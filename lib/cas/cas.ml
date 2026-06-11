@@ -160,8 +160,52 @@ let compiler_identity : string Lazy.t = lazy (
     let mtime = try string_of_float (Unix.stat exe).Unix.st_mtime with _ -> "0" in
     Blake3.hash_string (exe ^ "\x00" ^ mtime))
 
+(* Identity of the C runtime that gets compiled and linked into output
+   binaries.  The runtime sources are NOT part of the compiler executable,
+   so compiler_identity does not cover them: editing runtime/march_extras.c
+   would still serve the stale binary cached under the same key.  Digest
+   every .c/.h file (sorted name + contents) in the runtime directory. *)
+let runtime_identity_of_dir (dir : string) : string =
+  let files =
+    try
+      Sys.readdir dir
+      |> Array.to_list
+      |> List.filter (fun f ->
+           Filename.check_suffix f ".c" || Filename.check_suffix f ".h")
+      |> List.sort String.compare
+    with Sys_error _ -> []
+  in
+  let buf = Buffer.create (1 lsl 16) in
+  List.iter (fun f ->
+    Buffer.add_string buf f;
+    Buffer.add_char buf '\x00';
+    (match read_file (Filename.concat dir f) with
+     | Some data -> Buffer.add_string buf data
+     | None -> ());
+    Buffer.add_char buf '\x00'
+  ) files;
+  Blake3.hash_string (Buffer.contents buf)
+
+(* Computed once per process (Lazy), like compiler_identity.  Resolves the
+   runtime directory with the same candidates bin/main.ml uses to find
+   runtime/march_runtime.c.  Falls back to "" if no runtime dir is found
+   (e.g. unit tests) — the hash then simply carries no runtime component. *)
+let runtime_identity : string Lazy.t = lazy (
+  let candidates = [
+    "runtime";
+    Filename.concat (Filename.dirname Sys.executable_name) "../runtime";
+    Filename.concat (Filename.dirname Sys.executable_name) "../../runtime";
+  ] in
+  let is_dir d = (try Sys.is_directory d with Sys_error _ -> false) in
+  match List.find_opt is_dir candidates with
+  | Some dir -> runtime_identity_of_dir dir
+  | None -> "")
+
 let compilation_hash (impl_hash : string) ~(target : string) ~(flags : string list) : string =
-  let parts = [impl_hash; target; Lazy.force compiler_identity] @ flags in
+  let parts =
+    [impl_hash; target; Lazy.force compiler_identity; Lazy.force runtime_identity]
+    @ flags
+  in
   Blake3.hash_string (String.concat "\x00" parts)
 
 let store_artifact (t : t) (ch : string) (path : string) : unit =
@@ -169,6 +213,25 @@ let store_artifact (t : t) (ch : string) (path : string) : unit =
   (* Also write a pointer file so the store is persistent across processes *)
   let ptr = artifact_path t.local_root ch in
   write_file ptr path
+
+(* Copy a cached artifact to [dest], returning false if the artifact file is
+   gone or the copy fails — callers must treat that as a cache miss and
+   recompile, instead of reporting "(cached)" with no output written.
+   Stored artifact pointers hold the ORIGINAL output path, so recompiling
+   with the same -o makes [src] and [dest] the same file; `cp x x` exits
+   non-zero, so that case is detected and treated as success without copying. *)
+let copy_artifact ~(src : string) ~(dest : string) : bool =
+  if not (Sys.file_exists src) then false
+  else
+    let same_file =
+      try
+        let a = Unix.stat src and b = Unix.stat dest in
+        a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
+      with Unix.Unix_error _ -> false
+    in
+    same_file
+    || Sys.command (Printf.sprintf "cp %s %s"
+                      (Filename.quote src) (Filename.quote dest)) = 0
 
 let lookup_artifact (t : t) (ch : string) : string option =
   match Hashtbl.find_opt t.artifacts ch with

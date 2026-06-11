@@ -796,11 +796,12 @@ let compile filename =
           else basename
         in
         (match March_cas.Cas.lookup_artifact store ch with
-         | Some cached_bin ->
-           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+         | Some cached_bin
+           when March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
            Printf.eprintf "compiled %s (cached)\n" out_bin;
            exit 0
-         | None -> ());
+         (* Stale/missing artifact or failed copy → recompile *)
+         | Some _ | None -> ());
         Some (store, ch)
       end
     end
@@ -1081,12 +1082,17 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
-        (match March_cas.Cas.lookup_artifact store ch with
-        | Some cached_bin ->
-          let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+        let cached_ok =
+          match March_cas.Cas.lookup_artifact store ch with
+          | Some cached_bin ->
+            March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin
+          | None -> false
+        in
+        (if cached_ok then
           Printf.eprintf "compiled %s (cached)\n" out_bin
-        | None ->
-          (* Cache miss: emit LLVM IR, call clang, then cache the binary *)
+        else
+          (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
+             call clang, then cache the binary *)
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
