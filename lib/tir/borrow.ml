@@ -113,6 +113,17 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_join",          [false; true]);
   ("string_pad_left",      [true; false; true]);
   ("string_pad_right",     [true; false; true]);
+  (* ── Record introspection builtins ───────────────────────────────────────
+     All args are borrowed reads: the C implementations take +1 references
+     (march_incrc) on any field values they alias into freshly built results
+     and never consume the record/key/value arguments. *)
+  ("record_keys",      [true]);
+  ("record_values",    [true]);
+  ("record_entries",   [true]);
+  ("record_get",       [true; true]);
+  ("record_has_key",   [true; true]);
+  ("record_put",       [true; true; true]);
+  ("record_from_list", [true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);

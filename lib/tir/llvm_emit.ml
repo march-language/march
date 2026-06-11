@@ -103,6 +103,15 @@ type ctx = {
      ORC JIT on macOS cannot resolve TLS variables via emutls; the REPL is
      always single-threaded so the check is unnecessary there anyway. *)
   repl : bool;
+  (* Native record shape metadata: when true (non-WASM targets), record
+     allocations call march_record_set_shape to stamp the interned shape id
+     into the header pad word so the record introspection builtins
+     (record_keys/values/entries/get/put/has_key/from_list) and dynamic
+     field reads can recover field names at runtime.  See the
+     "Record shape registry" section in runtime/march_extras.c. *)
+  mutable shape_meta : bool;
+  (* Record shape descriptor → (descriptor string global, i32 id-cache global). *)
+  rec_shape_globals : (string, string * string) Hashtbl.t;
 }
 
 (** Compilation target. *)
@@ -176,6 +185,8 @@ let make_ctx ?(fast_math=false) ?(repl=false) () = {
   mutual_tco_fn_params  = [];
   mutual_tco_fn_tags    = [];
   repl;
+  shape_meta = true;
+  rec_shape_globals = Hashtbl.create 16;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -454,6 +465,14 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "logger_clear_context" -> Some Tir.TUnit
   | "logger_get_context"   -> Some (Tir.TCon ("List", [Tir.TTuple [Tir.TString; Tir.TString]]))
   | "logger_write"         -> Some Tir.TUnit
+  (* Record introspection builtins *)
+  | "record_keys"      -> Some (Tir.TCon ("List", [Tir.TString]))
+  | "record_values"    -> Some (Tir.TCon ("List", [Tir.TVar "_"]))
+  | "record_entries"   -> Some (Tir.TCon ("List", [Tir.TTuple [Tir.TString; Tir.TVar "_"]]))
+  | "record_get"       -> Some (Tir.TCon ("Option", [Tir.TVar "_"]))
+  | "record_put"       -> Some (Tir.TVar "_")
+  | "record_from_list" -> Some (Tir.TVar "_")
+  | "record_has_key"   -> Some Tir.TBool
   | "int_to_string"               -> Some Tir.TString
   | "float_to_string"             -> Some Tir.TString
   | "bool_to_string"              -> Some Tir.TString
@@ -679,6 +698,17 @@ let builtin_ret_ty : string -> Tir.ty option = function
 (** Mangle a March builtin name to the C runtime function name. *)
 let mangle_extern : string -> string = function
   | "panic"         -> "march_panic"
+  (* Record introspection builtins.  record_put maps to the 3-arg variant
+     (kind defaults to generic) for first-class / closure-wrapper call paths;
+     the direct EApp path in emit_expr calls the 4-arg march_record_put with
+     an explicit kind char instead. *)
+  | "record_keys"      -> "march_record_keys"
+  | "record_values"    -> "march_record_values"
+  | "record_entries"   -> "march_record_entries"
+  | "record_get"       -> "march_record_get"
+  | "record_has_key"   -> "march_record_has_key"
+  | "record_put"       -> "march_record_put3"
+  | "record_from_list" -> "march_record_from_list"
   | "println"       -> "march_println"
   | "print"         -> "march_print"
   | "print_stderr"  -> "march_print_stderr"
@@ -1328,6 +1358,11 @@ let emit_stack_alloc ctx n_fields =
   emit ctx (Printf.sprintf "%s = alloca [%d x i8], align 8" ptr (alloc_size n_fields));
   (* zero the header *)
   emit ctx (Printf.sprintf "store i64 0, ptr %s, align 8" ptr);
+  (* zero the tag+pad word too: alloca memory is garbage, and the pad word
+     (offset 12) is read as the record shape id by the native runtime *)
+  let hw = fresh ctx "tgp" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" hw ptr);
+  emit ctx (Printf.sprintf "store i64 0, ptr %s, align 8" hw);
   ptr
 
 (* ── Constructor lookup ──────────────────────────────────────────────── *)
@@ -1432,6 +1467,57 @@ let field_index_for ctx (ty : Tir.ty) (field_name : string) : int * Tir.ty =
     | _ :: rest -> find (i + 1) rest
   in
   find 0 fields
+
+(* ── Record shape metadata (native record introspection) ─────────────── *)
+
+(** Static TIR type of an atom (used for shape kinds and builtin kind hints). *)
+let atom_tir_ty : Tir.atom -> Tir.ty = function
+  | Tir.AVar v -> v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
+  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TCon ("Atom", [])
+  | Tir.ADefRef _ -> Tir.TVar "_"
+
+(** Field kind char for the runtime shape descriptor — describes the natural
+    in-slot representation (must match runtime/march_extras.c):
+    'i' raw i64 scalar, 'f' raw double bits, 'p' heap pointer, 'g' unknown. *)
+let shape_kind_char : Tir.ty -> char = function
+  | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) -> 'i'
+  | Tir.TFloat -> 'f'
+  | Tir.TVar _ -> 'g'
+  | _ -> 'p'
+
+(** Canonical shape descriptor "name:k;name:k;..." with fields sorted by name
+    — the same order record slots are laid out in. *)
+let shape_desc (fields : (string * Tir.ty) list) : string =
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
+  String.concat "" (List.map (fun (n, t) ->
+    Printf.sprintf "%s:%c;" n (shape_kind_char t)) sorted)
+
+(** Emit (once per shape) the descriptor string constant and the i32 id-cache
+    global; returns (desc_global, cache_global). *)
+let ensure_shape_globals ctx (desc : string) : string * string =
+  match Hashtbl.find_opt ctx.rec_shape_globals desc with
+  | Some pair -> pair
+  | None ->
+    let dg = intern_string ctx desc in
+    ctx.str_ctr <- ctx.str_ctr + 1;
+    let cg = Printf.sprintf "@.recshape%d" ctx.str_ctr in
+    Buffer.add_string ctx.preamble
+      (Printf.sprintf "%s = internal global i32 0\n" cg);
+    Hashtbl.replace ctx.rec_shape_globals desc (dg, cg);
+    (dg, cg)
+
+(** Stamp the interned shape id of [fields] into record cell [ptr]'s header
+    pad word.  No-op on WASM targets (no native runtime registry). *)
+let emit_set_shape ctx ptr (fields : (string * Tir.ty) list) =
+  if ctx.shape_meta then begin
+    let (dg, cg) = ensure_shape_globals ctx (shape_desc fields) in
+    emit ctx (Printf.sprintf
+      "call void @march_record_set_shape(ptr %s, ptr %s, ptr %s)" ptr dg cg)
+  end
 
 (* ── ADT structural equality generation ─────────────────────────────── *)
 
@@ -1619,7 +1705,7 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
                  e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
                | Tir.TString ->
                  e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
-               | Tir.TCon _ ->
+               | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ ->
                  (match ensure_adt_eq_fn ctx fty with
                   | Some fen ->
                     e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
@@ -1650,6 +1736,87 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
         Buffer.add_buffer ctx.extra_fns buf;
         Some fn_name
       end
+    end
+  (* Tuples and records: single-layout heap cells (tag 0) — compare fields
+     element-wise with short-circuiting.  Without this, == on tuple/record
+     operands fell back to pointer comparison, so e.g.
+     List.member(record_entries(r), ("age", 30)) was always false natively. *)
+  | Tir.TTuple _ | Tir.TRecord _ ->
+    let flds = (match ty with
+      | Tir.TTuple tys -> tys
+      | Tir.TRecord fields -> List.map snd fields   (* sorted by name = slot order *)
+      | _ -> []) in
+    let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
+    if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
+    else begin
+      Hashtbl.add ctx.emitted_eq_fns fn_name ();
+      let buf = Buffer.create 256 in
+      let ctr = ref 0 in let blk = ref 0 in
+      let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
+      let flbl pfx = incr blk; Printf.sprintf "%s%d" pfx !blk in
+      let e ln  = Buffer.add_string buf ("  " ^ ln ^ "\n") in
+      let lbl l = Buffer.add_string buf (l ^ ":\n") in
+      let lbl_eq     = flbl "is_eq" in
+      let lbl_not_eq = flbl "not_eq" in
+      Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+      Buffer.add_string buf "entry:\n";
+      let nf = List.length flds in
+      if nf = 0 then
+        e (Printf.sprintf "br label %%%s" lbl_eq)
+      else begin
+        let cont_lbls = Array.init nf (fun i ->
+          if i = 0 then "" else flbl (Printf.sprintf "f%d" i)) in
+        List.iteri (fun fi fty ->
+          if fi > 0 then lbl cont_lbls.(fi);
+          let off = 16 + fi * 8 in
+          let llt = field_load_llty fty in
+          let fgpa = frsh "fgpa" in let fgpb = frsh "fgpb" in
+          let fva  = frsh "fva"  in let fvb  = frsh "fvb"  in
+          e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 %d" fgpa off);
+          e (Printf.sprintf "%s = load %s, ptr %s, align 8" fva llt fgpa);
+          e (Printf.sprintf "%s = getelementptr i8, ptr %%b, i64 %d" fgpb off);
+          e (Printf.sprintf "%s = load %s, ptr %s, align 8" fvb llt fgpb);
+          let ok = frsh "ok" in
+          (match fty with
+           | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TFloat ->
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = fcmp oeq double %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TString ->
+             e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
+           | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ ->
+             (match ensure_adt_eq_fn ctx fty with
+              | Some fen ->
+                e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
+              | None ->
+                let pa = frsh "pa" in let pb = frsh "pb" in
+                e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+                e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+                let c = frsh "c" in
+                e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+                e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
+           | _ ->
+             let pa = frsh "pa" in let pb = frsh "pb" in
+             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c));
+          let oki = frsh "oki" in
+          e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
+          let nxt = if fi = nf - 1 then lbl_eq else cont_lbls.(fi + 1) in
+          e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" oki nxt lbl_not_eq)
+        ) flds
+      end;
+      lbl lbl_eq;     e "ret i64 1";
+      lbl lbl_not_eq; e "ret i64 0";
+      Buffer.add_string buf "}\n";
+      Buffer.add_buffer ctx.extra_fns buf;
+      Some fn_name
     end
   | _ -> None
 
@@ -1832,6 +1999,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | Tir.AVar v -> (match v.Tir.v_ty with
           | Tir.TCon ("Atom", []) -> None
           | Tir.TCon _ as t -> Some t
+          | (Tir.TTuple _ | Tir.TRecord _) as t -> Some t
           | _ -> None)
         | _ -> None
       in
@@ -1983,6 +2151,82 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* get_work_pool() → null sentinel in Phase 1 *)
   | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
     ("ptr", "null")
+
+  (* ── Record introspection builtins (native lowering) ───────────────── *)
+  (* These cannot be plain C externs because record values carry no field
+     names; they rely on the shape id stamped into the header pad word by
+     emit_set_shape and pass call-site value-kind hints where the C side
+     needs to know a value's natural representation.  See the "Record shape
+     registry" section in runtime/march_extras.c for the conventions. *)
+  | Tir.EApp (f, [r])
+    when (match f.Tir.v_name with
+          | "record_keys" | "record_values" | "record_entries" -> true
+          | _ -> false) ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_%s(ptr %s)"
+                res f.Tir.v_name rp);
+    ("ptr", res)
+
+  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_get" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_record_get(ptr %s, ptr %s)"
+                res rp kp);
+    ("ptr", res)
+
+  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_has_key" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call i64 @march_record_has_key(ptr %s, ptr %s)"
+                res rp kp);
+    ("i64", res)
+
+  | Tir.EApp (f, [r; k; v]) when f.Tir.v_name = "record_put" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let (vt, vv) = emit_atom ctx v in
+    (* Pass the value in NATURAL representation as a ptr-sized word: raw i64
+       for scalars (NOT low-bit tagged), raw bits for floats, ptr as-is. *)
+    let vp = (match vt with
+      | "i64" ->
+        let t = fresh ctx "cv" in
+        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+      | "double" ->
+        let b = fresh ctx "cv" in
+        let t = fresh ctx "cv" in
+        emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b vv);
+        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
+        t
+      | _ -> vv) in
+    let kind = shape_kind_char (atom_tir_ty v) in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_record_put(ptr %s, ptr %s, ptr %s, i64 %d)"
+      res rp kp vp (Char.code kind));
+    ("ptr", res)
+
+  | Tir.EApp (f, [l]) when f.Tir.v_name = "record_from_list" ->
+    let (lt, lv) = emit_atom ctx l in
+    let lp = coerce ctx lt lv "ptr" in
+    (* Kind hint for the pair values, from the list's element tuple type. *)
+    let kind = (match atom_tir_ty l with
+      | Tir.TCon ("List", [Tir.TTuple [_; b]]) -> shape_kind_char b
+      | _ -> 'g') in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_record_from_list_k(ptr %s, i64 %d)"
+      res lp (Char.code kind));
+    ("ptr", res)
 
   (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "to_string" ->
@@ -2266,6 +2510,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
       (ret_ty, r)
     end
+
+  (* ── ECallPtr to a record introspection builtin: redirect to the EApp
+     special cases above so kind hints and signatures stay correct. *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when (match f.Tir.v_name with
+          | "record_keys" | "record_values" | "record_entries"
+          | "record_get" | "record_has_key" | "record_put"
+          | "record_from_list" -> true
+          | _ -> false)
+      && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    emit_expr ctx (Tir.EApp (f, args))
 
   (* ── ECallPtr where callee is a known builtin ─────────────────────── *)
   (* Builtins (e.g. vault_update) are not in top_fns, so TIR lowering
@@ -2569,7 +2824,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result rv reuse_lbl hp fresh_lbl);
     ("ptr", result)
 
-  | Tir.EReuse (reuse_atom, _, args) ->
+  | Tir.EReuse (reuse_atom, reuse_ty, args) ->
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
     let (_, rv) = emit_atom ctx reuse_atom in
     let arg_vals = List.map (fun atom ->
@@ -2605,6 +2860,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
+    (* Records: stamp the shape id on the result (the fresh-branch cell has
+       pad=0; the reuse-branch cell may have been a different record shape). *)
+    (match reuse_ty with
+     | Tir.TRecord fields -> emit_set_shape ctx result fields
+     | _ -> ());
     ("ptr", result)
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)
@@ -2685,6 +2945,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (ty, v) = emit_atom ctx atom in
       emit_store_field ctx ptr i ty v
     ) sorted;
+    (* Stamp the shape id so record introspection builtins can recover the
+       field names at runtime. *)
+    emit_set_shape ctx ptr
+      (List.map (fun (nm, atom) -> (nm, atom_tir_ty atom)) sorted);
     ("ptr", ptr)
 
   (* ── Field access ──────────────────────────────────────────────────── *)
@@ -2694,18 +2958,35 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.ADefRef _ -> Tir.TVar "_"
       | Tir.ALit _    -> Tir.TVar "_"
     in
-    let (idx, field_ty) =
-      (* Closure free-variable fields: "$fvN" — parse index from name directly
-         since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
-      if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then
-        let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
-        (i, Tir.TPtr Tir.TUnit)   (* field type is opaque; let alloca use v_ty *)
-      else
-        field_index_for ctx obj_ty field_name
-    in
-    let (_, obj_val) = emit_atom ctx obj_atom in
-    let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
-    (llvm_ty field_ty, fv)
+    (* Closure free-variable fields: "$fvN" — parse index from name directly
+       since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
+    if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then begin
+      let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
+      let (_, obj_val) = emit_atom ctx obj_atom in
+      let fv = emit_load_field ctx obj_val i (llvm_ty (Tir.TPtr Tir.TUnit)) in
+      (llvm_ty (Tir.TPtr Tir.TUnit), fv)
+    end else begin
+      match get_record_fields ctx obj_ty with
+      | [] when ctx.shape_meta ->
+        (* Statically-unknown record shape (type-erased generic flow, or a
+           record extended at runtime by record_put): look the field up by
+           name via the shape id.  Result follows the generic ADT-slot
+           convention (ints low-bit tagged) — consumers coerce ptr→i64 with
+           an untagging ashr.  Cells without shape metadata fall back to the
+           legacy raw slot-0 read inside the C helper. *)
+        let (_, obj_val) = emit_atom ctx obj_atom in
+        let ng = intern_string ctx field_name in
+        let res = fresh ctx "cr" in
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_record_field_dyn(ptr %s, ptr %s, i64 %d)"
+          res obj_val ng (String.length field_name));
+        ("ptr", res)
+      | _ ->
+        let (idx, field_ty) = field_index_for ctx obj_ty field_name in
+        let (_, obj_val) = emit_atom ctx obj_atom in
+        let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
+        (llvm_ty field_ty, fv)
+    end
 
   (* ── Record update ─────────────────────────────────────────────────── *)
   | Tir.EUpdate (base_atom, updates) ->
@@ -2730,6 +3011,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (aty, av) = emit_atom ctx atom in
       emit_store_field ctx ptr idx aty av
     ) updates;
+    (* Stamp the shape id on the copy.  When the static shape is known, use
+       it; otherwise copy the base record's shape id (header pad word). *)
+    if ctx.shape_meta then begin
+      if all_fields <> [] then
+        emit_set_shape ctx ptr all_fields
+      else begin
+        let sp = fresh ctx "shp" in
+        let sv = fresh ctx "shv" in
+        let dp = fresh ctx "shp" in
+        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" sp base_val);
+        emit ctx (Printf.sprintf "%s = load i32, ptr %s, align 4" sv sp);
+        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" dp ptr);
+        emit ctx (Printf.sprintf "store i32 %s, ptr %s, align 4" sv dp)
+      end
+    end;
     ("ptr", ptr)
 
   (* ── Case expression ───────────────────────────────────────────────── *)
@@ -3578,6 +3874,18 @@ declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare i32  @march_record_shape_intern(ptr %desc)
+declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
+declare ptr  @march_record_keys(ptr %rec)
+declare ptr  @march_record_values(ptr %rec)
+declare ptr  @march_record_entries(ptr %rec)
+declare ptr  @march_record_get(ptr %rec, ptr %key)
+declare i64  @march_record_has_key(ptr %rec, ptr %key)
+declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)
+declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)
+declare ptr  @march_record_from_list(ptr %list)
+declare ptr  @march_record_from_list_k(ptr %list, i64 %kind)
+declare ptr  @march_record_field_dyn(ptr %rec, ptr %name, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
 declare ptr    @march_float_to_string(double %f)
 declare ptr    @march_bool_to_string(i64 %b)
@@ -3885,6 +4193,9 @@ let emit_main_wrapper (buf : Buffer.t) =
 
 let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
+  (* Record shape metadata requires the native runtime (march_extras.c);
+     the WASM runtime does not provide march_record_set_shape. *)
+  ctx.shape_meta <- not (is_wasm_target target);
   build_ctor_info ctx m;
   (* Register user-defined extern functions *)
   List.iter (fun (ed : Tir.extern_decl) ->
