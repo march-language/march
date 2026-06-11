@@ -1,0 +1,49 @@
+-- Regression: a module-nested fn with default-arg params AND a trailing
+-- zero-arg closure param (render_inner) must not free that closure early.
+--
+-- A zero-arg lambda `fn () -> T` is typed as a thunk `T` (its result), not a
+-- function, so a captured zero-arg closure param is typed `String` here.  The
+-- default args force the general match-merge desugar (a 5-tuple built then
+-- destructured), so render_inner is extracted from a tuple field.  Defun only
+-- rewrote `EApp` to a closure-call `ECallPtr` for TFn/TVar-typed callees, so
+-- `render_inner()` stayed `EApp(render_inner, [])`; perceus's liveness ignores
+-- EApp callees (assuming top-level symbols), so render_inner was dec_rc'd right
+-- after extraction.  The intervening `get_assign` allocations reused the freed
+-- closure, and `render_inner()` then jumped into that reused memory.
+--
+-- Native output must match the interpreter: "/login|post||tok=SECRET|INNER".
+mod ZeroArgClosureDefault do
+
+  type Conn = Conn(String, List((String, String)))
+
+  fn get_assign(conn : Conn, key : String) : String do
+    fn find(pairs : List((String, String))) : String do
+      match pairs do
+      Nil -> ""
+      Cons((k, v), rest) ->
+        if k == key do v else find(rest) end
+      end
+    end
+    match conn do Conn(_, a) -> find(a) end
+  end
+
+  fn assign(conn : Conn, key : String, value : String) : Conn do
+    match conn do Conn(b, a) -> Conn(b, Cons((key, value), a)) end
+  end
+
+  mod Wrap do
+    fn render(conn : Conn, action : String, method : String \\ "post",
+              class : String \\ "", render_inner) : String do
+      let tok = get_assign(conn, "_csrf_token")
+      let inner = render_inner()
+      action ++ "|" ++ method ++ "|" ++ class ++ "|tok=" ++ tok ++ "|" ++ inner
+    end
+  end
+
+  fn main() : Unit do
+    let conn0 = Conn("", Nil)
+    let conn1 = assign(conn0, "_csrf_token", "SECRET")
+    let inner = fn () -> "INNER"
+    println(Wrap.render(conn1, "/login", "post", "", inner))
+  end
+end

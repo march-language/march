@@ -399,14 +399,22 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],
                       Tir.EAtom (Tir.AVar ref_var)))
 
-    (* B. Indirect call: EApp of a TFn-typed (or TVar, i.e. unresolved) non-top-level var.
-       TVar "_" occurs when type_map is empty (e.g. stdlib precompile).  Without this
-       case the call stays as a direct @go invocation — an undefined symbol — causing
-       undefined behaviour at runtime.  Converting to ECallPtr is always safe for
-       non-top-level vars: they must be closure pointers allocated by an earlier ELetRec. *)
+    (* B. Indirect call: EApp of ANY non-top-level var.  Such a var must be a
+       closure pointer allocated by an earlier ELetRec — a non-top-level value
+       being applied cannot be a code symbol — so ECallPtr is always safe.
+       [top_level] already includes [builtin_names] (operators like ++, &&), so
+       those are excluded here and keep their direct lowering.
+
+       The type is NOT consulted: a zero-arg lambda [fn () -> T] is typed as a
+       thunk [T] (its result), not a function, so a captured zero-arg closure
+       param (e.g. [render_inner : String]) is neither TFn nor TVar.  Without
+       this broadening it stayed [EApp(render_inner, [])]; perceus's [live_before]
+       ignores EApp callees (assuming top-level symbols), so the closure was
+       dec_rc'd before [render_inner()] ran — a use-after-free that jumped into
+       reused memory.  TVar "_" still flows here too (empty type_map in stdlib
+       precompile), avoiding a direct @go call to an undefined symbol. *)
     | Tir.EApp (f_var, args)
-      when (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)
-        && not (StringSet.mem f_var.Tir.v_name top_level) ->
+      when not (StringSet.mem f_var.Tir.v_name top_level) ->
       Tir.ECallPtr (Tir.AVar f_var, args)
 
     (* Recurse into all other forms *)

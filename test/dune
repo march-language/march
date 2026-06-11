@@ -255,3 +255,28 @@
 (rule
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
+
+; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
+; A module-nested fn with default-arg params AND a trailing zero-arg closure
+; param desugars (general match-merge path) into a tuple build + destructure.
+; A zero-arg lambda `fn () -> T` is typed as a thunk `T` (not a function), so
+; the captured closure param is non-TFn-typed; defun only rewrote EApp→ECallPtr
+; for TFn/TVar callees, leaving `render_inner()` as EApp(render_inner, []).
+; Perceus's liveness ignores EApp callees, so the closure was dec_rc'd right
+; after extraction; intervening allocations reused the freed memory and the
+; later call jumped into it (a use-after-free crash).  Compile, run, and diff
+; stdout against the interpreter's output.
+(rule
+ (targets native_zero_arg_closure_default native_zero_arg_closure_default.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/zero_arg_closure_default.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_zero_arg_closure_default
+        native/zero_arg_closure_default.march)
+   (with-stdout-to native_zero_arg_closure_default.out
+        (system "./native_zero_arg_closure_default")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/zero_arg_closure_default.expected native_zero_arg_closure_default.out)))
