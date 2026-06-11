@@ -136,8 +136,32 @@ let lookup_def (t : t) (impl_hash : string) : hashed_def option =
         write_file local data;
         decode_hashed_def data
 
+(* Identity of the compiler that produced an artifact.  The compilation_hash
+   must change whenever the compiler itself changes — otherwise a rebuilt
+   compiler (e.g. a codegen bugfix) silently serves a stale binary that was
+   cached under the same source+target+flags key.  We mix in a BLAKE3 of the
+   running executable's contents; computed once per process (Lazy) since the
+   executable does not change underneath a live process.  Falls back to the
+   executable path + mtime if the bytes can't be read. *)
+let compiler_identity : string Lazy.t = lazy (
+  let exe = Sys.executable_name in
+  match
+    (try
+       let ic = open_in_bin exe in
+       Fun.protect ~finally:(fun () -> close_in ic) (fun () ->
+         let n = in_channel_length ic in
+         let b = Bytes.create n in
+         really_input ic b 0 n;
+         Some (Blake3.hash_string (Bytes.unsafe_to_string b)))
+     with _ -> None)
+  with
+  | Some h -> h
+  | None ->
+    let mtime = try string_of_float (Unix.stat exe).Unix.st_mtime with _ -> "0" in
+    Blake3.hash_string (exe ^ "\x00" ^ mtime))
+
 let compilation_hash (impl_hash : string) ~(target : string) ~(flags : string list) : string =
-  let parts = [impl_hash; target] @ flags in
+  let parts = [impl_hash; target; Lazy.force compiler_identity] @ flags in
   Blake3.hash_string (String.concat "\x00" parts)
 
 let store_artifact (t : t) (ch : string) (path : string) : unit =
