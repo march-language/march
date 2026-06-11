@@ -39,7 +39,7 @@ MARCH_LIB_PATH=/path/to/dep1/lib:/path/to/dep2/src \
 
 March walks ALL `.march` files in each `MARCH_LIB_PATH` directory recursively and loads their modules automatically. The entry file is the single `.march` file passed on the command line.
 
-**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts/`. After modifying the runtime C files (`runtime/march_extras.c`, `runtime/march_runtime.c`), clear this directory before rebuilding:
+**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts/`. The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`), so editing the runtime or rebuilding the compiler invalidates it automatically — no manual clearing needed. If a cache ever looks wrong anyway, clear it with:
 
 ```bash
 rm -rf /Users/80197052/code/march/.march/cas/artifacts/
