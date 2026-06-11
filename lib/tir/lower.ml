@@ -1130,48 +1130,58 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
     [prefix].  Used when lowering [DMod] inner functions to rewrite unqualified
     intra-module call sites (e.g. [from_string] → [IOList.from_string]).
 
-    Safe because TIR ANF let-bindings use fresh names ($t42, $lam5 …) and
-    module function names are conventionally distinct from local variable names
-    in stdlib code. *)
+    Locally-bound names SHADOW module-level names: a fn parameter, ECase
+    branch pattern variable, or ELet/ELetRec binding whose name collides with
+    a sibling module fn (e.g. param [fields] next to [fn fields]) must NOT be
+    qualified inside its scope — doing so turned the local reference into the
+    sibling fn's global address (or a zero-arg "gl" call), crashing at runtime.
+    The [shadowed] list threads the in-scope binders through the walk. *)
 let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : Tir.fn_def =
-  let rename_var (v : Tir.var) : Tir.var =
-    if List.mem v.Tir.v_name names
+  let rename_var shadowed (v : Tir.var) : Tir.var =
+    if List.mem v.Tir.v_name names && not (List.mem v.Tir.v_name shadowed)
     then { v with Tir.v_name = prefix ^ v.Tir.v_name }
     else v
   in
-  let rename_atom = function
-    | Tir.AVar v -> Tir.AVar (rename_var v)
+  let rename_atom shadowed = function
+    | Tir.AVar v -> Tir.AVar (rename_var shadowed v)
     | a -> a
   in
-  let rec rename_expr = function
-    | Tir.EAtom a        -> Tir.EAtom (rename_atom a)
-    | Tir.EApp (v, args) -> Tir.EApp (rename_var v, List.map rename_atom args)
-    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom f, List.map rename_atom args)
-    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rename_expr e1, rename_expr e2)
+  let rec rename_expr shadowed = function
+    | Tir.EAtom a        -> Tir.EAtom (rename_atom shadowed a)
+    | Tir.EApp (v, args) -> Tir.EApp (rename_var shadowed v, List.map (rename_atom shadowed) args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom shadowed f, List.map (rename_atom shadowed) args)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, rename_expr shadowed e1, rename_expr (v.Tir.v_name :: shadowed) e2)
     | Tir.ELetRec (fns, body) ->
-      Tir.ELetRec (List.map rename_fn fns, rename_expr body)
+      let shadowed' = List.map (fun (f : Tir.fn_def) -> f.Tir.fn_name) fns @ shadowed in
+      Tir.ELetRec (List.map (rename_fn shadowed') fns, rename_expr shadowed' body)
     | Tir.ECase (scrut, branches, def) ->
-      Tir.ECase (rename_atom scrut,
-                 List.map (fun br -> { br with Tir.br_body = rename_expr br.Tir.br_body }) branches,
-                 Option.map rename_expr def)
-    | Tir.ETuple atoms   -> Tir.ETuple (List.map rename_atom atoms)
-    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom a)) fields)
-    | Tir.EField (a, f)  -> Tir.EField (rename_atom a, f)
+      Tir.ECase (rename_atom shadowed scrut,
+                 List.map (fun br ->
+                     let shadowed' =
+                       List.map (fun (v : Tir.var) -> v.Tir.v_name) br.Tir.br_vars @ shadowed in
+                     { br with Tir.br_body = rename_expr shadowed' br.Tir.br_body }) branches,
+                 Option.map (rename_expr shadowed) def)
+    | Tir.ETuple atoms   -> Tir.ETuple (List.map (rename_atom shadowed) atoms)
+    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom shadowed a)) fields)
+    | Tir.EField (a, f)  -> Tir.EField (rename_atom shadowed a, f)
     | Tir.EUpdate (a, fields) ->
-      Tir.EUpdate (rename_atom a, List.map (fun (k, v) -> (k, rename_atom v)) fields)
-    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map rename_atom args)
-    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map rename_atom args)
-    | Tir.EFree a   -> Tir.EFree (rename_atom a)
-    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom a)
-    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom a)
-    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom a)
-    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom a)
-    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom a, ty, List.map rename_atom args)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr e1, rename_expr e2)
-  and rename_fn (f : Tir.fn_def) : Tir.fn_def =
-    { f with Tir.fn_body = rename_expr f.Tir.fn_body }
+      Tir.EUpdate (rename_atom shadowed a, List.map (fun (k, v) -> (k, rename_atom shadowed v)) fields)
+    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map (rename_atom shadowed) args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map (rename_atom shadowed) args)
+    | Tir.EFree a   -> Tir.EFree (rename_atom shadowed a)
+    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom shadowed a)
+    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom shadowed a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom shadowed a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom shadowed a)
+    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom shadowed a, ty, List.map (rename_atom shadowed) args)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr shadowed e1, rename_expr shadowed e2)
+  and rename_fn shadowed (f : Tir.fn_def) : Tir.fn_def =
+    let shadowed' =
+      List.map (fun (v : Tir.var) -> v.Tir.v_name) f.Tir.fn_params @ shadowed in
+    { f with Tir.fn_body = rename_expr shadowed' f.Tir.fn_body }
   in
-  rename_fn fn
+  rename_fn [] fn
 
 (* ── Declaration lowering ───────────────────────────────────────── *)
 

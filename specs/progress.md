@@ -280,6 +280,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-11, fix(tir): locals shadow sibling module fns in native codegen)
+
+- **Locals that share a name with a sibling module-level fn no longer miscompile in native builds.** `rename_tir_vars` (lib/tir/lower.ml) qualifies unqualified intra-module references (`from_string` → `IOList.from_string`) after lowering, but renamed EVERY `AVar` whose name matched a sibling fn — including function parameters, match-pattern bindings, and let bindings. A param like `fields` in `pfn blank_fold(fields, acc)` next to `fn fields(schema)` was rewritten to `Depot.Schema.fields`, which llvm_emit then materialized as the fn's global address (GEP'd as data → SIGBUS) or a zero-arg `"gl"` call (`call ptr @Depot.Schema.fields()` → "use of undefined value" at clang time). Fix: the rename walk now threads an in-scope binder set (fn params, ELet/ELetRec bindings, ECase branch vars) and skips shadowed names — the TIR/emit-level analog of typecheck commit 02d212d "local fns shadow bulk imports". Fixture: `test/imports/param_shadow_native/` (native compile + run; covers param, pattern-binding, and let-binding shadowing). Driven by depot's test suite (`Depot.Schema.blank_fold`).
+
 ## Current State (as of 2026-06-11, whole-program native codegen fixes)
 
 - **Cross-module ADT `==` now compiles and runs correctly in native whole-program builds.** `ensure_adt_eq_fn` resolves short TCon names against module-qualified ctor_info keys (with layout-compatible merging for same-short-name types like Ast.SortDir vs DataFrame.SortDir) and no longer memoizes before validating — previously every `==` on an imported ADT emitted calls to `@__march_eq_*` functions whose bodies were never generated. `lower.ml` no longer embeds qualified ctor references verbatim in EAlloc keys (silently tagging values 0). Interface impls now pre-register unit-wide in pass 1, and the exhaustiveness checker recognizes qualified constructor patterns. Fixture: `test/imports/adt_eq_native/`. Driven by depot's 5370-test suite.

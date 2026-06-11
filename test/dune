@@ -249,3 +249,18 @@
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
+
+; Native compile + run: locals that shadow a sibling module-level fn.
+; rename_tir_vars qualified every AVar whose name matched a sibling fn
+; ("fields" → "PsLib.fields") without checking whether the name was bound
+; locally (fn param, match-pattern var, let binding), so the local reference
+; was emitted as the fn's global address or a zero-arg "gl" call —
+; "use of undefined value" at clang time or SIGBUS at runtime.
+; The fixture compiles natively and RUNS the binary, which panics (exit 1)
+; on any wrong result.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/param_shadow_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))
