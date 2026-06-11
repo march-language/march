@@ -1,0 +1,16 @@
+-- Regression fixture: a sibling module that BULK-IMPORTS the entry module
+-- while defining its own function of the same name.  The import (UseAll)
+-- used to rebind the entry's `render` over the sibling's pass-1 placeholder,
+-- so check_fn unified the sibling's 3-arg definition against the entry's
+-- 2-arg signature, producing nonsense arity errors on the sibling's header.
+-- Local definitions must shadow bulk imports (env.local_fns guard).
+mod IsEntry do
+
+fn render(status : Int, message : String) : String do
+  int_to_string(status) ++ " " ++ message
+end
+
+fn render_default(status : Int) : String do
+  render(status, "default")
+end
+end

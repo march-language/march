@@ -1,0 +1,15 @@
+-- Defines its own 3-arg `render` AND bulk-imports the entry (whose `render`
+-- is 2-arg).  The local definition must win for bare `render` references;
+-- the entry's version stays reachable qualified (IsEntry.render).
+mod IsCtrl do
+
+import IsEntry
+
+fn render(conn : String, status : Int, template : String -> String) : String do
+  IsEntry.render(status, template(conn))
+end
+
+fn render_ok(conn : String, template : String -> String) : String do
+  render(conn, 200, template)
+end
+end

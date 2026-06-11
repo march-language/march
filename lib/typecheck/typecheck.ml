@@ -379,6 +379,15 @@ type env = {
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
+  local_fns : unit StrMap.t;
+  (** Function names DEFINED by the module currently being checked (set from
+      the pass-1 / DMod forward-reference prebind).  A bulk import
+      ([import X] / [import X except (...)]) must NOT rebind these bare
+      names: the local definition shadows the import.  Without this guard
+      the import clobbers the local fn's pass-1 placeholder with the
+      imported module's concrete scheme, and check_fn then unifies the
+      local definition against the WRONG function's type (manifesting as
+      nonsense arity/type errors on the local fn's header). *)
 }
 
 let make_env errors type_map = {
@@ -388,6 +397,7 @@ let make_env errors type_map = {
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
+  local_fns = StrMap.empty;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -4099,9 +4109,22 @@ let actor_handler_hints state_ty inferred_ty =
     - [render(State) -> IOList]        — required
     - [create(Props) -> State]          — recommended (warning if missing)
     - [merge(State, State) -> State]   — optional, no warning *)
-let validate_island_protocol (env : env) (mod_name : Ast.name) (inner_env : env) =
-  let has_type n = StrMap.mem n inner_env.types in
-  let has_fn n = StrMap.mem n inner_env.vars in
+let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl list) =
+  (* Inspect the module's OWN declarations, not the accumulated environment:
+     inner_env inherits every bare type/fn name exported by previously
+     checked sibling modules, so once any island module defined State/Msg,
+     every later module with a fn named update/render/create was falsely
+     flagged as an incomplete island. *)
+  let has_type n =
+    List.exists (function
+      | Ast.DType (_, tn, _, _, _) -> tn.Ast.txt = n
+      | _ -> false) decls
+  in
+  let has_fn n =
+    List.exists (function
+      | Ast.DFn (def, _) -> def.fn_name.txt = n
+      | _ -> false) decls
+  in
   if not (has_type "State" && has_type "Msg") then ()
   else begin
     let has_update = has_fn "update" in
@@ -4938,12 +4961,15 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
+    (* Reset local_fns for this module's scope: a nested module's locally
+       defined fn names shadow bulk imports inside it (see env.local_fns). *)
     let pre_env = List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) ->
+          let e = { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
-      ) env decls in
+      ) { env with local_fns = StrMap.empty } decls in
     let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
@@ -5012,7 +5038,7 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Validate capability declarations for this module *)
     check_module_needs env name decls;
     (* Validate island module protocol if applicable *)
-    validate_island_protocol env name inner_env;
+    validate_island_protocol env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
        Also export sub-module keys: if "B" is in pub_set, export "B.f" as "A.B.f". *)
     let is_pub_key k =
@@ -5342,12 +5368,19 @@ let rec check_decl env (d : Ast.decl) : env =
        (* Import the module path as an accessible prefix — no new bindings needed *)
        env
      | Ast.UseAll ->
-       (* Find all vars with "Prefix.name" and rebind them as plain "name" *)
+       (* Find all vars with "Prefix.name" and rebind them as plain "name".
+          Skip names the current module defines itself (env.local_fns):
+          the local definition shadows the bulk import — rebinding would
+          clobber the local fn's pass-1 placeholder and make check_fn unify
+          the local definition against the imported fn's type. *)
        let matching = StrMap.fold (fun k sch acc ->
            let plen = String.length prefix in
            if String.length k > plen
               && String.sub k 0 plen = prefix
-           then (String.sub k plen (String.length k - plen), sch) :: acc
+           then
+             let short = String.sub k plen (String.length k - plen) in
+             if StrMap.mem short env.local_fns then acc
+             else (short, sch) :: acc
            else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
        let env = StrMap.fold (fun k idef e ->
@@ -5398,6 +5431,8 @@ let rec check_decl env (d : Ast.decl) : env =
            then
              let short = String.sub k plen (String.length k - plen) in
              if List.mem short excl_set then acc
+             (* Local definitions shadow bulk imports — see UseAll. *)
+             else if StrMap.mem short env.local_fns then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Track for unused-import warning: warn if nothing from this module is used. *)
@@ -6013,6 +6048,9 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
+        (* Record the name as locally defined so bulk imports cannot clobber
+           its binding (local definitions shadow imports — see env.local_fns). *)
+        let env = { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns } in
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 1)) env

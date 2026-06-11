@@ -1,0 +1,10 @@
+-- Dotted module name: loads first in auto-discovery depth order and pulls
+-- IsCtrl in via the transitive-import path that triggers the failure.
+mod Is.Deep do
+
+import IsCtrl
+
+fn go() : String do
+  IsCtrl.render_ok("c", fn x -> x)
+end
+end

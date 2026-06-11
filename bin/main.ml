@@ -1138,7 +1138,13 @@ let compile filename =
      the sole definition. *)
   let stdlib_decls = load_stdlib () in
   let extern_mod_names =
-    List.filter_map (function
+    (* The ENTRY module's own name must shadow a same-named stdlib module
+       too: its declarations live at the top level (not as a DMod in
+       extra_decls), so without this a project file like lib/crypto.march
+       (`mod Crypto`) coexists with the stdlib Crypto DMod and sibling
+       modules resolve `Crypto.foo` against the stdlib copy. *)
+    desugared.March_ast.Ast.mod_name.March_ast.Ast.txt
+    :: List.filter_map (function
       | March_ast.Ast.DMod (nm, _vis, _decls, _sp) ->
         Some nm.March_ast.Ast.txt
       | _ -> None
