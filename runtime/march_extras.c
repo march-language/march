@@ -219,11 +219,15 @@ static void b64_decode_init(void) {
 
 /* ── Bytes(List(Int)) helpers ─────────────────────────────────────────── */
 
-/* Create a Cons(int, tail) list node.  Transfers ownership of tail. */
+/* Create a Cons(int, tail) list node.  Transfers ownership of tail.
+ * The Int payload is pre-tagged with (n<<1)|1: under the uniform low-bit
+ * integer tagging scheme, compiled code emits `ashr #1` when extracting an
+ * Int field from a generic constructor slot, so a raw value would be halved
+ * on untag.  (Same convention as make_int_cons in march_http.c.) */
 static void *int_cons(int64_t n, void *tail) {
     void *node = march_alloc(16 + 16);   /* hdr(16) + i64(8) + ptr(8) */
     *(int32_t *)((char *)node + 8)  = 1; /* tag = 1 = Cons */
-    *(int64_t *)((char *)node + 16) = n;
+    *(int64_t *)((char *)node + 16) = (n << 1) | 1;
     *(void **)((char *)node + 24)   = tail;
     return node;
 }
@@ -264,7 +268,8 @@ static uint8_t *bytes_to_raw(void *bytes_val, size_t *out_len) {
     while (p && i < n) {
         int32_t tag = *(int32_t *)((char *)p + 8);
         if (tag == 0) break;
-        buf[i++] = (uint8_t)(*(int64_t *)((char *)p + 16) & 0xFF);
+        /* Untag the Int payload: generic ctor slots store (n<<1)|1. */
+        buf[i++] = (uint8_t)((*(int64_t *)((char *)p + 16) >> 1) & 0xFF);
         p = *(void **)((char *)p + 24);
     }
     return buf;

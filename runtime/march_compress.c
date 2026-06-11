@@ -34,7 +34,9 @@ static void *compress_bytes_from_raw(const uint8_t *data, size_t len) {
     for (ssize_t i = (ssize_t)len - 1; i >= 0; i--) {
         void *node = march_alloc(16 + 8 + 8);
         *(int32_t *)((char *)node + 8) = 1; /* tag = Cons */
-        *(int64_t *)((char *)node + 16) = (int64_t)data[i];
+        /* Pre-tag the Int payload with (n<<1)|1 — uniform low-bit integer
+         * tagging for generic ctor slots (see make_int_cons, march_http.c). */
+        *(int64_t *)((char *)node + 16) = ((int64_t)data[i] << 1) | 1;
         *(void **)((char *)node + 24) = list;
         list = node;
     }
@@ -61,7 +63,8 @@ static uint8_t *compress_bytes_to_raw(void *bytes_val, size_t *out_len) {
     while (p && i < n) {
         int32_t tag = *(int32_t *)((char *)p + 8);
         if (tag == 0) break;
-        buf[i++] = (uint8_t)(*(int64_t *)((char *)p + 16) & 0xFF);
+        /* Untag the Int payload: generic ctor slots store (n<<1)|1. */
+        buf[i++] = (uint8_t)((*(int64_t *)((char *)p + 16) >> 1) & 0xFF);
         p = *(void **)((char *)p + 24);
     }
     return buf;
