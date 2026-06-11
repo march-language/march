@@ -1693,6 +1693,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       && (f.Tir.v_name = "==" || f.Tir.v_name = "!=")
       && (atom_is_string a || atom_is_string b)
     in
+    (* String ordering (<, <=, >, >=): the inline icmp fallback would compare
+       the string struct POINTERS as integers, which has nothing to do with
+       lexicographic order.  Route through march_compare_string (returns
+       -1/0/1) and compare the result against 0 with the same predicate. *)
+    let is_string_ord =
+      ty_a = "ptr"
+      && List.mem f.Tir.v_name ["<"; "<="; ">"; ">="]
+      && (atom_is_string a || atom_is_string b)
+    in
     if is_string_eq then begin
       (* String equality: call march_string_eq which returns i64 (0 or 1).
          Coerce both operands to ptr — vb may be an i64 literal (e.g. "0" for
@@ -1707,6 +1716,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         ("i64", nr)
       end else
         ("i64", r)
+    end else if is_string_ord then begin
+      (* String ordering: compare(a, b) <pred> 0. *)
+      let va_ptr = coerce ctx ty_a va "ptr" in
+      let vb_ptr = coerce ctx ty_b vb "ptr" in
+      let c   = fresh ctx "scmp" in
+      let cmp = fresh ctx "cmp" in
+      let r   = fresh ctx "ar" in
+      emit ctx (Printf.sprintf "%s = call i64 @march_compare_string(ptr %s, ptr %s)" c va_ptr vb_ptr);
+      emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c);
+      emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
+      ("i64", r)
     end else begin
       (* Fallback comparison: float or i64 (pointer coercion). *)
       let fallback_cmp () =

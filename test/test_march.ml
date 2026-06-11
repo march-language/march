@@ -20932,6 +20932,50 @@ let test_adt_eq_structural_fn_emitted () =
   Alcotest.(check bool) "structural eq fn __march_eq_ in IR" true
     (ir_contains ir "__march_eq_")
 
+(* ── Regression: string ordering comparison through a (polymorphic) closure ──
+   String `<`/`<=`/`>`/`>=` must lower to a call to march_compare_string and
+   compare the result against 0.  The old backend only special-cased string
+   `==`/`!=`; ordering ops fell through to the integer/pointer `icmp` fallback,
+   which compared the string STRUCT POINTERS as integers — garbage, unrelated
+   to lexicographic order.  This silently miscompiled every compiled program
+   that ordered strings via a comparator (e.g. List.sort_by), while the
+   interpreter stayed correct.  The comparator here is polymorphic
+   (String -> String -> Bool) and reaches `<` through a closure, exactly the
+   List.sort_by shape. *)
+let test_string_ord_uses_compare_string () =
+  let ir = emit_actor_ir {|mod Test do
+    fn use_cmp(cmp : String -> String -> Bool, x : String, y : String) : Bool do
+      cmp(x, y)
+    end
+    fn f() : Bool do
+      use_cmp(fn (a, b) -> a < b, "x", "y")
+    end
+  end|} in
+  (* Must emit the CALL (the declaration is always present in the preamble). *)
+  Alcotest.(check bool) "string < calls march_compare_string" true
+    (ir_contains ir "call i64 @march_compare_string")
+
+(* Value-level companion: List.sort_by on strings must order correctly.  Run
+   through the interpreter (the compiled path is asserted at the IR level
+   above; both share the same comparison-lowering decision). *)
+let test_sort_by_strings_orders_correctly () =
+  let env = eval_module {|mod T do
+    fn asc() : List(String) do
+      List.sort_by(Cons("2026-01-20", Cons("2026-03-28",
+        Cons("2026-02-10", Cons("2026-04-09", Nil)))), fn a -> fn b -> a < b)
+    end
+    fn desc() : List(String) do
+      List.sort_by(Cons("2026-01-20", Cons("2026-03-28",
+        Cons("2026-02-10", Cons("2026-04-09", Nil)))), fn a -> fn b -> a > b)
+    end
+  end|} in
+  let to_strs v =
+    List.map vstr (vlist (call_fn env v [])) in
+  Alcotest.(check (list string)) "sort_by asc"
+    ["2026-01-20"; "2026-02-10"; "2026-03-28"; "2026-04-09"] (to_strs "asc");
+  Alcotest.(check (list string)) "sort_by desc"
+    ["2026-04-09"; "2026-03-28"; "2026-02-10"; "2026-01-20"] (to_strs "desc")
+
 (* ── Regression #36: collect_tests recurses into DMod (bug_todos #36) ────
    Tests defined inside a module loaded via MARCH_LIB_PATH arrive as DMod
    entries in auto_decls.  collect_tests must descend into them. *)
@@ -22783,6 +22827,10 @@ let () =
           test_adv_perceus_scrutinee_in_body;
         Alcotest.test_case "#35 ADT == emits structural eq fn not icmp eq ptr" `Quick
           test_adt_eq_structural_fn_emitted;
+        Alcotest.test_case "string < through closure calls march_compare_string" `Quick
+          test_string_ord_uses_compare_string;
+        Alcotest.test_case "List.sort_by on strings orders correctly" `Quick
+          test_sort_by_strings_orders_correctly;
         Alcotest.test_case "#36 collect_tests descends into DMod" `Quick
           test_collect_tests_recurses_into_dmod;
         Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
