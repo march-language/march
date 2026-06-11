@@ -1,11 +1,35 @@
 [
   {
-    "hash": "a95cf0ca290ec2008374e03422cca393bbd0a6ea",
-    "short_hash": "a95cf0c",
+    "hash": "8184e006366047bb187eea2d6ac66040ef906dd7",
+    "short_hash": "8184e00",
     "author": "Matthew Gilliam",
-    "date": "2026-06-11T14:23:01-04:00",
-    "message": "fix(forge): put lib/ before test/ in MARCH_LIB_PATH for compiled tests\n\nMARCH_LIB_PATH order drives the whole-program module check order, and\ntest modules call into lib modules (never the reverse). With test/ first,\na lib function still bound to its pass-1 Mono placeholder gets pinned by\nthe first test call site that reaches it; every other call site with a\ndifferent shape (e.g. Depot.Schema.define's per-schema record arg) then\nfails to unify — 184 spurious type errors on depot's suite. lib/ first\nchecks definitions before uses.",
-    "files_changed": 1
+    "date": "2026-06-11T15:49:32-04:00",
+    "message": "fix(cas): invalidate compiled-artifact cache when runtime C sources change\n\ncompilation_hash mixed in compiler identity (83ef546) but nothing about\nruntime/*.c|*.h, which clang compiles and links into the output binary at\nmarch-compile time. Editing runtime/march_extras.c still served the stale\nbinary cached under the same key. Mix a BLAKE3 digest of the runtime\nsources (sorted name + contents, Lazy per process) into compilation_hash,\nresolving the runtime dir with the same candidates main.ml uses.\n\nAlso fix the cache-hit paths in bin/main.ml ignoring the cp exit code:\na dead artifact pointer (stored pointers hold the original output path,\nso deleting that file orphans them) printed \"compiled (cached)\" while\nwriting no output. New Cas.copy_artifact returns false on missing source\nor failed copy — both call sites now fall through and recompile — and\ntreats src==dest (same inode, recompile with the same -o) as success,\nsince cp exits non-zero on identical files.",
+    "files_changed": 3
+  },
+  {
+    "hash": "4f5bb97b5beb39e3ce6c10f3d1555220f501ff81",
+    "short_hash": "4f5bb97",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:48:46-04:00",
+    "message": "fix(typecheck): hmac_sha256 signature now matches eval/runtime/llvm_emit\n\nThe typecheck entry declared Bytes -> Bytes -> Bytes, but every\nimplementation disagreed: the eval builtin returns Ok(Bytes), the native\nruntime (march_hmac_sha256) reads march_string args and returns\nResult(Bytes, String), and llvm_emit's builtin_ret_ty already said\nResult(Bytes, String). Correct usage (Ok/Err match on String args) was\nrejected; the only accepted usage would misbehave at runtime.\n\nCanonical signature: String -> String -> Result(Bytes, String) — same as\nthe existing stdlib_hmac_sha256 entry. hmac_sha256_bytes (Bytes -> Bytes\n-> Bytes, bare result) was already consistent across all sites; unchanged.\n\nAdds typecheck-level regression tests for both builtins — prior tests\ncalled the eval builtin directly and never exercised the signature.\n1424 -> 1426 tests.",
+    "files_changed": 4
+  },
+  {
+    "hash": "aec71fb1d254b9a7d6ac371608ee52c9c400d0ad",
+    "short_hash": "aec71fb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:43:41-04:00",
+    "message": "fix(bench,test): restore | separators in type declarations over-removed by 33bf2a2\n\nCommit 33bf2a2 (remove | from match arms) also stripped | from type\nvariant declarations in 5 places. Two were already fixed; restore the\nremaining three: bench/tree_transform.march, bench/parallel.march,\ntest/depot/wire_encode_test.march.\n\nVerified: dune runtest (147 tests pass), tree_transform and parallel\ncompile at --opt 2, tree_transform runs and prints 104857600.",
+    "files_changed": 3
+  },
+  {
+    "hash": "22f8a59bbf4560144117b35e30bd5b4b723d8864",
+    "short_hash": "22f8a59",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:34:20-04:00",
+    "message": "chore: sync decision graph export after merge",
+    "files_changed": 2
   },
   {
     "hash": "c69d8773702bccaa33fc8b6daa7e4d1fdca769da",
@@ -1904,16 +1928,16 @@
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -1928,14 +1952,6 @@
     "files_changed": 7
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:38:16-04:00",
-    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
-    "files_changed": 3
-  },
-  {
     "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
     "short_hash": "6612a48",
     "author": "Matthew Gilliam",
@@ -1944,16 +1960,24 @@
     "files_changed": 3
   },
   {
-    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
-    "short_hash": "36a21bc",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:38:16-04:00",
+    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
+    "files_changed": 3
+  },
+  {
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
+    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
+    "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
@@ -1992,16 +2016,16 @@
     "files_changed": 1
   },
   {
-    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
-    "short_hash": "1f0c21a",
+    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
+    "short_hash": "63e7c83",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:10:54-04:00",
     "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
     "files_changed": 3
   },
   {
-    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
-    "short_hash": "63e7c83",
+    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
+    "short_hash": "1f0c21a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:10:54-04:00",
     "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
