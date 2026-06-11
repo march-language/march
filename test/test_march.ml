@@ -5603,6 +5603,93 @@ let test_actor_compile_call_reply_emitted () =
   Alcotest.(check bool) "march_actor_reply in IR" true
     (ir_contains ir "march_actor_reply")
 
+(* ── Nested immediate-literal pattern codegen tests ────────────────────── *)
+(* Regression tests for the wild-dereference miscompile of Bool/Int/Atom
+   literal patterns nested inside constructor patterns.  The field bound by
+   the outer constructor pattern is a low-bit-tagged immediate ((n<<1)|1),
+   not a heap pointer; compiling the inner literal test as a ctor-tag switch
+   loaded a tag from a non-pointer.  With an unreachable-defaulted switch,
+   LLVM folded the test away entirely — [Ok(true)]/[Ok(false)] both took the
+   FIRST bool arm (printed T T E instead of T F E); nested Int/Atom literal
+   matches segfaulted.  The fix routes all-immediate-literal-tag ECases to
+   scalar comparisons, so exactly ONE i32 ctor-tag switch (the outer Ok/Err
+   discrimination) must remain in the emitted IR. *)
+
+(** Count non-overlapping occurrences of [pat] in [ir]. *)
+let ir_count ir pat =
+  let re = Str.regexp_string pat in
+  let rec go i acc =
+    match Str.search_forward re ir i with
+    | j -> go (j + String.length pat) (acc + 1)
+    | exception Not_found -> acc
+  in
+  go 0 0
+
+(** Nested Bool literal patterns: the inner true/false test must be an
+    untag + trunc + br i1, not a second ctor-tag switch on the field. *)
+let test_nested_bool_lit_pattern_no_tag_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Bool, String)) : String do
+      match r do
+        Ok(true) -> "T"
+        Ok(false) -> "F"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(true)))
+      println(classify(Ok(false)))
+      println(classify(Err("x")))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32");
+  Alcotest.(check bool) "bool field tested via trunc to i1" true
+    (ir_contains ir "trunc i64");
+  Alcotest.(check bool) "bool field untagged via ashr" true
+    (ir_contains ir "ashr i64")
+
+(** Nested Int literal patterns: the inner test must switch on the raw
+    tagged bits with (n<<1)|1 labels — Ok(1) → label 3, Ok(2) → label 5. *)
+let test_nested_int_lit_pattern_tagged_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Int, String)) : String do
+      match r do
+        Ok(1) -> "one"
+        Ok(2) -> "two"
+        Ok(_) -> "other"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(1)))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32");
+  Alcotest.(check bool) "Ok(1) compared against tagged immediate 3" true
+    (ir_contains ir "i64 3, label");
+  Alcotest.(check bool) "Ok(2) compared against tagged immediate 5" true
+    (ir_contains ir "i64 5, label")
+
+(** Nested Atom literal patterns: same shape — no second ctor-tag switch. *)
+let test_nested_atom_lit_pattern_no_tag_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Atom, String)) : String do
+      match r do
+        Ok(:red) -> "R"
+        Ok(:blue) -> "B"
+        Ok(_) -> "other"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(:red)))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -21672,6 +21759,11 @@ let () =
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
+        ] );
+      ( "nested_lit_pattern_codegen", [
+          Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
+          Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
+          Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;

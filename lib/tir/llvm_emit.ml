@@ -2745,6 +2745,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 and emit_case ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
 
+  (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
+     integers (Int), ":name" (Atom).  ADT constructor tags are capitalized
+     identifiers, so these forms are unambiguous.  A scrutinee matched
+     against such tags is an immediate at runtime even when its LLVM value
+     is ptr-typed — e.g. an ADT field bound at a TVar type is stored as a
+     low-bit-tagged immediate ((n<<1)|1), NOT a heap pointer.  Treating it
+     as a heap pointer and loading a ctor tag from it is a wild dereference
+     (and LLVM folds the resulting unreachable-defaulted switch into "first
+     arm always wins").  See: nested Bool/Int/Atom literal patterns inside
+     constructor patterns, e.g. [match r do Ok(true) -> … Ok(false) -> …]. *)
+  let is_imm_lit_tag t =
+    t = "true" || t = "false"
+    || int_of_string_opt t <> None
+    || (String.length t > 0 && t.[0] = ':')
+  in
+  let all_imm_lit_tags =
+    branches <> [] &&
+    List.for_all (fun br -> is_imm_lit_tag br.Tir.br_tag) branches
+  in
+
   let is_ptr_scrut =
     match scrut_atom with
     | Tir.AVar v ->
@@ -2760,6 +2780,14 @@ and emit_case ctx scrut_atom branches default_opt =
     | Tir.ALit (March_ast.Ast.LitAtom _) -> false
     | _ -> scrut_ty = "ptr"
   in
+  (* Immediate-literal tags override the repr guess: the value cannot be a
+     heap object, so never take the load-ctor-tag path for it. *)
+  let is_ptr_scrut = is_ptr_scrut && not all_imm_lit_tags in
+  (* The scrutinee is an immediate but its LLVM value is ptr-typed: the raw
+     bits are the tagged immediate (n<<1)|1.  Switch labels must be tagged
+     the same way (comparing tagged-vs-tagged is exact; untagging via ashr
+     would lose bit 63 of 64-bit atom hashes). *)
+  let scrut_is_tagged_imm = all_imm_lit_tags && scrut_ty = "ptr" in
 
   let merge_lbl   = fresh_block ctx "case_merge" in
   let default_lbl = fresh_block ctx "case_default" in
@@ -2849,6 +2877,12 @@ and emit_case ctx scrut_atom branches default_opt =
       (* Determine switch discriminant (tag or scalar) *)
       let (sw_ty, sw_val) =
         if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
+        else if scrut_is_tagged_imm then begin
+          (* ptr-typed tagged immediate: switch on the raw bits *)
+          let raw = fresh ctx "ti" in
+          emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" raw scrut_val);
+          ("i64", raw)
+        end
         else ("i64", scrut_val)
       in
 
@@ -2862,14 +2896,25 @@ and emit_case ctx scrut_atom branches default_opt =
             if is_ptr_scrut then
               let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
               string_of_int e.ce_tag
-            else if is_atom_case then begin
-              (* Atom tags are ":NAME" — hash the name part with FNV1a *)
-              let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
-              Int64.to_string (fnv1a_64 name)
-            end else begin
-              match int_of_string_opt br.Tir.br_tag with
-              | Some n -> string_of_int n
-              | None -> "0"
+            else begin
+              let v =
+                if is_atom_case then begin
+                  (* Atom tags are ":NAME" — hash the name part with FNV1a *)
+                  let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
+                  fnv1a_64 name
+                end else
+                  match Int64.of_string_opt br.Tir.br_tag with
+                  | Some n -> n
+                  | None -> 0L
+              in
+              (* Tagged-immediate scrutinee: tag the label the same way the
+                 store tagged the value — (v << 1) | 1. *)
+              let v =
+                if scrut_is_tagged_imm
+                then Int64.logor (Int64.shift_left v 1) 1L
+                else v
+              in
+              Int64.to_string v
             end
           in
           if Hashtbl.mem seen_tags tag_str then None
