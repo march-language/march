@@ -1,0 +1,48 @@
+-- Entry: structural == on ADT values defined in an imported module, compiled
+-- natively.  Regression for ensure_adt_eq_fn: ctor_info keys are
+-- module-qualified ("AeLib.AeShape.AeDot") while the == site's TCon carries
+-- the short name ("AeShape"); the old lookup found no ctors and — because it
+-- memoized the fn name before validating — later requests returned a
+-- function that was never defined ("use of undefined value '@__march_eq_*'").
+mod AeEntry do
+
+import AeLib
+import AeLib2
+
+-- Discharge the typechecker's Eq constraint for ADT operands; the native
+-- emitter still routes == through generated structural eq functions.
+impl Eq(a) do
+  fn eq(x, y) do
+    eq(x, y)
+  end
+end
+
+fn check(name, cond) do
+  if cond do
+    println("ok " ++ name)
+    0
+  else
+    println("FAIL " ++ name)
+    1
+  end
+end
+
+fn main() do
+  let failures =
+    check("nested ctor equal",
+          AeLib.AeWrap(AeLib.mk_box(1, "x")) == AeLib.AeWrap(AeLib.mk_box(1, "x")))
+    + check("nested ctor not equal",
+            not (AeLib.AeWrap(AeLib.mk_box(1, "x")) == AeLib.AeWrap(AeLib.mk_box(2, "x"))))
+    + check("string field not equal",
+            not (AeLib.mk_box(1, "x") == AeLib.mk_box(1, "y")))
+    + check("nullary merged-layout equal", AeLib.east() == AeLib.east())
+    + check("nullary merged-layout not equal", not (AeLib.east() == AeLib.AeNorth))
+    + check("second module nullary equal", AeLib2.north() == AeLib2.north())
+  if failures == 0 do
+    println("all ok")
+  else
+    panic("adt_eq_native: " ++ int_to_string(failures) ++ " failures")
+  end
+end
+
+end
