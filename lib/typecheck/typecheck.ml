@@ -989,9 +989,13 @@ let builtin_bindings : (string * scheme) list =
        because the typechecker doesn't handle `() -> a` well in argument
        position), catching any runtime failure (assert, panic, match
        failure, division by zero, etc.) and returning Err(msg) on failure
-       or Ok(result) on success. Call as `__try_call(fn _ -> body)`. *)
-    ("__try_call",     poly1 (fun a ->
-        TArrow (TArrow (t_bool, a), t_result a t_string)));
+       or Ok(result) on success. Call as `__try_call(fn _ -> body)`.
+       The thunk must return Bool (not a generic `a`): the C runtime stores
+       the Ok field in the uniform low-bit-tagged immediate representation,
+       which would corrupt a heap pointer.  See __try_call in
+       runtime/march_runtime.c. *)
+    ("__try_call",     Mono
+        (TArrow (TArrow (t_bool, t_bool), t_result t_bool t_string)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));

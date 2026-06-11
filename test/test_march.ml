@@ -21076,6 +21076,50 @@ let test_dmod_test_body_qualifies_helper_refs () =
   Alcotest.(check bool) "TestB.helper define present when referenced"
     refs (refs && defines)
 
+(* ── Regression: __try_call must tag immediate results (uniform tagging) ──
+   Compiled `Check.all` properties failed on run 1 with "returned false" for
+   trivially-true properties (the interpreter passed them).  Root cause:
+   `__try_call` in runtime/march_runtime.c stored the property thunk's raw
+   i64 Bool into the Result Ok field UNTAGGED, but compiled March reads ADT
+   immediate fields with the uniform low-bit tag convention — `Ok(1)` was
+   untagged as `1 >> 1 = 0`, so `Check.is_failing` saw `not(false)` = true
+   for every passing property.  End-to-end guard: compile a test binary with
+   a trivially-true property through the real `--compile --test` pipeline
+   and assert it exits 0.  Skips gracefully (like the JIT tests) when the
+   compiler binary, clang, or the runtime is unavailable. *)
+let test_compiled_check_property_passes () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_checktag" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "t_test.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod CheckTag do\n\
+      \  describe \"tagging\" do\n\
+      \    test \"trivially-true property passes compiled\" do\n\
+      \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "tbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled trivially-true Check.all property exits 0" 0 run_rc
+    end
+  end
+
 let () =
   Alcotest.run "march"
     [
@@ -22899,5 +22943,7 @@ let () =
           test_collect_tests_no_double_collection;
         Alcotest.test_case "DMod test body qualifies sibling helper refs (no dangling @helper)" `Quick
           test_dmod_test_body_qualifies_helper_refs;
+        Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
+          test_compiled_check_property_passes;
       ]);
     ]
