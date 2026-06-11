@@ -1380,6 +1380,7 @@ let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = fun
     Falls back to [ctor_entry] (which may contain TVar placeholders) otherwise. *)
 let resolve_ctor_fields ctx scrut_tir_ty ctor_name n_args =
   match scrut_tir_ty with
+  | Tir.TTuple ts -> ts   (* tuple patterns ($TupleN): the element types ARE the field types *)
   | Tir.TCon (type_name, ty_args) ->
     (match Hashtbl.find_opt ctx.type_params type_name,
            Hashtbl.find_opt ctx.poly_ctors (type_name, ctor_name) with
@@ -2861,8 +2862,20 @@ and emit_case ctx scrut_atom branches default_opt =
       let concrete_fields =
         resolve_ctor_fields ctx scrut_tir_ty br.Tir.br_tag (List.length br.Tir.br_vars)
       in
+      (* For TUPLE scrutinees the fields are stored UNBOXED with their concrete
+         LLVM types — a Bool/Int field is a raw i64, not a low-bit-tagged ptr —
+         because ETuple/EAlloc build tuples from the atoms' native types.  The
+         synthetic $TupleN ctor_info entry, however, types every field as
+         TVar "_" (→ ptr), so loading via ce_fields would untag (ashr 1) a value
+         that was never tagged, corrupting e.g. Bool true → false.  Use the
+         concrete element types for tuple loads so build and destructure agree.
+         Variant ctors keep using ce_fields, whose generic TVar fields ARE
+         stored tagged on construction (coerced i64→ptr in EAlloc). *)
+      let is_tuple_scrut = match scrut_tir_ty with Tir.TTuple _ -> true | _ -> false in
       List.iteri (fun i (v : Tir.var) ->
-        let field_ty = match List.nth_opt entry.ce_fields i with
+        let field_ty =
+          let src = if is_tuple_scrut then concrete_fields else entry.ce_fields in
+          match List.nth_opt src i with
           | Some t -> llvm_ty t | None -> llvm_ty v.Tir.v_ty in
         let fv = emit_load_field ctx scrut_val i field_ty in
         let slot = alloca_name ctx (llvm_name v.Tir.v_name) in

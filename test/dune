@@ -231,3 +231,27 @@
        (glob_files imports/import_shadow/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/import_shadow\" %{exe:../bin/main.exe} --check \"$PWD/imports/import_shadow/is_entry.march\"")))
+
+; ── Regression: native codegen must not drop non-pointer tuple fields ──
+; A module-nested fn with default-arg params desugars to a body that builds a
+; tuple of its args and immediately destructures it.  The native tuple
+; destructure typed every field as a tagged pointer ($TupleN → TVar "_" → ptr)
+; and untagged on load (ashr 1), but the tuple was BUILT storing Bool/Int
+; fields RAW (i64).  The mismatch corrupted non-pointer fields — an explicitly
+; passed `loud : Bool \\ false = true` arrived as false, so the native binary
+; printed "Def!" instead of "Def *!".  Compile the repro natively, run it, and
+; diff stdout against the expected output (which equals the interpreter's).
+(rule
+ (targets native_default_args_nested native_default_args_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/default_args_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_default_args_nested
+        native/default_args_nested.march)
+   (with-stdout-to native_default_args_nested.out
+        (system "./native_default_args_nested")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/default_args_nested.expected native_default_args_nested.out)))
