@@ -21037,6 +21037,45 @@ let test_collect_tests_no_double_collection () =
   Alcotest.(check int) "3 unique tests collected, none doubled" 3
     (List.length tir.March_tir.Tir.tm_tests)
 
+(* ── Regression: DMod test bodies must qualify sibling-fn references ─────
+   A test inside a DMod (e.g. a second test file auto-discovered via
+   MARCH_LIB_PATH) that references a sibling helper ONLY through a closure
+   left the reference unqualified ("helper") while the definition was
+   registered qualified ("TestB.helper").  Defun then captured the helper as
+   a first-class value, DCE pruned the definition (free_vars ∩ fn_names name
+   mismatch), and llvm_emit's fallback emitted a dangling `@helper` —
+   "use of undefined value '@helper'" at the clang stage of `forge test`.
+   collect_tests must apply rename_tir_vars with the module prefix, exactly
+   as lower_mod_decls does for the module's DFn declarations. *)
+let test_dmod_test_body_qualifies_helper_refs () =
+  let src = {|mod Entry do
+    mod TestB do
+      fn helper(x : Int) : Bool do x >= 0 end
+      test "helper via closure" do
+        let f = fn x -> helper(x)
+        assert (f(3))
+      end
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~test_mode:true m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Opt.run tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  (* The buggy pipeline emits a trampoline for the unqualified name whose
+     call target `@helper` has no define.  The qualified wrapper
+     ("@TestB.helper$clo_wrap") is fine — the check is anchored on '@'. *)
+  Alcotest.(check bool) "no dangling unqualified @helper trampoline" false
+    (ir_contains ir "@helper$clo_wrap");
+  (* Any surviving reference to the qualified helper must have a define. *)
+  let refs    = ir_contains ir "@TestB.helper" in
+  let defines = ir_contains ir "define i64 @TestB.helper" in
+  Alcotest.(check bool) "TestB.helper define present when referenced"
+    refs (refs && defines)
+
 let () =
   Alcotest.run "march"
     [
@@ -22858,5 +22897,7 @@ let () =
           test_collect_tests_recurses_into_dmod;
         Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
           test_collect_tests_no_double_collection;
+        Alcotest.test_case "DMod test body qualifies sibling helper refs (no dangling @helper)" `Quick
+          test_dmod_test_body_qualifies_helper_refs;
       ]);
     ]

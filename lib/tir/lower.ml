@@ -2090,10 +2090,21 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   let test_pairs = ref [] in   (* (fn_name, display_name) in declaration order *)
   if test_mode then begin
     let test_counter = ref 0 in
+    (* Qualify references to sibling module functions inside a test/setup
+       body, mirroring what lower_mod_decls does for the module's own DFn
+       bodies via rename_tir_vars.  Without this, a helper referenced only
+       from a test body keeps its unqualified name ("helper") while the
+       definition is registered qualified ("TestB.helper"): defun then
+       captures the helper as a free variable, DCE prunes the qualified
+       definition (name mismatch), and llvm_emit's fallback emits a
+       dangling `@helper` — "use of undefined value" at the clang stage. *)
+    let qualify_mod_refs mod_prefix mod_fn_names fn =
+      if mod_prefix = "" || mod_fn_names = [] then fn
+      else rename_tir_vars mod_prefix mod_fn_names fn
+    in
     (* Lower a test-body expression to a zero-arg TIR function. *)
-    let lower_test_body name_prefix display_name body =
+    let lower_test_body ~mod_prefix ~mod_fn_names display_name body =
       let fn_name = Printf.sprintf "__march_test_%d__" !test_counter in
-      let _ = name_prefix in  (* prefix baked into display_name already *)
       incr test_counter;
       let body' = lower_expr body in
       let fn : Tir.fn_def = {
@@ -2102,20 +2113,24 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         fn_ret_ty = Tir.TCon ("Unit", []);
         fn_body   = body';
       } in
+      let fn = qualify_mod_refs mod_prefix mod_fn_names fn in
       fns := fn :: !fns;
       test_pairs := (fn_name, display_name) :: !test_pairs
     in
-    (* Recursive collector: descends into DDescribe blocks. *)
-    let rec collect_tests prefix decls =
+    (* Recursive collector: descends into DDescribe and DMod blocks.
+       [prefix] is the human-readable describe-label prefix; [mod_prefix] /
+       [mod_fn_names] track the enclosing DMod (module path + its direct
+       fn/let names) for reference qualification. *)
+    let rec collect_tests ~mod_prefix ~mod_fn_names prefix decls =
       List.iter (fun d ->
         match d with
         | Ast.DTest (tdef, _) ->
           let display = if prefix = "" then tdef.Ast.test_name
                         else prefix ^ " " ^ tdef.Ast.test_name in
-          lower_test_body prefix display tdef.Ast.test_body
+          lower_test_body ~mod_prefix ~mod_fn_names display tdef.Ast.test_body
         | Ast.DDescribe (label, inner, _) ->
           let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
-          collect_tests new_prefix inner
+          collect_tests ~mod_prefix ~mod_fn_names new_prefix inner
         | Ast.DSetup (body, _) ->
           (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
           let body' = lower_expr body in
@@ -2125,7 +2140,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
           } in
-          fns := fn :: !fns
+          fns := qualify_mod_refs mod_prefix mod_fn_names fn :: !fns
         | Ast.DSetupAll (body, _) ->
           let body' = lower_expr body in
           let fn : Tir.fn_def = {
@@ -2134,13 +2149,25 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
           } in
-          fns := fn :: !fns
-        | Ast.DMod (_, _, inner_decls, _) ->
-          collect_tests prefix inner_decls
+          fns := qualify_mod_refs mod_prefix mod_fn_names fn :: !fns
+        | Ast.DMod (mod_name, _, inner_decls, _) ->
+          (* Module functions are registered as "<prefix><name>" by
+             lower_mod_decls — collect the direct fn/let names so test
+             bodies inside this module can be renamed identically. *)
+          let inner_prefix = mod_prefix ^ mod_name.Ast.txt ^ "." in
+          let inner_fn_names = List.filter_map (function
+              | Ast.DFn (def, _) -> Some def.Ast.fn_name.Ast.txt
+              | Ast.DLet (_, b, _) ->
+                (match b.Ast.bind_pat with
+                 | Ast.PatVar n -> Some n.Ast.txt
+                 | _ -> None)
+              | _ -> None) inner_decls in
+          collect_tests ~mod_prefix:inner_prefix ~mod_fn_names:inner_fn_names
+            prefix inner_decls
         | _ -> ()
       ) decls
     in
-    collect_tests "" m.mod_decls
+    collect_tests ~mod_prefix:"" ~mod_fn_names:[] "" m.mod_decls
   end;
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
