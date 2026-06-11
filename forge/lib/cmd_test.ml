@@ -140,12 +140,18 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       let lib_path_with_test =
         if Sys.file_exists test_dir
         then Printf.sprintf "MARCH_LIB_PATH=%s:%s "
-               test_dir
+               (* lib/ must come BEFORE test/: MARCH_LIB_PATH order drives the
+                  module check order, and test modules call into lib modules
+                  (never the reverse).  With test/ first, a lib function still
+                  bound to its pass-1 Mono placeholder gets pinned by the
+                  first test call site, and every other call site with a
+                  different record shape then fails to unify. *)
                (match Sys.getenv_opt "MARCH_LIB_PATH" with
                 | Some s -> s
                 | None ->
                   let lib_dir = Filename.concat proj.Project.root "lib" in
                   lib_dir)
+               test_dir
         else lib_path_env
       in
       (* Use first test file as entry; MARCH_LIB_PATH provides the rest. *)
