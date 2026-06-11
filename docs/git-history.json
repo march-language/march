@@ -1,19 +1,27 @@
 [
   {
+    "hash": "61cfb279eaad798914f5260699e34caa466322ce",
+    "short_hash": "61cfb27",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:11:56-04:00",
+    "message": "fix(runtime): tag __try_call's Bool result so compiled Check.all properties pass\n\nCompiled property tests failed on run 1 with \"returned false\" for\ntrivially-true properties while the interpreter passed them. __try_call\n(the panic-catching trampoline behind Check.try_prop) stored the\nproperty thunk's raw i64 Bool directly into the Result Ok field, but\ncompiled March reads polymorphic ADT immediate fields with the uniform\nlow-bit tag convention (ptrtoint + ashr 1): Ok(1) read back as 0, so\nCheck.is_failing saw not(false) = failing for every passing property.\n\nFix: store ((result << 1) | 1) at the Result construction point in\n__try_call, matching the tagged-immediate convention, and tighten the\nbuiltin's typechecker signature from (Bool -> a) -> Result(a, String)\nto (Bool -> Bool) -> Result(Bool, String) so any future heap-typed use\nfails to typecheck instead of being silently corrupted by the tagging.\nThe interpreter's __try_call builds OCaml values and is unaffected.\n\nEnd-to-end regression test compiles a trivially-true Check.all property\nthrough the real --compile --test pipeline and asserts the binary exits\n0; skips gracefully when clang/runtime is unavailable (JIT-test\nconvention). 1422 -> 1423 tests.\n\nFound during verification, deferred as separate work: Bool literal\npatterns nested in constructor patterns (Ok(true)/Ok(false)) compile to\na heap-tag switch on a tagged immediate and LLVM's unreachable-default\nfolding makes the first Bool arm unconditionally taken — a real\nmiscompile, tracked separately.",
+    "files_changed": 5
+  },
+  {
+    "hash": "b8d37d61384aca427756356ca5119665c80104da",
+    "short_hash": "b8d37d6",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T12:40:22-04:00",
+    "message": "chore: sync decision graph export",
+    "files_changed": 2
+  },
+  {
     "hash": "7091bfb0fcd4a16d03f85ac1a97c59127cc6fced",
     "short_hash": "7091bfb",
     "author": "Matthew Gilliam",
     "date": "2026-06-11T12:39:42-04:00",
     "message": "fix(lower): qualify sibling-fn refs in DMod test bodies so DCE keeps closure-only helpers\n\nMulti-test-file `forge test` builds load non-entry test files as DMod\nentries. lower_mod_decls registers their functions qualified\n(TestB.helper) and renames refs inside the module's own DFn bodies via\nrename_tir_vars — but collect_tests lowered test/setup/setup_all bodies\nwith plain lower_expr, leaving refs unqualified (helper). A helper\nreferenced only through a closure (e.g. a Check.all property lambda)\nthen miscompiled down the pipeline: defun captured it as a free\nvariable instead of resolving a top-level fn, DCE pruned the qualified\ndefinition (reachability matches free_vars against fn names — name\nmismatch), and llvm_emit's no-slot AVar fallback emitted a\n@helper$clo_wrap trampoline calling a dangling @helper:\n\n    test/markdown_test.ll: error: use of undefined value '@all_in'\n\nFix: collect_tests threads the enclosing module prefix + direct fn/let\nnames through DMod descent and applies rename_tir_vars to lowered\ntest/setup bodies, mirroring the module's DFn handling.\n\nRegression test drives a DMod test that references a sibling helper\nthrough a closure across the full native pipeline and asserts no\ndangling unqualified trampoline survives. 1421 -> 1422 tests.\n\nNote: compiled Check.all properties still fail at runtime (returned\nfalse, counterexample prints as #<tag:0>) while the interpreter passes\n— separate pre-existing bug, tracked separately.",
     "files_changed": 4
-  },
-  {
-    "hash": "882dc437497e80ea3f7fc8a854e6b3d49c308990",
-    "short_hash": "882dc43",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-11T07:46:49-04:00",
-    "message": "test(llvm): lock in mono-specialization of string comparators through generics\n\nAdd an IR-level regression test proving a comparator closure threaded\nthrough a fully generic function + tuple (never mentioning String) still\nmonomorphizes to String-typed apply params and emits\nmarch_compare_string — confirming the polymorphic-'_ case does not reach\ncodegen for well-formed programs. Correct the progress.md note that\npreviously implied a residual gap. 1420 -> 1421 tests.",
-    "files_changed": 2
   },
   {
     "hash": "8d8395083b0132b29c1ff26bf1aff6137897cc63",
@@ -1872,16 +1880,16 @@
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -1928,14 +1936,6 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:06:51-04:00",
-    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
-    "files_changed": 5
-  },
-  {
     "hash": "331665a13c16dfef67c251366ec617b269e8f646",
     "short_hash": "331665a",
     "author": "Matthew Gilliam",
@@ -1944,12 +1944,12 @@
     "files_changed": 5
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
-    "date": "2026-03-26T21:28:52-04:00",
-    "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
-    "files_changed": 1
+    "date": "2026-03-26T22:06:51-04:00",
+    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
+    "files_changed": 5
   },
   {
     "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
@@ -1960,16 +1960,24 @@
     "files_changed": 1
   },
   {
-    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
-    "short_hash": "63e7c83",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T21:28:52-04:00",
+    "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
+    "files_changed": 1
+  },
+  {
+    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
+    "short_hash": "1f0c21a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:10:54-04:00",
     "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
     "files_changed": 3
   },
   {
-    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
-    "short_hash": "1f0c21a",
+    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
+    "short_hash": "63e7c83",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:10:54-04:00",
     "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
@@ -1992,16 +2000,16 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2016,16 +2024,16 @@
     "files_changed": 15
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
