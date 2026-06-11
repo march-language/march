@@ -1,0 +1,16 @@
+-- Sibling of tq_ctor_entry.march.  Imports the entry module and references
+-- its constructors with the TYPE-qualified form, which must resolve even
+-- when this module is typechecked before the entry's own declarations (the
+-- entry's decls live at the top level of the combined module, after all
+-- auto-discovered sibling DMods).
+mod TqCtorSibling do
+
+import TqCtorEntry
+
+fn dot_area() : Int do
+  match TqShape.TqDot(7) do
+  TqShape.TqDot(_)     -> 0
+  TqShape.TqLine(a, b) -> a * b
+  end
+end
+end

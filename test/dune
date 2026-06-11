@@ -199,3 +199,35 @@
        (glob_files whole_program/*.march))
  (action (setenv MARCH_LIB_PATH whole_program
           (run %{exe:../bin/main.exe} --check whole_program/prog.march))))
+
+; ── Regression: TYPE-qualified ctors of the ENTRY module used by siblings ──
+; Pass 1 of check_module registered the entry module's variant constructors
+; under their BARE names only; the "TypeName.CtorName" key was added in
+; check_decl (pass 2).  A sibling loaded via the transitive-import path
+; (dotted module name → loads first → imports a plain sibling) is checked
+; before the entry's own DType decl is reached, so its `TqShape.TqDot`
+; reference failed with "I don't know a constructor called `TqShape.TqDot`".
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/tq_ctor/*.march))
+ (action (setenv MARCH_LIB_PATH imports/tq_ctor
+          (run %{exe:../bin/main.exe} --check imports/tq_ctor/tq_ctor_entry.march))))
+
+; ── Regression: local fn definitions must shadow bulk imports ──
+; `import X` (UseAll) rebound every public `X.name` as bare `name`,
+; clobbering the importing module's OWN pass-1 placeholder when it defines a
+; function of the same name.  check_fn then unified the local definition
+; against the imported fn's type (nonsense arity errors on the local fn's
+; header, e.g. a 3-arg `render` "expected" to be the entry's 2-arg one).
+; The entry must be passed as an ABSOLUTE path: that makes the sibling's
+; `import IsEntry` resolve to the entry's pass-1b placeholder bindings (the
+; failing configuration) instead of double-loading the entry as a DMod copy.
+; forge always invokes `march --check` with absolute paths, so this mirrors
+; real `forge check` behavior.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/import_shadow/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/import_shadow\" %{exe:../bin/main.exe} --check \"$PWD/imports/import_shadow/is_entry.march\"")))

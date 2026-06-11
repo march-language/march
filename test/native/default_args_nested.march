@@ -1,0 +1,19 @@
+mod Probe8 do
+
+mod Inner do
+  fn greet3(name : String, loud : Bool, suffix : String) : String do
+    let base = if loud do name ++ " *" else name end
+    base ++ suffix
+  end
+
+  fn greet_d(name : String, loud : Bool \\ false, suffix : String \\ "?") : String do
+    let base = if loud do name ++ " *" else name end
+    base ++ suffix
+  end
+end
+
+fn main() : Unit do
+  println(Inner.greet3("NoDef", true, "!"))
+  println(Inner.greet_d("Def", true, "!"))
+end
+end

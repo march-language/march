@@ -1,0 +1,13 @@
+-- Dotted-namespace sibling.  Auto-discovery sorts by module-name depth
+-- (more dot-segments load first), so this module loads before the plain
+-- siblings and pulls TqCtorSibling in as a TRANSITIVE import — the load
+-- path that triggered the original failure in depot (Depot.Query importing
+-- Build, which references the entry's types with the TYPE-qualified form).
+mod Tq.Deep do
+
+import TqCtorSibling
+
+fn deep_area() : Int do
+  TqCtorSibling.dot_area()
+end
+end

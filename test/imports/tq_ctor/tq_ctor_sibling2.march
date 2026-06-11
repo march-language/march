@@ -1,0 +1,15 @@
+-- Second sibling: imports the first sibling (forming a DMod dependency
+-- chain) and the entry.  Mirrors the depot layout where Compile imports
+-- both Ast (the entry under test) and Message.
+mod TqCtorSibling2 do
+
+import TqCtorEntry
+import TqCtorSibling
+
+fn combined() : Int do
+  TqCtorSibling.dot_area() + (match TqShape.TqLine(2, 3) do
+  TqShape.TqDot(_)     -> 0
+  TqShape.TqLine(a, b) -> a + b
+  end)
+end
+end
