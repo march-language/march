@@ -1856,26 +1856,41 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      Maps base_name -> [(arity, mangled_name)] so that call sites can be
      rewritten: EApp(EVar "greet", [x]) → EApp(EVar "greet$1", [x]). *)
   let default_dispatch = Hashtbl.create 8 in
-  List.iter (fun d ->
-      match d with
-      | Ast.DFn (def, _) ->
-        let name = def.fn_name.txt in
-        (match String.rindex_opt name '$' with
-         | Some dollar_pos when dollar_pos > 0 ->
-           let base = String.sub name 0 dollar_pos in
-           let suffix = String.sub name (dollar_pos + 1) (String.length name - dollar_pos - 1) in
-           (match int_of_string_opt suffix with
-            | Some _ ->
-              let n_params = match def.fn_clauses with
-                | [] -> 0
-                | c :: _ -> List.length c.fc_params
-              in
-              let existing = try Hashtbl.find default_dispatch base with Not_found -> [] in
-              Hashtbl.replace default_dispatch base ((n_params, name) :: existing)
-            | None -> ())
-         | _ -> ())
-      | _ -> ()
-    ) all_context_decls;
+  (* Walk into DMods and register module-QUALIFIED keys so that any
+     arity-mangled foo$N declarations nested inside modules dispatch
+     correctly at qualified call sites (Mod.foo → Mod.foo$N).  NOTE: as of
+     today desugar only expands default-args to $N decls for top-level fns;
+     module-nested default-arg fns go through a separate tuple-switch
+     dispatcher in native codegen which MISCOMPILES non-pointer args (see
+     test/native/default_args_nested repro: an explicitly passed Bool true
+     arrives as false).  That bug is in the dispatcher lowering, not here. *)
+  let rec build_default_dispatch prefix decls =
+    List.iter (fun d ->
+        match d with
+        | Ast.DFn (def, _) ->
+          let name = def.fn_name.txt in
+          (match String.rindex_opt name '$' with
+           | Some dollar_pos when dollar_pos > 0 ->
+             let base = String.sub name 0 dollar_pos in
+             let suffix = String.sub name (dollar_pos + 1) (String.length name - dollar_pos - 1) in
+             (match int_of_string_opt suffix with
+              | Some _ ->
+                let n_params = match def.fn_clauses with
+                  | [] -> 0
+                  | c :: _ -> List.length c.fc_params
+                in
+                let key = prefix ^ base in
+                let mangled = prefix ^ name in
+                let existing = try Hashtbl.find default_dispatch key with Not_found -> [] in
+                Hashtbl.replace default_dispatch key ((n_params, mangled) :: existing)
+              | None -> ())
+           | _ -> ())
+        | Ast.DMod (mname, _, inner_decls, _) ->
+          build_default_dispatch (prefix ^ mname.Ast.txt ^ ".") inner_decls
+        | _ -> ()
+      ) decls
+  in
+  build_default_dispatch "" all_context_decls;
   _default_dispatch := default_dispatch;
   (* Pre-pass: Lower top-level DFn declarations from stdlib_context so that
      monomorphization can specialize them at user call sites.  These are
@@ -2090,10 +2105,27 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   let test_pairs = ref [] in   (* (fn_name, display_name) in declaration order *)
   if test_mode then begin
     let test_counter = ref 0 in
+    (* Qualify references to module-local fns/lets inside a lowered test or
+       setup body.  Test blocks written inside `mod X do ... end` call the
+       module's own (often private) helpers UNQUALIFIED, but those helpers
+       are emitted as "X.helper" — without the rename the test fn links
+       against an undefined bare symbol.  Same treatment as impl-method
+       bodies in collect_iface_impls. *)
+    let qualify_locals mod_prefix direct_fn_names fn =
+      if mod_prefix <> "" && direct_fn_names <> [] then
+        rename_tir_vars mod_prefix direct_fn_names fn
+      else fn
+    in
+    let direct_names_of decls =
+      List.filter_map (function
+        | Ast.DFn (def, _) -> Some def.fn_name.txt
+        | Ast.DLet (_, b, _) ->
+          (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+        | _ -> None) decls
+    in
     (* Lower a test-body expression to a zero-arg TIR function. *)
-    let lower_test_body name_prefix display_name body =
+    let lower_test_body ~mod_prefix ~direct_fn_names display_name body =
       let fn_name = Printf.sprintf "__march_test_%d__" !test_counter in
-      let _ = name_prefix in  (* prefix baked into display_name already *)
       incr test_counter;
       let body' = lower_expr body in
       let fn : Tir.fn_def = {
@@ -2102,20 +2134,23 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         fn_ret_ty = Tir.TCon ("Unit", []);
         fn_body   = body';
       } in
+      let fn = qualify_locals mod_prefix direct_fn_names fn in
       fns := fn :: !fns;
       test_pairs := (fn_name, display_name) :: !test_pairs
     in
-    (* Recursive collector: descends into DDescribe blocks. *)
-    let rec collect_tests prefix decls =
+    (* Recursive collector: descends into DDescribe and DMod blocks.
+       [prefix] builds the human-readable display name; [mod_prefix] /
+       [direct_fn_names] track the enclosing module for symbol renaming. *)
+    let rec collect_tests prefix ~mod_prefix ~direct_fn_names decls =
       List.iter (fun d ->
         match d with
         | Ast.DTest (tdef, _) ->
           let display = if prefix = "" then tdef.Ast.test_name
                         else prefix ^ " " ^ tdef.Ast.test_name in
-          lower_test_body prefix display tdef.Ast.test_body
+          lower_test_body ~mod_prefix ~direct_fn_names display tdef.Ast.test_body
         | Ast.DDescribe (label, inner, _) ->
           let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
-          collect_tests new_prefix inner
+          collect_tests new_prefix ~mod_prefix ~direct_fn_names inner
         | Ast.DSetup (body, _) ->
           (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
           let body' = lower_expr body in
@@ -2125,7 +2160,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
           } in
-          fns := fn :: !fns
+          fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DSetupAll (body, _) ->
           let body' = lower_expr body in
           let fn : Tir.fn_def = {
@@ -2134,13 +2169,16 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
           } in
-          fns := fn :: !fns
-        | Ast.DMod (_, _, inner_decls, _) ->
-          collect_tests prefix inner_decls
+          fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
+        | Ast.DMod (mname, _, inner_decls, _) ->
+          collect_tests prefix
+            ~mod_prefix:(mod_prefix ^ mname.txt ^ ".")
+            ~direct_fn_names:(direct_names_of inner_decls)
+            inner_decls
         | _ -> ()
       ) decls
     in
-    collect_tests "" m.mod_decls
+    collect_tests "" ~mod_prefix:"" ~direct_fn_names:(direct_names_of m.mod_decls) m.mod_decls
   end;
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
