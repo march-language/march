@@ -1,19 +1,43 @@
 [
   {
+    "hash": "a95cf0ca290ec2008374e03422cca393bbd0a6ea",
+    "short_hash": "a95cf0c",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T14:23:01-04:00",
+    "message": "fix(forge): put lib/ before test/ in MARCH_LIB_PATH for compiled tests\n\nMARCH_LIB_PATH order drives the whole-program module check order, and\ntest modules call into lib modules (never the reverse). With test/ first,\na lib function still bound to its pass-1 Mono placeholder gets pinned by\nthe first test call site that reaches it; every other call site with a\ndifferent shape (e.g. Depot.Schema.define's per-schema record arg) then\nfails to unify — 184 spurious type errors on depot's suite. lib/ first\nchecks definitions before uses.",
+    "files_changed": 1
+  },
+  {
+    "hash": "c69d8773702bccaa33fc8b6daa7e4d1fdca769da",
+    "short_hash": "c69d877",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:48:38-04:00",
+    "message": "fix(runtime): tag Int payloads in C-built generic list cells (extras/compress)\n\nCompiled code uses uniform low-bit integer tagging ((n<<1)|1) for Int\npayloads in generic constructor slots and emits ashr #1 on extraction.\nmarch_http.c's make_int_cons already pre-tags, but the int_cons /\nbytes_from_raw / bytes_to_raw helpers in march_extras.c and the copies in\nmarch_compress.c stored and read raw i64s, so every C builtin exchanging\nBytes/List(Int) with compiled code corrupted values in both directions\n(observed: base64_encode(Bytes([1,2,255])) -> [3,5,255] on input,\nhmac output bytes halved on read-back). Interp mode was unaffected.\n\nVerified: base64/hmac native == interp == python; RFC 5869 HKDF vector\npasses natively; full suite green.",
+    "files_changed": 2
+  },
+  {
+    "hash": "a01900735d9a2ae1c77405538fc0d69f2d6d31c2",
+    "short_hash": "a019007",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:28:19-04:00",
+    "message": "fix(llvm): nested Bool/Int/Atom literal patterns miscompiled as heap tag switches\n\nLiteral patterns nested inside constructor patterns (e.g. Ok(true)/Ok(false))\ncompiled the inner test as a heap ctor-tag switch on the bound field. But ADT\nfields holding immediates are stored low-bit-tagged ((n<<1)|1), not as heap\npointers — the tag load was a wild dereference. With the switch's default\nbeing unreachable, LLVM folded the test away: the first bool arm was always\ntaken (T T E instead of T F E); nested Int/Atom literal matches segfaulted.\n\nLiteral tags are syntactically unambiguous (lowercase true/false, integers,\n:atoms — ADT ctors are capitalized identifiers), so emit_case now detects\nall-immediate-literal-tag cases and never takes the load-ctor-tag path:\n\n- Bool: reuse the existing untag (ashr) + trunc + br i1 path.\n- Int/Atom: switch on the raw ptrtoint bits against (lit<<1)|1 labels.\n  Comparing tagged-vs-tagged is exact; untagging via ashr would lose bit 63\n  of 64-bit FNV1a atom hashes.\n\nUser ADTs literally named True | False(Int) still take the ctor-tag switch.\nAlso fixes the latent miscompile in stdlib/check.march format_error, which\nprinted the right string only by accident of arm order.\n\nRegression tests (nested_lit_pattern_codegen): IR-level assertions that\nexactly one i32 ctor-tag switch (the outer Ok/Err) survives, bool fields\nare tested via trunc to i1, and int literals compare against tagged\nimmediates. 1421 -> 1424 tests. binary_trees benchmark unchanged (~290ms).",
+    "files_changed": 4
+  },
+  {
+    "hash": "2545039fe6f409b6b53357e4d2c5c0593d196598",
+    "short_hash": "2545039",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:18:56-04:00",
+    "message": "fix(lsp): unify module resolution and typechecking with the CLI\n\nEditor diagnostics diverged from `march --check` in two ways, so Zed showed\n\"Unknown module `Bastion`\" (and ~30 more errors per file) on projects that\nforge check reports clean:\n\n1. resolver: bin/main.ml had grown its own resolve_imports while the shared\n   lib/resolver copy (used by the LSP and REPL) was an old fork with no\n   MARCH_LIB_PATH auto-discovery — modules whose declared name doesn't match\n   their filename (mod Bastion.Channel in channel.march) were unresolvable\n   in the editor.  The full implementation (auto-discovery with declared-name\n   indexing, canonical-path dedup, dotted module filenames, user_files\n   tracking) now lives in lib/resolver as the single source of truth;\n   bin/main.ml delegates to it.  New ?auto_discover flag (default true);\n   the REPL passes false to keep its per-input resolution cheap.  The\n   import-path dedup is now canonicalised too, fixing the relative-entry\n   double-load.\n\n2. typecheck: the LSP calls check_module_full, which was a REDUCED duplicate\n   of check_module's pass 1 — no type/ctor/record prebinding, no pass 1b —\n   so qualified type annotations (Bastion.Channel.ChannelConn) failed to\n   resolve only in the LSP.  check_module and check_module_full now share\n   one implementation (check_module_core) that returns the final env.\n\nVerified by driving march-lsp over JSON-RPC against bastion: didOpen on\nchannel_server/router/test_channel/csrf now publishes 0 errors (was 34 on\nchannel_server alone).  Full suite green (147 LSP tests incl.); forge check\nstill clean on bastion (80 files) and depot (27 files).",
+    "files_changed": 6
+  },
+  {
     "hash": "61cfb279eaad798914f5260699e34caa466322ce",
     "short_hash": "61cfb27",
     "author": "Matthew Gilliam",
     "date": "2026-06-11T13:11:56-04:00",
     "message": "fix(runtime): tag __try_call's Bool result so compiled Check.all properties pass\n\nCompiled property tests failed on run 1 with \"returned false\" for\ntrivially-true properties while the interpreter passed them. __try_call\n(the panic-catching trampoline behind Check.try_prop) stored the\nproperty thunk's raw i64 Bool directly into the Result Ok field, but\ncompiled March reads polymorphic ADT immediate fields with the uniform\nlow-bit tag convention (ptrtoint + ashr 1): Ok(1) read back as 0, so\nCheck.is_failing saw not(false) = failing for every passing property.\n\nFix: store ((result << 1) | 1) at the Result construction point in\n__try_call, matching the tagged-immediate convention, and tighten the\nbuiltin's typechecker signature from (Bool -> a) -> Result(a, String)\nto (Bool -> Bool) -> Result(Bool, String) so any future heap-typed use\nfails to typecheck instead of being silently corrupted by the tagging.\nThe interpreter's __try_call builds OCaml values and is unaffected.\n\nEnd-to-end regression test compiles a trivially-true Check.all property\nthrough the real --compile --test pipeline and asserts the binary exits\n0; skips gracefully when clang/runtime is unavailable (JIT-test\nconvention). 1422 -> 1423 tests.\n\nFound during verification, deferred as separate work: Bool literal\npatterns nested in constructor patterns (Ok(true)/Ok(false)) compile to\na heap-tag switch on a tagged immediate and LLVM's unreachable-default\nfolding makes the first Bool arm unconditionally taken — a real\nmiscompile, tracked separately.",
     "files_changed": 5
-  },
-  {
-    "hash": "b8d37d61384aca427756356ca5119665c80104da",
-    "short_hash": "b8d37d6",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-11T12:40:22-04:00",
-    "message": "chore: sync decision graph export",
-    "files_changed": 2
   },
   {
     "hash": "7091bfb0fcd4a16d03f85ac1a97c59127cc6fced",
@@ -1880,16 +1904,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -1904,16 +1928,16 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -1936,16 +1960,16 @@
     "files_changed": 1
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -2024,16 +2048,16 @@
     "files_changed": 15
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

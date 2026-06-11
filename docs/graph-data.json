@@ -11615,6 +11615,149 @@
       "created_at": "2026-06-11T13:12:07.276194-04:00",
       "updated_at": "2026-06-11T13:12:07.276194-04:00",
       "metadata_json": "{\"branch\":\"claude/lucid-cray-48e736\",\"commit\":\"61cfb27\",\"confidence\":95}"
+    },
+    {
+      "id": 1057,
+      "change_id": "55caed93-2301-43e7-a666-7a6706d22a11",
+      "node_type": "goal",
+      "title": "Fix native codegen miscompile of nested Bool literal patterns in compile_matrix",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:13:51.385464-04:00",
+      "updated_at": "2026-06-11T13:13:51.385464-04:00",
+      "metadata_json": "{\"branch\":\"claude/peaceful-brahmagupta-981324\",\"confidence\":90,\"prompt\":\"March compiler repo: /Users/80197052/code/march. Native codegen miscompiles Bool literal patterns nested inside constructor patterns — the first Bool arm is always taken.\\n\\nRepro (compile with the dev compiler: `dune build`, then `./_build/default/bin/main.exe --compile -o out file.march`; opam switch `march`, dune at /Users/80197052/.opam/march/bin/dune):\\n\\n    mod M do\\n      fn classify(r : Result(Bool, String)) : String do\\n        match r do\\n          Ok(true) -> \\\"T\\\"\\n          Ok(false) -> \\\"F\\\"\\n          Err(_) -> \\\"E\\\"\\n        end\\n      end\\n      fn main() : Unit do\\n        println(classify(Ok(true)))\\n        println(classify(Ok(false)))\\n        println(classify(Err(\\\"x\\\")))\\n      end\\n    end\\n\\nObserved: prints T T E. Expected: T F E. The interpreter (`march file.march` without --compile) prints T F E correctly.\\n\\nRoot cause (verified by reading emitted IR with --emit-llvm): the pattern-matrix compiler (compile_matrix in lib/tir/lower.ml) compiles the nested Bool literal patterns true/false as ADT constructor tests, emitting a heap-style tag switch — `getelementptr i8, ptr %field, i64 8; load i32; switch` — on the Ok field. But Bool fields of ADTs are stored as low-bit-tagged immediates ((n << 1) | 1), not heap pointers, so the tag load is a wild dereference. Because the switch's default branch is `unreachable` and (in observed cases) only one case label survives, LLVM folds the switch and deletes the load — making the FIRST Bool arm unconditionally taken instead of crashing.\\n\\nSame miscompiled shape exists in stdlib/check.march `format_error` (match r do Ok(false) -> ... Ok(true) -> ...) — it currently prints the right string only by accident of arm order.\\n\\nFix direction: when the matrix compiler tests a Bool (or other immediate) literal pattern against a field whose runtime repr is a tagged immediate, emit an integer comparison against the tagged value (or untag then icmp) instead of a constructor-tag switch. Check how top-level (non-nested) Bool matches compile — those work (icmp path) — and route nested occurrences the same way. Watch out: the field's TIR type may be a TVar at the match site even when the source type is concrete (Result(Bool, String)).\\n\\nAdd a regression test in test/test_march.ml: compile the repro through the full pipeline (see emit_actor_ir helper and the `__try_call tags Bool result` end-to-end test for patterns) and assert the output is T F E, or assert at IR level that no `unreachable`-defaulted single-case tag switch is emitted for the Bool field. Run `dune runtest --force` and the benchmarks in specs/benchmarks.md if pattern-compilation hot paths are touched. Update specs/todos.md and specs/progress.md in the same commit. Stage files explicitly by name (never git add -A). Clear CAS caches before authoritative compiles: rm -rf <project>/.march/cas ~/.march/cas ~/.cache/march/stdlib_ast_*.bin.\"}"
+    },
+    {
+      "id": 1058,
+      "change_id": "1763eef3-2d3e-4408-a3d0-ce300bc7220b",
+      "node_type": "observation",
+      "title": "Root cause: Perceus drops a tuple-field binding too early. Pattern 'let t=(a,b,c) in case t of (x,y,g) -> ...use x,y... g()' inserts 'dec_rc g' right after binding g, before g() use → use-after-free. Triggered in practice by default-arg fns inside nested mods: expand_defaults_decl does NOT recurse into DMod, so FPDefault param survives to desugar_decl, making clause non-trivial → params packed into tuple+matched → hits the Perceus bug. Minimal repro /tmp/tup2.march SIGSEGV.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:16:01.026616-04:00",
+      "updated_at": "2026-06-11T13:16:01.026616-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":92}"
+    },
+    {
+      "id": 1059,
+      "change_id": "cf92da3b-1ff7-41d3-8ecd-8073efa8b7e2",
+      "node_type": "observation",
+      "title": "Root cause: native tuple destructure (ECase $TupleN) types fields as TVar _ → ptr+untag, but tuples are built storing Bool/Int raw i64. Mismatch drops Bool true→false. General bug, not default-arg-specific. Repro: any tuple with Bool field destructured.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:17:23.255615-04:00",
+      "updated_at": "2026-06-11T13:17:23.255615-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":95,\"files\":[\"lib/tir/llvm_emit.ml\"]}"
+    },
+    {
+      "id": 1060,
+      "change_id": "17a37cda-46b5-4df8-ac62-207b91f5c054",
+      "node_type": "decision",
+      "title": "Fix (b): make tuple ECase destructure use scrutinee's concrete element types (typed/raw), matching construction+EField; leave desugar/typecheck/eval untouched. Rejected (a) [expand nested defaults] — requires absent typecheck source-call resolution.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:17:23.292354-04:00",
+      "updated_at": "2026-06-11T13:17:23.292354-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90}"
+    },
+    {
+      "id": 1061,
+      "change_id": "a7981b31-083f-40af-a2e2-b2988bc40dfb",
+      "node_type": "action",
+      "title": "Add TTuple case to resolve_ctor_fields; use concrete element types for tuple field loads in emit_case",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:17:23.320495-04:00",
+      "updated_at": "2026-06-11T13:17:23.320495-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":88,\"files\":[\"lib/tir/llvm_emit.ml\"]}"
+    },
+    {
+      "id": 1062,
+      "change_id": "a6769c52-8e7f-48ac-9a48-28ff0f83da73",
+      "node_type": "action",
+      "title": "Make expand_defaults_decl recurse into DMod so module-nested default-arg fns expand to arity variants (avoids broken tuple-switch dispatcher)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:18:03.201696-04:00",
+      "updated_at": "2026-06-11T13:18:03.201696-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":85,\"files\":[\"lib/desugar/desugar.ml\"]}"
+    },
+    {
+      "id": 1063,
+      "change_id": "c76ec3ba-9222-46f5-8621-d2f1d51e7a57",
+      "node_type": "action",
+      "title": "Fix emit_case: route immediate-literal tag cases (bool/int/atom) off the heap tag-switch path; compare tagged immediates",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:19:41.498319-04:00",
+      "updated_at": "2026-06-11T13:19:41.498319-04:00",
+      "metadata_json": "{\"branch\":\"claude/peaceful-brahmagupta-981324\",\"confidence\":90,\"files\":[\"lib/tir/llvm_emit.ml\"]}"
+    },
+    {
+      "id": 1064,
+      "change_id": "e7cb2792-2af5-4527-b992-7359c058966b",
+      "node_type": "observation",
+      "title": "Pivot: desugar-expand-in-modules fix requires also fixing typecheck qualified base-name->$N resolution (top-level native default calls ALSO fail 'cannot find greet'; nested simple-arg calls work, only closure params crash). Too broad/risky. Better fix: the fundamental Perceus early-drop bug (tup2 repro). Desugar change stashed as backup.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:25:13.619326-04:00",
+      "updated_at": "2026-06-11T13:25:13.619326-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":85}"
+    },
+    {
+      "id": 1065,
+      "change_id": "23e07c2c-04f5-447e-9db9-6eb57f37a2b5",
+      "node_type": "outcome",
+      "title": "Fixed: nested Bool/Int/Atom literal patterns compile to scalar comparisons; T F E correct, int/atom segfaults gone; 1424 tests green, binary_trees unchanged",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:28:25.855600-04:00",
+      "updated_at": "2026-06-11T13:28:25.855600-04:00",
+      "metadata_json": "{\"branch\":\"claude/peaceful-brahmagupta-981324\",\"commit\":\"a019007\",\"confidence\":95}"
+    },
+    {
+      "id": 1066,
+      "change_id": "f0ee0237-5eb4-4723-8502-24e4c0635664",
+      "node_type": "outcome",
+      "title": "Fixed: tuple destructure uses concrete element types. Repro native==interp (NoDef *! / Def *!); wired into dune runtest (compile+run+diff); 1421+ tests green; bastion Form 'required marker' test passes (was failing). Gate.validate_required failure pre-existing/unrelated (fails on stock march too).",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:36:27.843249-04:00",
+      "updated_at": "2026-06-11T13:36:27.843249-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"2545039\",\"confidence\":95}"
+    },
+    {
+      "id": 1067,
+      "change_id": "312c7d80-cfd0-4394-beb5-2dea26655073",
+      "node_type": "outcome",
+      "title": "defun fix works: all 1421 march tests pass; bastion islands tests 0 failures (IslandSocket 14/14, bidirectional flow 10/10, all dataflow groups pass); test-26 closure UAF crash fixed. Remaining forge-test crash at test 28 is PRE-EXISTING borrow UAF (confirmed crashes in isolation under MallocScribble on ORIGINAL compiler), unrelated to islands/my fix.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:41:21.091269-04:00",
+      "updated_at": "2026-06-11T13:41:21.091269-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":92}"
+    },
+    {
+      "id": 1068,
+      "change_id": "230afa7a-d504-4186-a529-f192970e8e91",
+      "node_type": "outcome",
+      "title": "Committed fix on worktree branch (838a37c). defun converts erased-type closure EApp->ECallPtr. 1423 march tests pass; regression test 'defun erased closure callptr' added (fails without fix). Bastion islands tests all pass in isolation. Restored original opam binary + cleaned caches. Remaining forge-test full-run crash is a SEPARATE pre-existing borrow UAF (test 28, shared conn), unrelated to islands/this fix.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T13:51:20.791822-04:00",
+      "updated_at": "2026-06-11T13:51:20.791822-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"c69d877\",\"confidence\":95}"
+    },
+    {
+      "id": 1069,
+      "change_id": "4bc96e81-bae8-4914-a4e6-8f0f24f1bc57",
+      "node_type": "goal",
+      "title": "Fix native-codegen param-vs-module-fn shadowing bug",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:29:36.144317-04:00",
+      "updated_at": "2026-06-11T15:29:36.144317-04:00",
+      "metadata_json": "{\"branch\":\"claude/suspicious-villani-276c9a\",\"confidence\":90,\"prompt\":\"In the march compiler repo at /Users/80197052/code/march, there is a native-codegen name-resolution bug: when a function parameter has the same name as a sibling module-level function, references to the parameter inside the function body can be emitted as zero-arg calls to the module-qualified global (e.g. `call ptr @Depot.Schema.fields()`), producing \\\"use of undefined value\\\" at clang time or wrong behavior. Likely area: lib/tir/lower.ml or lib/tir/llvm_emit.ml AVar resolution — the param should win over the qualified module-level fn loader path (the \\\"gl\\\" global-loader emission). Add a regression fixture under test/ that compiles natively and runs.\"}"
     }
   ],
   "edges": [
@@ -18789,6 +18932,138 @@
       "weight": 1.0,
       "rationale": "Implementation complete",
       "created_at": "2026-06-11T13:12:07.291073-04:00"
+    },
+    {
+      "id": 653,
+      "from_node_id": 1047,
+      "to_node_id": 1052,
+      "from_change_id": "7ca3f25d-a301-44b4-97ce-b93518cb0d39",
+      "to_change_id": "57693167-8abf-46aa-bef1-81aa2e7d6c67",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "observation under goal",
+      "created_at": "2026-06-11T13:17:23.334529-04:00"
+    },
+    {
+      "id": 654,
+      "from_node_id": 1047,
+      "to_node_id": 1053,
+      "from_change_id": "7ca3f25d-a301-44b4-97ce-b93518cb0d39",
+      "to_change_id": "acf64d0e-e46a-4a61-a0f0-e31aa7f39a0f",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "decision under goal",
+      "created_at": "2026-06-11T13:17:23.346599-04:00"
+    },
+    {
+      "id": 655,
+      "from_node_id": 1047,
+      "to_node_id": 1059,
+      "from_change_id": "7ca3f25d-a301-44b4-97ce-b93518cb0d39",
+      "to_change_id": "cf92da3b-1ff7-41d3-8ecd-8073efa8b7e2",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "root-cause observation",
+      "created_at": "2026-06-11T13:17:28.921342-04:00"
+    },
+    {
+      "id": 656,
+      "from_node_id": 1047,
+      "to_node_id": 1060,
+      "from_change_id": "7ca3f25d-a301-44b4-97ce-b93518cb0d39",
+      "to_change_id": "17a37cda-46b5-4df8-ac62-207b91f5c054",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "decision under goal",
+      "created_at": "2026-06-11T13:17:28.937202-04:00"
+    },
+    {
+      "id": 657,
+      "from_node_id": 1060,
+      "to_node_id": 1061,
+      "from_change_id": "17a37cda-46b5-4df8-ac62-207b91f5c054",
+      "to_change_id": "a7981b31-083f-40af-a2e2-b2988bc40dfb",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implements decision",
+      "created_at": "2026-06-11T13:17:28.950002-04:00"
+    },
+    {
+      "id": 658,
+      "from_node_id": 1046,
+      "to_node_id": 1062,
+      "from_change_id": "34ad55cf-52fc-4898-9101-2917d7eb5816",
+      "to_change_id": "a6769c52-8e7f-48ac-9a48-28ff0f83da73",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation step",
+      "created_at": "2026-06-11T13:18:03.237236-04:00"
+    },
+    {
+      "id": 659,
+      "from_node_id": 1057,
+      "to_node_id": 1063,
+      "from_change_id": "55caed93-2301-43e7-a666-7a6706d22a11",
+      "to_change_id": "c76ec3ba-9222-46f5-8621-d2f1d51e7a57",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": null,
+      "created_at": "2026-06-11T13:19:41.530484-04:00"
+    },
+    {
+      "id": 660,
+      "from_node_id": 1063,
+      "to_node_id": 1065,
+      "from_change_id": "c76ec3ba-9222-46f5-8621-d2f1d51e7a57",
+      "to_change_id": "23e07c2c-04f5-447e-9db9-6eb57f37a2b5",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete: emit_case immediate-literal routing verified end-to-end",
+      "created_at": "2026-06-11T13:28:34.322157-04:00"
+    },
+    {
+      "id": 661,
+      "from_node_id": 1061,
+      "to_node_id": 1066,
+      "from_change_id": "a7981b31-083f-40af-a2e2-b2988bc40dfb",
+      "to_change_id": "f0ee0237-5eb4-4723-8502-24e4c0635664",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation complete",
+      "created_at": "2026-06-11T13:36:27.876398-04:00"
+    },
+    {
+      "id": 662,
+      "from_node_id": 1062,
+      "to_node_id": 1067,
+      "from_change_id": "a6769c52-8e7f-48ac-9a48-28ff0f83da73",
+      "to_change_id": "312c7d80-cfd0-4394-beb5-2dea26655073",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "verification",
+      "created_at": "2026-06-11T13:41:21.124241-04:00"
+    },
+    {
+      "id": 663,
+      "from_node_id": 1062,
+      "to_node_id": 1068,
+      "from_change_id": "a6769c52-8e7f-48ac-9a48-28ff0f83da73",
+      "to_change_id": "230afa7a-d504-4186-a529-f192970e8e91",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "fix committed and verified",
+      "created_at": "2026-06-11T13:51:20.827620-04:00"
+    },
+    {
+      "id": 664,
+      "from_node_id": 1046,
+      "to_node_id": 1068,
+      "from_change_id": "34ad55cf-52fc-4898-9101-2917d7eb5816",
+      "to_change_id": "230afa7a-d504-4186-a529-f192970e8e91",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "goal outcome",
+      "created_at": "2026-06-11T13:51:20.839280-04:00"
     }
   ]
 }
