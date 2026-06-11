@@ -1467,24 +1467,92 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
     else begin
+      (* Resolve [type_name] against ctor_info's type-qualified keys
+         ("TypePath.CtorName").  TDVariant names from imported modules are
+         module-qualified ("Ast.Expr") while the TCon at a use site may carry
+         the short name ("Expr") — or vice versa.  Collect every type path
+         matching exactly or by dot-suffix.  When several types share the
+         short name (e.g. "SortDir" -> Ast.SortDir and DataFrame.SortDir) we
+         can still generate a correct comparison if their per-tag field
+         layouts agree on common tags: tags are contiguous from 0, so the
+         candidate with the most constructors covers every tag any operand
+         can carry.  Genuinely conflicting layouts (e.g. "Query" ->
+         Ast.Query(QueryFields) vs Depot.Query.Query's 8-field DQuery)
+         return None and the caller falls back.
+         NOTE: memoization in emitted_eq_fns must only happen once we commit
+         to generating a body — registering before the ctor lookup made later
+         requests return Some for a function that was never defined. *)
+      let split_type_path key =
+        match String.rindex_opt key '.' with
+        | None -> None
+        | Some i -> Some (String.sub key 0 i)
+      in
+      let ends_with_seg ~seg s =
+        let ls = String.length s and lx = String.length seg in
+        ls > lx + 1 && String.sub s (ls - lx - 1) (lx + 1) = "." ^ seg
+      in
+      let candidate_paths = Hashtbl.fold (fun key _ acc ->
+          match split_type_path key with
+          | Some tp when tp = type_name || ends_with_seg ~seg:type_name tp ->
+            if List.mem tp acc then acc else tp :: acc
+          | _ -> acc
+        ) ctx.ctor_info []
+      in
+      let ctors_of tp =
+        let prefix = tp ^ "." in
+        Hashtbl.fold (fun key entry acc ->
+          if String.length key > String.length prefix &&
+             String.sub key 0 (String.length prefix) = prefix &&
+             not (String.contains
+                    (String.sub key (String.length prefix)
+                       (String.length key - String.length prefix)) '.')
+          then
+            let cn = String.sub key (String.length prefix)
+                       (String.length key - String.length prefix) in
+            (entry.ce_tag, cn, entry.ce_fields) :: acc
+          else acc
+        ) ctx.ctor_info []
+      in
+      let resolved =
+        match candidate_paths with
+        | [] -> None
+        | [tp] -> Some (tp, ctors_of tp)
+        | tps ->
+          (* Multiple candidates: keep the largest ctor set when every other
+             candidate's per-tag field layout matches it on common tags. *)
+          let sorted = List.sort (fun (_, a) (_, b) ->
+              compare (List.length b) (List.length a))
+              (List.map (fun tp -> (tp, ctors_of tp)) tps) in
+          (match sorted with
+           | [] -> None
+           | ((_, big_ctors) as biggest) :: rest ->
+             let layout_of tag ctors =
+               Option.map (fun (_, _, flds) -> List.map field_load_llty flds)
+                 (List.find_opt (fun (t, _, _) -> t = tag) ctors)
+             in
+             let compatible = List.for_all (fun (_, cs) ->
+                 List.for_all (fun (tag, _, flds) ->
+                     layout_of tag big_ctors
+                     = Some (List.map field_load_llty flds)
+                   ) cs
+               ) rest
+             in
+             if compatible then Some biggest else None)
+      in
+      match resolved with
+      | None -> None
+      | Some (_, []) -> None
+      | Some (resolved_name, ctors) ->
       Hashtbl.add ctx.emitted_eq_fns fn_name ();
       let subst =
-        match Hashtbl.find_opt ctx.type_params type_name with
+        match Hashtbl.find_opt ctx.type_params resolved_name with
         | Some ps when List.length ps = List.length ty_args -> List.combine ps ty_args
-        | _ -> []
+        | _ ->
+          (match Hashtbl.find_opt ctx.type_params type_name with
+           | Some ps when List.length ps = List.length ty_args -> List.combine ps ty_args
+           | _ -> [])
       in
-      let prefix = type_name ^ "." in
-      let ctors = Hashtbl.fold (fun key entry acc ->
-        if String.length key > String.length prefix &&
-           String.sub key 0 (String.length prefix) = prefix
-        then
-          let cn = String.sub key (String.length prefix)
-                     (String.length key - String.length prefix) in
-          (entry.ce_tag, cn, entry.ce_fields) :: acc
-        else acc
-      ) ctx.ctor_info [] in
-      if ctors = [] then None
-      else begin
+      begin
         let ctors = List.sort (fun (a,_,_) (b,_,_) -> compare a b) ctors in
         let buf = Buffer.create 512 in
         let ctr = ref 0 in let blk = ref 0 in

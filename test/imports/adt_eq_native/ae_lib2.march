@@ -1,0 +1,9 @@
+-- Second module sharing the short type name AeDir with ae_lib.march, with a
+-- layout-compatible constructor subset (same tags, all nullary).
+mod AeLib2 do
+
+type AeDir = AeNorth | AeSouth
+
+fn north() do AeNorth end
+
+end

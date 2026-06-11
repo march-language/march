@@ -2299,7 +2299,15 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
   | Ast.PatRecord _          -> SPWild   (* conservative *)
-  | Ast.PatCon  (n, args)    -> SPCon (n.txt, List.map norm_pat args)
+  | Ast.PatCon  (n, args)    ->
+    (* Qualified constructor patterns ("MarchType.TBool", "Ast.Query")
+       carry their full dotted text; exhaustiveness compares against the
+       scrutinee type's BARE ctor names, so keep only the last segment. *)
+    let bare = match String.rindex_opt n.txt '.' with
+      | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
+      | None -> n.txt
+    in
+    SPCon (bare, List.map norm_pat args)
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
@@ -4008,6 +4016,40 @@ let rec impl_matches_ty impl_ty target_ty =
   | TLin (_, t1), TLin (_, t2) -> impl_matches_ty t1 t2
   | TError, _ | _, TError -> true
   | a, b -> a = b
+
+(** Pre-register an interface implementation's SHAPE (pass 1) so that
+    CInterface constraints from modules checked earlier in the unit can be
+    discharged against impls declared in modules checked later.  Conversion
+    is lenient — [impl_matches_ty] only compares constructor names and
+    shapes, so unresolved type names are embedded as-is rather than resolved
+    against the (still incomplete) pass-1 environment.  The full registration
+    with properly instantiated types still happens in check_decl's DImpl
+    case; duplicates are harmless because discharge uses List.exists. *)
+let register_impl_shape env (idef : Ast.impl_def) =
+  let module M = Map.Make (String) in
+  let tvars = ref M.empty in
+  let rec lenient_ty (t : Ast.ty) : ty =
+    match t with
+    | Ast.TyVar n ->
+      (match M.find_opt n.txt !tvars with
+       | Some v -> v
+       | None ->
+         let v = fresh_var 1 in
+         tvars := M.add n.txt v !tvars;
+         v)
+    | Ast.TyCon (n, args)  -> TCon (n.txt, List.map lenient_ty args)
+    | Ast.TyArrow (a, b)   -> TArrow (lenient_ty a, lenient_ty b)
+    | Ast.TyTuple ts       -> TTuple (List.map lenient_ty ts)
+    | Ast.TyRecord fs      ->
+      TRecord (List.map (fun ((n : Ast.name), ft) -> (n.txt, lenient_ty ft)) fs)
+    | Ast.TyLinear (l, t') -> TLin (l, lenient_ty t')
+    | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> fresh_var 1
+  in
+  let inst_ty = lenient_ty idef.impl_ty in
+  { env with impls =
+    (let key = idef.impl_iface.txt in
+     let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+     StrMap.add key (inst_ty :: lst) env.impls) }
 
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
@@ -6063,7 +6105,11 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
-        prebind_mod_members mname.txt env inner_decls
+        let env = prebind_mod_members mname.txt env inner_decls in
+        List.fold_left (fun e d -> match d with
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | _ -> e
+          ) env inner_decls
       | Ast.DType (_, name, params, typedef, _) ->
         let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
@@ -6111,6 +6157,18 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
         { env with sigs = (name.txt, sdef) :: env.sigs }
       | Ast.DInterface (idef, _) ->
         { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces }
+      | Ast.DImpl (idef, _) ->
+        register_impl_shape env idef
+      | Ast.DMod (_, _, inner_decls, _) ->
+        (* Interface implementations declared in sibling modules must be
+           visible unit-wide regardless of the order modules are checked in:
+           CInterface constraints discharge at declaration boundaries, so an
+           impl that is only registered when its defining module is reached
+           cannot satisfy constraints from modules checked earlier. *)
+        List.fold_left (fun e d -> match d with
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | _ -> e
+          ) env inner_decls
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls
   in

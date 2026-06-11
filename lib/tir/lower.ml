@@ -622,9 +622,19 @@ and lower_expr (e : Ast.expr) : Tir.expr =
      "type_name.ctor_name" as the key, otherwise fall back to the bare name. *)
   | Ast.ECon ({ txt = tag; _ }, args, span) ->
     lower_atoms_k args (fun arg_atoms ->
+      (* The reference itself may be module- or type-qualified
+         ("AeLib.AeWrap", "Expr.Col"); keep only the final segment so the key
+         stays in the "TypeName.CtorName" format ctor_entry resolves against.
+         Embedding the raw qualified tag produced keys like
+         "AeShape.AeLib.AeWrap" that matched nothing — the allocation then
+         silently defaulted to tag 0. *)
+      let short_tag = match String.rindex_opt tag '.' with
+        | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
+        | None -> tag
+      in
       let ctor_key = match ty_of_span span with
-        | Tir.TCon (type_name, _) -> type_name ^ "." ^ tag
-        | _ -> tag
+        | Tir.TCon (type_name, _) -> type_name ^ "." ^ short_tag
+        | _ -> short_tag
       in
       Tir.EAlloc (Tir.TCon (ctor_key, []), arg_atoms))
 
