@@ -611,6 +611,46 @@ void march_panic(void *s) {
     exit(1);
 }
 
+/* ── Checked integer division / remainder ────────────────────────────────── */
+/*
+ * The compiled backend lowers int_div / int_mod / int_mod_euclid through
+ * these helpers instead of emitting a raw sdiv/srem/urem so that a zero
+ * divisor traps via march_panic — matching the interpreter, which raises
+ * "<op>: division by zero" (see eval.ml).  Raw hardware division by zero is
+ * undefined (SIGFPE on x86, garbage on some ARM paths); pre-fix, compiled
+ * code silently returned a junk value and kept running, and the property
+ * runner reported a crashing property as passing.
+ *
+ * march_panic longjmps back to the test harness when inside a test (so
+ * __try_call / the property runner catches it); otherwise it prints and
+ * exits 1.  The message text matches the interpreter byte-for-byte so the
+ * two backends agree under the oracle.
+ *
+ * Non-zero behaviour is unchanged: idiv/imod use signed C operators
+ * (matching sdiv/srem) and umod uses unsigned (matching the prior urem
+ * lowering of int_mod_euclid). */
+static int64_t march_div_by_zero(const char *op) {
+    char buf[64];
+    int  n = snprintf(buf, sizeof buf, "%s: division by zero", op);
+    march_panic(march_string_lit(buf, (int64_t)n));
+    return 0; /* unreachable: march_panic does not return */
+}
+
+int64_t march_checked_idiv(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_div");
+    return a / b;
+}
+
+int64_t march_checked_imod(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_mod");
+    return a % b;
+}
+
+int64_t march_checked_umod(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_mod_euclid");
+    return (int64_t)((uint64_t)a % (uint64_t)b);
+}
+
 /* ── Test harness ────────────────────────────────────────────────────────── */
 
 /* State used by the test runner.  These are process-global because test

@@ -2123,13 +2123,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
-    let op = match f.Tir.v_name with
-      | "int_mod"        -> "srem"
-      | "int_div"        -> "sdiv"
-      | "int_mod_euclid" -> "urem"
+    (* Route through a checked runtime helper so a zero divisor traps via
+       march_panic (matching the interpreter) instead of executing a raw
+       sdiv/srem/urem, which is undefined for a 0 divisor. *)
+    let helper = match f.Tir.v_name with
+      | "int_mod"        -> "march_checked_imod"
+      | "int_div"        -> "march_checked_idiv"
+      | "int_mod_euclid" -> "march_checked_umod"
       | _                -> assert false
     in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a; b])
@@ -2371,13 +2374,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
-    let op = match f.Tir.v_name with
-      | "int_mod"        -> "srem"
-      | "int_div"        -> "sdiv"
-      | "int_mod_euclid" -> "urem"
+    (* Same checked-helper routing as the EApp form above. *)
+    let helper = match f.Tir.v_name with
+      | "int_mod"        -> "march_checked_imod"
+      | "int_div"        -> "march_checked_idiv"
+      | "int_mod_euclid" -> "march_checked_umod"
       | _                -> assert false
     in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
     ("i64", r)
 
   (* ── Indirect call through closure ────────────────────────────────── *)
@@ -3583,6 +3587,10 @@ declare ptr    @march_float_to_string(double %f)
 declare ptr    @march_bool_to_string(i64 %b)
 ; Checked float division — aborts on divisor == 0.0 instead of returning inf/NaN
 declare double @march_checked_fdiv(double %a, double %b)
+; Checked integer division/remainder — panic on a zero divisor (matches interpreter)
+declare i64    @march_checked_idiv(i64 %a, i64 %b)
+declare i64    @march_checked_imod(i64 %a, i64 %b)
+declare i64    @march_checked_umod(i64 %a, i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins
