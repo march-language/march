@@ -318,7 +318,7 @@ let is_builtin_fn name =
                  "process_pid"; "process_spawn_sync"; "process_spawn_lines";
                  "process_spawn_async"; "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc";
                  (* TCP/network builtins *)
-                 "tcp_connect"; "tcp_close"; "tcp_recv_exact";
+                 "tcp_connect"; "tcp_close"; "tcp_peer_addr"; "tcp_recv_exact";
                  "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
                  "tcp_recv_chunked_frame";
                  (* TLS builtins *)
@@ -358,7 +358,7 @@ let is_builtin_fn name =
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
                  "md5";
-                 "hmac_sha256"; "pbkdf2_sha256";
+                 "hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
                  "sha256"; "sha512";
                  "base64_encode"; "base64_decode";
                  "random_bytes";
@@ -558,6 +558,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "tcp_close"                   -> Some Tir.TUnit
+  | "tcp_peer_addr"               -> Some Tir.TString
   | "tcp_recv_exact"              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers"
   | "tcp_recv_http" | "tcp_recv_chunked_frame"
@@ -643,6 +644,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "sha256" | "stdlib_sha256"
   | "sha512" | "stdlib_sha512" -> Some Tir.TString
   | "sha1_bytes"               -> Some (Tir.TCon ("Bytes", []))
+  | "hmac_sha256_bytes"        -> Some (Tir.TCon ("Bytes", []))
   | "random_bytes" | "stdlib_random_bytes" -> Some (Tir.TCon ("Bytes", []))
   | "base64_encode" | "stdlib_base64_encode" -> Some Tir.TString
   | "base64_decode" | "stdlib_base64_decode"
@@ -706,6 +708,7 @@ let mangle_extern : string -> string = function
   | "tcp_recv_http"           -> "march_tcp_recv_http"
   | "tcp_send_all"            -> "march_tcp_send_all"
   | "tcp_close"               -> "march_tcp_close"
+  | "tcp_peer_addr"           -> "march_tcp_peer_addr"
   | "http_parse_request"      -> "march_http_parse_request"
   | "http_serialize_response" -> "march_http_serialize_response"
   | "http_server_listen"      -> "march_http_server_listen"
@@ -885,6 +888,7 @@ let mangle_extern : string -> string = function
   (* Crypto / hash builtins *)
   | "md5"                  -> "march_md5"
   | "hmac_sha256"          -> "march_hmac_sha256"
+  | "hmac_sha256_bytes"    -> "march_hmac_sha256_bytes"
   | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
   | "sha256" | "stdlib_sha256"              -> "march_sha256"
   | "sha512" | "stdlib_sha512"              -> "march_sha512"
@@ -3607,6 +3611,7 @@ declare ptr  @march_sha256(ptr %b)
 declare ptr  @march_sha512(ptr %b)
 declare ptr  @march_sha1_bytes(ptr %b)
 declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
+declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)
 declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
 declare ptr  @march_base64_encode(ptr %b)
 declare ptr  @march_base64_decode(ptr %s)
@@ -3682,6 +3687,7 @@ declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare void @march_tcp_send_all(i64 %fd, ptr %data)
 declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_tcp_peer_addr(i64 %fd)
 declare ptr  @march_http_parse_request(ptr %raw)
 declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)

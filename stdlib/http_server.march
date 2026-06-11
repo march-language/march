@@ -146,6 +146,20 @@ mod HttpServer do
     end
   end
 
+  doc """
+  Return the numeric IP address of the connected peer (the socket's
+  remote address), e.g. "203.0.113.7" or "2001:db8::1".
+
+  This is the transport-level address — it cannot be spoofed by request
+  headers, unlike `X-Forwarded-For`.  Behind a reverse proxy it is the
+  proxy's address, not the end client's.
+
+  Returns "" when no live socket backs the conn (e.g. test conns).
+  """
+  fn peer_addr(conn) do
+    tcp_peer_addr(fd(conn))
+  end
+
   -- Header lookup (case-insensitive) on request headers
   fn get_req_header(conn, name) do
     let lower_name = string_to_lowercase(name)

@@ -331,6 +331,30 @@ void march_tcp_close(int64_t fd) {
     close((int)fd);
 }
 
+/* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
+ * Returns "" when fd is not a connected INET socket.  IPv4-mapped IPv6
+ * addresses (::ffff:1.2.3.4) are normalized to plain IPv4 notation. */
+void *march_tcp_peer_addr(int64_t fd) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    char ip[INET6_ADDRSTRLEN] = {0};
+    if (getpeername((int)fd, (struct sockaddr *)&ss, &len) != 0)
+        return march_string_lit("", 0);
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip));
+    } else {
+        return march_string_lit("", 0);
+    }
+    const char *p = ip;
+    if (strncmp(ip, "::ffff:", 7) == 0 && strchr(ip + 7, '.'))
+        p = ip + 7;   /* IPv4-mapped IPv6 → plain IPv4 */
+    return march_string_lit(p, (int64_t)strlen(p));
+}
+
 /* tcp_recv_all(fd_ptr, max_bytes, timeout_ms) → Result(String, String)
  * Reads until connection closes or max_bytes reached.
  * fd_ptr: the socket fd passed as ptr (inttoptr of i64 fd value). */

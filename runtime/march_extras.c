@@ -447,6 +447,21 @@ void *march_hmac_sha256(void *key, void *msg) {
     return make_ok(bval);
 }
 
+/* ── march_hmac_sha256_bytes ─────────────────────────────────────────── */
+
+/* Takes key:Bytes, msg:Bytes, returns bare Bytes (raw 32-byte MAC).
+ * Bytes-domain variant for HKDF-style constructions where the key is
+ * raw key material that must never round-trip through a String. */
+void *march_hmac_sha256_bytes(void *key, void *msg) {
+    size_t klen, mlen;
+    uint8_t *kbytes = bytes_to_raw(key, &klen);
+    uint8_t *mbytes = bytes_to_raw(msg, &mlen);
+    uint8_t out[32];
+    do_hmac_sha256(kbytes, klen, mbytes, mlen, out);
+    free(kbytes); free(mbytes);
+    return bytes_from_raw(out, 32);
+}
+
 /* ── march_pbkdf2_sha256 ─────────────────────────────────────────────── */
 
 /* Takes pass:String, salt:Bytes, iters:Int, dklen:Int.

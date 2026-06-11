@@ -1704,8 +1704,10 @@ let parse_header_line line =
     Some (name, value)
 
 (** Build a March Conn value from parsed request data.
-    The [headers_raw] list contains (name, value) pairs. *)
-let build_conn_value ~method_str ~full_path ~headers_raw ~body =
+    The [headers_raw] list contains (name, value) pairs.
+    [fd] is the client socket fd so builtins like tcp_peer_addr can
+    query the connection (0 when no live socket backs the conn). *)
+let build_conn_value ?(fd = 0) ~method_str ~full_path ~headers_raw ~body () =
   let path, query_string =
     match String.index_opt full_path '?' with
     | Some i ->
@@ -1722,7 +1724,7 @@ let build_conn_value ~method_str ~full_path ~headers_raw ~body =
       headers_raw (VCon ("Nil", []))
   in
   VCon ("Conn", [
-    VInt 0;                  (* fd — not used in interpreter mode *)
+    VInt fd;                 (* client socket fd (0 = no live socket) *)
     method_val;
     VString path;
     path_info;
@@ -2151,7 +2153,8 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
       in
       (* 4. Build the Conn value *)
       let conn_val = build_conn_value
-          ~method_str:meth ~full_path ~headers_raw ~body in
+          ~fd:(Obj.magic sock : int)
+          ~method_str:meth ~full_path ~headers_raw ~body () in
       (* 5. Call the pipeline closure *)
       let result_conn = !apply_hook pipeline_fn [conn_val] in
       (* 6. Check for WebSocket upgrade *)
@@ -3904,6 +3907,28 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  (* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
+     Returns "" when the fd is not a connected INET socket.  IPv4-mapped
+     IPv6 addresses (::ffff:1.2.3.4) are normalized to plain IPv4. *)
+  ; ("tcp_peer_addr", VBuiltin ("tcp_peer_addr", function
+        | [VInt fd] ->
+          (try
+             match Unix.getpeername (Obj.magic fd : Unix.file_descr) with
+             | Unix.ADDR_INET (addr, _) ->
+               let ip = Unix.string_of_inet_addr addr in
+               let mapped_prefix = "::ffff:" in
+               let plen = String.length mapped_prefix in
+               let ip =
+                 if String.length ip > plen
+                    && String.sub ip 0 plen = mapped_prefix
+                    && String.contains ip '.'
+                 then String.sub ip plen (String.length ip - plen)
+                 else ip
+               in
+               VString ip
+             | Unix.ADDR_UNIX _ -> VString ""
+           with _ -> VString "")
+        | _ -> eval_error "tcp_peer_addr(fd)"))
   ; ("dns_resolve", VBuiltin ("dns_resolve", function
         | [VString host] ->
           (try
@@ -4000,6 +4025,16 @@ let base_env : env =
              VCon ("Ok", [march_bytes_of_string raw])
            | Error e, _ | _, Error e -> eval_error "stdlib_hmac_sha256: %s" e)
         | _ -> eval_error "stdlib_hmac_sha256(key: String | Bytes, msg: String | Bytes): Ok(Bytes)"))
+    (* ---- HMAC-SHA-256 over Bytes: returns bare Bytes (no Result wrapper).
+       Needed by HKDF-style constructions that chain MACs: the pseudorandom
+       key must round-trip as raw bytes, never through a UTF-8 String. ---- *)
+  ; ("hmac_sha256_bytes", VBuiltin ("hmac_sha256_bytes", function
+        | [key_v; msg_v] ->
+          (match march_val_to_raw key_v, march_val_to_raw msg_v with
+           | Ok key, Ok msg ->
+             march_bytes_of_string (Digestif.SHA256.(to_raw_string (hmac_string ~key msg)))
+           | Error e, _ | _, Error e -> eval_error "hmac_sha256_bytes: %s" e)
+        | _ -> eval_error "hmac_sha256_bytes(key: Bytes, msg: Bytes): Bytes"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->

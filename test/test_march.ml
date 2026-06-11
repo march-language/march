@@ -17939,6 +17939,21 @@ let test_crypto_hmac_sha256_length () =
      Alcotest.(check int) "hmac_sha256 output is 32 bytes" 32 (String.length raw)
    | _ -> Alcotest.fail "expected Ok(Bytes)")
 
+let test_crypto_hmac_sha256_bytes () =
+  (* RFC 4231 test case 2: key = "Jefe", data = "what do ya want for nothing?"
+     — exercises the Bytes-domain variant that returns bare Bytes (no Result).
+     Bytes keys must round-trip raw (HKDF chains MACs through the key slot). *)
+  let open March_eval.Eval in
+  let key = march_bytes_of_string "Jefe" in
+  let msg = march_bytes_of_string "what do ya want for nothing?" in
+  let r = call_builtin "hmac_sha256_bytes" [key; msg] in
+  let raw = bytes_val_to_string r in
+  let hex = String.concat "" (List.init (String.length raw)
+               (fun i -> Printf.sprintf "%02x" (Char.code raw.[i]))) in
+  Alcotest.(check string) "hmac_sha256_bytes(Jefe, ...)"
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    hex
+
 let test_crypto_pbkdf2_sha256_length () =
   let open March_eval.Eval in
   let r = call_builtin "pbkdf2_sha256"
@@ -22581,6 +22596,7 @@ let () =
         Alcotest.test_case "sha256 bytes input"       `Quick test_crypto_sha256_bytes_input;
         Alcotest.test_case "hmac_sha256 known"        `Quick test_crypto_hmac_sha256;
         Alcotest.test_case "hmac_sha256 length"       `Quick test_crypto_hmac_sha256_length;
+        Alcotest.test_case "hmac_sha256_bytes known"  `Quick test_crypto_hmac_sha256_bytes;
         Alcotest.test_case "pbkdf2_sha256 length"     `Quick test_crypto_pbkdf2_sha256_length;
         Alcotest.test_case "pbkdf2_sha256 known"      `Quick test_crypto_pbkdf2_sha256_known;
         Alcotest.test_case "base64_encode"            `Quick test_crypto_base64_encode;
