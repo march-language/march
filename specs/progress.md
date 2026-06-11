@@ -280,6 +280,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-11, fix(typecheck): hmac_sha256 signature matched no implementation)
+
+- **`hmac_sha256` is now typed `String -> String -> Result(Bytes, String)`, matching all implementations.** The typechecker entry declared `Bytes -> Bytes -> Bytes` while the eval builtin returns `VCon("Ok",[Bytes])`, the native runtime (`march_hmac_sha256`) reads `march_string` args and returns `Result(Bytes, String)`, and llvm_emit's `builtin_ret_ty` already said `Result(Bytes, String)`. The typechecker therefore rejected correct usage (matching `Ok(b)`/`Err(e)` with String args) and accepted only usage that would misbehave at runtime. The fix aligns the typecheck entry with the other three sites (and with the existing `stdlib_hmac_sha256` entry, which was already correct). `hmac_sha256_bytes` (`Bytes -> Bytes -> Bytes`, bare result) was already consistent everywhere and is unchanged. Added typecheck-level regression tests for both builtins — prior coverage called the eval builtin directly and never exercised the typechecker signature. 1424 → 1426 tests.
+
 ## Current State (as of 2026-06-11, whole-program native codegen fixes)
 
 - **Cross-module ADT `==` now compiles and runs correctly in native whole-program builds.** `ensure_adt_eq_fn` resolves short TCon names against module-qualified ctor_info keys (with layout-compatible merging for same-short-name types like Ast.SortDir vs DataFrame.SortDir) and no longer memoizes before validating — previously every `==` on an imported ADT emitted calls to `@__march_eq_*` functions whose bodies were never generated. `lower.ml` no longer embeds qualified ctor references verbatim in EAlloc keys (silently tagging values 0). Interface impls now pre-register unit-wide in pass 1, and the exhaustiveness checker recognizes qualified constructor patterns. Fixture: `test/imports/adt_eq_native/`. Driven by depot's 5370-test suite.
