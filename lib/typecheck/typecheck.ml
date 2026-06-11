@@ -1206,6 +1206,8 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
+    ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
     ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));
     (* tcp_recv_exact(fd, n): reads exactly n bytes, returns Result(Bytes, String) *)
     ("tcp_recv_exact",          Mono (TArrow (t_int, TArrow (t_int, t_result (TCon ("Bytes", [])) t_string))));
@@ -1338,6 +1340,9 @@ let builtin_bindings : (string * scheme) list =
     (* Crypto / encoding builtins *)
     ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
     ("hmac_sha256",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    (* hmac_sha256_bytes(key, msg): Bytes-domain HMAC, bare Bytes result *)
+    ("hmac_sha256_bytes", Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
@@ -5944,7 +5949,8 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
     Pass 2: check declarations in order, updating the environment.
 
     Returns the [Err.ctx] containing all diagnostics. *)
-let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   let type_map = Hashtbl.create 256 in
   (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
      declarations so that cross-module forward references are pre-bound in
@@ -6132,7 +6138,11 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
-  (errors, type_map)
+  (errors, type_map, final_env)
+
+let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  let (errs, type_map, _env) = check_module_core ?errors m in
+  (errs, type_map)
 
 (** Like [check_module] but starts from a pre-built environment.
     Used by the REPL JIT to typecheck user expressions incrementally
@@ -6250,55 +6260,12 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
 
-(** Like [check_module] but also returns the final type environment.
-    Used by tests to inspect protocol projections. *)
+(** Like [check_module] but also returns the final typing environment.
+    Used by the LSP for hover/completion.  Delegates to [check_module_core]
+    so editor diagnostics run the EXACT same passes as `march --check` —
+    a reduced duplicate here previously skipped the pass-1 type/ctor/record
+    prebinding, so qualified type annotations (Bastion.Channel.ChannelConn)
+    failed to resolve only in the LSP. *)
 let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  let type_map = Hashtbl.create 256 in
-  let rec prebind_mod_members_full prefix env decls =
-    List.fold_left (fun e d ->
-        match d with
-        | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
-          let qname = prefix ^ "." ^ def.fn_name.txt in
-          if StrMap.mem qname e.vars then e
-          else bind_var qname (Mono (fresh_var 1)) e
-        | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members_full (prefix ^ "." ^ mname.txt) e inner_decls
-        | _ -> e
-      ) env decls
-  in
-  (* Same two-pass structure as check_module — uses base_env with builtins. *)
-  let pre_env = List.fold_left (fun env d ->
-      match d with
-      | Ast.DFn (def, _) ->
-        if StrMap.mem def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
-      | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-        prebind_mod_members_full mname.txt env inner_decls
-      | Ast.DType (_vis, name, params, typedef, _) ->
-        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
-        (match typedef with
-         | Ast.TDVariant variants ->
-           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
-           List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
-                        ; ci_params  = param_names
-                        ; ci_arg_tys = v.var_args
-                        ; ci_vis     = v.var_vis } in
-               (* Register the type-qualified key ("TypeName.CtorName") in this
-                  forward-reference pass, not just in check_decl: sibling DMods
-                  are typechecked before the entry module's own DTypes are
-                  reached, so a sibling that imports the entry and
-                  disambiguates with `Expr.Col` would otherwise fail to
-                  resolve the constructor. *)
-               let qual_key = name.txt ^ "." ^ v.var_name.txt in
-               { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
-             ) env1 variants
-         | _ -> env1)
-      | _ -> env
-    ) (base_env errors type_map) m.Ast.mod_decls in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
-  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
-  warn_unused_imports final_env;
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
-  (errors, type_map, final_env)
+  check_module_core ~errors m

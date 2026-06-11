@@ -5,4 +5,5 @@
    march_lexer
    march_parser
    march_desugar
-   march_errors))
+   march_errors
+   unix))
