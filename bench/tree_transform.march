@@ -9,7 +9,7 @@
 
 mod TreeTransform do
 
-ptype Tree = Leaf(Int) Node(Tree, Tree)
+ptype Tree = Leaf(Int) | Node(Tree, Tree)
 
 pfn make(d : Int) : Tree do
   if d == 0 do Leaf(0)

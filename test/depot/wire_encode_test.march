@@ -24,7 +24,7 @@ type FrontendMessage =
   | SASLInitialResponse(String, Bytes)
   | SASLResponse(Bytes)
 
-type DescribeTarget = DescribeStatement(String) DescribePortal(String)
+type DescribeTarget = DescribeStatement(String) | DescribePortal(String)
 type CloseTarget    = CloseStatement(String)    | ClosePortal(String)
 
 type Param =
