@@ -20976,6 +20976,27 @@ let test_sort_by_strings_orders_correctly () =
   Alcotest.(check (list string)) "sort_by desc"
     ["2026-04-09"; "2026-03-28"; "2026-02-10"; "2026-01-20"] (to_strs "desc")
 
+(* Companion to the string-ordering fix: monomorphization must specialize a
+   comparator closure to the concrete element type even when it is threaded
+   through a fully generic function + data structure that never mentions
+   String.  If mono leaves the comparison operands as a type variable, codegen
+   falls back to pointer `icmp` (the original bug) and no march_compare_string
+   call is emitted.  Asserting the call appears proves the whole mono→codegen
+   path cooperates, not just the directly-typed inline case. *)
+let test_string_ord_generic_threaded_specializes () =
+  let ir = emit_actor_ir {|mod Test do
+    fn pick(box : (a -> a -> Bool, a, a)) : a do
+      match box do
+        (cmp, x, y) -> if cmp(x, y) do x else y end
+      end
+    end
+    fn f() : String do
+      pick((fn (p, q) -> p < q, "10", "9"))
+    end
+  end|} in
+  Alcotest.(check bool) "generic-threaded String comparator emits march_compare_string"
+    true (ir_contains ir "call i64 @march_compare_string")
+
 (* ── Regression #36: collect_tests recurses into DMod (bug_todos #36) ────
    Tests defined inside a module loaded via MARCH_LIB_PATH arrive as DMod
    entries in auto_decls.  collect_tests must descend into them. *)
@@ -22831,6 +22852,8 @@ let () =
           test_string_ord_uses_compare_string;
         Alcotest.test_case "List.sort_by on strings orders correctly" `Quick
           test_sort_by_strings_orders_correctly;
+        Alcotest.test_case "generic-threaded String comparator specializes to compare_string" `Quick
+          test_string_ord_generic_threaded_specializes;
         Alcotest.test_case "#36 collect_tests descends into DMod" `Quick
           test_collect_tests_recurses_into_dmod;
         Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
