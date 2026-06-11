@@ -1,11 +1,43 @@
 [
   {
-    "hash": "a95cf0ca290ec2008374e03422cca393bbd0a6ea",
-    "short_hash": "a95cf0c",
+    "hash": "ed6c9ea915bd36b507ee728e9e1ab6ca62229dde",
+    "short_hash": "ed6c9ea",
     "author": "Matthew Gilliam",
-    "date": "2026-06-11T14:23:01-04:00",
-    "message": "fix(forge): put lib/ before test/ in MARCH_LIB_PATH for compiled tests\n\nMARCH_LIB_PATH order drives the whole-program module check order, and\ntest modules call into lib modules (never the reverse). With test/ first,\na lib function still bound to its pass-1 Mono placeholder gets pinned by\nthe first test call site that reaches it; every other call site with a\ndifferent shape (e.g. Depot.Schema.define's per-schema record arg) then\nfails to unify — 184 spurious type errors on depot's suite. lib/ first\nchecks definitions before uses.",
+    "date": "2026-06-11T15:50:52-04:00",
+    "message": "docs(specs): correct post-merge test count to 1427",
     "files_changed": 1
+  },
+  {
+    "hash": "8184e006366047bb187eea2d6ac66040ef906dd7",
+    "short_hash": "8184e00",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:49:32-04:00",
+    "message": "fix(cas): invalidate compiled-artifact cache when runtime C sources change\n\ncompilation_hash mixed in compiler identity (83ef546) but nothing about\nruntime/*.c|*.h, which clang compiles and links into the output binary at\nmarch-compile time. Editing runtime/march_extras.c still served the stale\nbinary cached under the same key. Mix a BLAKE3 digest of the runtime\nsources (sorted name + contents, Lazy per process) into compilation_hash,\nresolving the runtime dir with the same candidates main.ml uses.\n\nAlso fix the cache-hit paths in bin/main.ml ignoring the cp exit code:\na dead artifact pointer (stored pointers hold the original output path,\nso deleting that file orphans them) printed \"compiled (cached)\" while\nwriting no output. New Cas.copy_artifact returns false on missing source\nor failed copy — both call sites now fall through and recompile — and\ntreats src==dest (same inode, recompile with the same -o) as success,\nsince cp exits non-zero on identical files.",
+    "files_changed": 3
+  },
+  {
+    "hash": "4f5bb97b5beb39e3ce6c10f3d1555220f501ff81",
+    "short_hash": "4f5bb97",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:48:46-04:00",
+    "message": "fix(typecheck): hmac_sha256 signature now matches eval/runtime/llvm_emit\n\nThe typecheck entry declared Bytes -> Bytes -> Bytes, but every\nimplementation disagreed: the eval builtin returns Ok(Bytes), the native\nruntime (march_hmac_sha256) reads march_string args and returns\nResult(Bytes, String), and llvm_emit's builtin_ret_ty already said\nResult(Bytes, String). Correct usage (Ok/Err match on String args) was\nrejected; the only accepted usage would misbehave at runtime.\n\nCanonical signature: String -> String -> Result(Bytes, String) — same as\nthe existing stdlib_hmac_sha256 entry. hmac_sha256_bytes (Bytes -> Bytes\n-> Bytes, bare result) was already consistent across all sites; unchanged.\n\nAdds typecheck-level regression tests for both builtins — prior tests\ncalled the eval builtin directly and never exercised the signature.\n1424 -> 1426 tests.",
+    "files_changed": 4
+  },
+  {
+    "hash": "57ddf9955d61c639dcc22c7d438442581aad1207",
+    "short_hash": "57ddf99",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:47:23-04:00",
+    "message": "Merge branch 'claude/peaceful-brahmagupta-981324'\n\n# Conflicts:\n#\tspecs/progress.md\n#\tspecs/todos.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "aec71fb1d254b9a7d6ac371608ee52c9c400d0ad",
+    "short_hash": "aec71fb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:43:41-04:00",
+    "message": "fix(bench,test): restore | separators in type declarations over-removed by 33bf2a2\n\nCommit 33bf2a2 (remove | from match arms) also stripped | from type\nvariant declarations in 5 places. Two were already fixed; restore the\nremaining three: bench/tree_transform.march, bench/parallel.march,\ntest/depot/wire_encode_test.march.\n\nVerified: dune runtest (147 tests pass), tree_transform and parallel\ncompile at --opt 2, tree_transform runs and prints 104857600.",
+    "files_changed": 3
   },
   {
     "hash": "c69d8773702bccaa33fc8b6daa7e4d1fdca769da",
@@ -1976,16 +2008,16 @@
     "files_changed": 5
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
