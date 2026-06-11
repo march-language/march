@@ -21052,6 +21052,89 @@ let test_collect_tests_no_double_collection () =
   Alcotest.(check int) "3 unique tests collected, none doubled" 3
     (List.length tir.March_tir.Tir.tm_tests)
 
+(* ── Regression: DMod test bodies must qualify sibling-fn references ─────
+   A test inside a DMod (e.g. a second test file auto-discovered via
+   MARCH_LIB_PATH) that references a sibling helper ONLY through a closure
+   left the reference unqualified ("helper") while the definition was
+   registered qualified ("TestB.helper").  Defun then captured the helper as
+   a first-class value, DCE pruned the definition (free_vars ∩ fn_names name
+   mismatch), and llvm_emit's fallback emitted a dangling `@helper` —
+   "use of undefined value '@helper'" at the clang stage of `forge test`.
+   collect_tests must apply rename_tir_vars with the module prefix, exactly
+   as lower_mod_decls does for the module's DFn declarations. *)
+let test_dmod_test_body_qualifies_helper_refs () =
+  let src = {|mod Entry do
+    mod TestB do
+      fn helper(x : Int) : Bool do x >= 0 end
+      test "helper via closure" do
+        let f = fn x -> helper(x)
+        assert (f(3))
+      end
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~test_mode:true m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Opt.run tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  (* The buggy pipeline emits a trampoline for the unqualified name whose
+     call target `@helper` has no define.  The qualified wrapper
+     ("@TestB.helper$clo_wrap") is fine — the check is anchored on '@'. *)
+  Alcotest.(check bool) "no dangling unqualified @helper trampoline" false
+    (ir_contains ir "@helper$clo_wrap");
+  (* Any surviving reference to the qualified helper must have a define. *)
+  let refs    = ir_contains ir "@TestB.helper" in
+  let defines = ir_contains ir "define i64 @TestB.helper" in
+  Alcotest.(check bool) "TestB.helper define present when referenced"
+    refs (refs && defines)
+
+(* ── Regression: __try_call must tag immediate results (uniform tagging) ──
+   Compiled `Check.all` properties failed on run 1 with "returned false" for
+   trivially-true properties (the interpreter passed them).  Root cause:
+   `__try_call` in runtime/march_runtime.c stored the property thunk's raw
+   i64 Bool into the Result Ok field UNTAGGED, but compiled March reads ADT
+   immediate fields with the uniform low-bit tag convention — `Ok(1)` was
+   untagged as `1 >> 1 = 0`, so `Check.is_failing` saw `not(false)` = true
+   for every passing property.  End-to-end guard: compile a test binary with
+   a trivially-true property through the real `--compile --test` pipeline
+   and assert it exits 0.  Skips gracefully (like the JIT tests) when the
+   compiler binary, clang, or the runtime is unavailable. *)
+let test_compiled_check_property_passes () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_checktag" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "t_test.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod CheckTag do\n\
+      \  describe \"tagging\" do\n\
+      \    test \"trivially-true property passes compiled\" do\n\
+      \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "tbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled trivially-true Check.all property exits 0" 0 run_rc
+    end
+  end
+
 let () =
   Alcotest.run "march"
     [
@@ -22874,5 +22957,9 @@ let () =
           test_collect_tests_recurses_into_dmod;
         Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
           test_collect_tests_no_double_collection;
+        Alcotest.test_case "DMod test body qualifies sibling helper refs (no dangling @helper)" `Quick
+          test_dmod_test_body_qualifies_helper_refs;
+        Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
+          test_compiled_check_property_passes;
       ]);
     ]
