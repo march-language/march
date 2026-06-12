@@ -358,7 +358,7 @@ let is_builtin_fn name =
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
                  "md5";
-                 "hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
+                 "hmac_sha256"; "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
                  "sha256"; "sha512";
                  "base64_encode"; "base64_decode";
                  "random_bytes";
@@ -639,7 +639,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "http_server_wait"            -> Some Tir.TUnit
   (* Crypto / hash builtins *)
   | "md5"                         -> Some Tir.TString
-  | "hmac_sha256"
+  | "hmac_sha256" | "stdlib_hmac_sha256"
   | "pbkdf2_sha256"           -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "sha256" | "stdlib_sha256"
   | "sha512" | "stdlib_sha512" -> Some Tir.TString
@@ -887,7 +887,7 @@ let mangle_extern : string -> string = function
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   (* Crypto / hash builtins *)
   | "md5"                  -> "march_md5"
-  | "hmac_sha256"          -> "march_hmac_sha256"
+  | "hmac_sha256" | "stdlib_hmac_sha256" -> "march_hmac_sha256"
   | "hmac_sha256_bytes"    -> "march_hmac_sha256_bytes"
   | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
   | "sha256" | "stdlib_sha256"              -> "march_sha256"

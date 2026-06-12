@@ -5443,14 +5443,22 @@ let rec check_decl env (d : Ast.decl) : env =
              if StrMap.mem short e.interfaces then e
              else { e with interfaces = StrMap.add short idef e.interfaces }
            else e) env.interfaces env in
-       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       (* Track for unused-import warning: warn if nothing from this module is
+          used.  A QUALIFIED use (HttpServer.query_string) must count too —
+          matching only the rebound short names produced false "unused import"
+          warnings on modules that are used exclusively via qualified calls
+          (common in wrapper modules whose own fns shadow the short names). *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
          let entry = { ie_span = sp
                      ; ie_desc = Printf.sprintf
                          "Unused import: nothing from `%s` is used.\n\
                           Remove this import or use something from it." mod_str
-                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_matches = (fun name ->
+                         List.mem name short_names
+                         || name = mod_str
+                         || (String.length name > String.length prefix
+                             && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
          env.import_tracker := entry :: !(env.import_tracker)
        end;
@@ -5486,14 +5494,22 @@ let rec check_decl env (d : Ast.decl) : env =
              else if StrMap.mem short env.local_fns then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
-       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       (* Track for unused-import warning: warn if nothing from this module is
+          used.  A QUALIFIED use (HttpServer.query_string) must count too —
+          matching only the rebound short names produced false "unused import"
+          warnings on modules that are used exclusively via qualified calls
+          (common in wrapper modules whose own fns shadow the short names). *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
          let entry = { ie_span = sp
                      ; ie_desc = Printf.sprintf
                          "Unused import: nothing from `%s` is used.\n\
                           Remove this import or use something from it." mod_str
-                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_matches = (fun name ->
+                         List.mem name short_names
+                         || name = mod_str
+                         || (String.length name > String.length prefix
+                             && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
          env.import_tracker := entry :: !(env.import_tracker)
        end;

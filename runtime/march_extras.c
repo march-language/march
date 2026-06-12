@@ -510,7 +510,11 @@ void *march_base64_encode(void *input) {
 
 /* ── march_base64_decode ─────────────────────────────────────────────── */
 
-/* Takes String (base64), returns Option(Bytes). */
+/* Takes String (base64), returns Result(Bytes, String) — must match the
+ * `base64_decode`/`stdlib_base64_decode` builtin type in typecheck.ml and
+ * llvm_emit.ml.  This previously built Option(Bytes) (make_some/make_none),
+ * whose ctor tags read back inverted under Result (Some=1=Err, None=0=Ok),
+ * so every compiled decode "failed" with Err of garbage. */
 void *march_base64_decode(void *str) {
     pthread_once(&b64_decode_init_once, b64_decode_init);
     march_string *ms = (march_string *)str;
@@ -523,7 +527,7 @@ void *march_base64_decode(void *str) {
     uint32_t buf = 0; int bits = 0;
     for (size_t i = 0; i < slen; i++) {
         int v = b64_decode_table[src[i]];
-        if (v == -1) { free(out); return make_none(); } /* invalid char */
+        if (v == -1) { free(out); return make_err_str("base64_decode: invalid character"); }
         if (v == -2) break; /* padding */
         buf = (buf << 6) | (uint32_t)v;
         bits += 6;
@@ -535,7 +539,7 @@ void *march_base64_decode(void *str) {
     }
     void *bval = bytes_from_raw(out, out_i);
     free(out);
-    return make_some(bval);
+    return make_ok(bval);
 }
 
 /* ── march_random_bytes ──────────────────────────────────────────────── */
