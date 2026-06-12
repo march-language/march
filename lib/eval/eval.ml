@@ -2739,32 +2739,37 @@ let base_env : env =
     (* ---- Record introspection builtins ---- *)
 
     (* record_keys: returns a list of field name strings from a record value.
-       %{a: 1, b: 2} => ["a", "b"]  (preserves insertion order) *)
+       %{a: 1, b: 2} => ["a", "b"]  (sorted by field name — matches the
+       native record layout, which stores fields sorted by name) *)
   ; ("record_keys", VBuiltin ("record_keys", function
         | [VRecord fields] ->
+          let sorted = List.sort (fun (a, _) (b, _) -> compare a b) fields in
           List.fold_right (fun (k, _) acc ->
             VCon ("Cons", [VString k; acc])
-          ) fields (VCon ("Nil", []))
+          ) sorted (VCon ("Nil", []))
         | [_] -> eval_error "record_keys: expected a record"
         | _ -> eval_error "record_keys: expected one argument"))
 
     (* record_values: returns a list of values from a record.
-       %{a: 1, b: 2} => [1, 2]  (preserves insertion order) *)
+       %{a: 1, b: 2} => [1, 2]  (sorted by field name — see record_keys) *)
   ; ("record_values", VBuiltin ("record_values", function
         | [VRecord fields] ->
+          let sorted = List.sort (fun (a, _) (b, _) -> compare a b) fields in
           List.fold_right (fun (_, v) acc ->
             VCon ("Cons", [v; acc])
-          ) fields (VCon ("Nil", []))
+          ) sorted (VCon ("Nil", []))
         | [_] -> eval_error "record_values: expected a record"
         | _ -> eval_error "record_values: expected one argument"))
 
     (* record_entries: returns a list of (key, value) pairs from a record.
-       %{a: 1, b: 2} => [("a", 1), ("b", 2)]  (preserves insertion order) *)
+       %{a: 1, b: 2} => [("a", 1), ("b", 2)]  (sorted by field name — see
+       record_keys) *)
   ; ("record_entries", VBuiltin ("record_entries", function
         | [VRecord fields] ->
+          let sorted = List.sort (fun (a, _) (b, _) -> compare a b) fields in
           List.fold_right (fun (k, v) acc ->
             VCon ("Cons", [VTuple [VString k; v]; acc])
-          ) fields (VCon ("Nil", []))
+          ) sorted (VCon ("Nil", []))
         | [_] -> eval_error "record_entries: expected a record"
         | _ -> eval_error "record_entries: expected one argument"))
 

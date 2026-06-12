@@ -249,3 +249,21 @@
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
+
+; ── Regression: record introspection builtins in native builds ──
+; record_keys/values/entries/get/put/has_key/from_list were interpreter-only
+; (no native lowering — bare `call ptr @record_entries` failed at link time).
+; Records now carry an interned shape id in the header pad word
+; (runtime/march_extras.c record shape registry); the builtins are C
+; functions reading the descriptor, record_put/from_list intern NEW shapes
+; at runtime, and EField on statically-unknown record types emits a dynamic
+; by-name lookup.  The fixture compiles natively and RUNS the binary, which
+; panics (exit 1) on any wrong result — covering static shapes,
+; heterogeneous entries, runtime shape extension (record_put with a new
+; key), and the dynamic record_from_list([]) + record_put fold pattern.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/record_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/record_native\" %{exe:../bin/main.exe} --compile -o record_native_bin \"$PWD/imports/record_native/rn_entry.march\" && ./record_native_bin")))

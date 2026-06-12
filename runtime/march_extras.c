@@ -1464,3 +1464,415 @@ int64_t march_repl_get(int64_t slot) {
 void march_repl_set(int64_t slot, int64_t val) {
     march_repl_slots[(size_t)slot] = val;
 }
+
+/* ── Record shape registry + record introspection builtins ───────────────
+ *
+ * Native records are heap cells with tag 0 and fields stored SORTED BY NAME
+ * at offsets 16 + i*8 — but the cell itself carries no field names.  To make
+ * the record introspection builtins (record_keys/values/entries/get/put/
+ * has_key/from_list) work natively, the compiler stores a SHAPE ID in the
+ * otherwise-unused header pad word (march_hdr.pad, offset 12; march_alloc
+ * zeroes it, so legacy/C-built cells read as shape 0 = "no metadata").
+ *
+ * A shape is interned from a canonical descriptor string:
+ *
+ *     "name:k;name:k;...;"      (names sorted ascending, k = field kind)
+ *
+ * Field kinds describe the natural in-slot representation:
+ *     'i'  Int/Bool/Unit/Atom — raw int64_t
+ *     'f'  Float              — raw double bits
+ *     'p'  heap pointer       — String/ADT/tuple/record/closure
+ *     'g'  generic/unknown    — bits as received from a type-erased context
+ *
+ * Value conventions at the builtin boundaries (must match llvm_emit.ml):
+ *   - OUT into generic ADT slots (List payload, Option Some payload, dynamic
+ *     field reads): 'i' fields are low-bit tagged ((n<<1)|1) because compiled
+ *     code untags generic ctor slots with `ashr 1`; 'f' raw bits; 'p'/'g'
+ *     bits as-is with a (guarded) incrc.
+ *   - OUT into tuple slots (record_entries pair snd): NATURAL representation
+ *     (raw i64 / raw double bits / ptr) because compiled code reads tuple
+ *     slots at their concrete element types without untagging.
+ *   - IN (record_put value, record_from_list pair values): natural repr with
+ *     an explicit kind argument supplied by the call site.
+ *
+ * RC contract: arguments are BORROWED (see borrow.ml extern_borrow_table);
+ * results are fresh +1.  Any heap value aliased into a result gets incrc'd.
+ */
+
+void march_panic(void *s);   /* march_runtime.c */
+
+typedef struct {
+    int32_t   nfields;
+    char    **names;      /* sorted ascending, NUL-terminated */
+    int64_t  *name_lens;
+    char     *kinds;      /* one of 'i','f','p','g' per field */
+    char     *desc;       /* owned canonical descriptor string */
+} march_record_shape;
+
+static march_record_shape **rec_shape_table = NULL;   /* index = id - 1 */
+static int32_t rec_shape_count = 0;
+static int32_t rec_shape_cap   = 0;
+static pthread_mutex_t rec_shape_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void rec_panic(const char *msg) {
+    void *s = march_string_lit(msg, (int64_t)strlen(msg));
+    march_panic(s);
+}
+
+/* Parse a canonical descriptor into a shape struct (assumes valid input). */
+static march_record_shape *rec_shape_parse(const char *desc) {
+    march_record_shape *s = calloc(1, sizeof(march_record_shape));
+    s->desc = strdup(desc);
+    int32_t n = 0;
+    for (const char *p = desc; *p; p++) if (*p == ';') n++;
+    s->nfields   = n;
+    s->names     = calloc(n > 0 ? n : 1, sizeof(char *));
+    s->name_lens = calloc(n > 0 ? n : 1, sizeof(int64_t));
+    s->kinds     = calloc(n > 0 ? n : 1, 1);
+    const char *p = desc;
+    for (int32_t i = 0; i < n; i++) {
+        const char *colon = strchr(p, ':');
+        size_t len = (size_t)(colon - p);
+        s->names[i] = malloc(len + 1);
+        memcpy(s->names[i], p, len);
+        s->names[i][len] = '\0';
+        s->name_lens[i] = (int64_t)len;
+        s->kinds[i] = colon[1];
+        p = colon + 3;            /* skip "k;" */
+    }
+    return s;
+}
+
+/* Intern a descriptor string, returning its shape id (>= 1). */
+int32_t march_record_shape_intern(const char *desc) {
+    pthread_mutex_lock(&rec_shape_mu);
+    for (int32_t i = 0; i < rec_shape_count; i++) {
+        if (strcmp(rec_shape_table[i]->desc, desc) == 0) {
+            pthread_mutex_unlock(&rec_shape_mu);
+            return i + 1;
+        }
+    }
+    if (rec_shape_count == rec_shape_cap) {
+        rec_shape_cap = rec_shape_cap ? rec_shape_cap * 2 : 32;
+        rec_shape_table = realloc(rec_shape_table,
+                                  (size_t)rec_shape_cap * sizeof(*rec_shape_table));
+    }
+    rec_shape_table[rec_shape_count] = rec_shape_parse(desc);
+    int32_t id = ++rec_shape_count;
+    pthread_mutex_unlock(&rec_shape_mu);
+    return id;
+}
+
+/* Called by compiled code after every record allocation.  [cache] is a
+ * per-shape module global that memoizes the interned id (benign race: the
+ * intern is idempotent). */
+void march_record_set_shape(void *rec, const char *desc, int32_t *cache) {
+    int32_t id = *cache;
+    if (id == 0) { id = march_record_shape_intern(desc); *cache = id; }
+    ((march_hdr *)rec)->pad = id;
+}
+
+static march_record_shape *rec_shape_of(void *rec) {
+    int32_t id = ((march_hdr *)rec)->pad;
+    if (id <= 0 || id > rec_shape_count) return NULL;
+    return rec_shape_table[id - 1];
+}
+
+static int64_t rec_field_raw(void *rec, int32_t i) {
+    return *(int64_t *)((char *)rec + 16 + (size_t)i * 8);
+}
+
+static void rec_field_set(void *rec, int32_t i, int64_t bits) {
+    *(int64_t *)((char *)rec + 16 + (size_t)i * 8) = bits;
+}
+
+/* Field value for a generic ADT slot (List payload / Some payload / dynamic
+ * field read): tag ints, incrc heap values. */
+static int64_t rec_field_out_adt(void *rec, int32_t i, char kind) {
+    int64_t raw = rec_field_raw(rec, i);
+    switch (kind) {
+    case 'i': return (raw << 1) | 1;
+    case 'f': return raw;
+    default:  march_incrc((void *)(intptr_t)raw);   /* guarded for 'g' */
+              return raw;
+    }
+}
+
+/* Field value for a tuple slot (record_entries): natural repr, incrc heap. */
+static int64_t rec_field_out_natural(void *rec, int32_t i, char kind) {
+    int64_t raw = rec_field_raw(rec, i);
+    if (kind == 'p' || kind == 'g') march_incrc((void *)(intptr_t)raw);
+    return raw;
+}
+
+/* Incoming value (record_put / record_from_list): natural repr; take a +1
+ * reference on heap values we alias into the freshly built record. */
+static int64_t rec_field_in(int64_t bits, char kind) {
+    if (kind == 'p' || kind == 'g') march_incrc((void *)(intptr_t)bits);
+    return bits;
+}
+
+static int32_t rec_find_field(march_record_shape *s, const char *name, int64_t len) {
+    for (int32_t i = 0; i < s->nfields; i++) {
+        if (s->name_lens[i] == len && memcmp(s->names[i], name, (size_t)len) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/* List/Option/tuple cell constructors (same layout as compiled allocs). */
+static void *rec_nil(void) { return march_alloc(16); }            /* tag 0 */
+
+static void *rec_cons(int64_t head_bits, void *tail) {
+    void *c = march_alloc(16 + 16);
+    ((march_hdr *)c)->tag = 1;
+    *(int64_t *)((char *)c + 16) = head_bits;
+    *(void **)((char *)c + 24)   = tail;
+    return c;
+}
+
+static void *rec_pair(void *fst, int64_t snd_bits) {
+    void *t = march_alloc(16 + 16);                                /* tag 0 */
+    *(void **)((char *)t + 16)   = fst;
+    *(int64_t *)((char *)t + 24) = snd_bits;
+    return t;
+}
+
+static void *rec_none(void) { return march_alloc(16); }           /* tag 0 */
+
+static void *rec_some(int64_t bits) {
+    void *c = march_alloc(16 + 8);
+    ((march_hdr *)c)->tag = 1;
+    *(int64_t *)((char *)c + 16) = bits;
+    return c;
+}
+
+static march_record_shape *rec_shape_or_panic(void *rec, const char *who) {
+    march_record_shape *s = rec_shape_of(rec);
+    if (!s) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s: value carries no record shape metadata", who);
+        rec_panic(buf);
+    }
+    return s;
+}
+
+/* record_keys(rec) -> List(String), sorted by field name. */
+void *march_record_keys(void *rec) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_keys");
+    void *list = rec_nil();
+    for (int32_t i = s->nfields - 1; i >= 0; i--) {
+        void *k = march_string_lit(s->names[i], s->name_lens[i]);
+        list = rec_cons((int64_t)(intptr_t)k, list);
+    }
+    return list;
+}
+
+/* record_values(rec) -> List(value), sorted by field name. */
+void *march_record_values(void *rec) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_values");
+    void *list = rec_nil();
+    for (int32_t i = s->nfields - 1; i >= 0; i--)
+        list = rec_cons(rec_field_out_adt(rec, i, s->kinds[i]), list);
+    return list;
+}
+
+/* record_entries(rec) -> List((String, value)), sorted by field name. */
+void *march_record_entries(void *rec) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_entries");
+    void *list = rec_nil();
+    for (int32_t i = s->nfields - 1; i >= 0; i--) {
+        void *k = march_string_lit(s->names[i], s->name_lens[i]);
+        void *pair = rec_pair(k, rec_field_out_natural(rec, i, s->kinds[i]));
+        list = rec_cons((int64_t)(intptr_t)pair, list);
+    }
+    return list;
+}
+
+/* record_get(rec, key) -> Option(value). */
+void *march_record_get(void *rec, void *key) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_get");
+    march_string *ks = (march_string *)key;
+    int32_t i = rec_find_field(s, ks->data, ks->len);
+    if (i < 0) return rec_none();
+    return rec_some(rec_field_out_adt(rec, i, s->kinds[i]));
+}
+
+/* record_has_key(rec, key) -> Bool (i64 0/1). */
+int64_t march_record_has_key(void *rec, void *key) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_has_key");
+    march_string *ks = (march_string *)key;
+    return rec_find_field(s, ks->data, ks->len) >= 0 ? 1 : 0;
+}
+
+/* Build a descriptor with field (name, kind) inserted in sorted order. */
+static char *rec_desc_insert(march_record_shape *s, const char *name,
+                             int64_t len, char kind, int32_t *out_pos) {
+    size_t cap = strlen(s->desc) + (size_t)len + 8;
+    char *desc = malloc(cap);
+    size_t w = 0;
+    int32_t pos = s->nfields;
+    int inserted = 0;
+    for (int32_t i = 0; i < s->nfields; i++) {
+        size_t minlen = (size_t)(len < s->name_lens[i] ? len : s->name_lens[i]);
+        int cmp = inserted ? 1 : memcmp(name, s->names[i], minlen);
+        if (cmp == 0 && !inserted)
+            cmp = (len < s->name_lens[i]) ? -1 : (len > s->name_lens[i] ? 1 : 0);
+        if (!inserted && cmp < 0) {
+            w += (size_t)snprintf(desc + w, cap - w, "%.*s:%c;", (int)len, name, kind);
+            pos = i;
+            inserted = 1;
+        }
+        w += (size_t)snprintf(desc + w, cap - w, "%s:%c;", s->names[i], s->kinds[i]);
+    }
+    if (!inserted)
+        w += (size_t)snprintf(desc + w, cap - w, "%.*s:%c;", (int)len, name, kind);
+    *out_pos = pos;
+    return desc;
+}
+
+/* Build a descriptor identical to s but with field fi's kind replaced. */
+static char *rec_desc_with_kind(march_record_shape *s, int32_t fi, char kind) {
+    char *desc = malloc(strlen(s->desc) + 1);
+    size_t w = 0;
+    for (int32_t i = 0; i < s->nfields; i++) {
+        char k = (i == fi) ? kind : s->kinds[i];
+        w += (size_t)sprintf(desc + w, "%s:%c;", s->names[i], k);
+    }
+    return desc;
+}
+
+/* record_put(rec, key, value, kind) -> new record with the field set (or
+ * added, interning an extended shape at runtime).  [value] arrives in natural
+ * representation; [kind] is the call site's static kind char. */
+void *march_record_put(void *rec, void *key, void *value, int64_t kind) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record_put");
+    march_string *ks = (march_string *)key;
+    char k = (char)kind;
+    int64_t vbits = (int64_t)(intptr_t)value;
+    int32_t fi = rec_find_field(s, ks->data, ks->len);
+    if (fi >= 0) {
+        /* Existing field: copy cell, overwrite one slot. */
+        char fk = (k == 'g') ? s->kinds[fi] : k;
+        void *out = march_alloc(16 + (size_t)s->nfields * 8);
+        for (int32_t i = 0; i < s->nfields; i++) {
+            if (i == fi) rec_field_set(out, i, rec_field_in(vbits, k));
+            else         rec_field_set(out, i, rec_field_out_natural(rec, i, s->kinds[i]));
+        }
+        if (fk == s->kinds[fi]) {
+            ((march_hdr *)out)->pad = ((march_hdr *)rec)->pad;
+        } else {
+            char *desc = rec_desc_with_kind(s, fi, fk);
+            ((march_hdr *)out)->pad = march_record_shape_intern(desc);
+            free(desc);
+        }
+        return out;
+    }
+    /* New field: intern the extended shape. */
+    int32_t pos;
+    char *desc = rec_desc_insert(s, ks->data, ks->len, k, &pos);
+    int32_t id = march_record_shape_intern(desc);
+    free(desc);
+    void *out = march_alloc(16 + ((size_t)s->nfields + 1) * 8);
+    for (int32_t i = 0; i < pos; i++)
+        rec_field_set(out, i, rec_field_out_natural(rec, i, s->kinds[i]));
+    rec_field_set(out, pos, rec_field_in(vbits, k));
+    for (int32_t i = pos; i < s->nfields; i++)
+        rec_field_set(out, i + 1, rec_field_out_natural(rec, i, s->kinds[i]));
+    ((march_hdr *)out)->pad = id;
+    return out;
+}
+
+/* 3-arg variant for first-class / generic call paths (kind unknown). */
+void *march_record_put3(void *rec, void *key, void *value) {
+    return march_record_put(rec, key, value, (int64_t)'g');
+}
+
+/* record_from_list(list, kind) -> record.  [list] is List((String, value))
+ * with pair snd in natural repr of [kind] ('g' when unknown).  First
+ * occurrence of a duplicate key wins (matches interpreter assoc lookup). */
+void *march_record_from_list_k(void *list, int64_t kind) {
+    char k = (char)kind;
+    /* Collect pairs. */
+    int32_t n = 0;
+    for (void *p = list; p && ((march_hdr *)p)->tag == 1;
+         p = *(void **)((char *)p + 24)) n++;
+    void   **keys = calloc(n > 0 ? n : 1, sizeof(void *));
+    int64_t *vals = calloc(n > 0 ? n : 1, sizeof(int64_t));
+    int32_t cnt = 0;
+    for (void *p = list; p && ((march_hdr *)p)->tag == 1;
+         p = *(void **)((char *)p + 24)) {
+        void *pair = *(void **)((char *)p + 16);
+        keys[cnt] = *(void **)((char *)pair + 16);
+        vals[cnt] = *(int64_t *)((char *)pair + 24);
+        cnt++;
+    }
+    /* Drop duplicate keys (keep first occurrence). */
+    int32_t m = 0;
+    for (int32_t i = 0; i < cnt; i++) {
+        march_string *ki = (march_string *)keys[i];
+        int dup = 0;
+        for (int32_t j = 0; j < m; j++) {
+            march_string *kj = (march_string *)keys[j];
+            if (ki->len == kj->len &&
+                memcmp(ki->data, kj->data, (size_t)ki->len) == 0) { dup = 1; break; }
+        }
+        if (!dup) { keys[m] = keys[i]; vals[m] = vals[i]; m++; }
+    }
+    /* Sort by key name (insertion sort — n is small). */
+    for (int32_t i = 1; i < m; i++) {
+        void *kp = keys[i]; int64_t vp = vals[i];
+        march_string *ki = (march_string *)kp;
+        int32_t j = i - 1;
+        while (j >= 0) {
+            march_string *kj = (march_string *)keys[j];
+            size_t minlen = (size_t)(ki->len < kj->len ? ki->len : kj->len);
+            int cmp = memcmp(ki->data, kj->data, minlen);
+            if (cmp == 0) cmp = (ki->len < kj->len) ? -1 : (ki->len > kj->len ? 1 : 0);
+            if (cmp >= 0) break;
+            keys[j + 1] = keys[j]; vals[j + 1] = vals[j]; j--;
+        }
+        keys[j + 1] = kp; vals[j + 1] = vp;
+    }
+    /* Build descriptor + record. */
+    size_t cap = 16;
+    for (int32_t i = 0; i < m; i++) cap += (size_t)((march_string *)keys[i])->len + 4;
+    char *desc = malloc(cap);
+    size_t w = 0;
+    for (int32_t i = 0; i < m; i++) {
+        march_string *ks = (march_string *)keys[i];
+        w += (size_t)snprintf(desc + w, cap - w, "%.*s:%c;", (int)ks->len, ks->data, k);
+    }
+    desc[w] = '\0';
+    int32_t id = march_record_shape_intern(desc);
+    free(desc);
+    void *out = march_alloc(16 + (size_t)m * 8);
+    for (int32_t i = 0; i < m; i++)
+        rec_field_set(out, i, rec_field_in(vals[i], k));
+    ((march_hdr *)out)->pad = id;
+    free(keys); free(vals);
+    return out;
+}
+
+void *march_record_from_list(void *list) {
+    return march_record_from_list_k(list, (int64_t)'g');
+}
+
+/* Dynamic field read for statically-unknown record types.  Returns the value
+ * in NATURAL representation (raw bits), exactly like a static EField load —
+ * consumers of TVar-typed loads use the bits without untagging, and Perceus
+ * inserts any needed IncRC on the projection result itself.  Shape 0 falls
+ * back to the legacy behavior (raw slot-0 read) so non-record cells reaching
+ * this path behave as before. */
+void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
+    march_record_shape *s = rec_shape_of(rec);
+    if (!s) return *(void **)((char *)rec + 16);
+    int32_t i = rec_find_field(s, name, len);
+    if (i < 0) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "record field access: no field \"%.*s\" in record",
+                 (int)(len < 100 ? len : 100), name);
+        rec_panic(buf);
+    }
+    return (void *)(intptr_t)rec_field_raw(rec, i);
+}

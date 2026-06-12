@@ -1130,48 +1130,62 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
     [prefix].  Used when lowering [DMod] inner functions to rewrite unqualified
     intra-module call sites (e.g. [from_string] → [IOList.from_string]).
 
-    Safe because TIR ANF let-bindings use fresh names ($t42, $lam5 …) and
-    module function names are conventionally distinct from local variable names
-    in stdlib code. *)
+    Scope-aware: a local binder with the same name as a module function
+    (a fn parameter, [ELet]/[ELetRec] binding, or [ECase] branch variable)
+    shadows it — references to the shadowed name are left untouched within
+    the binder's scope.  Without this, e.g. a parameter named [fields] in a
+    module that also defines [fn fields(...)] had its body references
+    rewritten to the qualified global, which the emitter then compiled as a
+    zero-arg module-constant call ([call ptr @Mod.fields()]). *)
 let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : Tir.fn_def =
-  let rename_var (v : Tir.var) : Tir.var =
-    if List.mem v.Tir.v_name names
+  let module SSet = Set.Make (String) in
+  let rename_var bound (v : Tir.var) : Tir.var =
+    if List.mem v.Tir.v_name names && not (SSet.mem v.Tir.v_name bound)
     then { v with Tir.v_name = prefix ^ v.Tir.v_name }
     else v
   in
-  let rename_atom = function
-    | Tir.AVar v -> Tir.AVar (rename_var v)
+  let rename_atom bound = function
+    | Tir.AVar v -> Tir.AVar (rename_var bound v)
     | a -> a
   in
-  let rec rename_expr = function
-    | Tir.EAtom a        -> Tir.EAtom (rename_atom a)
-    | Tir.EApp (v, args) -> Tir.EApp (rename_var v, List.map rename_atom args)
-    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom f, List.map rename_atom args)
-    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rename_expr e1, rename_expr e2)
-    | Tir.ELetRec (fns, body) ->
-      Tir.ELetRec (List.map rename_fn fns, rename_expr body)
-    | Tir.ECase (scrut, branches, def) ->
-      Tir.ECase (rename_atom scrut,
-                 List.map (fun br -> { br with Tir.br_body = rename_expr br.Tir.br_body }) branches,
-                 Option.map rename_expr def)
-    | Tir.ETuple atoms   -> Tir.ETuple (List.map rename_atom atoms)
-    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom a)) fields)
-    | Tir.EField (a, f)  -> Tir.EField (rename_atom a, f)
-    | Tir.EUpdate (a, fields) ->
-      Tir.EUpdate (rename_atom a, List.map (fun (k, v) -> (k, rename_atom v)) fields)
-    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map rename_atom args)
-    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map rename_atom args)
-    | Tir.EFree a   -> Tir.EFree (rename_atom a)
-    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom a)
-    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom a)
-    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom a)
-    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom a)
-    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom a, ty, List.map rename_atom args)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr e1, rename_expr e2)
-  and rename_fn (f : Tir.fn_def) : Tir.fn_def =
-    { f with Tir.fn_body = rename_expr f.Tir.fn_body }
+  let add_params bound (params : Tir.var list) =
+    List.fold_left (fun acc (p : Tir.var) -> SSet.add p.Tir.v_name acc) bound params
   in
-  rename_fn fn
+  let rec rename_expr bound = function
+    | Tir.EAtom a        -> Tir.EAtom (rename_atom bound a)
+    | Tir.EApp (v, args) -> Tir.EApp (rename_var bound v, List.map (rename_atom bound) args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom bound f, List.map (rename_atom bound) args)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, rename_expr bound e1, rename_expr (SSet.add v.Tir.v_name bound) e2)
+    | Tir.ELetRec (fns, body) ->
+      let bound' = List.fold_left (fun acc (f : Tir.fn_def) ->
+          SSet.add f.Tir.fn_name acc) bound fns in
+      Tir.ELetRec (List.map (rename_fn bound') fns, rename_expr bound' body)
+    | Tir.ECase (scrut, branches, def) ->
+      Tir.ECase (rename_atom bound scrut,
+                 List.map (fun br ->
+                     let bound' = add_params bound br.Tir.br_vars in
+                     { br with Tir.br_body = rename_expr bound' br.Tir.br_body }) branches,
+                 Option.map (rename_expr bound) def)
+    | Tir.ETuple atoms   -> Tir.ETuple (List.map (rename_atom bound) atoms)
+    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom bound a)) fields)
+    | Tir.EField (a, f)  -> Tir.EField (rename_atom bound a, f)
+    | Tir.EUpdate (a, fields) ->
+      Tir.EUpdate (rename_atom bound a, List.map (fun (k, v) -> (k, rename_atom bound v)) fields)
+    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map (rename_atom bound) args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map (rename_atom bound) args)
+    | Tir.EFree a   -> Tir.EFree (rename_atom bound a)
+    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom bound a)
+    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom bound a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom bound a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom bound a)
+    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom bound a, ty, List.map (rename_atom bound) args)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr bound e1, rename_expr bound e2)
+  and rename_fn bound (f : Tir.fn_def) : Tir.fn_def =
+    let bound' = add_params bound f.Tir.fn_params in
+    { f with Tir.fn_body = rename_expr bound' f.Tir.fn_body }
+  in
+  rename_fn SSet.empty fn
 
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
