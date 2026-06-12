@@ -485,17 +485,23 @@ let parse_march_file path src =
     explicit [use] declarations — required for multi-file projects.
     Returns (errors, extra_dmods_to_prepend). *)
 
-(** Recursively collect all .march files under [dir]. *)
+(** Recursively collect all .march files under [dir].
+    Entries are sorted so discovery order is deterministic — raw
+    [Sys.readdir] order is unspecified and filesystem-dependent, which
+    would make whole-program module discovery vary across machines. *)
 let collect_lib_files dir =
   let rec walk acc d =
     if not (Sys.file_exists d && Sys.is_directory d) then acc
-    else
+    else begin
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
       Array.fold_left (fun acc name ->
           let p = Filename.concat d name in
           if Sys.is_directory p then walk acc p
           else if Filename.check_suffix p ".march" then p :: acc
           else acc)
-        acc (Sys.readdir d)
+        acc entries
+    end
   in
   walk [] dir
 
@@ -714,6 +720,7 @@ let fmt_file filename =
 (** Collect all .march files under a directory recursively. *)
 let rec march_files_in dir =
   let entries = Sys.readdir dir in
+  Array.sort compare entries;
   Array.fold_left (fun acc entry ->
     let path = Filename.concat dir entry in
     if Sys.is_directory path then
@@ -752,7 +759,7 @@ let run_test_cmd args =
       let test_dir = "test" in
       if not (Sys.file_exists test_dir) then []
       else
-        let entries = Array.to_list (Sys.readdir test_dir) in
+        let entries = List.sort compare (Array.to_list (Sys.readdir test_dir)) in
         List.filter_map (fun name ->
           if (String.length name > 6 && String.sub name 0 5 = "test_"
               && Filename.check_suffix name ".march")

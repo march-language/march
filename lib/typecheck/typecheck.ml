@@ -455,6 +455,8 @@ let suggest_module_name (name : string) : string option =
     let best_dist = ref max_int in
     (try
        let entries = Sys.readdir dir in
+       (* Sort so equal-distance ties break deterministically. *)
+       Array.sort compare entries;
        Array.iter (fun entry ->
          if Filename.check_suffix entry ".march" then begin
            let base = Filename.chop_suffix entry ".march" in
