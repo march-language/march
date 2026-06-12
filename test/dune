@@ -172,6 +172,32 @@
           (run %{exe:../bin/main.exe} --check
                imports/entry_imports_ill_typed.march))))
 
+; ── Regression: ill-typed modules from a RELATIVE MARCH_LIB_PATH ──
+; user_files held only realpath-canonicalised paths while diagnostic spans
+; carry the as-given (relative) path the file was parsed under, so the
+; is_user_file filter misclassified lib-module errors as stdlib-internal
+; and silently tolerated them — ill-typed TIR reached codegen (the depot
+; repro: 70 swallowed type errors, undefined pattern-binder symbols at
+; link time).  user_files now records BOTH spellings; --check and the
+; interpreter path must exit 1.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files_rec imports/lib_path_ill_typed/*.march))
+ (action (setenv MARCH_LIB_PATH imports/lib_path_ill_typed/lp_lib
+          (with-accepted-exit-codes 1
+           (run %{exe:../bin/main.exe} --check
+                imports/lib_path_ill_typed/lp_entry.march)))))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files_rec imports/lib_path_ill_typed/*.march))
+ (action (setenv MARCH_LIB_PATH imports/lib_path_ill_typed/lp_lib
+          (with-accepted-exit-codes 1
+           (run %{exe:../bin/main.exe} test
+                imports/lib_path_ill_typed/lp_entry.march)))))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be

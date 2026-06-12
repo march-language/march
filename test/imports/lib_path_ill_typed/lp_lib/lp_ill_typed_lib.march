@@ -1,0 +1,19 @@
+-- Regression fixture: an ill-typed module discovered via a RELATIVE
+-- MARCH_LIB_PATH directory.  Auto-discovered files are parsed under their
+-- as-given (relative) path, so their diagnostic spans carry that relative
+-- string; user_files must contain it or the diagnostic filter
+-- misclassifies the error as stdlib-internal and silently tolerates it
+-- (the depot repro: 70 type errors swallowed, ill-typed TIR reaching
+-- codegen as undefined pattern-binder symbols at link time).
+mod LpIllTypedLib do
+
+  fn add(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  fn broken() : Int do
+    -- type error: add takes 2 arguments
+    add(1, 2, 3)
+  end
+
+end
