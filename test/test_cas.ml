@@ -218,6 +218,71 @@ let test_cas_store_artifact_and_lookup () =
   Alcotest.(check bool) "artifact found after store" true (Option.is_some result);
   Alcotest.(check string) "artifact path correct" fake_path (Option.get result)
 
+let test_cas_runtime_identity_changes_with_sources () =
+  with_tmpdir @@ fun dir ->
+  let write name data =
+    let oc = open_out_bin (Filename.concat dir name) in
+    output_string oc data;
+    close_out oc
+  in
+  write "march_runtime.c" "int main() { return 0; }";
+  write "march_gc.h" "#define GC 1";
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  let h1' = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check string) "digest is deterministic" h1 h1';
+  write "march_runtime.c" "int main() { return 1; }";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check bool) "edited .c source → different digest"
+    false (String.equal h1 h2)
+
+let test_cas_runtime_identity_ignores_non_c_files () =
+  with_tmpdir @@ fun dir ->
+  let write name data =
+    let oc = open_out_bin (Filename.concat dir name) in
+    output_string oc data;
+    close_out oc
+  in
+  write "march_runtime.c" "int main() { return 0; }";
+  let h1 = March_cas.Cas.runtime_identity_of_dir dir in
+  write "build_wasm.sh" "#!/bin/sh";
+  let h2 = March_cas.Cas.runtime_identity_of_dir dir in
+  Alcotest.(check string) "non-.c/.h files do not affect digest" h1 h2
+
+let test_cas_copy_artifact_missing_src_fails () =
+  with_tmpdir @@ fun dir ->
+  let src  = Filename.concat dir "gone.bin" in
+  let dest = Filename.concat dir "out.bin" in
+  let ok = March_cas.Cas.copy_artifact ~src ~dest in
+  Alcotest.(check bool) "missing cached artifact → copy fails" false ok;
+  Alcotest.(check bool) "no output file written" false (Sys.file_exists dest)
+
+let test_cas_copy_artifact_copies () =
+  with_tmpdir @@ fun dir ->
+  let src  = Filename.concat dir "cached.bin" in
+  let dest = Filename.concat dir "out.bin" in
+  let oc = open_out_bin src in
+  output_string oc "binary-bytes";
+  close_out oc;
+  let ok = March_cas.Cas.copy_artifact ~src ~dest in
+  Alcotest.(check bool) "copy succeeds" true ok;
+  let ic = open_in_bin dest in
+  let n  = in_channel_length ic in
+  let b  = really_input_string ic n in
+  close_in ic;
+  Alcotest.(check string) "dest has cached contents" "binary-bytes" b
+
+let test_cas_copy_artifact_same_file_ok () =
+  (* The stored artifact pointer is the original output path, so recompiling
+     with the same -o makes src and dest the same file. `cp x x` fails — the
+     helper must treat this as success, not a cache miss. *)
+  with_tmpdir @@ fun dir ->
+  let path = Filename.concat dir "out.bin" in
+  let oc = open_out_bin path in
+  output_string oc "binary-bytes";
+  close_out oc;
+  let ok = March_cas.Cas.copy_artifact ~src:path ~dest:path in
+  Alcotest.(check bool) "same src and dest → success" true ok
+
 let test_cas_compilation_hash_differs_by_target () =
   let ch1 = March_cas.Cas.compilation_hash (String.make 64 'd')
               ~target:"aarch64-darwin" ~flags:[] in
@@ -559,6 +624,11 @@ let () =
       Alcotest.test_case "lookup miss returns None"           `Quick test_cas_lookup_miss_returns_none;
       Alcotest.test_case "name index"                         `Quick test_cas_name_index;
       Alcotest.test_case "store and lookup artifact"          `Quick test_cas_store_artifact_and_lookup;
+      Alcotest.test_case "runtime identity tracks sources"    `Quick test_cas_runtime_identity_changes_with_sources;
+      Alcotest.test_case "runtime identity ignores non-C"     `Quick test_cas_runtime_identity_ignores_non_c_files;
+      Alcotest.test_case "copy_artifact missing src fails"    `Quick test_cas_copy_artifact_missing_src_fails;
+      Alcotest.test_case "copy_artifact copies bytes"         `Quick test_cas_copy_artifact_copies;
+      Alcotest.test_case "copy_artifact same file ok"         `Quick test_cas_copy_artifact_same_file_ok;
       Alcotest.test_case "compilation hash differs by target" `Quick test_cas_compilation_hash_differs_by_target;
       Alcotest.test_case "gc removes unreferenced"            `Quick test_cas_gc_removes_unreferenced;
     ]);

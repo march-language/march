@@ -98,17 +98,23 @@ let parse_march_file path src =
     let open Lexing in
     Error (Printf.sprintf "%s:%d: parse error" path pos.pos_lnum)
 
-(** Recursively collect all .march files under [dir]. *)
+(** Recursively collect all .march files under [dir].
+    Entries are sorted so discovery order is deterministic — raw
+    [Sys.readdir] order is unspecified and filesystem-dependent, which
+    would make whole-program module discovery vary across machines. *)
 let collect_lib_files dir =
   let rec walk acc d =
     if not (Sys.file_exists d && Sys.is_directory d) then acc
-    else
+    else begin
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
       Array.fold_left (fun acc name ->
           let p = Filename.concat d name in
           if Sys.is_directory p then walk acc p
           else if Filename.check_suffix p ".march" then p :: acc
           else acc)
-        acc (Sys.readdir d)
+        acc entries
+    end
   in
   walk [] dir
 

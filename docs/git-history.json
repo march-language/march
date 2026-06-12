@@ -1,5 +1,61 @@
 [
   {
+    "hash": "dcc9f2232df143051a4b66175e29257af64166f7",
+    "short_hash": "dcc9f22",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:05:51-04:00",
+    "message": "Merge branch 'claude/optimistic-banzai-b6626d': migrate wire_encode_test to uncurried collection API",
+    "files_changed": 0
+  },
+  {
+    "hash": "54436699e733164f47de7ecd57889846fc8966d3",
+    "short_hash": "5443669",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:58:22-04:00",
+    "message": "Merge branch 'claude/nostalgic-brown-f56d90': defun erased-type closure calls → ECallPtr (fixes closure use-after-free in module-nested default-arg fns)\n\n# Conflicts:\n#\tspecs/progress.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "ac438f70a99dfce4ef25ac5b6eee2f6bc40ac277",
+    "short_hash": "ac438f7",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:46:41-04:00",
+    "message": "Merge branch 'claude/romantic-wilson-b18655': CAS artifact cache invalidation on runtime C changes\n\n# Conflicts:\n#\tdocs/git-history.json\n#\tdocs/graph-data.json",
+    "files_changed": 0
+  },
+  {
+    "hash": "cb82b509459ca412e3a10b2eb6f7a564e91f49c0",
+    "short_hash": "cb82b50",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:45:49-04:00",
+    "message": "fix(eval): align FileKind OtherKind VCon tag with ptype declaration\n\nfile_stat emitted VCon (\"Other\", []) but stdlib FileKind declares the\nconstructor as OtherKind. Pattern matches on OtherKind would never fire\nat runtime. Corrected to VCon (\"OtherKind\", []).",
+    "files_changed": 1
+  },
+  {
+    "hash": "0a52b54eb96f95d54f8f988d97d9a8a10da77898",
+    "short_hash": "0a52b54",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:35:57-04:00",
+    "message": "fix(test): migrate wire_encode_test to uncurried collection API\n\nMap.fold and List.fold_left now take collection first, acc second,\nuncurried callback last. Also add missing | in DescribeTarget variants.",
+    "files_changed": 1
+  },
+  {
+    "hash": "20e53f2f80273bbc0fbb563e2867b8adaec058cf",
+    "short_hash": "20e53f2",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T21:32:54-04:00",
+    "message": "fix(codegen,runtime): unify tuple/erased slot convention; conditional untag preserves type-erased heap values\n\nCompiled code read tuple slots as ptr and untagged scalar views with an\nunconditional ashr, but ETuple/EAlloc-fallback/EStackAlloc-fallback/EReuse\nstored scalars in their NATURAL repr — match [(\"a\",5)] do Cons((k,v),_)->v\nreturned 2 and true matched as false in every compiled build.  All tuple and\nerased-cell slots now use the UNIFORM convention (scalars tagged via coerce\ni64->ptr, heap values raw), matching the destructure fallbacks that were\nalready reading them that way.\n\ncoerce ptr->i64 now untags CONDITIONALLY (ashr iff low bit set): producers\nalways tag scalars, so an even value in a scalar-typed view is a heap pointer\nflowing through a lying static type (dynamically-typed record/alist code,\ne.g. depot's heterogeneous schema opts).  Preserving even bits verbatim makes\ntag->untag lossless for all bit patterns, so such values survive scalar-typed\ntransit (the depot 'blank uses explicit defaults' hang: a string payload\nhalved by ashr then memcmp'd with a garbage length).\n\nmarch_extras.c record builtins aligned with the uniform convention:\n- record_entries pair snd: uniform (was natural — true read back as false)\n- march_record_field_dyn: tags 'i' fields (consumers cond-untag)\n- record_put: normalizes input, downgrades kind i->g when a scalar-typed\n  value's bits are heap-plausible (lying static type) so bits round-trip\n- record_from_list: pair values arrive uniform; per-field kind normalization\n\nDepot test_depot_schema natively: was 3 F + hang at test 17, now 42 tests,\n6 failures (all generic-to_string printing, separate bugs).",
+    "files_changed": 2
+  },
+  {
+    "hash": "cee6f225e92f573026a6dee8a5d0ad32dd1c5152",
+    "short_hash": "cee6f22",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T17:10:43-04:00",
+    "message": "feat(codegen,runtime): native lowering for record introspection builtins via runtime shape registry\n\nThe seven record introspection builtins (record_keys, record_values,\nrecord_entries, record_get, record_put, record_has_key, record_from_list)\nwere interpreter-only: native builds emitted bare 'call ptr\n@record_entries(...)' with no definition, failing at link time.\n\nRecords carry no field names at runtime, so this adds a record shape\nregistry to runtime/march_extras.c: every record allocation (ERecord /\nEUpdate / EReuse) stamps an interned shape id into the previously-unused\nheader pad word (offset 12, always zero via march_alloc's calloc).  A shape\ndescriptor is the canonical string \"name:kind;...\" (fields sorted by name,\nkind chars i/f/p/g = raw-i64 scalar / double bits / heap ptr / generic).\nThe builtins are C functions reading the descriptor; record_put with a new\nkey and record_from_list intern NEW shapes at runtime (sorted insert), so\ndynamically-built records (depot's Depot.Schema.blank fold over\nrecord_from_list([])) work in compiled code.\n\nValue conventions (documented in march_extras.c):\n- record slots hold the natural representation; the descriptor records kind\n- outputs into generic ADT slots (values list payloads, record_get's Some\n  payload) low-bit-tag ints, matching the ashr-untag on extraction\n- record_entries pair snd stays natural per field kind (tuple slots are\n  read at concrete element types without untagging)\n- record_put / record_from_list call sites pass explicit kind hints\n\nllvm_emit.ml: EApp special cases for the seven builtins (natural-repr value\npassing + kind args), ECallPtr redirect, builtin_ret_ty/mangle_extern\nentries, preamble declares, shape stamping at ERecord/EUpdate/EReuse,\nstack-alloc pad zeroing, and EField on statically-unknown record types now\nemits a dynamic by-name lookup (march_record_field_dyn; legacy slot-0 read\nfor shape-0 cells).  WASM targets skip shape metadata.  borrow.ml: record_*\nargs are borrowed.  eval.ml: record_keys/values/entries now sort by field\nname to match the native sorted-by-name slot layout.\n\nTwo enabling fixes shipped together (both blocked depot's native build):\n- lower.ml rename_tir_vars is now scope-aware: a local binder sharing a\n  module fn name (e.g. a param 'fields' in a module defining fn fields/1)\n  no longer has its references rewritten to the qualified global, which\n  compiled to an undefined zero-arg call '@Depot.Schema.fields()'.\n- ensure_adt_eq_fn generates element-wise short-circuiting structural ==\n  for TTuple and TRecord (previously pointer comparison, so\n  List.member(record_entries(r), (\"age\", 30)) was always false natively).\n\nFixture: test/imports/record_native/ (18 compile-and-run checks: static\nshapes, heterogeneous entries via List.member, runtime shape extension,\ndynamic blank-style fold + dynamic field reads).  dune runtest green\n(1422 alcotest + doctests + fixtures; the 2 entry_imports_ill_typed rule\nfailures are pre-existing on this branch).",
+    "files_changed": 9
+  },
+  {
     "hash": "19fa9a275d127971bf3196aa4f357aebbc4ac5dd",
     "short_hash": "19fa9a2",
     "author": "Matthew Gilliam",
@@ -14,14 +70,6 @@
     "date": "2026-06-11T15:51:34-04:00",
     "message": "chore: sync decision graph export after merge",
     "files_changed": 2
-  },
-  {
-    "hash": "c2b5504a1017c1674f6ee3181410b77596dbb931",
-    "short_hash": "c2b5504",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-11T15:51:01-04:00",
-    "message": "docs(specs): correct post-merge test count in todos.md",
-    "files_changed": 1
   },
   {
     "hash": "8184e006366047bb187eea2d6ac66040ef906dd7",
@@ -1952,16 +2000,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2008,16 +2056,16 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -2040,14 +2088,6 @@
     "files_changed": 1
   },
   {
-    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
-    "short_hash": "1f0c21a",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:10:54-04:00",
-    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
-    "files_changed": 3
-  },
-  {
     "hash": "63e7c836e71daee264867c92f97513fc91763b29",
     "short_hash": "63e7c83",
     "author": "Matthew Gilliam",
@@ -2056,12 +2096,12 @@
     "files_changed": 3
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
+    "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
+    "short_hash": "1f0c21a",
     "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
+    "date": "2026-03-26T20:10:54-04:00",
+    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
+    "files_changed": 3
   },
   {
     "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
@@ -2072,16 +2112,24 @@
     "files_changed": 7
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2096,16 +2144,16 @@
     "files_changed": 15
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

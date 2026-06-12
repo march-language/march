@@ -3,7 +3,7 @@
 let rec collect_march_files dir =
   if not (Sys.file_exists dir) then []
   else
-    Array.to_list (Sys.readdir dir)
+    List.sort compare (Array.to_list (Sys.readdir dir))
     |> List.concat_map (fun name ->
         let path = Filename.concat dir name in
         if Sys.is_directory path then

@@ -655,6 +655,22 @@ int64_t march_checked_umod(int64_t a, int64_t b) {
     return (int64_t)((uint64_t)a % (uint64_t)b);
 }
 
+/* The `/` and `%` infix operators (is_int_arith in llvm_emit.ml) lower to these
+ * instead of march_checked_idiv/imod because the interpreter raises the BARE
+ * messages "division by zero" / "modulo by zero" for the operator forms — with
+ * no "int_div:" / "int_mod:" prefix (see eval.ml base_env entries for "/" and
+ * "%").  The oracle compares stdout via __try_call, so the text must match the
+ * interpreter byte-for-byte. */
+int64_t march_checked_div_op(int64_t a, int64_t b) {
+    if (b == 0) { march_panic(march_string_lit("division by zero", 16)); return 0; }
+    return a / b;
+}
+
+int64_t march_checked_mod_op(int64_t a, int64_t b) {
+    if (b == 0) { march_panic(march_string_lit("modulo by zero", 14)); return 0; }
+    return a % b;
+}
+
 /* ── Test harness ────────────────────────────────────────────────────────── */
 
 /* State used by the test runner.  These are process-global because test
