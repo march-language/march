@@ -12121,6 +12121,171 @@
       "created_at": "2026-06-11T16:46:09.242491-04:00",
       "updated_at": "2026-06-11T16:46:09.242491-04:00",
       "metadata_json": "{\"branch\":\"main\",\"commit\":\"04966f4\",\"confidence\":90}"
+    },
+    {
+      "id": 1103,
+      "change_id": "61cf6689-961d-4885-b592-88db1db425db",
+      "node_type": "outcome",
+      "title": "Record introspection builtins work natively: shape registry in march_extras.c (header pad word shape ids), 7 C builtins, emit-time kind hints, dynamic EField, runtime shape interning for record_put/from_list. Plus scope-aware rename_tir_vars and structural tuple/record ==. march suite green (1422 alcotest + fixtures); new 18-check native fixture green; depot test_aggregates_live now COMPILES (previously link-failed) and runs ~300 tests before hitting remaining PRE-EXISTING native gaps (generic to_string on erased strings via march_value_to_string; an infinite loop in the inlined blank_fold flow at depot test 'blank uses explicit defaults')",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T17:10:54.604809-04:00",
+      "updated_at": "2026-06-11T17:10:54.604809-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"commit\":\"cee6f22\",\"confidence\":90}"
+    },
+    {
+      "id": 1104,
+      "change_id": "eb4e5de6-8156-4445-b9cd-e0a7d518dc3a",
+      "node_type": "observation",
+      "title": "Depot full-green natively is gated by two PRE-EXISTING native codegen gaps, now precisely diagnosed with minimal repros: (1) generic to_string on type-erased strings calls march_value_to_string which cannot recognize march_string cells (prints #<tag:len>), so Depot.Schema.put_typed_default dispatches to the wrong branch -> wrong blank() defaults (the F failures in test_depot_schema). (2) Tag/untag mismatch across monomorphization boundaries: a Some cell built by a GENERIC alist_get_opt copy stores its payload RAW (ptr->ptr), but the consumer specialized at Bool untags with ashr (coerce ptr->i64), yielding ptr>>1 — confirmed arithmetically: corrupted b.role value 0xa5782218 == 0x14AF04430>>1. The resulting garbage pointer makes march_string_eq memcmp a huge bogus length = the apparent hang in depot test 'blank uses explicit defaults'. Repro: /tmp/dblank.march against depot lib. Neither is caused by the record-builtin work; both were unreachable natively before because record_* calls failed at link.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T18:02:02.551935-04:00",
+      "updated_at": "2026-06-11T18:02:02.551935-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":95}"
+    },
+    {
+      "id": 1105,
+      "change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "node_type": "goal",
+      "title": "Fix two pre-existing native-codegen bugs blocking depot forge test: tag/untag mismatch across mono boundaries + generic to_string on erased strings",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T20:50:02.382841-04:00",
+      "updated_at": "2026-06-11T20:50:02.382841-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":90,\"prompt\":\"In the march compiler repo at /Users/80197052/code/march, two pre-existing native-codegen bugs block the depot project (/Users/80197052/code/depot) from passing `forge test` natively. Both are precisely diagnosed; the record introspection builtins that exposed them were implemented in commit cee6f22 (branch claude/upbeat-gauss-9440d3, \\\"feat(codegen,runtime): native lowering for record introspection builtins\\\").\\n\\nBUG 1 — Tag/untag mismatch across monomorphization boundaries (causes apparent hangs / pointer corruption):\\nCompiled code stores Ints in generic ADT ctor slots low-bit tagged ((n<<1)|1, see coerce in lib/tir/llvm_emit.ml: i64→ptr tags, ptr→i64 untags with ashr). But when a GENERIC (unspecialized) copy of a function builds an ADT cell from a TVar-typed value (coerce ptr→ptr = no-op, RAW bits) and the CONSUMER is specialized at a scalar type (payload extraction coerces ptr→i64 = ashr), the value gets halved. Concrete repro: depot's stdlib-style alist_get_opt returns Some(v) built in a generic copy with a raw string pointer payload (the opts alist unified at List((String, Bool)) by the typechecker), and the consumer put_*_default extracts d : Bool → ashr → ptr>>1 → garbage pointer (verified: corrupted value 0xa5782218 == 0x14AF04430>>1). The garbage then reaches march_string_eq which memcmp's a bogus huge length — looks like a hang in depot's test \\\"blank uses explicit defaults from field options\\\". Standalone repro: write a main that imports Depot.Schema (MARCH_LIB_PATH=/Users/80197052/code/depot/lib), calls Depot.Schema.define(\\\"users\\\", { fields = { role = (\\\"String\\\", { default = \\\"user\\\" }), age = (\\\"Int\\\", { default = 0 }) } }), then Depot.Schema.blank(s), then asserts b.role == \\\"user\\\" — compile with --compile and run; it hangs/crashes while the interpreter path works.\\n\\nBUG 2 — Generic to_string on type-erased strings (causes wrong-value failures):\\nto_string(x) where x : TVar emits march_value_to_string (runtime/march_runtime.c ~line 2758), which cannot recognize march_string cells ({rc; len; data} — no tag field) and prints \\\"#<tag:N>\\\" where N is the string's length word. Depot's Depot.Schema.parse_field_spec does to_string(typ) on a type-erased string (\\\"Int\\\"/\\\"String\\\"), so put_typed_default dispatches to the wrong branch and blank() fills wrong defaults (the F failures in depot's test_depot_schema native run).\\n\\nVerification targets: cd /Users/80197052/code/depot && MARCH_LIB_PATH=lib <march> --compile --test -o /tmp/dts test/test_depot_schema.march && /tmp/dts should go fully green (currently 3 F + hang at \\\"blank uses explicit defaults\\\"); the interpreter run is the oracle. Ultimately plain `forge test` in depot matching the interpreter run. The march repo's own suite (dune runtest) must stay green; note the 2 pre-existing entry_imports_ill_typed rule failures are unrelated.\\n\\nDesign hints: for Bug 1, the principled fix is making the generic/specialized convention consistent — either (a) mono ensures TVar-typed values entering ADT slots from generic copies are tagged exactly when scalars (hard — provenance unknown), (b) uniform tagging at TUPLE slots as well so type-erased bits are always-tagged for scalars (sweeping change: audit ETuple emission, tuple destructuring loads, C code building tuples in march_http.c/march_extras.c), or (c) prevent the unifier from instantiating the same alist payload type at Bool while storing strings in it (the depot code only works because the interpreter is dynamically typed — consider whether the typechecker should reject or the codegen should treat such unifications as fully generic). Look at deciduous nodes 1070-1104 on branch claude/upbeat-gauss-9440d3 for the full decision history, and specs/todos.md \\\"Native lowering for the 7 record introspection builtins\\\" entry for context.\"}"
+    },
+    {
+      "id": 1106,
+      "change_id": "019d9c43-b836-4160-befc-8becbdb9e800",
+      "node_type": "action",
+      "title": "Merge claude/upbeat-gauss-9440d3 (cee6f22 record builtins + scope-aware rename) into worktree branch as prerequisite base",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T20:58:37.038723-04:00",
+      "updated_at": "2026-06-11T20:58:37.038723-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":90}"
+    },
+    {
+      "id": 1107,
+      "change_id": "dc29f03b-2487-4bb5-86d7-7ffd60c8d6ea",
+      "node_type": "observation",
+      "title": "Reproduced on merged base: native .....F.F..F..... + hang at test 17 'uses explicit defaults' (matches diagnosis). NEW: interpreter oracle itself fails 1/137 — 'bare string field spec' expects insertion-order field_names but cee6f22 sorts record_entries by name (eval parity change). Third issue, separate from Bug1/Bug2.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:03:24.112425-04:00",
+      "updated_at": "2026-06-11T21:03:24.112425-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":95}"
+    },
+    {
+      "id": 1108,
+      "change_id": "b3f3a37c-3c9f-4786-8fee-c02fd2b1b60e",
+      "node_type": "observation",
+      "title": "IR ground truth: compiled tuple slots are ALREADY uniform (specialized alist_get_opt$List_T_String_Bool loads pair snd as ptr + ashr untag; ETuple stores via coerce i64->ptr tag). cee6f22's C 'natural pair snd' convention contradicts compiled code — that mismatch IS the is_virtual/db_fields F failures (true=1 raw, ashr->0). The hang is the unconditional ashr halving a lying heap ptr (Bool-typed slot holding a string ptr from depot's heterogeneous opts).",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:27.316182-04:00",
+      "updated_at": "2026-06-11T21:21:27.316182-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":95}"
+    },
+    {
+      "id": 1109,
+      "change_id": "664db3e6-739e-40ba-9673-d15d25ed15ac",
+      "node_type": "option",
+      "title": "Bug1 (a): mono tags TVar values entering ADT slots from generic copies — rejected, provenance unknowable",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:37.663200-04:00",
+      "updated_at": "2026-06-11T21:21:37.663200-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":20}"
+    },
+    {
+      "id": 1110,
+      "change_id": "82e8c9fd-929d-4ed9-902e-594c967b914c",
+      "node_type": "option",
+      "title": "Bug1 (b-sweeping): convert all tuple slots to uniform tagging — unnecessary, IR shows compiled tuples already uniform; only the C builtins deviate",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:37.691524-04:00",
+      "updated_at": "2026-06-11T21:21:37.691524-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":40}"
+    },
+    {
+      "id": 1111,
+      "change_id": "9fecd175-843f-4744-8ef0-ad9c6cc0c1fd",
+      "node_type": "option",
+      "title": "Bug1 (chosen shape): make untag CONDITIONAL (ashr iff low bit set, preserve even bits = lying heap ptrs) + align C builtin outputs to the uniform convention (tag 'i' in entries pair snd + field_dyn) + record_put downgrades kind i->g when value bits look like a heap ptr + from_list cond-untags uniform inputs",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:37.722687-04:00",
+      "updated_at": "2026-06-11T21:21:37.722687-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":85}"
+    },
+    {
+      "id": 1112,
+      "change_id": "0f9d3a0d-b22d-4ca4-bf73-a41d35d74d03",
+      "node_type": "option",
+      "title": "Bug2 (a): heuristic string detection in march_value_to_string — rejected, unsound",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:37.753290-04:00",
+      "updated_at": "2026-06-11T21:21:37.753290-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":15}"
+    },
+    {
+      "id": 1113,
+      "change_id": "7428780d-2f26-4f33-a1c9-495b6729d6e8",
+      "node_type": "option",
+      "title": "Bug2 (chosen): give march_string a real header tag (layout {rc;tag;pad;len;data}, data 16->24) so any heap cell is discriminable; march_value_to_string recognizes strings; later extensible to ADT ctor-shape stamping for printing parity",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:37.786108-04:00",
+      "updated_at": "2026-06-11T21:21:37.786108-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":80}"
+    },
+    {
+      "id": 1114,
+      "change_id": "c1ec80f6-28a1-4669-b611-d0a0d90d35c8",
+      "node_type": "decision",
+      "title": "Fix plan: P1 string header tag + march_value_to_string string recognition (Bug2 core); P2 conditional untag in coerce ptr->i64 + C uniform-out alignment + record_put lie-downgrade (Bug1); P3 if needed for full green: ADT ctor-shape stamping for generic to_string printing parity (Some(false)/Some(0.) tests); P4 verify depot suite + march suite + benchmarks. Key invariant: uncond tag at i64->ptr stays (RC safety for large ints); cond-untag inverts it losslessly for ALL bits, so lying ptrs survive tag/untag roundtrips.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:21:46.891805-04:00",
+      "updated_at": "2026-06-11T21:21:46.891805-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":85}"
+    },
+    {
+      "id": 1115,
+      "change_id": "9602a749-5ca6-4181-b9a7-8f15aa8d7c33",
+      "node_type": "action",
+      "title": "P2 implement: conditional untag in coerce ptr->i64 (llvm_emit.ml); C side: tag 'i' in rec_field_out_natural + march_record_field_dyn, record_put kind i->g downgrade on heap-looking bits, from_list cond-untag of uniform pair-snd inputs (march_extras.c)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:22:05.047981-04:00",
+      "updated_at": "2026-06-11T21:22:05.047981-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":85,\"files\":[\"lib/tir/llvm_emit.ml\",\"runtime/march_extras.c\"]}"
+    },
+    {
+      "id": 1116,
+      "change_id": "5dc96666-da6f-4fdb-8544-65924231a215",
+      "node_type": "observation",
+      "title": "SMOKING GUN: stock march native miscompiles PLAIN alists — match [(\"a\",5)] do Cons((k,v),_)->v gives 2 (5 ashr'd), true->false. ETuple stores scalars NATURAL (emit_store_field at atom's natural llvm type) while tuple-in-ctor destructure loads ptr+ashr (uniform). Bug 1 is a general tuple-slot convention split, not just a mono-boundary issue. Direction forced: tuple slots uniform everywhere (prompt option b), readers already mostly assume it.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:27:47.930027-04:00",
+      "updated_at": "2026-06-11T21:27:47.930027-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"confidence\":95}"
+    },
+    {
+      "id": 1117,
+      "change_id": "8496594e-374c-4590-9a2a-2eff612e4d9f",
+      "node_type": "outcome",
+      "title": "P2 landed (20e53f2): hang fixed, alist miscompile fixed (stock march returned 2 for v=5, false for true — now correct). Depot schema native: 42 tests, 6 F left (4x to_string-on-erased-string = Bug2/P1; 2x generic to_string on ADTs = P3). is_virtual/db_fields/blank all green.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T21:33:03.906990-04:00",
+      "updated_at": "2026-06-11T21:33:03.906990-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"commit\":\"20e53f2\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -19790,6 +19955,182 @@
       "weight": 1.0,
       "rationale": "fix complete",
       "created_at": "2026-06-11T16:46:09.278310-04:00"
+    },
+    {
+      "id": 701,
+      "from_node_id": 1098,
+      "to_node_id": 1101,
+      "from_change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "to_change_id": "ffff4279-de2d-44e7-b8cd-a2811fbf5a18",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation committed",
+      "created_at": "2026-06-11T17:10:54.617326-04:00"
+    },
+    {
+      "id": 702,
+      "from_node_id": 1098,
+      "to_node_id": 1103,
+      "from_change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "to_change_id": "61cf6689-961d-4885-b592-88db1db425db",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation committed",
+      "created_at": "2026-06-11T17:11:14.981469-04:00"
+    },
+    {
+      "id": 703,
+      "from_node_id": 1103,
+      "to_node_id": 1104,
+      "from_change_id": "61cf6689-961d-4885-b592-88db1db425db",
+      "to_change_id": "eb4e5de6-8156-4445-b9cd-e0a7d518dc3a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Remaining blockers diagnosed",
+      "created_at": "2026-06-11T18:02:02.563011-04:00"
+    },
+    {
+      "id": 704,
+      "from_node_id": 1105,
+      "to_node_id": 1106,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "019d9c43-b836-4160-befc-8becbdb9e800",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Prerequisite: bugs only reproducible on top of cee6f22",
+      "created_at": "2026-06-11T20:58:37.100753-04:00"
+    },
+    {
+      "id": 705,
+      "from_node_id": 1106,
+      "to_node_id": 1107,
+      "from_change_id": "019d9c43-b836-4160-befc-8becbdb9e800",
+      "to_change_id": "dc29f03b-2487-4bb5-86d7-7ffd60c8d6ea",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Verification of merged base",
+      "created_at": "2026-06-11T21:03:24.123629-04:00"
+    },
+    {
+      "id": 706,
+      "from_node_id": 1105,
+      "to_node_id": 1108,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "b3f3a37c-3c9f-4786-8fee-c02fd2b1b60e",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design investigation",
+      "created_at": "2026-06-11T21:21:27.358519-04:00"
+    },
+    {
+      "id": 707,
+      "from_node_id": 1105,
+      "to_node_id": 1109,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "664db3e6-739e-40ba-9673-d15d25ed15ac",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design option",
+      "created_at": "2026-06-11T21:21:46.808408-04:00"
+    },
+    {
+      "id": 708,
+      "from_node_id": 1105,
+      "to_node_id": 1110,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "82e8c9fd-929d-4ed9-902e-594c967b914c",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design option",
+      "created_at": "2026-06-11T21:21:46.824442-04:00"
+    },
+    {
+      "id": 709,
+      "from_node_id": 1105,
+      "to_node_id": 1111,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "9fecd175-843f-4744-8ef0-ad9c6cc0c1fd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design option",
+      "created_at": "2026-06-11T21:21:46.840572-04:00"
+    },
+    {
+      "id": 710,
+      "from_node_id": 1105,
+      "to_node_id": 1112,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "0f9d3a0d-b22d-4ca4-bf73-a41d35d74d03",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design option",
+      "created_at": "2026-06-11T21:21:46.852732-04:00"
+    },
+    {
+      "id": 711,
+      "from_node_id": 1105,
+      "to_node_id": 1113,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "7428780d-2f26-4f33-a1c9-495b6729d6e8",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Design option",
+      "created_at": "2026-06-11T21:21:46.862233-04:00"
+    },
+    {
+      "id": 712,
+      "from_node_id": 1111,
+      "to_node_id": 1114,
+      "from_change_id": "9fecd175-843f-4744-8ef0-ad9c6cc0c1fd",
+      "to_change_id": "c1ec80f6-28a1-4669-b611-d0a0d90d35c8",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen",
+      "created_at": "2026-06-11T21:21:46.903157-04:00"
+    },
+    {
+      "id": 713,
+      "from_node_id": 1113,
+      "to_node_id": 1114,
+      "from_change_id": "7428780d-2f26-4f33-a1c9-495b6729d6e8",
+      "to_change_id": "c1ec80f6-28a1-4669-b611-d0a0d90d35c8",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen",
+      "created_at": "2026-06-11T21:21:46.918748-04:00"
+    },
+    {
+      "id": 714,
+      "from_node_id": 1114,
+      "to_node_id": 1115,
+      "from_change_id": "c1ec80f6-28a1-4669-b611-d0a0d90d35c8",
+      "to_change_id": "9602a749-5ca6-4181-b9a7-8f15aa8d7c33",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation step",
+      "created_at": "2026-06-11T21:22:05.060481-04:00"
+    },
+    {
+      "id": 715,
+      "from_node_id": 1115,
+      "to_node_id": 1116,
+      "from_change_id": "9602a749-5ca6-4181-b9a7-8f15aa8d7c33",
+      "to_change_id": "5dc96666-da6f-4fdb-8544-65924231a215",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation discovery",
+      "created_at": "2026-06-11T21:27:47.944005-04:00"
+    },
+    {
+      "id": 716,
+      "from_node_id": 1115,
+      "to_node_id": 1117,
+      "from_change_id": "9602a749-5ca6-4181-b9a7-8f15aa8d7c33",
+      "to_change_id": "8496594e-374c-4590-9a2a-2eff612e4d9f",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "P2 implementation result",
+      "created_at": "2026-06-11T21:33:03.919113-04:00"
     }
   ]
 }
