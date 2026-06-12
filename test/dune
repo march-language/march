@@ -333,6 +333,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
@@ -351,6 +352,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/record_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/record_native\" %{exe:../bin/main.exe} --compile -o record_native_bin \"$PWD/imports/record_native/rn_entry.march\" && ./record_native_bin")))
@@ -366,6 +368,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/param_shadow_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))
