@@ -18,10 +18,13 @@
 /* ── march_hdr mirror (avoid circular include with march_runtime.h) ────── */
 typedef struct { int64_t rc; int32_t tag; int32_t pad; } msg_hdr;
 
-/* String layout: rc(8) + len(8) + data[len] (no trailing NUL required) */
-typedef struct { int64_t rc; int64_t len; char data[]; } msg_string;
+/* String layout: rc(8) + tag(4) + pad(4) + len(8) + data[len].
+ * Mirrors march_string in march_runtime.h (kept in sync manually to avoid a
+ * circular include).  The tag word carries MARCH_STRING_TAG so copy_value can
+ * discriminate strings from ADT/tuple/record cells. */
+typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } msg_string;
 
-/* Tag value used to mark string objects (must match llvm_emit convention).
+/* Tag value used to mark string objects (must match march_runtime.h).
  * Strings use tag = -1 (0xFFFFFFFF as int32_t) as a sentinel. */
 #define MARCH_STRING_TAG  (-1)
 
@@ -116,18 +119,19 @@ static void *copy_string(march_heap_t *dst_heap, void *value) {
     msg_string *s = (msg_string *)value;
     /* Allocate: rc(8) + len(8) + data[len], 8-byte aligned. */
     size_t data_size = (size_t)s->len;
-    size_t total_sz  = sizeof(int64_t) + sizeof(int64_t) + data_size;
+    /* New string layout: rc(8) + tag(4) + pad(4) + len(8) + data + NUL. */
+    size_t total_sz  = sizeof(msg_string) + data_size + 1;
     total_sz = (total_sz + 7u) & ~7u;
-    /* Strings have their own layout — we allocate raw via march_process_alloc
-     * using a size that fills the standard header (16 bytes) + extra.
-     * We treat the string as an object with n_fields = (total_sz-16)/8
-     * (may be 0 for short strings — the char data occupies the tail). */
     void *np = march_process_alloc(dst_heap, total_sz < 16 ? 16 : total_sz);
-    /* Overwrite the standard header with string layout. */
+    /* Overwrite the standard header with string layout, including the
+     * MARCH_STRING_TAG discriminator so the copy is itself recognizable. */
     msg_string *ns = (msg_string *)np;
     ns->rc  = 1;
+    ns->tag = MARCH_STRING_TAG;
+    ns->pad = 0;
     ns->len = s->len;
     memcpy(ns->data, s->data, data_size);
+    ns->data[data_size] = '\0';
     return ns;
 }
 

@@ -12788,9 +12788,9 @@
       "node_type": "goal",
       "title": "Fix multi-module typecheck missing errors caught standalone (depot transaction.march)",
       "description": null,
-      "status": "completed",
+      "status": "pending",
       "created_at": "2026-06-12T12:56:38.728269-04:00",
-      "updated_at": "2026-06-12T13:05:24.826393-04:00",
+      "updated_at": "2026-06-12T12:56:38.728269-04:00",
       "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90,\"prompt\":\"fix\\nThe repro still doesn't fully compile, but the remaining failure is not a missing builtin: depot's lib/transaction.march:114 violates __try_call's documented Bool-only contract (matches the unwrapped Bool against Ok/Err). March rejects it when typechecked standalone, but multi-module whole-program inference silently misses the error and codegen then emits an undefined $f27180 pattern binder. That typecheck-consistency bug is its own investigation — I've flagged it as a spawnable task chip.\"}"
     },
     {
@@ -12924,94 +12924,6 @@
       "created_at": "2026-06-12T13:00:26.975001-04:00",
       "updated_at": "2026-06-12T13:00:26.975001-04:00",
       "metadata_json": "{\"branch\":\"claude/amazing-merkle-1926c0\",\"commit\":\"ef84adc\",\"confidence\":95}"
-    },
-    {
-      "id": 1176,
-      "change_id": "ea9b521c-1c04-41fe-bf17-d83a2bb611a7",
-      "node_type": "action",
-      "title": "Fix resolver.ml: record as-parsed path spellings alongside canonical paths; user_files = union of both",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:01:43.297743-04:00",
-      "updated_at": "2026-06-12T13:01:43.297743-04:00",
-      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90,\"files\":[\"lib/resolver/resolver.ml\"]}"
-    },
-    {
-      "id": 1177,
-      "change_id": "af2bca2c-245b-4f72-9055-6e82ac73aefd",
-      "node_type": "observation",
-      "title": "Existing test/dune ill_typed regression rules already fail under --force; dune incremental cache replayed stale pass since commit 2545039 introduced realpath canonicalization",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:01:43.347236-04:00",
-      "updated_at": "2026-06-12T13:01:43.347236-04:00",
-      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":95}"
-    },
-    {
-      "id": 1178,
-      "change_id": "e5f2e37a-52af-4668-b0f7-b7ece0f61e26",
-      "node_type": "observation",
-      "title": "Root cause: commit 2545039 (LSP/CLI resolution unification) canonicalises loaded_paths via realpath, but files are parsed under their as-given (relative) path — diagnostic spans carry the as-given string, so is_user_file's List.mem fails and ALL lib-module errors are filtered as stdlib-internal. Depot repro: 70 swallowed errors; existing entry_imports_ill_typed fixtures were live failures post-merge",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:04:01.612920-04:00",
-      "updated_at": "2026-06-12T13:04:01.612920-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
-    },
-    {
-      "id": 1179,
-      "change_id": "41ba202a-2afd-4f09-888c-cfb827afe16f",
-      "node_type": "option",
-      "title": "resolver: user_files records BOTH as-given and canonical spellings",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:04:01.644795-04:00",
-      "updated_at": "2026-06-12T13:04:01.644795-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
-    },
-    {
-      "id": 1180,
-      "change_id": "f1440592-c750-4163-85ad-e19cfc3852bd",
-      "node_type": "option",
-      "title": "main.ml: realpath each diagnostic file before List.mem",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:04:01.682334-04:00",
-      "updated_at": "2026-06-12T13:04:01.682334-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":60}"
-    },
-    {
-      "id": 1181,
-      "change_id": "012ec6cd-714b-4578-8961-c72aaf7b47a2",
-      "node_type": "decision",
-      "title": "Fix in resolver (both spellings in user_files): single source of truth, covers both main.ml filter sites without per-diagnostic realpath syscalls; main.ml-side canonicalisation would need duplicating at two call sites",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:04:09.831730-04:00",
-      "updated_at": "2026-06-12T13:04:09.831730-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
-    },
-    {
-      "id": 1182,
-      "change_id": "38991777-bd3d-4bca-837c-a42ab67522d0",
-      "node_type": "action",
-      "title": "Implemented record_user_path in resolver.ml (entry, explicit-import load, auto-discovery phase 2); regression fixture test/imports/lib_path_ill_typed + 2 dune rules (--check and test mode, relative MARCH_LIB_PATH, exit 1); verified fixture exits 0 pre-fix / 1 post-fix",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:04:16.415860-04:00",
-      "updated_at": "2026-06-12T13:04:16.415860-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
-    },
-    {
-      "id": 1183,
-      "change_id": "f1f0a915-044b-49dc-876b-f0cf300819d9",
-      "node_type": "outcome",
-      "title": "Verified: full suite green (incl. 2 new lib_path_ill_typed rules + revived entry_imports_ill_typed rules + well-typed whole_program relative-lib-path rules still exit 0). Depot repro now correctly reports all 70 type errors and exits 1 instead of miscompiling to an undefined $f27180 link failure",
-      "description": null,
-      "status": "pending",
-      "created_at": "2026-06-12T13:05:19.318517-04:00",
-      "updated_at": "2026-06-12T13:05:19.318517-04:00",
-      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"commit\":\"8c58349\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -21506,127 +21418,6 @@
       "weight": 1.0,
       "rationale": "Implementation complete",
       "created_at": "2026-06-12T13:00:33.147314-04:00"
-    },
-    {
-      "id": 782,
-      "from_node_id": 1167,
-      "to_node_id": 1168,
-      "from_change_id": "4864c150-5992-4844-8836-771f7b34f154",
-      "to_change_id": "fb70d950-7f0e-44bb-96f2-58f497f2e95a",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "Implementation of chosen option",
-      "created_at": "2026-06-12T13:01:43.311794-04:00"
-    },
-    {
-      "id": 783,
-      "from_node_id": 1164,
-      "to_node_id": 1169,
-      "from_change_id": "b2dc0336-9529-4613-85b9-757ef45a30af",
-      "to_change_id": "e664bfec-0064-4b61-b881-8f8f7f1fc96a",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "supporting evidence",
-      "created_at": "2026-06-12T13:01:43.359551-04:00"
-    },
-    {
-      "id": 784,
-      "from_node_id": 1167,
-      "to_node_id": 1176,
-      "from_change_id": "4864c150-5992-4844-8836-771f7b34f154",
-      "to_change_id": "ea9b521c-1c04-41fe-bf17-d83a2bb611a7",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "Implementation of chosen option",
-      "created_at": "2026-06-12T13:01:50.387226-04:00"
-    },
-    {
-      "id": 785,
-      "from_node_id": 1164,
-      "to_node_id": 1177,
-      "from_change_id": "b2dc0336-9529-4613-85b9-757ef45a30af",
-      "to_change_id": "af2bca2c-245b-4f72-9055-6e82ac73aefd",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "supporting evidence",
-      "created_at": "2026-06-12T13:01:50.400268-04:00"
-    },
-    {
-      "id": 786,
-      "from_node_id": 1178,
-      "to_node_id": 1163,
-      "from_change_id": "e5f2e37a-52af-4668-b0f7-b7ece0f61e26",
-      "to_change_id": "99233e29-72f8-46e1-8174-3b512924355f",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "investigation",
-      "created_at": "2026-06-12T13:04:09.776443-04:00"
-    },
-    {
-      "id": 787,
-      "from_node_id": 1163,
-      "to_node_id": 1179,
-      "from_change_id": "99233e29-72f8-46e1-8174-3b512924355f",
-      "to_change_id": "41ba202a-2afd-4f09-888c-cfb827afe16f",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "approach",
-      "created_at": "2026-06-12T13:04:09.788007-04:00"
-    },
-    {
-      "id": 788,
-      "from_node_id": 1163,
-      "to_node_id": 1180,
-      "from_change_id": "99233e29-72f8-46e1-8174-3b512924355f",
-      "to_change_id": "f1440592-c750-4163-85ad-e19cfc3852bd",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "approach",
-      "created_at": "2026-06-12T13:04:09.799236-04:00"
-    },
-    {
-      "id": 789,
-      "from_node_id": 1179,
-      "to_node_id": 1181,
-      "from_change_id": "41ba202a-2afd-4f09-888c-cfb827afe16f",
-      "to_change_id": "012ec6cd-714b-4578-8961-c72aaf7b47a2",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "chosen",
-      "created_at": "2026-06-12T13:04:16.363627-04:00"
-    },
-    {
-      "id": 790,
-      "from_node_id": 1180,
-      "to_node_id": 1181,
-      "from_change_id": "f1440592-c750-4163-85ad-e19cfc3852bd",
-      "to_change_id": "012ec6cd-714b-4578-8961-c72aaf7b47a2",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "rejected: duplicated at 2 call sites + syscall per diagnostic",
-      "created_at": "2026-06-12T13:04:16.378993-04:00"
-    },
-    {
-      "id": 791,
-      "from_node_id": 1181,
-      "to_node_id": 1182,
-      "from_change_id": "012ec6cd-714b-4578-8961-c72aaf7b47a2",
-      "to_change_id": "38991777-bd3d-4bca-837c-a42ab67522d0",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "implementation",
-      "created_at": "2026-06-12T13:04:21.527411-04:00"
-    },
-    {
-      "id": 792,
-      "from_node_id": 1182,
-      "to_node_id": 1183,
-      "from_change_id": "38991777-bd3d-4bca-837c-a42ab67522d0",
-      "to_change_id": "f1f0a915-044b-49dc-876b-f0cf300819d9",
-      "edge_type": "leads_to",
-      "weight": 1.0,
-      "rationale": "verification",
-      "created_at": "2026-06-12T13:05:24.813222-04:00"
     }
   ]
 }

@@ -123,15 +123,17 @@ CAMLprim value march_read_ptr_at(value v_ptr, value v_off) {
 }
 
 /* Read a march_string* as an OCaml string.
-   march_string layout: { int64_t rc; int64_t len; char data[]; }
-   — rc at offset 0, len at offset 8, data at offset 16. */
+   march_string layout: { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; }
+   — rc at offset 0, tag/pad at offset 8, len at offset 16, data at offset 24.
+   (The tag word carries MARCH_STRING_TAG so the cell is discriminable from
+   ADT/tuple/record cells; see march_runtime.h.) */
 CAMLprim value march_read_march_string(value v_ptr) {
     CAMLparam1(v_ptr);
     CAMLlocal1(result);
     char *base = (char *)Nativeint_val(v_ptr);
     int64_t len;
-    memcpy(&len, base + 8, 8);
+    memcpy(&len, base + 16, 8);
     result = caml_alloc_string((mlsize_t)len);
-    memcpy(Bytes_val(result), base + 16, (size_t)len);
+    memcpy(Bytes_val(result), base + 24, (size_t)len);
     CAMLreturn(result);
 }
