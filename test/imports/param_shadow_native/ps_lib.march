@@ -1,0 +1,49 @@
+-- Lib module: function parameters and match-pattern bindings that share a
+-- name with a SIBLING module-level fn.  Regression for rename_tir_vars:
+-- it qualified every AVar matching a sibling fn name ("fields" →
+-- "PsLib.fields") without checking whether the name was locally bound,
+-- so the param reference was emitted as the function's global address
+-- (or a zero-arg "gl" call), crashing at runtime / failing at clang time.
+mod PsLib do
+
+type Lst = PNil | PCons(Int, Lst)
+
+fn fields(schema) do
+  schema + 1
+end
+
+-- Param `fields` shadows the sibling fn `fields`.
+pfn blank_fold(fields, acc) do
+  match fields do
+    PNil -> acc
+    PCons(entry, rest) -> blank_fold(rest, acc + entry)
+  end
+end
+
+-- Match-pattern binding `fields` shadows the sibling fn too.
+pfn head_or(opt, dflt) do
+  match opt do
+    PCons(fields, _) -> fields
+    PNil -> dflt
+  end
+end
+
+-- Let binding `fields` shadows the sibling fn.
+pfn let_shadow(x) do
+  let fields = x * 10
+  fields + 1
+end
+
+fn sum_all(lst) do
+  blank_fold(lst, 100)
+end
+
+fn first_or(lst, dflt) do
+  head_or(lst, dflt)
+end
+
+fn tenfold_plus_one(x) do
+  let_shadow(x)
+end
+
+end
