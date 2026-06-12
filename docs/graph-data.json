@@ -13265,6 +13265,17 @@
       "created_at": "2026-06-12T16:18:25.397208-04:00",
       "updated_at": "2026-06-12T16:18:25.397208-04:00",
       "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
+    },
+    {
+      "id": 1207,
+      "change_id": "9e5acf96-0d6f-4f26-8187-b2df0faf1054",
+      "node_type": "outcome",
+      "title": "Merged to main: fast-forward eefa409 -> bb8be48 (9 files, +210/-33). Delta: ECallPtr erased-callee restore, erased_clo_native + lib_path_ill_typed fixtures (interpreter + --check modes), specs, graph export. Full suite was green on this exact tree",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T16:22:36.639414-04:00",
+      "updated_at": "2026-06-12T16:22:36.639414-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -22243,6 +22254,17 @@
       "weight": 1.0,
       "rationale": "verified merge-ready state",
       "created_at": "2026-06-12T16:18:25.409387-04:00"
+    },
+    {
+      "id": 826,
+      "from_node_id": 1206,
+      "to_node_id": 1207,
+      "from_change_id": "8aa0ae49-ab44-49ca-b2fc-a034e6333723",
+      "to_change_id": "9e5acf96-0d6f-4f26-8187-b2df0faf1054",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "landed",
+      "created_at": "2026-06-12T16:22:36.655004-04:00"
     }
   ]
 }
