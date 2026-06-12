@@ -10,6 +10,9 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 *(No active P0 blockers)*
 
+### Recently fixed
+- ✅ **Perceus RC use-after-free on cross-module opaque types** — a value whose concrete type isn't propagated across a module boundary (e.g. `let gate = Gate.cast(...)` where `Gate` is an opaque type from another module) keeps an unresolved type-var `'_NNNN` in monomorphic TIR. `needs_rc (TVar _)` returned `false` ("skip RC"), so Perceus never emitted an `EIncRC` for such a heap value; when the binding was consumed twice (e.g. two `Gate.get_change(gate, …)` calls) the first consume freed the box and the second double-freed it (`RC underflow in march_decrc_freed`, bastion `Gate.cast` test). Fix: `needs_rc (TVar _) = true` (`lib/tir/perceus.ml`) — `llvm_ty (TVar _) = "ptr"`, so the value is a heap pointer and must be RC-managed; safe for genuine scalars because RC ops are guarded by `if ty = "ptr"` in llvm_emit and `IS_HEAP_PTR` in the runtime. Mirrors the earlier `TFn` fix. Regression test: `perceus` group "incrc for unresolved-tvar value used twice (cross-module opaque)" in `test/test_march.ml`.
+
 ---
 
 ## P1 — High Impact / Near-Term

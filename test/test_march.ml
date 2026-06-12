@@ -6397,6 +6397,68 @@ let test_perceus_no_incrc_for_eapp_operator_callee () =
       false (has_incrc_for_builtin fn.March_tir.Tir.fn_body)
   ) m.March_tir.Tir.tm_fns
 
+(* Regression: a heap value whose concrete type does not resolve across a module
+   boundary keeps an unresolved type-var (`'_NNNN`) in monomorphic TIR.  This
+   happens for an opaque type defined in one module and consumed in another
+   (e.g. bastion's `Gate.cast` → `Gate.get_change(gate, …)`): `gate`'s let binding
+   stays `TVar "_NNNN"` instead of `TCon ("Gate", [])`.
+
+   Perceus's needs_rc used to return false for `TVar _` ("skip RC"), so such a
+   value was invisible to Perceus — no EIncRC was emitted before a consuming
+   call.  When the same binding was consumed twice the first consume freed the
+   heap box and the second double-freed it: `RC underflow in march_decrc_freed`.
+   The minimal shape below (opaque Box in a nested module, `get` consumes the
+   box, `b` used by two `get` calls) reproduces the missing dup.
+
+   Fix: needs_rc (TVar _) = true.  llvm_ty (TVar _) = "ptr" so the value is a
+   heap pointer; emitting EIncRC/EDecRC is correct for the box and a no-op for a
+   genuine scalar (guarded by [if ty = "ptr"] in llvm_emit and IS_HEAP_PTR in
+   the runtime).  Without the fix the EIncRC for `b` is absent and this fails. *)
+let test_perceus_incrc_for_unresolved_tvar_used_twice () =
+  let m = perceus_module {|mod Outer do
+    mod Box do
+      opaque type Box = Box(Int)
+      fn make(n : Int) : Box do Box(n) end
+      fn get(b : Box) : Int do unwrap(b) end
+      pfn unwrap(b : Box) : Int do match b do Box(n) -> n end end
+    end
+    mod Main do
+      import Box
+      fn main() : Int do
+        let b = Box.make(42)
+        let x = Box.get(b)
+        let y = Box.get(b)
+        x + y
+      end
+    end
+  end|} in
+  let main_fn =
+    List.find_opt (fun fn ->
+      let n = fn.March_tir.Tir.fn_name in
+      n = "Main.main" || n = "Outer.Main.main")
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "Main.main exists" true (main_fn <> None);
+  let main_fn = Option.get main_fn in
+  (* The fix must emit an EIncRC for `b` (the unresolved-type-var heap value)
+     before its first consuming use, so the second use does not double-free. *)
+  let rec incs_b = function
+    | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+    | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) ->
+      String.equal v.March_tir.Tir.v_name "b"
+    | March_tir.Tir.ELet (_, e1, e2) -> incs_b e1 || incs_b e2
+    | March_tir.Tir.ESeq (e1, e2) -> incs_b e1 || incs_b e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> incs_b b.March_tir.Tir.br_body) brs
+      || (match def with Some e -> incs_b e | None -> false)
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> incs_b f.March_tir.Tir.fn_body) fns || incs_b body
+    | _ -> false
+  in
+  Alcotest.(check bool)
+    "Main.main dups `b` before consuming it twice (cross-module opaque RC UAF)"
+    true (incs_b main_fn.March_tir.Tir.fn_body)
+
 (* Regression: record parameter used in multiple sequential calls within the
    same match arm.  Before the fix, borrow inference did not consider TRecord
    parameters as borrow candidates (needs_rc(TRecord) was false), so
@@ -21681,6 +21743,10 @@ let () =
           (* Regression: 831e315 needs_rc(TFn) caused spurious EIncRC for EApp
              operator callees like && / || whose llvm_name maps to @__ *)
           Alcotest.test_case "no EIncRC for && / || callee (831e315)" `Quick test_perceus_no_incrc_for_eapp_operator_callee;
+          (* Regression: cross-module opaque type leaves an unresolved TVar; the
+             heap value used twice must be dup'd or the second consume
+             double-frees (bastion Gate.cast RC underflow UAF). *)
+          Alcotest.test_case "incrc for unresolved-tvar value used twice (cross-module opaque)" `Quick test_perceus_incrc_for_unresolved_tvar_used_twice;
           (* Regression: record param used in two sequential calls — second
              call read a freed field string (RC underflow).  Fix: TRecord is
              now borrow-eligible; _borrowed_field_vars suppresses field RC ops. *)

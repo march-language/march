@@ -184,7 +184,19 @@ let needs_rc : Tir.ty -> bool = function
                               guards all RC calls with [if ty = "ptr" then …], so
                               emitting EIncRC/EDecRC for a scalar TVar "_" is safe —
                               the guard prevents the actual C call from firing. *)
-  | Tir.TVar _ -> false  (* unresolved user type-var after mono: skip RC *)
+  | Tir.TVar _ -> true
+    (* Unresolved user type-var after mono: leaks into monomorphic TIR when a
+       value's concrete type is not propagated across a module boundary (e.g.
+       a `let gate = Gate.cast(...)` whose result is an opaque type defined in
+       another module stays `'_NNNN` instead of resolving to `Gate`).
+       llvm_ty (TVar _) = "ptr", so the value IS a heap pointer at runtime;
+       the old `false` made it invisible to Perceus, so no EIncRC was emitted
+       before a consuming call.  When the same binding was consumed twice (two
+       `Gate.get_change(gate, ...)` calls) the first consume freed the box and
+       the second double-freed it (bastion `Gate.cast` RC-underflow UAF).
+       Conservatively heap-carrying, exactly like the TFn case below; safe
+       because llvm_emit guards RC ops with [if ty = "ptr"] and the runtime
+       guards with IS_HEAP_PTR. *)
   | Tir.TFn _ -> true
     (* After defun, any AVar with a TFn type is a heap-allocated closure
        struct (never a raw code pointer — those are ADefRef and never appear
