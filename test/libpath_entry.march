@@ -1,0 +1,11 @@
+-- Regression fixture entry for MARCH_LIB_PATH auto-discovery diagnostics.
+-- Deliberately does NOT import LibpathIllTyped: auto-discovery loads every
+-- .march file on the lib path, and a type error in any of them must fail
+-- the build (exit 1) even when the entry never references the module.
+mod LibpathEntry do
+
+  fn main() do
+    println("unreachable: lib module is ill-typed")
+  end
+
+end

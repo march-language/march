@@ -3097,6 +3097,31 @@ and emit_case ctx scrut_atom branches default_opt =
      would lose bit 63 of 64-bit atom hashes). *)
   let scrut_is_tagged_imm = all_imm_lit_tags && scrut_ty = "ptr" in
 
+  (* Defensive invariant: a branch that binds constructor fields requires the
+     heap-pointer path — field loads only happen under [is_ptr_scrut].  An ADT
+     ctor branch with binders on a non-ptr scrutinee means type-incorrect TIR
+     reached codegen (e.g. an i64 scrutinee matched against Ok(v)/Err(e)); the
+     integer switch below would leave [br_vars] unbound, and emit_atom's
+     0-arg-global-call fallback turns each use into an undefined symbol that
+     only surfaces as a clang link error.  Fail loudly at the source instead. *)
+  if not is_ptr_scrut then
+    List.iter (fun br ->
+        let t = br.Tir.br_tag in
+        let is_str_tag = String.length t > 0 && t.[0] = '"' in
+        if br.Tir.br_vars <> [] && not (is_imm_lit_tag t) && not is_str_tag then
+          failwith (Printf.sprintf
+            "LLVM emit: constructor pattern %s(%s) destructures a non-pointer \
+             scrutinee%s — type-incorrect TIR reached codegen (the pattern \
+             binders can never be bound). This is a compiler bug: the \
+             typechecker should have rejected this program."
+            t
+            (String.concat ", "
+               (List.map (fun (v : Tir.var) -> v.Tir.v_name) br.Tir.br_vars))
+            (match scrut_atom with
+             | Tir.AVar v -> " `" ^ v.Tir.v_name ^ "`"
+             | _ -> ""))
+      ) branches;
+
   let merge_lbl   = fresh_block ctx "case_merge" in
   let default_lbl = fresh_block ctx "case_default" in
   let branch_lbls = List.map (fun _ -> fresh_block ctx "case_br") branches in

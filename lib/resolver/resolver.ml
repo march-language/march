@@ -147,6 +147,13 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
   let resolved : (string, March_ast.Ast.decl list) Hashtbl.t = Hashtbl.create 8 in
   (* Track loaded file paths so the same file is never parsed twice *)
   let loaded_paths : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+  (* Paths EXACTLY as passed to the parser.  [loaded_paths] keys are
+     canonicalised (realpath) for dedup, but diagnostic spans carry the
+     as-parsed string — often relative, e.g. "lib/foo.march" — so callers
+     matching span files against [user_files] (is_user_file in bin/main.ml)
+     need BOTH spellings or lib-module errors are silently misclassified
+     as stdlib-internal and dropped. *)
+  let parsed_paths : (string, unit) Hashtbl.t = Hashtbl.create 8 in
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
@@ -157,6 +164,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
   let canonical_source =
     (try Unix.realpath source_file with Unix.Unix_error _ -> source_file) in
   Hashtbl.add loaded_paths canonical_source ();
+  Hashtbl.replace parsed_paths source_file ();
 
   let find_file mod_name =
     let fname = module_name_to_filename mod_name in
@@ -195,6 +203,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
             []
           else begin
             Hashtbl.add loaded_paths canon_fp ();
+            Hashtbl.replace parsed_paths file_path ();
             let src =
               try read_file file_path
               with Sys_error msg ->
@@ -286,6 +295,9 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                 | Error msg ->
                   Printf.eprintf "[lib] %s\n%!" msg; None
                 | Ok ast ->
+                  (* Spans in this AST carry [file_path] as-written; record it
+                     so user_files matches them (see parsed_paths above). *)
+                  Hashtbl.replace parsed_paths file_path ();
                   Some (canon_fp, March_desugar.Desugar.desugar_module ast)
           ) files in
         (* Sort: more dot-segments in mod name → load first (namespace leaves).
@@ -326,8 +338,12 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
      the source dir / lib path).  Callers use this list to decide which
      typecheck diagnostics are fatal: errors in any of these files must
      abort, while stdlib-internal errors are tolerated (some stdlib modules
-     are WIP).  Membership is exact — span files carry the same path strings
-     used to open them — and is robust against stdlib files whose cached
-     spans point at a different install location. *)
-  let user_files = Hashtbl.fold (fun path () acc -> path :: acc) loaded_paths [] in
+     are WIP).  Membership is by exact string match, so include BOTH path
+     spellings: the as-parsed strings (what diagnostic spans carry, often
+     relative) and the canonical realpath'd strings.  Listing only the
+     canonical form silently dropped every lib-module diagnostic when
+     MARCH_LIB_PATH was relative, letting ill-typed TIR reach codegen. *)
+  let user_files =
+    Hashtbl.fold (fun path () acc -> path :: acc) parsed_paths
+      (Hashtbl.fold (fun path () acc -> path :: acc) loaded_paths []) in
   (!errors, explicit_decls @ auto_decls, user_files)
