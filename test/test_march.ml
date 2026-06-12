@@ -3810,6 +3810,58 @@ let test_defun_erased_closure_in_tuple_becomes_ecallptr () =
   Alcotest.(check bool) "erased closure call in run is ECallPtr" true
     (has_callptr run_fn.March_tir.Tir.fn_body)
 
+(* Regression: a default-arg function defined inside a NESTED module must keep
+   its real parameter list, not be routed through the general desugar path that
+   boxes every parameter into a synthesised tuple
+   (`let $t = (a, ...) in case $t of Tuple(...)`).  [expand_defaults_decl] only
+   runs on top-level decls, so before the fix a nested default-arg fn kept its
+   [FPDefault] params, [clause_is_trivial] returned false, and [desugar_fn_def]
+   produced the tuple adapter.  When such a fn also takes a type-erased closure
+   parameter, that adapter mismanaged the closure's refcount and freed it before
+   its call — a use-after-free (bastion Form.Wrapper.render via CSRF.tag). *)
+let test_desugar_nested_default_arg_no_param_tuple () =
+  let m = parse_and_desugar {|mod Outer do
+    mod Inner do
+      fn render(a, b, c \\ "post", ri) do
+        let z = a
+        ri()
+      end
+    end
+  end|} in
+  let rec find_render decls =
+    List.fold_left (fun acc d ->
+      match acc with
+      | Some _ -> acc
+      | None ->
+        (match d with
+         | March_ast.Ast.DFn (def, _)
+           when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "render" -> Some def
+         | March_ast.Ast.DMod (_, _, inner, _) -> find_render inner
+         | _ -> None)
+    ) None decls
+  in
+  let render = match find_render m.March_ast.Ast.mod_decls with
+    | Some d -> d
+    | None -> Alcotest.fail "nested render fn not found after desugar"
+  in
+  let clause = List.hd render.March_ast.Ast.fn_clauses in
+  (* The body must NOT be a match over a synthesised param tuple. *)
+  let is_param_tuple_match = match clause.March_ast.Ast.fc_body with
+    | March_ast.Ast.EMatch (March_ast.Ast.ETuple _, _, _) -> true
+    | _ -> false
+  in
+  Alcotest.(check bool) "nested default-arg fn body is not a param-tuple match"
+    false is_param_tuple_match;
+  (* Params should be the real names, never synthesised __argN. *)
+  let synth_param = List.exists (function
+    | March_ast.Ast.FPNamed p ->
+      let n = p.March_ast.Ast.param_name.March_ast.Ast.txt in
+      String.length n >= 5 && String.sub n 0 5 = "__arg"
+    | _ -> false) clause.March_ast.Ast.fc_params
+  in
+  Alcotest.(check bool) "nested default-arg fn keeps real param names"
+    false synth_param
+
 let test_defun_zero_capture_closure () =
   let m = defun_module {|mod Test do
     fn main() : Int do
@@ -21719,6 +21771,7 @@ let () =
           Alcotest.test_case "defun no letrec lambda"`Quick test_defun_no_letrec_lambda;
           Alcotest.test_case "defun indirect call"   `Quick test_defun_indirect_call_becomes_ecallptr;
           Alcotest.test_case "defun erased closure callptr" `Quick test_defun_erased_closure_in_tuple_becomes_ecallptr;
+          Alcotest.test_case "nested default-arg fn keeps signature (no param tuple)" `Quick test_desugar_nested_default_arg_no_param_tuple;
           Alcotest.test_case "defun zero capture"    `Quick test_defun_zero_capture_closure;
           Alcotest.test_case "defun nested lambda"   `Quick test_defun_nested_lambda;
           Alcotest.test_case "defun pp type_def"     `Quick test_defun_pp_type_def;
