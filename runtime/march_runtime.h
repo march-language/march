@@ -75,8 +75,25 @@ void   *march_logger_clear_context(void);
 void   *march_logger_get_context(void);
 void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
 
-/* String builtins. */
-typedef struct { int64_t rc; int64_t len; char data[]; } march_string;
+/* String builtins.
+ *
+ * march_string shares the 16-byte march_hdr prefix (rc/tag/pad) so that a
+ * string heap cell is DISCRIMINABLE from an ADT/tuple/record cell by its tag
+ * word at offset 8 — every string carries the reserved MARCH_STRING_TAG.
+ * This lets march_value_to_string (the type-erased to_string path, hit when
+ * the static type is a TVar that actually holds a string) recognize a string
+ * and return it verbatim instead of misreading the layout and printing
+ * "#<tag:len>".  len moves to offset 16 and data to offset 24; all access is
+ * through the struct members, so recompilation keeps every offset correct.
+ * Compiled code never bakes in the layout — it builds strings via
+ * march_string_lit — so this is a runtime-only change. */
+#define MARCH_STRING_TAG ((int32_t)-1) /* 0xFFFFFFFF — reserved sentinel, never a ctor index (ADT tags are >= 0). Matches the long-standing cross-heap copy convention in march_message.c. */
+typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
+/* Allocate an uninitialised-data march_string of byte length [len], with the
+ * header (rc=1, tag=MARCH_STRING_TAG, pad=0, len) filled in.  Callers fill
+ * data[0..len] and the NUL terminator.  Centralises header init so no string
+ * site can leave the discriminator tag unset. */
+void *march_string_alloc(int64_t len);
 void *march_string_lit(const char *utf8, int64_t len);
 void *march_int_to_string(int64_t n);
 void *march_float_to_string(double f);

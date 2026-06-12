@@ -268,12 +268,22 @@ void *march_iolist_hash_fnv1a(void *iol) {
 
 /* ── Strings ─────────────────────────────────────────────────────────── */
 
-/* march_string layout: [rc:i64][len:i64][data:char*] */
-void *march_string_lit(const char *utf8, int64_t len) {
+/* march_string layout: [rc:i64][tag:i32][pad:i32][len:i64][data:char[]]
+ * The tag word (offset 8) carries MARCH_STRING_TAG so the cell is
+ * distinguishable from ADT/tuple/record cells in the type-erased
+ * march_value_to_string path. */
+void *march_string_alloc(int64_t len) {
     march_string *s = malloc(sizeof(march_string) + (size_t)len + 1);
     if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
     s->rc  = 1;
+    s->tag = MARCH_STRING_TAG;
+    s->pad = 0;
     s->len = len;
+    return s;
+}
+
+void *march_string_lit(const char *utf8, int64_t len) {
+    march_string *s = march_string_alloc(len);
     memcpy(s->data, utf8, (size_t)len);
     s->data[len] = '\0';
     return s;
@@ -321,10 +331,7 @@ void *march_string_concat(void *a, void *b) {
     if (__builtin_add_overflow(sa->len, sb->len, &total)) {
         fputs("march: runtime error: string too large (concat overflow)\n", stderr); exit(1);
     }
-    march_string *s = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
-    s->rc  = 1;
-    s->len = total;
+    march_string *s = march_string_alloc(total);
     memcpy(s->data, sa->data, (size_t)sa->len);
     memcpy(s->data + sa->len, sb->data, (size_t)sb->len);
     s->data[total] = '\0';
@@ -445,10 +452,7 @@ void *march_string_join(void *list, void *sep) {
     }
     if (count > 1) total += sep_len * (count - 1);
     /* Allocate result string */
-    march_string *result = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!result) { fputs("march: out of memory\n", stderr); exit(1); }
-    result->rc  = 1;
-    result->len = total;
+    march_string *result = march_string_alloc(total);
     /* Second pass: fill */
     char *dst = result->data;
     int64_t first = 1;
@@ -1600,9 +1604,7 @@ void *march_string_from_chars(void *lst) {
         total += ch->len;
         cur = *(void **)((char *)cur + 24);
     }
-    march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = total;
+    march_string *r = march_string_alloc(total);
     int64_t off = 0;
     cur = lst;
     while (1) {
@@ -1629,9 +1631,7 @@ void *march_string_replace(void *s, void *old, void *new_) {
     for (int64_t i = 0; i + so->len <= ss->len; i++) {
         if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
             int64_t newlen = ss->len - so->len + sn->len;
-            march_string *r = malloc(sizeof(march_string) + (size_t)newlen + 1);
-            if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-            r->rc = 1; r->len = newlen;
+            march_string *r = march_string_alloc(newlen);
             memcpy(r->data, ss->data, (size_t)i);
             memcpy(r->data + i, sn->data, (size_t)sn->len);
             memcpy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
@@ -1679,9 +1679,7 @@ void *march_string_replace_all(void *s, void *old, void *new_) {
 
 void *march_string_to_lowercase(void *s) {
     march_string *ss = (march_string *)s;
-    march_string *r = malloc(sizeof(march_string) + (size_t)ss->len + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = ss->len;
+    march_string *r = march_string_alloc(ss->len);
     for (int64_t i = 0; i < ss->len; i++) {
         r->data[i] = (char)tolower((unsigned char)ss->data[i]);
     }
@@ -1691,9 +1689,7 @@ void *march_string_to_lowercase(void *s) {
 
 void *march_string_to_uppercase(void *s) {
     march_string *ss = (march_string *)s;
-    march_string *r = malloc(sizeof(march_string) + (size_t)ss->len + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = ss->len;
+    march_string *r = march_string_alloc(ss->len);
     for (int64_t i = 0; i < ss->len; i++) {
         r->data[i] = (char)toupper((unsigned char)ss->data[i]);
     }
@@ -1737,9 +1733,7 @@ void *march_string_repeat(void *s, int64_t n) {
     if (__builtin_mul_overflow(ss->len, n, &total)) {
         fputs("march: runtime error: string too large (repeat overflow)\n", stderr); exit(1);
     }
-    march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = total;
+    march_string *r = march_string_alloc(total);
     for (int64_t i = 0; i < n; i++) {
         memcpy(r->data + i * ss->len, ss->data, (size_t)ss->len);
     }
@@ -1749,9 +1743,7 @@ void *march_string_repeat(void *s, int64_t n) {
 
 void *march_string_reverse(void *s) {
     march_string *ss = (march_string *)s;
-    march_string *r = malloc(sizeof(march_string) + (size_t)ss->len + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = ss->len;
+    march_string *r = march_string_alloc(ss->len);
     for (int64_t i = 0; i < ss->len; i++) {
         r->data[i] = ss->data[ss->len - 1 - i];
     }
@@ -1765,9 +1757,7 @@ void *march_string_pad_left(void *s, int64_t width, void *fill) {
     if (ss->len >= width) return march_string_lit(ss->data, ss->len);
     int64_t pad = width - ss->len;
     int64_t total = width;
-    march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = total;
+    march_string *r = march_string_alloc(total);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data, fc, (size_t)pad);
     memcpy(r->data + pad, ss->data, (size_t)ss->len);
@@ -1781,9 +1771,7 @@ void *march_string_pad_right(void *s, int64_t width, void *fill) {
     if (ss->len >= width) return march_string_lit(ss->data, ss->len);
     int64_t pad = width - ss->len;
     int64_t total = width;
-    march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
-    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
-    r->rc = 1; r->len = total;
+    march_string *r = march_string_alloc(total);
     memcpy(r->data, ss->data, (size_t)ss->len);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data + ss->len, fc, (size_t)pad);
@@ -2841,6 +2829,12 @@ void *march_value_to_string(void *v) {
     }
     march_hdr *h = (march_hdr *)v;
     int32_t tag = h->tag;
+    /* String heap cell: every march_string carries MARCH_STRING_TAG at the
+     * tag word, so to_string on a value whose static type erased to a TVar but
+     * actually holds a string returns the string verbatim (identity), matching
+     * the interpreter — instead of misreading the layout (len-as-tag) and
+     * printing "#<tag:len>".  Result is +1: alias the borrowed input. */
+    if (tag == MARCH_STRING_TAG) { march_incrc(v); return v; }
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);

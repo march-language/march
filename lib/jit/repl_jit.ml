@@ -333,7 +333,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
   let open March_tir.Tir in
   match ty with
   | TString ->
-    (* march_string layout: {rc:i64, len:i64, data:char[]} *)
+    (* march_string layout: {rc:i64, tag:i32, pad:i32, len:i64, data:char[]} *)
     Printf.sprintf "%S" (Jit.read_march_string ptr)
   | TCon ("List", [elem_ty]) ->
     pp_list ~depth ~type_defs elem_ty ptr
@@ -348,8 +348,9 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
     if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ~type_defs ~tagged:true ok_ty ptr 0)
     else         Printf.sprintf "Err(%s)" (pp_field ~depth ~type_defs ~tagged:true err_ty ptr 0)
   | TTuple tys ->
-    (* Tuple fields are stored UNTAGGED (no tag bit on scalar slots). *)
-    let fields = List.mapi (fun i ty -> pp_field ~depth ~type_defs ~tagged:false ty ptr i) tys in
+    (* Tuple fields use the uniform slot convention: scalars are low-bit
+       tagged (matching ETuple's coerce-to-ptr store), so untag scalar views. *)
+    let fields = List.mapi (fun i ty -> pp_field ~depth ~type_defs ~tagged:true ty ptr i) tys in
     Printf.sprintf "(%s)" (String.concat ", " fields)
   | TCon (name, args) when Hashtbl.mem type_defs name ->
     let td = Hashtbl.find type_defs name in

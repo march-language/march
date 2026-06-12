@@ -1022,12 +1022,24 @@ let coerce ctx from_ty v to_ty =
     emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r i);
     r
   | ("ptr", "i64") ->
-    (* Untag a low-bit-tagged integer: arithmetic right-shift restores value.
-       inttoptr stores (n<<1)|1 for integer n; ashr by 1 recovers n. *)
+    (* Untag a low-bit-tagged integer — CONDITIONALLY.  Producers store
+       integers as (n<<1)|1 (always odd), so an odd value is untagged with an
+       arithmetic right-shift.  An EVEN value cannot be a tagged scalar: it is
+       a heap pointer flowing through a scalar-typed view (dynamically-typed
+       record/alist code whose static type lies about the runtime value, e.g.
+       depot's heterogeneous schema opts).  Preserving even bits verbatim
+       makes tag→untag a lossless roundtrip for ALL bit patterns, so such
+       values survive scalar-typed transit unscathed. *)
     let i = fresh ctx "cv" in
+    let b = fresh ctx "cv" in
+    let s = fresh ctx "cv" in
+    let o = fresh ctx "cv" in
     let r = fresh ctx "cv" in
     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
-    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" r i);
+    emit ctx (Printf.sprintf "%s = and i64 %s, 1" b i);
+    emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" o b);
+    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" s i);
+    emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r o s i);
     r
   | ("i64", "ptr") ->
     (* Tag an integer for polymorphic storage: (n << 1) | 1.
@@ -2448,7 +2460,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some t -> t
       | None   ->
         (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         (* The function IS registered but with an unresolved TVar return, so
+            its definition emits `ret ptr` (the generic representation).  The
+            call site MUST therefore read the result as ptr and let the
+            consumer coerce/untag to its concrete type — using the call-site
+            scalar type here would emit `call i64` against a `ret ptr` body,
+            reinterpreting a tagged generic value as a raw scalar (e.g. a
+            dynamic record-field read returning `(n<<1)|1` read back as `3`).
+            Mirrors the zero-arg AVar path. *)
+         | Some (Tir.TVar _) -> Tir.TVar "_"
+         (* Unregistered (extern/interface dispatch): the call-site annotation
+            is the only type info; the forward declaration uses it too. *)
+         | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
@@ -2509,7 +2532,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some c_name -> c_name
       | None -> mangle_extern qualified in
     let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty qualified with
-      | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+      (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
+      | Some (Tir.TVar _) -> Tir.TVar "_"
+      | None -> fn_ret_tir f.Tir.v_ty
       | Some t -> t
     in
     let ret_ty = llvm_ret_ty ret_tir in
@@ -2591,7 +2616,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some t -> t
       | None ->
         (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
+         | Some (Tir.TVar _) -> Tir.TVar "_"
+         | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
@@ -2739,11 +2766,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", ptr)
 
   | Tir.EAlloc (_, args) ->
+    (* Non-TCon allocation (tuples / erased cells): UNIFORM slots — readers
+       go through ctor_entry fallbacks that load ptr and untag conditionally. *)
     let n = List.length args in
     let ptr = emit_heap_alloc ctx 0 n in
     List.iteri (fun i atom ->
       let (ty, v) = emit_atom ctx atom in
-      emit_store_field ctx ptr i ty v
+      let vp = coerce ctx ty v "ptr" in
+      emit_store_field ctx ptr i "ptr" vp
     ) args;
     ("ptr", ptr)
 
@@ -2768,11 +2798,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", ptr)
 
   | Tir.EStackAlloc (_, args) ->
+    (* Non-TCon stack allocation: UNIFORM slots, mirroring EAlloc above. *)
     let n = List.length args in
     let ptr = emit_stack_alloc ctx n in
     List.iteri (fun i atom ->
       let (ty, v) = emit_atom ctx atom in
-      emit_store_field ctx ptr i ty v
+      let vp = coerce ctx ty v "ptr" in
+      emit_store_field ctx ptr i "ptr" vp
     ) args;
     ("ptr", ptr)
 
@@ -2840,7 +2872,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
     let (_, rv) = emit_atom ctx reuse_atom in
     let arg_vals = List.map (fun atom ->
-      let (ty, v) = emit_atom ctx atom in (ty, v)
+      let (ty, v) = emit_atom ctx atom in
+      (* Records keep NATURAL slot repr (shape descriptors record the kind);
+         tuples / erased cells use the UNIFORM convention (scalars tagged),
+         matching ETuple and the ptr-typed destructure fallbacks. *)
+      (match reuse_ty with
+       | Tir.TRecord _ -> (ty, v)
+       | _ -> ("ptr", coerce ctx ty v "ptr"))
     ) args in
     let rc = fresh ctx "rc" in
     emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
@@ -2939,11 +2977,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ETuple [] -> ("i64", "0")
 
   | Tir.ETuple atoms ->
+    (* Tuple slots use the UNIFORM convention: scalars low-bit tagged via
+       coerce i64→ptr, heap values raw.  Every destructure path reads tuple
+       fields as ptr (ctor_entry "$TupleN" is never registered, so its
+       fallback yields TVar fields) and untags scalar views conditionally —
+       storing naturals here silently halved odd ints / flipped true→false
+       the moment a tuple passed through any pattern match. *)
     let n = List.length atoms in
     let ptr = emit_heap_alloc ctx 0 n in
     List.iteri (fun i atom ->
       let (ty, v) = emit_atom ctx atom in
-      emit_store_field ctx ptr i ty v
+      let vp = coerce ctx ty v "ptr" in
+      emit_store_field ctx ptr i "ptr" vp
     ) atoms;
     ("ptr", ptr)
 
