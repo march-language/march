@@ -1422,13 +1422,7 @@ void *march_codepoint_to_utf8(int64_t cp) {
     }
 
     /* Create March string from UTF-8 bytes */
-    march_string *s = (march_string *)malloc(sizeof(march_string) + (size_t)len + 1);
-    if (!s) {
-        fputs("march: out of memory\n", stderr);
-        exit(1);
-    }
-    s->rc = 1;
-    s->len = len;
+    march_string *s = march_string_alloc(len);
     memcpy(s->data, buf, (size_t)len);
     s->data[len] = '\0';
 

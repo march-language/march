@@ -296,6 +296,8 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
     march_string *result = malloc(sizeof(march_string) + total + 1);
     if (!result) { free(body_buf); return NULL; }
     atomic_store_explicit((_Atomic int64_t *)&result->rc, 1, memory_order_relaxed);
+    result->tag = MARCH_STRING_TAG;
+    result->pad = 0;
     result->len = (int64_t)total;
     memcpy(result->data, tl_recv_buf.buf, hdrs_end);
     if (body_buf) {

@@ -2452,7 +2452,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some t -> t
       | None   ->
         (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         (* The function IS registered but with an unresolved TVar return, so
+            its definition emits `ret ptr` (the generic representation).  The
+            call site MUST therefore read the result as ptr and let the
+            consumer coerce/untag to its concrete type — using the call-site
+            scalar type here would emit `call i64` against a `ret ptr` body,
+            reinterpreting a tagged generic value as a raw scalar (e.g. a
+            dynamic record-field read returning `(n<<1)|1` read back as `3`).
+            Mirrors the zero-arg AVar path. *)
+         | Some (Tir.TVar _) -> Tir.TVar "_"
+         (* Unregistered (extern/interface dispatch): the call-site annotation
+            is the only type info; the forward declaration uses it too. *)
+         | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
@@ -2513,7 +2524,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some c_name -> c_name
       | None -> mangle_extern qualified in
     let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty qualified with
-      | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+      (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
+      | Some (Tir.TVar _) -> Tir.TVar "_"
+      | None -> fn_ret_tir f.Tir.v_ty
       | Some t -> t
     in
     let ret_ty = llvm_ret_ty ret_tir in
@@ -2595,7 +2608,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some t -> t
       | None ->
         (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
-         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         (* TVar-registered fn emits `ret ptr`; call as ptr, consumer coerces. *)
+         | Some (Tir.TVar _) -> Tir.TVar "_"
+         | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
