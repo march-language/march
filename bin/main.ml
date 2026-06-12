@@ -443,6 +443,7 @@ let fmt_file filename =
 (** Collect all .march files under a directory recursively. *)
 let rec march_files_in dir =
   let entries = Sys.readdir dir in
+  Array.sort compare entries;
   Array.fold_left (fun acc entry ->
     let path = Filename.concat dir entry in
     if Sys.is_directory path then
@@ -481,7 +482,7 @@ let run_test_cmd args =
       let test_dir = "test" in
       if not (Sys.file_exists test_dir) then []
       else
-        let entries = Array.to_list (Sys.readdir test_dir) in
+        let entries = List.sort compare (Array.to_list (Sys.readdir test_dir)) in
         List.filter_map (fun name ->
           if (String.length name > 6 && String.sub name 0 5 = "test_"
               && Filename.check_suffix name ".march")
