@@ -1,0 +1,13 @@
+-- Regression fixture entry: well-typed itself; the type error lives in a
+-- module auto-discovered from a relative MARCH_LIB_PATH directory.  Both
+-- `march --check` and `march test` must exit 1.
+mod LpEntry do
+
+  -- Deliberately does NOT call LpIllTypedLib.broken(): the failure must
+  -- come from the typechecker seeing the lib module's body, not from a
+  -- runtime arity check.
+  test "lib-path module must typecheck" do
+    assert (LpIllTypedLib.add(2, 4) == 6)
+  end
+
+end

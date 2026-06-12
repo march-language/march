@@ -1,0 +1,29 @@
+-- Entry: indirect call through an erased-type closure, compiled natively.
+-- Regression for the ECallPtr dispatch path in llvm_emit.ml: the callee
+-- atom may load as i64 when its TIR type is an unconstrained TVar (a
+-- closure parameter captured into another lambda's environment loses its
+-- TFn type through the erased env slot).  The dispatch previously assumed
+-- the callee was already a ptr and fed the raw i64 SSA value to the
+-- fn-pointer getelementptr, producing invalid IR:
+--   error: '%ldNN' defined with type 'i64' but expected 'ptr'
+-- The callee must be coerced to ptr (inttoptr) before the field load.
+-- Distilled from Depot.Migration.run: a thunk param wrapped in
+-- `__try_call(fn _ -> thunk())`.
+mod EcEntry do
+
+fn apply_thunk(thunk) do
+  match __try_call(fn _ -> thunk()) do
+    Ok(v) -> v
+    Err(_) -> false
+  end
+end
+
+fn main() do
+  if apply_thunk(fn () -> true) do
+    println("ok erased closure call")
+  else
+    panic("erased_clo_native: thunk result wrong")
+  end
+end
+
+end

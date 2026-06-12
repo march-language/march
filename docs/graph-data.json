@@ -13243,6 +13243,39 @@
       "created_at": "2026-06-12T14:54:31.974761-04:00",
       "updated_at": "2026-06-12T14:54:31.974761-04:00",
       "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"confidence\":90}"
+    },
+    {
+      "id": 1205,
+      "change_id": "6c7eb2c8-550b-4d5e-8c5a-d5cffed0d2a5",
+      "node_type": "observation",
+      "title": "False alarm resolved: record_native 'entries hetero int' failure was a POISONED TEST ENV, not a main regression — _build/default/runtime/march_extras.c was a stale pre-#40 dune copy (11:43) while source was current (13:12); the compiler links runtime exe-relative so native fixtures mixed pre-#40 C (natural pair snd) with post-#40 codegen (tagged tuples). Fresh copy → record_native all ok. Commit a5af8ab on main (runtime source_tree deps) addresses this staleness class",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T15:25:09.037831-04:00",
+      "updated_at": "2026-06-12T15:25:09.037831-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
+    },
+    {
+      "id": 1206,
+      "change_id": "8aa0ae49-ab44-49ca-b2fc-a034e6333723",
+      "node_type": "outcome",
+      "title": "Merge-ready: branch 55c7caa = latest main + ECallPtr i64-callee restore (19-line llvm_emit delta) + 3 regression fixtures; full dune runtest exit 0, zero FAIL lines; record_native/erased_clo/lib_path_ill_typed individually verified. Fast-forward of main blocked by a concurrent session's uncommitted test/dune edits — user chose to wait; monitor armed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T16:18:25.397208-04:00",
+      "updated_at": "2026-06-12T16:18:25.397208-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
+    },
+    {
+      "id": 1207,
+      "change_id": "9e5acf96-0d6f-4f26-8187-b2df0faf1054",
+      "node_type": "outcome",
+      "title": "Merged to main: fast-forward eefa409 -> bb8be48 (9 files, +210/-33). Delta: ECallPtr erased-callee restore, erased_clo_native + lib_path_ill_typed fixtures (interpreter + --check modes), specs, graph export. Full suite was green on this exact tree",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T16:22:36.639414-04:00",
+      "updated_at": "2026-06-12T16:22:36.639414-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -22199,6 +22232,39 @@
       "weight": 1.0,
       "rationale": "Exit-1 investigation outcome",
       "created_at": "2026-06-12T14:54:37.230862-04:00"
+    },
+    {
+      "id": 824,
+      "from_node_id": 1192,
+      "to_node_id": 1205,
+      "from_change_id": "e12ac9a0-cac3-4489-b867-8fb10248013e",
+      "to_change_id": "6c7eb2c8-550b-4d5e-8c5a-d5cffed0d2a5",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "merge verification follow-up",
+      "created_at": "2026-06-12T15:25:18.929511-04:00"
+    },
+    {
+      "id": 825,
+      "from_node_id": 1192,
+      "to_node_id": 1206,
+      "from_change_id": "e12ac9a0-cac3-4489-b867-8fb10248013e",
+      "to_change_id": "8aa0ae49-ab44-49ca-b2fc-a034e6333723",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "verified merge-ready state",
+      "created_at": "2026-06-12T16:18:25.409387-04:00"
+    },
+    {
+      "id": 826,
+      "from_node_id": 1206,
+      "to_node_id": 1207,
+      "from_change_id": "8aa0ae49-ab44-49ca-b2fc-a034e6333723",
+      "to_change_id": "9e5acf96-0d6f-4f26-8187-b2df0faf1054",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "landed",
+      "created_at": "2026-06-12T16:22:36.655004-04:00"
     }
   ]
 }
