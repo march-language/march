@@ -172,6 +172,20 @@
           (run %{exe:../bin/main.exe} --check
                imports/entry_imports_ill_typed.march))))
 
+; The `check` SUBCOMMAND (run_check_cmd, what `forge` invokes) is a THIRD code
+; path distinct from `--check` above: it filtered diagnostics against the
+; command-line file list only, so errors in auto-discovered imported modules
+; were dropped as stdlib-internal (fixed by merging each entry's user_files
+; into the membership filter).  Must exit 1 like the other two paths.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/entry_imports_ill_typed.march)
+       (file imports/ill_typed_user_mod.march))
+ (action (with-accepted-exit-codes 1
+          (run %{exe:../bin/main.exe} check
+               imports/entry_imports_ill_typed.march))))
+
 ; ── Regression: relative MARCH_LIB_PATH diagnostics must not be dropped ──
 ; user_files held only canonicalised (realpath'd) paths while diagnostic
 ; spans carry the as-parsed path, so with a RELATIVE lib path every
@@ -282,6 +296,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_default_args_nested native_default_args_nested.out)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (file native/default_args_nested.march))
  (action
   (progn
@@ -307,6 +322,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_zero_arg_closure_default native_zero_arg_closure_default.out)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (file native/zero_arg_closure_default.march))
  (action
   (progn
