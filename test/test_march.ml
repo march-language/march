@@ -6822,14 +6822,22 @@ let test_complete_replace_with_suffix () =
 (* ------------------------------------------------------------------ *)
 
 (** Try to compile the march runtime to a shared library.
-    Returns [Some path] on success, [None] if clang or runtime.c is missing. *)
+    Returns [Some path] on success, [None] if clang or runtime.c is missing.
+
+    The cache lives in ~/.cache/march, which is SHARED across worktrees and
+    concurrent sessions — so the artifact name is keyed by a digest of every
+    C source/header that goes into it, and the write is atomic (compile to
+    a pid-suffixed temp, then rename).  The old scheme — one fixed
+    "libmarch_rt_test.so" with an existence-only check — was never
+    invalidated when the runtime changed, and a concurrent worktree with
+    diverged runtime sources would overwrite it with an ABI-mismatched
+    binary, hanging whichever test process dlopen'd the wrong build. *)
 let setup_jit_runtime () =
   let home = Sys.getenv "HOME" in
   let dot_cache = Filename.concat home ".cache" in
   let cache_dir = Filename.concat dot_cache "march" in
   (try Unix.mkdir dot_cache 0o755 with Unix.Unix_error _ -> ());
   (try Unix.mkdir cache_dir 0o755 with Unix.Unix_error _ -> ());
-  let so_path = Filename.concat cache_dir "libmarch_rt_test.so" in
   let candidates = [
     "runtime/march_runtime.c";
     "../runtime/march_runtime.c";
@@ -6839,25 +6847,41 @@ let setup_jit_runtime () =
   match List.find_opt Sys.file_exists candidates with
   | None -> None
   | Some runtime_c ->
-    if not (Sys.file_exists so_path) then begin
-      let runtime_dir = Filename.dirname runtime_c in
-      let opt_file f =
-        let p = Filename.concat runtime_dir f in
-        if Sys.file_exists p then " " ^ p else ""
-      in
-      (* On Linux, dlopen requires all symbols resolved at load time (unlike
-         macOS which allows lazy/two-level resolution). Include all core C
-         files that march_runtime.c depends on. Determined by attempting a
-         link and collecting the resulting "undefined symbol" errors. *)
+    let runtime_dir = Filename.dirname runtime_c in
+    let opt_path f =
+      let p = Filename.concat runtime_dir f in
+      if Sys.file_exists p then Some p else None
+    in
+    (* On Linux, dlopen requires all symbols resolved at load time (unlike
+       macOS which allows lazy/two-level resolution). Include all core C
+       files that march_runtime.c depends on. Determined by attempting a
+       link and collecting the resulting "undefined symbol" errors. *)
+    let extra_src_list = List.filter_map opt_path [
+      "march_scheduler.c"; "march_message.c"; "march_heap.c";
+      "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c";
+    ] in
+    let c_inputs = runtime_c :: extra_src_list in
+    let h_inputs =
+      (try Sys.readdir runtime_dir with Sys_error _ -> [||])
+      |> Array.to_list
+      |> List.filter (fun f -> Filename.check_suffix f ".h")
+      |> List.sort String.compare
+      |> List.map (Filename.concat runtime_dir)
+    in
+    let key_buf = Buffer.create 256 in
+    List.iter (fun p ->
+        Buffer.add_string key_buf (Filename.basename p);
+        try Buffer.add_string key_buf (Digest.to_hex (Digest.file p))
+        with Sys_error _ -> ())
+      (c_inputs @ h_inputs);
+    let key =
+      String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
+    let so_path =
+      Filename.concat cache_dir ("libmarch_rt_test_" ^ key ^ ".so") in
+    if Sys.file_exists so_path then Some so_path
+    else begin
       let extra_srcs =
-        (opt_file "march_scheduler.c") ^
-        (opt_file "march_message.c") ^
-        (opt_file "march_heap.c") ^
-        (opt_file "march_gc.c") ^
-        (opt_file "sha1.c") ^
-        (opt_file "march_extras.c") ^
-        (opt_file "base64.c")
-      in
+        String.concat "" (List.map (fun p -> " " ^ p) extra_src_list) in
       (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
       let pthread_flag =
         match Sys.os_type with
@@ -6867,11 +6891,22 @@ let setup_jit_runtime () =
            | _ -> " -lpthread")
         | _ -> ""
       in
+      (* Compile to a temp and rename: rename(2) is atomic on the same
+         filesystem, so a concurrent test process can never dlopen a
+         half-written .so. *)
+      let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
       let rc = Sys.command (Printf.sprintf
         "clang -shared -O2 -fPIC %s%s%s -o %s 2>/dev/null"
-        runtime_c extra_srcs pthread_flag so_path) in
-      if rc <> 0 then None else Some so_path
-    end else Some so_path
+        runtime_c extra_srcs pthread_flag tmp) in
+      if rc <> 0 then begin
+        (try Sys.remove tmp with Sys_error _ -> ());
+        None
+      end else begin
+        (try Sys.rename tmp so_path
+         with Sys_error _ -> (try Sys.remove tmp with Sys_error _ -> ()));
+        if Sys.file_exists so_path then Some so_path else None
+      end
+    end
 
 (** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
 let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
