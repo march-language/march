@@ -18103,6 +18103,36 @@ let test_crypto_hmac_sha256_bytes () =
     "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
     hex
 
+let test_crypto_hmac_sha256_typecheck () =
+  (* Regression: the typecheck entry once declared Bytes -> Bytes -> Bytes,
+     disagreeing with eval, the native runtime, and llvm_emit — all of which
+     take String keys/messages and return Result(Bytes, String).  The
+     canonical signature is String -> String -> Result(Bytes, String). *)
+  let src = {|mod Test do
+    fn go() do
+      match hmac_sha256("secret", "message") do
+        Ok(b) -> base64_encode(b)
+        Err(e) -> e
+      end
+    end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "hmac_sha256 Result usage typechecks"
+    false (has_errors errors)
+
+let test_crypto_hmac_sha256_bytes_typecheck () =
+  (* The Bytes-domain variant returns bare Bytes (no Result wrapper):
+     its result feeds base64_encode(Bytes) directly, and its params are
+     inferred as Bytes from the builtin signature. *)
+  let src = {|mod Test do
+    fn go() do
+      base64_encode(hmac_sha256_bytes(random_bytes(4), random_bytes(8)))
+    end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "hmac_sha256_bytes bare-Bytes usage typechecks"
+    false (has_errors errors)
+
 let test_crypto_pbkdf2_sha256_length () =
   let open March_eval.Eval in
   let r = call_builtin "pbkdf2_sha256"
@@ -22837,6 +22867,8 @@ let () =
         Alcotest.test_case "sha256 bytes input"       `Quick test_crypto_sha256_bytes_input;
         Alcotest.test_case "hmac_sha256 known"        `Quick test_crypto_hmac_sha256;
         Alcotest.test_case "hmac_sha256 length"       `Quick test_crypto_hmac_sha256_length;
+        Alcotest.test_case "hmac_sha256 typecheck"    `Quick test_crypto_hmac_sha256_typecheck;
+        Alcotest.test_case "hmac_sha256_bytes typecheck" `Quick test_crypto_hmac_sha256_bytes_typecheck;
         Alcotest.test_case "hmac_sha256_bytes known"  `Quick test_crypto_hmac_sha256_bytes;
         Alcotest.test_case "pbkdf2_sha256 length"     `Quick test_crypto_pbkdf2_sha256_length;
         Alcotest.test_case "pbkdf2_sha256 known"      `Quick test_crypto_pbkdf2_sha256_known;

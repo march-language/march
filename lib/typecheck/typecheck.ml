@@ -1343,8 +1343,11 @@ let builtin_bindings : (string * scheme) list =
     ("receive", poly1 (fun a -> a));
     (* Crypto / encoding builtins *)
     ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
-    ("hmac_sha256",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
-        TCon ("Bytes", [])))));
+    (* hmac_sha256(key, msg): String-domain HMAC. Canonical signature matches
+       the native runtime (march_hmac_sha256 reads march_string args) and the
+       eval builtin — both return Result(Bytes, String). *)
+    ("hmac_sha256",     Mono (TArrow (t_string, TArrow (t_string,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
     (* hmac_sha256_bytes(key, msg): Bytes-domain HMAC, bare Bytes result *)
     ("hmac_sha256_bytes", Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));

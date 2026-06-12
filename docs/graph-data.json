@@ -12286,6 +12286,39 @@
       "created_at": "2026-06-11T21:33:03.906990-04:00",
       "updated_at": "2026-06-11T21:33:03.906990-04:00",
       "metadata_json": "{\"branch\":\"claude/eager-edison-13686a\",\"commit\":\"20e53f2\",\"confidence\":95}"
+    },
+    {
+      "id": 1118,
+      "change_id": "6fb0c3cb-d1a7-4a17-b20e-27540019b292",
+      "node_type": "goal",
+      "title": "Fix wire_encode_test stale curried collection API",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:36:07.516877-04:00",
+      "updated_at": "2026-06-12T11:36:07.516877-04:00",
+      "metadata_json": "{\"branch\":\"claude/optimistic-banzai-b6626d\",\"confidence\":95,\"prompt\":\"test/depot/wire_encode_test.march in the March repo parses but fails typechecking: it uses the old curried collection API, e.g. line 69 Map.fold(Bytes.empty(), params, fn acc -> fn k -> fn v -> ...) — current stdlib Map.fold is uncurried with a different argument order/signature. Run ./_build/default/bin/main.exe test test/depot/wire_encode_test.march to see all type errors (several Bytes.concat/Map.fold mismatches around lines 69-118), update the calls to the current stdlib signatures (check stdlib/map.march and stdlib conventions: collections take uncurried multi-arg lambdas), and verify the test file passes. Stage files explicitly by name, never git add -A.\"}"
+    },
+    {
+      "id": 1119,
+      "change_id": "77d9c484-ae8d-4df6-93d1-fb551cf63eca",
+      "node_type": "action",
+      "title": "Migrated folds to uncurried API, fixed missing | in DescribeTarget",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:36:13.325611-04:00",
+      "updated_at": "2026-06-12T11:36:13.325611-04:00",
+      "metadata_json": "{\"branch\":\"claude/optimistic-banzai-b6626d\",\"commit\":\"0a52b54\",\"confidence\":95,\"files\":[\"test/depot/wire_encode_test.march\"]}"
+    },
+    {
+      "id": 1120,
+      "change_id": "10a6cc01-9610-4665-b0b0-7651dce2300b",
+      "node_type": "outcome",
+      "title": "wire_encode_test passes: 129 tests",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:36:13.355846-04:00",
+      "updated_at": "2026-06-12T11:36:13.355846-04:00",
+      "metadata_json": "{\"branch\":\"claude/optimistic-banzai-b6626d\",\"confidence\":100}"
     }
   ],
   "edges": [
@@ -20131,6 +20164,28 @@
       "weight": 1.0,
       "rationale": "P2 implementation result",
       "created_at": "2026-06-11T21:33:03.919113-04:00"
+    },
+    {
+      "id": 717,
+      "from_node_id": 1118,
+      "to_node_id": 1119,
+      "from_change_id": "6fb0c3cb-d1a7-4a17-b20e-27540019b292",
+      "to_change_id": "77d9c484-ae8d-4df6-93d1-fb551cf63eca",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-12T11:36:13.368297-04:00"
+    },
+    {
+      "id": 718,
+      "from_node_id": 1119,
+      "to_node_id": 1120,
+      "from_change_id": "77d9c484-ae8d-4df6-93d1-fb551cf63eca",
+      "to_change_id": "10a6cc01-9610-4665-b0b0-7651dce2300b",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Test run result",
+      "created_at": "2026-06-12T11:36:13.380713-04:00"
     }
   ]
 }
