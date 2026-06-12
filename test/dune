@@ -172,6 +172,27 @@
           (run %{exe:../bin/main.exe} --check
                imports/entry_imports_ill_typed.march))))
 
+; ── Regression: early-CAS hash must cover source-dir sibling modules ──
+; The --check/--compile early-exit cache hashed the entry source, the stdlib
+; hash, and MARCH_LIB_PATH files — but NOT the entry's own source-dir
+; siblings, which resolve_imports auto-discovers as user code.  Editing an
+; imported sibling to introduce a type error therefore hit the stale OK
+; artifact and exited 0 without typechecking.  This rule checks a two-file
+; sandbox (caching an OK result), injects an arity error into the sibling,
+; and requires the SECOND --check to exit 1 (a warm-cache exit 0 fails it).
+; Files are generated inline so the duplicate `mod CsHelper` bodies never
+; pollute imports/ auto-discovery for other rules.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe}))
+ (action (system "\
+rm -rf cas_stale_dir && mkdir cas_stale_dir && \
+printf 'mod CsEntry do\\n\\n  use CsHelper\\n\\n  fn main() : Int do\\n    CsHelper.double(21)\\n  end\\n\\nend\\n' > cas_stale_dir/cs_entry.march && \
+printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\n\\nend\\n' > cas_stale_dir/cs_helper.march && \
+%{exe:../bin/main.exe} --check cas_stale_dir/cs_entry.march && \
+printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\n\\n  fn broken() : Int do\\n    double(1, 2, 3)\\n  end\\n\\nend\\n' > cas_stale_dir/cs_helper.march && \
+! %{exe:../bin/main.exe} --check cas_stale_dir/cs_entry.march 2>/dev/null")))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be

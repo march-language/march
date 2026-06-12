@@ -754,11 +754,26 @@ let compile filename =
       (match stdlib_source_hash () with
        | Some (_, h, _) -> Buffer.add_string buf h
        | None -> ());
+      (* Hash every .march file the resolver will load as user code: the
+         entry's OWN source directory (siblings are auto-discovered by
+         resolve_imports — search_path = source_dir :: lib paths) plus all
+         MARCH_LIB_PATH directories.  Omitting the source-dir siblings let a
+         cached OK artifact survive edits to an imported sibling module, so
+         --check/--compile exited 0 on an ill-typed program without ever
+         typechecking it.  The entry file is skipped (its bytes are already
+         the first buffer element); realpath comparison so relative/absolute
+         spellings of the entry don't double-count or slip through. *)
       let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
-      if lib_path <> "" then
-        List.iter (fun dir ->
-          let files = List.sort String.compare (collect_lib_files dir) in
-          List.iter (fun fp ->
+      let lib_dirs =
+        List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
+      let entry_real =
+        (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+      List.iter (fun dir ->
+        let files = List.sort String.compare (collect_lib_files dir) in
+        List.iter (fun fp ->
+          let fp_real =
+            (try Unix.realpath fp with Unix.Unix_error _ -> fp) in
+          if fp_real <> entry_real then begin
             Buffer.add_string buf fp;
             (try
               let ic = open_in_bin fp in
@@ -768,8 +783,9 @@ let compile filename =
               close_in ic;
               Buffer.add_bytes buf b
             with Sys_error _ -> ())
-          ) files
-        ) (String.split_on_char ':' lib_path);
+          end
+        ) files
+      ) (Filename.dirname filename :: lib_dirs);
       let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
       if !do_check then begin
