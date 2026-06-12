@@ -1910,7 +1910,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let va' = coerce ctx ty_a va "i64" in
       let vb = emit_atom_as ctx "i64" b in
       let r  = fresh ctx "ar" in
-      emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb);
+      (* / and % on Int route through checked helpers so a zero divisor traps
+         (matching the interpreter) instead of emitting a raw sdiv/srem that
+         returns garbage.  The helpers use the bare operator messages
+         ("division by zero" / "modulo by zero"); other ops stay native. *)
+      (match f.Tir.v_name with
+       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb)
+       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb)
+       | _   -> emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb));
       ("i64", r)
     end
 
@@ -3944,6 +3951,9 @@ declare double @march_checked_fdiv(double %a, double %b)
 declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
 declare i64    @march_checked_umod(i64 %a, i64 %b)
+; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
+declare i64    @march_checked_div_op(i64 %a, i64 %b)
+declare i64    @march_checked_mod_op(i64 %a, i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins
