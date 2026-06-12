@@ -3771,6 +3771,45 @@ let test_defun_indirect_call_becomes_ecallptr () =
   in
   Alcotest.(check bool) "apply_fn body has ECallPtr" true (has_callptr apply_fn.March_tir.Tir.fn_body)
 
+(* Regression: a closure whose function type was ERASED to a concrete type
+   (e.g. threaded through a tuple field, which the checker types as String)
+   must still be called via ECallPtr after defun.  Previously defun's guard
+   only fired for TFn/TVar-typed callees, so the call stayed an EApp of a
+   local variable.  Perceus's EApp liveness ignores the callee, so the
+   closure was dropped (EDecRC) before its call — a use-after-free that
+   crashed at runtime (e.g. Form.Wrapper.render through default-arg dispatch
+   in bastion).  Defun now also converts EApp of a locally-bound callee. *)
+let test_defun_erased_closure_in_tuple_becomes_ecallptr () =
+  let m = defun_module {|mod Test do
+    fn run(a, b, f) : String do
+      let t = (a, b, f)
+      match t do
+      (x, y, g) ->
+        let z = x ++ y
+        z ++ g()
+      end
+    end
+    fn main() : String do
+      run("hi", "there", fn () -> "!")
+    end
+  end|} in
+  let run_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "run") m.March_tir.Tir.tm_fns in
+  let rec has_callptr = function
+    | March_tir.Tir.ECallPtr _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_callptr e1 || has_callptr e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_callptr f.March_tir.Tir.fn_body) fns || has_callptr body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_callptr b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_callptr e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_callptr a || has_callptr b
+    | _ -> false
+  in
+  (* The only indirect call in [run] is g(); it must be an ECallPtr so that
+     Perceus keeps the closure live for the call. *)
+  Alcotest.(check bool) "erased closure call in run is ECallPtr" true
+    (has_callptr run_fn.March_tir.Tir.fn_body)
+
 let test_defun_zero_capture_closure () =
   let m = defun_module {|mod Test do
     fn main() : Int do
@@ -21644,6 +21683,7 @@ let () =
           Alcotest.test_case "defun closure struct"  `Quick test_defun_closure_struct;
           Alcotest.test_case "defun no letrec lambda"`Quick test_defun_no_letrec_lambda;
           Alcotest.test_case "defun indirect call"   `Quick test_defun_indirect_call_becomes_ecallptr;
+          Alcotest.test_case "defun erased closure callptr" `Quick test_defun_erased_closure_in_tuple_becomes_ecallptr;
           Alcotest.test_case "defun zero capture"    `Quick test_defun_zero_capture_closure;
           Alcotest.test_case "defun nested lambda"   `Quick test_defun_nested_lambda;
           Alcotest.test_case "defun pp type_def"     `Quick test_defun_pp_type_def;
