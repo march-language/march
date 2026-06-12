@@ -26,14 +26,19 @@ let is_test_file name =
 let find_march_files dir =
   let rec walk acc d =
     if not (Sys.file_exists d) then acc
-    else
+    else begin
+      (* Sort entries: raw Sys.readdir order is filesystem-dependent, which
+         would make file discovery order nondeterministic across machines. *)
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
       Array.fold_left (fun acc name ->
           let path = Filename.concat d name in
           if Sys.is_directory path then walk acc path
           else if Filename.check_suffix name ".march" && not (is_test_file name)
           then path :: acc
           else acc)
-        acc (Sys.readdir d)
+        acc entries
+    end
   in
   walk [] dir
 

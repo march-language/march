@@ -12341,6 +12341,160 @@
       "created_at": "2026-06-12T11:45:54.361905-04:00",
       "updated_at": "2026-06-12T11:45:54.361905-04:00",
       "metadata_json": "{\"branch\":\"main\",\"commit\":\"cb82b50\",\"confidence\":98}"
+    },
+    {
+      "id": 1123,
+      "change_id": "6fc72077-d37c-458d-ae93-ab62a3dcf178",
+      "node_type": "action",
+      "title": "Bug1 fix adopted via cherry-pick of 20e53f2 (conditional untag + uniform tuple/erased slot convention) onto magical-aryabhata worktree; ttup2 30, depot hang gone (42 tests, 6F)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:46:29.130437-04:00",
+      "updated_at": "2026-06-12T11:46:29.130437-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":95}"
+    },
+    {
+      "id": 1124,
+      "change_id": "fc9a2193-8f69-4f6b-a0bf-834e8dd44828",
+      "node_type": "action",
+      "title": "Bug2 fix: march_string given real header tag (layout {rc;tag;pad;len;data}, sentinel -1 matching pre-existing march_message convention); march_value_to_string recognizes strings; all string-alloc sites routed through march_string_alloc helper; depot 6F->3F (primary_key+field_type fixed)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:46:29.179502-04:00",
+      "updated_at": "2026-06-12T11:46:29.179502-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":92}"
+    },
+    {
+      "id": 1125,
+      "change_id": "1c2a13a3-ff6f-4daa-9da5-63fae4599904",
+      "node_type": "goal",
+      "title": "Native record_entries/record_from_list + fix depot repro",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:47:09.091126-04:00",
+      "updated_at": "2026-06-12T11:47:09.091126-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95,\"prompt\":\"In the march compiler repo at /Users/80197052/code/march: the builtins `record_entries` and `record_from_list` are registered in the defun builtin list (lib/tir/defun.ml:121) and work in the interpreter (lib/eval/eval.ml), but have NO native implementation — natively-compiled programs that use them emit `declare ptr @record_entries(ptr)` / `@record_from_list` and fail at link time with \\\"Undefined symbols: _record_entries, _record_from_list\\\".\\n\\nRepro: cd /Users/80197052/code/depot && MARCH_LIB_PATH=lib:test ./_build/default/bin/main.exe --compile --test -o /tmp/t test/test_depot_schema.march (calls come from lib/depot_migration.march and Depot.Gate.cast_record). Check how sibling record builtins (record_get, record_put, record_keys, record_values — same list in defun.ml) are implemented natively (runtime/march_extras.c / march_runtime.c, and any mangle_extern mapping in lib/tir/llvm_emit.ml) and implement record_entries/record_from_list the same way. Add a native regression test under test/ (see test/dune rule patterns for native compile+run fixtures, e.g. imports/adt_eq_native).\"}"
+    },
+    {
+      "id": 1126,
+      "change_id": "b0fc3623-46d4-41e9-95d3-6b8be9396e0c",
+      "node_type": "observation",
+      "title": "Original bug already fixed by commit 6b8b4da: native lowering, C impls (march_record_entries/march_record_from_list_k), and native test (test/imports/record_native) all exist on main",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:49:17.981183-04:00",
+      "updated_at": "2026-06-12T11:49:17.981183-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":95}"
+    },
+    {
+      "id": 1127,
+      "change_id": "f8241c04-36cd-402a-b3ea-52c545f545a7",
+      "node_type": "observation",
+      "title": "Depot repro now fails differently: ECallPtr at llvm_emit.ml:2654 discards emit_atom's type, assumes ptr callee; unconstrained-TVar closure (migration_fn in Depot.Migration.run) loads as i64 -> invalid GEP, clang error",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:49:18.014767-04:00",
+      "updated_at": "2026-06-12T11:49:18.014767-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
+    },
+    {
+      "id": 1128,
+      "change_id": "6a367afc-09e0-4ca0-bafa-1c113c4ac959",
+      "node_type": "option",
+      "title": "Coerce ECallPtr callee to ptr via coerce ctx (inttoptr for i64)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:49:26.222282-04:00",
+      "updated_at": "2026-06-12T11:49:26.222282-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
+    },
+    {
+      "id": 1129,
+      "change_id": "0ec27158-3589-4e91-ab6f-24f4709e50ed",
+      "node_type": "option",
+      "title": "Fix capture typing upstream so closure captures are never i64",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:49:26.252729-04:00",
+      "updated_at": "2026-06-12T11:49:26.252729-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":50}"
+    },
+    {
+      "id": 1130,
+      "change_id": "d5e26149-6761-47ed-a4e9-4903e3ba82bd",
+      "node_type": "decision",
+      "title": "Coerce callee at ECallPtr dispatch site — minimal, matches existing coerce idiom used for args on the same path; upstream capture-typing rework is invasive and risks other paths",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:49:35.705312-04:00",
+      "updated_at": "2026-06-12T11:49:35.705312-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
+    },
+    {
+      "id": 1131,
+      "change_id": "9f2931d2-7c62-4de5-9b3d-e3393a0388d4",
+      "node_type": "outcome",
+      "title": "Merged to main as e4bc69a. Discovery: main commit cee6f22 had independently implemented the identical shadow-aware rename_tir_vars fix (plus the record_entries/record_from_list native builtins); merge resolved lower.ml to main's Set-based version, contributing the param_shadow_native fixture + dune rule + specs entries",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:50:11.473062-04:00",
+      "updated_at": "2026-06-12T11:50:11.473062-04:00",
+      "metadata_json": "{\"branch\":\"claude/suspicious-villani-276c9a\",\"confidence\":95}"
+    },
+    {
+      "id": 1132,
+      "change_id": "0ea9d761-83fc-42dc-8c39-d568f9917151",
+      "node_type": "action",
+      "title": "Fix ECallPtr dispatch: coerce callee atom to ptr before fn-ptr load (llvm_emit.ml:2653); add native regression fixture test/imports/erased_clo_native distilled from Depot.Migration.run __try_call(fn _ -> thunk()) pattern",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:54:29.732247-04:00",
+      "updated_at": "2026-06-12T11:54:29.732247-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
+    },
+    {
+      "id": 1133,
+      "change_id": "8c2f29cd-23ff-4603-b695-eb7746e50caf",
+      "node_type": "action",
+      "title": "Merged branch to main and pushed to origin",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:06:28.690662-04:00",
+      "updated_at": "2026-06-12T12:06:28.690662-04:00",
+      "metadata_json": "{\"branch\":\"claude/optimistic-banzai-b6626d\",\"commit\":\"dcc9f22\",\"confidence\":100}"
+    },
+    {
+      "id": 1134,
+      "change_id": "d3d67568-8193-41c8-9e9a-6d6f44ac3b5a",
+      "node_type": "outcome",
+      "title": "Merged claude/gracious-murdock-0bae13 into main (b7a400c); resolved specs/docs conflicts keeping both sides; hmac + typecheck regression tests pass on merged main",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:06:36.022659-04:00",
+      "updated_at": "2026-06-12T12:06:36.022659-04:00",
+      "metadata_json": "{\"branch\":\"claude/gracious-murdock-0bae13\",\"confidence\":95}"
+    },
+    {
+      "id": 1135,
+      "change_id": "170b1492-405c-477b-84b3-58b21d516220",
+      "node_type": "outcome",
+      "title": "Merged claude/romantic-wilson-b18655 into main (ac438f7); graph-export conflicts resolved via events rebuild + re-sync; merged tree verified in isolated worktree: 4179 C-runtime tests + all alcotest suites pass; only failures are two PRE-EXISTING issues present at the fork point (swallowed imported-module type errors fixture; missing runtime dep in cold dune runtest)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:11:47.896060-04:00",
+      "updated_at": "2026-06-12T12:11:47.896060-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"ac438f7\",\"confidence\":95}"
+    },
+    {
+      "id": 1136,
+      "change_id": "dde62892-75d1-43c4-baf6-9e611049b0ba",
+      "node_type": "observation",
+      "title": "Pre-existing on main (at least since 1a7f605): (1) --check/test on test/imports/entry_imports_ill_typed.march exits 0 instead of 1 — imported-user-module type errors swallowed again; (2) cold 'dune runtest' fails native-compile rules because _build/default/runtime is only materialized by bin/dune warm-cache alias (@all, not @runtest)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:11:47.952066-04:00",
+      "updated_at": "2026-06-12T12:11:47.952066-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90}"
     }
   ],
   "edges": [
@@ -20219,6 +20373,171 @@
       "weight": 1.0,
       "rationale": "produced",
       "created_at": "2026-06-12T11:45:54.395451-04:00"
+    },
+    {
+      "id": 720,
+      "from_node_id": 1105,
+      "to_node_id": 1123,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "6fc72077-d37c-458d-ae93-ab62a3dcf178",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Bug1 implementation",
+      "created_at": "2026-06-12T11:46:32.252558-04:00"
+    },
+    {
+      "id": 721,
+      "from_node_id": 1105,
+      "to_node_id": 1124,
+      "from_change_id": "61e26a4f-f790-441f-9daa-4cb473dc9594",
+      "to_change_id": "fc9a2193-8f69-4f6b-a0bf-834e8dd44828",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Bug2 implementation",
+      "created_at": "2026-06-12T11:46:32.277947-04:00"
+    },
+    {
+      "id": 722,
+      "from_node_id": 1126,
+      "to_node_id": 1125,
+      "from_change_id": "b0fc3623-46d4-41e9-95d3-6b8be9396e0c",
+      "to_change_id": "1c2a13a3-ff6f-4daa-9da5-63fae4599904",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Investigation of stale bug report",
+      "created_at": "2026-06-12T11:49:26.147067-04:00"
+    },
+    {
+      "id": 723,
+      "from_node_id": 1127,
+      "to_node_id": 1125,
+      "from_change_id": "f8241c04-36cd-402a-b3ea-52c545f545a7",
+      "to_change_id": "1c2a13a3-ff6f-4daa-9da5-63fae4599904",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Remaining blocker for the named repro",
+      "created_at": "2026-06-12T11:49:26.159005-04:00"
+    },
+    {
+      "id": 724,
+      "from_node_id": 1125,
+      "to_node_id": 1128,
+      "from_change_id": "1c2a13a3-ff6f-4daa-9da5-63fae4599904",
+      "to_change_id": "6a367afc-09e0-4ca0-bafa-1c113c4ac959",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T11:49:35.661051-04:00"
+    },
+    {
+      "id": 725,
+      "from_node_id": 1125,
+      "to_node_id": 1129,
+      "from_change_id": "1c2a13a3-ff6f-4daa-9da5-63fae4599904",
+      "to_change_id": "0ec27158-3589-4e91-ab6f-24f4709e50ed",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T11:49:35.672374-04:00"
+    },
+    {
+      "id": 726,
+      "from_node_id": 1128,
+      "to_node_id": 1130,
+      "from_change_id": "6a367afc-09e0-4ca0-bafa-1c113c4ac959",
+      "to_change_id": "d5e26149-6761-47ed-a4e9-4903e3ba82bd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "chosen",
+      "created_at": "2026-06-12T11:49:35.716205-04:00"
+    },
+    {
+      "id": 727,
+      "from_node_id": 1129,
+      "to_node_id": 1130,
+      "from_change_id": "0ec27158-3589-4e91-ab6f-24f4709e50ed",
+      "to_change_id": "d5e26149-6761-47ed-a4e9-4903e3ba82bd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "rejected: invasive",
+      "created_at": "2026-06-12T11:49:35.727345-04:00"
+    },
+    {
+      "id": 729,
+      "from_node_id": 1096,
+      "to_node_id": 1131,
+      "from_change_id": "5c369e75-fa31-426c-820c-2eff40f79c22",
+      "to_change_id": "9f2931d2-7c62-4de5-9b3d-e3393a0388d4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Merge result",
+      "created_at": "2026-06-12T11:50:20.148996-04:00"
+    },
+    {
+      "id": 730,
+      "from_node_id": 1130,
+      "to_node_id": 1131,
+      "from_change_id": "d5e26149-6761-47ed-a4e9-4903e3ba82bd",
+      "to_change_id": "9f2931d2-7c62-4de5-9b3d-e3393a0388d4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation",
+      "created_at": "2026-06-12T11:54:29.745084-04:00"
+    },
+    {
+      "id": 731,
+      "from_node_id": 1130,
+      "to_node_id": 1132,
+      "from_change_id": "d5e26149-6761-47ed-a4e9-4903e3ba82bd",
+      "to_change_id": "0ea9d761-83fc-42dc-8c39-d568f9917151",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation",
+      "created_at": "2026-06-12T11:54:44.011306-04:00"
+    },
+    {
+      "id": 733,
+      "from_node_id": 1120,
+      "to_node_id": 1133,
+      "from_change_id": "10a6cc01-9610-4665-b0b0-7651dce2300b",
+      "to_change_id": "8c2f29cd-23ff-4603-b695-eb7746e50caf",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Merge after tests verified",
+      "created_at": "2026-06-12T12:06:35.853781-04:00"
+    },
+    {
+      "id": 735,
+      "from_node_id": 1089,
+      "to_node_id": 1134,
+      "from_change_id": "ce240cb7-8293-45dd-8d44-33b700155d86",
+      "to_change_id": "d3d67568-8193-41c8-9e9a-6d6f44ac3b5a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Branch merged to main",
+      "created_at": "2026-06-12T12:06:50.440826-04:00"
+    },
+    {
+      "id": 736,
+      "from_node_id": 1090,
+      "to_node_id": 1135,
+      "from_change_id": "40d1a51f-c221-4f66-8909-9af73d78c018",
+      "to_change_id": "170b1492-405c-477b-84b3-58b21d516220",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "branch merged to main",
+      "created_at": "2026-06-12T12:11:52.789950-04:00"
+    },
+    {
+      "id": 737,
+      "from_node_id": 1135,
+      "to_node_id": 1136,
+      "from_change_id": "170b1492-405c-477b-84b3-58b21d516220",
+      "to_change_id": "dde62892-75d1-43c4-baf6-9e611049b0ba",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "discovered during merge verification",
+      "created_at": "2026-06-12T12:11:52.822930-04:00"
     }
   ]
 }

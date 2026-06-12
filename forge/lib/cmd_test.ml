@@ -14,7 +14,7 @@ let is_test_file name =
   || Filename.check_suffix name "_test.march"
 
 let rec find_test_files dir =
-  Array.to_list (Sys.readdir dir)
+  List.sort compare (Array.to_list (Sys.readdir dir))
   |> List.concat_map (fun entry ->
     let path = Filename.concat dir entry in
     if Sys.file_exists path && Sys.is_directory path then
