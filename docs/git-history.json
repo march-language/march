@@ -1,5 +1,37 @@
 [
   {
+    "hash": "315bb82f3b9144bc8138688e523aa0a7623c82f6",
+    "short_hash": "315bb82",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:11:46-04:00",
+    "message": "fix(resolver): include as-parsed paths in user_files so relative MARCH_LIB_PATH diagnostics are not dropped\n\nWhole-program compilation accepted ill-typed code the single-file checker\nrejects: user_files held only realpath-canonicalised paths while diagnostic\nspans carry the as-parsed (often relative) path, so is_user_file's exact\nstring match failed for every lib-path module and their type errors were\ntolerated as stdlib-internal. Type-incorrect TIR then reached codegen and\ndied in clang with undefined pattern-binder symbols (i64 scrutinee on\nemit_case's integer-switch path never binds br_vars).\n\n- resolver: record the as-parsed path spelling alongside the canonical one;\n  user_files is the union of both.\n- llvm_emit (defense-in-depth): emit_case fails loudly when an ADT ctor\n  branch with binders meets a non-pointer scrutinee instead of emitting an\n  integer switch with unbound binder symbols.\n- new regression: test/libpath_ill_typed/ — relative MARCH_LIB_PATH module\n  with a body type error, never imported by the entry, must fail --check.\n  (The existing entry_imports_ill_typed rules caught this only under\n  --force; dune's incremental cache replayed their stale pass.)",
+    "files_changed": 7
+  },
+  {
+    "hash": "db0b5d4ccd1589a3c1d9992ab704b47df0a4c23a",
+    "short_hash": "db0b5d4",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:07:44-04:00",
+    "message": "fix(cas): include source-dir imports in the early --check/--compile hash\n\nThe early source-hash CAS key covered the entry file's source, the stdlib\nhash, and all .march files under MARCH_LIB_PATH — but not sibling modules\nresolved from the entry file's own directory, even though the resolver's\nsearch path is source_dir :: lib_paths.  Editing an imported sibling after\na clean run left the hash unchanged, so the next --check hit the stale\n\"check ok\" artifact and exited 0 on a now-ill-typed program (and --compile\nreused a stale binary).\n\nHash every .march file under the entry's directory the same way lib-path\ndirs are hashed.  Extra files in the key can only cause spurious misses,\nnever stale hits.\n\nRegression rule: test/imports/cas_stale/ checks a clean copy, swaps the\nimported module for an ill-typed version, and asserts the second --check\nexits nonzero (verified to fail against the pre-fix compiler).",
+    "files_changed": 5
+  },
+  {
+    "hash": "154fa042f6aae1f8cc389556adb793bebcd21296",
+    "short_hash": "154fa04",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:05:43-04:00",
+    "message": "chore: sync decision graph export",
+    "files_changed": 2
+  },
+  {
+    "hash": "8c58349063089def4ba75434cbac0aefca8bcfd3",
+    "short_hash": "8c58349",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:05:12-04:00",
+    "message": "fix(resolver): report type errors from relatively-pathed lib modules\n\nuser_files held only realpath-canonicalised paths (since the LSP/CLI\nresolution unification) while files are parsed under their as-given\npath -- diagnostic spans carry the as-given string, so with a relative\nMARCH_LIB_PATH (or relative source-dir imports) is_user_file's exact\nList.mem failed for every lib-module diagnostic and the errors were\ntolerated as stdlib-internal. Ill-typed whole-program builds proceeded\ninto codegen: the depot repro had 70 swallowed type errors and failed\nonly at clang with \"use of undefined value '@$f27180'\" (an Ok(v)\npattern binder never bound because the ill-typed Bool scrutinee took\nemit_case's integer-switch path, which binds no br_vars). The\npre-existing entry_imports_ill_typed fixtures had silently become live\nfailures for the same reason.\n\nuser_files now records BOTH spellings of every loaded file\n(record_user_path at the entry pre-mark, the explicit-import load path,\nand auto-discovery phase 2, which threads the as-given path through\nfrom phase 1); loaded_paths stays canonical-only for dedup.\n\nRegression: test/imports/lib_path_ill_typed/ -- relative MARCH_LIB_PATH,\nill-typed lib module never called by the entry; --check and march test\nmust both exit 1 (verified exit 0 pre-fix). Full suite green.",
+    "files_changed": 6
+  },
+  {
     "hash": "ef84adca6a16e62ddd7e757c545387fda657cae7",
     "short_hash": "ef84adc",
     "author": "Matthew Gilliam",
@@ -14,14 +46,6 @@
     "date": "2026-06-12T12:57:58-04:00",
     "message": "fix(resolver): report user_files under the paths diagnostics actually carry\n\nRegression from 2545039 (resolver unification): the shared resolver dedups\nloaded files by canonical (realpath) path and returned those canonical\nstrings as user_files, but files are parsed under the possibly-relative\npath they were opened with — which is what diagnostic spans carry.  The\nCLI's is_user_file membership check (List.mem span.file user_files) then\nmissed every imported-module diagnostic, silently restoring the pre-a8ca488\nbug: type errors in imported user modules were filtered as stdlib-internal\nand march --check / march test exited 0 on ill-typed programs.\n\nTrack the parse-path strings (plus their canonical forms, for callers whose\nspans are absolute) in a separate table and return those as user_files;\ndedup stays keyed on canonical paths.  Auto-discovery now threads the\noriginal parse path through phase 1 instead of dropping it.\n\nCaught by the existing a8ca488 regression rule: dune runtest asserts\nmarch --check imports/entry_imports_ill_typed.march exits 1.",
     "files_changed": 1
-  },
-  {
-    "hash": "77fd3710a51a04d62f4b118d44eb948a16d82554",
-    "short_hash": "77fd371",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-12T12:39:19-04:00",
-    "message": "chore: sync decision graph export (entry_imports_ill_typed regression fix)",
-    "files_changed": 2
   },
   {
     "hash": "78afbbc3fdfa176128870f68d478ede63613ae64",
@@ -2064,16 +2088,16 @@
     "files_changed": 7
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -2112,16 +2136,16 @@
     "files_changed": 5
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
@@ -2144,16 +2168,16 @@
     "files_changed": 3
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
     "files_changed": 7
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
