@@ -374,8 +374,15 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
     - Lambda creation sites → EAlloc of closure struct
     - Indirect calls (EApp of TFn-typed non-top-level var) → ECallPtr *)
 let rewrite_expr (known_lambdas : (string * lambda_info) list)
-    (top_level : StringSet.t) (e : Tir.expr) : Tir.expr =
-  let rec rw = function
+    (top_level : StringSet.t) (init_bound : StringSet.t) (e : Tir.expr) : Tir.expr =
+  (* [bound] tracks the names of locally-bound variables (params, let bindings,
+     case-arm pattern vars, recursive-fn names) in scope at the current point.
+     A call whose callee is locally bound must dispatch through a closure
+     pointer — see case B. *)
+  let add_params bound params =
+    List.fold_left (fun s (p : Tir.var) -> StringSet.add p.Tir.v_name s) bound params
+  in
+  let rec rw bound = function
     (* A. Lambda creation site *)
     | Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar ref_var))
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
@@ -396,43 +403,47 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          Tir.EAlloc (Tir.TCon (clo_name, []), fn_ptr_atom :: fv_atoms)
        | None ->
          (* Not a known lambda — rewrite children *)
-         Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],
+         let inner = add_params (StringSet.add fn.Tir.fn_name bound) fn.Tir.fn_params in
+         Tir.ELetRec ([{ fn with Tir.fn_body = rw inner fn.Tir.fn_body }],
                       Tir.EAtom (Tir.AVar ref_var)))
 
-    (* B. Indirect call: EApp of ANY non-top-level var.  Such a var must be a
-       closure pointer allocated by an earlier ELetRec — a non-top-level value
-       being applied cannot be a code symbol — so ECallPtr is always safe.
-       [top_level] already includes [builtin_names] (operators like ++, &&), so
-       those are excluded here and keep their direct lowering.
-
-       The type is NOT consulted: a zero-arg lambda [fn () -> T] is typed as a
-       thunk [T] (its result), not a function, so a captured zero-arg closure
-       param (e.g. [render_inner : String]) is neither TFn nor TVar.  Without
-       this broadening it stayed [EApp(render_inner, [])]; perceus's [live_before]
-       ignores EApp callees (assuming top-level symbols), so the closure was
-       dec_rc'd before [render_inner()] ran — a use-after-free that jumped into
-       reused memory.  TVar "_" still flows here too (empty type_map in stdlib
-       precompile), avoiding a direct @go call to an undefined symbol. *)
+    (* B. Indirect call: EApp of a non-top-level var that is either function-typed
+       (TFn / TVar — TVar "_" occurs when type_map is empty, e.g. stdlib precompile)
+       OR a locally-bound value (a closure whose function type was erased to a
+       concrete type — e.g. a closure threaded through a tuple field, which the
+       checker may have typed as String).  Without this conversion the call stays
+       as a direct @go invocation — an undefined symbol — and, crucially, Perceus's
+       EApp liveness ignores the callee, so the closure variable is dropped before
+       the call (use-after-free).  Converting to ECallPtr is always safe for
+       non-top-level vars: they must be closure pointers allocated by an earlier
+       ELetRec, and locally-bound names that are called are necessarily callable
+       (closures), never operators/builtins (which are never let/param-bound). *)
     | Tir.EApp (f_var, args)
-      when not (StringSet.mem f_var.Tir.v_name top_level) ->
+      when not (StringSet.mem f_var.Tir.v_name top_level)
+        && ((match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)
+            || StringSet.mem f_var.Tir.v_name bound) ->
       Tir.ECallPtr (Tir.AVar f_var, args)
 
     (* Recurse into all other forms *)
     | Tir.ELetRec (fns, body) ->
-      let fns' = List.map (fun fn -> { fn with Tir.fn_body = rw fn.Tir.fn_body }) fns in
-      Tir.ELetRec (fns', rw body)
+      let bound' =
+        List.fold_left (fun s fn -> StringSet.add fn.Tir.fn_name s) bound fns in
+      let fns' = List.map (fun fn ->
+          { fn with Tir.fn_body = rw (add_params bound' fn.Tir.fn_params) fn.Tir.fn_body })
+          fns in
+      Tir.ELetRec (fns', rw bound' body)
     | Tir.ELet (v, e1, e2) ->
-      Tir.ELet (v, rw e1, rw e2)
+      Tir.ELet (v, rw bound e1, rw (StringSet.add v.Tir.v_name bound) e2)
     | Tir.ECase (a, brs, def) ->
       let brs' = List.map (fun (br : Tir.branch) ->
-          { br with Tir.br_body = rw br.Tir.br_body }
+          { br with Tir.br_body = rw (add_params bound br.Tir.br_vars) br.Tir.br_body }
         ) brs in
-      Tir.ECase (a, brs', Option.map rw def)
+      Tir.ECase (a, brs', Option.map (rw bound) def)
     | Tir.ESeq (e1, e2) ->
-      Tir.ESeq (rw e1, rw e2)
+      Tir.ESeq (rw bound e1, rw bound e2)
     | e -> e
   in
-  rw e
+  rw init_bound e
 
 (* ── Entry point ─────────────────────────────────────────────────── *)
 
@@ -447,13 +458,21 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   (* Phase 2: generate closure structs and lifted fns *)
   let (new_types, new_fns) = List.split (List.map lift_lambda lambdas) in
 
-  (* Phase 3: rewrite all top-level fn bodies *)
+  (* Phase 3: rewrite all top-level fn bodies.  The initial bound set is the
+     function's own parameters, so a call to a function-typed parameter whose
+     type was erased still dispatches indirectly. *)
+  let params_set fn =
+    List.fold_left (fun s (p : Tir.var) -> StringSet.add p.Tir.v_name s)
+      StringSet.empty fn.Tir.fn_params
+  in
   let rewritten_fns = List.map (fun fn ->
-      { fn with Tir.fn_body = rewrite_expr known_lambdas top_level fn.Tir.fn_body }
+      { fn with Tir.fn_body =
+          rewrite_expr known_lambdas top_level (params_set fn) fn.Tir.fn_body }
     ) m.Tir.tm_fns in
   (* Also rewrite lifted apply fns (to handle nested lambdas) *)
   let rewritten_new_fns = List.map (fun fn ->
-      { fn with Tir.fn_body = rewrite_expr known_lambdas top_level fn.Tir.fn_body }
+      { fn with Tir.fn_body =
+          rewrite_expr known_lambdas top_level (params_set fn) fn.Tir.fn_body }
     ) new_fns in
 
   {
