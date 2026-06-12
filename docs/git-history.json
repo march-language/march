@@ -1,5 +1,29 @@
 [
   {
+    "hash": "ef84adca6a16e62ddd7e757c545387fda657cae7",
+    "short_hash": "ef84adc",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:00:21-04:00",
+    "message": "fix(cas): include source-dir sibling modules in the early-exit cache hash\n\nThe early source-hash CAS in `compile` hashed the entry file, the stdlib\nhash, and all .march files under MARCH_LIB_PATH — but not the sibling\n.march files in the entry's own source directory, which resolve_imports\nauto-discovers and loads as user code (search_path = source_dir :: lib\npaths). Editing an imported sibling to introduce a type error therefore\nhit the stale OK artifact: --check/--compile exited 0 without ever\ntypechecking the now-ill-typed program. The cache-level twin of the\ndiagnostic-filter regression fixed in 78afbbc.\n\nThe hash walk now covers Filename.dirname entry :: MARCH_LIB_PATH dirs\n(same sorted collect_lib_files walk), skipping the realpath-equal entry\nfile whose bytes are already the first buffer element. Adding or\ndeleting a sibling also changes the key (paths are hashed alongside\ncontents); reverting an edit re-hits the original OK artifact.\n\nRegression rule in test/dune (cas_stale_dir): generates a two-file\nsandbox, --check (caches OK), injects an arity error into the sibling,\nand requires the second --check to exit 1 — a warm-cache exit 0 fails\nthe rule. Files are generated inline so the duplicate `mod CsHelper`\nbodies never pollute imports/ auto-discovery for other rules.\n\nVerified: fresh-dir repro flips 0→1 after the sibling edit and back to a\ncache hit on revert; `dune build @runtest --force` exits 0.",
+    "files_changed": 3
+  },
+  {
+    "hash": "bdff02da33da5ae72f0352f447c32b0dc86dca44",
+    "short_hash": "bdff02d",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:57:58-04:00",
+    "message": "fix(resolver): report user_files under the paths diagnostics actually carry\n\nRegression from 2545039 (resolver unification): the shared resolver dedups\nloaded files by canonical (realpath) path and returned those canonical\nstrings as user_files, but files are parsed under the possibly-relative\npath they were opened with — which is what diagnostic spans carry.  The\nCLI's is_user_file membership check (List.mem span.file user_files) then\nmissed every imported-module diagnostic, silently restoring the pre-a8ca488\nbug: type errors in imported user modules were filtered as stdlib-internal\nand march --check / march test exited 0 on ill-typed programs.\n\nTrack the parse-path strings (plus their canonical forms, for callers whose\nspans are absolute) in a separate table and return those as user_files;\ndedup stays keyed on canonical paths.  Auto-discovery now threads the\noriginal parse path through phase 1 instead of dropping it.\n\nCaught by the existing a8ca488 regression rule: dune runtest asserts\nmarch --check imports/entry_imports_ill_typed.march exits 1.",
+    "files_changed": 1
+  },
+  {
+    "hash": "77fd3710a51a04d62f4b118d44eb948a16d82554",
+    "short_hash": "77fd371",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:39:19-04:00",
+    "message": "chore: sync decision graph export (entry_imports_ill_typed regression fix)",
+    "files_changed": 2
+  },
+  {
     "hash": "78afbbc3fdfa176128870f68d478ede63613ae64",
     "short_hash": "78afbbc",
     "author": "Matthew Gilliam",
@@ -14,14 +38,6 @@
     "date": "2026-06-12T12:21:33-04:00",
     "message": "fix(codegen): restore erased-closure pointers in ECallPtr dispatch\n\nA closure parameter captured into another lambda's environment loses its\nTFn type through the erased env slot (TVar -> i64). ECallPtr dispatch\nassumed the callee atom was already ptr and fed the raw i64 SSA value to\nthe fn-pointer getelementptr -- clang rejected the module ('%ldNN'\ndefined with type 'i64' but expected 'ptr'). Hit by depot's\nDepot.Migration.run pattern: __try_call(fn _ -> thunk()).\n\nEvery ptr->i64 erasure goes through coerce's ashr-by-1 (the tagged-\nimmediate untag), so an erased i64 callee holds p>>1. Heap pointers are\neven, so shl 1 -- WITHOUT the |1 immediate tag coerce would add --\nrestores the original pointer exactly (coerce would yield p+1: a\nmisaligned non-pointer, jumping to garbage).\n\nFixture: test/imports/erased_clo_native/ (compile-and-run, distilled\nfrom the depot repro). Suite green; list_ops bench output correct.",
     "files_changed": 5
-  },
-  {
-    "hash": "b5d52c419b6124db635fed520660ac3077236373",
-    "short_hash": "b5d52c4",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-12T12:20:23-04:00",
-    "message": "Merge branch 'claude/modest-lichterman-58b84f': sort directory entries for deterministic file discovery\n\nConflict resolution: main refactored the import resolver out of\nbin/main.ml into lib/resolver; kept the refactor and applied the\ncollect_lib_files entry-sort fix to the shared resolver instead.",
-    "files_changed": 0
   },
   {
     "hash": "9170b7911df4bd03d8651c6e66c80ebdbb1feeec",
@@ -2024,16 +2040,16 @@
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2048,14 +2064,6 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:38:16-04:00",
-    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
-    "files_changed": 3
-  },
-  {
     "hash": "376a668a88cb9f396603a482660f75857ae567ce",
     "short_hash": "376a668",
     "author": "Matthew Gilliam",
@@ -2064,16 +2072,24 @@
     "files_changed": 3
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:38:16-04:00",
+    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
+    "files_changed": 3
+  },
+  {
+    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
+    "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
-    "short_hash": "36a21bc",
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
@@ -2096,16 +2112,16 @@
     "files_changed": 5
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
@@ -2144,16 +2160,16 @@
     "files_changed": 7
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",

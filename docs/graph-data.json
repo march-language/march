@@ -12726,6 +12726,204 @@
       "created_at": "2026-06-12T12:37:16.235557-04:00",
       "updated_at": "2026-06-12T12:37:16.235557-04:00",
       "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"confidence\":90,\"files\":[\"lib/resolver/resolver.ml\",\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1158,
+      "change_id": "09574410-ba09-4bc7-b2d7-c75441fc8091",
+      "node_type": "observation",
+      "title": "Concurrent session (branch claude/amazing-merkle-1926c0, commit 78afbbc) independently fixed the resolver user_files regression with a functionally identical diff + specs/progress.md entry. It does NOT cover run_check_cmd wiring or the test/dune cold-runtest deps. Plan: cherry-pick 78afbbc here, drop my duplicate resolver edit, keep test/dune + run_check_cmd as separate commit.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:38:24.060394-04:00",
+      "updated_at": "2026-06-12T12:38:24.060394-04:00",
+      "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"confidence\":95}"
+    },
+    {
+      "id": 1159,
+      "change_id": "63892609-96fd-4cc0-9a03-be420ddfc642",
+      "node_type": "outcome",
+      "title": "Both bugs fixed + verified: alcotest 1428/0/0, record_native 18/18 (Bug1 fixed entries-hetero-int, call-path fix fixed from_list), adt_eq_native 6/6, depot test_depot_schema hang gone (42 tests, 3 remaining = P3 ADT-printing + sort-order, out of 2-bug scope). Also fixed latent call-emission bug (TVar-return fn called as scalar) + JIT string marshaling for new layout.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:39:17.899796-04:00",
+      "updated_at": "2026-06-12T12:39:17.899796-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":95}"
+    },
+    {
+      "id": 1160,
+      "change_id": "b86b839c-ed16-4159-8d17-1417e309813e",
+      "node_type": "goal",
+      "title": "Fix multi-module typecheck missing diagnostics that single-file mode reports",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:52:19.808613-04:00",
+      "updated_at": "2026-06-12T12:52:19.808613-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90,\"prompt\":\"In the march compiler repo (/Users/80197052/code/march): whole-program multi-module typechecking (MARCH_LIB_PATH auto-discovery) accepts ill-typed code that the single-file typechecker rejects, letting type-incorrect TIR reach codegen where it miscompiles (undefined pattern-binder symbols at link time).\\n\\nConcrete repro:\\n1. `cd /Users/80197052/code/depot && MARCH_LIB_PATH=lib /Users/80197052/code/march/_build/default/bin/main.exe lib/transaction.march` → correctly errors: \\\"I expected `Result(n2, String)` but found `Bool`\\\" at line 114 (Transaction.run violates `__try_call`'s Bool-only contract — `__try_call : (Bool -> Bool) -> Result(Bool, String)` per lib/typecheck/typecheck.ml:1007, but the callback returns a Result and the unwrapped value is then matched against Ok/Err).\\n2. `cd /Users/80197052/code/depot && MARCH_LIB_PATH=lib:test /Users/80197052/code/march/_build/default/bin/main.exe --compile --test -o /tmp/t test/test_depot_schema.march` → NO type error (only warnings), then clang fails with `use of undefined value '@$f27180'` — the Ok(v) pattern binder in Transaction.run's `match outcome` is never bound because the i64-typed scrutinee took emit_case's integer-switch path (lib/tir/llvm_emit.ml emit_case), which doesn't bind br_vars, and the unbound var fell into the 0-arg-global-call fallback in emit_atom.\\n\\nInvestigate why whole-program inference (bin/main.ml around line 911, March_typecheck.Typecheck.check_module on the combined module set) doesn't produce the same error the standalone check does — likely constraint-ordering/generalization differences in multi-module mode. Fix so multi-module mode reports the same diagnostics. A defensive secondary fix: emit_case with ADT ctor branches on a non-ptr scrutinee should not silently emit an integer switch with unbound br_vars — at minimum fail with a diagnostic instead of producing an undefined symbol.\"}"
+    },
+    {
+      "id": 1161,
+      "change_id": "4e9e925f-84c4-43c2-a93f-6b7e70834d7d",
+      "node_type": "goal",
+      "title": "Fix early-CAS hash gap: include source-dir sibling .march files so editing an imported sibling invalidates cached --check/--compile results",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:53:43.365201-04:00",
+      "updated_at": "2026-06-12T12:53:43.365201-04:00",
+      "metadata_json": "{\"branch\":\"claude/amazing-merkle-1926c0\",\"confidence\":90,\"prompt\":\"In /Users/80197052/code/march, bin/main.ml `compile` builds an early CAS source hash (search for \\\"Early source-hash CAS\\\", ~line 745-775): it hashes the entry file source, the stdlib hash, and all .march files under MARCH_LIB_PATH directories — but NOT the sibling .march files in the entry file's own source directory, which lib/resolver/resolver.ml resolve_imports auto-discovers and loads as user code (search_path = source_dir :: lib paths). Consequence: run `march --check entry.march` (or --compile) while all imported sibling modules are well-typed → an OK artifact is stored; then edit a sibling module to introduce a type error; re-run → src_hash is unchanged, the cached artifact hits, and the compiler exits 0 without typechecking the now-ill-typed import. Repro sketch: in a fresh dir, create entry.march that does `use Helper` and helper.march with a well-typed fn; --check (exit 0, caches); add a type error like calling a 2-arg fn with 3 args inside helper.march; --check again — observe exit 0 instead of 1; rm -rf .march/cas and it correctly exits 1. Fix: include the source-dir .march siblings (recursively, same collect_lib_files walk used for MARCH_LIB_PATH dirs, sorted for determinism) in the hash buffer, taking care to not double-add the entry file itself. Add a regression test (dune rule or shell-based) covering the edit-after-cache scenario. Build with dune; dune/opam are at /Users/80197052/.opam/march/bin (not in default PATH).\"}"
+    },
+    {
+      "id": 1162,
+      "change_id": "2dd88094-14d3-4561-9ea1-95220d1efb48",
+      "node_type": "action",
+      "title": "Extend early-CAS hash in bin/main.ml compile: walk source_dir :: MARCH_LIB_PATH dirs with collect_lib_files, skip realpath-equal entry; add system-action dune regression rule for edit-after-cache",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:55:31.322103-04:00",
+      "updated_at": "2026-06-12T12:55:31.322103-04:00",
+      "metadata_json": "{\"branch\":\"claude/amazing-merkle-1926c0\",\"confidence\":88,\"files\":[\"bin/main.ml\",\"test/dune\"]}"
+    },
+    {
+      "id": 1163,
+      "change_id": "99233e29-72f8-46e1-8174-3b512924355f",
+      "node_type": "goal",
+      "title": "Fix multi-module typecheck missing errors caught standalone (depot transaction.march)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:56:38.728269-04:00",
+      "updated_at": "2026-06-12T12:56:38.728269-04:00",
+      "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90,\"prompt\":\"fix\\nThe repro still doesn't fully compile, but the remaining failure is not a missing builtin: depot's lib/transaction.march:114 violates __try_call's documented Bool-only contract (matches the unwrapped Bool against Ok/Err). March rejects it when typechecked standalone, but multi-module whole-program inference silently misses the error and codegen then emits an undefined $f27180 pattern binder. That typecheck-consistency bug is its own investigation — I've flagged it as a spawnable task chip.\"}"
+    },
+    {
+      "id": 1164,
+      "change_id": "b2dc0336-9529-4613-85b9-757ef45a30af",
+      "node_type": "observation",
+      "title": "Errors ARE generated in multi-module mode; is_user_file drops them: user_files holds realpath'd paths, spans hold as-parsed (relative) paths. Absolute MARCH_LIB_PATH makes all 70 errors print.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:57:36.941282-04:00",
+      "updated_at": "2026-06-12T12:57:36.941282-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":95,\"files\":[\"lib/resolver/resolver.ml\",\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1165,
+      "change_id": "aa8d34eb-2abf-4376-bb44-fc6025826db4",
+      "node_type": "option",
+      "title": "Fix in resolver: user_files includes BOTH as-parsed and canonical path spellings",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:57:49.282529-04:00",
+      "updated_at": "2026-06-12T12:57:49.282529-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90}"
+    },
+    {
+      "id": 1166,
+      "change_id": "5e0cc62f-cc04-464e-9d7e-9fa7ef0d3160",
+      "node_type": "option",
+      "title": "Fix in main.ml: realpath span files at comparison time in is_user_file",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:57:49.320798-04:00",
+      "updated_at": "2026-06-12T12:57:49.320798-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":60}"
+    },
+    {
+      "id": 1167,
+      "change_id": "4864c150-5992-4844-8836-771f7b34f154",
+      "node_type": "decision",
+      "title": "Choose resolver-side fix: single source of truth, fixes all is_user_file call sites + LSP, no cwd dependence at print time",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:57:49.380508-04:00",
+      "updated_at": "2026-06-12T12:57:49.380508-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90}"
+    },
+    {
+      "id": 1168,
+      "change_id": "fb70d950-7f0e-44bb-96f2-58f497f2e95a",
+      "node_type": "goal",
+      "title": "Fix --check regression: imported-module type errors swallowed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:09.848095-04:00",
+      "updated_at": "2026-06-12T12:58:09.848095-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":95,\"prompt\":\"In /Users/80197052/code/march, `dune runtest` fails because of the rule in test/dune lines 166-173: it runs `./_build/default/bin/main.exe --check imports/entry_imports_ill_typed.march` (with deps test/imports/entry_imports_ill_typed.march and test/imports/ill_typed_user_mod.march) wrapped in `with-accepted-exit-codes 1`, but the command exits 0 — the type error in the imported user module is not reported. Commit a8ca488 \\\"fix(cli): report type errors from imported user modules\\\" previously made this work, so this is likely a regression in the import-checking path (bin/main.ml --check flow or typecheck of imported modules). Reproduce with: `cd /Users/80197052/code/march && dune build bin/main.exe && ./_build/default/bin/main.exe --check test/imports/entry_imports_ill_typed.march; echo $?` (currently prints exit 0 with no diagnostics; expected: type error diagnostics and exit 1). Fix the regression so the dune rule passes, run `dune runtest` to verify, and stage files explicitly by name (never git add -A). Note: dune/opam need PATH prefix /Users/80197052/.opam/march/bin.\"}"
+    },
+    {
+      "id": 1169,
+      "change_id": "e664bfec-0064-4b61-b881-8f8f7f1fc96a",
+      "node_type": "observation",
+      "title": "Root cause: resolver returns canonical-path user_files but spans carry parse paths",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.153893-04:00",
+      "updated_at": "2026-06-12T12:58:22.153893-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":95,\"files\":[\"lib/resolver/resolver.ml\",\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1170,
+      "change_id": "e9bf3f21-7c50-4af6-b993-9d159361db16",
+      "node_type": "option",
+      "title": "Fix resolver: return parse-path strings (plus canonical) as user_files",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.192639-04:00",
+      "updated_at": "2026-06-12T12:58:22.192639-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":90}"
+    },
+    {
+      "id": 1171,
+      "change_id": "6db66797-2637-4ce1-8f48-eaf8742dba40",
+      "node_type": "option",
+      "title": "Fix callers: canonicalize span.file before membership check",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.224672-04:00",
+      "updated_at": "2026-06-12T12:58:22.224672-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":60}"
+    },
+    {
+      "id": 1172,
+      "change_id": "33063b0f-189c-489d-87a9-9ba357a01748",
+      "node_type": "decision",
+      "title": "Fix in resolver so user_files matches span strings exactly",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.257459-04:00",
+      "updated_at": "2026-06-12T12:58:22.257459-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":90}"
+    },
+    {
+      "id": 1173,
+      "change_id": "44450958-6ea3-4ec4-8e7a-e5d8ba194e25",
+      "node_type": "action",
+      "title": "Track span_paths table in resolver; thread parse path through auto-discovery",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.308532-04:00",
+      "updated_at": "2026-06-12T12:58:22.308532-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"commit\":\"bdff02d\",\"confidence\":90,\"files\":[\"lib/resolver/resolver.ml\"]}"
+    },
+    {
+      "id": 1174,
+      "change_id": "2d314e09-0f39-413b-b797-36d5bfb533bf",
+      "node_type": "outcome",
+      "title": "dune runtest green (1431 tests); --check and --test exit 1 on ill-typed import",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T12:58:22.343360-04:00",
+      "updated_at": "2026-06-12T12:58:22.343360-04:00",
+      "metadata_json": "{\"branch\":\"claude/reverent-noether-8bf2cf\",\"confidence\":95}"
+    },
+    {
+      "id": 1175,
+      "change_id": "8cc78284-18b1-49ca-8eef-2443afc56cad",
+      "node_type": "outcome",
+      "title": "CAS sibling-hash fix verified: fresh-dir repro flips 0→1 after sibling edit, revert re-hits cached OK; new cas_stale_dir dune rule passes; dune build @runtest --force exits 0. Committed ef84adc.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:00:26.975001-04:00",
+      "updated_at": "2026-06-12T13:00:26.975001-04:00",
+      "metadata_json": "{\"branch\":\"claude/amazing-merkle-1926c0\",\"commit\":\"ef84adc\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -21033,6 +21231,193 @@
       "weight": 1.0,
       "rationale": "Implementation of decision",
       "created_at": "2026-06-12T12:37:21.627906-04:00"
+    },
+    {
+      "id": 765,
+      "from_node_id": 1157,
+      "to_node_id": 1158,
+      "from_change_id": "1c244006-1b38-4cee-87c5-47ebc03438a4",
+      "to_change_id": "09574410-ba09-4bc7-b2d7-c75441fc8091",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Integration decision",
+      "created_at": "2026-06-12T12:38:24.074683-04:00"
+    },
+    {
+      "id": 766,
+      "from_node_id": 1123,
+      "to_node_id": 1159,
+      "from_change_id": "6fc72077-d37c-458d-ae93-ab62a3dcf178",
+      "to_change_id": "63892609-96fd-4cc0-9a03-be420ddfc642",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Bug1 verified",
+      "created_at": "2026-06-12T12:39:48.239839-04:00"
+    },
+    {
+      "id": 767,
+      "from_node_id": 1124,
+      "to_node_id": 1159,
+      "from_change_id": "fc9a2193-8f69-4f6b-a0bf-834e8dd44828",
+      "to_change_id": "63892609-96fd-4cc0-9a03-be420ddfc642",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Bug2 verified",
+      "created_at": "2026-06-12T12:39:48.279541-04:00"
+    },
+    {
+      "id": 768,
+      "from_node_id": 1161,
+      "to_node_id": 1162,
+      "from_change_id": "4e9e925f-84c4-43c2-a93f-6b7e70834d7d",
+      "to_change_id": "2dd88094-14d3-4561-9ea1-95220d1efb48",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-12T12:55:31.335493-04:00"
+    },
+    {
+      "id": 769,
+      "from_node_id": 1160,
+      "to_node_id": 1164,
+      "from_change_id": "b86b839c-ed16-4159-8d17-1417e309813e",
+      "to_change_id": "b2dc0336-9529-4613-85b9-757ef45a30af",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Root-cause evidence",
+      "created_at": "2026-06-12T12:57:36.975726-04:00"
+    },
+    {
+      "id": 770,
+      "from_node_id": 1160,
+      "to_node_id": 1165,
+      "from_change_id": "b86b839c-ed16-4159-8d17-1417e309813e",
+      "to_change_id": "aa8d34eb-2abf-4376-bb44-fc6025826db4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T12:57:49.333907-04:00"
+    },
+    {
+      "id": 771,
+      "from_node_id": 1160,
+      "to_node_id": 1166,
+      "from_change_id": "b86b839c-ed16-4159-8d17-1417e309813e",
+      "to_change_id": "5e0cc62f-cc04-464e-9d7e-9fa7ef0d3160",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T12:57:49.346074-04:00"
+    },
+    {
+      "id": 772,
+      "from_node_id": 1165,
+      "to_node_id": 1167,
+      "from_change_id": "aa8d34eb-2abf-4376-bb44-fc6025826db4",
+      "to_change_id": "4864c150-5992-4844-8836-771f7b34f154",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "chosen",
+      "created_at": "2026-06-12T12:57:49.393076-04:00"
+    },
+    {
+      "id": 773,
+      "from_node_id": 1166,
+      "to_node_id": 1167,
+      "from_change_id": "5e0cc62f-cc04-464e-9d7e-9fa7ef0d3160",
+      "to_change_id": "4864c150-5992-4844-8836-771f7b34f154",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "rejected: per-diagnostic realpath depends on cwd, must be repeated at every call site",
+      "created_at": "2026-06-12T12:57:49.404770-04:00"
+    },
+    {
+      "id": 774,
+      "from_node_id": 1168,
+      "to_node_id": 1169,
+      "from_change_id": "fb70d950-7f0e-44bb-96f2-58f497f2e95a",
+      "to_change_id": "e664bfec-0064-4b61-b881-8f8f7f1fc96a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Instrumented diag dump revealed filter mismatch",
+      "created_at": "2026-06-12T12:58:22.356726-04:00"
+    },
+    {
+      "id": 775,
+      "from_node_id": 1168,
+      "to_node_id": 1170,
+      "from_change_id": "fb70d950-7f0e-44bb-96f2-58f497f2e95a",
+      "to_change_id": "e9bf3f21-7c50-4af6-b993-9d159361db16",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Approach: fix at source in resolver",
+      "created_at": "2026-06-12T12:58:22.366648-04:00"
+    },
+    {
+      "id": 776,
+      "from_node_id": 1168,
+      "to_node_id": 1171,
+      "from_change_id": "fb70d950-7f0e-44bb-96f2-58f497f2e95a",
+      "to_change_id": "6db66797-2637-4ce1-8f48-eaf8742dba40",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Approach: normalize at each caller",
+      "created_at": "2026-06-12T12:58:22.376244-04:00"
+    },
+    {
+      "id": 777,
+      "from_node_id": 1170,
+      "to_node_id": 1172,
+      "from_change_id": "e9bf3f21-7c50-4af6-b993-9d159361db16",
+      "to_change_id": "33063b0f-189c-489d-87a9-9ba357a01748",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen: exact membership, single fix point, no caller churn",
+      "created_at": "2026-06-12T12:58:22.386400-04:00"
+    },
+    {
+      "id": 778,
+      "from_node_id": 1171,
+      "to_node_id": 1172,
+      "from_change_id": "6db66797-2637-4ce1-8f48-eaf8742dba40",
+      "to_change_id": "33063b0f-189c-489d-87a9-9ba357a01748",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Rejected: N callers, realpath per diagnostic",
+      "created_at": "2026-06-12T12:58:22.398481-04:00"
+    },
+    {
+      "id": 779,
+      "from_node_id": 1172,
+      "to_node_id": 1173,
+      "from_change_id": "33063b0f-189c-489d-87a9-9ba357a01748",
+      "to_change_id": "44450958-6ea3-4ec4-8e7a-e5d8ba194e25",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-12T12:58:22.410688-04:00"
+    },
+    {
+      "id": 780,
+      "from_node_id": 1173,
+      "to_node_id": 1174,
+      "from_change_id": "44450958-6ea3-4ec4-8e7a-e5d8ba194e25",
+      "to_change_id": "2d314e09-0f39-413b-b797-36d5bfb533bf",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Verified by full suite + manual repro",
+      "created_at": "2026-06-12T12:58:22.422411-04:00"
+    },
+    {
+      "id": 781,
+      "from_node_id": 1162,
+      "to_node_id": 1175,
+      "from_change_id": "2dd88094-14d3-4561-9ea1-95220d1efb48",
+      "to_change_id": "8cc78284-18b1-49ca-8eef-2443afc56cad",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-12T13:00:33.147314-04:00"
     }
   ]
 }
