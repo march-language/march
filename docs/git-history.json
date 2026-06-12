@@ -1,18 +1,42 @@
 [
   {
+    "hash": "78afbbc3fdfa176128870f68d478ede63613ae64",
+    "short_hash": "78afbbc",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:36:40-04:00",
+    "message": "fix(resolver): report imported-module type errors again — user_files must carry parse-time paths\n\nRegression of a8ca488 (\"report type errors from imported user modules\"),\nintroduced one day later by 2545039 (LSP/CLI resolver unification): when\nresolve_imports was consolidated into lib/resolver, the explicit-import\ndedup was canonicalised with Unix.realpath, so the returned user_files\nlist held canonical ABSOLUTE paths while diagnostic spans carry the\nRELATIVE path each file was parsed under (pos_fname). bin/main.ml's\nis_user_file does an exact List.mem of span files against user_files, so\nimported-module errors never matched, were filtered as stdlib-internal,\nand ill-typed programs compiled to corrupt binaries with exit 0 and no\ndiagnostics.\n\nThe regression fixture test/imports/entry_imports_ill_typed.march caught\nthis immediately — its two with-accepted-exit-codes-1 dune rules failed\nfrom 2545039 onward — but the failures were misread as pre-existing noise\nbecause the test-suite tail looked green; only dune runtest's exit code\nshowed it.\n\nFix: track user_files separately from the canonical-keyed loaded_paths\ndedup table, recording BOTH the parse-time path string (what spans carry)\nand the realpath at all three load sites: the entry pre-mark, explicit\n`load`, and auto-discovery (phase 1 now threads the original path through\nto phase 2 alongside canon_fp). Dedup behaviour is unchanged.\n\nVerified: --check and `march test` on the fixture exit 1 (cold and warm\nCAS cache) with the error rendered against the imported file's source;\n`dune build @runtest --force` exits 0 with every rule re-executed.\n\nKnown adjacent gap (deliberately not fixed here, tracked separately): the\nearly-CAS --check/--compile source hash omits source-dir sibling files,\nso editing an imported sibling can serve a stale cached OK.",
+    "files_changed": 2
+  },
+  {
+    "hash": "dfc749f8371437b468de6c2ff1488c7b01319023",
+    "short_hash": "dfc749f",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:21:33-04:00",
+    "message": "fix(codegen): restore erased-closure pointers in ECallPtr dispatch\n\nA closure parameter captured into another lambda's environment loses its\nTFn type through the erased env slot (TVar -> i64). ECallPtr dispatch\nassumed the callee atom was already ptr and fed the raw i64 SSA value to\nthe fn-pointer getelementptr -- clang rejected the module ('%ldNN'\ndefined with type 'i64' but expected 'ptr'). Hit by depot's\nDepot.Migration.run pattern: __try_call(fn _ -> thunk()).\n\nEvery ptr->i64 erasure goes through coerce's ashr-by-1 (the tagged-\nimmediate untag), so an erased i64 callee holds p>>1. Heap pointers are\neven, so shl 1 -- WITHOUT the |1 immediate tag coerce would add --\nrestores the original pointer exactly (coerce would yield p+1: a\nmisaligned non-pointer, jumping to garbage).\n\nFixture: test/imports/erased_clo_native/ (compile-and-run, distilled\nfrom the depot repro). Suite green; list_ops bench output correct.",
+    "files_changed": 5
+  },
+  {
+    "hash": "b5d52c419b6124db635fed520660ac3077236373",
+    "short_hash": "b5d52c4",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:20:23-04:00",
+    "message": "Merge branch 'claude/modest-lichterman-58b84f': sort directory entries for deterministic file discovery\n\nConflict resolution: main refactored the import resolver out of\nbin/main.ml into lib/resolver; kept the refactor and applied the\ncollect_lib_files entry-sort fix to the shared resolver instead.",
+    "files_changed": 0
+  },
+  {
+    "hash": "9170b7911df4bd03d8651c6e66c80ebdbb1feeec",
+    "short_hash": "9170b79",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T12:16:13-04:00",
+    "message": "fix(cli,forge,typecheck): sort directory entries for deterministic file discovery\n\nRaw Sys.readdir order is unspecified and filesystem-dependent, so\nMARCH_LIB_PATH module discovery (collect_lib_files) varied across\nmachines — pre-fix bugs sensitive to module load order (e.g. the\nunqualified-variant ordering leak fixed in 8d83950) reproduced on some\nfilesystems and not others. Sort entries at every .march discovery walk:\n\n- bin/main.ml: collect_lib_files (MARCH_LIB_PATH), march_files_in (fmt),\n  march test discovery\n- forge: cmd_build find_march_files, cmd_test find_test_files,\n  cmd_lint/cmd_format collect_march_files\n- typecheck: suggest_module_name tie-breaking\n\nforge resolver_api_surface/resolver_cas_package already sorted.",
+    "files_changed": 6
+  },
+  {
     "hash": "dcc9f2232df143051a4b66175e29257af64166f7",
     "short_hash": "dcc9f22",
     "author": "Matthew Gilliam",
     "date": "2026-06-12T12:05:51-04:00",
     "message": "Merge branch 'claude/optimistic-banzai-b6626d': migrate wire_encode_test to uncurried collection API",
-    "files_changed": 0
-  },
-  {
-    "hash": "54436699e733164f47de7ecd57889846fc8966d3",
-    "short_hash": "5443669",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-12T11:58:22-04:00",
-    "message": "Merge branch 'claude/nostalgic-brown-f56d90': defun erased-type closure calls → ECallPtr (fixes closure use-after-free in module-nested default-arg fns)\n\n# Conflicts:\n#\tspecs/progress.md",
     "files_changed": 0
   },
   {
@@ -2056,16 +2080,16 @@
     "files_changed": 1
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -2104,14 +2128,6 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
     "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
@@ -2120,16 +2136,24 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2144,16 +2168,16 @@
     "files_changed": 15
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
