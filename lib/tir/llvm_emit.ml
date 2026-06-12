@@ -2651,7 +2651,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Field 0 of the closure is the apply fn ptr.
      Convention: apply fn takes (ptr $clo, original_params…). *)
   | Tir.ECallPtr (fn_atom, args) ->
-    let (_, clo_ptr) = emit_atom ctx fn_atom in
+    (* The callee may surface as i64 when its TIR type is an unconstrained
+       TVar (e.g. a closure captured through an erased env slot or passed to
+       an erased i64 param).  Every ptr→i64 erasure goes through coerce's
+       ashr-by-1 (the tagged-immediate untag), so the i64 holds p>>1.  Heap
+       pointers are even, so shl 1 — WITHOUT the |1 immediate tag that
+       coerce i64→ptr would add — restores the original pointer exactly.
+       (coerce would yield p+1: a misaligned non-pointer; the fn-ptr load
+       below then jumps to garbage.) *)
+    let (clo_ty, clo_val) = emit_atom ctx fn_atom in
+    let clo_ptr =
+      if clo_ty = "ptr" then clo_val
+      else begin
+        let v64 = if clo_ty = "i64" then clo_val
+                  else coerce ctx clo_ty clo_val "i64" in
+        let s = fresh ctx "cv" in
+        let r = fresh ctx "cv" in
+        emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s v64);
+        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r s);
+        r
+      end
+    in
     let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
     let nargs = List.length args in
     let ret_tir = match fn_atom with

@@ -267,3 +267,19 @@
        (glob_files imports/record_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/record_native\" %{exe:../bin/main.exe} --compile -o record_native_bin \"$PWD/imports/record_native/rn_entry.march\" && ./record_native_bin")))
+
+; ── Regression: indirect call through an erased-type closure ──
+; ECallPtr dispatch (llvm_emit.ml) assumed the callee atom was already a
+; ptr; a closure param captured into another lambda's env loses its TFn
+; type (erased slot → loads as i64), and the raw i64 fed the fn-pointer
+; getelementptr — clang: "'%ldNN' defined with type 'i64' but expected
+; 'ptr'".  The callee is now coerced to ptr before the field load.
+; Distilled from Depot.Migration.run's `__try_call(fn _ -> thunk())`.
+; The fixture compiles natively and RUNS the binary, panicking (exit 1)
+; if the thunk's result is wrong.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/erased_clo_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/erased_clo_native\" %{exe:../bin/main.exe} --compile -o erased_clo_native_bin \"$PWD/imports/erased_clo_native/ec_entry.march\" && ./erased_clo_native_bin")))
