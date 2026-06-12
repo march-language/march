@@ -12000,6 +12000,127 @@
       "created_at": "2026-06-11T15:51:13.390504-04:00",
       "updated_at": "2026-06-11T15:51:13.390504-04:00",
       "metadata_json": "{\"branch\":\"claude/peaceful-brahmagupta-981324\",\"commit\":\"57ddf99\",\"confidence\":95}"
+    },
+    {
+      "id": 1092,
+      "change_id": "1f37f27c-5e0c-4d15-915d-df5f0991a444",
+      "node_type": "observation",
+      "title": "Depot builds records DYNAMICALLY (blank() = record_from_list([]) + record_put fold over runtime schema data, then static-ish field access b.password). Pure compile-time per-shape specialization cannot reach 5275 green. Runtime needs record shape metadata. Also: compiled code has uniform low-bit int tagging ((n<<1)|1) for generic ADT slots (coerce i64<->ptr), tuples use NATURAL repr, records use NATURAL repr.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:51:39.258351-04:00",
+      "updated_at": "2026-06-11T15:51:39.258351-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":95}"
+    },
+    {
+      "id": 1093,
+      "change_id": "e86854ac-fcab-4907-9a65-eebfb7f38521",
+      "node_type": "option",
+      "title": "Static emit-time specialization per record shape (task prompt sketch) — works only for statically-known record types; rejects/breaks dynamic flows (blank, record_put append)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:51:39.286729-04:00",
+      "updated_at": "2026-06-11T15:51:39.286729-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":85}"
+    },
+    {
+      "id": 1094,
+      "change_id": "6b9de88e-78ff-4881-845f-2e4c9bd13506",
+      "node_type": "option",
+      "title": "Shape-tagged records: intern record shapes in runtime registry, store shape id in the i32 tag field at every record alloc site; implement the 7 builtins as C functions reading the descriptor; EField on unknown types falls back to dynamic by-name lookup; call sites pass value-kind hints",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:51:39.319175-04:00",
+      "updated_at": "2026-06-11T15:51:39.319175-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":85}"
+    },
+    {
+      "id": 1095,
+      "change_id": "d2b73d89-957f-4832-bc37-4fb7bdf86593",
+      "node_type": "outcome",
+      "title": "Fix verified: fixture passes (4/4 checks), full dune runtest green, depot IR now compiles past the shadowing bug (remaining link failure is pre-existing missing native record_entries/record_from_list builtins, flagged separately)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:53:36.789565-04:00",
+      "updated_at": "2026-06-11T15:53:36.789565-04:00",
+      "metadata_json": "{\"branch\":\"claude/suspicious-villani-276c9a\",\"commit\":\"19fa9a2\",\"confidence\":95}"
+    },
+    {
+      "id": 1096,
+      "change_id": "5c369e75-fa31-426c-820c-2eff40f79c22",
+      "node_type": "action",
+      "title": "Committed 19fa9a2: shadow-aware rename_tir_vars + param_shadow_native fixture + specs updates",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T15:53:36.853300-04:00",
+      "updated_at": "2026-06-11T15:53:36.853300-04:00",
+      "metadata_json": "{\"branch\":\"claude/suspicious-villani-276c9a\",\"commit\":\"19fa9a2\",\"confidence\":95}"
+    },
+    {
+      "id": 1097,
+      "change_id": "738aa0ec-92f4-48bf-9ace-bfb48684d1b3",
+      "node_type": "decision",
+      "title": "Chose hybrid runtime-shape-metadata design: record shape ids interned in a native runtime registry, stored in the unused header pad (offset 12, always 0 today via calloc); the 7 builtins become C functions in march_extras.c reading the descriptor; record_put/from_list intern NEW shapes at runtime (supports depot's dynamic blank() flow); EField on statically-unknown record types emits a dynamic by-name lookup (legacy slot-0 read if shape==0); call sites pass value-kind hints (i/f/p/g) via emit-time special-casing; value conventions: record slots natural repr, ADT-slot outputs tagged ints, entries tuple snd natural-by-kind; eval.ml keys/values/entries sorted by field name for native parity; WASM target skips shape stores",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:00:40.438978-04:00",
+      "updated_at": "2026-06-11T16:00:40.438978-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":85}"
+    },
+    {
+      "id": 1098,
+      "change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "node_type": "action",
+      "title": "Implement shape registry + 7 record builtins in march_extras.c; shape stores + EApp special-cases + EField dynamic fallback in llvm_emit.ml; sort eval record_keys/values/entries; native regression fixture",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:00:49.494361-04:00",
+      "updated_at": "2026-06-11T16:00:49.494361-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":85,\"files\":[\"runtime/march_extras.c\",\"lib/tir/llvm_emit.ml\",\"lib/eval/eval.ml\"]}"
+    },
+    {
+      "id": 1099,
+      "change_id": "a693325e-bc48-4704-97d3-f02910ae5fbd",
+      "node_type": "observation",
+      "title": "Minimal repro of bastion crash: module-nested default-arg fn (method\\\\, class\\\\) + trailing required closure param (render_inner) + body using a local closure capturing a literal. Native jumps to addr=ASCII('_csrf_to'): closure code-ptr slot overwritten with captured string FV. Needs BOTH default-args AND trailing param. Pre-existing (stock+fixed identical). NOT the tuple-Bool fix.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:14:04.795370-04:00",
+      "updated_at": "2026-06-11T16:14:04.795370-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":95,\"files\":[\"/tmp/inlrepro.march\"]}"
+    },
+    {
+      "id": 1100,
+      "change_id": "1f010f9e-9eef-4d81-9728-1aa8f0f57b75",
+      "node_type": "observation",
+      "title": "Pre-existing blocker found while verifying depot: lower.ml rename_tir_vars qualifies intra-module fn references without scope tracking — a local binder sharing a module fn name (Depot.Schema.blank_fold's param 'fields' vs fn fields/1) gets its body references rewritten to the qualified global, emitting 'call ptr @Depot.Schema.fields()' (undefined zero-arg). Confirmed pre-existing via stashed-base compiler. Fixing as part of this work since it gates depot native verification.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:30:18.566593-04:00",
+      "updated_at": "2026-06-11T16:30:18.566593-04:00",
+      "metadata_json": "{\"branch\":\"claude/upbeat-gauss-9440d3\",\"confidence\":95}"
+    },
+    {
+      "id": 1101,
+      "change_id": "ffff4279-de2d-44e7-b8cd-a2811fbf5a18",
+      "node_type": "decision",
+      "title": "Fix bastion crash: broaden defun EApp->ECallPtr to ALL non-top-level applied vars (not just TFn/TVar-typed). Root: zero-arg lambda fn()->T typed as thunk T (not TFn), so render_inner:String slips defun's type check, stays EApp(var,[]); perceus live_before ignores EApp callee -> premature dec_rc -> closure freed before render_inner() call -> jump into reused mem. builtins already excluded via top_level.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:33:14.003001-04:00",
+      "updated_at": "2026-06-11T16:33:14.003001-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":88,\"files\":[\"lib/tir/defun.ml\",\"lib/desugar/desugar.ml\"]}"
+    },
+    {
+      "id": 1102,
+      "change_id": "7346154f-9fd3-4296-8129-56992a657b3c",
+      "node_type": "outcome",
+      "title": "FIXED the crash: defun rewrites EApp->ECallPtr for any non-top-level applied var (zero-arg closure thunks no longer slip through). Minimal repro + variants pass native==interp; full suite 1421+ green; regression test/native/zero_arg_closure_default wired into runtest. Desugar span change reverted (defun alone suffices). Gate.validate_required: separate logic miscompile, NOT reproducible self-contained; bastion full-suite validation blocked by env race (concurrent session evolved bastion past worktree 63dcfbf stdlib: hmac_sha256_bytes/peer_addr missing -> bastion no longer compiles in worktree, independent of this fix).",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-11T16:46:09.242491-04:00",
+      "updated_at": "2026-06-11T16:46:09.242491-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"04966f4\",\"confidence\":90}"
     }
   ],
   "edges": [
@@ -19504,6 +19625,171 @@
       "weight": 1.0,
       "rationale": "Branch merged and verified on main",
       "created_at": "2026-06-11T15:51:13.417034-04:00"
+    },
+    {
+      "id": 684,
+      "from_node_id": 1070,
+      "to_node_id": 1092,
+      "from_change_id": "bcdfcb4a-8529-467e-8ee4-9cda91877e53",
+      "to_change_id": "1f37f27c-5e0c-4d15-915d-df5f0991a444",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Exploration finding",
+      "created_at": "2026-06-11T15:51:46.054362-04:00"
+    },
+    {
+      "id": 685,
+      "from_node_id": 1070,
+      "to_node_id": 1093,
+      "from_change_id": "bcdfcb4a-8529-467e-8ee4-9cda91877e53",
+      "to_change_id": "e86854ac-fcab-4907-9a65-eebfb7f38521",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Possible approach",
+      "created_at": "2026-06-11T15:51:46.066222-04:00"
+    },
+    {
+      "id": 686,
+      "from_node_id": 1070,
+      "to_node_id": 1094,
+      "from_change_id": "bcdfcb4a-8529-467e-8ee4-9cda91877e53",
+      "to_change_id": "6b9de88e-78ff-4881-845f-2e4c9bd13506",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Possible approach",
+      "created_at": "2026-06-11T15:51:46.076663-04:00"
+    },
+    {
+      "id": 689,
+      "from_node_id": 1073,
+      "to_node_id": 1095,
+      "from_change_id": "50cd5f12-5749-4b13-8d6a-b7c4b2991105",
+      "to_change_id": "d2b73d89-957f-4832-bc37-4fb7bdf86593",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Verification result",
+      "created_at": "2026-06-11T15:53:45.098016-04:00"
+    },
+    {
+      "id": 690,
+      "from_node_id": 1073,
+      "to_node_id": 1096,
+      "from_change_id": "50cd5f12-5749-4b13-8d6a-b7c4b2991105",
+      "to_change_id": "5c369e75-fa31-426c-820c-2eff40f79c22",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Commit",
+      "created_at": "2026-06-11T15:53:45.109567-04:00"
+    },
+    {
+      "id": 691,
+      "from_node_id": 1094,
+      "to_node_id": 1095,
+      "from_change_id": "6b9de88e-78ff-4881-845f-2e4c9bd13506",
+      "to_change_id": "d2b73d89-957f-4832-bc37-4fb7bdf86593",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen option",
+      "created_at": "2026-06-11T16:00:40.451773-04:00"
+    },
+    {
+      "id": 692,
+      "from_node_id": 1093,
+      "to_node_id": 1095,
+      "from_change_id": "e86854ac-fcab-4907-9a65-eebfb7f38521",
+      "to_change_id": "d2b73d89-957f-4832-bc37-4fb7bdf86593",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Rejected: cannot handle dynamic record flows",
+      "created_at": "2026-06-11T16:00:40.462736-04:00"
+    },
+    {
+      "id": 693,
+      "from_node_id": 1094,
+      "to_node_id": 1097,
+      "from_change_id": "6b9de88e-78ff-4881-845f-2e4c9bd13506",
+      "to_change_id": "738aa0ec-92f4-48bf-9ace-bfb48684d1b3",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen option",
+      "created_at": "2026-06-11T16:00:49.452367-04:00"
+    },
+    {
+      "id": 694,
+      "from_node_id": 1093,
+      "to_node_id": 1097,
+      "from_change_id": "e86854ac-fcab-4907-9a65-eebfb7f38521",
+      "to_change_id": "738aa0ec-92f4-48bf-9ace-bfb48684d1b3",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Rejected: cannot handle dynamic record flows",
+      "created_at": "2026-06-11T16:00:49.463682-04:00"
+    },
+    {
+      "id": 695,
+      "from_node_id": 1097,
+      "to_node_id": 1098,
+      "from_change_id": "738aa0ec-92f4-48bf-9ace-bfb48684d1b3",
+      "to_change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-11T16:00:49.527072-04:00"
+    },
+    {
+      "id": 696,
+      "from_node_id": 1074,
+      "to_node_id": 1099,
+      "from_change_id": "3a3cc428-ef0e-40ff-85db-ed30103b8eb6",
+      "to_change_id": "a693325e-bc48-4704-97d3-f02910ae5fbd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "root-cause observation",
+      "created_at": "2026-06-11T16:14:04.833100-04:00"
+    },
+    {
+      "id": 697,
+      "from_node_id": 1098,
+      "to_node_id": 1099,
+      "from_change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "to_change_id": "a693325e-bc48-4704-97d3-f02910ae5fbd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Blocker discovered during verification",
+      "created_at": "2026-06-11T16:30:18.579910-04:00"
+    },
+    {
+      "id": 698,
+      "from_node_id": 1098,
+      "to_node_id": 1100,
+      "from_change_id": "d523d51c-f3e5-47ea-8d04-6f347bbc1a7c",
+      "to_change_id": "1f010f9e-9eef-4d81-9728-1aa8f0f57b75",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Blocker discovered during verification",
+      "created_at": "2026-06-11T16:30:24.888749-04:00"
+    },
+    {
+      "id": 699,
+      "from_node_id": 1099,
+      "to_node_id": 1101,
+      "from_change_id": "a693325e-bc48-4704-97d3-f02910ae5fbd",
+      "to_change_id": "ffff4279-de2d-44e7-b8cd-a2811fbf5a18",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "fix decision",
+      "created_at": "2026-06-11T16:33:14.040788-04:00"
+    },
+    {
+      "id": 700,
+      "from_node_id": 1101,
+      "to_node_id": 1102,
+      "from_change_id": "ffff4279-de2d-44e7-b8cd-a2811fbf5a18",
+      "to_change_id": "7346154f-9fd3-4296-8129-56992a657b3c",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "fix complete",
+      "created_at": "2026-06-11T16:46:09.278310-04:00"
     }
   ]
 }
