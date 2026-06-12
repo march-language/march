@@ -3653,7 +3653,7 @@ let base_env : env =
              | Unix.S_REG  -> VCon ("RegularFile", [])
              | Unix.S_DIR  -> VCon ("Directory", [])
              | Unix.S_LNK  -> VCon ("Symlink", [])
-             | _           -> VCon ("Other", [])
+             | _           -> VCon ("OtherKind", [])
            in
            (* FileStat is a positional constructor: FileStat(size, kind, modified, accessed) *)
            VCon ("Ok", [VCon ("FileStat", [
