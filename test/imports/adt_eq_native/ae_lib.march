@@ -1,0 +1,14 @@
+-- Library module defining ADTs compared with == from the entry module.
+-- AeDir is also defined (with fewer constructors) in ae_lib2.march to
+-- exercise the same-short-name layout-merge path in ensure_adt_eq_fn.
+mod AeLib do
+
+type AeShape = AeDot | AeBox(Int, String) | AeWrap(AeShape)
+
+type AeDir = AeNorth | AeSouth | AeEast | AeWest
+
+fn mk_box(n, s) do AeBox(n, s) end
+
+fn east() do AeEast end
+
+end

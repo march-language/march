@@ -1,19 +1,443 @@
 [
   {
+    "hash": "cb82b509459ca412e3a10b2eb6f7a564e91f49c0",
+    "short_hash": "cb82b50",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:45:49-04:00",
+    "message": "fix(eval): align FileKind OtherKind VCon tag with ptype declaration\n\nfile_stat emitted VCon (\"Other\", []) but stdlib FileKind declares the\nconstructor as OtherKind. Pattern matches on OtherKind would never fire\nat runtime. Corrected to VCon (\"OtherKind\", []).",
+    "files_changed": 1
+  },
+  {
+    "hash": "b7a400c3a8eb33558cf9c6ca5293898a3f0e9d6f",
+    "short_hash": "b7a400c",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:45:45-04:00",
+    "message": "Merge branch 'claude/gracious-murdock-0bae13': hmac_sha256 typecheck signature fix",
+    "files_changed": 0
+  },
+  {
+    "hash": "0a52b54eb96f95d54f8f988d97d9a8a10da77898",
+    "short_hash": "0a52b54",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:35:57-04:00",
+    "message": "fix(test): migrate wire_encode_test to uncurried collection API\n\nMap.fold and List.fold_left now take collection first, acc second,\nuncurried callback last. Also add missing | in DescribeTarget variants.",
+    "files_changed": 1
+  },
+  {
+    "hash": "20e53f2f80273bbc0fbb563e2867b8adaec058cf",
+    "short_hash": "20e53f2",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T21:32:54-04:00",
+    "message": "fix(codegen,runtime): unify tuple/erased slot convention; conditional untag preserves type-erased heap values\n\nCompiled code read tuple slots as ptr and untagged scalar views with an\nunconditional ashr, but ETuple/EAlloc-fallback/EStackAlloc-fallback/EReuse\nstored scalars in their NATURAL repr — match [(\"a\",5)] do Cons((k,v),_)->v\nreturned 2 and true matched as false in every compiled build.  All tuple and\nerased-cell slots now use the UNIFORM convention (scalars tagged via coerce\ni64->ptr, heap values raw), matching the destructure fallbacks that were\nalready reading them that way.\n\ncoerce ptr->i64 now untags CONDITIONALLY (ashr iff low bit set): producers\nalways tag scalars, so an even value in a scalar-typed view is a heap pointer\nflowing through a lying static type (dynamically-typed record/alist code,\ne.g. depot's heterogeneous schema opts).  Preserving even bits verbatim makes\ntag->untag lossless for all bit patterns, so such values survive scalar-typed\ntransit (the depot 'blank uses explicit defaults' hang: a string payload\nhalved by ashr then memcmp'd with a garbage length).\n\nmarch_extras.c record builtins aligned with the uniform convention:\n- record_entries pair snd: uniform (was natural — true read back as false)\n- march_record_field_dyn: tags 'i' fields (consumers cond-untag)\n- record_put: normalizes input, downgrades kind i->g when a scalar-typed\n  value's bits are heap-plausible (lying static type) so bits round-trip\n- record_from_list: pair values arrive uniform; per-field kind normalization\n\nDepot test_depot_schema natively: was 3 F + hang at test 17, now 42 tests,\n6 failures (all generic-to_string printing, separate bugs).",
+    "files_changed": 2
+  },
+  {
+    "hash": "cee6f225e92f573026a6dee8a5d0ad32dd1c5152",
+    "short_hash": "cee6f22",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T17:10:43-04:00",
+    "message": "feat(codegen,runtime): native lowering for record introspection builtins via runtime shape registry\n\nThe seven record introspection builtins (record_keys, record_values,\nrecord_entries, record_get, record_put, record_has_key, record_from_list)\nwere interpreter-only: native builds emitted bare 'call ptr\n@record_entries(...)' with no definition, failing at link time.\n\nRecords carry no field names at runtime, so this adds a record shape\nregistry to runtime/march_extras.c: every record allocation (ERecord /\nEUpdate / EReuse) stamps an interned shape id into the previously-unused\nheader pad word (offset 12, always zero via march_alloc's calloc).  A shape\ndescriptor is the canonical string \"name:kind;...\" (fields sorted by name,\nkind chars i/f/p/g = raw-i64 scalar / double bits / heap ptr / generic).\nThe builtins are C functions reading the descriptor; record_put with a new\nkey and record_from_list intern NEW shapes at runtime (sorted insert), so\ndynamically-built records (depot's Depot.Schema.blank fold over\nrecord_from_list([])) work in compiled code.\n\nValue conventions (documented in march_extras.c):\n- record slots hold the natural representation; the descriptor records kind\n- outputs into generic ADT slots (values list payloads, record_get's Some\n  payload) low-bit-tag ints, matching the ashr-untag on extraction\n- record_entries pair snd stays natural per field kind (tuple slots are\n  read at concrete element types without untagging)\n- record_put / record_from_list call sites pass explicit kind hints\n\nllvm_emit.ml: EApp special cases for the seven builtins (natural-repr value\npassing + kind args), ECallPtr redirect, builtin_ret_ty/mangle_extern\nentries, preamble declares, shape stamping at ERecord/EUpdate/EReuse,\nstack-alloc pad zeroing, and EField on statically-unknown record types now\nemits a dynamic by-name lookup (march_record_field_dyn; legacy slot-0 read\nfor shape-0 cells).  WASM targets skip shape metadata.  borrow.ml: record_*\nargs are borrowed.  eval.ml: record_keys/values/entries now sort by field\nname to match the native sorted-by-name slot layout.\n\nTwo enabling fixes shipped together (both blocked depot's native build):\n- lower.ml rename_tir_vars is now scope-aware: a local binder sharing a\n  module fn name (e.g. a param 'fields' in a module defining fn fields/1)\n  no longer has its references rewritten to the qualified global, which\n  compiled to an undefined zero-arg call '@Depot.Schema.fields()'.\n- ensure_adt_eq_fn generates element-wise short-circuiting structural ==\n  for TTuple and TRecord (previously pointer comparison, so\n  List.member(record_entries(r), (\"age\", 30)) was always false natively).\n\nFixture: test/imports/record_native/ (18 compile-and-run checks: static\nshapes, heterogeneous entries via List.member, runtime shape extension,\ndynamic blank-style fold + dynamic field reads).  dune runtest green\n(1422 alcotest + doctests + fixtures; the 2 entry_imports_ill_typed rule\nfailures are pre-existing on this branch).",
+    "files_changed": 9
+  },
+  {
+    "hash": "19fa9a275d127971bf3196aa4f357aebbc4ac5dd",
+    "short_hash": "19fa9a2",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:53:29-04:00",
+    "message": "fix(tir): locals shadow sibling module-level fns in rename_tir_vars\n\nrename_tir_vars qualified every AVar whose name matched a sibling\nmodule-level fn, ignoring local binders. A param like `fields` in\npfn blank_fold(fields, acc) next to fn fields(schema) was rewritten\nto the qualified global (Depot.Schema.fields), which llvm_emit then\nemitted as the fn's address used as data (SIGBUS) or a zero-arg \"gl\"\ncall (\"use of undefined value\" at clang time).\n\nThe rename walk now threads an in-scope binder set — fn params,\nELet/ELetRec bindings, ECase branch vars — and skips shadowed names.\nTIR-level analog of 02d212d (\"local fns shadow bulk imports\").\n\nRegression fixture test/imports/param_shadow_native/ compiles natively\nand runs; covers param, match-pattern, and let-binding shadowing.",
+    "files_changed": 6
+  },
+  {
+    "hash": "04966f4f0855e5f083782f6ef76cfde338a0d281",
+    "short_hash": "04966f4",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:51:34-04:00",
+    "message": "chore: sync decision graph export after merge",
+    "files_changed": 2
+  },
+  {
+    "hash": "8184e006366047bb187eea2d6ac66040ef906dd7",
+    "short_hash": "8184e00",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:49:32-04:00",
+    "message": "fix(cas): invalidate compiled-artifact cache when runtime C sources change\n\ncompilation_hash mixed in compiler identity (83ef546) but nothing about\nruntime/*.c|*.h, which clang compiles and links into the output binary at\nmarch-compile time. Editing runtime/march_extras.c still served the stale\nbinary cached under the same key. Mix a BLAKE3 digest of the runtime\nsources (sorted name + contents, Lazy per process) into compilation_hash,\nresolving the runtime dir with the same candidates main.ml uses.\n\nAlso fix the cache-hit paths in bin/main.ml ignoring the cp exit code:\na dead artifact pointer (stored pointers hold the original output path,\nso deleting that file orphans them) printed \"compiled (cached)\" while\nwriting no output. New Cas.copy_artifact returns false on missing source\nor failed copy — both call sites now fall through and recompile — and\ntreats src==dest (same inode, recompile with the same -o) as success,\nsince cp exits non-zero on identical files.",
+    "files_changed": 3
+  },
+  {
+    "hash": "4f5bb97b5beb39e3ce6c10f3d1555220f501ff81",
+    "short_hash": "4f5bb97",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:48:46-04:00",
+    "message": "fix(typecheck): hmac_sha256 signature now matches eval/runtime/llvm_emit\n\nThe typecheck entry declared Bytes -> Bytes -> Bytes, but every\nimplementation disagreed: the eval builtin returns Ok(Bytes), the native\nruntime (march_hmac_sha256) reads march_string args and returns\nResult(Bytes, String), and llvm_emit's builtin_ret_ty already said\nResult(Bytes, String). Correct usage (Ok/Err match on String args) was\nrejected; the only accepted usage would misbehave at runtime.\n\nCanonical signature: String -> String -> Result(Bytes, String) — same as\nthe existing stdlib_hmac_sha256 entry. hmac_sha256_bytes (Bytes -> Bytes\n-> Bytes, bare result) was already consistent across all sites; unchanged.\n\nAdds typecheck-level regression tests for both builtins — prior tests\ncalled the eval builtin directly and never exercised the signature.\n1424 -> 1426 tests.",
+    "files_changed": 4
+  },
+  {
+    "hash": "57ddf9955d61c639dcc22c7d438442581aad1207",
+    "short_hash": "57ddf99",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:47:23-04:00",
+    "message": "Merge branch 'claude/peaceful-brahmagupta-981324'\n\n# Conflicts:\n#\tspecs/progress.md\n#\tspecs/todos.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "aec71fb1d254b9a7d6ac371608ee52c9c400d0ad",
+    "short_hash": "aec71fb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T15:43:41-04:00",
+    "message": "fix(bench,test): restore | separators in type declarations over-removed by 33bf2a2\n\nCommit 33bf2a2 (remove | from match arms) also stripped | from type\nvariant declarations in 5 places. Two were already fixed; restore the\nremaining three: bench/tree_transform.march, bench/parallel.march,\ntest/depot/wire_encode_test.march.\n\nVerified: dune runtest (147 tests pass), tree_transform and parallel\ncompile at --opt 2, tree_transform runs and prints 104857600.",
+    "files_changed": 3
+  },
+  {
+    "hash": "c69d8773702bccaa33fc8b6daa7e4d1fdca769da",
+    "short_hash": "c69d877",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:48:38-04:00",
+    "message": "fix(runtime): tag Int payloads in C-built generic list cells (extras/compress)\n\nCompiled code uses uniform low-bit integer tagging ((n<<1)|1) for Int\npayloads in generic constructor slots and emits ashr #1 on extraction.\nmarch_http.c's make_int_cons already pre-tags, but the int_cons /\nbytes_from_raw / bytes_to_raw helpers in march_extras.c and the copies in\nmarch_compress.c stored and read raw i64s, so every C builtin exchanging\nBytes/List(Int) with compiled code corrupted values in both directions\n(observed: base64_encode(Bytes([1,2,255])) -> [3,5,255] on input,\nhmac output bytes halved on read-back). Interp mode was unaffected.\n\nVerified: base64/hmac native == interp == python; RFC 5869 HKDF vector\npasses natively; full suite green.",
+    "files_changed": 2
+  },
+  {
+    "hash": "a01900735d9a2ae1c77405538fc0d69f2d6d31c2",
+    "short_hash": "a019007",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:28:19-04:00",
+    "message": "fix(llvm): nested Bool/Int/Atom literal patterns miscompiled as heap tag switches\n\nLiteral patterns nested inside constructor patterns (e.g. Ok(true)/Ok(false))\ncompiled the inner test as a heap ctor-tag switch on the bound field. But ADT\nfields holding immediates are stored low-bit-tagged ((n<<1)|1), not as heap\npointers — the tag load was a wild dereference. With the switch's default\nbeing unreachable, LLVM folded the test away: the first bool arm was always\ntaken (T T E instead of T F E); nested Int/Atom literal matches segfaulted.\n\nLiteral tags are syntactically unambiguous (lowercase true/false, integers,\n:atoms — ADT ctors are capitalized identifiers), so emit_case now detects\nall-immediate-literal-tag cases and never takes the load-ctor-tag path:\n\n- Bool: reuse the existing untag (ashr) + trunc + br i1 path.\n- Int/Atom: switch on the raw ptrtoint bits against (lit<<1)|1 labels.\n  Comparing tagged-vs-tagged is exact; untagging via ashr would lose bit 63\n  of 64-bit FNV1a atom hashes.\n\nUser ADTs literally named True | False(Int) still take the ctor-tag switch.\nAlso fixes the latent miscompile in stdlib/check.march format_error, which\nprinted the right string only by accident of arm order.\n\nRegression tests (nested_lit_pattern_codegen): IR-level assertions that\nexactly one i32 ctor-tag switch (the outer Ok/Err) survives, bool fields\nare tested via trunc to i1, and int literals compare against tagged\nimmediates. 1421 -> 1424 tests. binary_trees benchmark unchanged (~290ms).",
+    "files_changed": 4
+  },
+  {
+    "hash": "2545039fe6f409b6b53357e4d2c5c0593d196598",
+    "short_hash": "2545039",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:18:56-04:00",
+    "message": "fix(lsp): unify module resolution and typechecking with the CLI\n\nEditor diagnostics diverged from `march --check` in two ways, so Zed showed\n\"Unknown module `Bastion`\" (and ~30 more errors per file) on projects that\nforge check reports clean:\n\n1. resolver: bin/main.ml had grown its own resolve_imports while the shared\n   lib/resolver copy (used by the LSP and REPL) was an old fork with no\n   MARCH_LIB_PATH auto-discovery — modules whose declared name doesn't match\n   their filename (mod Bastion.Channel in channel.march) were unresolvable\n   in the editor.  The full implementation (auto-discovery with declared-name\n   indexing, canonical-path dedup, dotted module filenames, user_files\n   tracking) now lives in lib/resolver as the single source of truth;\n   bin/main.ml delegates to it.  New ?auto_discover flag (default true);\n   the REPL passes false to keep its per-input resolution cheap.  The\n   import-path dedup is now canonicalised too, fixing the relative-entry\n   double-load.\n\n2. typecheck: the LSP calls check_module_full, which was a REDUCED duplicate\n   of check_module's pass 1 — no type/ctor/record prebinding, no pass 1b —\n   so qualified type annotations (Bastion.Channel.ChannelConn) failed to\n   resolve only in the LSP.  check_module and check_module_full now share\n   one implementation (check_module_core) that returns the final env.\n\nVerified by driving march-lsp over JSON-RPC against bastion: didOpen on\nchannel_server/router/test_channel/csrf now publishes 0 errors (was 34 on\nchannel_server alone).  Full suite green (147 LSP tests incl.); forge check\nstill clean on bastion (80 files) and depot (27 files).",
+    "files_changed": 6
+  },
+  {
+    "hash": "61cfb279eaad798914f5260699e34caa466322ce",
+    "short_hash": "61cfb27",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T13:11:56-04:00",
+    "message": "fix(runtime): tag __try_call's Bool result so compiled Check.all properties pass\n\nCompiled property tests failed on run 1 with \"returned false\" for\ntrivially-true properties while the interpreter passed them. __try_call\n(the panic-catching trampoline behind Check.try_prop) stored the\nproperty thunk's raw i64 Bool directly into the Result Ok field, but\ncompiled March reads polymorphic ADT immediate fields with the uniform\nlow-bit tag convention (ptrtoint + ashr 1): Ok(1) read back as 0, so\nCheck.is_failing saw not(false) = failing for every passing property.\n\nFix: store ((result << 1) | 1) at the Result construction point in\n__try_call, matching the tagged-immediate convention, and tighten the\nbuiltin's typechecker signature from (Bool -> a) -> Result(a, String)\nto (Bool -> Bool) -> Result(Bool, String) so any future heap-typed use\nfails to typecheck instead of being silently corrupted by the tagging.\nThe interpreter's __try_call builds OCaml values and is unaffected.\n\nEnd-to-end regression test compiles a trivially-true Check.all property\nthrough the real --compile --test pipeline and asserts the binary exits\n0; skips gracefully when clang/runtime is unavailable (JIT-test\nconvention). 1422 -> 1423 tests.\n\nFound during verification, deferred as separate work: Bool literal\npatterns nested in constructor patterns (Ok(true)/Ok(false)) compile to\na heap-tag switch on a tagged immediate and LLVM's unreachable-default\nfolding makes the first Bool arm unconditionally taken — a real\nmiscompile, tracked separately.",
+    "files_changed": 5
+  },
+  {
+    "hash": "7091bfb0fcd4a16d03f85ac1a97c59127cc6fced",
+    "short_hash": "7091bfb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-11T12:39:42-04:00",
+    "message": "fix(lower): qualify sibling-fn refs in DMod test bodies so DCE keeps closure-only helpers\n\nMulti-test-file `forge test` builds load non-entry test files as DMod\nentries. lower_mod_decls registers their functions qualified\n(TestB.helper) and renames refs inside the module's own DFn bodies via\nrename_tir_vars — but collect_tests lowered test/setup/setup_all bodies\nwith plain lower_expr, leaving refs unqualified (helper). A helper\nreferenced only through a closure (e.g. a Check.all property lambda)\nthen miscompiled down the pipeline: defun captured it as a free\nvariable instead of resolving a top-level fn, DCE pruned the qualified\ndefinition (reachability matches free_vars against fn names — name\nmismatch), and llvm_emit's no-slot AVar fallback emitted a\n@helper$clo_wrap trampoline calling a dangling @helper:\n\n    test/markdown_test.ll: error: use of undefined value '@all_in'\n\nFix: collect_tests threads the enclosing module prefix + direct fn/let\nnames through DMod descent and applies rename_tir_vars to lowered\ntest/setup bodies, mirroring the module's DFn handling.\n\nRegression test drives a DMod test that references a sibling helper\nthrough a closure across the full native pipeline and asserts no\ndangling unqualified trampoline survives. 1421 -> 1422 tests.\n\nNote: compiled Check.all properties still fail at runtime (returned\nfalse, counterexample prints as #<tag:0>) while the interpreter passes\n— separate pre-existing bug, tracked separately.",
+    "files_changed": 4
+  },
+  {
+    "hash": "8d8395083b0132b29c1ff26bf1aff6137897cc63",
+    "short_hash": "8d83950",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-10T17:06:46-04:00",
+    "message": "fix(typecheck): resolve cross-module named-type leaks in whole-program builds\n\n`forge build` typechecks each lib file individually (`march --check <file>`)\nwith the siblings discovered via MARCH_LIB_PATH, so any file can be the compile\nentry: its declarations sit at the top level while the imported modules are\nwrapped `DMod`s.  That asymmetry leaked several cross-module type errors that a\nsingle-entry `forge test` build never hits, so well-typed projects (sigil)\nfailed to build while their tests passed.\n\nFour fixes, all order-preserving so constructor tags are unchanged at lowering:\n\n- Order sibling modules by UNQUALIFIED type/constructor references, not just\n  qualified `Mod.x` ones.  A module using another's variant type or constructors\n  by their bare name (`List(Block)`, `Heading(..)`, `match .. Heading(x) ->`)\n  now records a dependency on the definer, so the definer is checked first and\n  its bare names are exported before the user is checked (\"I cannot find\n  `Block`\").  This reorders only; it does not pre-bind names eagerly, which would\n  change a constructor's resolved type and miscompile its tag.\n\n- Disambiguate a constructor shared by several ADTs (`Text` in both `Inline` and\n  `XmlNode`) by the expected/scrutinee type instead of `lookup_ctor`'s\n  order-dependent \"most-recently-registered wins\".  `infer_pattern` now threads\n  the scrutinee type from both match-checking paths and from nested constructor\n  arguments.\n\n- Pre-bind the entry module's own top-level declarations under its qualified\n  module name (`Config.Site`), as a wrapped sibling already is.  Without this a\n  sibling's `Config.Site` annotation falls through to the module registry, which\n  carries no record fields and so yields a nominal `TCon` that will not unify\n  with the entry module's structural use of the record.\n\n- Register the disambiguated module.type.ctor form (`Md.Inline.Text`) in pass 1\n  with the bare type as its ci_type, so a sibling can reference the entry\n  module's constructors in their fully-qualified disambiguating form.\n\nRegression: test/whole_program fixtures + two `march --check` rules in test/dune\n(record owned by the entry, variant used unqualified by an earlier-sorted\nsibling) — both fail before and pass after.",
+    "files_changed": 7
+  },
+  {
+    "hash": "2acd942da7451d0cc0e08810a9b5eb7db81bfbb8",
+    "short_hash": "2acd942",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-08T10:48:00-04:00",
+    "message": "docs(readme): fix remaining stale content\n\n- Add march language tag to all language tour code blocks\n- Scope \"interpreter only\" to actor model; Task concurrency works compiled\n- Fix pipe example: qualify List.* names, sum -> sum_int\n- Expand tir/ layout: add tir.ml, borrow.ml, fusion.ml, opt.ml",
+    "files_changed": 1
+  },
+  {
+    "hash": "5f6ee00930870ad4c988e66c9586c2aa3dbf182d",
+    "short_hash": "5f6ee00",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-08T08:22:58-04:00",
+    "message": "docs(syntax-ref): remove | as match arm separator from docs",
+    "files_changed": 1
+  },
+  {
+    "hash": "7d578145b04dc92ded98c405b8b96e602ce9401f",
+    "short_hash": "7d57814",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-08T08:20:16-04:00",
+    "message": "docs(readme): fix stale match/if syntax throughout\n\nmatch now uses `do...end` not `with`, arms no longer require leading `|`,\nand conditionals use `if cond do ... end` not `if cond then ...`.\n\nUpdated 5 match expressions and 2 if expressions across the language tour\nand FBIP example.",
+    "files_changed": 1
+  },
+  {
+    "hash": "b6999984549a807b16d12b898b4bdb1cbe26b4a5",
+    "short_hash": "b699998",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-07T11:23:20-04:00",
+    "message": "fix(llvm): last-wins entry point selection for multi-module compilation\n\nChange List.find_map to List.fold_left so that when multiple modules\neach define fn main(), the entry file's module wins.  The entry file's\ndeclarations are injected last into mod_decls (and therefore appear\nlast in tm_fns), so fold_left (last match wins) gives the correct\nresult without requiring the caller to control declaration order.\n\nWithout this fix, MARCH_LIB_PATH compilation with a library that also\ndefines main (e.g. Ssg.main in sigil.march) would pick the library's\nmain instead of the user's entry file's main, causing the wrong program\nto run.",
+    "files_changed": 1
+  },
+  {
+    "hash": "e698e6303bc9386567c8ac7c17abb3aa58f717d4",
+    "short_hash": "e698e63",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T21:01:22-04:00",
+    "message": "fix(runtime): fix two RC bugs in march_task_spawn_thunk\n\nBug 1 (crash): task[0] = 0 zeroed the Task object's ref-count field\nimmediately after march_alloc set it to 1. When the caller's Perceus-emitted\nmarch_decrc_local fired on the Task result, rc went 0→-1, triggering\n\"local RC underflow — aborting\".\n\nBug 2 (leak): march_incrc(clo_ptr) added a spurious extra reference to the\nclosure. Perceus treats task_spawn as a consuming call and emits no DecRC on\nthe caller side, so the closure's rc=1 IS the task's reference. Adding another\nIncRC left the closure with rc=1 after the trampoline's march_decrc ran, leaking\nit for the program's lifetime.\n\nFix: remove task[0]=0 (march_alloc already initialises rc=1, tag=0, pad=0),\nremove the redundant ((int32_t*)task)[2]=0 (same reason), and remove the\nspurious march_incrc. The Task's rc field is now correctly 1 when returned\nto the caller, and the closure's single reference is properly consumed by the\ntrampoline's march_decrc after the lambda returns.\n\nPure-integer tasks were unaffected because no heap-allocating RC operations\nfired before the crash point in the main thread.",
+    "files_changed": 1
+  },
+  {
+    "hash": "65babe6e27f1cb12ecdbf8b308900f6dc1647c54",
+    "short_hash": "65babe6",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T20:58:50-04:00",
+    "message": "fix(perceus): exclude TPtr sources from is_borrowed_field to fix closure FV RC underflow\n\nWhen borrow inference marks a closure's \\$clo parameter as :borrow (not :own),\nit lands in the outer borrowed set passed to insert_rc, which is unioned into\nborrowed' (live_after).  The is_borrowed_field check in ELet then fires for\nany field access \"let fv = \\$clo.fvN\" because \\$clo is in live_after (condition 1),\nand marks the closure FV as a _borrowed_field_var.  This suppresses the EIncRC\nthat d2cf09e was supposed to emit before any consuming callee, so the FV is\npassed unconsumed on every call and freed after the first → RC underflow on the\nsecond HTTP request (or second call to any multi-invocation closure).\n\nRoot cause: conditions 1–3 of is_borrowed_field had no TPtr exclusion; only\ncondition 4 guarded against TPtr.  The fix adds a global TPtr guard before all\nfour conditions.  TPtr sources are always closure structs (\\$clo) — their fields\nare closure FVs managed by the borrowed' mechanism in insert_rc (d2cf09e).\nMarking them as borrowed_field_vars suppressed the required EIncRC.\n\nRegression test: test_perceus_closure_fv_borrowed_clo_incrc verifies the apply\nfunction for a multi-call pipeline closure emits EIncRC for the captured list FV.",
+    "files_changed": 2
+  },
+  {
+    "hash": "99e5cf8290cb65d8d064cc8941242ea5587dbfad",
+    "short_hash": "99e5cf8",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T20:45:42-04:00",
+    "message": "fix(lower): handle PatAtom in pat_tag_and_subs for atom pattern matching\n\nThe parser always emits PatAtom for bare atom patterns (:get, :post, …).\npat_tag_and_subs only handled PatLit(LitAtom), which is never produced\nby the parser — so every atom branch returned None, was silently dropped\nfrom the pattern matrix, and only the wildcard arm fired in compiled mode.\n\nFix: add PatAtom cases to pat_tag_and_subs:\n  - PatAtom(a, [], _)   → Some(\":\" ^ a, [])   (bare atom: switch on i64 hash)\n  - PatAtom(a, subs, _) → Some(a, subs)        (atom constructor: heap tag)\n\nAdd regression test confirming :get/:post branches appear in ECase.",
+    "files_changed": 2
+  },
+  {
+    "hash": "17ef0cc88d108b10b362036558741ce9e9ecf1d8",
+    "short_hash": "17ef0cc",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T15:34:13-04:00",
+    "message": "fix(perceus): suppress spurious EDecRC for locally-owned record fields\n\nRoot cause: is_borrowed_field only fired when the source record was in\nlive_after (borrowed parameter) or _borrowed_field_vars.  For records\nreturned by cross-module function calls, the source was only in\nlive_into_e2 — not live_after — so String fields were treated as\nindependently owned.  post_dec then emitted EDecRC(field) at the last\nborrowed-call use, freeing meta.title while the record still held a\nreference → dangling pointer and RC underflow.\n\nFix: is_borrowed_field now also triggers in two new cases:\n1. live_before(e2, live_after) includes src — the record is used again\n   in the body after this extraction (sequential multi-field access).\n2. src is in _var_ctx and is NOT a TPtr — the record is a locally-owned\n   heap variable still in scope (e.g. returned by Page.decode).  TPtr\n   sources (the closure struct $clo: TPtr TUnit) are excluded so that\n   the borrowed' set continues to emit EIncRC for closure FVs before\n   consuming calls, which _borrowed_field_vars would otherwise suppress.\n\nRegression test: perceus/local record field no spurious decrc.\n1413 → 1414 tests.",
+    "files_changed": 3
+  },
+  {
+    "hash": "383b2614455826e5ac9390666043ce4b64f46bb2",
+    "short_hash": "383b261",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T15:09:18-04:00",
+    "message": "fix(lower): pre-register all DMod names before lowering to prevent type erasure\n\n_ensure_module_lowered re-parses stdlib files on demand using\nModule_registry.find_stdlib_file, which returns a RELATIVE path\n(e.g. \"stdlib/yaml.march\").  But the type_map is keyed by spans from\nthe ABSOLUTE path used by load_stdlib() (e.g. \"/Users/.../yaml.march\").\nThe file-path mismatch causes ty_of_span to return TVar \"_\" for every\nexpression in the re-parsed module, so all local variables get unknown\ntypes and emit_case falls through to the heap-ADT tag-read path for\nBooleans — crashing when the value is actually a tagged integer.\n\nFix: scan m.mod_decls at the start of lower_module and pre-register\nevery DMod name in _lowered_modules.  When _ensure_module_lowered fires\nfor a name already in the combined module, it returns immediately instead\nof re-parsing from disk.  Pass 2 then lowers all functions with the\ncorrect type_map.\n\nReproducer: any .march file calling Yaml.parse_exn / Yaml.skip_ws with\n--compile (segfaults before; prints correct output after).\n1412 → 1413 tests.",
+    "files_changed": 1
+  },
+  {
+    "hash": "3c937d37b9b52ca00072f3c5af97a6530df1550d",
+    "short_hash": "3c937d3",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T15:07:36-04:00",
+    "message": "fix(perceus): prevent RC underflow when tuple param is destructured via ECase in multi-call context\n\nRoot cause: field_escape_owns in borrow.ml's owned_in fired for TTuple/TRecord\nscrutinees whenever a branch variable escaped via EAtom (returned from the\nmatch arm).  This flipped the tuple parameter to cfg:own in borrow inference,\npreventing scrutinee_borrowed from becoming true in Perceus.\n\nWith pair:own instead of pair:borrowed, live_after was empty when Perceus\nprocessed the function body, so scrutinee_borrowed = false.\nadd_scrutinee_free_for then emitted EDecRC(pair) inside the match branch AND\npost_dec_vars emitted EDecRC on the extracted String field — without any\nmatching EIncRC.  On the second call from the loop the field String's RC was\nalready 0 → \"local RC underflow\".\n\nFix: field_escape_owns now returns false for TTuple and TRecord scrutinees.\nPerceus's scrutinee_borrowed mechanism already handles field escapes for these\ntypes: when the scrutinee is in live_after (because the param is borrowed),\nbranch vars are added to live_after and EIncRC is emitted for any extracted\nfield used at a non-last-use position.  ADT (TCon) scrutinees keep the\nexisting field_escape_owns logic for FBIP-ownership patterns.\n\nRegression test: perceus/tuple param multi-destruct no RC underflow.\n1412 → 1413 tests.",
+    "files_changed": 3
+  },
+  {
+    "hash": "b985c81fb5593809431e876a6ed2427fda047e0e",
+    "short_hash": "b985c81",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T14:33:18-04:00",
+    "message": "fix(llvm_emit): don't clear local_names between mutual TCO case bodies\n\nIn emit_mutual_tco_group, all case bodies are emitted into the same\nLLVM function. Clearing local_names before each case body reset the\nalloca uniquification counter, so two case bodies that both declared\na local variable with the same name (e.g. 'st2') each emitted\n'%st2.addr = alloca ptr' — a duplicate SSA definition, which clang\nrejected with \"multiple definition of local value named 'st2.addr'\".\n\nFix: clear local_names once at the start of emit_mutual_tco_group\n(matching emit_fn), then clear only var_slot and var_llvm_ty per case\nbody. This lets the name counter accumulate across all case bodies,\nso later case bodies get uniquified names (st2_1, st2_2, …).\n\nReproducer: any .march file calling Yaml.parse_exn with --compile.",
+    "files_changed": 1
+  },
+  {
+    "hash": "3e023e430f68e6ee17be689f1593e12e234310c0",
+    "short_hash": "3e023e4",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-06T12:51:40-04:00",
+    "message": "test(perceus): regression test for List.length+List.nth RC underflow\n\nAdds perceus/list length+nth EIncRC emitted test to verify that\nsequential calls List.length(xs) then List.nth(xs, 0) correctly\nemit EIncRC(xs) before the first consuming call.\n\nThe List.length internal go closure has xs:own because the tail\nfield $t passes to ECallPtr (conservative-owning), triggering\nfield_escape_owns = true in borrow inference.  Without the EIncRC,\nList.length decrements each Cons node to zero and List.nth reads\nfreed memory (\"local RC underflow\").  The fix landed in 0b52510.\n\n1410 → 1412 tests.",
+    "files_changed": 2
+  },
+  {
+    "hash": "0b52510d8ef35e76cf251f3d46cc3c6bfc9bb853",
+    "short_hash": "0b52510",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-05T14:46:30-04:00",
+    "message": "fix(perceus): preserve record liveness when parameter used in multiple sequential calls\n\nRoot cause: needs_rc(TRecord _) = false in borrow.ml prevented record params\nfrom entering the borrow-inference fixpoint, so functions that only read a\nrecord via EField were incorrectly marked cfg:own.  Perceus then emitted\ndec_rc on the extracted string field at last-use inside the callee; a second\ncall in the same loop arm read a freed string → \"local RC underflow\".\n\nFix (two parts):\n1. borrow.ml: needs_rc now returns true for TRecord _ and TTuple _,\n   making record/tuple params borrow-eligible.  Functions that only read\n   fields are correctly inferred as cfg:borrowed.\n\n2. perceus.ml: new _borrowed_field_vars ref tracks variables extracted from\n   a borrowed/live record via EField (and aliases via EAtom).  All four RC\n   emission sites — EAtom non-last-use inc, find_inc_vars, post_dec_vars,\n   and ELet dead-binding dec — skip variables in this set, preventing the\n   callee from emitting any RC ops on field strings owned by the record.\n\nRegression test: perceus/record param multi-call no RC underflow.\n1401 → 1410 tests.",
+    "files_changed": 4
+  },
+  {
+    "hash": "df3b1e4494b48ccf735c4a5e6eebc73c7183a410",
+    "short_hash": "df3b1e4",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-20T21:34:02-04:00",
+    "message": "feat(show): generic to_string / polymorphic println via Show interface\n\nShow impls for List/Option/Result added to stdlib/prelude.march so that\nprintln([1,2,3]), println(Some(42)), println(Err(\"oops\")) all work without\nthe caller defining their own Show instance.\n\nKey changes:\n- stdlib/prelude.march: impl Show(List(a)), Show(Option(a)),\n  Show(Result(a,e)); println(x) delegates to show(x); str(x) alias for\n  to_string\n- lib/eval/eval.ml: show_dispatch helper routes show/to_string/println\n  through impl_tbl; builtin ctors (Ok/Err/Some/None/Cons/Nil) pre-seeded\n  in ctor_type_tbl in both reset_scheduler_state and eval_module_env; Show\n  impl methods use plain VClosure(env, params, body) so show inside the\n  body calls the dispatcher, not itself\n- lib/tir/lower.ml: Show$Unit.show synthetic builtin registered\n- test/test_march.ml: 7 new tests covering show List, Option Some/None,\n  Result Ok/Err, nested list, and polymorphic println typecheck\n  (1394 → 1401 tests)\n- specs/todos.md + specs/progress.md updated",
+    "files_changed": 6
+  },
+  {
+    "hash": "4f2343f653261ebbf0737e72ecc89a3c1916a1f0",
+    "short_hash": "4f2343f",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-19T15:34:29-04:00",
+    "message": "feat(forge): show installed archive tasks under own heading in --help\n\n- read_tasks_from_toml now parses an optional `doc` field, returning\n  (cmd, module, doc) triples\n- list_archive_tasks propagates doc through to callers\n- archive_man_blocks() builds a Manpage.block list per installed archive\n  and is wired into the root Cmd.info ~man; each archive gets its own\n  S section with I (command, doc) entries\n- find_task updated to use List.find_opt on triples\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "files_changed": 3
+  },
+  {
+    "hash": "68b6b2d944019ff81bece6a6cd2bfeea439311df",
+    "short_hash": "68b6b2d",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-18T23:41:03-04:00",
+    "message": "fix(backtrace): tighten stdlib filter, add call-site display, cache getenv\n\nThree deferred fixes from the adversarial review:\n\n1. stdlib filter: replace ad-hoc substring search with canonical prefix\n   from find_stdlib_dir() with basename fallback for AST-cached frames\n   whose pos_fname comes from a different build directory.\n\n2. call-site display: append \"()\" to plain identifier names in the\n   interpreter backtrace so \"panic() file:3\" reads as a call site, not\n   a definition site. Operators and <anon> are unchanged.\n\n3. getenv cache: cache the MARCH_BACKTRACE env lookup in a static local\n   on first call; also defer the stack-trace header in march_print_backtrace\n   until at least one visible frame exists (avoids orphan header when all\n   frames are stdlib-filtered).",
+    "files_changed": 2
+  },
+  {
+    "hash": "c0ecd31358f12fff817f6d49fd4411278efa5915",
+    "short_hash": "c0ecd31",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-18T22:01:11-04:00",
+    "message": "fix(stdlib): harden Compress module against adversarial inputs\n\nCritical C fixes:\n- Add MAX_INPUT_SIZE (256 MB) and MAX_DECOMPRESS_SIZE (256 MB) constants to\n  both march_compress.c and compress_stubs.c; gzip/deflate/zstd/brotli decode\n  now check against the cap in every grow loop, preventing decompression bombs\n- Fix zstd decode: check frame_size > MAX_DECOMPRESS_SIZE before malloc so a\n  crafted frame header cannot cause a multi-GB allocation before any data is read\n- Fix compress_bytes_to_raw: check malloc return value; all callers now handle\n  the NULL return with a proper Err instead of passing NULL to zlib/zstd\n- Add defensive input size check in all eight encode functions (four algorithms,\n  two C files) so the uInt cast for zs.avail_in is always safe (no truncation)\n- Copy OCaml String_val(input) to malloc buffer in all six stubs before any\n  caml_alloc_* call; eliminates GC-move hazard on raw C pointer\n\nMarch API fixes:\n- Zstd.Fast(n): remove erroneous clamping of n < 1 to 1; zstd supports negative\n  levels natively (e.g. Fast(-1) = ultra-fast); pass n through unchanged\n- encode_stream/decode_stream (Gzip and Zstd): return\n  Seq(Result(Bytes, Compress.Error)) instead of Seq(Bytes); errors are now\n  surfaced per-chunk rather than silently dropped\n- accept_encoding: split each token on \";\" to strip q= parameters; exclude\n  tokens with q=0 (client explicitly refuses); strips q=0.0, q=0.00 as well\n\nNew tests:\n- deflate/zstd/brotli invalid decode → Err (were only tested for gzip)\n- Zstd.Fast(-1) negative level compresses and round-trips correctly\n- accept_encoding strips q= suffix (\"gzip;q=0.9\" → \"gzip\")\n- accept_encoding excludes q=0 (\"gzip;q=0, br\" → [\"br\"])",
+    "files_changed": 4
+  },
+  {
+    "hash": "ac9b31b14b6c2765fc512017567f91b0d14bc333",
+    "short_hash": "ac9b31b",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-18T21:41:22-04:00",
+    "message": "docs(specs): update progress.md — interpreter backtraces implemented",
+    "files_changed": 1
+  },
+  {
+    "hash": "2f721f5c0c2ca1a74860f846d3d86eea766acf68",
+    "short_hash": "2f721f5",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-18T21:40:20-04:00",
+    "message": "feat(backtraces): March call stack for interpreter panics\n\nAdds three-layer panic improvements to the interpreter:\n\n1. Call stack tracking — EApp expressions push a frame (fn name + file:line)\n   before apply() and pop on normal return. Exceptions leave frames live so\n   the top-level handler can print the full call stack.\n\n2. Stdlib frame filtering — frames from stdlib/ paths are hidden by default;\n   MARCH_BACKTRACE=full shows all frames.\n\n3. Assert location — EAssert now includes file:line in the failure message.\n\n4. Assert_failure handler — bin/main.ml now catches all three exception types\n   (Eval_error, Match_failure, Assert_failure) and prints the backtrace.\n\n5. C runtime frame table — march_frame_t linked list with march_frame_push /\n   march_frame_pop / march_frame_reset for compiled binaries (Part 2 runtime).\n   The struct and prototypes are in march_runtime.h; the implementation and\n   march_panic integration are in march_runtime.c.\n\nPlan doc updated to address review issues: threading clarification, String.starts_with\nfix, #[no_backtrace] scoped to future work, default-on frames, TCO noinline note,\ntesting strategy, and EvalError coverage.",
+    "files_changed": 5
+  },
+  {
+    "hash": "983b6105685e8ff8d8fdca4b4b72fecdd431080d",
+    "short_hash": "983b610",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-18T18:46:00-04:00",
+    "message": "feat(stdlib): add Compress module — gzip, deflate, zstd, brotli\n\nImplements stdlib/compress.march with sub-modules Gzip, Deflate, Zstd,\nand Brotli.  Each sub-module provides one-shot encode/decode returning\nResult(Bytes, Compress.Error), plus streaming encode_stream/decode_stream\nvariants.  HTTP helpers accept_encoding/best_encoding round out the API.\n\nImplementation layers:\n- runtime/march_compress.c: C shims over zlib (-lz, always available),\n  libzstd (optional, auto-detected), libbrotli (optional, auto-detected).\n  Missing optional libs return Err(\"not available\") at runtime.\n- lib/eval/compress_stubs.c: OCaml CAMLprim stubs (same logic) so the\n  interpreter can call them via external declarations in eval.ml.\n- lib/eval/dune: foreign_stubs + c_library_flags for the eval library.\n- lib/eval/eval.ml: stdlib_gzip_encode/decode, stdlib_deflate_*,\n  stdlib_zstd_*, stdlib_brotli_* builtins (Ok/Err wrapping Failure).\n- lib/tir/llvm_emit.ml: name mappings + LLVM declare lines for all 8\n  compress functions.\n- bin/main.ml: march_compress.c included in both JIT .so and native\n  clang invocations with auto-detected zstd/brotli flags.\n\nTests: 24 new tests in test_march.ml covering all algorithms, empty\ninput, invalid-data error paths, HTTP helpers, and 6 property tests\n(Check.all with Gen.list(Gen.int(0, 255))) verifying encode∘decode = id\nfor all four algorithms.\n\nTotal: 1394 tests, all passing (was 1363 + 7 pre-existing = 1370; net\n+24 compress tests, remaining delta from stdlib warm-cache).",
+    "files_changed": 8
+  },
+  {
+    "hash": "831e3153428e476ae509e2a99c1af1b716593b57",
+    "short_hash": "831e315",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T21:58:08-04:00",
+    "message": "fix(perceus): track TFn closures with RC + insert cross-branch EDecRC\n\nTwo interlocking bugs in lib/tir/perceus.ml caused a march_decrc crash\nwhen Map.fold was called with a Bytes accumulator:\n\n1. needs_rc (TFn _) = false — every function-typed parameter was\n   invisible to Perceus. After defun, any AVar with TFn type is a\n   heap-allocated closure struct (raw code pointers are ADefRef and\n   never appear in AVar liveness). Setting this to false caused:\n   - no EIncRC when f was captured into the go closure (EAlloc)\n   - no EDecRC in the HEmpty arm where f is unused\n   - the dangling closure slot was later misread as a Bytes payload\n     pointer and freed via march_decrc, producing a .text-segment crash\n\n   Fix: needs_rc (TFn _) = true. llvm_ty (TFn _) = \"ptr\" so EIncRC/\n   EDecRC emit correctly at the LLVM level with no further changes.\n\n2. ECase discarded live_before_br — variables live in some branches\n   but dead in others never got EDecRC in the dead branches (a second\n   class of RC leak). Fix: collect live_before_br per branch, compute\n   union_live_br, insert EDecRC v at the head of each branch where\n   v ∈ union_live_br but v ∉ live_before_br (excluding closure FVs,\n   arm-bound vars, and vars live after the case).\n\n   New _var_ctx global (Tir.var StringMap.t ref) provides correctly-\n   typed Tir.var records for cross-branch EDecRC; seeded from fn params\n   in insert_rc, extended via ELet with save/restore.\n\nAll 1358 tests pass.",
+    "files_changed": 3
+  },
+  {
+    "hash": "7a72d07f7d34050c6f80b3dc24efa54355d58bcc",
+    "short_hash": "7a72d07",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T15:15:25-04:00",
+    "message": "feat(test): add Perceus TIR snapshot test framework (7 tests)\n\nAdd test/test_snapshots.ml with a snapshot framework that compiles minimal\nMarch programs through the full pipeline (parse→desugar→typecheck→lower→\nmono→defun→perceus) and diffs pretty-printed post-Perceus TIR against\n.expected files in test/snapshots/perceus/.\n\nSeven snapshots cover: FBIP reuse in recursive tree map, borrowed string\nparams (no EIncRC at extern call site), closure FV ownership (EIncRC before\nEAlloc), scrutinee escape rewrite (xs-returning arm → EAlloc so FBIP fires),\nactor atomic RC (EAtomicIncRC on first of two sends), RC elision pairs\n(first peek gets EIncRC, last transfers ownership), and borrowed param at\nlast use (caller emits EDecRC, no EIncRC at callee site).\n\nRegenerate with:\n  UPDATE_SNAPSHOTS=1 SNAPSHOTS_DIR=$(pwd)/test/snapshots/perceus \\\n  dune runtest --force\n\nAlso add compiler instrumentation debug flags to specs/progress.md:\nMARCH_DEBUG_PERCEUS, MARCH_DEBUG_BORROW, MARCH_SANITIZE, MARCH_DEBUG_RUNTIME,\nand -g passthrough in dune dev C profile (landed in earlier commits).",
+    "files_changed": 11
+  },
+  {
+    "hash": "19a6fa98247388263f261fae35b4161e0b8b6521",
+    "short_hash": "19a6fa9",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T14:14:03-04:00",
+    "message": "feat(debug): add compiler instrumentation for RC and borrow analysis\n\n- dune dev profile: add -g to C stubs for debug symbols\n- bin/main.ml: add -g to clang native/WASM compile when --debug is set;\n  MARCH_DEBUG_RUNTIME=1 adds -g to the JIT runtime .so;\n  MARCH_SANITIZE=1 adds -fsanitize=address,undefined to all clang paths\n- lib/tir/perceus.ml: MARCH_DEBUG_PERCEUS=1 prints per-module RC stats\n  (inserted inc/dec/atomic counts, cancelled pairs after elision, reuse count)\n- lib/tir/borrow.ml: MARCH_DEBUG_BORROW=1 dumps per-function borrow map\n  showing which parameters are inferred as borrowed vs owned",
+    "files_changed": 4
+  },
+  {
+    "hash": "af85702108397508b219bea02f7847d79d7eb882",
+    "short_hash": "af85702",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T10:56:31-04:00",
+    "message": "test(stdlib): add comprehensive property tests for String.from_codepoint and String.to_codepoints\n\nAdd 40+ unit and property-based tests covering:\n\nUnit tests:\n- Basic encoding of ASCII, 2-byte, 3-byte, 4-byte UTF-8 characters\n- Invalid codepoint rejection (negative, out-of-range, surrogates)\n- Basic to_codepoints on various strings\n- Empty string handling\n\nProperty-based tests (using Check.all):\n1. **Byte length properties**: Verify correct UTF-8 byte lengths\n   - 1-byte for 0-127\n   - 2-byte for 128-2047\n   - 3-byte for 2048-65535 (excluding surrogates)\n   - 4-byte for 65536-1114111\n\n2. **Roundtrip properties**: encode → decode preserves original codepoint\n   - Single codepoint roundtrip\n   - Two-codepoint concatenation roundtrip\n   - Three-codepoint concatenation roundtrip\n\n3. **Invalid input rejection**: Surrogates, negative, out-of-range all return None\n\n4. **Multi-codepoint extraction**: Verifies decoded codepoints are always valid\n\nTests use generated random codepoints to exercise the full valid Unicode range,\nincluding edge cases at boundaries between UTF-8 encoding lengths.",
+    "files_changed": 1
+  },
+  {
+    "hash": "8919a2392271c8a89be7011761463903c27f7d6e",
+    "short_hash": "8919a23",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T10:47:06-04:00",
+    "message": "feat(stdlib): add String.from_codepoint and String.to_codepoints\n\nImplement proper Unicode codepoint encoding/decoding for UTF-8 support.\n\nNew builtins:\n- string_from_codepoint(cp: int) -> Some(string) | None\n  Encodes a single Unicode codepoint (0x0 to 0x10FFFF) as UTF-8.\n  Validates range and rejects surrogates (0xD800-0xDFFF).\n  Returns None for invalid codepoints.\n\n- string_to_codepoints(s: string) -> list[int]\n  Extracts all Unicode codepoints from a UTF-8 string as a list of ints.\n  Handles 1-byte (ASCII), 2-byte, 3-byte, and 4-byte UTF-8 sequences.\n  Invalid sequences are treated as individual byte values.\n\nStdlib functions:\n- String.from_codepoint(cp: int) -> option[string]\n  Wrapper around the builtin with proper docstring.\n\n- String.to_codepoints(s: string) -> list[int]\n  Wrapper around the builtin with proper docstring.\n\nThis fixes the issue in scroll's codepoint_to_utf8 where multi-byte UTF-8\nsequences (e.g., é = 0xE9) were failing because Char.from_int was ASCII-only.\n\nThe interpreter now correctly encodes any valid Unicode codepoint as UTF-8.\nFor compiled code, llvm_emit.ml can call the C runtime function\nmarch_codepoint_to_utf8 (added to march_extras.c for reference).",
+    "files_changed": 4
+  },
+  {
+    "hash": "7e310b0f3acde62afa0044d6d1ee48a1a1abfb29",
+    "short_hash": "7e310b0",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-17T04:21:10-04:00",
+    "message": "fix(runtime): pre-tag Int payloads in make_some_i64 and march_string_to_int\n\nUser-reported bug #34.\n\nRoot cause\n==========\n\nUnder the uniform low-bit integer tagging scheme (commit 1696576),\npolymorphic ptr-sized payloads storing an Int must be pre-tagged with\n(n<<1)|1 so the compiler's `ashr #1` untag recovers the real value.\n\nmake_some_i64 and the analogous path in march_string_to_int stored\nthe raw int64_t in the payload.  The compiler, seeing Some(Int) /\nOption(Int), emitted the untag shift; extraction halved the value:\n\n    String.index_of(\"hello world\", \"world\")\n      interpreter:  Some(6)\n      native:       Some(3)        <-- bug\n\n    String.to_int(\"42\")\n      interpreter:  Ok(42)\n      native:       Ok(21)         <-- bug\n\nPresence checks that only distinguished Some(_) from None kept\nworking, which is why String.contains (bool-returning) was unaffected\nand the bug stayed hidden.\n\nFix\n===\n\nmake_some_i64 and march_string_to_int now pre-tag the payload\n((int64_t)val << 1) | 1.  make_some_i64 is used by\nmarch_string_index_of and march_string_last_index_of, both of which\nare now correct without further changes.\n\nAudited the other 24-byte alloc sites (make_some_ptr, mk_ok, file/\ncsv/actor helpers) — all pass pointer-typed values (or unit 0) that\ndo not need tagging.\n\nRegression test\n===============\n\nNew oracle test examples/rc_option_int_tagged_payload.march exercises\nString.index_of and String.to_int.  Pre-fix native prints\n'idx=3 / n=21'; post-fix prints 'idx=6 / n=42' matching the\ninterpreter.\n\ndune runtest: 1359 OCaml tests — all green.",
+    "files_changed": 3
+  },
+  {
+    "hash": "33546bd75a50237d089f39b03d846e8068a75502",
+    "short_hash": "33546bd",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-16T23:13:56-04:00",
+    "message": "fix(perceus/gc/runtime): four audit follow-ups (C1, C2, P1, M1)\n\nC1 (runtime/march_runtime.c): march_decrc_freed now aborts on RC underflow\ninstead of silently double-freeing.  Mirrors march_decrc's existing guard.\n\nC2 (runtime/march_gc.c): pass2_visit now uses GC_IS_HEAP_PTR which mirrors\nthe runtime's IS_HEAP_PTR (low-bit + sign-bit + <4096 guards).  Without\nthis, tagged-immediate integers from polymorphic containers (the new\nuniform low-bit tagging scheme) were passed to fwd_lookup as candidate\npointers — wasted work and a latent corruption surface.\n\nP1 (lib/tir/perceus.ml): post_dec_vars in EApp now dedups by v_name.\nWhen the same heap variable is passed at multiple borrowed positions of\na single call (e.g. string_eq(s, s)) and is dead after, Perceus was\nemitting one EDecRC per position, underflowing the caller's single\nreference.  Confirmed regression: pre-fix the new\nexamples/rc_borrowed_dup_arg.march aborts with \"RC underflow\"; post-fix\nit completes.\n\nM1 (lib/tir/llvm_emit.ml): EReuse non-TCon branch now writes tag=0 in\nthe reuse path so both branches produce same-tagged cells (the fresh\nbranch goes through emit_heap_alloc which writes tag 0).\n\nTests:\n- new test_gc_pass2_scalar_preservation in test/test_heap.c (7 PASS)\n- new examples/rc_borrowed_dup_arg.march oracle program (P1 regression)\n- additional non-pointer-input checks for march_decrc_freed in test_runtime.c\n\ndune runtest: 1358 OCaml tests, 4176 C-runtime checks — all green.",
+    "files_changed": 8
+  },
+  {
+    "hash": "16965766ee7251c63c524d573845d54004877bac",
+    "short_hash": "1696576",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-16T19:24:28-04:00",
+    "message": "feat(runtime/codegen): uniform low-bit integer tagging for polymorphic values\n\nFixes SIGSEGV when integers flow through polymorphic ADT fields (e.g.\nList(Int) with n >= 4096).  The root cause: positive integers in [4096,\n2^62] passed IS_HEAP_PTR and were dereferenced as march_hdr* in incrc/decrc.\n\nTag scheme: immediate scalars stored as (n << 1) | 1 (low bit = 1).\nHeap pointers from march_alloc are always 8-byte aligned (low bit = 0).\n\nChanges (Phases 1 + 2):\n\nruntime/march_runtime.c\n- IS_HEAP_PTR: add ((uintptr_t)(p) & 1u) == 0 as first clause so tagged\n  immediates short-circuit before the page/sign guards on the hot RC path.\n- march_value_to_string: check low bit before dereferencing; tagged\n  immediates are formatted via march_int_to_string((intptr_t)p >> 1).\n\nlib/tir/llvm_emit.ml\n- coerce (\"i64\",\"ptr\"): emit shl i64 %v,1 + or i64 %s,1 + inttoptr to tag.\n- coerce (\"ptr\",\"i64\"): emit ptrtoint + ashr i64 %i,1 to untag (sign-preserving).\n- All three i64-returning closure wrapper emitters (top-level fn ref,\n  AVar cross-module ref, REPL closure wrap) now tag the return value\n  with shl+or before inttoptr.\n\ntest/test_march.ml\n- test_int_tag_coerce_ir: verifies shl/or/ashr appear in IR for List(Int) code.\n- test_int_tag_wrapper_ir: verifies wrapper emits tagged i64 return.\n\nspecs/{todos,progress}.md updated.",
+    "files_changed": 5
+  },
+  {
+    "hash": "7cbb3b35429b95635902a257b70d1c12c2cee13a",
+    "short_hash": "7cbb3b3",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-15T09:07:21-04:00",
+    "message": "perceus: fix double-dec_rc crash for let-rebinding shadows and branch vars\n\nTwo related RC underflow bugs that manifest when a borrowed parameter is\naccessed through an ECase branch variable or when a function rebinds a\nparameter name with let.\n\nFix A — borrowed-parameter shadowed by same-name let-binding:\n  When json_escape(s) writes `let s = replace_all(s, …)`, lower.ml\n  reuses the name \"s\" for the new binding.  Perceus's ELet case computes\n  `live_for_rhs = live_into_body \\ {v.name}`, removing the borrowed\n  parameter \"s\" from live_after for the RHS.  post_dec_var then fires at\n  the replace_all call site, inserting a spurious dec_rc for the borrowed\n  parameter.\n  Fix: in insert_rc, call rename_borrowed_shadows before RC insertion.\n  This new pass renames only ELet/ECase-bound variables whose names collide\n  with borrowed parameters, giving each shadow a fresh \"s_b{N}\" name so\n  liveness analysis can distinguish parameter from binding.\n\nFix B — branch variables extracted from a borrowed scrutinee:\n  In cell_to_json_obj, when the scrutinee (cell) is borrowed and the\n  Code(s) branch extracts s, Perceus's ECase handling did not propagate\n  the borrowed status to s.  After json_str(s) (a borrowing call), s\n  appeared dead and post_dec_var inserted dec_rc(s) — a second decrement\n  of the same string pointer that json_escape had already decremented.\n  Fix: in the ECase branch handler, when the scrutinee is in live_after\n  (i.e. it is borrowed), add all branch vars to la so post_dec_var cannot\n  fire for them.\n\nAlso adds StringMap module to perceus.ml (needed by rename_borrowed_shadows).\nAll 1348 tests pass.",
+    "files_changed": 2
+  },
+  {
+    "hash": "7112271134b1480e8d788346d757cf00ce1e2b98",
+    "short_hash": "7112271",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-13T22:19:46-04:00",
+    "message": "fix(simplify): restrict 0/x → 0 to known non-zero literal divisors\n\nThe previous rule optimized `0 / x → 0` for any x, which is unsound\nwhen x=0: it silently returns 0 instead of trapping with a division-\nby-zero error. Now only fires when the divisor is a literal ≠ 0.\n\nUpdated test to verify variable divisors are left unchanged and added\na new test for the known-nonzero-literal case.",
+    "files_changed": 2
+  },
+  {
+    "hash": "aadb1bea66d4c74802f44969183c24803b5d1d92",
+    "short_hash": "aadb1be",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-13T22:18:31-04:00",
+    "message": "feat(session-types): TIR lowering for Chan.*/MPST.* — compile to native binaries\n\nWire session-typed channel operations through the full TIR pipeline\n(lower → mono → defun → perceus → llvm_emit) so protocol-verified\ncode compiles to native binaries, not just the tree-walking interpreter.\n\n- lower.ml: pattern-match Chan.new/send/recv/close/choose/offer and\n  MPST.new/send/recv/close before general EApp, lowering to chan_*/mpst_*\n  runtime calls\n- llvm_emit.ml: builtin_ret_ty, mangle_extern, and LLVM declare entries\n  for all 10 channel builtins\n- runtime/march_extras.c: C runtime with mutex-protected queue pairs\n  (binary) and N×N queue matrices (MPST); atomic refcounting for\n  endpoint lifecycle\n- 3 new tests in session_compile group (1317 total)",
+    "files_changed": 8
+  },
+  {
+    "hash": "b44716ebd300575ac6432d9901a09543680cd4a5",
+    "short_hash": "b44716e",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-12T23:15:28-04:00",
+    "message": "feat(notebook): Livebook-style CLI — sync from main repo",
+    "files_changed": 3
+  },
+  {
+    "hash": "8c4933bb2eff447f241475802eb0c6aafff67145",
+    "short_hash": "8c4933b",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-12T23:08:46-04:00",
+    "message": "feat(notebook): update notebook_server.march with server cell support\n\nCopy the updated notebook_server.march from the elastic-kowalevski worktree.\nAdds server cell kind, shell-backgrounding process management, and Vault\nPID registry. See worktree commit 1981ebb for full details.",
+    "files_changed": 1
+  },
+  {
+    "hash": "1981ebb8b4cb86052163913ba328759199241c52",
+    "short_hash": "1981ebb",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-12T23:05:17-04:00",
+    "message": "feat(notebook): add server cells for long-running background processes\n\nExtend the notebook server with a new cell kind — `\\`\\`\\`march:server` fences\n— that spawn background OS processes (HttpServers, actors, etc.) without\nblocking the WebSocket event loop.\n\nImplementation:\n- Parse \\`\\`\\`march:server fences as ServerCell(String) in Cell type\n- generate_runner skips ServerCell items (they run independently)\n- generate_server_runner wraps server cell source in mod/main\n- start_server_proc: writes temp file, uses sh backgrounding\n  (\"march /tmp/... > /tmp/log &  echo $!\") so Process.run returns immediately\n- Server PID stored in Vault namespace for lifecycle management\n- server_is_running: kill -0 check; stop_server_proc: kill -TERM\n- read_server_log: reads /tmp log file on demand\n- New WS messages: start_server, stop_server, read_server (server-side)\n  and server_started, server_stopped, server_output, server_error (client-side)\n- JS: server cell UI with green border, Start/Stop button, pid badge,\n  scrollable output area, 2s polling via setInterval\n- \"+ Server\" button in toolbar and between-cell add bars\n- Cmd+Enter on server cells triggers Start\n\nAlso: rename Process.spawn → Process.spawn_async (spawn is a reserved keyword)",
+    "files_changed": 1
+  },
+  {
+    "hash": "46322a80f0dd66ad5d315b290392f86c2c395827",
+    "short_hash": "46322a8",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-10T08:37:37-04:00",
+    "message": "feat(errors): Elm-like compiler errors with source rendering and suggestions\n\n- Add render_diagnostic: shows source line with caret underline, Elm-style\n  header bar, and indented notes for all typecheck errors\n- Add suggest_var_in_scope: \"Did you mean `greet`?\" for unbound variable typos\n  using edit distance on in-scope names\n- Add common_hint in report_mismatch: actionable notes for Int/Float confusion\n  (use int_to_float/float_to_int), Int→Bool (use x != 0), number→String\n  (use int_to_string/float_to_string), and function/value confusion\n- Improve non-exhaustive match warning with note: \"Add a branch for this case,\n  or use `_ -> ...` as a catch-all.\"\n- Improve eval let-binding pattern failure to show the offending value\n- Improve runtime non-exhaustive match error to show unmatched value and hint\n- Improve cmp_op error to report types (\"cannot compare a Int with a String\")\n- Update main.ml and repl.ml to use render_diagnostic for typecheck errors\n\nAll 1314 + 147 tests pass.",
+    "files_changed": 5
+  },
+  {
+    "hash": "53664945d000d91a13470eb7e1b0f73529fe3755",
+    "short_hash": "5366494",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-10T04:33:49-04:00",
+    "message": "perf(repl): add `march warm-cache` and run it during dune build\n\nNew `march warm-cache` subcommand pre-generates all REPL caches:\n- stdlib_ast_<hash>.bin — parsed+desugared ASTs\n- stdlib_tcenv_<hash>.bin — typecheck environment\n- stdlib_prelude_O1_<hash>.so — JIT-compiled stdlib\n\nRuns automatically as part of `dune build` via @all alias, so after\n`dune build && dune install march`, the first `forge i` / `march repl`\nstarts with warm caches. Adds ~0.06s to incremental builds (cache hit)\nand ~2.6s to clean builds (one-time stdlib .so compilation).\n\nAlso exports cache helper functions from repl.mli so they can be\ncalled from main.ml.",
+    "files_changed": 3
+  },
+  {
+    "hash": "eaddcf10946744bc71dd28562dc067281c681d2f",
+    "short_hash": "eaddcf1",
+    "author": "Matthew Gilliam",
+    "date": "2026-04-09T21:46:50-04:00",
+    "message": "refactor: remove depot_* stdlib modules (moved to /code/depot)\n\nThe Depot.* in-memory/Vault-backed modules are now a standalone forge\nlibrary at /code/depot rather than part of march's stdlib. Apps that use\nDepot should add it as a forge path dependency instead.\n\nRemoved from stdlib load order (bin/main.ml):\n- depot_form.march, depot_gate.march, depot_schema.march\n- depot_repo.march, depot_query.march, depot_migration.march\n- depot_test.march",
+    "files_changed": 1
+  },
+  {
     "hash": "9191cf4bd6f7a1e6707eae1c042c065ac8f71aa9",
     "short_hash": "9191cf4",
     "author": "Matthew Gilliam",
     "date": "2026-04-09T15:07:54-04:00",
     "message": "fix: stdlib module shadowing and stale resolver stdlib_module_names\n\nTwo bugs discovered when investigating Islands in interpreted/bastion mode:\n\n1. stdlib/MARCH_LIB_PATH module shadowing (bin/main.ml)\n   When a dep (e.g. bastion) provides a module that also ships in the\n   stdlib (e.g. Islands, CSRF, Session), both versions were being loaded\n   into mod_decls — the MARCH_LIB_PATH version silently shadowed the\n   stdlib version, which could cause type confusion.\n   Fix: after resolve_imports, collect top-level module names loaded from\n   external paths and filter them out of stdlib_decls before prepending.\n   The external version becomes the sole definition.\n\n2. Stale stdlib_module_names in lib/resolver/resolver.ml\n   The LSP and REPL resolver was missing ~20 stdlib modules introduced\n   since the list was last updated (Islands, CSRF, Session, Vault, Test,\n   Config, Crypto, all Depot.* variants, all Bastion* variants, etc.).\n   Missing entries caused false \"unknown module\" diagnostics in the LSP.\n   Fix: sync the list with what load_stdlib() actually loads.",
     "files_changed": 2
-  },
-  {
-    "hash": "b52bb9b6e2ff6269402f854db89c3730281aff93",
-    "short_hash": "b52bb9b",
-    "author": "Matthew Gilliam",
-    "date": "2026-04-09T15:00:46-04:00",
-    "message": "fix(docs): syntax highlighting + move superpowers to specs\n\n- Replace all ```march code fences with ```elixir for Rouge highlighting\n- Move docs/superpowers/plans/* → specs/plans/\n- Move docs/superpowers/specs/* → specs/\n- Remove docs/superpowers from git tracking\n- Add docs/superpowers/ to .gitignore",
-    "files_changed": 34
   },
   {
     "hash": "2a5b7796141bdde17a04651a65bb8b437ba7da35",
@@ -1584,14 +2008,6 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:38:16-04:00",
-    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
-    "files_changed": 3
-  },
-  {
     "hash": "376a668a88cb9f396603a482660f75857ae567ce",
     "short_hash": "376a668",
     "author": "Matthew Gilliam",
@@ -1600,16 +2016,24 @@
     "files_changed": 3
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:38:16-04:00",
+    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
+    "files_changed": 3
+  },
+  {
+    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
+    "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
-    "short_hash": "36a21bc",
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
@@ -1632,16 +2056,16 @@
     "files_changed": 5
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
@@ -1664,14 +2088,6 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
     "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
@@ -1680,16 +2096,24 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",

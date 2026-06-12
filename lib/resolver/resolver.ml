@@ -1,10 +1,18 @@
-(** March cross-file import resolver — shared between the compiler
-    entry point (bin/main.ml) and the REPL (lib/repl/repl.ml). *)
+(** March cross-file import resolver — shared between the compiler entry
+    point (bin/main.ml), the REPL (lib/repl/repl.ml), and the LSP
+    (lsp/lib/analysis.ml).
 
-(** Convert a CamelCase module name to a snake_case .march filename.
-    E.g. "HttpClient" → "http_client.march", "Message" → "message.march" *)
-let module_name_to_filename name =
-  let buf = Buffer.create (String.length name + 8) in
+    This is the single source of truth for module resolution.  It resolves
+    explicit [import]/[alias] declarations by filename convention AND
+    auto-discovers every .march file reachable through the library search
+    path, indexing modules by their DECLARED name — so a module like
+    [Bastion.Channel] living in [channel.march] resolves the same way for
+    `forge check`, the REPL, and editor diagnostics. *)
+
+(** Convert a single CamelCase segment to snake_case.
+    E.g. "HttpClient" → "http_client", "Router" → "router" *)
+let camel_to_snake name =
+  let buf = Buffer.create (String.length name + 4) in
   String.iteri (fun i c ->
     if i > 0 && c >= 'A' && c <= 'Z' then begin
       Buffer.add_char buf '_';
@@ -12,11 +20,21 @@ let module_name_to_filename name =
     end else
       Buffer.add_char buf (Char.lowercase_ascii c)
   ) name;
-  Buffer.add_string buf ".march";
   Buffer.contents buf
 
-(** Stdlib module names — always resolved from the bundled stdlib, never
-    from the user's source tree. *)
+(** Convert a possibly-dotted module name to a relative file path.
+    Single segment: "HttpClient" → "http_client.march"
+    Dotted:         "MyApp.Router" → "my_app/router.march"
+                    "MyApp.Templates.Layout" → "my_app/templates/layout.march" *)
+let module_name_to_filename name =
+  let parts = String.split_on_char '.' name in
+  let snake_parts = List.map camel_to_snake parts in
+  String.concat Filename.dir_sep snake_parts ^ ".march"
+
+(** Stdlib module names — used only to SUPPRESS "module not found" errors
+    for imports that resolve from the bundled stdlib.  A user file with the
+    same conventional filename always wins (it is found first), so listing
+    a name here never shadows user code. *)
 let stdlib_module_names =
   [ "List"; "Map"; "Set"; "Array"; "Queue"; "String"; "Option"; "Result"
   ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Duration"; "Bytes"; "Json"
@@ -24,7 +42,9 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Test"
-  ; "Vault"; "Config"; "Crypto"; "Env"; "Channel"; "PubSub"
+  ; "Vault"; "URI"
+  ; "Depot"; "Depot.Gate"
+  ; "Config"; "Crypto"; "Env"; "Channel"; "PubSub"
   ; "ChannelServer"; "ChannelSocket"; "Presence"; "Tls"; "Uuid"
   ; "DepotForm"; "DepotGate"; "DepotSchema"; "DepotRepo"
   ; "DepotQuery"; "DepotMigration"; "DepotTest"
@@ -48,12 +68,27 @@ let rec import_refs decls =
     | _ -> []
   ) decls
 
-(** Parse a .march source file.  Returns [Ok module_ast] or [Error msg]. *)
+let read_file path =
+  let ic = open_in_bin path in
+  let n  = in_channel_length ic in
+  let b  = Bytes.create n in
+  really_input ic b 0 n;
+  close_in ic;
+  Bytes.to_string b
+
+(** Parse a .march source file.  Returns [Ok module_ast] or [Error msg].
+    Applies a span-remap sidecar when one exists (template-lowered files). *)
 let parse_march_file path src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  try Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+  try
+    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = match March_ast.Span_remap.load_sidecar path with
+      | Some tbl -> March_ast.Span_remap.remap_module tbl m
+      | None -> m
+    in
+    Ok m
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
@@ -63,34 +98,59 @@ let parse_march_file path src =
     let open Lexing in
     Error (Printf.sprintf "%s:%d: parse error" path pos.pos_lnum)
 
-let read_file path =
-  let ic = open_in_bin path in
-  let n  = in_channel_length ic in
-  let b  = Bytes.create n in
-  really_input ic b 0 n;
-  close_in ic;
-  Bytes.to_string b
+(** Recursively collect all .march files under [dir]. *)
+let collect_lib_files dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else
+      Array.fold_left (fun acc name ->
+          let p = Filename.concat d name in
+          if Sys.is_directory p then walk acc p
+          else if Filename.check_suffix p ".march" then p :: acc
+          else acc)
+        acc (Sys.readdir d)
+  in
+  walk [] dir
 
-(** Resolve cross-file imports.
-    Scans [m.mod_decls] for DUse/DAlias that name user modules (not stdlib),
-    finds their .march files, parses and desugars them, detects cycles.
-    Returns (errors, extra_dmods_to_prepend).
+(** Resolve cross-file imports and auto-discover project library files.
 
-    [extra_lib_paths] are prepended to the search path before [MARCH_LIB_PATH].
-    This lets callers (e.g. the LSP) inject paths derived from forge.toml deps
-    without requiring the env var to be set. *)
-let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module_) =
+    Step 1 resolves explicit [import]/[alias] declarations from the entry
+    module (by filename convention).  Step 2 auto-discovers all .march
+    files in the library search path so that qualified cross-module calls
+    (e.g. MyApp.Router.dispatch) and modules whose declared name does not
+    match their filename (mod Bastion.Channel in channel.march) work
+    without explicit [use] declarations — required for multi-file projects.
+
+    The search path is [source_dir :: extra_lib_paths @ MARCH_LIB_PATH].
+    [extra_lib_paths] lets callers (e.g. the LSP) inject paths derived from
+    forge.toml without requiring the env var to be set.
+
+    Returns (errors, extra_dmods_to_prepend, user_files) where [user_files]
+    is every file loaded as user code (entry + imports + discovered libs) —
+    callers use it to decide which typecheck diagnostics are fatal. *)
+let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
+    ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
   let env_lib_paths =
     match Sys.getenv_opt "MARCH_LIB_PATH" with
     | None -> []
     | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
   in
-  let search_path = source_dir :: (extra_lib_paths @ env_lib_paths) in
+  let all_lib_paths = extra_lib_paths @ env_lib_paths in
+  let search_path = source_dir :: all_lib_paths in
   let resolved : (string, March_ast.Ast.decl list) Hashtbl.t = Hashtbl.create 8 in
+  (* Track loaded file paths so the same file is never parsed twice *)
+  let loaded_paths : (string, unit) Hashtbl.t = Hashtbl.create 8 in
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
+  (* Pre-mark the entry file so auto-discovery never re-loads it.
+     Canonicalise the path so that relative and absolute references to the
+     same file are treated as identical (prevents the file being loaded a
+     second time when it also appears in the lib path as an absolute path). *)
+  let canonical_source =
+    (try Unix.realpath source_file with Unix.Unix_error _ -> source_file) in
+  Hashtbl.add loaded_paths canonical_source ();
 
   let find_file mod_name =
     let fname = module_name_to_filename mod_name in
@@ -122,34 +182,42 @@ let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module
                 mod_name (module_name_to_filename mod_name)) :: !errors;
           []
         | Some file_path ->
-          let src =
-            try read_file file_path
-            with Sys_error msg ->
-              errors := (mod_name, from_span,
-                Printf.sprintf "Cannot read `%s`: %s" file_path msg) :: !errors;
-              ""
-          in
-          if src = "" then []
-          else
-            match parse_march_file file_path src with
-            | Error msg ->
-              errors := (mod_name, from_span, msg) :: !errors; []
-            | Ok ast ->
-              let ast = March_desugar.Desugar.desugar_module ast in
-              (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
-              Hashtbl.add resolved mod_name [];
-              let transitive = load_refs ast.March_ast.Ast.mod_decls in
-              let self_dmod =
-                March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
-                                    March_ast.Ast.Public,
-                                    ast.March_ast.Ast.mod_decls,
-                                    dummy_span)
-              in
-              (* Emit transitive imports as top-level siblings, NOT nested.
-                 Nesting causes TIR to prefix their fn names with this
-                 module's name (e.g. `Runner.foo` → `Processes.Runner.foo`),
-                 which breaks qualified cross-module calls at link time. *)
-              transitive @ [self_dmod]
+          let canon_fp =
+            (try Unix.realpath file_path with Unix.Unix_error _ -> file_path) in
+          if Hashtbl.mem loaded_paths canon_fp then
+            (* Already loaded (entry file or earlier import) — avoid duplication *)
+            []
+          else begin
+            Hashtbl.add loaded_paths canon_fp ();
+            let src =
+              try read_file file_path
+              with Sys_error msg ->
+                errors := (mod_name, from_span,
+                  Printf.sprintf "Cannot read `%s`: %s" file_path msg) :: !errors;
+                ""
+            in
+            if src = "" then []
+            else
+              match parse_march_file file_path src with
+              | Error msg ->
+                errors := (mod_name, from_span, msg) :: !errors; []
+              | Ok ast ->
+                let ast = March_desugar.Desugar.desugar_module ast in
+                (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
+                Hashtbl.add resolved mod_name [];
+                let transitive = load_refs ast.March_ast.Ast.mod_decls in
+                let self_dmod =
+                  March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                                      March_ast.Ast.Public,
+                                      ast.March_ast.Ast.mod_decls,
+                                      dummy_span)
+                in
+                (* Emit transitive imports as top-level siblings, NOT nested.
+                   Nesting would cause TIR to prefix their fn names with this
+                   module's name (e.g. `Runner.foo` → `Processes.Runner.foo`),
+                   which breaks qualified cross-module calls at link time. *)
+                transitive @ [self_dmod]
+          end
       in
       Hashtbl.remove in_progress mod_name;
       result
@@ -168,5 +236,92 @@ let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module
         end
       ) refs
   in
-  let extra_decls = load_refs m.March_ast.Ast.mod_decls in
-  (!errors, extra_decls)
+
+  (* Step 1: resolve explicit imports (DUse/DAlias) from the entry file *)
+  let explicit_decls = load_refs m.March_ast.Ast.mod_decls in
+  (* Mark all explicitly-loaded modules (and their nested transitive deps) as
+     already-emitted.  This prevents them from being re-embedded as transitive
+     deps inside auto-discovered DMods in step 2.  Without this, every
+     submodule that does `import App` would embed the entire App DMod
+     inside itself, causing O(N²) typecheck cost. *)
+  let rec mark_emitted_decls = function
+    | [] -> ()
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, inner, _) :: rest ->
+      Hashtbl.replace resolved mn [];
+      mark_emitted_decls inner;
+      mark_emitted_decls rest
+    | _ :: rest -> mark_emitted_decls rest
+  in
+  mark_emitted_decls explicit_decls;
+
+  (* Step 2: auto-discover all .march files in the library search path.
+     Load any that were not already pulled in via explicit imports.
+     Two-phase: parse all files first to learn their module names, then sort
+     by module-name depth (more dot-segments = deeper namespace = fewer
+     dependents = load first) so dependencies are in env before their users. *)
+  let dot_count s =
+    String.fold_left (fun n c -> if c = '.' then n + 1 else n) 0 s
+  in
+  let auto_decls =
+    if not auto_discover then []
+    else
+    List.concat_map (fun lib_dir ->
+        let files = collect_lib_files lib_dir in
+        (* Phase 1: parse + desugar all un-loaded files to learn their mod names *)
+        let parsed = List.filter_map (fun file_path ->
+            let canon_fp =
+              (try Unix.realpath file_path with Unix.Unix_error _ -> file_path) in
+            if Hashtbl.mem loaded_paths canon_fp then None
+            else
+              let src = try read_file file_path with Sys_error _ -> "" in
+              if src = "" then None
+              else
+                match parse_march_file file_path src with
+                | Error msg ->
+                  Printf.eprintf "[lib] %s\n%!" msg; None
+                | Ok ast ->
+                  Some (canon_fp, March_desugar.Desugar.desugar_module ast)
+          ) files in
+        (* Sort: more dot-segments in mod name → load first (namespace leaves).
+           Alphabetical tiebreak keeps things deterministic. *)
+        let sorted = List.sort (fun (_, a) (_, b) ->
+            let mn ast = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
+            let da = dot_count (mn a) and db = dot_count (mn b) in
+            if db <> da then compare db da
+            else compare (mn a) (mn b)
+          ) parsed in
+        (* Phase 2: build DMods in sorted order.  Emit transitive imports as
+           top-level siblings (not nested) to avoid name-mangling collisions. *)
+        List.concat_map (fun (file_path, ast) ->
+            if Hashtbl.mem loaded_paths file_path then []
+            else begin
+              Hashtbl.add loaded_paths file_path ();  (* file_path already canonicalised in phase 1 *)
+              let mn = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
+              if Hashtbl.mem resolved mn then []
+              else begin
+                (* Mark emitted BEFORE load_refs so recursive imports don't
+                   re-emit this module inside their own transitive set. *)
+                Hashtbl.add resolved mn [];
+                let transitive = load_refs ast.March_ast.Ast.mod_decls in
+                let self_dmod =
+                  March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                                      March_ast.Ast.Public,
+                                      ast.March_ast.Ast.mod_decls,
+                                      dummy_span)
+                in
+                transitive @ [self_dmod]
+              end
+            end
+          ) sorted
+      ) all_lib_paths
+  in
+
+  (* Every file loaded here is USER code (the entry file plus modules from
+     the source dir / lib path).  Callers use this list to decide which
+     typecheck diagnostics are fatal: errors in any of these files must
+     abort, while stdlib-internal errors are tolerated (some stdlib modules
+     are WIP).  Membership is exact — span files carry the same path strings
+     used to open them — and is robust against stdlib files whose cached
+     spans point at a different install location. *)
+  let user_files = Hashtbl.fold (fun path () acc -> path :: acc) loaded_paths [] in
+  (!errors, explicit_decls @ auto_decls, user_files)

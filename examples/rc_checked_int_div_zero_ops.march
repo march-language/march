@@ -1,0 +1,43 @@
+-- Regression test: the `/` and `%` infix operators on Int must trap (panic)
+-- on a zero divisor natively, matching the interpreter — instead of returning
+-- garbage from a raw LLVM sdiv/srem.
+--
+-- The bug #38 fix routed the int_div/int_mod/int_mod_euclid *builtin* forms
+-- through march_checked_idiv/imod/umod, but the *operator* forms `a / b` and
+-- `a % b` (is_int_arith in llvm_emit.ml) still emitted raw sdiv/srem and were
+-- treated as PURE, so `let _ = a / 0` was deleted by DCE.  This case closes
+-- that gap: the operators lower to march_checked_div_op / march_checked_mod_op
+-- and are marked impure so the divergence survives.
+--
+-- The interpreter uses the BARE operator messages "division by zero" /
+-- "modulo by zero" (no "int_div:" prefix — see eval.ml base_env "/" and "%"),
+-- so the runtime helpers use the same text.  Caught via __try_call so the
+-- outcome is observable on stdout and the oracle (interpreter == native) holds.
+--
+-- Pre-fix native:  no-trap / no-trap / 14 / 2   (operations elided by DCE)
+-- Post-fix native: division by zero / modulo by zero / 14 / 2
+--                  (matches the interpreter)
+
+mod RcCheckedIntDivZeroOps do
+
+pfn outcome(r : Result(Bool, String)) : String do
+  match r do
+  Ok(_)  -> "no-trap"
+  Err(m) -> m
+  end
+end
+
+fn main() do
+  println(outcome(__try_call(fn _ ->
+    let _ = 100 / 0
+    true
+  )))
+  println(outcome(__try_call(fn _ ->
+    let _ = 100 % 0
+    true
+  )))
+  println(int_to_string(100 / 7))
+  println(int_to_string(100 % 7))
+end
+
+end

@@ -103,6 +103,15 @@ type ctx = {
      ORC JIT on macOS cannot resolve TLS variables via emutls; the REPL is
      always single-threaded so the check is unnecessary there anyway. *)
   repl : bool;
+  (* Native record shape metadata: when true (non-WASM targets), record
+     allocations call march_record_set_shape to stamp the interned shape id
+     into the header pad word so the record introspection builtins
+     (record_keys/values/entries/get/put/has_key/from_list) and dynamic
+     field reads can recover field names at runtime.  See the
+     "Record shape registry" section in runtime/march_extras.c. *)
+  mutable shape_meta : bool;
+  (* Record shape descriptor → (descriptor string global, i32 id-cache global). *)
+  rec_shape_globals : (string, string * string) Hashtbl.t;
 }
 
 (** Compilation target. *)
@@ -176,6 +185,8 @@ let make_ctx ?(fast_math=false) ?(repl=false) () = {
   mutual_tco_fn_params  = [];
   mutual_tco_fn_tags    = [];
   repl;
+  shape_meta = true;
+  rec_shape_globals = Hashtbl.create 16;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -318,7 +329,7 @@ let is_builtin_fn name =
                  "process_pid"; "process_spawn_sync"; "process_spawn_lines";
                  "process_spawn_async"; "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc";
                  (* TCP/network builtins *)
-                 "tcp_connect"; "tcp_close"; "tcp_recv_exact";
+                 "tcp_connect"; "tcp_close"; "tcp_peer_addr"; "tcp_recv_exact";
                  "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
                  "tcp_recv_chunked_frame";
                  (* TLS builtins *)
@@ -358,7 +369,7 @@ let is_builtin_fn name =
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
                  "md5";
-                 "hmac_sha256"; "pbkdf2_sha256";
+                 "hmac_sha256"; "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
                  "sha256"; "sha512";
                  "base64_encode"; "base64_decode";
                  "random_bytes";
@@ -454,6 +465,14 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "logger_clear_context" -> Some Tir.TUnit
   | "logger_get_context"   -> Some (Tir.TCon ("List", [Tir.TTuple [Tir.TString; Tir.TString]]))
   | "logger_write"         -> Some Tir.TUnit
+  (* Record introspection builtins *)
+  | "record_keys"      -> Some (Tir.TCon ("List", [Tir.TString]))
+  | "record_values"    -> Some (Tir.TCon ("List", [Tir.TVar "_"]))
+  | "record_entries"   -> Some (Tir.TCon ("List", [Tir.TTuple [Tir.TString; Tir.TVar "_"]]))
+  | "record_get"       -> Some (Tir.TCon ("Option", [Tir.TVar "_"]))
+  | "record_put"       -> Some (Tir.TVar "_")
+  | "record_from_list" -> Some (Tir.TVar "_")
+  | "record_has_key"   -> Some Tir.TBool
   | "int_to_string"               -> Some Tir.TString
   | "float_to_string"             -> Some Tir.TString
   | "bool_to_string"              -> Some Tir.TString
@@ -558,6 +577,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "tcp_close"                   -> Some Tir.TUnit
+  | "tcp_peer_addr"               -> Some Tir.TString
   | "tcp_recv_exact"              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers"
   | "tcp_recv_http" | "tcp_recv_chunked_frame"
@@ -638,11 +658,12 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "http_server_wait"            -> Some Tir.TUnit
   (* Crypto / hash builtins *)
   | "md5"                         -> Some Tir.TString
-  | "hmac_sha256"
+  | "hmac_sha256" | "stdlib_hmac_sha256"
   | "pbkdf2_sha256"           -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "sha256" | "stdlib_sha256"
   | "sha512" | "stdlib_sha512" -> Some Tir.TString
   | "sha1_bytes"               -> Some (Tir.TCon ("Bytes", []))
+  | "hmac_sha256_bytes"        -> Some (Tir.TCon ("Bytes", []))
   | "random_bytes" | "stdlib_random_bytes" -> Some (Tir.TCon ("Bytes", []))
   | "base64_encode" | "stdlib_base64_encode" -> Some Tir.TString
   | "base64_decode" | "stdlib_base64_decode"
@@ -677,6 +698,17 @@ let builtin_ret_ty : string -> Tir.ty option = function
 (** Mangle a March builtin name to the C runtime function name. *)
 let mangle_extern : string -> string = function
   | "panic"         -> "march_panic"
+  (* Record introspection builtins.  record_put maps to the 3-arg variant
+     (kind defaults to generic) for first-class / closure-wrapper call paths;
+     the direct EApp path in emit_expr calls the 4-arg march_record_put with
+     an explicit kind char instead. *)
+  | "record_keys"      -> "march_record_keys"
+  | "record_values"    -> "march_record_values"
+  | "record_entries"   -> "march_record_entries"
+  | "record_get"       -> "march_record_get"
+  | "record_has_key"   -> "march_record_has_key"
+  | "record_put"       -> "march_record_put3"
+  | "record_from_list" -> "march_record_from_list"
   | "println"       -> "march_println"
   | "print"         -> "march_print"
   | "print_stderr"  -> "march_print_stderr"
@@ -706,6 +738,7 @@ let mangle_extern : string -> string = function
   | "tcp_recv_http"           -> "march_tcp_recv_http"
   | "tcp_send_all"            -> "march_tcp_send_all"
   | "tcp_close"               -> "march_tcp_close"
+  | "tcp_peer_addr"           -> "march_tcp_peer_addr"
   | "http_parse_request"      -> "march_http_parse_request"
   | "http_serialize_response" -> "march_http_serialize_response"
   | "http_server_listen"      -> "march_http_server_listen"
@@ -884,7 +917,8 @@ let mangle_extern : string -> string = function
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   (* Crypto / hash builtins *)
   | "md5"                  -> "march_md5"
-  | "hmac_sha256"          -> "march_hmac_sha256"
+  | "hmac_sha256" | "stdlib_hmac_sha256" -> "march_hmac_sha256"
+  | "hmac_sha256_bytes"    -> "march_hmac_sha256_bytes"
   | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
   | "sha256" | "stdlib_sha256"              -> "march_sha256"
   | "sha512" | "stdlib_sha512"              -> "march_sha512"
@@ -1324,6 +1358,11 @@ let emit_stack_alloc ctx n_fields =
   emit ctx (Printf.sprintf "%s = alloca [%d x i8], align 8" ptr (alloc_size n_fields));
   (* zero the header *)
   emit ctx (Printf.sprintf "store i64 0, ptr %s, align 8" ptr);
+  (* zero the tag+pad word too: alloca memory is garbage, and the pad word
+     (offset 12) is read as the record shape id by the native runtime *)
+  let hw = fresh ctx "tgp" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" hw ptr);
+  emit ctx (Printf.sprintf "store i64 0, ptr %s, align 8" hw);
   ptr
 
 (* ── Constructor lookup ──────────────────────────────────────────────── *)
@@ -1430,6 +1469,57 @@ let field_index_for ctx (ty : Tir.ty) (field_name : string) : int * Tir.ty =
   in
   find 0 fields
 
+(* ── Record shape metadata (native record introspection) ─────────────── *)
+
+(** Static TIR type of an atom (used for shape kinds and builtin kind hints). *)
+let atom_tir_ty : Tir.atom -> Tir.ty = function
+  | Tir.AVar v -> v.Tir.v_ty
+  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
+  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TCon ("Atom", [])
+  | Tir.ADefRef _ -> Tir.TVar "_"
+
+(** Field kind char for the runtime shape descriptor — describes the natural
+    in-slot representation (must match runtime/march_extras.c):
+    'i' raw i64 scalar, 'f' raw double bits, 'p' heap pointer, 'g' unknown. *)
+let shape_kind_char : Tir.ty -> char = function
+  | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) -> 'i'
+  | Tir.TFloat -> 'f'
+  | Tir.TVar _ -> 'g'
+  | _ -> 'p'
+
+(** Canonical shape descriptor "name:k;name:k;..." with fields sorted by name
+    — the same order record slots are laid out in. *)
+let shape_desc (fields : (string * Tir.ty) list) : string =
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
+  String.concat "" (List.map (fun (n, t) ->
+    Printf.sprintf "%s:%c;" n (shape_kind_char t)) sorted)
+
+(** Emit (once per shape) the descriptor string constant and the i32 id-cache
+    global; returns (desc_global, cache_global). *)
+let ensure_shape_globals ctx (desc : string) : string * string =
+  match Hashtbl.find_opt ctx.rec_shape_globals desc with
+  | Some pair -> pair
+  | None ->
+    let dg = intern_string ctx desc in
+    ctx.str_ctr <- ctx.str_ctr + 1;
+    let cg = Printf.sprintf "@.recshape%d" ctx.str_ctr in
+    Buffer.add_string ctx.preamble
+      (Printf.sprintf "%s = internal global i32 0\n" cg);
+    Hashtbl.replace ctx.rec_shape_globals desc (dg, cg);
+    (dg, cg)
+
+(** Stamp the interned shape id of [fields] into record cell [ptr]'s header
+    pad word.  No-op on WASM targets (no native runtime registry). *)
+let emit_set_shape ctx ptr (fields : (string * Tir.ty) list) =
+  if ctx.shape_meta then begin
+    let (dg, cg) = ensure_shape_globals ctx (shape_desc fields) in
+    emit ctx (Printf.sprintf
+      "call void @march_record_set_shape(ptr %s, ptr %s, ptr %s)" ptr dg cg)
+  end
+
 (* ── ADT structural equality generation ─────────────────────────────── *)
 
 (** Mangle a TIR type to a valid LLVM identifier fragment for equality function names. *)
@@ -1464,24 +1554,92 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
     else begin
+      (* Resolve [type_name] against ctor_info's type-qualified keys
+         ("TypePath.CtorName").  TDVariant names from imported modules are
+         module-qualified ("Ast.Expr") while the TCon at a use site may carry
+         the short name ("Expr") — or vice versa.  Collect every type path
+         matching exactly or by dot-suffix.  When several types share the
+         short name (e.g. "SortDir" -> Ast.SortDir and DataFrame.SortDir) we
+         can still generate a correct comparison if their per-tag field
+         layouts agree on common tags: tags are contiguous from 0, so the
+         candidate with the most constructors covers every tag any operand
+         can carry.  Genuinely conflicting layouts (e.g. "Query" ->
+         Ast.Query(QueryFields) vs Depot.Query.Query's 8-field DQuery)
+         return None and the caller falls back.
+         NOTE: memoization in emitted_eq_fns must only happen once we commit
+         to generating a body — registering before the ctor lookup made later
+         requests return Some for a function that was never defined. *)
+      let split_type_path key =
+        match String.rindex_opt key '.' with
+        | None -> None
+        | Some i -> Some (String.sub key 0 i)
+      in
+      let ends_with_seg ~seg s =
+        let ls = String.length s and lx = String.length seg in
+        ls > lx + 1 && String.sub s (ls - lx - 1) (lx + 1) = "." ^ seg
+      in
+      let candidate_paths = Hashtbl.fold (fun key _ acc ->
+          match split_type_path key with
+          | Some tp when tp = type_name || ends_with_seg ~seg:type_name tp ->
+            if List.mem tp acc then acc else tp :: acc
+          | _ -> acc
+        ) ctx.ctor_info []
+      in
+      let ctors_of tp =
+        let prefix = tp ^ "." in
+        Hashtbl.fold (fun key entry acc ->
+          if String.length key > String.length prefix &&
+             String.sub key 0 (String.length prefix) = prefix &&
+             not (String.contains
+                    (String.sub key (String.length prefix)
+                       (String.length key - String.length prefix)) '.')
+          then
+            let cn = String.sub key (String.length prefix)
+                       (String.length key - String.length prefix) in
+            (entry.ce_tag, cn, entry.ce_fields) :: acc
+          else acc
+        ) ctx.ctor_info []
+      in
+      let resolved =
+        match candidate_paths with
+        | [] -> None
+        | [tp] -> Some (tp, ctors_of tp)
+        | tps ->
+          (* Multiple candidates: keep the largest ctor set when every other
+             candidate's per-tag field layout matches it on common tags. *)
+          let sorted = List.sort (fun (_, a) (_, b) ->
+              compare (List.length b) (List.length a))
+              (List.map (fun tp -> (tp, ctors_of tp)) tps) in
+          (match sorted with
+           | [] -> None
+           | ((_, big_ctors) as biggest) :: rest ->
+             let layout_of tag ctors =
+               Option.map (fun (_, _, flds) -> List.map field_load_llty flds)
+                 (List.find_opt (fun (t, _, _) -> t = tag) ctors)
+             in
+             let compatible = List.for_all (fun (_, cs) ->
+                 List.for_all (fun (tag, _, flds) ->
+                     layout_of tag big_ctors
+                     = Some (List.map field_load_llty flds)
+                   ) cs
+               ) rest
+             in
+             if compatible then Some biggest else None)
+      in
+      match resolved with
+      | None -> None
+      | Some (_, []) -> None
+      | Some (resolved_name, ctors) ->
       Hashtbl.add ctx.emitted_eq_fns fn_name ();
       let subst =
-        match Hashtbl.find_opt ctx.type_params type_name with
+        match Hashtbl.find_opt ctx.type_params resolved_name with
         | Some ps when List.length ps = List.length ty_args -> List.combine ps ty_args
-        | _ -> []
+        | _ ->
+          (match Hashtbl.find_opt ctx.type_params type_name with
+           | Some ps when List.length ps = List.length ty_args -> List.combine ps ty_args
+           | _ -> [])
       in
-      let prefix = type_name ^ "." in
-      let ctors = Hashtbl.fold (fun key entry acc ->
-        if String.length key > String.length prefix &&
-           String.sub key 0 (String.length prefix) = prefix
-        then
-          let cn = String.sub key (String.length prefix)
-                     (String.length key - String.length prefix) in
-          (entry.ce_tag, cn, entry.ce_fields) :: acc
-        else acc
-      ) ctx.ctor_info [] in
-      if ctors = [] then None
-      else begin
+      begin
         let ctors = List.sort (fun (a,_,_) (b,_,_) -> compare a b) ctors in
         let buf = Buffer.create 512 in
         let ctr = ref 0 in let blk = ref 0 in
@@ -1548,7 +1706,7 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
                  e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
                | Tir.TString ->
                  e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
-               | Tir.TCon _ ->
+               | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ ->
                  (match ensure_adt_eq_fn ctx fty with
                   | Some fen ->
                     e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
@@ -1579,6 +1737,87 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
         Buffer.add_buffer ctx.extra_fns buf;
         Some fn_name
       end
+    end
+  (* Tuples and records: single-layout heap cells (tag 0) — compare fields
+     element-wise with short-circuiting.  Without this, == on tuple/record
+     operands fell back to pointer comparison, so e.g.
+     List.member(record_entries(r), ("age", 30)) was always false natively. *)
+  | Tir.TTuple _ | Tir.TRecord _ ->
+    let flds = (match ty with
+      | Tir.TTuple tys -> tys
+      | Tir.TRecord fields -> List.map snd fields   (* sorted by name = slot order *)
+      | _ -> []) in
+    let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
+    if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
+    else begin
+      Hashtbl.add ctx.emitted_eq_fns fn_name ();
+      let buf = Buffer.create 256 in
+      let ctr = ref 0 in let blk = ref 0 in
+      let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
+      let flbl pfx = incr blk; Printf.sprintf "%s%d" pfx !blk in
+      let e ln  = Buffer.add_string buf ("  " ^ ln ^ "\n") in
+      let lbl l = Buffer.add_string buf (l ^ ":\n") in
+      let lbl_eq     = flbl "is_eq" in
+      let lbl_not_eq = flbl "not_eq" in
+      Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+      Buffer.add_string buf "entry:\n";
+      let nf = List.length flds in
+      if nf = 0 then
+        e (Printf.sprintf "br label %%%s" lbl_eq)
+      else begin
+        let cont_lbls = Array.init nf (fun i ->
+          if i = 0 then "" else flbl (Printf.sprintf "f%d" i)) in
+        List.iteri (fun fi fty ->
+          if fi > 0 then lbl cont_lbls.(fi);
+          let off = 16 + fi * 8 in
+          let llt = field_load_llty fty in
+          let fgpa = frsh "fgpa" in let fgpb = frsh "fgpb" in
+          let fva  = frsh "fva"  in let fvb  = frsh "fvb"  in
+          e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 %d" fgpa off);
+          e (Printf.sprintf "%s = load %s, ptr %s, align 8" fva llt fgpa);
+          e (Printf.sprintf "%s = getelementptr i8, ptr %%b, i64 %d" fgpb off);
+          e (Printf.sprintf "%s = load %s, ptr %s, align 8" fvb llt fgpb);
+          let ok = frsh "ok" in
+          (match fty with
+           | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TFloat ->
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = fcmp oeq double %s, %s" c fva fvb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TString ->
+             e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
+           | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ ->
+             (match ensure_adt_eq_fn ctx fty with
+              | Some fen ->
+                e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
+              | None ->
+                let pa = frsh "pa" in let pb = frsh "pb" in
+                e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+                e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+                let c = frsh "c" in
+                e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+                e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
+           | _ ->
+             let pa = frsh "pa" in let pb = frsh "pb" in
+             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+             e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+             let c = frsh "c" in
+             e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+             e (Printf.sprintf "%s = zext i1 %s to i64" ok c));
+          let oki = frsh "oki" in
+          e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
+          let nxt = if fi = nf - 1 then lbl_eq else cont_lbls.(fi + 1) in
+          e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" oki nxt lbl_not_eq)
+        ) flds
+      end;
+      lbl lbl_eq;     e "ret i64 1";
+      lbl lbl_not_eq; e "ret i64 0";
+      Buffer.add_string buf "}\n";
+      Buffer.add_buffer ctx.extra_fns buf;
+      Some fn_name
     end
   | _ -> None
 
@@ -1672,7 +1911,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let va' = coerce ctx ty_a va "i64" in
       let vb = emit_atom_as ctx "i64" b in
       let r  = fresh ctx "ar" in
-      emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb);
+      (* / and % on Int route through checked helpers so a zero divisor traps
+         (matching the interpreter) instead of emitting a raw sdiv/srem that
+         returns garbage.  The helpers use the bare operator messages
+         ("division by zero" / "modulo by zero"); other ops stay native. *)
+      (match f.Tir.v_name with
+       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb)
+       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb)
+       | _   -> emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb));
       ("i64", r)
     end
 
@@ -1761,6 +2007,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | Tir.AVar v -> (match v.Tir.v_ty with
           | Tir.TCon ("Atom", []) -> None
           | Tir.TCon _ as t -> Some t
+          | (Tir.TTuple _ | Tir.TRecord _) as t -> Some t
           | _ -> None)
         | _ -> None
       in
@@ -1913,6 +2160,82 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
     ("ptr", "null")
 
+  (* ── Record introspection builtins (native lowering) ───────────────── *)
+  (* These cannot be plain C externs because record values carry no field
+     names; they rely on the shape id stamped into the header pad word by
+     emit_set_shape and pass call-site value-kind hints where the C side
+     needs to know a value's natural representation.  See the "Record shape
+     registry" section in runtime/march_extras.c for the conventions. *)
+  | Tir.EApp (f, [r])
+    when (match f.Tir.v_name with
+          | "record_keys" | "record_values" | "record_entries" -> true
+          | _ -> false) ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_%s(ptr %s)"
+                res f.Tir.v_name rp);
+    ("ptr", res)
+
+  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_get" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_record_get(ptr %s, ptr %s)"
+                res rp kp);
+    ("ptr", res)
+
+  | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_has_key" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call i64 @march_record_has_key(ptr %s, ptr %s)"
+                res rp kp);
+    ("i64", res)
+
+  | Tir.EApp (f, [r; k; v]) when f.Tir.v_name = "record_put" ->
+    let (rt, rv) = emit_atom ctx r in
+    let rp = coerce ctx rt rv "ptr" in
+    let (kt, kv) = emit_atom ctx k in
+    let kp = coerce ctx kt kv "ptr" in
+    let (vt, vv) = emit_atom ctx v in
+    (* Pass the value in NATURAL representation as a ptr-sized word: raw i64
+       for scalars (NOT low-bit tagged), raw bits for floats, ptr as-is. *)
+    let vp = (match vt with
+      | "i64" ->
+        let t = fresh ctx "cv" in
+        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+      | "double" ->
+        let b = fresh ctx "cv" in
+        let t = fresh ctx "cv" in
+        emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b vv);
+        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
+        t
+      | _ -> vv) in
+    let kind = shape_kind_char (atom_tir_ty v) in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_record_put(ptr %s, ptr %s, ptr %s, i64 %d)"
+      res rp kp vp (Char.code kind));
+    ("ptr", res)
+
+  | Tir.EApp (f, [l]) when f.Tir.v_name = "record_from_list" ->
+    let (lt, lv) = emit_atom ctx l in
+    let lp = coerce ctx lt lv "ptr" in
+    (* Kind hint for the pair values, from the list's element tuple type. *)
+    let kind = (match atom_tir_ty l with
+      | Tir.TCon ("List", [Tir.TTuple [_; b]]) -> shape_kind_char b
+      | _ -> 'g') in
+    let res = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_record_from_list_k(ptr %s, i64 %d)"
+      res lp (Char.code kind));
+    ("ptr", res)
+
   (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "to_string" ->
     let (arg_ty, arg_val) = emit_atom ctx a in
@@ -2052,13 +2375,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
-    let op = match f.Tir.v_name with
-      | "int_mod"        -> "srem"
-      | "int_div"        -> "sdiv"
-      | "int_mod_euclid" -> "urem"
+    (* Route through a checked runtime helper so a zero divisor traps via
+       march_panic (matching the interpreter) instead of executing a raw
+       sdiv/srem/urem, which is undefined for a 0 divisor. *)
+    let helper = match f.Tir.v_name with
+      | "int_mod"        -> "march_checked_imod"
+      | "int_div"        -> "march_checked_idiv"
+      | "int_mod_euclid" -> "march_checked_umod"
       | _                -> assert false
     in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a; b])
@@ -2196,6 +2522,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       (ret_ty, r)
     end
 
+  (* ── ECallPtr to a record introspection builtin: redirect to the EApp
+     special cases above so kind hints and signatures stay correct. *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when (match f.Tir.v_name with
+          | "record_keys" | "record_values" | "record_entries"
+          | "record_get" | "record_has_key" | "record_put"
+          | "record_from_list" -> true
+          | _ -> false)
+      && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    emit_expr ctx (Tir.EApp (f, args))
+
   (* ── ECallPtr where callee is a known builtin ─────────────────────── *)
   (* Builtins (e.g. vault_update) are not in top_fns, so TIR lowering
      emits them as call_ptr.  Detect this here and emit a direct call
@@ -2300,13 +2637,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
-    let op = match f.Tir.v_name with
-      | "int_mod"        -> "srem"
-      | "int_div"        -> "sdiv"
-      | "int_mod_euclid" -> "urem"
+    (* Same checked-helper routing as the EApp form above. *)
+    let helper = match f.Tir.v_name with
+      | "int_mod"        -> "march_checked_imod"
+      | "int_div"        -> "march_checked_idiv"
+      | "int_mod_euclid" -> "march_checked_umod"
       | _                -> assert false
     in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
     ("i64", r)
 
   (* ── Indirect call through closure ────────────────────────────────── *)
@@ -2498,7 +2836,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result rv reuse_lbl hp fresh_lbl);
     ("ptr", result)
 
-  | Tir.EReuse (reuse_atom, _, args) ->
+  | Tir.EReuse (reuse_atom, reuse_ty, args) ->
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
     let (_, rv) = emit_atom ctx reuse_atom in
     let arg_vals = List.map (fun atom ->
@@ -2534,6 +2872,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
+    (* Records: stamp the shape id on the result (the fresh-branch cell has
+       pad=0; the reuse-branch cell may have been a different record shape). *)
+    (match reuse_ty with
+     | Tir.TRecord fields -> emit_set_shape ctx result fields
+     | _ -> ());
     ("ptr", result)
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)
@@ -2614,6 +2957,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (ty, v) = emit_atom ctx atom in
       emit_store_field ctx ptr i ty v
     ) sorted;
+    (* Stamp the shape id so record introspection builtins can recover the
+       field names at runtime. *)
+    emit_set_shape ctx ptr
+      (List.map (fun (nm, atom) -> (nm, atom_tir_ty atom)) sorted);
     ("ptr", ptr)
 
   (* ── Field access ──────────────────────────────────────────────────── *)
@@ -2623,18 +2970,35 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.ADefRef _ -> Tir.TVar "_"
       | Tir.ALit _    -> Tir.TVar "_"
     in
-    let (idx, field_ty) =
-      (* Closure free-variable fields: "$fvN" — parse index from name directly
-         since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
-      if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then
-        let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
-        (i, Tir.TPtr Tir.TUnit)   (* field type is opaque; let alloca use v_ty *)
-      else
-        field_index_for ctx obj_ty field_name
-    in
-    let (_, obj_val) = emit_atom ctx obj_atom in
-    let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
-    (llvm_ty field_ty, fv)
+    (* Closure free-variable fields: "$fvN" — parse index from name directly
+       since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
+    if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then begin
+      let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
+      let (_, obj_val) = emit_atom ctx obj_atom in
+      let fv = emit_load_field ctx obj_val i (llvm_ty (Tir.TPtr Tir.TUnit)) in
+      (llvm_ty (Tir.TPtr Tir.TUnit), fv)
+    end else begin
+      match get_record_fields ctx obj_ty with
+      | [] when ctx.shape_meta ->
+        (* Statically-unknown record shape (type-erased generic flow, or a
+           record extended at runtime by record_put): look the field up by
+           name via the shape id.  Result follows the generic ADT-slot
+           convention (ints low-bit tagged) — consumers coerce ptr→i64 with
+           an untagging ashr.  Cells without shape metadata fall back to the
+           legacy raw slot-0 read inside the C helper. *)
+        let (_, obj_val) = emit_atom ctx obj_atom in
+        let ng = intern_string ctx field_name in
+        let res = fresh ctx "cr" in
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_record_field_dyn(ptr %s, ptr %s, i64 %d)"
+          res obj_val ng (String.length field_name));
+        ("ptr", res)
+      | _ ->
+        let (idx, field_ty) = field_index_for ctx obj_ty field_name in
+        let (_, obj_val) = emit_atom ctx obj_atom in
+        let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
+        (llvm_ty field_ty, fv)
+    end
 
   (* ── Record update ─────────────────────────────────────────────────── *)
   | Tir.EUpdate (base_atom, updates) ->
@@ -2659,6 +3023,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (aty, av) = emit_atom ctx atom in
       emit_store_field ctx ptr idx aty av
     ) updates;
+    (* Stamp the shape id on the copy.  When the static shape is known, use
+       it; otherwise copy the base record's shape id (header pad word). *)
+    if ctx.shape_meta then begin
+      if all_fields <> [] then
+        emit_set_shape ctx ptr all_fields
+      else begin
+        let sp = fresh ctx "shp" in
+        let sv = fresh ctx "shv" in
+        let dp = fresh ctx "shp" in
+        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" sp base_val);
+        emit ctx (Printf.sprintf "%s = load i32, ptr %s, align 4" sv sp);
+        emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 12" dp ptr);
+        emit ctx (Printf.sprintf "store i32 %s, ptr %s, align 4" sv dp)
+      end
+    end;
     ("ptr", ptr)
 
   (* ── Case expression ───────────────────────────────────────────────── *)
@@ -2673,6 +3052,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     Result is materialized via ptr alloca slot with ptrtoint/inttoptr coercion. *)
 and emit_case ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
+
+  (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
+     integers (Int), ":name" (Atom).  ADT constructor tags are capitalized
+     identifiers, so these forms are unambiguous.  A scrutinee matched
+     against such tags is an immediate at runtime even when its LLVM value
+     is ptr-typed — e.g. an ADT field bound at a TVar type is stored as a
+     low-bit-tagged immediate ((n<<1)|1), NOT a heap pointer.  Treating it
+     as a heap pointer and loading a ctor tag from it is a wild dereference
+     (and LLVM folds the resulting unreachable-defaulted switch into "first
+     arm always wins").  See: nested Bool/Int/Atom literal patterns inside
+     constructor patterns, e.g. [match r do Ok(true) -> … Ok(false) -> …]. *)
+  let is_imm_lit_tag t =
+    t = "true" || t = "false"
+    || int_of_string_opt t <> None
+    || (String.length t > 0 && t.[0] = ':')
+  in
+  let all_imm_lit_tags =
+    branches <> [] &&
+    List.for_all (fun br -> is_imm_lit_tag br.Tir.br_tag) branches
+  in
 
   let is_ptr_scrut =
     match scrut_atom with
@@ -2689,6 +3088,14 @@ and emit_case ctx scrut_atom branches default_opt =
     | Tir.ALit (March_ast.Ast.LitAtom _) -> false
     | _ -> scrut_ty = "ptr"
   in
+  (* Immediate-literal tags override the repr guess: the value cannot be a
+     heap object, so never take the load-ctor-tag path for it. *)
+  let is_ptr_scrut = is_ptr_scrut && not all_imm_lit_tags in
+  (* The scrutinee is an immediate but its LLVM value is ptr-typed: the raw
+     bits are the tagged immediate (n<<1)|1.  Switch labels must be tagged
+     the same way (comparing tagged-vs-tagged is exact; untagging via ashr
+     would lose bit 63 of 64-bit atom hashes). *)
+  let scrut_is_tagged_imm = all_imm_lit_tags && scrut_ty = "ptr" in
 
   let merge_lbl   = fresh_block ctx "case_merge" in
   let default_lbl = fresh_block ctx "case_default" in
@@ -2778,6 +3185,12 @@ and emit_case ctx scrut_atom branches default_opt =
       (* Determine switch discriminant (tag or scalar) *)
       let (sw_ty, sw_val) =
         if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
+        else if scrut_is_tagged_imm then begin
+          (* ptr-typed tagged immediate: switch on the raw bits *)
+          let raw = fresh ctx "ti" in
+          emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" raw scrut_val);
+          ("i64", raw)
+        end
         else ("i64", scrut_val)
       in
 
@@ -2791,14 +3204,25 @@ and emit_case ctx scrut_atom branches default_opt =
             if is_ptr_scrut then
               let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
               string_of_int e.ce_tag
-            else if is_atom_case then begin
-              (* Atom tags are ":NAME" — hash the name part with FNV1a *)
-              let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
-              Int64.to_string (fnv1a_64 name)
-            end else begin
-              match int_of_string_opt br.Tir.br_tag with
-              | Some n -> string_of_int n
-              | None -> "0"
+            else begin
+              let v =
+                if is_atom_case then begin
+                  (* Atom tags are ":NAME" — hash the name part with FNV1a *)
+                  let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
+                  fnv1a_64 name
+                end else
+                  match Int64.of_string_opt br.Tir.br_tag with
+                  | Some n -> n
+                  | None -> 0L
+              in
+              (* Tagged-immediate scrutinee: tag the label the same way the
+                 store tagged the value — (v << 1) | 1. *)
+              let v =
+                if scrut_is_tagged_imm
+                then Int64.logor (Int64.shift_left v 1) 1L
+                else v
+              in
+              Int64.to_string v
             end
           in
           if Hashtbl.mem seen_tags tag_str then None
@@ -3519,11 +3943,30 @@ declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare i32  @march_record_shape_intern(ptr %desc)
+declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
+declare ptr  @march_record_keys(ptr %rec)
+declare ptr  @march_record_values(ptr %rec)
+declare ptr  @march_record_entries(ptr %rec)
+declare ptr  @march_record_get(ptr %rec, ptr %key)
+declare i64  @march_record_has_key(ptr %rec, ptr %key)
+declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)
+declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)
+declare ptr  @march_record_from_list(ptr %list)
+declare ptr  @march_record_from_list_k(ptr %list, i64 %kind)
+declare ptr  @march_record_field_dyn(ptr %rec, ptr %name, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
 declare ptr    @march_float_to_string(double %f)
 declare ptr    @march_bool_to_string(i64 %b)
 ; Checked float division — aborts on divisor == 0.0 instead of returning inf/NaN
 declare double @march_checked_fdiv(double %a, double %b)
+; Checked integer division/remainder — panic on a zero divisor (matches interpreter)
+declare i64    @march_checked_idiv(i64 %a, i64 %b)
+declare i64    @march_checked_imod(i64 %a, i64 %b)
+declare i64    @march_checked_umod(i64 %a, i64 %b)
+; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
+declare i64    @march_checked_div_op(i64 %a, i64 %b)
+declare i64    @march_checked_mod_op(i64 %a, i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins
@@ -3620,6 +4063,7 @@ declare ptr  @march_sha256(ptr %b)
 declare ptr  @march_sha512(ptr %b)
 declare ptr  @march_sha1_bytes(ptr %b)
 declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
+declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)
 declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
 declare ptr  @march_base64_encode(ptr %b)
 declare ptr  @march_base64_decode(ptr %s)
@@ -3695,6 +4139,7 @@ declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare void @march_tcp_send_all(i64 %fd, ptr %data)
 declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_tcp_peer_addr(i64 %fd)
 declare ptr  @march_http_parse_request(ptr %raw)
 declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
@@ -3824,6 +4269,9 @@ let emit_main_wrapper (buf : Buffer.t) =
 
 let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
+  (* Record shape metadata requires the native runtime (march_extras.c);
+     the WASM runtime does not provide march_record_set_shape. *)
+  ctx.shape_meta <- not (is_wasm_target target);
   build_ctor_info ctx m;
   (* Register user-defined extern functions *)
   List.iter (fun (ed : Tir.extern_decl) ->

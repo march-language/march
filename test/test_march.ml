@@ -5603,6 +5603,93 @@ let test_actor_compile_call_reply_emitted () =
   Alcotest.(check bool) "march_actor_reply in IR" true
     (ir_contains ir "march_actor_reply")
 
+(* ── Nested immediate-literal pattern codegen tests ────────────────────── *)
+(* Regression tests for the wild-dereference miscompile of Bool/Int/Atom
+   literal patterns nested inside constructor patterns.  The field bound by
+   the outer constructor pattern is a low-bit-tagged immediate ((n<<1)|1),
+   not a heap pointer; compiling the inner literal test as a ctor-tag switch
+   loaded a tag from a non-pointer.  With an unreachable-defaulted switch,
+   LLVM folded the test away entirely — [Ok(true)]/[Ok(false)] both took the
+   FIRST bool arm (printed T T E instead of T F E); nested Int/Atom literal
+   matches segfaulted.  The fix routes all-immediate-literal-tag ECases to
+   scalar comparisons, so exactly ONE i32 ctor-tag switch (the outer Ok/Err
+   discrimination) must remain in the emitted IR. *)
+
+(** Count non-overlapping occurrences of [pat] in [ir]. *)
+let ir_count ir pat =
+  let re = Str.regexp_string pat in
+  let rec go i acc =
+    match Str.search_forward re ir i with
+    | j -> go (j + String.length pat) (acc + 1)
+    | exception Not_found -> acc
+  in
+  go 0 0
+
+(** Nested Bool literal patterns: the inner true/false test must be an
+    untag + trunc + br i1, not a second ctor-tag switch on the field. *)
+let test_nested_bool_lit_pattern_no_tag_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Bool, String)) : String do
+      match r do
+        Ok(true) -> "T"
+        Ok(false) -> "F"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(true)))
+      println(classify(Ok(false)))
+      println(classify(Err("x")))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32");
+  Alcotest.(check bool) "bool field tested via trunc to i1" true
+    (ir_contains ir "trunc i64");
+  Alcotest.(check bool) "bool field untagged via ashr" true
+    (ir_contains ir "ashr i64")
+
+(** Nested Int literal patterns: the inner test must switch on the raw
+    tagged bits with (n<<1)|1 labels — Ok(1) → label 3, Ok(2) → label 5. *)
+let test_nested_int_lit_pattern_tagged_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Int, String)) : String do
+      match r do
+        Ok(1) -> "one"
+        Ok(2) -> "two"
+        Ok(_) -> "other"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(1)))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32");
+  Alcotest.(check bool) "Ok(1) compared against tagged immediate 3" true
+    (ir_contains ir "i64 3, label");
+  Alcotest.(check bool) "Ok(2) compared against tagged immediate 5" true
+    (ir_contains ir "i64 5, label")
+
+(** Nested Atom literal patterns: same shape — no second ctor-tag switch. *)
+let test_nested_atom_lit_pattern_no_tag_switch () =
+  let ir = emit_actor_ir {|mod Test do
+    fn classify(r : Result(Atom, String)) : String do
+      match r do
+        Ok(:red) -> "R"
+        Ok(:blue) -> "B"
+        Ok(_) -> "other"
+        Err(_) -> "E"
+      end
+    end
+    fn main() : Unit do
+      println(classify(Ok(:red)))
+    end
+  end|} in
+  Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
+    (ir_count ir "switch i32")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -6309,6 +6396,68 @@ let test_perceus_no_incrc_for_eapp_operator_callee () =
       (Printf.sprintf "no EIncRC for operator callee in %s" fn.March_tir.Tir.fn_name)
       false (has_incrc_for_builtin fn.March_tir.Tir.fn_body)
   ) m.March_tir.Tir.tm_fns
+
+(* Regression: a heap value whose concrete type does not resolve across a module
+   boundary keeps an unresolved type-var (`'_NNNN`) in monomorphic TIR.  This
+   happens for an opaque type defined in one module and consumed in another
+   (e.g. bastion's `Gate.cast` → `Gate.get_change(gate, …)`): `gate`'s let binding
+   stays `TVar "_NNNN"` instead of `TCon ("Gate", [])`.
+
+   Perceus's needs_rc used to return false for `TVar _` ("skip RC"), so such a
+   value was invisible to Perceus — no EIncRC was emitted before a consuming
+   call.  When the same binding was consumed twice the first consume freed the
+   heap box and the second double-freed it: `RC underflow in march_decrc_freed`.
+   The minimal shape below (opaque Box in a nested module, `get` consumes the
+   box, `b` used by two `get` calls) reproduces the missing dup.
+
+   Fix: needs_rc (TVar _) = true.  llvm_ty (TVar _) = "ptr" so the value is a
+   heap pointer; emitting EIncRC/EDecRC is correct for the box and a no-op for a
+   genuine scalar (guarded by [if ty = "ptr"] in llvm_emit and IS_HEAP_PTR in
+   the runtime).  Without the fix the EIncRC for `b` is absent and this fails. *)
+let test_perceus_incrc_for_unresolved_tvar_used_twice () =
+  let m = perceus_module {|mod Outer do
+    mod Box do
+      opaque type Box = Box(Int)
+      fn make(n : Int) : Box do Box(n) end
+      fn get(b : Box) : Int do unwrap(b) end
+      pfn unwrap(b : Box) : Int do match b do Box(n) -> n end end
+    end
+    mod Main do
+      import Box
+      fn main() : Int do
+        let b = Box.make(42)
+        let x = Box.get(b)
+        let y = Box.get(b)
+        x + y
+      end
+    end
+  end|} in
+  let main_fn =
+    List.find_opt (fun fn ->
+      let n = fn.March_tir.Tir.fn_name in
+      n = "Main.main" || n = "Outer.Main.main")
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "Main.main exists" true (main_fn <> None);
+  let main_fn = Option.get main_fn in
+  (* The fix must emit an EIncRC for `b` (the unresolved-type-var heap value)
+     before its first consuming use, so the second use does not double-free. *)
+  let rec incs_b = function
+    | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+    | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) ->
+      String.equal v.March_tir.Tir.v_name "b"
+    | March_tir.Tir.ELet (_, e1, e2) -> incs_b e1 || incs_b e2
+    | March_tir.Tir.ESeq (e1, e2) -> incs_b e1 || incs_b e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> incs_b b.March_tir.Tir.br_body) brs
+      || (match def with Some e -> incs_b e | None -> false)
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> incs_b f.March_tir.Tir.fn_body) fns || incs_b body
+    | _ -> false
+  in
+  Alcotest.(check bool)
+    "Main.main dups `b` before consuming it twice (cross-module opaque RC UAF)"
+    true (incs_b main_fn.March_tir.Tir.fn_body)
 
 (* Regression: record parameter used in multiple sequential calls within the
    same match arm.  Before the fix, borrow inference did not consider TRecord
@@ -17939,6 +18088,51 @@ let test_crypto_hmac_sha256_length () =
      Alcotest.(check int) "hmac_sha256 output is 32 bytes" 32 (String.length raw)
    | _ -> Alcotest.fail "expected Ok(Bytes)")
 
+let test_crypto_hmac_sha256_bytes () =
+  (* RFC 4231 test case 2: key = "Jefe", data = "what do ya want for nothing?"
+     — exercises the Bytes-domain variant that returns bare Bytes (no Result).
+     Bytes keys must round-trip raw (HKDF chains MACs through the key slot). *)
+  let open March_eval.Eval in
+  let key = march_bytes_of_string "Jefe" in
+  let msg = march_bytes_of_string "what do ya want for nothing?" in
+  let r = call_builtin "hmac_sha256_bytes" [key; msg] in
+  let raw = bytes_val_to_string r in
+  let hex = String.concat "" (List.init (String.length raw)
+               (fun i -> Printf.sprintf "%02x" (Char.code raw.[i]))) in
+  Alcotest.(check string) "hmac_sha256_bytes(Jefe, ...)"
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    hex
+
+let test_crypto_hmac_sha256_typecheck () =
+  (* Regression: the typecheck entry once declared Bytes -> Bytes -> Bytes,
+     disagreeing with eval, the native runtime, and llvm_emit — all of which
+     take String keys/messages and return Result(Bytes, String).  The
+     canonical signature is String -> String -> Result(Bytes, String). *)
+  let src = {|mod Test do
+    fn go() do
+      match hmac_sha256("secret", "message") do
+        Ok(b) -> base64_encode(b)
+        Err(e) -> e
+      end
+    end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "hmac_sha256 Result usage typechecks"
+    false (has_errors errors)
+
+let test_crypto_hmac_sha256_bytes_typecheck () =
+  (* The Bytes-domain variant returns bare Bytes (no Result wrapper):
+     its result feeds base64_encode(Bytes) directly, and its params are
+     inferred as Bytes from the builtin signature. *)
+  let src = {|mod Test do
+    fn go() do
+      base64_encode(hmac_sha256_bytes(random_bytes(4), random_bytes(8)))
+    end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "hmac_sha256_bytes bare-Bytes usage typechecks"
+    false (has_errors errors)
+
 let test_crypto_pbkdf2_sha256_length () =
   let open March_eval.Eval in
   let r = call_builtin "pbkdf2_sha256"
@@ -21037,6 +21231,89 @@ let test_collect_tests_no_double_collection () =
   Alcotest.(check int) "3 unique tests collected, none doubled" 3
     (List.length tir.March_tir.Tir.tm_tests)
 
+(* ── Regression: DMod test bodies must qualify sibling-fn references ─────
+   A test inside a DMod (e.g. a second test file auto-discovered via
+   MARCH_LIB_PATH) that references a sibling helper ONLY through a closure
+   left the reference unqualified ("helper") while the definition was
+   registered qualified ("TestB.helper").  Defun then captured the helper as
+   a first-class value, DCE pruned the definition (free_vars ∩ fn_names name
+   mismatch), and llvm_emit's fallback emitted a dangling `@helper` —
+   "use of undefined value '@helper'" at the clang stage of `forge test`.
+   collect_tests must apply rename_tir_vars with the module prefix, exactly
+   as lower_mod_decls does for the module's DFn declarations. *)
+let test_dmod_test_body_qualifies_helper_refs () =
+  let src = {|mod Entry do
+    mod TestB do
+      fn helper(x : Int) : Bool do x >= 0 end
+      test "helper via closure" do
+        let f = fn x -> helper(x)
+        assert (f(3))
+      end
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~test_mode:true m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Opt.run tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  (* The buggy pipeline emits a trampoline for the unqualified name whose
+     call target `@helper` has no define.  The qualified wrapper
+     ("@TestB.helper$clo_wrap") is fine — the check is anchored on '@'. *)
+  Alcotest.(check bool) "no dangling unqualified @helper trampoline" false
+    (ir_contains ir "@helper$clo_wrap");
+  (* Any surviving reference to the qualified helper must have a define. *)
+  let refs    = ir_contains ir "@TestB.helper" in
+  let defines = ir_contains ir "define i64 @TestB.helper" in
+  Alcotest.(check bool) "TestB.helper define present when referenced"
+    refs (refs && defines)
+
+(* ── Regression: __try_call must tag immediate results (uniform tagging) ──
+   Compiled `Check.all` properties failed on run 1 with "returned false" for
+   trivially-true properties (the interpreter passed them).  Root cause:
+   `__try_call` in runtime/march_runtime.c stored the property thunk's raw
+   i64 Bool into the Result Ok field UNTAGGED, but compiled March reads ADT
+   immediate fields with the uniform low-bit tag convention — `Ok(1)` was
+   untagged as `1 >> 1 = 0`, so `Check.is_failing` saw `not(false)` = true
+   for every passing property.  End-to-end guard: compile a test binary with
+   a trivially-true property through the real `--compile --test` pipeline
+   and assert it exits 0.  Skips gracefully (like the JIT tests) when the
+   compiler binary, clang, or the runtime is unavailable. *)
+let test_compiled_check_property_passes () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_checktag" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "t_test.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod CheckTag do\n\
+      \  describe \"tagging\" do\n\
+      \    test \"trivially-true property passes compiled\" do\n\
+      \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "tbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled trivially-true Check.all property exits 0" 0 run_rc
+    end
+  end
+
 let () =
   Alcotest.run "march"
     [
@@ -21496,6 +21773,10 @@ let () =
           (* Regression: 831e315 needs_rc(TFn) caused spurious EIncRC for EApp
              operator callees like && / || whose llvm_name maps to @__ *)
           Alcotest.test_case "no EIncRC for && / || callee (831e315)" `Quick test_perceus_no_incrc_for_eapp_operator_callee;
+          (* Regression: cross-module opaque type leaves an unresolved TVar; the
+             heap value used twice must be dup'd or the second consume
+             double-frees (bastion Gate.cast RC underflow UAF). *)
+          Alcotest.test_case "incrc for unresolved-tvar value used twice (cross-module opaque)" `Quick test_perceus_incrc_for_unresolved_tvar_used_twice;
           (* Regression: record param used in two sequential calls — second
              call read a freed field string (RC underflow).  Fix: TRecord is
              now borrow-eligible; _borrowed_field_vars suppresses field RC ops. *)
@@ -21574,6 +21855,11 @@ let () =
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
+        ] );
+      ( "nested_lit_pattern_codegen", [
+          Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
+          Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
+          Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
@@ -22581,6 +22867,9 @@ let () =
         Alcotest.test_case "sha256 bytes input"       `Quick test_crypto_sha256_bytes_input;
         Alcotest.test_case "hmac_sha256 known"        `Quick test_crypto_hmac_sha256;
         Alcotest.test_case "hmac_sha256 length"       `Quick test_crypto_hmac_sha256_length;
+        Alcotest.test_case "hmac_sha256 typecheck"    `Quick test_crypto_hmac_sha256_typecheck;
+        Alcotest.test_case "hmac_sha256_bytes typecheck" `Quick test_crypto_hmac_sha256_bytes_typecheck;
+        Alcotest.test_case "hmac_sha256_bytes known"  `Quick test_crypto_hmac_sha256_bytes;
         Alcotest.test_case "pbkdf2_sha256 length"     `Quick test_crypto_pbkdf2_sha256_length;
         Alcotest.test_case "pbkdf2_sha256 known"      `Quick test_crypto_pbkdf2_sha256_known;
         Alcotest.test_case "base64_encode"            `Quick test_crypto_base64_encode;
@@ -22858,5 +23147,9 @@ let () =
           test_collect_tests_recurses_into_dmod;
         Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
           test_collect_tests_no_double_collection;
+        Alcotest.test_case "DMod test body qualifies sibling helper refs (no dangling @helper)" `Quick
+          test_dmod_test_body_qualifies_helper_refs;
+        Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
+          test_compiled_check_property_passes;
       ]);
     ]

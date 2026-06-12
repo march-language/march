@@ -347,8 +347,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
       | None -> None
       | Some desugared ->
-        let (import_errs, extra_decls) =
-          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+        let (import_errs, extra_decls, _user_files) =
+          March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
         List.iter (fun (_, span, msg) ->
           Printf.eprintf "%s:%d: import error: %s\n%!"
             span.March_ast.Ast.file span.March_ast.Ast.start_line msg
@@ -768,8 +768,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     let dummy_src = Filename.concat search_dir "_repl_.march" in
                     let dummy_mod = { March_ast.Ast.mod_name  = { txt = "Repl"; span = March_ast.Ast.dummy_span }
                                     ; mod_decls = [d'] } in
-                    let (_, extra_decls) =
-                      March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
+                    let (_, extra_decls, _) =
+                      March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:dummy_src dummy_mod in
                     List.iter (fun decl ->
                       (* Register user modules with Module_registry so qualified
                          accesses (`MyMod.foo`) resolve. *)
@@ -1143,8 +1143,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
       | None -> None
       | Some desugared ->
-        let (_, extra_decls) =
-          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+        let (_, extra_decls, _) =
+          March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
         Some (desugared, extra_decls))
   in
 
@@ -1269,8 +1269,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          let dummy_src = Filename.concat search_dir "_repl_.march" in
          let dummy_mod = { March_ast.Ast.mod_name = { txt = "Repl"; span = March_ast.Ast.dummy_span }
                          ; mod_decls = [d'] } in
-         let (_, extra_decls) =
-           March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
+         let (_, extra_decls, _) =
+           March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:dummy_src dummy_mod in
          List.iter (fun decl ->
            (* Register user modules with Module_registry so qualified accesses
               (`MyMod.foo`) resolve.  Without this, check_decl successfully adds
@@ -1793,8 +1793,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
                | None -> ()
                | Some desugared ->
-                 let (_, extra_decls) =
-                   March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+                 let (_, extra_decls, _) =
+                   March_resolver.Resolver.resolve_imports ~auto_discover:false ~source_file:path desugared in
                  let file_mod =
                    March_ast.Ast.DMod (
                      desugared.March_ast.Ast.mod_name,

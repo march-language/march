@@ -34,6 +34,16 @@ let impure_builtins = [
   "process_set_env";
   (* Mutable state *)
   "march_set_global"; "vault_set"; "vault_drop"; "vault_update";
+  (* Partial / diverging: integer division and remainder panic on a zero
+     divisor (see march_checked_idiv/imod/umod in the runtime), matching the
+     interpreter's "<op>: division by zero".  That divergence is observable,
+     so DCE/fusion must not eliminate or reorder these even when the result
+     is unused — `let _ = int_div(x, 0)` must still trap.  The "/" and "%"
+     infix operators trap the same way (march_checked_div_op/mod_op, bare
+     "division by zero" / "modulo by zero"); "/" also covers float division,
+     which traps on 0.0 via march_checked_fdiv — so it is impure too. *)
+  "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "/"; "%";
 ]
 
 module StringSet = Set.Make (String)

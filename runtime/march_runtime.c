@@ -611,6 +611,62 @@ void march_panic(void *s) {
     exit(1);
 }
 
+/* ── Checked integer division / remainder ────────────────────────────────── */
+/*
+ * The compiled backend lowers int_div / int_mod / int_mod_euclid through
+ * these helpers instead of emitting a raw sdiv/srem/urem so that a zero
+ * divisor traps via march_panic — matching the interpreter, which raises
+ * "<op>: division by zero" (see eval.ml).  Raw hardware division by zero is
+ * undefined (SIGFPE on x86, garbage on some ARM paths); pre-fix, compiled
+ * code silently returned a junk value and kept running, and the property
+ * runner reported a crashing property as passing.
+ *
+ * march_panic longjmps back to the test harness when inside a test (so
+ * __try_call / the property runner catches it); otherwise it prints and
+ * exits 1.  The message text matches the interpreter byte-for-byte so the
+ * two backends agree under the oracle.
+ *
+ * Non-zero behaviour is unchanged: idiv/imod use signed C operators
+ * (matching sdiv/srem) and umod uses unsigned (matching the prior urem
+ * lowering of int_mod_euclid). */
+static int64_t march_div_by_zero(const char *op) {
+    char buf[64];
+    int  n = snprintf(buf, sizeof buf, "%s: division by zero", op);
+    march_panic(march_string_lit(buf, (int64_t)n));
+    return 0; /* unreachable: march_panic does not return */
+}
+
+int64_t march_checked_idiv(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_div");
+    return a / b;
+}
+
+int64_t march_checked_imod(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_mod");
+    return a % b;
+}
+
+int64_t march_checked_umod(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_mod_euclid");
+    return (int64_t)((uint64_t)a % (uint64_t)b);
+}
+
+/* The `/` and `%` infix operators (is_int_arith in llvm_emit.ml) lower to these
+ * instead of march_checked_idiv/imod because the interpreter raises the BARE
+ * messages "division by zero" / "modulo by zero" for the operator forms — with
+ * no "int_div:" / "int_mod:" prefix (see eval.ml base_env entries for "/" and
+ * "%").  The oracle compares stdout via __try_call, so the text must match the
+ * interpreter byte-for-byte. */
+int64_t march_checked_div_op(int64_t a, int64_t b) {
+    if (b == 0) { march_panic(march_string_lit("division by zero", 16)); return 0; }
+    return a / b;
+}
+
+int64_t march_checked_mod_op(int64_t a, int64_t b) {
+    if (b == 0) { march_panic(march_string_lit("modulo by zero", 14)); return 0; }
+    return a % b;
+}
+
 /* ── Test harness ────────────────────────────────────────────────────────── */
 
 /* State used by the test runner.  These are process-global because test
@@ -715,11 +771,17 @@ int32_t march_test_report(void) {
 
 /* ── __try_call ──────────────────────────────────────────────────────────── */
 /*
- * __try_call : (Bool -> a) -> Result(a, String)
+ * __try_call : (Bool -> Bool) -> Result(Bool, String)
  *
  * Invokes the compiled March closure [thunk] with a dummy Bool argument and
  * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
  * a failing assert, division by zero, match failure, etc.).
+ *
+ * The thunk MUST return an immediate (Bool) — the Ok field is stored in the
+ * uniform low-bit-tagged representation ((n << 1) | 1), matching how
+ * compiled March reads polymorphic ADT fields.  The Bool-only contract is
+ * enforced by the typechecker signature; widening it back to a generic
+ * (Bool -> a) would require distinguishing immediate from heap results here.
  *
  * The closure is a "fn _ -> body" workaround for (Unit -> a): the argument
  * is ignored by the lambda body, so we pass 1 (true).
@@ -794,7 +856,14 @@ void *__try_call(void *thunk) {
     void     **field  = (void **)(result + 16);
     if (!panicked) {
         hdr->tag = 0;                              /* Ok */
-        *field   = (void *)(intptr_t)ok_result;
+        /* The Ok field is a polymorphic ADT slot, so immediates must use the
+           uniform low-bit tag representation ((n << 1) | 1) that compiled
+           March emits when reading it back (ptrtoint + ashr 1).  The thunk
+           returns a raw Bool (0/1) — __try_call's March type is
+           (Bool -> Bool) -> Result(Bool, String), enforced by the
+           typechecker, so the result here is ALWAYS an immediate; storing a
+           heap pointer through this path would corrupt it. */
+        *field   = (void *)((((intptr_t)ok_result) << 1) | 1);
     } else {
         hdr->tag = 1;                              /* Err */
         *field   = err_str;

@@ -1,0 +1,33 @@
+-- Entry: exercises PsLib helpers whose params/pattern/let bindings shadow a
+-- sibling module-level fn ("fields").  Compiled natively; panics on any
+-- wrong result so the dune rule fails on regression.
+mod PsEntry do
+
+import PsLib
+
+fn check(name, got, want) do
+  if got == want do
+    println("ok " ++ name)
+    0
+  else
+    println("FAIL " ++ name ++ ": got " ++ int_to_string(got)
+            ++ " want " ++ int_to_string(want))
+    1
+  end
+end
+
+fn main() do
+  let lst = PsLib.PCons(1, PsLib.PCons(2, PsLib.PNil))
+  let failures =
+    check("param shadows sibling fn", PsLib.sum_all(lst), 103)
+    + check("pattern binding shadows sibling fn", PsLib.first_or(lst, 9), 1)
+    + check("let binding shadows sibling fn", PsLib.tenfold_plus_one(4), 41)
+    + check("sibling fn still callable", PsLib.fields(0), 1)
+  if failures == 0 do
+    println("all ok")
+  else
+    panic("param_shadow_native: " ++ int_to_string(failures) ++ " failures")
+  end
+end
+
+end

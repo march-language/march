@@ -1225,7 +1225,7 @@ let analyse ~filename ~src : t =
       | None      -> []
       | Some root -> Forge_config.project_lib_paths root
     in
-    let (_resolve_errors, extra_decls) =
+    let (_resolve_errors, extra_decls, _user_files) =
       March_resolver.Resolver.resolve_imports
         ~extra_lib_paths:forge_lib_paths
         ~source_file:filename

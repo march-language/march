@@ -999,9 +999,13 @@ let builtin_bindings : (string * scheme) list =
        because the typechecker doesn't handle `() -> a` well in argument
        position), catching any runtime failure (assert, panic, match
        failure, division by zero, etc.) and returning Err(msg) on failure
-       or Ok(result) on success. Call as `__try_call(fn _ -> body)`. *)
-    ("__try_call",     poly1 (fun a ->
-        TArrow (TArrow (t_bool, a), t_result a t_string)));
+       or Ok(result) on success. Call as `__try_call(fn _ -> body)`.
+       The thunk must return Bool (not a generic `a`): the C runtime stores
+       the Ok field in the uniform low-bit-tagged immediate representation,
+       which would corrupt a heap pointer.  See __try_call in
+       runtime/march_runtime.c. *)
+    ("__try_call",     Mono
+        (TArrow (TArrow (t_bool, t_bool), t_result t_bool t_string)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
@@ -1206,6 +1210,8 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
+    ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
     ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));
     (* tcp_recv_exact(fd, n): reads exactly n bytes, returns Result(Bytes, String) *)
     ("tcp_recv_exact",          Mono (TArrow (t_int, TArrow (t_int, t_result (TCon ("Bytes", [])) t_string))));
@@ -1337,7 +1343,13 @@ let builtin_bindings : (string * scheme) list =
     ("receive", poly1 (fun a -> a));
     (* Crypto / encoding builtins *)
     ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
-    ("hmac_sha256",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+    (* hmac_sha256(key, msg): String-domain HMAC. Canonical signature matches
+       the native runtime (march_hmac_sha256 reads march_string args) and the
+       eval builtin — both return Result(Bytes, String). *)
+    ("hmac_sha256",     Mono (TArrow (t_string, TArrow (t_string,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    (* hmac_sha256_bytes(key, msg): Bytes-domain HMAC, bare Bytes result *)
+    ("hmac_sha256_bytes", Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
@@ -2294,7 +2306,15 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
   | Ast.PatRecord _          -> SPWild   (* conservative *)
-  | Ast.PatCon  (n, args)    -> SPCon (n.txt, List.map norm_pat args)
+  | Ast.PatCon  (n, args)    ->
+    (* Qualified constructor patterns ("MarchType.TBool", "Ast.Query")
+       carry their full dotted text; exhaustiveness compares against the
+       scrutinee type's BARE ctor names, so keep only the last segment. *)
+    let bare = match String.rindex_opt n.txt '.' with
+      | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
+      | None -> n.txt
+    in
+    SPCon (bare, List.map norm_pat args)
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
@@ -4004,6 +4024,40 @@ let rec impl_matches_ty impl_ty target_ty =
   | TError, _ | _, TError -> true
   | a, b -> a = b
 
+(** Pre-register an interface implementation's SHAPE (pass 1) so that
+    CInterface constraints from modules checked earlier in the unit can be
+    discharged against impls declared in modules checked later.  Conversion
+    is lenient — [impl_matches_ty] only compares constructor names and
+    shapes, so unresolved type names are embedded as-is rather than resolved
+    against the (still incomplete) pass-1 environment.  The full registration
+    with properly instantiated types still happens in check_decl's DImpl
+    case; duplicates are harmless because discharge uses List.exists. *)
+let register_impl_shape env (idef : Ast.impl_def) =
+  let module M = Map.Make (String) in
+  let tvars = ref M.empty in
+  let rec lenient_ty (t : Ast.ty) : ty =
+    match t with
+    | Ast.TyVar n ->
+      (match M.find_opt n.txt !tvars with
+       | Some v -> v
+       | None ->
+         let v = fresh_var 1 in
+         tvars := M.add n.txt v !tvars;
+         v)
+    | Ast.TyCon (n, args)  -> TCon (n.txt, List.map lenient_ty args)
+    | Ast.TyArrow (a, b)   -> TArrow (lenient_ty a, lenient_ty b)
+    | Ast.TyTuple ts       -> TTuple (List.map lenient_ty ts)
+    | Ast.TyRecord fs      ->
+      TRecord (List.map (fun ((n : Ast.name), ft) -> (n.txt, lenient_ty ft)) fs)
+    | Ast.TyLinear (l, t') -> TLin (l, lenient_ty t')
+    | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> fresh_var 1
+  in
+  let inst_ty = lenient_ty idef.impl_ty in
+  { env with impls =
+    (let key = idef.impl_iface.txt in
+     let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+     StrMap.add key (inst_ty :: lst) env.impls) }
+
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
@@ -5392,14 +5446,22 @@ let rec check_decl env (d : Ast.decl) : env =
              if StrMap.mem short e.interfaces then e
              else { e with interfaces = StrMap.add short idef e.interfaces }
            else e) env.interfaces env in
-       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       (* Track for unused-import warning: warn if nothing from this module is
+          used.  A QUALIFIED use (HttpServer.query_string) must count too —
+          matching only the rebound short names produced false "unused import"
+          warnings on modules that are used exclusively via qualified calls
+          (common in wrapper modules whose own fns shadow the short names). *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
          let entry = { ie_span = sp
                      ; ie_desc = Printf.sprintf
                          "Unused import: nothing from `%s` is used.\n\
                           Remove this import or use something from it." mod_str
-                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_matches = (fun name ->
+                         List.mem name short_names
+                         || name = mod_str
+                         || (String.length name > String.length prefix
+                             && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
          env.import_tracker := entry :: !(env.import_tracker)
        end;
@@ -5435,14 +5497,22 @@ let rec check_decl env (d : Ast.decl) : env =
              else if StrMap.mem short env.local_fns then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
-       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       (* Track for unused-import warning: warn if nothing from this module is
+          used.  A QUALIFIED use (HttpServer.query_string) must count too —
+          matching only the rebound short names produced false "unused import"
+          warnings on modules that are used exclusively via qualified calls
+          (common in wrapper modules whose own fns shadow the short names). *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
          let entry = { ie_span = sp
                      ; ie_desc = Printf.sprintf
                          "Unused import: nothing from `%s` is used.\n\
                           Remove this import or use something from it." mod_str
-                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_matches = (fun name ->
+                         List.mem name short_names
+                         || name = mod_str
+                         || (String.length name > String.length prefix
+                             && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
          env.import_tracker := entry :: !(env.import_tracker)
        end;
@@ -5944,7 +6014,8 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
     Pass 2: check declarations in order, updating the environment.
 
     Returns the [Err.ctx] containing all diagnostics. *)
-let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   let type_map = Hashtbl.create 256 in
   (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
      declarations so that cross-module forward references are pre-bound in
@@ -6057,7 +6128,11 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
-        prebind_mod_members mname.txt env inner_decls
+        let env = prebind_mod_members mname.txt env inner_decls in
+        List.fold_left (fun e d -> match d with
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | _ -> e
+          ) env inner_decls
       | Ast.DType (_, name, params, typedef, _) ->
         let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
@@ -6105,6 +6180,18 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
         { env with sigs = (name.txt, sdef) :: env.sigs }
       | Ast.DInterface (idef, _) ->
         { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces }
+      | Ast.DImpl (idef, _) ->
+        register_impl_shape env idef
+      | Ast.DMod (_, _, inner_decls, _) ->
+        (* Interface implementations declared in sibling modules must be
+           visible unit-wide regardless of the order modules are checked in:
+           CInterface constraints discharge at declaration boundaries, so an
+           impl that is only registered when its defining module is reached
+           cannot satisfy constraints from modules checked earlier. *)
+        List.fold_left (fun e d -> match d with
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | _ -> e
+          ) env inner_decls
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls
   in
@@ -6132,7 +6219,11 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
-  (errors, type_map)
+  (errors, type_map, final_env)
+
+let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  let (errs, type_map, _env) = check_module_core ?errors m in
+  (errs, type_map)
 
 (** Like [check_module] but starts from a pre-built environment.
     Used by the REPL JIT to typecheck user expressions incrementally
@@ -6250,55 +6341,12 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
 
-(** Like [check_module] but also returns the final type environment.
-    Used by tests to inspect protocol projections. *)
+(** Like [check_module] but also returns the final typing environment.
+    Used by the LSP for hover/completion.  Delegates to [check_module_core]
+    so editor diagnostics run the EXACT same passes as `march --check` —
+    a reduced duplicate here previously skipped the pass-1 type/ctor/record
+    prebinding, so qualified type annotations (Bastion.Channel.ChannelConn)
+    failed to resolve only in the LSP. *)
 let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  let type_map = Hashtbl.create 256 in
-  let rec prebind_mod_members_full prefix env decls =
-    List.fold_left (fun e d ->
-        match d with
-        | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
-          let qname = prefix ^ "." ^ def.fn_name.txt in
-          if StrMap.mem qname e.vars then e
-          else bind_var qname (Mono (fresh_var 1)) e
-        | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members_full (prefix ^ "." ^ mname.txt) e inner_decls
-        | _ -> e
-      ) env decls
-  in
-  (* Same two-pass structure as check_module — uses base_env with builtins. *)
-  let pre_env = List.fold_left (fun env d ->
-      match d with
-      | Ast.DFn (def, _) ->
-        if StrMap.mem def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
-      | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-        prebind_mod_members_full mname.txt env inner_decls
-      | Ast.DType (_vis, name, params, typedef, _) ->
-        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
-        (match typedef with
-         | Ast.TDVariant variants ->
-           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
-           List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
-                        ; ci_params  = param_names
-                        ; ci_arg_tys = v.var_args
-                        ; ci_vis     = v.var_vis } in
-               (* Register the type-qualified key ("TypeName.CtorName") in this
-                  forward-reference pass, not just in check_decl: sibling DMods
-                  are typechecked before the entry module's own DTypes are
-                  reached, so a sibling that imports the entry and
-                  disambiguates with `Expr.Col` would otherwise fail to
-                  resolve the constructor. *)
-               let qual_key = name.txt ^ "." ^ v.var_name.txt in
-               { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
-             ) env1 variants
-         | _ -> env1)
-      | _ -> env
-    ) (base_env errors type_map) m.Ast.mod_decls in
-  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
-  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
-  warn_unused_imports final_env;
-  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
-  (errors, type_map, final_env)
+  check_module_core ~errors m

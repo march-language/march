@@ -1,0 +1,88 @@
+-- Entry: record introspection builtins compiled natively.  Regression for
+-- the runtime record-shape registry (runtime/march_extras.c) + the
+-- llvm_emit.ml shape stamping / builtin special-casing: record allocations
+-- stamp an interned shape id into the header pad word so record_keys/
+-- values/entries/get/put/has_key/from_list (interpreter-only before this)
+-- work in compiled binaries, including records EXTENDED at runtime by
+-- record_put and records built dynamically from record_from_list([]).
+mod RnEntry do
+
+fn check(name, cond) do
+  if cond do
+    println("ok " ++ name)
+    0
+  else
+    println("FAIL " ++ name)
+    1
+  end
+end
+
+fn keys_csv(r) do
+  string_join(record_keys(r), ",")
+end
+
+fn get_int(r, k, default) do
+  match record_get(r, k) do
+    Some(v) -> v
+    None -> default
+  end
+end
+
+fn get_str(r, k) do
+  match record_get(r, k) do
+    Some(v) -> v
+    None -> "<none>"
+  end
+end
+
+-- blank()-style dynamic flow: build a record from runtime data by folding
+-- record_put over an empty record (the depot Depot.Schema.blank pattern).
+fn build_dyn(fields) do
+  match fields do
+    Nil -> record_from_list([])
+    Cons((k, v), rest) -> record_put(build_dyn(rest), k, v)
+  end
+end
+
+fn from_list_a() do
+  let built = record_from_list([("a", 1), ("b", 2)])
+  built.a
+end
+
+fn main() do
+  let r = { name = "Alice", age = 30 }
+  let nums = { x = 10, y = 20 }
+
+  let failures =
+    check("keys sorted", keys_csv(r) == "age,name")
+    + check("has_key hit", record_has_key(r, "name"))
+    + check("has_key miss", not (record_has_key(r, "zip")))
+    + check("get int", get_int(r, "age", -1) == 30)
+    + check("get string", get_str(r, "name") == "Alice")
+    + check("get miss", get_int(r, "missing", -1) == -1)
+    + check("values member", List.member(record_values(nums), 20))
+    + check("entries length", List.length(record_entries(r)) == 2)
+    + check("entries hetero str", List.member(record_entries(r), ("name", "Alice")))
+    + check("entries hetero int", List.member(record_entries(r), ("age", 30)))
+    + check("put existing", get_int(record_put(r, "age", 41), "age", -1) == 41)
+    + check("put new key extends shape",
+            get_str(record_put(r, "city", "Austin"), "city") == "Austin")
+    + check("put new key keeps old fields",
+            get_int(record_put(r, "city", "Austin"), "age", -1) == 30)
+    + check("put new key in keys",
+            keys_csv(record_put(r, "city", "Austin")) == "age,city,name")
+    + check("from_list static field access", from_list_a() == 1)
+    + check("from_list keys",
+            keys_csv(record_from_list([("a", 1), ("b", 2)])) == "a,b")
+    + check("dynamic blank flow keys",
+            keys_csv(build_dyn([("password", "p"), ("email", "e")])) == "email,password")
+    + check("dynamic blank flow value",
+            get_str(build_dyn([("password", "p"), ("email", "e")]), "password") == "p")
+  if failures == 0 do
+    println("all ok")
+  else
+    panic("record_native: " ++ int_to_string(failures) ++ " failures")
+  end
+end
+
+end
