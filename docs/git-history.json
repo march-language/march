@@ -1,19 +1,27 @@
 [
   {
+    "hash": "cb82b509459ca412e3a10b2eb6f7a564e91f49c0",
+    "short_hash": "cb82b50",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:45:49-04:00",
+    "message": "fix(eval): align FileKind OtherKind VCon tag with ptype declaration\n\nfile_stat emitted VCon (\"Other\", []) but stdlib FileKind declares the\nconstructor as OtherKind. Pattern matches on OtherKind would never fire\nat runtime. Corrected to VCon (\"OtherKind\", []).",
+    "files_changed": 1
+  },
+  {
+    "hash": "b7a400c3a8eb33558cf9c6ca5293898a3f0e9d6f",
+    "short_hash": "b7a400c",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T11:45:45-04:00",
+    "message": "Merge branch 'claude/gracious-murdock-0bae13': hmac_sha256 typecheck signature fix",
+    "files_changed": 0
+  },
+  {
     "hash": "0a52b54eb96f95d54f8f988d97d9a8a10da77898",
     "short_hash": "0a52b54",
     "author": "Matthew Gilliam",
     "date": "2026-06-12T11:35:57-04:00",
     "message": "fix(test): migrate wire_encode_test to uncurried collection API\n\nMap.fold and List.fold_left now take collection first, acc second,\nuncurried callback last. Also add missing | in DescribeTarget variants.",
     "files_changed": 1
-  },
-  {
-    "hash": "e352e99f1b35a7da9794a421a82de87ac8240458",
-    "short_hash": "e352e99",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-12T11:35:06-04:00",
-    "message": "Merge branch 'claude/vigilant-keller-e6d245'",
-    "files_changed": 0
   },
   {
     "hash": "20e53f2f80273bbc0fbb563e2867b8adaec058cf",
@@ -1976,16 +1984,16 @@
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2000,14 +2008,6 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:38:16-04:00",
-    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
-    "files_changed": 3
-  },
-  {
     "hash": "376a668a88cb9f396603a482660f75857ae567ce",
     "short_hash": "376a668",
     "author": "Matthew Gilliam",
@@ -2016,16 +2016,24 @@
     "files_changed": 3
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:38:16-04:00",
+    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
+    "files_changed": 3
+  },
+  {
+    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
+    "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
-    "short_hash": "36a21bc",
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
@@ -2080,14 +2088,6 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
     "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
@@ -2096,16 +2096,24 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2120,16 +2128,16 @@
     "files_changed": 15
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

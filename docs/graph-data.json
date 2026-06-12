@@ -12319,6 +12319,28 @@
       "created_at": "2026-06-12T11:36:13.355846-04:00",
       "updated_at": "2026-06-12T11:36:13.355846-04:00",
       "metadata_json": "{\"branch\":\"claude/optimistic-banzai-b6626d\",\"confidence\":100}"
+    },
+    {
+      "id": 1121,
+      "change_id": "6986d5a4-4b12-42cb-8195-afd51479e907",
+      "node_type": "observation",
+      "title": "Bug report 'tree_transform.march parse error' was stale — already fixed by aec71fb (restore | in type decls over-removed by 33bf2a2); verified compile+run prints 104857600, scanned all bench/examples/stdlib/test .march for same pattern, none remain",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:45:11.554506-04:00",
+      "updated_at": "2026-06-12T11:45:11.554506-04:00",
+      "metadata_json": "{\"branch\":\"claude/nifty-bartik-112573\",\"confidence\":95,\"files\":[\"bench/tree_transform.march\",\"bench/parallel.march\",\"test/depot/wire_encode_test.march\"]}"
+    },
+    {
+      "id": 1122,
+      "change_id": "be9f9ca9-d6f5-4272-a1a5-c3bd2b7c0608",
+      "node_type": "outcome",
+      "title": "Committed fix(eval): OtherKind tag corrected, merged to main on top of gracious-murdock-0bae13 merge",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T11:45:54.361905-04:00",
+      "updated_at": "2026-06-12T11:45:54.361905-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"cb82b50\",\"confidence\":98}"
     }
   ],
   "edges": [
@@ -20186,6 +20208,17 @@
       "weight": 1.0,
       "rationale": "Test run result",
       "created_at": "2026-06-12T11:36:13.380713-04:00"
+    },
+    {
+      "id": 719,
+      "from_node_id": 27,
+      "to_node_id": 1006,
+      "from_change_id": "50908f33-4dc1-484e-a3bf-0fe59af48c9c",
+      "to_change_id": "e45494b6-9d01-4e69-96e5-786ddbd3551e",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "produced",
+      "created_at": "2026-06-12T11:45:54.395451-04:00"
     }
   ]
 }
