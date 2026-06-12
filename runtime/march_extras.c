@@ -1485,15 +1485,21 @@ void march_repl_set(int64_t slot, int64_t val) {
  *     'g'  generic/unknown    — bits as received from a type-erased context
  *
  * Value conventions at the builtin boundaries (must match llvm_emit.ml):
- *   - OUT into generic ADT slots (List payload, Option Some payload, dynamic
- *     field reads): 'i' fields are low-bit tagged ((n<<1)|1) because compiled
- *     code untags generic ctor slots with `ashr 1`; 'f' raw bits; 'p'/'g'
- *     bits as-is with a (guarded) incrc.
- *   - OUT into tuple slots (record_entries pair snd): NATURAL representation
- *     (raw i64 / raw double bits / ptr) because compiled code reads tuple
- *     slots at their concrete element types without untagging.
- *   - IN (record_put value, record_from_list pair values): natural repr with
- *     an explicit kind argument supplied by the call site.
+ *   - OUT into ANY ptr-sized generic slot (List payload, Option Some payload,
+ *     record_entries pair snd, dynamic field reads): the UNIFORM convention —
+ *     'i' fields are low-bit tagged ((n<<1)|1) because compiled code reads
+ *     generic ctor AND tuple slots as ptr and untags scalar views
+ *     conditionally (ashr iff odd); 'f' raw double bits; 'p'/'g' bits as-is.
+ *     Compiled tuple slots are uniform too (ETuple stores scalars through
+ *     coerce i64→ptr = tag), so pair snd MUST be tagged, not natural.
+ *   - IN (record_put value): NATURAL repr with an explicit kind argument
+ *     supplied by the call site (the EApp special case passes raw i64 bits).
+ *     If a kind-'i' value's bits look like a heap pointer, the static type
+ *     lied (type-erased heterogeneous flow) and the field kind is downgraded
+ *     to 'g' so the bits round-trip unmodified.
+ *   - IN (record_from_list pair values): UNIFORM repr (the pairs come from
+ *     compiled tuple slots / record_entries) — 'i' values are conditionally
+ *     untagged to natural before storing.
  *
  * RC contract: arguments are BORROWED (see borrow.ml extern_borrow_table);
  * results are fresh +1.  Any heap value aliased into a result gets incrc'd.
@@ -1586,8 +1592,16 @@ static void rec_field_set(void *rec, int32_t i, int64_t bits) {
     *(int64_t *)((char *)rec + 16 + (size_t)i * 8) = bits;
 }
 
-/* Field value for a generic ADT slot (List payload / Some payload / dynamic
- * field read): tag ints, incrc heap values. */
+/* Plausible-heap-pointer test, mirroring IS_HEAP_PTR in march_runtime.c:
+ * even, above the first page, positive.  Used to detect statically-typed
+ * scalar slots that actually carry a heap pointer (type-erased heterogeneous
+ * flows whose static types lie about the runtime value). */
+#define REC_PLAUSIBLE_HEAP(bits) \
+    ((((uint64_t)(bits)) & 1u) == 0 && (uint64_t)(bits) >= 4096u && (bits) > 0)
+
+/* Field value for ANY generic ptr-sized slot (List payload / Some payload /
+ * record_entries pair snd / dynamic field read): the UNIFORM convention —
+ * tag ints, raw float bits, incrc heap values. */
 static int64_t rec_field_out_adt(void *rec, int32_t i, char kind) {
     int64_t raw = rec_field_raw(rec, i);
     switch (kind) {
@@ -1598,18 +1612,52 @@ static int64_t rec_field_out_adt(void *rec, int32_t i, char kind) {
     }
 }
 
-/* Field value for a tuple slot (record_entries): natural repr, incrc heap. */
-static int64_t rec_field_out_natural(void *rec, int32_t i, char kind) {
+/* Slot-to-slot copy within record cells (record_put rebuilding a cell):
+ * bits verbatim, +1 reference on aliased heap values. */
+static int64_t rec_field_copy(void *rec, int32_t i, char kind) {
     int64_t raw = rec_field_raw(rec, i);
     if (kind == 'p' || kind == 'g') march_incrc((void *)(intptr_t)raw);
     return raw;
 }
 
-/* Incoming value (record_put / record_from_list): natural repr; take a +1
- * reference on heap values we alias into the freshly built record. */
-static int64_t rec_field_in(int64_t bits, char kind) {
-    if (kind == 'p' || kind == 'g') march_incrc((void *)(intptr_t)bits);
+/* Normalize an incoming (bits, kind) pair to the natural slot value and the
+ * honest field kind, then take any needed +1 reference.
+ *
+ *   'i'  natural i64 from the record_put EApp special case.  If the bits look
+ *        like a heap pointer the static type lied (type-erased heterogeneous
+ *        flow) — downgrade the field to 'g' so the bits round-trip verbatim.
+ *   'g'  UNIFORM bits from generic call paths / record_from_list pair snd:
+ *        odd = tagged int (untag to natural, kind 'i'); even = heap pointer
+ *        or erased raw bits (store verbatim, kind 'g', guarded incrc).
+ *   'f'  raw double bits.   'p'  heap pointer (+1 ref).
+ */
+static int64_t rec_field_norm_uniform(int64_t bits, char *kind) {
+    if (bits & 1) { *kind = 'i'; return bits >> 1; }      /* tagged int */
+    if (REC_PLAUSIBLE_HEAP(bits)) {
+        if (*kind != 'p') *kind = 'g';
+        march_incrc((void *)(intptr_t)bits);              /* guarded */
+        return bits;
+    }
+    if (*kind != 'g') *kind = 'i';                        /* small even raw */
     return bits;
+}
+
+static int64_t rec_field_norm_in(int64_t bits, char *kind) {
+    switch (*kind) {
+    case 'i':
+        if (REC_PLAUSIBLE_HEAP(bits)) {
+            *kind = 'g';
+            march_incrc((void *)(intptr_t)bits);    /* guarded */
+        }
+        return bits;
+    case 'g':
+        return rec_field_norm_uniform(bits, kind);
+    case 'p':
+        march_incrc((void *)(intptr_t)bits);
+        return bits;
+    default:   /* 'f' */
+        return bits;
+    }
 }
 
 static int32_t rec_find_field(march_record_shape *s, const char *name, int64_t len) {
@@ -1677,13 +1725,16 @@ void *march_record_values(void *rec) {
     return list;
 }
 
-/* record_entries(rec) -> List((String, value)), sorted by field name. */
+/* record_entries(rec) -> List((String, value)), sorted by field name.
+ * Pair snd uses the UNIFORM convention (tagged ints) — compiled tuple slots
+ * are uniform: ETuple stores scalars through coerce i64→ptr (tag) and all
+ * destructure paths untag scalar views conditionally. */
 void *march_record_entries(void *rec) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_entries");
     void *list = rec_nil();
     for (int32_t i = s->nfields - 1; i >= 0; i--) {
         void *k = march_string_lit(s->names[i], s->name_lens[i]);
-        void *pair = rec_pair(k, rec_field_out_natural(rec, i, s->kinds[i]));
+        void *pair = rec_pair(k, rec_field_out_adt(rec, i, s->kinds[i]));
         list = rec_cons((int64_t)(intptr_t)pair, list);
     }
     return list;
@@ -1749,15 +1800,15 @@ void *march_record_put(void *rec, void *key, void *value, int64_t kind) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_put");
     march_string *ks = (march_string *)key;
     char k = (char)kind;
-    int64_t vbits = (int64_t)(intptr_t)value;
+    int64_t vbits = rec_field_norm_in((int64_t)(intptr_t)value, &k);
     int32_t fi = rec_find_field(s, ks->data, ks->len);
     if (fi >= 0) {
         /* Existing field: copy cell, overwrite one slot. */
-        char fk = (k == 'g') ? s->kinds[fi] : k;
+        char fk = k;
         void *out = march_alloc(16 + (size_t)s->nfields * 8);
         for (int32_t i = 0; i < s->nfields; i++) {
-            if (i == fi) rec_field_set(out, i, rec_field_in(vbits, k));
-            else         rec_field_set(out, i, rec_field_out_natural(rec, i, s->kinds[i]));
+            if (i == fi) rec_field_set(out, i, vbits);
+            else         rec_field_set(out, i, rec_field_copy(rec, i, s->kinds[i]));
         }
         if (fk == s->kinds[fi]) {
             ((march_hdr *)out)->pad = ((march_hdr *)rec)->pad;
@@ -1775,10 +1826,10 @@ void *march_record_put(void *rec, void *key, void *value, int64_t kind) {
     free(desc);
     void *out = march_alloc(16 + ((size_t)s->nfields + 1) * 8);
     for (int32_t i = 0; i < pos; i++)
-        rec_field_set(out, i, rec_field_out_natural(rec, i, s->kinds[i]));
-    rec_field_set(out, pos, rec_field_in(vbits, k));
+        rec_field_set(out, i, rec_field_copy(rec, i, s->kinds[i]));
+    rec_field_set(out, pos, vbits);
     for (int32_t i = pos; i < s->nfields; i++)
-        rec_field_set(out, i + 1, rec_field_out_natural(rec, i, s->kinds[i]));
+        rec_field_set(out, i + 1, rec_field_copy(rec, i, s->kinds[i]));
     ((march_hdr *)out)->pad = id;
     return out;
 }
@@ -1834,6 +1885,18 @@ void *march_record_from_list_k(void *list, int64_t kind) {
         }
         keys[j + 1] = kp; vals[j + 1] = vp;
     }
+    /* Normalize values: pair snd arrives in UNIFORM repr (compiled tuple
+     * slots tag scalars), so per-field kinds may differ from the static
+     * hint — e.g. a tagged int untags to a natural 'i' slot, while a heap
+     * pointer under an 'i' hint (lying static type) downgrades to 'g'. */
+    char *fkinds = malloc((size_t)(m > 0 ? m : 1));
+    for (int32_t i = 0; i < m; i++) {
+        char fk = k;
+        if (fk == 'f')      { /* raw double bits, store verbatim */ }
+        else if (fk == 'p') { march_incrc((void *)(intptr_t)vals[i]); }
+        else                { vals[i] = rec_field_norm_uniform(vals[i], &fk); }
+        fkinds[i] = fk;
+    }
     /* Build descriptor + record. */
     size_t cap = 16;
     for (int32_t i = 0; i < m; i++) cap += (size_t)((march_string *)keys[i])->len + 4;
@@ -1841,16 +1904,16 @@ void *march_record_from_list_k(void *list, int64_t kind) {
     size_t w = 0;
     for (int32_t i = 0; i < m; i++) {
         march_string *ks = (march_string *)keys[i];
-        w += (size_t)snprintf(desc + w, cap - w, "%.*s:%c;", (int)ks->len, ks->data, k);
+        w += (size_t)snprintf(desc + w, cap - w, "%.*s:%c;", (int)ks->len, ks->data, fkinds[i]);
     }
     desc[w] = '\0';
     int32_t id = march_record_shape_intern(desc);
     free(desc);
     void *out = march_alloc(16 + (size_t)m * 8);
     for (int32_t i = 0; i < m; i++)
-        rec_field_set(out, i, rec_field_in(vals[i], k));
+        rec_field_set(out, i, vals[i]);
     ((march_hdr *)out)->pad = id;
-    free(keys); free(vals);
+    free(keys); free(vals); free(fkinds);
     return out;
 }
 
@@ -1859,11 +1922,12 @@ void *march_record_from_list(void *list) {
 }
 
 /* Dynamic field read for statically-unknown record types.  Returns the value
- * in NATURAL representation (raw bits), exactly like a static EField load —
- * consumers of TVar-typed loads use the bits without untagging, and Perceus
- * inserts any needed IncRC on the projection result itself.  Shape 0 falls
- * back to the legacy behavior (raw slot-0 read) so non-record cells reaching
- * this path behave as before. */
+ * in UNIFORM representation ('i' fields low-bit tagged, 'f' raw double bits,
+ * heap pointers verbatim): consumers view the ptr result through their static
+ * type, untagging scalar views conditionally (ashr iff odd).  No incrc here —
+ * Perceus inserts any needed IncRC on the projection result itself, exactly
+ * like a static EField load.  Shape 0 falls back to the legacy behavior (raw
+ * slot-0 read) so non-record cells reaching this path behave as before. */
 void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
     march_record_shape *s = rec_shape_of(rec);
     if (!s) return *(void **)((char *)rec + 16);
@@ -1874,5 +1938,7 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
                  (int)(len < 100 ? len : 100), name);
         rec_panic(buf);
     }
-    return (void *)(intptr_t)rec_field_raw(rec, i);
+    int64_t raw = rec_field_raw(rec, i);
+    if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
+    return (void *)(intptr_t)raw;
 }
