@@ -232,6 +232,55 @@
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/import_shadow\" %{exe:../bin/main.exe} --check \"$PWD/imports/import_shadow/is_entry.march\"")))
 
+; ── Regression: native codegen must not drop non-pointer tuple fields ──
+; A module-nested fn with default-arg params desugars to a body that builds a
+; tuple of its args and immediately destructures it.  The native tuple
+; destructure typed every field as a tagged pointer ($TupleN → TVar "_" → ptr)
+; and untagged on load (ashr 1), but the tuple was BUILT storing Bool/Int
+; fields RAW (i64).  The mismatch corrupted non-pointer fields — an explicitly
+; passed `loud : Bool \\ false = true` arrived as false, so the native binary
+; printed "Def!" instead of "Def *!".  Compile the repro natively, run it, and
+; diff stdout against the expected output (which equals the interpreter's).
+(rule
+ (targets native_default_args_nested native_default_args_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/default_args_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_default_args_nested
+        native/default_args_nested.march)
+   (with-stdout-to native_default_args_nested.out
+        (system "./native_default_args_nested")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/default_args_nested.expected native_default_args_nested.out)))
+
+; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
+; A module-nested fn with default-arg params AND a trailing zero-arg closure
+; param desugars (general match-merge path) into a tuple build + destructure.
+; A zero-arg lambda `fn () -> T` is typed as a thunk `T` (not a function), so
+; the captured closure param is non-TFn-typed; defun only rewrote EApp→ECallPtr
+; for TFn/TVar callees, leaving `render_inner()` as EApp(render_inner, []).
+; Perceus's liveness ignores EApp callees, so the closure was dec_rc'd right
+; after extraction; intervening allocations reused the freed memory and the
+; later call jumped into it (a use-after-free crash).  Compile, run, and diff
+; stdout against the interpreter's output.
+(rule
+ (targets native_zero_arg_closure_default native_zero_arg_closure_default.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/zero_arg_closure_default.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_zero_arg_closure_default
+        native/zero_arg_closure_default.march)
+   (with-stdout-to native_zero_arg_closure_default.out
+        (system "./native_zero_arg_closure_default")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/zero_arg_closure_default.expected native_zero_arg_closure_default.out)))
+
 ; ── Regression: structural == on imported ADTs in native builds ──
 ; ensure_adt_eq_fn looked constructors up by the TCon's (short) type name
 ; while build_ctor_info keys are module-qualified ("AeLib.AeShape.AeDot"),
@@ -283,3 +332,18 @@
        (glob_files imports/erased_clo_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/erased_clo_native\" %{exe:../bin/main.exe} --compile -o erased_clo_native_bin \"$PWD/imports/erased_clo_native/ec_entry.march\" && ./erased_clo_native_bin")))
+
+; Native compile + run: locals that shadow a sibling module-level fn.
+; rename_tir_vars qualified every AVar whose name matched a sibling fn
+; ("fields" → "PsLib.fields") without checking whether the name was bound
+; locally (fn param, match-pattern var, let binding), so the local reference
+; was emitted as the fn's global address or a zero-arg "gl" call —
+; "use of undefined value" at clang time or SIGBUS at runtime.
+; The fixture compiles natively and RUNS the binary, which panics (exit 1)
+; on any wrong result.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/param_shadow_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))
