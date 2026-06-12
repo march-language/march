@@ -1,0 +1,37 @@
+-- Regression test: native integer division/remainder by zero must trap
+-- (panic) to match the interpreter, instead of returning garbage.
+--
+-- The compiled backend lowered int_div/int_mod/int_mod_euclid to raw
+-- LLVM sdiv/srem/urem with no zero-divisor check, so `int_div(100, 0)`
+-- returned a garbage value and kept running; the interpreter raises
+-- "int_div: division by zero".  Caught via __try_call so the outcome is
+-- observable on stdout (and so the property runner reports a crashing
+-- property as a failure rather than silently passing).
+--
+-- Pre-fix native:  no-trap / no-trap / 14 / 2
+-- Post-fix native: int_div: division by zero / int_mod: division by zero / 14 / 2
+--                  (matches the interpreter)
+
+mod RcCheckedIntDivZero do
+
+pfn outcome(r : Result(Bool, String)) : String do
+  match r do
+  Ok(_)  -> "no-trap"
+  Err(m) -> m
+  end
+end
+
+fn main() do
+  println(outcome(__try_call(fn _ ->
+    let _ = int_div(100, 0)
+    true
+  )))
+  println(outcome(__try_call(fn _ ->
+    let _ = int_mod(100, 0)
+    true
+  )))
+  println(int_to_string(int_div(100, 7)))
+  println(int_to_string(int_mod(100, 7)))
+end
+
+end

@@ -70,11 +70,13 @@ mod TestCheck do
     let config = { Check.default_config() with seed = Some(12345), num_runs = 200 }
     let r1 = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
-      ()
+      -- __try_call is (Bool -> Bool); all_with panics before this is reached.
+      true
     )
     let r2 = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
-      ()
+      -- __try_call is (Bool -> Bool); all_with panics before this is reached.
+      true
     )
     -- Both should be Err (property fails for n >= 50).
     match r1 do
@@ -105,7 +107,7 @@ mod TestCheck do
     let config = { Check.default_config() with seed = Some(7), num_runs = 200 }
     let r = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(0, 100), fn n -> n < 50, config)
-      ()
+      true
     )
     match r do
     Ok(_)  -> Test.fail("expected property to fail")
@@ -123,7 +125,7 @@ mod TestCheck do
         let _ = int_div(100, n)  -- crashes when n == 0
         true
       , config)
-      ()
+      true
     )
     match r do
     Ok(_)  -> Test.fail("expected crash to be reported as failure")
