@@ -1461,6 +1461,10 @@ let run_check_cmd files =
     Printf.eprintf "march check: no files specified\n"; exit 1
   end;
   let stdlib_decls = load_stdlib () in
+  (* Files pulled in by import resolution (source dir / MARCH_LIB_PATH) are
+     user code too: diagnostics pointing into them must be fatal even though
+     they were not listed on the command line. *)
+  let import_user_files = ref [] in
   (* Parse and desugar each file; collect all declarations *)
   let all_decls = List.concat_map (fun filename ->
     let src =
@@ -1485,7 +1489,8 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
-    let (_resolve_errors, extra_decls, _user_files) = resolve_imports ~source_file:filename desugared in
+    let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
+    import_user_files := user_files @ !import_user_files;
     let desugared =
       { desugared with
         March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
@@ -1507,7 +1512,8 @@ let run_check_cmd files =
   } in
   let (errors, _type_map) = March_typecheck.Typecheck.check_module combined in
   let diags = March_errors.Errors.sorted errors in
-  let lib_files = List.sort_uniq String.compare files in
+  let lib_files =
+    List.sort_uniq String.compare (files @ !import_user_files) in
   let is_user_file (d : March_errors.Errors.diagnostic) =
     List.mem d.span.March_ast.Ast.file lib_files ||
     d.span.March_ast.Ast.file = "" ||
