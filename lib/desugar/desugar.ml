@@ -569,6 +569,38 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
     in
     { def with fn_clauses = [only'] }
 
+  | [only]
+    when (only.fc_guard = None || is_class_constraint_guard only.fc_guard)
+      && List.for_all
+           (function FPNamed _ | FPPat (PatVar _) | FPDefault _ -> true
+                   | FPPat _ -> false)
+           only.fc_params ->
+    (* Fast path for a single clause whose only "non-trivial" params are
+       [FPDefault] (e.g. a default-arg function defined inside a nested
+       module, which [expand_defaults_decl] does not reach — it only runs on
+       top-level decls).  Strip the defaults to plain named params and take
+       the fast path, so the function keeps its real signature instead of
+       being routed through the general param-tuple [EMatch] path.
+
+       The general path boxes every parameter into a synthesised tuple
+       (`let $t = (a, …) in case $t of Tuple(…)`).  When such a function also
+       takes a type-erased closure parameter, that tuple adapter mismanages
+       the closure's refcount and frees it before its call — a use-after-free
+       (observed in bastion's Form.Wrapper.render via CSRF.tag). Top-level
+       default-arg fns avoid this because they ARE expanded (their `$N`
+       arities have plain named params); this brings nested ones in line.
+
+       Default *values* are dropped here, matching the pre-existing behaviour
+       of the general path (the synthesised tuple match also requires every
+       argument to be supplied — nested default-arg dispatch was never wired
+       up). *)
+    let strip = function FPDefault (p, _) -> FPNamed p | other -> other in
+    let only' = { only with fc_params = List.map strip only.fc_params
+                           ; fc_body = desugar_expr only.fc_body
+                           ; fc_guard = Option.map desugar_expr only.fc_guard }
+    in
+    { def with fn_clauses = [only'] }
+
   | first :: _ ->
     (* General path: synthesise fresh arg names based on first clause's arity. *)
     let arity = List.length first.fc_params in

@@ -171,13 +171,17 @@ let save_cached_tc_env ~content_hash tc_env =
   (try
     (try Unix.mkdir cache_dir 0o755
      with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-    let oc = open_out_bin cache_path in
+    (* Write-to-temp + rename: the cache dir is shared across concurrent
+       sessions; a reader must never see a half-written Marshal blob. *)
+    let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
+    let oc = open_out_bin tmp in
     Marshal.to_channel oc tc_env [];
     (* Save type_map as association list (Hashtbl isn't stable across runs) *)
     let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
       tc_env.March_typecheck.Typecheck.type_map [] in
     Marshal.to_channel oc tm_list [];
-    close_out oc
+    close_out oc;
+    Sys.rename tmp cache_path
   with _ -> ())
 
 (** Compute a content hash of stdlib decls using MD5 of their marshalled form.

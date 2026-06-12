@@ -198,6 +198,23 @@
            (run %{exe:../bin/main.exe} test
                 imports/lib_path_ill_typed/lp_entry.march)))))
 
+; ── Regression: relative MARCH_LIB_PATH diagnostics must not be dropped ──
+; user_files held only canonicalised (realpath'd) paths while diagnostic
+; spans carry the as-parsed path, so with a RELATIVE lib path every
+; lib-module diagnostic failed the exact-string is_user_file match and was
+; tolerated as "stdlib-internal" — ill-typed TIR reached codegen and died
+; in clang with undefined pattern-binder symbols.  The entry deliberately
+; does not import the ill-typed module: auto-discovery alone must surface
+; the error and exit 1.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file libpath_entry.march)
+       (glob_files libpath_ill_typed/*.march))
+ (action (setenv MARCH_LIB_PATH libpath_ill_typed
+          (with-accepted-exit-codes 1
+           (run %{exe:../bin/main.exe} --check libpath_entry.march)))))
+
 ; ── Regression: early-CAS hash must cover source-dir sibling modules ──
 ; The --check/--compile early-exit cache hashed the entry source, the stdlib
 ; hash, and MARCH_LIB_PATH files — but NOT the entry's own source-dir
@@ -342,6 +359,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
@@ -360,6 +378,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/record_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/record_native\" %{exe:../bin/main.exe} --compile -o record_native_bin \"$PWD/imports/record_native/rn_entry.march\" && ./record_native_bin")))
@@ -391,6 +410,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
        (glob_files imports/param_shadow_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))

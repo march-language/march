@@ -13111,6 +13111,138 @@
       "created_at": "2026-06-12T13:16:00.665900-04:00",
       "updated_at": "2026-06-12T13:16:00.665900-04:00",
       "metadata_json": "{\"branch\":\"claude/crazy-dijkstra-12ab14\",\"confidence\":90}"
+    },
+    {
+      "id": 1193,
+      "change_id": "4b2b0730-a9ab-4263-9ada-4b7755adeb0d",
+      "node_type": "outcome",
+      "title": "Merged main (78afbbc = same resolver fix landed concurrently); kept novel parts: libpath_ill_typed auto-discovery regression + emit_case defensive guard. Depot repro exits 1 on merged code.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:27:01.435877-04:00",
+      "updated_at": "2026-06-12T13:27:01.435877-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"commit\":\"964e8f5\",\"confidence\":95}"
+    },
+    {
+      "id": 1194,
+      "change_id": "e8455aef-674e-4a42-b74f-671ffceca486",
+      "node_type": "goal",
+      "title": "Fix test-infra issues: verify/correct the dune cache-replay claim, and fix cross-session JIT .so cache poisoning",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:50:40.425440-04:00",
+      "updated_at": "2026-06-12T13:50:40.425440-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":85,\"prompt\":\"can you fix those too?\"}"
+    },
+    {
+      "id": 1195,
+      "change_id": "6805401d-0604-423b-b9ae-8678079cf9ae",
+      "node_type": "option",
+      "title": "Content-hash-keyed filenames + tmp-file/atomic-rename for all ~/.cache/march writers",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:53:58.133378-04:00",
+      "updated_at": "2026-06-12T13:53:58.133378-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90}"
+    },
+    {
+      "id": 1196,
+      "change_id": "6b6d6586-65a2-47b8-b31d-af420f477650",
+      "node_type": "option",
+      "title": "Per-worktree cache dirs (key by repo path)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:53:58.197020-04:00",
+      "updated_at": "2026-06-12T13:53:58.197020-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":50}"
+    },
+    {
+      "id": 1197,
+      "change_id": "3fd6eb14-88e5-413d-96b7-3ec06e4e40e4",
+      "node_type": "decision",
+      "title": "Hash-keyed names + atomic rename: lets concurrent sessions safely SHARE identical artifacts, invalidates on any source change; per-worktree dirs would duplicate artifacts and still race within a worktree",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:53:58.225217-04:00",
+      "updated_at": "2026-06-12T13:53:58.225217-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":90}"
+    },
+    {
+      "id": 1198,
+      "change_id": "4c67a439-c361-4ff9-be2f-733f8d4d5300",
+      "node_type": "action",
+      "title": "Implement hash-keyed + atomic cache writes in main.ml ensure_runtime_so/load_stdlib, repl.ml tc_env, repl_jit.ml precompile_stdlib, test_march.ml setup_jit_runtime",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:54:06.104297-04:00",
+      "updated_at": "2026-06-12T13:54:06.104297-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":88,\"files\":[\"bin/main.ml\",\"lib/repl/repl.ml\",\"lib/jit/repl_jit.ml\",\"test/test_march.ml\"]}"
+    },
+    {
+      "id": 1199,
+      "change_id": "3b6765e7-38e9-48e8-bc8c-a4e1da54451f",
+      "node_type": "outcome",
+      "title": "Cache fixes verified: fresh+warm REPL on isolated HOME, runtime edit yields new hash key (old artifact intact), JIT group green, full suite 1431 green; committed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:59:37.270665-04:00",
+      "updated_at": "2026-06-12T13:59:37.270665-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"commit\":\"1d6b57b\",\"confidence\":95,\"files\":[\"bin/main.ml\",\"lib/repl/repl.ml\",\"lib/jit/repl_jit.ml\",\"test/test_march.ml\"]}"
+    },
+    {
+      "id": 1200,
+      "change_id": "e13ab68e-4858-44ac-b017-18f2ee6643b4",
+      "node_type": "outcome",
+      "title": "Dune cache-replay claim REFUTED: incremental dune fails correctly on broken rules; earlier exit-0 readings were head/tail exit codes through pipelines. Memory + specs corrected; no repo change needed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T13:59:37.301569-04:00",
+      "updated_at": "2026-06-12T13:59:37.301569-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"confidence\":95}"
+    },
+    {
+      "id": 1201,
+      "change_id": "2e2efbaf-43a6-44e9-bbfb-120261446d79",
+      "node_type": "outcome",
+      "title": "Merged claude/eager-williams-af8b7d to main (ff to 64d42e8) and pushed to origin (51544a2..64d42e8); final tree green (build + full runtest, 0 rule failures)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T14:46:01.755944-04:00",
+      "updated_at": "2026-06-12T14:46:01.755944-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-williams-af8b7d\",\"commit\":\"64d42e8\",\"confidence\":95}"
+    },
+    {
+      "id": 1202,
+      "change_id": "f9e7f1e1-44e8-4361-b1df-bb053bec55c5",
+      "node_type": "action",
+      "title": "Committed a5af8ab (test/dune runtime deps) and 1457216 (run_check_cmd user_files) on claude/stoic-spence-8f46f7 after merging main (which brought 78afbbc resolver fix); dropped duplicate resolver edit",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T14:49:58.529695-04:00",
+      "updated_at": "2026-06-12T14:49:58.529695-04:00",
+      "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"commit\":\"1457216\",\"confidence\":95}"
+    },
+    {
+      "id": 1203,
+      "change_id": "64602051-829a-485a-906d-be901c4d99a7",
+      "node_type": "outcome",
+      "title": "Merged to main (ff to 1457216): a5af8ab cold-runtest runtime deps + 1457216 march-check user_files. Verified on merged tree: fixture exit codes correct on all 3 paths, dune runtest + 2x forced @runtest all exit 0 (18 suites)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T14:54:31.933066-04:00",
+      "updated_at": "2026-06-12T14:54:31.933066-04:00",
+      "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"commit\":\"1457216\",\"confidence\":95}"
+    },
+    {
+      "id": 1204,
+      "change_id": "90120630-9061-4a0d-8e59-0c0557805ade",
+      "node_type": "outcome",
+      "title": "Exit-1 mystery resolved: test_march HUNG (no output, no dune failure block, suite absent from log) on the pre-merge tree — cross-session ~/.cache/march libmarch_rt_test.so poisoning, already fixed in main by 1d6b57b (content-hash-keyed + atomic cache). Gone after merge: 3 consecutive green full runs. No new fix needed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-12T14:54:31.974761-04:00",
+      "updated_at": "2026-06-12T14:54:31.974761-04:00",
+      "metadata_json": "{\"branch\":\"claude/stoic-spence-8f46f7\",\"confidence\":90}"
     }
   ],
   "edges": [
@@ -21891,6 +22023,182 @@
       "weight": 1.0,
       "rationale": "landing work",
       "created_at": "2026-06-12T13:16:05.482373-04:00"
+    },
+    {
+      "id": 808,
+      "from_node_id": 1190,
+      "to_node_id": 1193,
+      "from_change_id": "7fe8d2c5-2572-4d70-b980-2e14661435f5",
+      "to_change_id": "4b2b0730-a9ab-4263-9ada-4b7755adeb0d",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "merge reconciliation with concurrent main fix",
+      "created_at": "2026-06-12T13:27:07.343005-04:00"
+    },
+    {
+      "id": 809,
+      "from_node_id": 1160,
+      "to_node_id": 1194,
+      "from_change_id": "b86b839c-ed16-4159-8d17-1417e309813e",
+      "to_change_id": "e8455aef-674e-4a42-b74f-671ffceca486",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "follow-up infra issues discovered during the investigation",
+      "created_at": "2026-06-12T13:50:48.330724-04:00"
+    },
+    {
+      "id": 810,
+      "from_node_id": 1194,
+      "to_node_id": 1195,
+      "from_change_id": "e8455aef-674e-4a42-b74f-671ffceca486",
+      "to_change_id": "6805401d-0604-423b-b9ae-8678079cf9ae",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T13:54:06.043380-04:00"
+    },
+    {
+      "id": 811,
+      "from_node_id": 1194,
+      "to_node_id": 1196,
+      "from_change_id": "e8455aef-674e-4a42-b74f-671ffceca486",
+      "to_change_id": "6b6d6586-65a2-47b8-b31d-af420f477650",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "approach",
+      "created_at": "2026-06-12T13:54:06.055261-04:00"
+    },
+    {
+      "id": 812,
+      "from_node_id": 1195,
+      "to_node_id": 1197,
+      "from_change_id": "6805401d-0604-423b-b9ae-8678079cf9ae",
+      "to_change_id": "3fd6eb14-88e5-413d-96b7-3ec06e4e40e4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "chosen",
+      "created_at": "2026-06-12T13:54:06.065356-04:00"
+    },
+    {
+      "id": 813,
+      "from_node_id": 1196,
+      "to_node_id": 1197,
+      "from_change_id": "6b6d6586-65a2-47b8-b31d-af420f477650",
+      "to_change_id": "3fd6eb14-88e5-413d-96b7-3ec06e4e40e4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "rejected",
+      "created_at": "2026-06-12T13:54:06.075858-04:00"
+    },
+    {
+      "id": 814,
+      "from_node_id": 1197,
+      "to_node_id": 1198,
+      "from_change_id": "3fd6eb14-88e5-413d-96b7-3ec06e4e40e4",
+      "to_change_id": "4c67a439-c361-4ff9-be2f-733f8d4d5300",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation",
+      "created_at": "2026-06-12T13:54:06.114570-04:00"
+    },
+    {
+      "id": 815,
+      "from_node_id": 1198,
+      "to_node_id": 1199,
+      "from_change_id": "4c67a439-c361-4ff9-be2f-733f8d4d5300",
+      "to_change_id": "3b6765e7-38e9-48e8-bc8c-a4e1da54451f",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation result",
+      "created_at": "2026-06-12T13:59:42.770697-04:00"
+    },
+    {
+      "id": 816,
+      "from_node_id": 1194,
+      "to_node_id": 1200,
+      "from_change_id": "e8455aef-674e-4a42-b74f-671ffceca486",
+      "to_change_id": "e13ab68e-4858-44ac-b017-18f2ee6643b4",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "first half of goal: verification refuted the premise",
+      "created_at": "2026-06-12T13:59:42.783062-04:00"
+    },
+    {
+      "id": 817,
+      "from_node_id": 1199,
+      "to_node_id": 1201,
+      "from_change_id": "3b6765e7-38e9-48e8-bc8c-a4e1da54451f",
+      "to_change_id": "2e2efbaf-43a6-44e9-bbfb-120261446d79",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "shipped",
+      "created_at": "2026-06-12T14:46:01.769642-04:00"
+    },
+    {
+      "id": 818,
+      "from_node_id": 1144,
+      "to_node_id": 1159,
+      "from_change_id": "ffe5da5e-ba31-4cbc-bcda-bf901018f48a",
+      "to_change_id": "63892609-96fd-4cc0-9a03-be420ddfc642",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Commit of test/dune fix",
+      "created_at": "2026-06-12T14:49:58.542367-04:00"
+    },
+    {
+      "id": 819,
+      "from_node_id": 1157,
+      "to_node_id": 1159,
+      "from_change_id": "1c244006-1b38-4cee-87c5-47ebc03438a4",
+      "to_change_id": "63892609-96fd-4cc0-9a03-be420ddfc642",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Commit of run_check_cmd fix",
+      "created_at": "2026-06-12T14:49:58.553103-04:00"
+    },
+    {
+      "id": 820,
+      "from_node_id": 1144,
+      "to_node_id": 1202,
+      "from_change_id": "ffe5da5e-ba31-4cbc-bcda-bf901018f48a",
+      "to_change_id": "f9e7f1e1-44e8-4361-b1df-bb053bec55c5",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Commit of test/dune fix",
+      "created_at": "2026-06-12T14:50:11.612353-04:00"
+    },
+    {
+      "id": 821,
+      "from_node_id": 1157,
+      "to_node_id": 1202,
+      "from_change_id": "1c244006-1b38-4cee-87c5-47ebc03438a4",
+      "to_change_id": "f9e7f1e1-44e8-4361-b1df-bb053bec55c5",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Commit of run_check_cmd fix",
+      "created_at": "2026-06-12T14:50:11.623537-04:00"
+    },
+    {
+      "id": 822,
+      "from_node_id": 1202,
+      "to_node_id": 1203,
+      "from_change_id": "f9e7f1e1-44e8-4361-b1df-bb053bec55c5",
+      "to_change_id": "64602051-829a-485a-906d-be901c4d99a7",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Merge + verification",
+      "created_at": "2026-06-12T14:54:31.945145-04:00"
+    },
+    {
+      "id": 823,
+      "from_node_id": 1142,
+      "to_node_id": 1204,
+      "from_change_id": "58c76f6e-357e-4b95-8103-1006f6beb7c7",
+      "to_change_id": "90120630-9061-4a0d-8e59-0c0557805ade",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Exit-1 investigation outcome",
+      "created_at": "2026-06-12T14:54:37.230862-04:00"
     }
   ]
 }

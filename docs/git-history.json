@@ -1,5 +1,45 @@
 [
   {
+    "hash": "1457216f72faef5aab2b36699d738001fa39e2b1",
+    "short_hash": "1457216",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T14:49:45-04:00",
+    "message": "fix(cli): march check reports type errors from auto-discovered imported modules\n\nrun_check_cmd filtered diagnostics against the command-line file list\nonly, so errors in modules pulled in by import resolution (source dir /\nMARCH_LIB_PATH siblings) were dropped as stdlib-internal — the same\nclass of bug as the a8ca488 imported-module filter regression, on a\nthird code path (march check <files>, used by forge).\n\nEach entry's user_files (which carry parse-time span paths since the\nresolver fix) is now merged into the membership filter.  Verified:\nmarch check imports/entry_imports_ill_typed.march exits 1 rendering the\nimported module's arity error; well-typed entries still exit 0.",
+    "files_changed": 1
+  },
+  {
+    "hash": "a5af8ab76e3b107294fb0a61898e3c091c40411d",
+    "short_hash": "a5af8ab",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T14:49:34-04:00",
+    "message": "fix(test): declare runtime source_tree deps so cold-checkout dune runtest is self-sufficient\n\nThe adt_eq_native, record_native, and param_shadow_native rules run\nmain.exe --compile, which locates the C runtime exe-relative\n(_build/default/runtime) — but that directory was only materialized by\nthe warm-cache alias in bin/dune, attached to @all, not @runtest.  From\na cold checkout, dune runtest (without a prior dune build) failed all\nthree rules with 'march: cannot find runtime/march_runtime.c'; on a\nwarm _build they passed, which is why this went unnoticed.\n\nEach rule now declares (source_tree ../runtime) in its deps.  Verified\nin a fresh copy with dune runtest --root . only: pre-fix exits 1 with\nthe three runtime errors, post-fix those rules compile and run green.",
+    "files_changed": 2
+  },
+  {
+    "hash": "64d42e816a2ac6b1b4646edf9a123adae7b7a4a0",
+    "short_hash": "64d42e8",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T14:44:35-04:00",
+    "message": "Merge branch 'main' into claude/eager-williams-af8b7d",
+    "files_changed": 0
+  },
+  {
+    "hash": "1d6b57b7c66519e1848203ed29310da083b65877",
+    "short_hash": "1d6b57b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:59:28-04:00",
+    "message": "fix(cache): content-hash-keyed artifacts + atomic writes for shared ~/.cache/march\n\nThe cache dir is shared across worktrees and concurrent sessions; two\nfixed-name artifacts let sessions corrupt each other:\n\n- libmarch_runtime.so (ensure_runtime_so) was invalidated only by\n  march_runtime.c's mtime — edits to the other runtime C files never\n  invalidated it, and a worktree with diverged sources overwrote it with\n  an ABI-mismatched binary, hanging whichever session dlopen'd it.\n- libmarch_rt_test.so (setup_jit_runtime) had an existence-only check\n  and was NEVER invalidated (observed: 22-minute test_march.exe hangs).\n\nBoth are now keyed by a digest of every compiled .c file, every\nruntime/*.h, and (for the runtime) the clang flag string — identical\ninputs share one artifact, divergent worktrees get separate files.\n\nAll five cache writers (those two plus stdlib_prelude .so/.names,\nstdlib_ast .bin, stdlib_tcenv .bin) now compile/marshal to a\npid-suffixed temp and rename(2) into place, so readers never see a\nhalf-written file. The prelude .names publishes before its .so, so a\nvisible .so always implies a complete names file. ensure_runtime_so\nwith no source tree falls back to the newest cached runtime .so.\n\nVerified: fresh/warm REPL runs on an isolated HOME, a runtime source\nedit produces a new key leaving the old artifact intact, JIT alcotest\ngroup green, full suite green (1431 tests).",
+    "files_changed": 6
+  },
+  {
+    "hash": "964e8f552eaf0d4841d09be8902ac96738b22de5",
+    "short_hash": "964e8f5",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-12T13:16:01-04:00",
+    "message": "Merge branch 'main': take 78afbbc resolver fix; keep libpath auto-discovery regression + emit_case guard",
+    "files_changed": 0
+  },
+  {
     "hash": "315bb82f3b9144bc8138688e523aa0a7623c82f6",
     "short_hash": "315bb82",
     "author": "Matthew Gilliam",
@@ -14,14 +54,6 @@
     "date": "2026-06-12T13:07:44-04:00",
     "message": "fix(cas): include source-dir imports in the early --check/--compile hash\n\nThe early source-hash CAS key covered the entry file's source, the stdlib\nhash, and all .march files under MARCH_LIB_PATH — but not sibling modules\nresolved from the entry file's own directory, even though the resolver's\nsearch path is source_dir :: lib_paths.  Editing an imported sibling after\na clean run left the hash unchanged, so the next --check hit the stale\n\"check ok\" artifact and exited 0 on a now-ill-typed program (and --compile\nreused a stale binary).\n\nHash every .march file under the entry's directory the same way lib-path\ndirs are hashed.  Extra files in the key can only cause spurious misses,\nnever stale hits.\n\nRegression rule: test/imports/cas_stale/ checks a clean copy, swaps the\nimported module for an ill-typed version, and asserts the second --check\nexits nonzero (verified to fail against the pre-fix compiler).",
     "files_changed": 5
-  },
-  {
-    "hash": "154fa042f6aae1f8cc389556adb793bebcd21296",
-    "short_hash": "154fa04",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-12T13:05:43-04:00",
-    "message": "chore: sync decision graph export",
-    "files_changed": 2
   },
   {
     "hash": "8c58349063089def4ba75434cbac0aefca8bcfd3",
@@ -2064,16 +2096,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2152,14 +2184,6 @@
     "files_changed": 1
   },
   {
-    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
-    "short_hash": "63e7c83",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:10:54-04:00",
-    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
-    "files_changed": 3
-  },
-  {
     "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
     "short_hash": "1f0c21a",
     "author": "Matthew Gilliam",
@@ -2168,16 +2192,24 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
+    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
+    "short_hash": "63e7c83",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:10:54-04:00",
+    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
+    "files_changed": 3
+  },
+  {
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
     "files_changed": 7
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",

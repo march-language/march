@@ -1,0 +1,14 @@
+-- Regression fixture: auto-discovered via a RELATIVE MARCH_LIB_PATH entry
+-- and never explicitly imported.  Pre-fix, diagnostics from lib-path
+-- modules were silently dropped: user_files held only realpath'd
+-- (canonical) paths while spans carried this relative path, so
+-- is_user_file misclassified the error as stdlib-internal and ill-typed
+-- TIR reached codegen (undefined pattern-binder symbols at link time).
+mod LibpathIllTyped do
+
+  fn broken() : Int do
+    -- type error: Int + String
+    1 + "not an int"
+  end
+
+end

@@ -788,8 +788,12 @@ let precompile_stdlib ctx
         let oc = open_out ll_path in
         output_string oc ir;
         close_out oc;
+        (* Compile to a pid-suffixed temp and rename into place below: the
+           cache dir is shared across concurrent sessions, and dlopen of a
+           half-written .so crashes or hangs the reader. *)
+        let so_tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
         let cmd = Printf.sprintf "%s -shared -fPIC -O1%s -o %s %s 2>&1"
-          ctx.clang ctx.undef_flag so_path ll_path in
+          ctx.clang ctx.undef_flag so_tmp ll_path in
         let ic = Unix.open_process_in cmd in
         let errbuf = Buffer.create 256 in
         (try while true do Buffer.add_char errbuf (input_char ic) done
@@ -800,21 +804,33 @@ let precompile_stdlib ctx
            (try Sys.remove ll_path with _ -> ());
            (* Write companion names file: one function name per line, then
               a "lambda_counter=N" sentinel so cache-hit runs can restore
-              the counter and avoid UID collisions with prelude functions. *)
+              the counter and avoid UID collisions with prelude functions.
+              Written to a temp and renamed BEFORE the .so is renamed: the
+              cache-hit check requires both files, so publishing the .so
+              last guarantees no reader ever pairs it with a partial
+              .names file. *)
            (try
-             let nc = open_out names_path in
+             let names_tmp =
+               Printf.sprintf "%s.%d.tmp" names_path (Unix.getpid ()) in
+             let nc = open_out names_tmp in
              Fun.protect ~finally:(fun () -> close_out_noerr nc) (fun () ->
                List.iter (fun (f : March_tir.Tir.fn_def) ->
                  output_string nc (f.fn_name ^ "\n")) stdlib_fns;
                output_string nc
                  (Printf.sprintf "lambda_counter=%d\n"
-                    (March_tir.Defun.get_lambda_counter ())))
+                    (March_tir.Defun.get_lambda_counter ())));
+             Sys.rename names_tmp names_path
            with _ -> ());
+           (* Publish the .so atomically; fall back to loading the temp
+              directly if the rename is refused. *)
+           let load_path =
+             (try Sys.rename so_tmp so_path; so_path
+              with Sys_error _ -> so_tmp) in
            (* Only mark functions as compiled if the .so was actually loaded.
               If we mark them before dlopen, future fragments would declare them
               as extern and then fail at link time with "symbol not found". *)
            (try
-             let handle = Jit.dlopen so_path in
+             let handle = Jit.dlopen load_path in
              ctx.handles <- handle :: ctx.handles;
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                Hashtbl.replace ctx.compiled_fns f.fn_name ()
@@ -823,7 +839,7 @@ let precompile_stdlib ctx
              Printf.eprintf "march JIT: stdlib .so dlopen failed (%s)\n%!"
                (Printexc.to_string exn))
          | _ ->
-           (try Sys.remove so_path with _ -> ());
+           (try Sys.remove so_tmp with _ -> ());
            Printf.eprintf "march JIT: stdlib precompile failed:\n%s\n%!"
              (Buffer.contents errbuf))
       end

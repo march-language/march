@@ -228,14 +228,28 @@ let load_stdlib () =
       (try
         (try Unix.mkdir cache_dir 0o755
          with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-        let oc = open_out_bin cache_path in
+        (* Write-to-temp + rename: the cache dir is shared across concurrent
+           sessions; a reader must never see a half-written Marshal blob. *)
+        let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
+        let oc = open_out_bin tmp in
         Marshal.to_channel oc decls [];
-        close_out oc
+        close_out oc;
+        Sys.rename tmp cache_path
       with _ -> ());
       decls
 
 (** Pre-compile the C runtime to a shared library.
-    Cached at ~/.cache/march/libmarch_runtime.so.
+    Cached at ~/.cache/march/libmarch_runtime_<hash>.so, where <hash> covers
+    every C source/header that goes into the build plus the clang flags.
+
+    The cache directory is SHARED across worktrees and concurrent sessions,
+    so the artifact name must be a pure function of its inputs and the write
+    must be atomic (compile to a pid-suffixed temp, then rename).  The old
+    scheme — one fixed "libmarch_runtime.so" invalidated by the mtime of
+    march_runtime.c alone — let two worktrees with diverged runtimes
+    ping-pong overwrite each other's binary (ABI mismatch → wrong symbols →
+    hangs/crashes in whichever session dlopen'd the other's build), and a
+    reader could dlopen a half-written .so mid-compile.
     Returns the path to the .so. *)
 let ensure_runtime_so () =
   let home = Sys.getenv "HOME" in
@@ -246,7 +260,6 @@ let ensure_runtime_so () =
     try Unix.mkdir d 0o755
     with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   ) [dot_cache; cache_dir];
-  let so_path = Filename.concat cache_dir "libmarch_runtime.so" in
   (* Find runtime source *)
   let candidates = [
     "runtime/march_runtime.c";
@@ -254,21 +267,26 @@ let ensure_runtime_so () =
     Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
   ] in
   let runtime_c_opt = List.find_opt Sys.file_exists candidates in
-  let so_exists = Sys.file_exists so_path in
-  (* If the .so is already cached and we can't find the source, just use the cache. *)
-  let runtime_c = match runtime_c_opt with
-    | Some p -> p
-    | None ->
-      if so_exists then ""  (* use cached .so as-is *)
-      else failwith "march: cannot find runtime/march_runtime.c"
-  in
-  let runtime_dir = if runtime_c = "" then "" else Filename.dirname runtime_c in
-  (* Recompile if .so is missing or source is newer than the cached .so *)
-  let needs_compile =
-    not so_exists ||
-    (runtime_c <> "" && (Unix.stat runtime_c).st_mtime > (Unix.stat so_path).st_mtime)
-  in
-  if needs_compile then begin
+  match runtime_c_opt with
+  | None ->
+    (* No sources (e.g. installed binary without a source tree): fall back
+       to the newest cached runtime .so from a previous run, if any. *)
+    let cached =
+      (try Sys.readdir cache_dir with Sys_error _ -> [||])
+      |> Array.to_list
+      |> List.filter (fun f ->
+          String.length f > 16
+          && String.sub f 0 16 = "libmarch_runtime"
+          && Filename.check_suffix f ".so")
+      |> List.map (Filename.concat cache_dir)
+      |> List.sort (fun a b ->
+          compare (Unix.stat b).Unix.st_mtime (Unix.stat a).Unix.st_mtime)
+    in
+    (match cached with
+     | newest :: _ -> newest
+     | [] -> failwith "march: cannot find runtime/march_runtime.c")
+  | Some runtime_c ->
+    let runtime_dir = Filename.dirname runtime_c in
     (* Note: -lpthread not needed on macOS (pthreads are in libSystem). *)
     let http_c     = Filename.concat runtime_dir "march_http.c" in
     let extras_c   = Filename.concat runtime_dir "march_extras.c" in
@@ -347,14 +365,48 @@ let ensure_runtime_so () =
     let so_san_flag =
       if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined" else ""
     in
-    let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s -o %s 2>&1"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags so_path in
-    let rc = Sys.command cmd in
-    if rc <> 0 then
-      failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
-  end;
-  so_path
+    (* Content key: digests of every C input (the .c files named in the
+       command plus every header in runtime/) and the full flag string.
+       Identical inputs across worktrees share one artifact; any divergence
+       gets its own filename instead of overwriting a shared one. *)
+    let flags_sig = Printf.sprintf
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags in
+    let key_buf = Buffer.create 256 in
+    Buffer.add_string key_buf flags_sig;
+    let c_inputs =
+      runtime_c ::
+      (String.split_on_char ' ' extra_files
+       |> List.filter (fun s -> s <> "" && Filename.check_suffix s ".c")) in
+    let h_inputs =
+      (try Sys.readdir runtime_dir with Sys_error _ -> [||])
+      |> Array.to_list
+      |> List.filter (fun f -> Filename.check_suffix f ".h")
+      |> List.sort String.compare
+      |> List.map (Filename.concat runtime_dir) in
+    List.iter (fun p ->
+        Buffer.add_string key_buf p;
+        try Buffer.add_string key_buf (Digest.to_hex (Digest.file p))
+        with Sys_error _ -> ())
+      (c_inputs @ h_inputs);
+    let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
+    let so_path = Filename.concat cache_dir ("libmarch_runtime_" ^ key ^ ".so") in
+    if not (Sys.file_exists so_path) then begin
+      (* Compile to a pid-suffixed temp and rename into place: rename(2) is
+         atomic on the same filesystem, so a concurrent session can never
+         dlopen a half-written .so, and same-key racers converge on
+         identical bytes regardless of who wins the rename. *)
+      let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
+      let cmd = Printf.sprintf "%s -o %s 2>&1" flags_sig tmp in
+      let rc = Sys.command cmd in
+      if rc <> 0 then begin
+        (try Sys.remove tmp with Sys_error _ -> ());
+        failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
+      end;
+      (try Sys.rename tmp so_path
+       with Sys_error _ -> (try Sys.remove tmp with Sys_error _ -> ()))
+    end;
+    so_path
 
 let dump_tir       = ref false
 let dump_phases    = ref false
@@ -1409,6 +1461,10 @@ let run_check_cmd files =
     Printf.eprintf "march check: no files specified\n"; exit 1
   end;
   let stdlib_decls = load_stdlib () in
+  (* Files pulled in by import resolution (source dir / MARCH_LIB_PATH) are
+     user code too: diagnostics pointing into them must be fatal even though
+     they were not listed on the command line. *)
+  let import_user_files = ref [] in
   (* Parse and desugar each file; collect all declarations *)
   let all_decls = List.concat_map (fun filename ->
     let src =
@@ -1433,7 +1489,8 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
-    let (_resolve_errors, extra_decls, _user_files) = resolve_imports ~source_file:filename desugared in
+    let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
+    import_user_files := user_files @ !import_user_files;
     let desugared =
       { desugared with
         March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
@@ -1455,7 +1512,8 @@ let run_check_cmd files =
   } in
   let (errors, _type_map) = March_typecheck.Typecheck.check_module combined in
   let diags = March_errors.Errors.sorted errors in
-  let lib_files = List.sort_uniq String.compare files in
+  let lib_files =
+    List.sort_uniq String.compare (files @ !import_user_files) in
   let is_user_file (d : March_errors.Errors.diagnostic) =
     List.mem d.span.March_ast.Ast.file lib_files ||
     d.span.March_ast.Ast.file = "" ||
