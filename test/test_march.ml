@@ -21440,9 +21440,32 @@ let test_compiled_check_property_passes () =
     end
   end
 
+(* Regression: a dangling symlink in a scanned lib dir used to crash the whole
+   compiler — [Sys.is_directory] stats through the link and raises Sys_error.
+   [collect_lib_files] must skip it and still find sibling .march modules. *)
+let test_resolver_skips_dangling_symlink () =
+  let dir = Filename.temp_file "march_resolver_dangling_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let foo = Filename.concat dir "foo.march" in
+  let oc = open_out foo in
+  output_string oc "mod Foo do\nend\n";
+  close_out oc;
+  Unix.symlink "/nonexistent/march/target" (Filename.concat dir "broken");
+  let files = March_resolver.Resolver.collect_lib_files dir in
+  Alcotest.(check bool) "valid module found despite dangling symlink"
+    true (List.exists (fun p -> Filename.basename p = "foo.march") files);
+  Alcotest.(check bool) "dangling symlink not collected"
+    false (List.exists (fun p -> Filename.basename p = "broken") files)
+
 let () =
   Alcotest.run "march"
     [
+      ( "resolver",
+        [
+          Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
+            test_resolver_skips_dangling_symlink;
+        ] );
       ( "app",
         [
           Alcotest.test_case "app keyword lexes"       `Quick test_lexer_keyword_app;

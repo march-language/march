@@ -110,9 +110,13 @@ let collect_lib_files dir =
       Array.sort compare entries;
       Array.fold_left (fun acc name ->
           let p = Filename.concat d name in
-          if Sys.is_directory p then walk acc p
-          else if Filename.check_suffix p ".march" then p :: acc
-          else acc)
+          (* A dangling symlink makes [Sys.is_directory] (which stats through
+             the link) raise [Sys_error]; skip any entry we can't stat rather
+             than aborting the whole compile. *)
+          match Sys.is_directory p with
+          | true -> walk acc p
+          | false -> if Filename.check_suffix p ".march" then p :: acc else acc
+          | exception (Sys_error _ | Unix.Unix_error _) -> acc)
         acc entries
     end
   in
