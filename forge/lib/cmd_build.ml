@@ -42,6 +42,31 @@ let find_march_files dir =
   in
   walk [] dir
 
+(** Collect [dir] plus every nested subdirectory under it.
+
+    The module resolver searches each lib path FLATLY (it does not recurse
+    into subdirectories when resolving an [import]).  To let projects group
+    their lib/ modules into subfolders without rewriting every import, we
+    expand a lib root into the root plus all of its descendant directories
+    so each one becomes an independent entry on MARCH_LIB_PATH.
+
+    Entries are sorted so MARCH_LIB_PATH order is deterministic across
+    machines (raw [Sys.readdir] order is filesystem-dependent). *)
+let collect_lib_dirs dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else begin
+      let acc = d :: acc in
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
+      Array.fold_left (fun acc name ->
+          let path = Filename.concat d name in
+          if Sys.is_directory path then walk acc path else acc)
+        acc entries
+    end
+  in
+  List.rev (walk [] dir)
+
 (** Read the full contents of a file, returning empty string on error. *)
 let read_file path =
   try
@@ -154,7 +179,7 @@ let lib_path_env proj =
     ) proj.Project.deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
-    dep_lib_paths @ [lib_dir]
+    dep_lib_paths @ collect_lib_dirs lib_dir
     @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in

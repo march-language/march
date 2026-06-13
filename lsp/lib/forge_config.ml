@@ -284,17 +284,36 @@ let dep_lib_paths root =
         else (Hashtbl.add seen d (); true)
       ) (inline_paths @ section_paths)
 
+(** Collect [dir] plus every nested subdirectory under it, so that lib/
+    modules grouped into subfolders are each on the search path.  Mirrors
+    [collect_lib_dirs] in [forge/lib/cmd_build.ml]. *)
+let collect_lib_dirs dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else begin
+      let acc = d :: acc in
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
+      Array.fold_left (fun acc name ->
+          let path = Filename.concat d name in
+          if Sys.is_directory path then walk acc path else acc)
+        acc entries
+    end
+  in
+  List.rev (walk [] dir)
+
 (** All lib paths for a project root: dependency paths PLUS the project's own
-    [lib/], [.forge/generated/], and [config/] — mirroring [lib_path_env] in
-    [forge/lib/cmd_build.ml]. *)
+    [lib/] (and its subdirectories), [.forge/generated/], and [config/] —
+    mirroring [lib_path_env] in [forge/lib/cmd_build.ml]. *)
 let project_lib_paths root =
   let dep_paths = dep_lib_paths root in
   let lib_dir   = Filename.concat root "lib" in
   let gen_dir   = Filename.concat root ".forge/generated" in
   let cfg_dir   = Filename.concat root "config" in
   let extras =
-    List.filter_map (fun d -> if Sys.file_exists d then Some d else None)
-      [lib_dir; gen_dir; cfg_dir]
+    collect_lib_dirs lib_dir
+    @ List.filter_map (fun d -> if Sys.file_exists d then Some d else None)
+        [gen_dir; cfg_dir]
   in
   let seen = Hashtbl.create 8 in
   List.filter (fun d ->
