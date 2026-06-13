@@ -15,8 +15,12 @@ let analyse_and_cache uri src =
     try  Lsp.Types.DocumentUri.to_path uri
     with _ -> Lsp.Types.DocumentUri.to_string uri
   in
-  let analysis = Analysis.analyse ~filename ~src in
-  Hashtbl.replace doc_cache (Lsp.Types.DocumentUri.to_string uri) analysis;
+  let key = Lsp.Types.DocumentUri.to_string uri in
+  (* Fall back to the last good analysis when an edit doesn't parse, so IDE
+     features keep working on a transiently-broken buffer. *)
+  let prev = Hashtbl.find_opt doc_cache key in
+  let analysis = Analysis.analyse_resilient ~prev ~filename ~src in
+  Hashtbl.replace doc_cache key analysis;
   analysis
 
 let get_analysis uri =

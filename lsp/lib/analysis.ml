@@ -3341,3 +3341,28 @@ let query_references_at (a : t) ~include_declaration ~line ~utf16_char =
 let query_rename_at (a : t) ~line ~utf16_char ~new_name =
   rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char) ~new_name
   |> List.map (Pos.remap_text_edit a.doc)
+
+(* ---------------------------------------------------------------------- *)
+(* Error-resilient analysis.                                               *)
+(* When an edit leaves the buffer unparseable, [analyse] returns empty     *)
+(* maps and every IDE feature goes dark. Instead, fall back to the last    *)
+(* good analysis's symbol maps while surfacing the current parse error and *)
+(* keeping the current source/doc (so the error's position is correct).    *)
+(*                                                                         *)
+(* [parsed_ok] is a heuristic proxy for "the parse produced usable maps".  *)
+(* A pure parse/lex failure yields empty maps; a parses-but-type-errors    *)
+(* buffer still populates maps and is used as-is. Phase 5's recovering     *)
+(* parser will replace this with partial maps from a single pass.          *)
+(* ---------------------------------------------------------------------- *)
+let analyse_resilient ~prev ~filename ~src : t =
+  let fresh = analyse ~filename ~src in
+  let parsed_ok =
+    Hashtbl.length fresh.type_map > 0
+    || fresh.vars <> []
+    || Hashtbl.length fresh.def_map > 0
+  in
+  match prev with
+  | Some p when not parsed_ok ->
+    { p with src; filename; doc = Utf16.build src;
+             diagnostics = fresh.diagnostics }
+  | _ -> fresh

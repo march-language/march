@@ -2865,6 +2865,23 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Error-resilient analysis (Phase 1)                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_resilient_keeps_last_good () =
+  (* A broken edit that fails to parse must not blank out IDE features: the
+     resilient analysis retains the last good symbol maps while reporting the
+     new parse error. *)
+  let good = "mod M do\n  fn f() : Int do 41 end\nend\n" in
+  let a_good = An.analyse ~filename:"t.march" ~src:good in
+  let broken = "mod M do\n  fn f() : Int do 41 end\n  fn g(\n" in
+  let a = An.analyse_resilient ~prev:(Some a_good) ~filename:"t.march" ~src:broken in
+  Alcotest.(check bool) "broken edit still reports diagnostics"
+    true (a.An.diagnostics <> []);
+  Alcotest.(check bool) "def map retained from last good analysis"
+    true (Hashtbl.mem a.An.def_map "f")
+
+(* ------------------------------------------------------------------ *)
 (* Stdlib cache (Phase 1)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2919,6 +2936,9 @@ let () =
     ];
     "stdlib cache", [
       "stdlib parse/desugar is memoized", `Quick, test_stdlib_cache_memoizes;
+    ];
+    "error-resilient analysis", [
+      "broken edit retains last good maps", `Quick, test_resilient_keeps_last_good;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
