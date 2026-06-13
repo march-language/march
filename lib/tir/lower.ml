@@ -854,7 +854,18 @@ and bind_trivial_pat (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : 
     Returns None for trivial patterns. *)
 and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   match pat with
-  | Ast.PatCon ({ txt = tag; _ }, subs) -> Some (tag, subs)
+  | Ast.PatCon ({ txt = full; _ }, subs) ->
+    (* Type-/module-qualified constructor patterns ("T.B", "Json.Str") carry
+       their full dotted text, but case arms discriminate on the BARE ctor
+       name (matching construction, e.g. List.Cons → arm "Cons").  Keep only
+       the last segment so a qualified pattern on a non-first variant resolves
+       to the right tag instead of falling back to tag 0's payload layout.
+       Mirrors norm_pat's stripping in the exhaustiveness checker. *)
+    let tag = match String.rindex_opt full '.' with
+      | Some i -> String.sub full (i + 1) (String.length full - i - 1)
+      | None -> full
+    in
+    Some (tag, subs)
   | Ast.PatTuple (subs, _) ->
     Some (Printf.sprintf "$Tuple%d" (List.length subs), subs)
   | Ast.PatLit (Ast.LitInt n, _)    -> Some (string_of_int n, [])
