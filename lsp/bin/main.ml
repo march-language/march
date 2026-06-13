@@ -1,12 +1,10 @@
 (** march-lsp entry point.
 
-    Starts a stdio-based LSP server for the March language.
-    Usage: march-lsp   (no arguments; communicates via stdin/stdout)
+    - [march-lsp]                : stdio LSP server (stdin/stdout)
+    - [march-lsp query <...>]    : stateless one-shot query, JSON on stdout
 *)
 
-let () =
-  (* Without this, the backtrace printed on a fatal error below is empty. *)
-  Printexc.record_backtrace true;
+let run_server () =
   let server = new March_lsp_lib.Server.march_server in
   let conn =
     Linol_lwt.Jsonrpc2.create_stdio ~env:() server
@@ -19,3 +17,14 @@ let () =
     Printf.eprintf "march-lsp: fatal error: %s\n%s\n"
       (Printexc.to_string exn) bt;
     exit 1
+
+let () =
+  (* Without this, the backtrace printed on a fatal error is empty. *)
+  Printexc.record_backtrace true;
+  if Array.length Sys.argv > 1 && Sys.argv.(1) = "query" then
+    (* Drop the program name so argv starts at the "query" subcommand,
+       matching Query_cli.run_to_string's [subcommand; feature; file; ...]. *)
+    exit (March_lsp_lib.Query_cli.main
+            (Array.sub Sys.argv 1 (Array.length Sys.argv - 1)))
+  else
+    run_server ()

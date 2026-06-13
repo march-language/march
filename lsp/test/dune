@@ -17,3 +17,8 @@
  (name test_utf16)
  (modules test_utf16)
  (libraries march_lsp_lib linol.lsp alcotest))
+
+(test
+ (name test_query_cli)
+ (modules test_query_cli)
+ (libraries march_lsp_lib alcotest))
