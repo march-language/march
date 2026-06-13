@@ -59,7 +59,7 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 
 - ✅ **Per-project toolchain pinning** — `.march-version` (walking up parents) + Version Resolution Order (`Toolchain.find_pin`/`resolve_version`/`march_command`/`path_prefix`, 12 unit tests), wired into `forge build`/`run`/`check`/`test` via the shared `lib_path_env` PATH prefix; `build`/`run` hard-error on a missing pin. New `forge toolchain pin`/`which` commands. See `forge_version_manager.md § Implementation Status`.
 - [ ] **Toolchain version in `forge.lock`** — record the resolved compiler version alongside dependency locks so a checkout reproduces both deps and compiler.
-- [ ] **`forge.toml` `march` constraint enforcement** — check the resolved toolchain against an optional `march = "~> X.Y"` constraint in `forge build` (designed; unbuilt).
+- ✅ **`forge.toml` `march` constraint enforcement** — `forge build` blocks when the resolved toolchain doesn't satisfy an optional `march = "~> X.Y"` under `[package]` (`Toolchain.check_constraint`, 4 unit tests; non-semver tags allowed through). `project.ml` gains a `march_req` field.
 - [ ] **Auto-install a missing pinned toolchain** (or a clear prompt) when a project pins an uninstalled version.
 - [ ] **`forge upgrade` self-update** — update the forge/march binaries in place (designed; unbuilt).
 - [ ] **`forge list-all` / `forge toolchain list --remote`** — list installable versions from the releases API.

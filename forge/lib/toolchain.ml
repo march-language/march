@@ -81,6 +81,23 @@ let march_command ?(cwd = Sys.getcwd ()) () =
     else Error (Printf.sprintf
       "march %s is not installed. Run: forge toolchain install %s" tag tag)
 
+(* Check that the resolved toolchain [resolved] satisfies the forge.toml `march`
+   constraint [req] (same syntax as dependency constraints). A non-semver tag
+   (e.g. a nightly tag like nightly-YYYYMMDD) can't be evaluated, so it is
+   allowed through; a malformed constraint is a config error. *)
+let check_constraint ~resolved ~req =
+  match Resolver_constraint.parse req with
+  | Error e -> Error (Printf.sprintf "invalid `march` constraint %S in forge.toml: %s" req e)
+  | Ok c ->
+    match Resolver_version.parse resolved with
+    | Error _ -> Ok ()   (* not semver (e.g. a nightly tag) — cannot evaluate *)
+    | Ok v ->
+      if Resolver_constraint.satisfies v c then Ok ()
+      else Error (Printf.sprintf
+        "the active March toolchain %s does not satisfy `march = %S` in forge.toml. \
+         Switch to a compatible version (forge toolchain install/use), or update the constraint."
+        resolved req)
+
 (* A shell prefix that puts the resolved toolchain's bin/ first on PATH, so a
    bare `march` in a forge subprocess uses the pinned/global version. Empty when
    nothing is resolved (PATH fallback). Error when a pin is not installed. *)

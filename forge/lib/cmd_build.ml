@@ -289,6 +289,15 @@ let build ~release ?(dump_phases=false) () =
     match Toolchain.march_command () with
     | Error e -> Error e
     | Ok _ ->
+    (* Enforce an optional `march = "~> X.Y"` constraint in forge.toml against
+       the resolved toolchain. *)
+    match
+      match proj.Project.march_req, Toolchain.resolve_version () with
+      | Some req, Some resolved -> Toolchain.check_constraint ~resolved ~req
+      | _ -> Ok ()
+    with
+    | Error e -> Error e
+    | Ok () ->
     let mode = if release then "release" else "debug" in
     let build_dir =
       Filename.concat proj.Project.root

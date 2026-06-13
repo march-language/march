@@ -40,6 +40,7 @@ type project = {
   author        : string;
   root          : string;
   entrypoint    : string option;
+  march_req     : string option;  (** optional `march = "~> X.Y"` toolchain constraint *)
   deps          : (string * dep) list;
   dev_deps      : (string * dep) list;
   patches       : patch list;
@@ -184,6 +185,7 @@ let load_from root =
   let description = Option.value ~default:""       (Toml.get_string pkg "description") in
   let author      = Option.value ~default:""       (Toml.get_string pkg "author") in
   let entrypoint  = Toml.get_string pkg "entrypoint" in
+  let march_req   = Toml.get_string pkg "march" in
   (* [deps] inline + section forms *)
   let inline_deps   = parse_deps_section (Toml.get_section doc "deps") in
   let section_deps  = parse_section_deps "deps" doc in
@@ -209,7 +211,7 @@ let load_from root =
     ) (Toml.get_section doc "preprocessors")
   in
   { name; version; project_type = project_type_of_string type_str;
-    description; author; root; entrypoint; deps; dev_deps; patches;
+    description; author; root; entrypoint; march_req; deps; dev_deps; patches;
     archive_tasks; archive_deps; preprocessors }
 
 let load_from_dir dir =
