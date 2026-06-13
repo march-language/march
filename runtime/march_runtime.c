@@ -770,7 +770,16 @@ int32_t march_test_report(void) {
            test_total,  test_total  == 1 ? "" : "s",
            test_failed, test_failed == 1 ? "" : "s");
     fflush(stdout);
-    return test_failed > 0 ? 1 : 0;
+    fflush(stderr);
+    /* Exit immediately with the test result.  A test may have spawned an actor,
+       lazily starting the background scheduler thread (sched_bg_entry); letting
+       main return would run libc teardown that can join/race that thread,
+       hanging the runner (uninterruptible) or crashing it (exit 255) even when
+       every test passed.  _exit skips atexit/destructors/thread-joins so the
+       runner always terminates with the correct code. */
+    int32_t code = test_failed > 0 ? 1 : 0;
+    _exit(code);
+    return code;
 }
 
 /* ── __try_call ──────────────────────────────────────────────────────────── */
