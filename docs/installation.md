@@ -15,12 +15,12 @@ The fastest way to get March is a prebuilt binary. You can also build from sourc
 Prebuilt releases for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64` are published on the [releases page](https://github.com/march-language/march/releases). Each archive bundles `march`, `forge`, the standard library, and the C runtime sources.
 
 ```sh
-curl -fsSL https://github.com/march-language/march/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh
 ```
 
 The installer downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin`. Add that directory to your `PATH` (the installer prints the exact line). Use `MARCH_VERSION=nightly` for the latest nightly or `MARCH_VERSION=<tag>` to pin a version.
 
-On **macOS**, install the linked libraries first: `brew install blake3 zstd brotli`. The Linux archives are statically linked.
+The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs needs nothing extra. To use `march --compile`, install a C toolchain — `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
 
 Switch between installed versions with `forge`:
 

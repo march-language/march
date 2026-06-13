@@ -96,7 +96,15 @@ jobs:
         if: "!matrix.cross"
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 llvm
+            brew install blake3 zstd brotli llvm
+            # Homebrew ships only the blake3 dylib. Build a static libblake3.a so
+            # the release binary links blake3 (and zstd/brotli, whose .a come from
+            # brew) statically — no Homebrew dylib dependency on the user's machine.
+            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            ( cd /tmp/blake3/c && \
+              clang -O2 -c blake3.c blake3_dispatch.c blake3_portable.c blake3_neon.c && \
+              ar rcs "$(brew --prefix)/lib/libblake3.a" \
+                blake3.o blake3_dispatch.o blake3_portable.o blake3_neon.o )
           else
             sudo apt-get update
             sudo apt-get install -y llvm-dev libbrotli-dev

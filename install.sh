@@ -80,18 +80,19 @@ SUMS_URL="$(printf '%s\n' "${ASSETS}" | grep -- "checksums\.txt$" | head -1)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 TARBALL="${TMP}/$(basename "${TARBALL_URL}")"
-info "Downloading ${TARBALL_URL##*/} ..."
+NAME="$(basename "${TARBALL}")"
+info "Downloading ${NAME} ..."
 curl -fsSL -o "${TARBALL}" "${TARBALL_URL}"
 
-if [ -n "${SUMS_URL}" ]; then
-  info "Verifying checksum ..."
-  # The checksums file may prefix hashes with "sha256:" (legacy) — strip it.
-  api_get "${SUMS_URL}" | sed 's/^sha256://' > "${TMP}/checksums.txt"
-  ( cd "${TMP}" && eval "${SHACHECK} checksums.txt" >/dev/null ) \
-    || err "checksum verification failed for ${TARBALL##*/}"
-else
-  info "warning: no checksums asset found; skipping verification"
-fi
+# Fail closed: refuse to install anything we can't verify.
+[ -n "${SUMS_URL}" ] || err "release ${TAG} has no checksums asset; refusing to install an unverified download"
+info "Verifying checksum ..."
+# The checksums file may prefix hashes with "sha256:" (legacy) — strip it.
+api_get "${SUMS_URL}" | sed 's/^sha256://' > "${TMP}/checksums.txt"
+grep -q " ${NAME}\$" "${TMP}/checksums.txt" \
+  || err "${NAME} is not listed in the checksums file; refusing unverified install"
+( cd "${TMP}" && grep " ${NAME}\$" checksums.txt | eval "${SHACHECK}" >/dev/null ) \
+  || err "checksum verification failed for ${NAME}"
 
 # --- install --------------------------------------------------------------
 DEST="${MARCH_HOME}/versions/${TAG}"
@@ -121,6 +122,17 @@ done
 
 info ""
 info "March ${TAG} installed."
+
+# --- sanity check ---------------------------------------------------------
+# Make sure the installed compiler actually runs (e.g. catches missing dylibs).
+if ! "${MARCH_HOME}/bin/march" --version >/dev/null 2>&1; then
+  info ""
+  info "warning: the installed 'march' did not run."
+  case "${PLATFORM}" in
+    darwin-*) info "On macOS, install its linked libraries:  brew install blake3 zstd brotli" ;;
+    *)        info "Make sure a C toolchain (clang/llvm) and required libraries are available." ;;
+  esac
+fi
 
 # --- PATH guidance --------------------------------------------------------
 case ":${PATH}:" in

@@ -129,18 +129,16 @@ march
 
 ## Install a prebuilt binary
 
-Prebuilt binaries are published as [GitHub releases](https://github.com/march-language/march/releases) for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64`. Each archive bundles the `march` compiler, the `forge` build tool, the standard library, and the C runtime sources (so `march --compile` works out of the box).
+Prebuilt binaries are published as [GitHub releases](https://github.com/march-language/march/releases) for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64`. Each archive bundles the `march` compiler, the `forge` build tool, the standard library, and the C runtime sources.
 
-> **macOS only:** the binary links against Homebrew's `blake3`, `zstd`, and `brotli`. Install them first:
-> ```bash
-> brew install blake3 zstd brotli
-> ```
-> The Linux archives are statically linked and need no extra packages.
+The binaries are self-contained — the macOS build statically links `blake3`/`zstd`/`brotli` and the Linux builds are statically linked — so **running** March (interpreting programs) needs no extra packages.
+
+> **To use `march --compile`** you also need a C toolchain installed: `clang` + LLVM. On macOS install the Xcode Command Line Tools (`xcode-select --install`); on Linux install e.g. `clang llvm`. The compiler shells out to `clang` to build the bundled runtime.
 
 ### One-line installer
 
 ```bash
-curl -fsSL https://github.com/march-language/march/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh
 ```
 
 This downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin` (add that to your `PATH` as the script prints). Set `MARCH_VERSION=nightly` for the latest nightly, or `MARCH_VERSION=<tag>` to pin a specific release.
@@ -159,7 +157,7 @@ forge toolchain uninstall <version>
 
 Both the installer and `forge toolchain` share the `~/.march/versions/<tag>` layout and switch the active toolchain via the `~/.march/current` symlink.
 
-> **Note:** the one-line installer and `forge toolchain` ship in releases built from these sources, and require a release that includes `install.sh`. Until the first such release is published, use the manual download below.
+> **Note:** `forge toolchain`, the bundled runtime (native compile), and static linking ship in releases built from the current sources. Nightlies published earlier predate them — installing one still works for interpreting, but those features require a newer release. The manual download below works against any release.
 
 ### Manual download
 

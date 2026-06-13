@@ -64,17 +64,19 @@ let curl_get url =
   in
   capture (Printf.sprintf "curl -fsSL %s%s" auth (Filename.quote url))
 
+(* Pure platform mapping (unit-tested). *)
+let platform_of_uname os arch =
+  match String.trim os, String.trim arch with
+  | "Darwin", "arm64"               -> Ok "darwin-arm64"
+  | "Linux",  "x86_64"              -> Ok "linux-x86_64"
+  | "Linux",  ("aarch64" | "arm64") -> Ok "linux-aarch64"
+  | "Darwin", "x86_64" ->
+    Error "no prebuilt for Intel macOS (darwin-x86_64); build from source"
+  | o, a -> Error (Printf.sprintf "unsupported platform: %s-%s" o a)
+
 let detect_platform () =
-  let trim s = String.trim s in
   match capture "uname -s", capture "uname -m" with
-  | Ok os, Ok arch ->
-    (match trim os, trim arch with
-     | "Darwin", "arm64"                  -> Ok "darwin-arm64"
-     | "Linux",  "x86_64"                 -> Ok "linux-x86_64"
-     | "Linux",  ("aarch64" | "arm64")    -> Ok "linux-aarch64"
-     | "Darwin", "x86_64" ->
-       Error "no prebuilt for Intel macOS (darwin-x86_64); build from source"
-     | o, a -> Error (Printf.sprintf "unsupported platform: %s-%s" o a))
+  | Ok os, Ok arch -> platform_of_uname os arch
   | _ -> Error "could not detect platform (uname failed)"
 
 (* ----------------------------------------------------------- API -------- *)
@@ -142,30 +144,32 @@ let asset_urls ~tag ~platform =
 
 (* ----------------------------------------------------------- verify ----- *)
 
+(* Pure: find the expected hash for [file] in a checksums document. Each line is
+   "<hash>  <file>" or legacy "sha256:<hash>  <file>". Returns lowercase hex. *)
+let expected_hash_for ~sums ~file =
+  List.find_map (fun line ->
+    match String.split_on_char ' ' (String.trim line) |> List.filter (fun s -> s <> "") with
+    | hash :: f :: _ when Filename.basename f = file ->
+      let hash = match String.index_opt hash ':' with
+        | Some i -> String.sub hash (i + 1) (String.length hash - i - 1)
+        | None -> hash
+      in Some (String.lowercase_ascii hash)
+    | _ -> None)
+    (String.split_on_char '\n' sums)
+
+(* Fail closed: a download with no checksums asset, no matching entry, or a
+   mismatch is rejected — never silently accepted. *)
 let verify_checksum ~tarball ~sums_url =
   match sums_url with
-  | None ->
-    Printf.eprintf "warning: no checksums asset; skipping verification\n%!"; Ok ()
+  | None -> Error "release has no checksums asset; refusing to install an unverified download"
   | Some url ->
     Result.bind (curl_get url) (fun sums ->
       let want_name = Filename.basename tarball in
       let actual =
         Digestif.SHA256.to_hex (Digestif.SHA256.digest_string (Project.read_file tarball))
       in
-      (* Each line is "<hash>  <file>" or legacy "sha256:<hash>  <file>". *)
-      let expected =
-        List.find_map (fun line ->
-          match String.split_on_char ' ' (String.trim line) |> List.filter (fun s -> s <> "") with
-          | hash :: file :: _ when Filename.basename file = want_name ->
-            let hash = match String.index_opt hash ':' with
-              | Some i -> String.sub hash (i + 1) (String.length hash - i - 1)
-              | None -> hash
-            in Some (String.lowercase_ascii hash)
-          | _ -> None)
-          (String.split_on_char '\n' sums)
-      in
-      match expected with
-      | None -> Printf.eprintf "warning: %s not in checksums; skipping\n%!" want_name; Ok ()
+      match expected_hash_for ~sums ~file:want_name with
+      | None -> Error (Printf.sprintf "%s is not listed in the checksums file; refusing unverified install" want_name)
       | Some want when String.lowercase_ascii actual = want -> Ok ()
       | Some _ -> Error (Printf.sprintf "checksum mismatch for %s" want_name))
 
@@ -182,11 +186,15 @@ let write_wrappers () =
     Unix.chmod path 0o755)
     ["march"; "forge"]
 
-(* Point ~/.march/current at versions/<tag> (relative, like install.sh). *)
+(* Point ~/.march/current at versions/<tag> (relative, like install.sh).
+   Atomic: create a temp symlink and rename it over current, so a concurrent
+   march invocation never observes a missing current. *)
 let set_current tag =
   let link = current_link () in
-  (try Unix.unlink link with Unix.Unix_error _ -> ());
-  Unix.symlink (Filename.concat "versions" tag) link
+  let tmp = link ^ ".tmp" in
+  (try Unix.unlink tmp with Unix.Unix_error _ -> ());
+  Unix.symlink (Filename.concat "versions" tag) tmp;
+  Unix.rename tmp link
 
 (* ----------------------------------------------------------- commands --- *)
 
@@ -273,8 +281,13 @@ let install spec =
                           (Filename.quote dest) (Filename.quote (versions_dir ()))) in
          let* () = run (Printf.sprintf "mv %s %s"
                           (Filename.quote inner) (Filename.quote dest)) in
-         let* () = use tag in
-         Printf.printf "March %s installed.\n" tag;
+         (* Activate on the first install; otherwise leave the active toolchain
+            alone (rustup-style) so installing a version is non-disruptive. *)
+         write_wrappers ();
+         (match active_tag () with
+          | None        -> set_current tag; Printf.printf "March %s installed and set as active.\n" tag
+          | Some cur when cur = tag -> set_current tag; Printf.printf "March %s reinstalled (active).\n" tag
+          | Some _      -> Printf.printf "March %s installed. Activate it with: forge toolchain use %s\n" tag tag);
          (* PATH hint if ~/.march/bin isn't on PATH. *)
          let bd = bin_dir () in
          let on_path =
