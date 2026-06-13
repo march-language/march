@@ -10,6 +10,19 @@ module Pos = Position  (* our position utilities *)
 
 let doc_cache : (string, Analysis.t) Hashtbl.t = Hashtbl.create 16
 
+(* Monotonic per-document version. A background fiber (the TIR pass) only
+   publishes if the document hasn't advanced since the fiber started, so a slow
+   fiber for an old edit can't overwrite a newer analysis or flicker stale
+   diagnostics. *)
+let make_version_table () : (string, int) Hashtbl.t = Hashtbl.create 16
+let versions = make_version_table ()
+let bump_version vt uri =
+  let v = (match Hashtbl.find_opt vt uri with Some n -> n | None -> 0) + 1 in
+  Hashtbl.replace vt uri v;
+  v
+let is_current vt uri v =
+  match Hashtbl.find_opt vt uri with Some n -> n = v | None -> false
+
 let analyse_and_cache uri src =
   let filename =
     try  Lsp.Types.DocumentUri.to_path uri
@@ -196,18 +209,26 @@ class march_server =
 
     method on_notif_doc_did_open ~notify_back doc ~content =
       let uri = doc.Lsp.Types.TextDocumentItem.uri in
+      let uri_str = Lsp.Types.DocumentUri.to_string uri in
+      let v = bump_version versions uri_str in
       let a = analyse_and_cache uri content in
+      (* Run the TIR pipeline in a guarded background fiber: only publish if
+         this edit is still current, and never let a TIR bug crash the server. *)
+      Lwt.dont_wait
+        (fun () ->
+           if is_current versions uri_str v then begin
+             let a2 = Analysis.run_tir_pass a in
+             if is_current versions uri_str v then begin
+               Hashtbl.replace doc_cache uri_str a2;
+               notify_back#send_diagnostic
+                 (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+             end else Lwt.return_unit
+           end else Lwt.return_unit)
+        (fun exn ->
+           Printf.eprintf "march-lsp: TIR fiber error: %s\n%!"
+             (Printexc.to_string exn));
       (* Push AST-level diagnostics immediately so the editor is responsive.
-         Diagnostic ranges are produced in byte columns; remap to UTF-16. *)
-      Lwt.async (fun () ->
-        (* Run TIR pipeline in a background fiber.  On completion, update the
-           cached analysis and push an incremental publishDiagnostics with the
-           TIR-level hints merged in. *)
-        let a2 = Analysis.run_tir_pass a in
-        let uri_str = Lsp.Types.DocumentUri.to_string uri in
-        Hashtbl.replace doc_cache uri_str a2;
-        notify_back#send_diagnostic
-          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics));
+         Diagnostic ranges are byte columns; remap to UTF-16. *)
       notify_back#send_diagnostic
         (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
 
@@ -220,15 +241,24 @@ class march_server =
     method on_notif_doc_did_change ~notify_back vdoc _changes
         ~old_content:_ ~new_content =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
+      let uri_str = Lsp.Types.DocumentUri.to_string uri in
+      let v = bump_version versions uri_str in
       let a = analyse_and_cache uri new_content in
-      (* Same two-phase publish: AST diagnostics first, TIR insights async.
-         Diagnostic ranges are byte columns; remap to UTF-16 for the client. *)
-      Lwt.async (fun () ->
-        let a2 = Analysis.run_tir_pass a in
-        let uri_str = Lsp.Types.DocumentUri.to_string uri in
-        Hashtbl.replace doc_cache uri_str a2;
-        notify_back#send_diagnostic
-          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics));
+      (* Same two-phase publish: AST diagnostics now; TIR insights in a guarded
+         fiber that only publishes if this edit is still the current one. *)
+      Lwt.dont_wait
+        (fun () ->
+           if is_current versions uri_str v then begin
+             let a2 = Analysis.run_tir_pass a in
+             if is_current versions uri_str v then begin
+               Hashtbl.replace doc_cache uri_str a2;
+               notify_back#send_diagnostic
+                 (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+             end else Lwt.return_unit
+           end else Lwt.return_unit)
+        (fun exn ->
+           Printf.eprintf "march-lsp: TIR fiber error: %s\n%!"
+             (Printexc.to_string exn));
       notify_back#send_diagnostic
         (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
 

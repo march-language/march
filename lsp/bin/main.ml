@@ -5,6 +5,8 @@
 *)
 
 let () =
+  (* Without this, the backtrace printed on a fatal error below is empty. *)
+  Printexc.record_backtrace true;
   let server = new March_lsp_lib.Server.march_server in
   let conn =
     Linol_lwt.Jsonrpc2.create_stdio ~env:() server

@@ -2865,6 +2865,19 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Document version guard (Phase 1)                                    *)
+(* ------------------------------------------------------------------ *)
+
+let test_version_guard () =
+  let open March_lsp_lib.Server in
+  let vt = make_version_table () in
+  ignore (bump_version vt "u");   (* v = 1 *)
+  ignore (bump_version vt "u");   (* v = 2 *)
+  (* A fiber that started at v=1 must NOT publish once current is v=2. *)
+  Alcotest.(check bool) "stale (v1) rejected"  false (is_current vt "u" 1);
+  Alcotest.(check bool) "current (v2) accepted" true  (is_current vt "u" 2)
+
+(* ------------------------------------------------------------------ *)
 (* Error-resilient analysis (Phase 1)                                  *)
 (* ------------------------------------------------------------------ *)
 
@@ -2939,6 +2952,9 @@ let () =
     ];
     "error-resilient analysis", [
       "broken edit retains last good maps", `Quick, test_resilient_keeps_last_good;
+    ];
+    "document version guard", [
+      "stale background results are rejected", `Quick, test_version_guard;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
