@@ -335,6 +335,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── Regression: destructuring a tuple's scalar (Int/Bool) field must untag it ──
+; Tuple fields are stored low-bit tagged (coerce i64->ptr at construction); the
+; destructure must read them back as ptr + conditional untag.  A raw-i64
+; tuple-field load (a stale path predating the tagging build) read the tagged
+; value verbatim — Int 0 -> 1, 5 -> 11 — the moment a tuple flowed through a
+; pattern match.  Compile natively, run, diff stdout.
+(rule
+ (targets native_tuple_scalar_fields native_tuple_scalar_fields.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/tuple_scalar_fields.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tuple_scalar_fields
+        native/tuple_scalar_fields.march)
+   (with-stdout-to native_tuple_scalar_fields.out
+        (system "./native_tuple_scalar_fields")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_scalar_fields.expected native_tuple_scalar_fields.out)))
+
 ; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
 ; A module-nested fn with default-arg params AND a trailing zero-arg closure
 ; param desugars (general match-merge path) into a tuple build + destructure.

@@ -3404,20 +3404,18 @@ and emit_case ctx scrut_atom branches default_opt =
       let concrete_fields =
         resolve_ctor_fields ctx scrut_tir_ty br.Tir.br_tag (List.length br.Tir.br_vars)
       in
-      (* For TUPLE scrutinees the fields are stored UNBOXED with their concrete
-         LLVM types — a Bool/Int field is a raw i64, not a low-bit-tagged ptr —
-         because ETuple/EAlloc build tuples from the atoms' native types.  The
-         synthetic $TupleN ctor_info entry, however, types every field as
-         TVar "_" (→ ptr), so loading via ce_fields would untag (ashr 1) a value
-         that was never tagged, corrupting e.g. Bool true → false.  Use the
-         concrete element types for tuple loads so build and destructure agree.
-         Variant ctors keep using ce_fields, whose generic TVar fields ARE
-         stored tagged on construction (coerced i64→ptr in EAlloc). *)
-      let is_tuple_scrut = match scrut_tir_ty with Tir.TTuple _ -> true | _ -> false in
+      (* Tuple AND variant fields both follow the UNIFORM slot convention
+         (ee23036): scalars are low-bit tagged at construction (coerce i64→ptr)
+         and read back as ptr, then untagged conditionally by `coerce ptr→i64`
+         (which ashr's only odd/tagged values).  So load EVERY field via
+         ce_fields — "ptr" for the synthetic $TupleN entry and for a ctor's
+         generic TVar fields — never the concrete native type.  Loading a tuple
+         scalar as raw i64 (49ecfbe, which predated the tagging build) read the
+         tagged value verbatim — Int 0 → 1, 5 → 11, Bool true → 3 — the moment a
+         tuple flowed through a pattern match.  concrete_fields is still used
+         below to decide which fields are genuine heap pointers (for IncRC). *)
       List.iteri (fun i (v : Tir.var) ->
-        let field_ty =
-          let src = if is_tuple_scrut then concrete_fields else entry.ce_fields in
-          match List.nth_opt src i with
+        let field_ty = match List.nth_opt entry.ce_fields i with
           | Some t -> llvm_ty t | None -> llvm_ty v.Tir.v_ty in
         let fv = emit_load_field ctx scrut_val i field_ty in
         let slot = alloca_name ctx (llvm_name v.Tir.v_name) in

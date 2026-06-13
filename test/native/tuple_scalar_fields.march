@@ -1,0 +1,24 @@
+-- Regression: destructuring a tuple's scalar (Int/Bool) field must untag it.
+-- Tuple fields are stored low-bit tagged (coerce i64->ptr at construction);
+-- a raw-i64 tuple-field load read the tagged value verbatim the moment a tuple
+-- flowed through a pattern match — Int 0 -> 1, 5 -> 11, Bool true -> a nonzero
+-- garbage value.  Both a direct local tuple and a tuple in a list are covered.
+mod TupleScalarFields do
+  fn head_int(rows : List((Int, String))) : Int do
+    match rows do
+    Cons(row, _) ->
+      match row do (n, _) -> n end
+    Nil -> 0 - 1
+    end
+  end
+
+  fn main() : Unit do
+    let t = (5, "x")
+    match t do (n, _) -> println("direct=" ++ int_to_string(n)) end
+    let z = (0, "q")
+    match z do (n, _) -> println("zero=" ++ int_to_string(n)) end
+    println("list=" ++ int_to_string(head_int(Cons((7, "y"), Nil))))
+    let b = (true, 9)
+    match b do (flag, _) -> println(if flag do "bool=true" else "bool=false" end) end
+  end
+end
