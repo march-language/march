@@ -97,7 +97,9 @@ let project_env proj =
     ) proj.Project.deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
-    dep_lib_paths @ [lib_dir]
+    (* Expand lib/ into all of its subdirectories so modules grouped into
+       subfolders resolve (same as Cmd_build.lib_path_env). *)
+    dep_lib_paths @ Cmd_build.collect_lib_dirs lib_dir
     @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
@@ -110,7 +112,7 @@ let project_env proj =
   in
   Project.mkdir_p test_build_dir;
   let output = Filename.concat test_build_dir (proj.Project.name ^ "_test") in
-  (lib_path_env, output)
+  (lib_path_env, output, all_lib_paths)
 
 (** Run forge test for a given list of test files (after directory expansion). *)
 let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) test_files =
@@ -127,7 +129,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     let lib_dir_pp = Filename.concat proj.Project.root "lib" in
     let _pp = Cmd_build.run_preprocessors ~proj ~src_dir ~gen_dir in
     let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
-    let (lib_path_env, output) = project_env proj in
+    let (lib_path_env, output, all_lib_paths) = project_env proj in
     if use_interp then
       invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~lib_path_env test_files
     else begin
@@ -145,12 +147,10 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
                   (never the reverse).  With test/ first, a lib function still
                   bound to its pass-1 Mono placeholder gets pinned by the
                   first test call site, and every other call site with a
-                  different record shape then fails to unify. *)
-               (match Sys.getenv_opt "MARCH_LIB_PATH" with
-                | Some s -> s
-                | None ->
-                  let lib_dir = Filename.concat proj.Project.root "lib" in
-                  lib_dir)
+                  different record shape then fails to unify.
+                  Use the full computed path (deps + every lib/ subdirectory)
+                  so modules grouped into subfolders resolve. *)
+               (String.concat ":" all_lib_paths)
                test_dir
         else lib_path_env
       in
