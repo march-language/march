@@ -2865,6 +2865,18 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Query facade (Phase 2)                                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_query_hover_record () =
+  let src = "mod Test do\n  fn f() : Int do 41 end\nend\n" in
+  let a = An.analyse ~filename:"t.march" ~src in
+  (* 'f' is at line 1, UTF-16 column 5. *)
+  let r = March_lsp_lib.Query.hover a ~line:1 ~utf16_char:5 in
+  Alcotest.(check bool) "hover record carries a type"
+    true (r.March_lsp_lib.Query.h_type <> None)
+
+(* ------------------------------------------------------------------ *)
 (* Document version guard (Phase 1)                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -2955,6 +2967,9 @@ let () =
     ];
     "document version guard", [
       "stale background results are rejected", `Quick, test_version_guard;
+    ];
+    "query facade", [
+      "hover returns a transport-agnostic record", `Quick, test_query_hover_record;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
