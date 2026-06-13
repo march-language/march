@@ -460,8 +460,21 @@ let toolchain_cmd =
     Cmd.v (Cmd.info "uninstall" ~doc:"Remove an installed March toolchain")
       Term.(const run $ version)
   in
+  let pin_sub =
+    let version =
+      Arg.(required & pos 0 (some string) None &
+           info [] ~docv:"VERSION" ~doc:"Version to pin for this project (writes .march-version)")
+    in
+    let run v = handle (Toolchain.pin v) in
+    Cmd.v (Cmd.info "pin" ~doc:"Pin a March version for this project via .march-version")
+      Term.(const run $ version)
+  in
+  let which_sub =
+    Cmd.v (Cmd.info "which" ~doc:"Show which toolchain a build here resolves to")
+      Term.(const (fun () -> handle (Toolchain.which ())) $ const ())
+  in
   Cmd.group (Cmd.info "toolchain" ~doc:"Manage installed March compiler versions")
-    [ install_sub; use_sub; list_sub; uninstall_sub ]
+    [ install_sub; use_sub; list_sub; uninstall_sub; pin_sub; which_sub ]
 
 (* ------------------------------------------------------------------ forge init *)
 

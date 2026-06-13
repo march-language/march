@@ -276,6 +276,113 @@ let test_checksum_not_found () =
   Alcotest.(check (option string)) "unlisted file yields None (verify fails closed)"
     None (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
 
+(* per-project toolchain pin (.march-version) resolution ------------------- *)
+
+let mkdir_p path =
+  ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote path)))
+
+let write_file path contents =
+  let oc = open_out path in output_string oc contents; close_out oc
+
+let fresh_dir () =
+  let d = Filename.temp_file "march_pin_" "" in
+  Sys.remove d; Unix.mkdir d 0o755; d
+
+let test_pin_in_current_dir () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir ".march-version") "0.5.0\n";
+  Alcotest.(check (option string)) "pin read from cwd"
+    (Some "0.5.0") (Toolchain.find_pin dir)
+
+let test_pin_walks_up_parents () =
+  let root = fresh_dir () in
+  write_file (Filename.concat root ".march-version") "0.4.2\n";
+  let child = Filename.concat root "a/b" in
+  mkdir_p child;
+  Alcotest.(check (option string)) "pin found by walking up to an ancestor"
+    (Some "0.4.2") (Toolchain.find_pin child)
+
+let test_pin_absent () =
+  let dir = fresh_dir () in
+  Alcotest.(check (option string)) "no .march-version anywhere -> None"
+    None (Toolchain.find_pin dir)
+
+(* Point a temp MARCH_HOME's `current` symlink at [tag] (the global default). *)
+let set_fake_global tag =
+  let home = fresh_dir () in
+  Unix.putenv "MARCH_HOME" home;
+  mkdir_p (Filename.concat home "versions");
+  Unix.symlink (Filename.concat "versions" tag) (Filename.concat home "current")
+
+let test_resolve_prefers_pin () =
+  set_fake_global "9.9.9";
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir ".march-version") "0.5.0\n";
+  Alcotest.(check (option string)) "project pin wins over the global default"
+    (Some "0.5.0") (Toolchain.resolve_version ~cwd:dir ())
+
+let test_resolve_falls_back_to_global () =
+  set_fake_global "0.6.0";
+  let dir = fresh_dir () in   (* no .march-version *)
+  Alcotest.(check (option string)) "no pin -> global default"
+    (Some "0.6.0") (Toolchain.resolve_version ~cwd:dir ())
+
+let test_resolve_none_when_unset () =
+  Unix.putenv "MARCH_HOME" (fresh_dir ());   (* empty home, no current *)
+  let dir = fresh_dir () in
+  Alcotest.(check (option string)) "no pin and no global -> None"
+    None (Toolchain.resolve_version ~cwd:dir ())
+
+(* Create a fake installed toolchain at <home>/versions/<tag>/bin/march. *)
+let install_fake home tag =
+  let bin = Filename.concat (Filename.concat (Filename.concat home "versions") tag) "bin" in
+  mkdir_p bin;
+  write_file (Filename.concat bin "march") "#!/bin/sh\n"
+
+let test_march_command_uses_installed_version () =
+  let home = fresh_dir () in
+  Unix.putenv "MARCH_HOME" home;
+  install_fake home "0.6.0";
+  Unix.symlink (Filename.concat "versions" "0.6.0") (Filename.concat home "current");
+  (match Toolchain.march_command ~cwd:(fresh_dir ()) () with
+   | Ok path -> Alcotest.(check bool) "march path points at the resolved version"
+                  true (Filename.check_suffix path "versions/0.6.0/bin/march")
+   | Error e -> Alcotest.failf "expected Ok, got Error: %s" e)
+
+let test_march_command_errors_when_pinned_version_missing () =
+  let home = fresh_dir () in
+  Unix.putenv "MARCH_HOME" home;
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir ".march-version") "0.7.0\n";  (* not installed *)
+  (match Toolchain.march_command ~cwd:dir () with
+   | Error _ -> ()
+   | Ok p -> Alcotest.failf "expected Error for uninstalled pin, got %s" p)
+
+let test_march_command_falls_back_to_path () =
+  Unix.putenv "MARCH_HOME" (fresh_dir ());
+  Alcotest.(check (result string string)) "no resolution -> bare 'march' on PATH"
+    (Ok "march") (Toolchain.march_command ~cwd:(fresh_dir ()) ())
+
+let contains haystack needle =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec at i = i + nl <= hl && (String.sub haystack i nl = needle || at (i + 1)) in
+  nl = 0 || at 0
+
+let test_path_prefix_installed () =
+  let home = fresh_dir () in
+  Unix.putenv "MARCH_HOME" home;
+  install_fake home "0.6.0";
+  Unix.symlink (Filename.concat "versions" "0.6.0") (Filename.concat home "current");
+  (match Toolchain.path_prefix ~cwd:(fresh_dir ()) () with
+   | Ok p -> Alcotest.(check bool) "prefix puts the version bin on PATH"
+               true (contains p "PATH=" && contains p "versions/0.6.0/bin")
+   | Error e -> Alcotest.failf "expected Ok, got Error: %s" e)
+
+let test_path_prefix_empty_on_fallback () =
+  Unix.putenv "MARCH_HOME" (fresh_dir ());
+  Alcotest.(check (result string string)) "no resolution -> empty prefix (use PATH)"
+    (Ok "") (Toolchain.path_prefix ~cwd:(fresh_dir ()) ())
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -307,5 +414,16 @@ let () =
       Alcotest.test_case "checksum: standard format"         `Quick test_checksum_standard;
       Alcotest.test_case "checksum: legacy sha256 prefix"    `Quick test_checksum_legacy_prefix;
       Alcotest.test_case "checksum: unlisted file -> None"   `Quick test_checksum_not_found;
+      Alcotest.test_case "pin: read from current dir"        `Quick test_pin_in_current_dir;
+      Alcotest.test_case "pin: walks up to ancestor"         `Quick test_pin_walks_up_parents;
+      Alcotest.test_case "pin: absent -> None"               `Quick test_pin_absent;
+      Alcotest.test_case "resolve: pin beats global"         `Quick test_resolve_prefers_pin;
+      Alcotest.test_case "resolve: falls back to global"     `Quick test_resolve_falls_back_to_global;
+      Alcotest.test_case "resolve: none when unset"          `Quick test_resolve_none_when_unset;
+      Alcotest.test_case "march_command: uses installed ver" `Quick test_march_command_uses_installed_version;
+      Alcotest.test_case "march_command: errors if pin missing" `Quick test_march_command_errors_when_pinned_version_missing;
+      Alcotest.test_case "march_command: PATH fallback"      `Quick test_march_command_falls_back_to_path;
+      Alcotest.test_case "path_prefix: installed -> PATH override" `Quick test_path_prefix_installed;
+      Alcotest.test_case "path_prefix: fallback -> empty"    `Quick test_path_prefix_empty_on_fallback;
     ];
   ]

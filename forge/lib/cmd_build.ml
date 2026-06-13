@@ -183,7 +183,10 @@ let lib_path_env proj =
     @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
-  Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
+  (* Put the resolved toolchain (project .march-version pin, else global) first
+     on PATH so the bare `march` in the commands below uses the pinned version. *)
+  let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
+  Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx (String.concat ":" all_lib_paths)
 
 (** Typecheck [file] via [march --check].
     Returns [true] on clean exit, [false] on any compiler error.
@@ -281,6 +284,11 @@ let build ~release ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
+    (* Fail early with an actionable message if the project pins a March version
+       that isn't installed (rather than falling through to a confusing error). *)
+    match Toolchain.march_command () with
+    | Error e -> Error e
+    | Ok _ ->
     let mode = if release then "release" else "debug" in
     let build_dir =
       Filename.concat proj.Project.root
