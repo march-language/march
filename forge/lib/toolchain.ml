@@ -32,6 +32,64 @@ let version_dir tag = Filename.concat (versions_dir ()) tag
 let current_link () = Filename.concat (march_home ()) "current"
 let bin_dir ()      = Filename.concat (march_home ()) "bin"
 
+(* ----------------------------------------------------- project pin ------ *)
+
+(* Read a `.march-version` file: its first non-empty trimmed line, or None. *)
+let read_version_file path =
+  if Sys.file_exists path then
+    match In_channel.with_open_text path In_channel.input_line with
+    | Some line -> let v = String.trim line in if v = "" then None else Some v
+    | None | exception _ -> None
+  else None
+
+(* The per-project pin: the first `.march-version` found walking up from [dir]
+   to the filesystem root. Returns the pinned version tag, or None. *)
+let find_pin dir =
+  let rec up d =
+    match read_version_file (Filename.concat d ".march-version") with
+    | Some _ as found -> found
+    | None ->
+      let parent = Filename.dirname d in
+      if parent = d then None else up parent
+  in
+  up dir
+
+(* The global default toolchain: the basename of the `current` symlink target. *)
+let global_version () =
+  match Unix.readlink (current_link ()) with
+  | target -> Some (Filename.basename target)
+  | exception _ -> None
+
+(* Version Resolution Order (see forge_version_manager.md): a project
+   `.march-version` pin (walking up from [cwd]) wins over the global default;
+   if neither is set, None — callers fall back to `march` on PATH. *)
+let resolve_version ?(cwd = Sys.getcwd ()) () =
+  match find_pin cwd with
+  | Some _ as v -> v
+  | None -> global_version ()
+
+(* Resolve the `march` executable to invoke for a build in [cwd]:
+   - a resolved version that is installed  -> its versions/<tag>/bin/march
+   - a resolved version that is NOT installed -> Error (actionable message)
+   - nothing resolved (no pin, no global)  -> Ok "march" (use PATH) *)
+let march_command ?(cwd = Sys.getcwd ()) () =
+  match resolve_version ~cwd () with
+  | None -> Ok "march"
+  | Some tag ->
+    let bin = Filename.concat (version_dir tag) "bin/march" in
+    if Sys.file_exists bin then Ok bin
+    else Error (Printf.sprintf
+      "march %s is not installed. Run: forge toolchain install %s" tag tag)
+
+(* A shell prefix that puts the resolved toolchain's bin/ first on PATH, so a
+   bare `march` in a forge subprocess uses the pinned/global version. Empty when
+   nothing is resolved (PATH fallback). Error when a pin is not installed. *)
+let path_prefix ?(cwd = Sys.getcwd ()) () =
+  match march_command ~cwd () with
+  | Error _ as e -> e
+  | Ok exe when Filename.is_relative exe -> Ok ""   (* bare "march" — use PATH *)
+  | Ok exe -> Ok (Printf.sprintf "PATH=%s:$PATH " (Filename.quote (Filename.dirname exe)))
+
 (* ----------------------------------------------------------- helpers ---- *)
 
 let read_all ic =
@@ -198,10 +256,9 @@ let set_current tag =
 
 (* ----------------------------------------------------------- commands --- *)
 
-let active_tag () =
-  match Unix.readlink (current_link ()) with
-  | target -> Some (Filename.basename target)
-  | exception _ -> None
+(* The active global toolchain (alias of [global_version], kept for clarity
+   at the command call sites). *)
+let active_tag = global_version
 
 let installed_tags () =
   match Sys.readdir (versions_dir ()) with
@@ -241,6 +298,32 @@ let uninstall version =
   else
     Result.map (fun () -> Printf.printf "Removed March %s\n" version)
       (run (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+
+(* Write a `.march-version` pin in the current directory. *)
+let pin version =
+  let path = Filename.concat (Sys.getcwd ()) ".march-version" in
+  let oc = open_out path in
+  output_string oc (version ^ "\n");
+  close_out oc;
+  Printf.printf "Pinned March %s for this project (%s)\n" version path;
+  if not (Sys.file_exists (Filename.concat (version_dir version) "bin/march")) then
+    Printf.printf "note: %s is not installed yet. Run: forge toolchain install %s\n" version version;
+  Ok ()
+
+(* Show which toolchain a build here would use, and where it resolves from. *)
+let which () =
+  let cwd = Sys.getcwd () in
+  (match find_pin cwd with
+   | Some v -> Printf.printf "%s (pinned via .march-version)\n" v
+   | None ->
+     match global_version () with
+     | Some v -> Printf.printf "%s (global default)\n" v
+     | None   -> Printf.printf "none — no pin or active toolchain; `march` resolves via PATH\n");
+  (match march_command ~cwd () with
+   | Ok exe when not (Filename.is_relative exe) -> Printf.printf "  %s\n" exe
+   | Ok _ -> ()
+   | Error e -> Printf.printf "  %s\n" e);
+  Ok ()
 
 let install spec =
   let ( let* ) = Result.bind in

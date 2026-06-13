@@ -6,6 +6,18 @@ Forge doubles as March's version manager: it can install, switch between, and re
 
 March is a compiled language whose compiler is itself written in March (after bootstrapping from OCaml). As the language evolves, projects need to pin a specific compiler version — a library targeting 0.4.x shouldn't silently build with a 0.6 compiler that changed semantics. Forge already manages packages; extending it to manage compiler versions keeps the toolchain unified under one command and avoids yet-another-tool proliferation.
 
+## Implementation Status (as of 2026-06-13)
+
+A first slice of this design is built; most of its value remains designed-but-unbuilt (see [Gaps & Roadmap](#gaps--roadmap-2026-06-13)). What exists today:
+
+- **Commands** under a `forge toolchain` namespace — chosen to avoid colliding with the pre-existing archive-install `forge install` (which installs library archives, not compiler versions): `forge toolchain install [<version>|nightly]`, `use <version>`, `list`, `uninstall <version>`. These correspond to the `forge install`/`use`/`list`/`uninstall` commands described below — read those sections with the `toolchain` prefix in mind.
+- **Layout:** `~/.march/versions/<tag>/` + a `~/.march/current` symlink + `~/.march/bin/{march,forge}` **wrapper scripts** that exec through `current/` (so the binaries resolve their bundled stdlib/runtime correctly on macOS and Linux). There is no `~/.march/version` plain-text file yet — the `current` symlink *is* the global state — and no `.march-version` project pin yet.
+- **Resolution:** `install` resolves `latest` (newest stable) with a newest-nightly fallback, plus explicit tags and `nightly`. Checksum verification is **fail-closed** (no asset / no matching entry / mismatch → refuse).
+- **Bootstrap:** the `install.sh` installer (`curl … | sh` from the stable `raw.githubusercontent.com/march-language/march/main/install.sh` URL) replaces the `marchup` script described under [Bootstrapping](#bootstrapping). `install.sh` and `forge toolchain` share the `~/.march` layout.
+- **Per-project pinning + Version Resolution Order** (2026-06-13): a `.march-version` file (walking up parent dirs) takes precedence over the global `current`, falling back to `march` on PATH (`Toolchain.find_pin` / `resolve_version` / `march_command` / `path_prefix`, all unit-tested). `forge build`, `run`, `check`, and `test` route `march` through the resolved toolchain via the shared `Cmd_build.lib_path_env` PATH prefix; `build`/`run` hard-error with an actionable message when a pin isn't installed. New commands: `forge toolchain pin <version>` (writes `.march-version`) and `forge toolchain which` (shows what a build here resolves to).
+
+**Not yet built** — the remaining substance of this spec: the `forge.toml` `march` constraint check in `forge build`; recording the toolchain version in `forge.lock`; auto-installing a missing pinned toolchain; `forge upgrade` self-update; `forge shell-hook`; `forge list-all` / `forge toolchain list --remote`.
+
 ## Concepts
 
 **Version string.** A semver triple `MAJOR.MINOR.PATCH`, optionally with a pre-release suffix (`0.5.0-nightly.20260328`). Leading `v` prefix is accepted and stripped. Build metadata (`+build`) is stripped and ignored, consistent with `Resolver_version`.
@@ -486,6 +498,30 @@ Forge should produce clear, actionable error messages for common failure modes:
 | Checksum mismatch | `Checksum verification failed for march-0.5.0-darwin-arm64.tar.gz. The download may be corrupt. Run 'forge install 0.5.0 --force' to retry.` |
 | Platform unsupported | `No prebuilt binary available for linux-riscv64. See docs for building from source.` |
 | Version constraint mismatch | `march 0.7.0 (from ~/.march/version) does not satisfy 'march = "~> 0.5.0"' in forge.toml. Run 'forge install 0.5.1 && forge use 0.5.1' or update the constraint.` |
+
+## Gaps & Roadmap (2026-06-13)
+
+A consolidated, prioritised list of what forge is still missing across version **and** package management, from a review of the implemented surface.
+
+### Version management (this spec)
+
+1. ~~**Per-project toolchain pinning.**~~ ✅ **Done (2026-06-13).** `.march-version` + the [Version Resolution Order](#version-resolution-order) are implemented and wired into `forge build`/`run`/`check`/`test`, plus `forge toolchain pin`/`which`. See [Implementation Status](#implementation-status-as-of-2026-06-13). Remaining sub-items split into #2–#4 below.
+2. **Toolchain version in `forge.lock`.** Record the resolved compiler version alongside the dependency locks so a checkout reproduces both deps and compiler.
+3. **`forge.toml` `march` constraint enforcement** in `forge build` (designed under [Version Constraints in forge.toml](#version-constraints-in-forgetoml); unbuilt).
+4. **Auto-install a missing pinned toolchain** (or a clear, actionable prompt) when a project pins a version that isn't installed.
+5. **`forge upgrade` self-update** of the forge/march binaries (designed under [Self-Update](#self-update); unbuilt).
+6. **`forge list-all` / `forge toolchain list --remote`** — list installable versions from the releases API.
+
+### Package management (cross-cutting; see also [forge_archives.md](forge_archives.md))
+
+7. **Registry server + network publish/fetch.** `forge publish` validates locally only — there is no registry server, no `forge login`/auth/tokens, and no network fetch. Real distribution is git/path-only today. Largest package-side gap (already noted as "Phase 6" in the publish path).
+8. **`forge yank <version>`** — retract a published version. Missing.
+9. **Introspection: `forge why <pkg>`, `forge tree`, `forge outdated`.** `why` is nearly free given the PubGrub solver already builds a derivation tree; `tree`/`outdated` are standard and high-value for debugging resolution.
+10. **`license` field** (and `repository`/`homepage`/`keywords`) in `forge.toml` — standard publishing metadata; currently unparsed.
+11. **Workspaces / monorepo** — multiple packages in one repo sharing a single lockfile.
+12. **Vendoring / explicit offline mode** (`forge vendor`, `--offline`) — partly mitigated by the CAS cache, but there is no explicit vendor/offline story (overlaps with "Offline mode" under Future Work).
+13. **Optional dependencies / feature flags** — conditional deps and compile-time features. A language-design question, not just a missing command.
+14. **Full AST-based semver-compatibility checking** on publish — `Resolver_api_surface` is text-heuristic today; linearity/generic-constraint diffing needs compiler integration (its own "Phase 6").
 
 ## Future Work
 

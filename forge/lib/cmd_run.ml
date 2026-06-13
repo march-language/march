@@ -22,7 +22,13 @@ let run ?(dump_phases=false) ?(compiled=false) () =
       in
       if not (Sys.file_exists entry) then
         Error (Printf.sprintf "entry point not found: %s" entry)
-      else begin
+      else
+      (* Resolve the toolchain (project .march-version pin, else global). Fail
+         early with an actionable message if a pinned version isn't installed. *)
+      match Toolchain.path_prefix () with
+      | Error e -> Error e
+      | Ok toolchain_pfx ->
+      begin
         (* Build MARCH_LIB_PATH: dep lib dirs + lib/ + config/ (if present) *)
         let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
             match dep with
@@ -44,7 +50,7 @@ let run ?(dump_phases=false) ?(compiled=false) () =
           @ (if Sys.file_exists config_dir then [config_dir] else [])
         in
         let lib_path_env =
-          Printf.sprintf "MARCH_LIB_PATH=%s" (String.concat ":" extra_dirs)
+          Printf.sprintf "%sMARCH_LIB_PATH=%s" toolchain_pfx (String.concat ":" extra_dirs)
         in
         let dump_flag = if dump_phases then " --dump-phases" else "" in
         let cmd = Printf.sprintf "%s march%s %s"
