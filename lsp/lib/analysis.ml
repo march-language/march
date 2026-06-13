@@ -112,6 +112,8 @@ type code_lens_item = {
 type t = {
   src         : string;
   filename    : string;
+  doc         : Utf16.doc;
+  (** Line index + source for UTF-16<->byte column conversion. *)
   type_map    : (Ast.span, Tc.ty) Hashtbl.t;
   (** Span → inferred type. *)
   def_map     : (string, Ast.span) Hashtbl.t;
@@ -234,6 +236,12 @@ let load_stdlib () =
     List.concat_map
       (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
       ordered
+
+(* Route stdlib loading through the process-lifetime memo so the parse/desugar
+   happens once, not on every keystroke. *)
+let () =
+  Stdlib_cache.set_stdlib_dir find_stdlib_dir;
+  Stdlib_cache.set_loader load_stdlib
 
 (* ------------------------------------------------------------------ *)
 (* Diagnostic conversion                                               *)
@@ -1152,9 +1160,11 @@ let analyse ~filename ~src : t =
     | March_lexer.Lexer.Lexer_error msg ->
       Error (`LexerError (msg, Lexing.lexeme_start_p lexbuf))
   in
+  let doc = Utf16.build src in
   let make_empty_with diag =
     { src;
       filename;
+      doc;
       type_map         = Hashtbl.create 0;
       def_map          = Hashtbl.create 0;
       use_map          = Hashtbl.create 0;
@@ -1210,7 +1220,7 @@ let analyse ~filename ~src : t =
 
   | Ok raw_ast ->
     let desugared = March_desugar.Desugar.desugar_module raw_ast in
-    let stdlib_decls = load_stdlib () in
+    let stdlib_decls = Stdlib_cache.load () in
     (* Resolve cross-file imports (user imports + forge dep imports).
        Build the extra lib-path list from:
          1. forge.toml [deps] resolved to absolute lib/ dirs
@@ -1763,7 +1773,7 @@ let analyse ~filename ~src : t =
       @ unused_fn_diags
       @ perf_diags
     in
-    { src; filename; type_map; def_map; use_map;
+    { src; filename; doc; type_map; def_map; use_map;
       vars       = Tc.StrMap.bindings final_env.Tc.vars;
       types      = Tc.StrMap.bindings final_env.Tc.types;
       ctors      = Tc.StrMap.fold (fun name cis acc ->
@@ -3289,3 +3299,70 @@ let perf_insight_at (a : t) ~line ~character : string option =
       ) (List.hd candidates) (List.tl candidates)
     in
     Some best.pi_message
+
+(* ---------------------------------------------------------------------- *)
+(* UTF-16 query wrappers.                                                  *)
+(* Editors (and the CLI) pass UTF-16 character columns; the internal query *)
+(* functions work in byte columns (matching March spans). These wrappers   *)
+(* convert the incoming column and remap any outbound ranges back to       *)
+(* UTF-16, so callers never touch encoding.                                *)
+(* ---------------------------------------------------------------------- *)
+
+let byte_col_of (a : t) ~line ~utf16_char =
+  Utf16.lsp_char_to_byte_col a.doc ~line ~utf16_char
+
+let query_type_at (a : t) ~line ~utf16_char =
+  type_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_doc_name_at (a : t) ~line ~utf16_char =
+  doc_name_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_perf_insight_at (a : t) ~line ~utf16_char =
+  perf_insight_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_actor_info_at (a : t) ~line ~utf16_char =
+  actor_info_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_signature_help_at (a : t) ~line ~utf16_char =
+  signature_help_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_completions_at (a : t) ~line ~utf16_char =
+  completions_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_definition_at (a : t) ~line ~utf16_char =
+  match definition_at a ~line ~character:(byte_col_of a ~line ~utf16_char) with
+  | None -> None
+  | Some l -> Some (Pos.remap_location a.doc l)
+
+let query_references_at (a : t) ~include_declaration ~line ~utf16_char =
+  references_at a ~include_declaration ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (Pos.remap_location a.doc)
+
+let query_rename_at (a : t) ~line ~utf16_char ~new_name =
+  rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char) ~new_name
+  |> List.map (Pos.remap_text_edit a.doc)
+
+(* ---------------------------------------------------------------------- *)
+(* Error-resilient analysis.                                               *)
+(* When an edit leaves the buffer unparseable, [analyse] returns empty     *)
+(* maps and every IDE feature goes dark. Instead, fall back to the last    *)
+(* good analysis's symbol maps while surfacing the current parse error and *)
+(* keeping the current source/doc (so the error's position is correct).    *)
+(*                                                                         *)
+(* [parsed_ok] is a heuristic proxy for "the parse produced usable maps".  *)
+(* A pure parse/lex failure yields empty maps; a parses-but-type-errors    *)
+(* buffer still populates maps and is used as-is. Phase 5's recovering     *)
+(* parser will replace this with partial maps from a single pass.          *)
+(* ---------------------------------------------------------------------- *)
+let analyse_resilient ~prev ~filename ~src : t =
+  let fresh = analyse ~filename ~src in
+  let parsed_ok =
+    Hashtbl.length fresh.type_map > 0
+    || fresh.vars <> []
+    || Hashtbl.length fresh.def_map > 0
+  in
+  match prev with
+  | Some p when not parsed_ok ->
+    { p with src; filename; doc = Utf16.build src;
+             diagnostics = fresh.diagnostics }
+  | _ -> fresh

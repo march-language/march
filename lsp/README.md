@@ -11,13 +11,22 @@ Provides rich editor support built on the March compiler's parse, desugar, and t
 | **Diagnostics** | ✅ Parse + typecheck errors, warnings, hints with source spans |
 | **Hover types** | ✅ Show inferred type at cursor (full HM inference) |
 | **Go to definition** | ✅ Jump to definition of functions, types, constructors, modules |
-| **Completion** | ✅ Keywords, in-scope variables, type constructors, interfaces |
-| **Inlay hints** | ✅ Show inferred types inline for let-bindings |
+| **Completion** | ✅ Keywords, in-scope variables, type constructors, interfaces (flat list; context-awareness planned) |
+| **Inlay hints** | ✅ Show inferred types inline |
 | **Document symbols** | ✅ Outline of functions, types, interfaces, modules |
 | **Semantic tokens** | ✅ Rich syntax highlighting beyond keyword patterns |
-| **Code actions** | 🚧 Linear type suggestions, sort algorithm hints (stub) |
+| **Code actions** | ✅ Match-exhaustiveness, De Morgan, make-linear, annotations, unused-import/binding, inspect, naming |
+| **Find references** | ✅ All use sites of a name (name-based; sound symbol identity planned) |
+| **Rename** | ✅ Rename across use sites (name-based; sound symbol identity planned) |
+| **Signature help** | ✅ Parameter hints at call sites |
+| **Folding ranges** | ✅ |
+| **Code lens / perf insights** | ✅ TCO, closure capture, actor copy; TIR-pipeline lenses |
 | **Actor info** | ✅ Hover over actor names to see state + message types |
 | **Interface impls** | ✅ Find all implementations of an interface |
+| **UTF-16 position encoding** | ✅ Correct on non-ASCII lines (advertises `positionEncoding`) |
+| **Standalone CLI** | ✅ `march-lsp query …` — one-shot JSON queries for scripts/LLMs (see [docs/editors.md](docs/editors.md)) |
+
+See [`docs/editors.md`](docs/editors.md) for editor setup (Neovim, Helix, Zed, Emacs, VS Code) and the standalone CLI reference, and `../specs/plans/2026-06-13-lsp-best-in-class.md` for the best-in-class roadmap.
 
 ### March-specific highlights
 

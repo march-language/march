@@ -2865,11 +2865,114 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Query facade (Phase 2)                                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_query_hover_record () =
+  let src = "mod Test do\n  fn f() : Int do 41 end\nend\n" in
+  let a = An.analyse ~filename:"t.march" ~src in
+  (* 'f' is at line 1, UTF-16 column 5. *)
+  let r = March_lsp_lib.Query.hover a ~line:1 ~utf16_char:5 in
+  Alcotest.(check bool) "hover record carries a type"
+    true (r.March_lsp_lib.Query.h_type <> None)
+
+(* ------------------------------------------------------------------ *)
+(* Document version guard (Phase 1)                                    *)
+(* ------------------------------------------------------------------ *)
+
+let test_version_guard () =
+  let open March_lsp_lib.Server in
+  let vt = make_version_table () in
+  ignore (bump_version vt "u");   (* v = 1 *)
+  ignore (bump_version vt "u");   (* v = 2 *)
+  (* A fiber that started at v=1 must NOT publish once current is v=2. *)
+  Alcotest.(check bool) "stale (v1) rejected"  false (is_current vt "u" 1);
+  Alcotest.(check bool) "current (v2) accepted" true  (is_current vt "u" 2)
+
+(* ------------------------------------------------------------------ *)
+(* Error-resilient analysis (Phase 1)                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_resilient_keeps_last_good () =
+  (* A broken edit that fails to parse must not blank out IDE features: the
+     resilient analysis retains the last good symbol maps while reporting the
+     new parse error. *)
+  let good = "mod M do\n  fn f() : Int do 41 end\nend\n" in
+  let a_good = An.analyse ~filename:"t.march" ~src:good in
+  let broken = "mod M do\n  fn f() : Int do 41 end\n  fn g(\n" in
+  let a = An.analyse_resilient ~prev:(Some a_good) ~filename:"t.march" ~src:broken in
+  Alcotest.(check bool) "broken edit still reports diagnostics"
+    true (a.An.diagnostics <> []);
+  Alcotest.(check bool) "def map retained from last good analysis"
+    true (Hashtbl.mem a.An.def_map "f")
+
+(* ------------------------------------------------------------------ *)
+(* Stdlib cache (Phase 1)                                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_stdlib_cache_memoizes () =
+  (* Two loads in the same process must return the *physically same* decls
+     list — proving the parse/desugar is memoized, not repeated. When the
+     stdlib is present (direct runs, CI) the lists are a shared non-empty cons
+     cell; under dune's sandbox the stdlib dir may be unreachable and both are
+     the empty list — physical equality holds either way, and a broken memo
+     (fresh list per call) fails it whenever the stdlib is found. *)
+  let d1 = March_lsp_lib.Stdlib_cache.load () in
+  let d2 = March_lsp_lib.Stdlib_cache.load () in
+  Alcotest.(check bool) "same cached decls (memoized)" true (d1 == d2)
+
+(* ------------------------------------------------------------------ *)
+(* UTF-16 position encoding (Phase 0)                                  *)
+(* ------------------------------------------------------------------ *)
+
+let has_sub s sub =
+  let ls = String.length s and lsub = String.length sub in
+  let rec go i = i + lsub <= ls && (String.sub s i lsub = sub || go (i + 1)) in
+  go 0
+
+let test_hover_after_unicode () =
+  (* On line 2, '    let t = ("é", n)', the param 'n' sits AFTER a 2-byte char
+     (é, 1 UTF-16 unit / 2 bytes). 'n' is at UTF-16 column 18 but byte column
+     19. The query path must convert UTF-16->byte; otherwise the cursor lands
+     one byte early (on the space inside the tuple) and reports the tuple type
+     "(String, Int)" instead of the parameter's type "Int". *)
+  let src =
+    "mod Test do\n\
+    \  fn f(n: Int) : Int do\n\
+    \    let t = (\"\xc3\xa9\", n)\n\
+    \    n\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  match An.query_type_at a ~line:2 ~utf16_char:18 with
+  | None -> Alcotest.fail "expected a type at the identifier 'n'"
+  | Some s ->
+    Alcotest.(check bool)
+      "n resolves to Int (not the enclosing tuple) — UTF-16 column converted"
+      true (has_sub s "Int" && not (has_sub s "String"))
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "march-lsp" [
+    "utf16 position encoding", [
+      "hover resolves identifier on a unicode line", `Quick, test_hover_after_unicode;
+    ];
+    "stdlib cache", [
+      "stdlib parse/desugar is memoized", `Quick, test_stdlib_cache_memoizes;
+    ];
+    "error-resilient analysis", [
+      "broken edit retains last good maps", `Quick, test_resilient_keeps_last_good;
+    ];
+    "document version guard", [
+      "stale background results are rejected", `Quick, test_version_guard;
+    ];
+    "query facade", [
+      "hover returns a transport-agnostic record", `Quick, test_query_hover_record;
+    ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
       Alcotest.test_case "span_to_range multi-line"     `Quick test_span_to_range_multi_line;
