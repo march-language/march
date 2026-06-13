@@ -1,0 +1,19 @@
+-- Regression (cross-module): match a value built in another module with a
+-- type-qualified pattern `Inl.Inline.Text` on the FIRST variant, whose bare
+-- ctor name (`Text`) collides with stdlib Xml.XmlNode.Text.
+--
+-- The qualifier-stripping in lower.ml (b3e8721) reduced the pattern to bare
+-- "Text"; with the element type unpropagated to codegen, ctor_entry's ambiguous
+-- ".Text" suffix resolver then picked the stdlib ctor's tag (1) instead of
+-- Inline.Text (0), so the first-variant match silently missed → "MISS".
+mod XModCtorCollision do
+  fn main() : Unit do
+    let out =
+      match Inl.one("hi") do
+      Cons(Inline.Text(s), Nil) -> "text:" ++ s
+      Cons(Inline.Emph(s), Nil) -> "emph:" ++ s
+      _ -> "MISS"
+      end
+    println(out)
+  end
+end

@@ -1,0 +1,9 @@
+-- Library module (resolved via MARCH_LIB_PATH) whose FIRST constructor name,
+-- `Text`, collides with a stdlib constructor of the same name (Xml.XmlNode.Text,
+-- a non-first variant).  The value is built here and matched in entry.march, so
+-- the element type is not propagated to the match site's codegen.
+mod Inl do
+  type Inline = Text(String) | Emph(String) | Code(String)
+
+  fn one(s : String) : List(Inline) do Cons(Text(s), Nil) end
+end

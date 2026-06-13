@@ -3209,13 +3209,43 @@ and emit_case ctx scrut_atom branches default_opt =
     match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
   in
 
-  (* Produce the type-qualified ctor_info key for a branch tag.
-     When the scrutinee's type is TCon("List", _) and br_tag is "Cons", the key
-     is "List.Cons" — matching the key format used by build_ctor_info and lower.ml. *)
+  (* Produce the ctor_info key for a branch tag (keys are "TypeName.CtorName").
+     - A BARE tag ("Cons") is qualified with the scrutinee type when known
+       ("List.Cons"); otherwise left bare for ctor_entry's suffix resolver.
+     - A QUALIFIED pattern ("Inline.Text", "Md.Inline.Text") carries its own type
+       qualifier.  Resolve it to the ctor_info key whose constructor matches AND
+       whose type segment matches that qualifier, so a ctor name that collides
+       with another type's constructor (e.g. stdlib Xml.XmlNode.Text) is
+       disambiguated by the qualifier the user wrote — NOT by ctor_entry's
+       ambiguous last-segment suffix match (which picks by hashtable order and
+       was the cause of cross-module first-variant mismatches). *)
   let qualified_br_key br_tag =
-    match scrut_tir_ty with
-    | Tir.TCon (type_name, _) -> type_name ^ "." ^ br_tag
-    | _ -> br_tag
+    match String.rindex_opt br_tag '.' with
+    | None ->
+      (match scrut_tir_ty with
+       | Tir.TCon (type_name, _) -> type_name ^ "." ^ br_tag
+       | _ -> br_tag)
+    | Some i ->
+      if Hashtbl.mem ctx.ctor_info br_tag then br_tag
+      else begin
+        let ctor = String.sub br_tag (i + 1) (String.length br_tag - i - 1) in
+        let qual = String.sub br_tag 0 i in
+        let last_seg s = match String.rindex_opt s '.' with
+          | Some j -> String.sub s (j + 1) (String.length s - j - 1) | None -> s in
+        let qtail = last_seg qual in
+        let matched = Hashtbl.fold (fun k _ acc ->
+            match String.rindex_opt k '.' with
+            | Some kc
+              when String.equal (String.sub k (kc + 1) (String.length k - kc - 1)) ctor
+                   && (let ktype = String.sub k 0 kc in
+                       String.equal ktype qual || String.equal (last_seg ktype) qtail) ->
+              k :: acc
+            | _ -> acc
+          ) ctx.ctor_info [] in
+        match matched with
+        | k :: _ -> k
+        | [] -> ctor
+      end
   in
 
   if is_string_case then begin

@@ -854,17 +854,14 @@ and bind_trivial_pat (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : 
     Returns None for trivial patterns. *)
 and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   match pat with
-  | Ast.PatCon ({ txt = full; _ }, subs) ->
-    (* Type-/module-qualified constructor patterns ("T.B", "Json.Str") carry
-       their full dotted text, but case arms discriminate on the BARE ctor
-       name (matching construction, e.g. List.Cons → arm "Cons").  Keep only
-       the last segment so a qualified pattern on a non-first variant resolves
-       to the right tag instead of falling back to tag 0's payload layout.
-       Mirrors norm_pat's stripping in the exhaustiveness checker. *)
-    let tag = match String.rindex_opt full '.' with
-      | Some i -> String.sub full (i + 1) (String.length full - i - 1)
-      | None -> full
-    in
+  | Ast.PatCon ({ txt = tag; _ }, subs) ->
+    (* Keep the constructor pattern's FULL text (e.g. "Inline.Text", "T.B").
+       A type-qualified pattern carries its own disambiguating qualifier; codegen
+       (qualified_br_key in llvm_emit) resolves it to the right ctor_info key.
+       Stripping to the bare name here loses that qualifier, so a bare ctor name
+       that collides with another type's constructor (e.g. stdlib Xml.XmlNode.Text)
+       resolves ambiguously to the wrong tag when the scrutinee type was not
+       propagated to codegen. *)
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->
     Some (Printf.sprintf "$Tuple%d" (List.length subs), subs)

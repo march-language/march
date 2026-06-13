@@ -384,6 +384,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/qualified_ctor_pattern.expected native_qualified_ctor_pattern.out)))
 
+; ── Regression: cross-module ctor pattern whose name collides with a stdlib ──
+; ── constructor, on the FIRST variant. ──
+; A user type's first ctor `Text` collides with stdlib Xml.XmlNode.Text (tag 1).
+; Stripping the qualified pattern `Inline.Text` to bare "Text" (b3e8721) left
+; codegen's ctor_entry to resolve it by an ambiguous ".Text" suffix match when
+; the value's element type was not propagated across the module boundary — it
+; picked the stdlib ctor's tag (1) instead of Inline.Text (0), so the
+; first-variant match silently missed.  The fix keeps the pattern's qualifier
+; and resolves it to the ctor_info key whose type segment matches.  Build the
+; value in a MARCH_LIB_PATH lib module, match it cross-module, run, diff stdout.
+(rule
+ (targets native_xmod_ctor_collision native_xmod_ctor_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (glob_files_rec native/xmod_ctor_collision/*.march))
+ (action
+  (setenv MARCH_LIB_PATH native/xmod_ctor_collision/lib
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_xmod_ctor_collision
+         native/xmod_ctor_collision/entry.march)
+    (with-stdout-to native_xmod_ctor_collision.out
+         (system "./native_xmod_ctor_collision"))))))
+
+(rule
+ (alias runtest)
+ (action (diff native/xmod_ctor_collision.expected native_xmod_ctor_collision.out)))
+
 ; ── Regression: structural == on imported ADTs in native builds ──
 ; ensure_adt_eq_fn looked constructors up by the TCon's (short) type name
 ; while build_ctor_info keys are module-qualified ("AeLib.AeShape.AeDot"),
