@@ -1,0 +1,20 @@
+-- Regression: type-qualified constructor patterns on a non-first variant.
+-- `T.B(n)` was lowered to a case arm tagged "T.B"; codegen matches arms on the
+-- bare ctor name ("B"), so it fell back to tag 0's payload layout and read the
+-- variant-1 Int at the wrong offset (garbage).  Both arms here are qualified;
+-- the second (B, variant 1) is the one that regressed.
+mod QualCtorPat do
+  type T = A(Int) | B(Int)
+
+  fn extract(t : T) : Int do
+    match t do
+    T.A(n) -> n
+    T.B(n) -> n
+    end
+  end
+
+  fn main() : Unit do
+    println(int_to_string(extract(A(7))))
+    println(int_to_string(extract(B(9))))
+  end
+end

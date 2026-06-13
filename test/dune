@@ -361,6 +361,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/zero_arg_closure_default.expected native_zero_arg_closure_default.out)))
 
+; ── Regression: type-qualified constructor patterns on non-first variants ──
+; `match t do T.B(n) -> ...` lowered the arm with the full dotted tag "T.B",
+; but codegen discriminates on the bare ctor name ("B"), so the arm fell back
+; to tag 0's payload layout and read variant 1's Int at the wrong offset
+; (garbage).  Bare patterns and first-variant qualified patterns coincided
+; with offset 0, so the bug only showed for a qualified non-first variant.
+; Compile, run, and diff stdout against the expected (interpreter) output.
+(rule
+ (targets native_qualified_ctor_pattern native_qualified_ctor_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/qualified_ctor_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_qualified_ctor_pattern
+        native/qualified_ctor_pattern.march)
+   (with-stdout-to native_qualified_ctor_pattern.out
+        (system "./native_qualified_ctor_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/qualified_ctor_pattern.expected native_qualified_ctor_pattern.out)))
+
 ; ── Regression: structural == on imported ADTs in native builds ──
 ; ensure_adt_eq_fn looked constructors up by the TCon's (short) type name
 ; while build_ctor_info keys are module-qualified ("AeLib.AeShape.AeDot"),
