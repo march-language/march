@@ -426,6 +426,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/qualified_ctor_pattern.expected native_qualified_ctor_pattern.out)))
 
+; ── Regression: Atom in a generic constructor slot round-trips losslessly ──
+; Atoms are i64 FNV hashes; generic ctor slots tag-encode immediates as
+; (n<<1)|1 and decode with arithmetic shift-right, lossless only when
+; bit63 == bit62.  :put/:post hashes violate that, so they came back as
+; garbage after Conn-field extraction (broke Router method matching).
+; atom_hash now forces bit63 == bit62.  Compile, run, diff stdout.
+(rule
+ (targets native_atom_ctor_field native_atom_ctor_field.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/atom_ctor_field.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_atom_ctor_field
+        native/atom_ctor_field.march)
+   (with-stdout-to native_atom_ctor_field.out
+        (system "./native_atom_ctor_field")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/atom_ctor_field.expected native_atom_ctor_field.out)))
+
 ; ── Regression: cross-module ctor pattern whose name collides with a stdlib ──
 ; ── constructor, on the FIRST variant. ──
 ; A user type's first ctor `Text` collides with stdlib Xml.XmlNode.Text (tag 1).

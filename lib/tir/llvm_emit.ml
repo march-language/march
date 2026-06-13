@@ -231,6 +231,23 @@ let fnv1a_64 (s : string) : int64 =
     Int64.mul (Int64.logxor h (Int64.of_int (Char.code c))) fnv_prime
   ) fnv_offset s
 
+(** Atom interning value: FNV-1a 64-bit of the name, then forced so bit63 ==
+    bit62.  Atoms are i64 immediates that may flow through GENERIC (ptr)
+    constructor slots, where they are tag-encoded as (n<<1)|1 and decoded with
+    an ARITHMETIC shift-right (see emit_conv ptr<->i64).  That round-trip is
+    lossless only when bit63 == bit62 (a sign-extended 63-bit integer); a raw
+    64-bit hash with bit63 <> bit62 is corrupted on extract — e.g. :put / :post
+    came back as garbage, breaking Router method matching.  Forcing
+    bit63 := bit62 makes every atom survive generic-slot transit while keeping
+    63 bits of entropy.  BOTH atom-emission sites (literal + switch-arm tag)
+    must use this. *)
+let atom_hash (name : string) : int64 =
+  let h = fnv1a_64 name in
+  let bit62 = Int64.logand (Int64.shift_right_logical h 62) 1L in
+  Int64.logor
+    (Int64.logand h 0x7FFFFFFFFFFFFFFFL)   (* clear bit63 *)
+    (Int64.shift_left bit62 63)            (* set bit63 := bit62 *)
+
 let llvm_ty : Tir.ty -> string = function
   | Tir.TInt    -> "i64"
   | Tir.TFloat  -> "double"
@@ -1125,8 +1142,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     ("double", Printf.sprintf "0x%016LX" bits)
   | Tir.ALit (March_ast.Ast.LitBool b)  -> ("i64",    if b then "1" else "0")
   | Tir.ALit (March_ast.Ast.LitAtom name) ->
-    (* Atoms are interned as FNV-1a 64-bit hashes of their name *)
-    let h = fnv1a_64 name in
+    (* Atoms are interned as FNV-1a 64-bit hashes (bit63 forced == bit62 so
+       they survive generic-slot tag round-trips — see atom_hash). *)
+    let h = atom_hash name in
     ("i64", Int64.to_string h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
     let gname = intern_string ctx s in
@@ -3336,9 +3354,9 @@ and emit_case ctx scrut_atom branches default_opt =
             else begin
               let v =
                 if is_atom_case then begin
-                  (* Atom tags are ":NAME" — hash the name part with FNV1a *)
+                  (* Atom tags are ":NAME" — must match emit_atom's interning. *)
                   let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
-                  fnv1a_64 name
+                  atom_hash name
                 end else
                   match Int64.of_string_opt br.Tir.br_tag with
                   | Some n -> n

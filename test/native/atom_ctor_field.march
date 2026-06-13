@@ -1,0 +1,26 @@
+-- Regression: an Atom stored in a GENERIC (mixed-type) constructor slot and
+-- extracted via pattern match must round-trip exactly.  Atoms are i64 FNV
+-- hashes; generic slots tag-encode immediates as (n<<1)|1 and decode with an
+-- arithmetic shift-right, which is only lossless when bit63 == bit62.  :put and
+-- :post have FNV hashes with bit63 != bit62, so they used to come back as
+-- garbage (broke Router method matching).  atom_hash now forces bit63 == bit62.
+mod AtomCtorField do
+  type Box = Box(Int, Atom, Int)
+
+  fn mk(a : Atom) : Box do Box(0, a, 1) end
+  fn get(b : Box) : Atom do
+    match b do Box(_, a, _) -> a end
+  end
+
+  fn check(label : String, got : Atom, want : Atom) : Unit do
+    if got == want do println("ok " ++ label) else println("BAD " ++ label) end
+  end
+
+  fn main() : Unit do
+    check("put", get(mk(:put)), :put)
+    check("post", get(mk(:post)), :post)
+    check("get", get(mk(:get)), :get)
+    check("patch", get(mk(:patch)), :patch)
+    check("delete", get(mk(:delete)), :delete)
+  end
+end
