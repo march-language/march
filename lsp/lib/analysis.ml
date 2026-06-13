@@ -112,6 +112,8 @@ type code_lens_item = {
 type t = {
   src         : string;
   filename    : string;
+  doc         : Utf16.doc;
+  (** Line index + source for UTF-16<->byte column conversion. *)
   type_map    : (Ast.span, Tc.ty) Hashtbl.t;
   (** Span → inferred type. *)
   def_map     : (string, Ast.span) Hashtbl.t;
@@ -1152,9 +1154,11 @@ let analyse ~filename ~src : t =
     | March_lexer.Lexer.Lexer_error msg ->
       Error (`LexerError (msg, Lexing.lexeme_start_p lexbuf))
   in
+  let doc = Utf16.build src in
   let make_empty_with diag =
     { src;
       filename;
+      doc;
       type_map         = Hashtbl.create 0;
       def_map          = Hashtbl.create 0;
       use_map          = Hashtbl.create 0;
@@ -1763,7 +1767,7 @@ let analyse ~filename ~src : t =
       @ unused_fn_diags
       @ perf_diags
     in
-    { src; filename; type_map; def_map; use_map;
+    { src; filename; doc; type_map; def_map; use_map;
       vars       = Tc.StrMap.bindings final_env.Tc.vars;
       types      = Tc.StrMap.bindings final_env.Tc.types;
       ctors      = Tc.StrMap.fold (fun name cis acc ->
@@ -3289,3 +3293,45 @@ let perf_insight_at (a : t) ~line ~character : string option =
       ) (List.hd candidates) (List.tl candidates)
     in
     Some best.pi_message
+
+(* ---------------------------------------------------------------------- *)
+(* UTF-16 query wrappers.                                                  *)
+(* Editors (and the CLI) pass UTF-16 character columns; the internal query *)
+(* functions work in byte columns (matching March spans). These wrappers   *)
+(* convert the incoming column and remap any outbound ranges back to       *)
+(* UTF-16, so callers never touch encoding.                                *)
+(* ---------------------------------------------------------------------- *)
+
+let byte_col_of (a : t) ~line ~utf16_char =
+  Utf16.lsp_char_to_byte_col a.doc ~line ~utf16_char
+
+let query_type_at (a : t) ~line ~utf16_char =
+  type_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_doc_name_at (a : t) ~line ~utf16_char =
+  doc_name_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_perf_insight_at (a : t) ~line ~utf16_char =
+  perf_insight_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_actor_info_at (a : t) ~line ~utf16_char =
+  actor_info_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_signature_help_at (a : t) ~line ~utf16_char =
+  signature_help_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_completions_at (a : t) ~line ~utf16_char =
+  completions_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_definition_at (a : t) ~line ~utf16_char =
+  match definition_at a ~line ~character:(byte_col_of a ~line ~utf16_char) with
+  | None -> None
+  | Some l -> Some (Pos.remap_location a.doc l)
+
+let query_references_at (a : t) ~include_declaration ~line ~utf16_char =
+  references_at a ~include_declaration ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (Pos.remap_location a.doc)
+
+let query_rename_at (a : t) ~line ~utf16_char ~new_name =
+  rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char) ~new_name
+  |> List.map (Pos.remap_text_edit a.doc)

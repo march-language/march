@@ -42,3 +42,58 @@ let lsp_pos_to_pair (pos : Lsp.Types.Position.t) : int * int =
 (** Create an LSP Position value. *)
 let create ~line ~character : Lsp.Types.Position.t =
   Lsp.Types.Position.create ~line ~character
+
+(* ---------------------------------------------------------------------- *)
+(* Outbound remap: byte-column ranges (as produced internally) -> UTF-16.  *)
+(* Applied at the transport boundary so every Range/Location/TextEdit/      *)
+(* Diagnostic the client receives uses correct UTF-16 character columns.    *)
+(* ---------------------------------------------------------------------- *)
+
+let remap_pos (d : Utf16.doc) (p : Lsp.Types.Position.t) : Lsp.Types.Position.t =
+  Lsp.Types.Position.create
+    ~line:p.Lsp.Types.Position.line
+    ~character:(Utf16.byte_col_to_lsp_char d
+                  ~line:p.Lsp.Types.Position.line
+                  ~byte_col:p.Lsp.Types.Position.character)
+
+let remap_range (d : Utf16.doc) (r : Lsp.Types.Range.t) : Lsp.Types.Range.t =
+  Lsp.Types.Range.create
+    ~start:(remap_pos d r.Lsp.Types.Range.start)
+    ~end_:(remap_pos d r.Lsp.Types.Range.end_)
+
+let remap_location (d : Utf16.doc) (l : Lsp.Types.Location.t) : Lsp.Types.Location.t =
+  { l with Lsp.Types.Location.range = remap_range d l.Lsp.Types.Location.range }
+
+let remap_text_edit (d : Utf16.doc) (e : Lsp.Types.TextEdit.t) : Lsp.Types.TextEdit.t =
+  { e with Lsp.Types.TextEdit.range = remap_range d e.Lsp.Types.TextEdit.range }
+
+let remap_diagnostic (d : Utf16.doc) (dg : Lsp.Types.Diagnostic.t) : Lsp.Types.Diagnostic.t =
+  { dg with Lsp.Types.Diagnostic.range = remap_range d dg.Lsp.Types.Diagnostic.range }
+
+let remap_inlay_hint (d : Utf16.doc) (h : Lsp.Types.InlayHint.t) : Lsp.Types.InlayHint.t =
+  { h with Lsp.Types.InlayHint.position = remap_pos d h.Lsp.Types.InlayHint.position }
+
+let rec remap_document_symbol (d : Utf16.doc) (s : Lsp.Types.DocumentSymbol.t)
+  : Lsp.Types.DocumentSymbol.t =
+  { s with
+    Lsp.Types.DocumentSymbol.range = remap_range d s.Lsp.Types.DocumentSymbol.range;
+    Lsp.Types.DocumentSymbol.selectionRange =
+      remap_range d s.Lsp.Types.DocumentSymbol.selectionRange;
+    Lsp.Types.DocumentSymbol.children =
+      Option.map (List.map (remap_document_symbol d))
+        s.Lsp.Types.DocumentSymbol.children }
+
+let remap_workspace_edit (d : Utf16.doc) (we : Lsp.Types.WorkspaceEdit.t)
+  : Lsp.Types.WorkspaceEdit.t =
+  match we.Lsp.Types.WorkspaceEdit.changes with
+  | None -> we
+  | Some chs ->
+    { we with Lsp.Types.WorkspaceEdit.changes =
+        Some (List.map
+                (fun (uri, edits) -> (uri, List.map (remap_text_edit d) edits))
+                chs) }
+
+let remap_code_action (d : Utf16.doc) (ca : Lsp.Types.CodeAction.t)
+  : Lsp.Types.CodeAction.t =
+  { ca with Lsp.Types.CodeAction.edit =
+      Option.map (remap_workspace_edit d) ca.Lsp.Types.CodeAction.edit }

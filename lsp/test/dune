@@ -16,4 +16,4 @@
 (test
  (name test_utf16)
  (modules test_utf16)
- (libraries march_lsp_lib alcotest))
+ (libraries march_lsp_lib linol.lsp alcotest))

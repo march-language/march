@@ -31,10 +31,24 @@ let test_ascii_identity () =
   Alcotest.(check int) "ascii utf16==byte" 4
     (U.lsp_char_to_byte_col d ~line:0 ~utf16_char:4)
 
+(* Outbound: a byte-column range (as produced internally) is remapped to
+   UTF-16 at the boundary. On line 1 "let é = 2", the '=' is at byte col 7
+   but UTF-16 col 6 (é is 2 bytes / 1 unit). *)
+let test_remap_range_to_utf16 () =
+  let open Linol_lsp.Lsp.Types in
+  let d = U.build src in
+  let r = Range.create
+    ~start:(Position.create ~line:1 ~character:7)
+    ~end_:(Position.create ~line:1 ~character:8) in
+  let r2 = March_lsp_lib.Position.remap_range d r in
+  Alcotest.(check int) "start byte 7 -> utf16 6" 6 r2.start.character;
+  Alcotest.(check int) "end byte 8 -> utf16 7" 7 r2.end_.character
+
 let () =
   Alcotest.run "utf16"
     [ "conv",
       [ Alcotest.test_case "line index" `Quick test_line_index;
         Alcotest.test_case "2-byte char" `Quick test_utf16_after_2byte_char;
         Alcotest.test_case "astral char" `Quick test_astral_char_two_units;
-        Alcotest.test_case "ascii identity" `Quick test_ascii_identity ] ]
+        Alcotest.test_case "ascii identity" `Quick test_ascii_identity;
+        Alcotest.test_case "remap range outbound" `Quick test_remap_range_to_utf16 ] ]

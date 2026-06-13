@@ -2865,11 +2865,45 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* UTF-16 position encoding (Phase 0)                                  *)
+(* ------------------------------------------------------------------ *)
+
+let has_sub s sub =
+  let ls = String.length s and lsub = String.length sub in
+  let rec go i = i + lsub <= ls && (String.sub s i lsub = sub || go (i + 1)) in
+  go 0
+
+let test_hover_after_unicode () =
+  (* On line 2, '    let t = ("é", n)', the param 'n' sits AFTER a 2-byte char
+     (é, 1 UTF-16 unit / 2 bytes). 'n' is at UTF-16 column 18 but byte column
+     19. The query path must convert UTF-16->byte; otherwise the cursor lands
+     one byte early (on the space inside the tuple) and reports the tuple type
+     "(String, Int)" instead of the parameter's type "Int". *)
+  let src =
+    "mod Test do\n\
+    \  fn f(n: Int) : Int do\n\
+    \    let t = (\"\xc3\xa9\", n)\n\
+    \    n\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  match An.query_type_at a ~line:2 ~utf16_char:18 with
+  | None -> Alcotest.fail "expected a type at the identifier 'n'"
+  | Some s ->
+    Alcotest.(check bool)
+      "n resolves to Int (not the enclosing tuple) — UTF-16 column converted"
+      true (has_sub s "Int" && not (has_sub s "String"))
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "march-lsp" [
+    "utf16 position encoding", [
+      "hover resolves identifier on a unicode line", `Quick, test_hover_after_unicode;
+    ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
       Alcotest.test_case "span_to_range multi-line"     `Quick test_span_to_range_multi_line;

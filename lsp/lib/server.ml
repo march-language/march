@@ -29,9 +29,15 @@ let get_analysis uri =
 let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t)
     (diagnostics : Lsp.Types.Diagnostic.t list) :
     Lsp.Types.CodeAction.t list =
-  let line      = range.Lsp.Types.Range.start.Lsp.Types.Position.line in
-  let character = range.Lsp.Types.Range.start.Lsp.Types.Position.character in
+  let line = range.Lsp.Types.Range.start.Lsp.Types.Position.line in
+  (* Inbound: the client's cursor column is UTF-16; analysis works in bytes. *)
+  let character =
+    Utf16.lsp_char_to_byte_col a.Analysis.doc ~line
+      ~utf16_char:range.Lsp.Types.Range.start.Lsp.Types.Position.character
+  in
+  (* Outbound: remap edit ranges back to UTF-16 for the client. *)
   Analysis.code_actions_at a ~line ~character ~diagnostics ()
+  |> List.map (Pos.remap_code_action a.Analysis.doc)
 
 (* ------------------------------------------------------------------ *)
 (* Semantic tokens encoding                                            *)
@@ -46,6 +52,10 @@ let semantic_tokens_data (a : Analysis.t) : int array =
   let mod_readonly    = 4 in
 
   let tokens = ref [] in
+  (* LSP semantic-token start columns and lengths are in UTF-16 code units. *)
+  let to_u line0 byte_col =
+    Utf16.byte_col_to_lsp_char a.Analysis.doc ~line:line0 ~byte_col
+  in
 
   Hashtbl.iter (fun name sp ->
       let tok_type_idx, mods =
@@ -57,20 +67,22 @@ let semantic_tokens_data (a : Analysis.t) : int array =
           tok_function, mod_declaration
       in
       let len = sp.March_ast.Ast.end_col - sp.March_ast.Ast.start_col in
-      if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then
-        tokens :=
-          (sp.March_ast.Ast.start_line - 1,
-           sp.March_ast.Ast.start_col,
-           len, tok_type_idx, mods) :: !tokens
+      if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then begin
+        let line0 = sp.March_ast.Ast.start_line - 1 in
+        let u_start = to_u line0 sp.March_ast.Ast.start_col in
+        let u_len   = to_u line0 sp.March_ast.Ast.end_col - u_start in
+        tokens := (line0, u_start, u_len, tok_type_idx, mods) :: !tokens
+      end
     ) a.Analysis.def_map;
 
   Hashtbl.iter (fun sp _name ->
       let len = sp.March_ast.Ast.end_col - sp.March_ast.Ast.start_col in
-      if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then
-        tokens :=
-          (sp.March_ast.Ast.start_line - 1,
-           sp.March_ast.Ast.start_col,
-           len, tok_variable, 0) :: !tokens
+      if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then begin
+        let line0 = sp.March_ast.Ast.start_line - 1 in
+        let u_start = to_u line0 sp.March_ast.Ast.start_col in
+        let u_len   = to_u line0 sp.March_ast.Ast.end_col - u_start in
+        tokens := (line0, u_start, u_len, tok_variable, 0) :: !tokens
+      end
     ) a.Analysis.use_map;
 
   let sorted = List.sort
@@ -157,6 +169,10 @@ class march_server =
           ()
       in
       { caps with
+        (* All ranges we emit are converted to UTF-16 (the LSP default) against
+           the document text, so advertise UTF-16 explicitly. *)
+        ServerCapabilities.positionEncoding =
+          Some Lsp.Types.PositionEncodingKind.UTF16;
         ServerCapabilities.semanticTokensProvider =
           Some (`SemanticTokensOptions sem_tokens);
         ServerCapabilities.referencesProvider =
@@ -177,7 +193,8 @@ class march_server =
     method on_notif_doc_did_open ~notify_back doc ~content =
       let uri = doc.Lsp.Types.TextDocumentItem.uri in
       let a = analyse_and_cache uri content in
-      (* Push AST-level diagnostics immediately so the editor is responsive. *)
+      (* Push AST-level diagnostics immediately so the editor is responsive.
+         Diagnostic ranges are produced in byte columns; remap to UTF-16. *)
       Lwt.async (fun () ->
         (* Run TIR pipeline in a background fiber.  On completion, update the
            cached analysis and push an incremental publishDiagnostics with the
@@ -185,8 +202,10 @@ class march_server =
         let a2 = Analysis.run_tir_pass a in
         let uri_str = Lsp.Types.DocumentUri.to_string uri in
         Hashtbl.replace doc_cache uri_str a2;
-        notify_back#send_diagnostic a2.Analysis.diagnostics);
-      notify_back#send_diagnostic a.Analysis.diagnostics
+        notify_back#send_diagnostic
+          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics));
+      notify_back#send_diagnostic
+        (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
 
     method on_notif_doc_did_close ~notify_back:_ doc =
       Hashtbl.remove doc_cache
@@ -198,13 +217,16 @@ class march_server =
         ~old_content:_ ~new_content =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
       let a = analyse_and_cache uri new_content in
-      (* Same two-phase publish: AST diagnostics first, TIR insights async. *)
+      (* Same two-phase publish: AST diagnostics first, TIR insights async.
+         Diagnostic ranges are byte columns; remap to UTF-16 for the client. *)
       Lwt.async (fun () ->
         let a2 = Analysis.run_tir_pass a in
         let uri_str = Lsp.Types.DocumentUri.to_string uri in
         Hashtbl.replace doc_cache uri_str a2;
-        notify_back#send_diagnostic a2.Analysis.diagnostics);
-      notify_back#send_diagnostic a.Analysis.diagnostics
+        notify_back#send_diagnostic
+          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics));
+      notify_back#send_diagnostic
+        (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
 
     (* -------------------------------------------------------------- *)
     (* Hover                                                           *)
@@ -212,14 +234,14 @@ class march_server =
 
     method on_req_hover ~notify_back:_ ~id:_ ~uri ~pos ~workDoneToken:_ _doc =
       let open Lsp.Types in
-      let (line, character) = Pos.lsp_pos_to_pair pos in
+      let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
       let result =
         match get_analysis uri with
         | None -> None
         | Some a ->
-          let ty_str   = Analysis.type_at a ~line ~character in
-          let doc_str  = Analysis.doc_name_at a ~line ~character in
-          let perf_str = Analysis.perf_insight_at a ~line ~character in
+          let ty_str   = Analysis.query_type_at a ~line ~utf16_char in
+          let doc_str  = Analysis.query_doc_name_at a ~line ~utf16_char in
+          let perf_str = Analysis.query_perf_insight_at a ~line ~utf16_char in
           let parts   = List.filter_map Fun.id [
             Option.map (fun ty -> Printf.sprintf "```march\n%s\n```" ty) ty_str;
             Option.map (fun d  -> "---\n" ^ d) doc_str;
@@ -231,7 +253,7 @@ class march_server =
               ~value:(String.concat "\n" parts) in
             Some (Hover.create ~contents:(`MarkupContent md) ())
           else
-            Analysis.actor_info_at a ~line ~character
+            Analysis.query_actor_info_at a ~line ~utf16_char
             |> Option.map (fun info ->
                 let md = MarkupContent.create
                   ~kind:MarkupKind.Markdown ~value:info in
@@ -245,11 +267,11 @@ class march_server =
 
     method on_req_definition ~notify_back:_ ~id:_ ~uri ~pos
         ~workDoneToken:_ ~partialResultToken:_ _doc =
-      let (line, character) = Pos.lsp_pos_to_pair pos in
+      let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
       let loc =
         match get_analysis uri with
         | None -> None
-        | Some a -> Analysis.definition_at a ~line ~character
+        | Some a -> Analysis.query_definition_at a ~line ~utf16_char
       in
       Lwt.return (Option.map (fun l -> `Location [l]) loc)
 
@@ -259,11 +281,11 @@ class march_server =
 
     method on_req_completion ~notify_back:_ ~id:_ ~uri ~pos ~ctx:_
         ~workDoneToken:_ ~partialResultToken:_ _doc =
-      let (line, character) = Pos.lsp_pos_to_pair pos in
+      let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
       let items =
         match get_analysis uri with
         | None -> []
-        | Some a -> Analysis.completions_at a ~line ~character
+        | Some a -> Analysis.query_completions_at a ~line ~utf16_char
       in
       Lwt.return (Some (`List items))
 
@@ -276,8 +298,11 @@ class march_server =
         match get_analysis uri with
         | None -> None
         | Some a ->
+          (* inlay_hints_for filters by line only, so the inbound range needs
+             no column conversion; remap the outbound hint positions to UTF-16. *)
           let hs = Analysis.inlay_hints_for a range in
-          if hs = [] then None else Some hs
+          if hs = [] then None
+          else Some (List.map (Pos.remap_inlay_hint a.Analysis.doc) hs)
       in
       Lwt.return hints
 
@@ -290,7 +315,12 @@ class march_server =
       let syms =
         match get_analysis uri with
         | None -> None
-        | Some a -> Some (Analysis.document_symbols a)
+        | Some a ->
+          (match Analysis.document_symbols a with
+           | `DocumentSymbol ss ->
+             Some (`DocumentSymbol
+                     (List.map (Pos.remap_document_symbol a.Analysis.doc) ss))
+           | other -> Some other)
       in
       Lwt.return syms
 
@@ -388,7 +418,7 @@ class march_server =
              | _ -> false)
           | _ -> false
         in
-        let (line, character) = get_position () in
+        let (line, utf16_char) = get_position () in
         let locs =
           match get_td_uri () with
           | None -> []
@@ -396,7 +426,7 @@ class march_server =
             (match get_analysis uri with
              | None -> []
              | Some a ->
-               Analysis.references_at a ~include_declaration ~line ~character)
+               Analysis.query_references_at a ~include_declaration ~line ~utf16_char)
         in
         Lwt.return
           (`List (List.map (fun (loc : Lsp.Types.Location.t) ->
@@ -413,7 +443,7 @@ class march_server =
              | Some (`String s) -> s | _ -> "")
           | _ -> ""
         in
-        let (line, character) = get_position () in
+        let (line, utf16_char) = get_position () in
         let edits, uri_str =
           match get_td_uri () with
           | None -> ([], "")
@@ -421,7 +451,7 @@ class march_server =
             (match get_analysis uri with
              | None -> ([], "")
              | Some a ->
-               let es = Analysis.rename_at a ~line ~character ~new_name in
+               let es = Analysis.query_rename_at a ~line ~utf16_char ~new_name in
                (es, Lsp.Types.DocumentUri.to_string uri))
         in
         let json_edits = List.map (fun (e : Lsp.Types.TextEdit.t) ->
@@ -437,14 +467,14 @@ class march_server =
             (`Assoc [("changes", `Assoc [(uri_str, `List json_edits)])])
 
       end else if meth = "textDocument/signatureHelp" then begin
-        let (line, character) = get_position () in
+        let (line, utf16_char) = get_position () in
         let result =
           match get_td_uri () with
           | None -> None
           | Some uri ->
             (match get_analysis uri with
              | None -> None
-             | Some a -> Analysis.signature_help_at a ~line ~character)
+             | Some a -> Analysis.query_signature_help_at a ~line ~utf16_char)
         in
         (match result with
          | None ->
@@ -472,7 +502,12 @@ class march_server =
           | Some uri ->
             (match get_analysis uri with
              | None -> []
-             | Some a -> a.Analysis.code_lens_items)
+             | Some a ->
+               (* Remap code-lens ranges (byte columns) to UTF-16. *)
+               List.map (fun (cl : Analysis.code_lens_item) ->
+                   { cl with Analysis.cl_range =
+                               Pos.remap_range a.Analysis.doc cl.Analysis.cl_range })
+                 a.Analysis.code_lens_items)
         in
         let json_items = List.map (fun (cl : Analysis.code_lens_item) ->
             `Assoc [
