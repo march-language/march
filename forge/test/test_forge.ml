@@ -189,7 +189,7 @@ author = ""
 let test_toml_inline_table () =
   let text = {|
 [deps]
-stdlib = { git = "https://github.com/march-lang/stdlib", rev = "main" }
+stdlib = { git = "https://github.com/march-language/stdlib", rev = "main" }
 |} in
   let doc  = Toml.parse text in
   let deps = Toml.get_section doc "deps" in
@@ -197,7 +197,7 @@ stdlib = { git = "https://github.com/march-lang/stdlib", rev = "main" }
    | None     -> Alcotest.fail "expected inline table for stdlib"
    | Some tbl ->
      Alcotest.(check (option string)) "git url"
-       (Some "https://github.com/march-lang/stdlib")
+       (Some "https://github.com/march-language/stdlib")
        (Toml.get_string tbl "git");
      Alcotest.(check (option string)) "rev"
        (Some "main")
@@ -237,6 +237,45 @@ name = "bar"
   let deps = Toml.get_section doc "deps" in
   Alcotest.(check int) "empty deps section" 0 (List.length deps)
 
+(* ---------------------------------------------------------------- toolchain *)
+
+let test_platform_darwin_arm () =
+  Alcotest.(check (result string string)) "darwin arm64"
+    (Ok "darwin-arm64") (Toolchain.platform_of_uname "Darwin" "arm64")
+
+let test_platform_linux () =
+  Alcotest.(check (result string string)) "linux x86_64"
+    (Ok "linux-x86_64") (Toolchain.platform_of_uname "Linux" "x86_64");
+  Alcotest.(check (result string string)) "linux aarch64"
+    (Ok "linux-aarch64") (Toolchain.platform_of_uname "Linux" "aarch64");
+  Alcotest.(check (result string string)) "linux arm64 maps to aarch64"
+    (Ok "linux-aarch64") (Toolchain.platform_of_uname "Linux" "arm64")
+
+let test_platform_trims () =
+  Alcotest.(check (result string string)) "trims uname whitespace"
+    (Ok "darwin-arm64") (Toolchain.platform_of_uname "Darwin\n" "  arm64 ")
+
+let test_platform_unsupported () =
+  (match Toolchain.platform_of_uname "Darwin" "x86_64" with
+   | Error _ -> () | Ok _ -> Alcotest.fail "intel macOS should be unsupported");
+  (match Toolchain.platform_of_uname "Plan9" "vax" with
+   | Error _ -> () | Ok _ -> Alcotest.fail "unknown platform should error")
+
+let test_checksum_standard () =
+  let sums = "abc123  march-1.0-darwin-arm64.tar.gz\ndef456  march-1.0-linux-x86_64.tar.gz" in
+  Alcotest.(check (option string)) "finds the matching line's hash"
+    (Some "abc123") (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
+
+let test_checksum_legacy_prefix () =
+  let sums = "sha256:ABC123  march-1.0-darwin-arm64.tar.gz" in
+  Alcotest.(check (option string)) "strips sha256: prefix and lowercases"
+    (Some "abc123") (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
+
+let test_checksum_not_found () =
+  let sums = "abc123  other.tar.gz" in
+  Alcotest.(check (option string)) "unlisted file yields None (verify fails closed)"
+    None (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -259,5 +298,14 @@ let () =
       Alcotest.test_case "inline table (path dep)"  `Quick test_toml_path_dep;
       Alcotest.test_case "comments are ignored"     `Quick test_toml_comments_ignored;
       Alcotest.test_case "missing section is empty" `Quick test_toml_missing_section;
+    ];
+    "toolchain", [
+      Alcotest.test_case "platform: darwin arm64"            `Quick test_platform_darwin_arm;
+      Alcotest.test_case "platform: linux variants"          `Quick test_platform_linux;
+      Alcotest.test_case "platform: trims uname output"      `Quick test_platform_trims;
+      Alcotest.test_case "platform: unsupported errors"      `Quick test_platform_unsupported;
+      Alcotest.test_case "checksum: standard format"         `Quick test_checksum_standard;
+      Alcotest.test_case "checksum: legacy sha256 prefix"    `Quick test_checksum_legacy_prefix;
+      Alcotest.test_case "checksum: unlisted file -> None"   `Quick test_checksum_not_found;
     ];
   ]

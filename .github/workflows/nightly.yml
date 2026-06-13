@@ -53,7 +53,7 @@ jobs:
           VERSION="${{ needs.version.outputs.version }}"
           DATE="${{ needs.version.outputs.date }}"
           COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-          REPO="https://github.com/march-lang/march/releases/download"
+          REPO="https://github.com/march-language/march/releases/download"
 
           cat > nightly-manifest.json << MANIFEST
           {
@@ -64,10 +64,6 @@ jobs:
               "darwin-arm64": {
                 "url": "${REPO}/nightly-${DATE}/march-${VERSION}-darwin-arm64.tar.gz",
                 "sha256": "$(grep darwin-arm64 artifacts/march-${VERSION}-checksums.txt | cut -d' ' -f1)"
-              },
-              "darwin-x86_64": {
-                "url": "${REPO}/nightly-${DATE}/march-${VERSION}-darwin-x86_64.tar.gz",
-                "sha256": "$(grep darwin-x86_64 artifacts/march-${VERSION}-checksums.txt | cut -d' ' -f1)"
               },
               "linux-x86_64": {
                 "url": "${REPO}/nightly-${DATE}/march-${VERSION}-linux-x86_64.tar.gz",
@@ -94,11 +90,12 @@ jobs:
 
             Install with forge:
             ```
-            forge install ${{ needs.version.outputs.version }}
+            forge toolchain install ${{ needs.version.outputs.version }}
             ```
           files: |
             artifacts/*
             nightly-manifest.json
+            install.sh
           prerelease: true
 
       - name: Update rolling nightly tag

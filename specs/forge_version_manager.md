@@ -225,7 +225,7 @@ The package CAS stores whole directory archives keyed by a single hash of the ca
 version = "0.5.0"
 installed_at = "2026-03-28T14:30:00Z"
 archive_hash = "sha256:abc123..."
-source_url = "https://github.com/march-lang/march/releases/download/v0.5.0/march-0.5.0-darwin-arm64.tar.gz"
+source_url = "https://github.com/march-language/march/releases/download/v0.5.0/march-0.5.0-darwin-arm64.tar.gz"
 
 [[files]]
 path = "bin/march"
@@ -364,7 +364,7 @@ Nightly builds are produced by a scheduled GitHub Actions workflow that:
   "commit": "abc123f",
   "assets": {
     "darwin-arm64": {
-      "url": "https://github.com/march-lang/march/releases/download/nightly-20260328/march-0.6.0-nightly.20260328-darwin-arm64.tar.gz",
+      "url": "https://github.com/march-language/march/releases/download/nightly-20260328/march-0.6.0-nightly.20260328-darwin-arm64.tar.gz",
       "sha256": "abc123..."
     },
     "darwin-x86_64": { "...": "..." },
@@ -419,7 +419,7 @@ The release archive includes both `march` and `forge` as prebuilt binaries, so a
 For environments where piping to `sh` is undesirable, precompiled `marchup` binaries (static, no dependencies) are available for direct download from the GitHub release:
 
 ```
-$ wget https://github.com/march-lang/march/releases/latest/download/marchup-darwin-arm64
+$ wget https://github.com/march-language/march/releases/latest/download/marchup-darwin-arm64
 $ chmod +x marchup-darwin-arm64
 $ ./marchup-darwin-arm64
 ```

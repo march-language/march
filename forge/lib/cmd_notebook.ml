@@ -8,7 +8,7 @@
     If FILE.scrollmd is given but does not exist, it is created with a starter template.
 
     The batch renderer lives in forge/tasks/notebook.march, embedded at build time.
-    The live server is the Scroll tool (https://github.com/march-lang/scroll).
+    The live server is the Scroll tool (https://github.com/march-language/scroll).
     Install it with: forge install scroll  *)
 
 (* ------------------------------------------------------------------ *)
@@ -176,7 +176,7 @@ let run_serve ~input ~port ~no_open () =
     Error
       "scroll is not installed.\n\
        Install it with: forge install scroll@/path/to/scroll\n\
-       or: forge install scroll@https://github.com/march-lang/scroll"
+       or: forge install scroll@https://github.com/march-language/scroll"
   | Some (task_file, lib_paths) ->
   (* Resolve the notebook path, creating the file if needed *)
   let (input_path, is_temp) = match input with

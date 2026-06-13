@@ -6,7 +6,31 @@ nav_order: 2
 
 # Installation
 
-March is built from source. The toolchain is OCaml 5.3.0 + dune, managed with opam.
+The fastest way to get March is a prebuilt binary. You can also build from source with OCaml 5.3.0 + dune (managed with opam).
+
+---
+
+## Prebuilt binaries (recommended)
+
+Prebuilt releases for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64` are published on the [releases page](https://github.com/march-language/march/releases). Each archive bundles `march`, `forge`, the standard library, and the C runtime sources.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh
+```
+
+The installer downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin`. Add that directory to your `PATH` (the installer prints the exact line). Use `MARCH_VERSION=nightly` for the latest nightly or `MARCH_VERSION=<tag>` to pin a version.
+
+The binaries are self-contained (macOS statically links `blake3`/`zstd`/`brotli`; Linux builds are static), so interpreting programs needs nothing extra. To use `march --compile`, install a C toolchain — `clang` + LLVM (macOS: `xcode-select --install`; Linux: e.g. `clang llvm`).
+
+Switch between installed versions with `forge`:
+
+```sh
+forge toolchain install        # latest stable (or newest nightly)
+forge toolchain use <version>  # activate an installed toolchain
+forge toolchain list           # show installed versions
+```
+
+See the [README](https://github.com/march-language/march#install-a-prebuilt-binary) for the manual-download alternative and details.
 
 ---
 
@@ -43,7 +67,7 @@ For other distributions use your package manager to install `opam` and a recent 
 ## 1. Clone
 
 ```sh
-git clone https://github.com/march-lang/march.git
+git clone https://github.com/march-language/march.git
 cd march
 ```
 

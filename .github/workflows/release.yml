@@ -20,6 +20,11 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -35,14 +40,14 @@ jobs:
             ## Installation
 
             ```
-            curl -sSf https://march-lang.org/install | sh
+            curl -fsSL https://github.com/march-language/march/releases/latest/download/install.sh | sh
             ```
 
             Or if you already have forge:
 
             ```
-            forge install ${{ github.ref_name }}
-            forge use ${{ github.ref_name }}
+            forge toolchain install ${{ github.ref_name }}
+            forge toolchain use ${{ github.ref_name }}
             ```
 
             ## Checksums
@@ -52,7 +57,9 @@ jobs:
             ```
             sha256sum -c march-${{ github.ref_name }}-checksums.txt
             ```
-          files: artifacts/*
+          files: |
+            artifacts/*
+            install.sh
           draft: false
           prerelease: false
 

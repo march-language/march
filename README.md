@@ -127,6 +127,68 @@ march --emit-llvm --target wasm64-wasi file.march
 march
 ```
 
+## Install a prebuilt binary
+
+Prebuilt binaries are published as [GitHub releases](https://github.com/march-language/march/releases) for `darwin-arm64`, `linux-x86_64`, and `linux-aarch64`. Each archive bundles the `march` compiler, the `forge` build tool, the standard library, and the C runtime sources.
+
+The binaries are self-contained — the macOS build statically links `blake3`/`zstd`/`brotli` and the Linux builds are statically linked — so **running** March (interpreting programs) needs no extra packages.
+
+> **To use `march --compile`** you also need a C toolchain installed: `clang` + LLVM. On macOS install the Xcode Command Line Tools (`xcode-select --install`); on Linux install e.g. `clang llvm`. The compiler shells out to `clang` to build the bundled runtime.
+
+### One-line installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh
+```
+
+This downloads the latest release into `~/.march`, verifies its checksum, and installs `march` and `forge` into `~/.march/bin` (add that to your `PATH` as the script prints). Set `MARCH_VERSION=nightly` for the latest nightly, or `MARCH_VERSION=<tag>` to pin a specific release.
+
+### Managing toolchains with forge
+
+Once `forge` is installed, it manages March versions rustup-style:
+
+```bash
+forge toolchain install            # latest stable (falls back to newest nightly)
+forge toolchain install nightly    # latest nightly
+forge toolchain use <version>      # switch the active toolchain
+forge toolchain list               # show installed versions
+forge toolchain uninstall <version>
+```
+
+Both the installer and `forge toolchain` share the `~/.march/versions/<tag>` layout and switch the active toolchain via the `~/.march/current` symlink.
+
+> **Note:** `forge toolchain`, the bundled runtime (native compile), and static linking ship in releases built from the current sources. Nightlies published earlier predate them — installing one still works for interpreting, but those features require a newer release. The manual download below works against any release.
+
+### Manual download
+
+```bash
+PLATFORM=darwin-arm64        # or: linux-x86_64, linux-aarch64
+api="https://api.github.com/repos/march-language/march/releases"
+
+# Download the latest nightly tarball + checksums
+url=$(curl -fsSL "$api"  | grep browser_download_url | grep "${PLATFORM}.tar.gz" | head -1 | cut -d'"' -f4)
+sums=$(curl -fsSL "$api" | grep browser_download_url | grep "checksums.txt"      | head -1 | cut -d'"' -f4)
+curl -fsSLO "$url"
+curl -fsSLO "$sums"
+
+# Verify the checksum (sed strips a legacy "sha256:" prefix if present;
+# use shasum on macOS, sha256sum on Linux)
+sed 's/^sha256://' march-*-checksums.txt | shasum -a 256 -c --ignore-missing
+
+# Extract and add to PATH
+tar xzf march-*-"${PLATFORM}.tar.gz"
+toolchain="$PWD/$(ls -d march-*-${PLATFORM}/)"
+export PATH="${toolchain}bin:$PATH"
+```
+
+Add the final `export PATH=...` line (with the real path) to your `~/.zshrc` or `~/.bashrc` to make it permanent. Then:
+
+```bash
+march hello.march                            # interpret a program
+march --compile -o hello hello.march         # compile to a native binary
+./hello
+```
+
 ## Installing from source
 
 **Prerequisites**
@@ -151,7 +213,7 @@ eval $(opam env --switch=march)
 **3. Clone and build**
 
 ```bash
-git clone https://github.com/march-lang/march.git
+git clone https://github.com/march-language/march.git
 cd march
 opam install . --deps-only
 dune build

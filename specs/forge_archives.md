@@ -28,8 +28,8 @@ Install an archive globally. The argument is `<name>[@<ref>]` where `<ref>` dete
 | `forge install bastion@1.1.0` | Exact version from registry |
 | `forge install bastion@latest` | Explicit latest (same as no ref) |
 | `forge install bastion@../bastion` | Local path (ref starts with `.` or `/`) |
-| `forge install bastion@https://github.com/march-lang/bastion` | Git, default branch |
-| `forge install bastion@https://github.com/march-lang/bastion#v1.2.0` | Git, specific tag or branch |
+| `forge install bastion@https://github.com/march-language/bastion` | Git, default branch |
+| `forge install bastion@https://github.com/march-language/bastion#v1.2.0` | Git, specific tag or branch |
 
 Examples:
 
@@ -43,7 +43,7 @@ Done. Tasks available: bastion.new, bastion.gen.auth, bastion.server
 
 $ forge install bastion@1.1.0
 $ forge install bastion@../bastion
-$ forge install bastion@https://github.com/march-lang/bastion#main
+$ forge install bastion@https://github.com/march-language/bastion#main
 ```
 
 Forge infers the source from the ref:
@@ -79,7 +79,7 @@ Show all installed archives.
 $ forge archives
 bastion  1.2.0  registry  tasks: bastion.new, bastion.gen.auth, bastion.server
 depot    0.9.1  registry  tasks: depot.gen.migration, depot.gen.schema
-conduit  0.3.0  git       https://github.com/march-lang/conduit (main@abc1234)
+conduit  0.3.0  git       https://github.com/march-language/conduit (main@abc1234)
 (dev)    --     path      /Users/chase/src/mylib/
 ```
 
@@ -150,7 +150,7 @@ installed_at = "2026-03-28T08:00:00Z"
 [conduit]
 version = "0.3.0"
 source  = "git"
-url     = "https://github.com/march-lang/conduit"
+url     = "https://github.com/march-language/conduit"
 branch  = "main"
 rev     = "abc1234"
 hash    = "sha256:789abc..."

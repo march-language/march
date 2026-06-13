@@ -1644,6 +1644,11 @@ let analyze_gc_trace path =
 let () =
   (* Handle subcommands before Arg.parse *)
   let argv = Sys.argv in
+  if Array.length argv >= 2 && (argv.(1) = "--version" || argv.(1) = "-version") then begin
+    (* Keep in sync with the (version ...) field in dune-project. *)
+    print_string "march 0.1.0\n";
+    exit 0
+  end;
   if Array.length argv >= 2 && argv.(1) = "fmt" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_fmt rest
