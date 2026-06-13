@@ -329,16 +329,30 @@ and lower_expr (e : Ast.expr) : Tir.expr =
        } in
        Tir.ELet (v, rhs, body)
      | Ast.PatTuple (pats, _) ->
-       (* let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; … *)
+       (* let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; …
+          Recover the tuple's element types from the rhs and give each field var
+          its concrete type.  Tuple scalar fields are stored low-bit tagged; a
+          field var left at TVar makes ELet trust the raw ptr load (no untag), so
+          int_to_string(field) prints (n<<1)|1.  The match-pattern path already
+          propagates element types from the scrutinee's tuple type — mirror it. *)
+       let rhs_tuple_ty = match b.bind_ty with
+         | Some t -> lower_ty t
+         | None -> ty_of_expr b.bind_expr in
+       let elem_tys = match rhs_tuple_ty with
+         | Tir.TTuple ts -> ts
+         | _ -> [] in
+       let elem_ty_at i = match List.nth_opt elem_tys i with
+         | Some t -> t
+         | None -> unknown_ty in
        let tname = fresh_name "p" in
-       let tv : Tir.var = { v_name = tname; v_ty = unknown_ty; v_lin = Tir.Lin } in
+       let tv : Tir.var = { v_name = tname; v_ty = rhs_tuple_ty; v_lin = Tir.Lin } in
        let tv_atom = Tir.AVar tv in
        (* Build inner ELet chain: fold_right so field 0 is the outermost let *)
        let body_with_fields =
          List.fold_right (fun (i, pat) inner ->
            match pat with
            | Ast.PatVar n ->
-             let fv : Tir.var = { v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Lin } in
+             let fv : Tir.var = { v_name = n.txt; v_ty = elem_ty_at i; v_lin = Tir.Lin } in
              Tir.ELet (fv, Tir.EField (tv_atom, Printf.sprintf "$fv%d" i), inner)
            | _ -> inner  (* wildcard / other → skip *)
          ) (List.mapi (fun i p -> (i, p)) pats) body

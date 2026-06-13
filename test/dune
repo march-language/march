@@ -357,6 +357,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_scalar_fields.expected native_tuple_scalar_fields.out)))
 
+; ── Regression: `let (a, b) = rhs` must untag scalar tuple fields ───────────
+; The match-pattern path bound fields at their concrete element type and untagged
+; them; the let-destructure path bound them at TVar, so a tagged scalar field was
+; carried verbatim (Int 5 -> 11) and never untagged.  Broke Random.range/Gen.element.
+(rule
+ (targets native_let_tuple_destructure native_let_tuple_destructure.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/let_tuple_destructure.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_let_tuple_destructure
+        native/let_tuple_destructure.march)
+   (with-stdout-to native_let_tuple_destructure.out
+        (system "./native_let_tuple_destructure")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/let_tuple_destructure.expected native_let_tuple_destructure.out)))
+
 ; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
 ; A module-nested fn with default-arg params AND a trailing zero-arg closure
 ; param desugars (general match-merge path) into a tuple build + destructure.

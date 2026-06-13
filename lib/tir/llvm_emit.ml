@@ -1867,7 +1867,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
     let (_, obj_val) = emit_atom ctx obj_atom in
     let field_ty = llvm_ty v.Tir.v_ty in
-    let fv = emit_load_field ctx obj_val field_idx field_ty in
+    (* Tuple fields are stored low-bit tagged (the unified slot convention): a
+       direct native-typed load (e.g. `load i64`) reads the tagged value
+       verbatim — Int 5 -> 11.  When the object is a tuple, load the slot as ptr
+       and conditionally untag to the field's concrete type via `coerce`.
+       Closure free-vars (the other `$fv` producer) keep the direct native load,
+       so this is inert for defun-generated apply fns. *)
+    let fv = match atom_tir_ty obj_atom with
+      | Tir.TTuple _ ->
+        let raw = emit_load_field ctx obj_val field_idx "ptr" in
+        coerce ctx "ptr" raw field_ty
+      | _ -> emit_load_field ctx obj_val field_idx field_ty
+    in
     let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
     emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
     emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);

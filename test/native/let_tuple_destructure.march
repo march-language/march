@@ -1,0 +1,40 @@
+-- Regression: `let (a, b) = rhs` tuple destructuring must untag scalar fields.
+--
+-- Tuple scalar fields are stored low-bit tagged ((n<<1)|1).  The match-pattern
+-- path binds each field at its concrete element type (Int/Bool/Float), so the
+-- consumer untags it.  The `let (a, b) = ...` lowering, however, bound every
+-- field var at TVar — so a tagged scalar was carried verbatim as a ptr and
+-- never untagged: `int_to_string(a)` printed (n<<1)|1 (5 -> 11, 0 -> 1).
+-- This broke any `let (idx, _) = Random.range(...)` and Gen.element.
+mod LetTupleDestructure do
+  fn ret_ii(x : Int) : (Int, Int) do
+    (x + 0, 99)
+  end
+
+  fn ret_pair(x : Int) : (Int, String) do
+    (x + 0, "tail")
+  end
+
+  fn ret_bf(b : Bool) : (Bool, Float) do
+    (b, 2.5)
+  end
+
+  fn main() : Unit do
+    -- function-returned (Int, Int): both fields must untag
+    let (s, t) = ret_ii(5)
+    println("ii=" ++ int_to_string(s) ++ "," ++ int_to_string(t))
+
+    -- function-returned (Int, String): Int field untags, String passes through
+    let (n, tail) = ret_pair(0)
+    println("pair=" ++ int_to_string(n) ++ "," ++ tail)
+
+    -- local tuple
+    let loc = (7, 8)
+    let (u, v) = loc
+    println("local=" ++ int_to_string(u) ++ "," ++ int_to_string(v))
+
+    -- Bool + Float fields
+    let (flag, f) = ret_bf(true)
+    println("bf=" ++ (if flag do "true" else "false" end) ++ "," ++ float_to_string(f))
+  end
+end
