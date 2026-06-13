@@ -1417,7 +1417,7 @@ Runtime error: unbound variable `x`.
 
 This should have been caught during type-checking. If you're seeing
 this message, please report it as a compiler bug at:
-    https://github.com/march-lang/march/issues
+    https://github.com/march-language/march/issues
 ```
 
 ---

@@ -4,8 +4,8 @@
     forge install bastion@1.2.0        — pinned version from registry
     forge install bastion@latest       — explicit latest
     forge install bastion@../bastion   — local path (dev)
-    forge install bastion@https://github.com/march-lang/bastion       — git default branch
-    forge install bastion@https://github.com/march-lang/bastion#main  — git branch/tag
+    forge install bastion@https://github.com/march-language/bastion       — git default branch
+    forge install bastion@https://github.com/march-language/bastion#main  — git branch/tag
 
     forge uninstall bastion
     forge archives

@@ -189,7 +189,7 @@ author = ""
 let test_toml_inline_table () =
   let text = {|
 [deps]
-stdlib = { git = "https://github.com/march-lang/stdlib", rev = "main" }
+stdlib = { git = "https://github.com/march-language/stdlib", rev = "main" }
 |} in
   let doc  = Toml.parse text in
   let deps = Toml.get_section doc "deps" in
@@ -197,7 +197,7 @@ stdlib = { git = "https://github.com/march-lang/stdlib", rev = "main" }
    | None     -> Alcotest.fail "expected inline table for stdlib"
    | Some tbl ->
      Alcotest.(check (option string)) "git url"
-       (Some "https://github.com/march-lang/stdlib")
+       (Some "https://github.com/march-language/stdlib")
        (Toml.get_string tbl "git");
      Alcotest.(check (option string)) "rev"
        (Some "main")

@@ -424,6 +424,45 @@ let verify_cmd =
   Cmd.v (Cmd.info "verify" ~doc:"Verify integrity of installed archives")
     Term.(const run $ name)
 
+(* ------------------------------------------------------------- forge toolchain *)
+
+let toolchain_cmd =
+  let install_sub =
+    let version =
+      Arg.(value & pos 0 (some string) None &
+           info [] ~docv:"VERSION"
+             ~doc:"Release to install: a tag ($(b,v0.1.0), $(b,nightly-YYYYMMDD)), \
+                   $(b,nightly) for the latest nightly, or omit for the latest stable.")
+    in
+    let run v = handle (Toolchain.install v) in
+    Cmd.v (Cmd.info "install" ~doc:"Download and install a March toolchain")
+      Term.(const run $ version)
+  in
+  let use_sub =
+    let version =
+      Arg.(required & pos 0 (some string) None &
+           info [] ~docv:"VERSION" ~doc:"Installed toolchain to activate")
+    in
+    let run v = handle (Toolchain.use v) in
+    Cmd.v (Cmd.info "use" ~doc:"Switch the active March toolchain")
+      Term.(const run $ version)
+  in
+  let list_sub =
+    Cmd.v (Cmd.info "list" ~doc:"List installed March toolchains")
+      Term.(const (fun () -> handle (Toolchain.list ())) $ const ())
+  in
+  let uninstall_sub =
+    let version =
+      Arg.(required & pos 0 (some string) None &
+           info [] ~docv:"VERSION" ~doc:"Toolchain to remove")
+    in
+    let run v = handle (Toolchain.uninstall v) in
+    Cmd.v (Cmd.info "uninstall" ~doc:"Remove an installed March toolchain")
+      Term.(const run $ version)
+  in
+  Cmd.group (Cmd.info "toolchain" ~doc:"Manage installed March compiler versions")
+    [ install_sub; use_sub; list_sub; uninstall_sub ]
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -565,7 +604,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
