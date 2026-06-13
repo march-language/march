@@ -544,3 +544,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (glob_files imports/param_shadow_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))
+
+; ── Regression: a module's own top-level fn shadows another module's import ──
+; _use_aliases is program-global; one module's `import X` registers X's public
+; names as bare aliases, which leaked into OTHER modules during lowering.
+; resolve_use_alias only guarded against locals (params/lets), not same-module
+; top-level fns, so e.g. Widget.use_it's bare `render(x)` was rewritten to
+; Other.render (registered by the entry's `import Other`) — wrong arity, called
+; with one arg, silently miscompiled. resolve_use_alias now also skips names in
+; _current_module_fns (the fns the module being lowered defines).  Compile +
+; run; the binary panics (exit 1) if the bare call resolved to the wrong fn.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (glob_files imports/same_mod_shadow_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/same_mod_shadow_native\" %{exe:../bin/main.exe} --compile -o same_mod_shadow_native_bin \"$PWD/imports/same_mod_shadow_native/sms_entry.march\" && ./same_mod_shadow_native_bin")))

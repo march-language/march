@@ -1,0 +1,3 @@
+mod Other do
+  fn render(a : Int, b : Int) : Int do a + b end
+end

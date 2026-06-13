@@ -1,0 +1,6 @@
+mod Widget do
+  fn render(x : Int) : Int do x * 10 end
+  -- bare render must resolve to Widget.render even though the entry's
+  -- `import Other` registers render -> Other.render in the global alias table.
+  fn use_it(x : Int) : Int do render(x) end
+end

@@ -144,8 +144,26 @@ let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
     parameter named e.g. [status] would be rewritten to [HttpServer.status]
     whenever [import HttpServer] is in scope, replacing every use of the
     local parameter with a global function reference. *)
+(** Bare function names DEFINED by the module currently being lowered.  A
+    same-module top-level fn shadows any import alias — including one another
+    module's import added to the (program-global) [_use_aliases] table.
+    Without this, e.g. CounterIsland.ssr's bare `render(state)` was rewritten
+    to `Controller.render` (added by some other module's `import Controller`),
+    silently calling the wrong function. *)
+let _current_module_fns : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 0)
+
+(** Run [f] with [_current_module_fns] set to [names], restoring the previous
+    table afterwards (so nested module lowering composes correctly). *)
+let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
+  let saved = !_current_module_fns in
+  let tbl = Hashtbl.create (List.length names) in
+  List.iter (fun n -> Hashtbl.replace tbl n ()) names;
+  _current_module_fns := tbl;
+  Fun.protect ~finally:(fun () -> _current_module_fns := saved) f
+
 let resolve_use_alias (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
+  else if Hashtbl.mem !_current_module_fns name then name
   else match Hashtbl.find_opt !_use_aliases name with
   | Some qualified -> qualified
   | None -> name
@@ -2002,6 +2020,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               | Ast.DLet (_, b, _) ->
                 (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
               | _ -> None) decls in
+          with_current_module_fns direct_fn_names (fun () ->
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
@@ -2076,7 +2095,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 register_aliases ctx_prefix;
                 register_aliases import_prefix
               | _ -> ()
-            ) decls
+            ) decls)
         in
         lower_mod_decls (mod_name.txt ^ ".") inner_decls
       | Ast.DExtern (edef, _) ->
