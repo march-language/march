@@ -2865,6 +2865,19 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Stdlib cache (Phase 1)                                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_stdlib_cache_memoizes () =
+  (* Two loads in the same process must return the *physically same* decls
+     list — proving the parse/desugar is memoized, not repeated. (Non-empty
+     guards against a vacuous pass if the stdlib weren't found.) *)
+  let d1 = March_lsp_lib.Stdlib_cache.load () in
+  let d2 = March_lsp_lib.Stdlib_cache.load () in
+  Alcotest.(check bool) "stdlib decls non-empty" true (List.length d1 > 0);
+  Alcotest.(check bool) "same cached decls (memoized)" true (d1 == d2)
+
+(* ------------------------------------------------------------------ *)
 (* UTF-16 position encoding (Phase 0)                                  *)
 (* ------------------------------------------------------------------ *)
 
@@ -2903,6 +2916,9 @@ let () =
   Alcotest.run "march-lsp" [
     "utf16 position encoding", [
       "hover resolves identifier on a unicode line", `Quick, test_hover_after_unicode;
+    ];
+    "stdlib cache", [
+      "stdlib parse/desugar is memoized", `Quick, test_stdlib_cache_memoizes;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;

@@ -237,6 +237,12 @@ let load_stdlib () =
       (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
       ordered
 
+(* Route stdlib loading through the process-lifetime memo so the parse/desugar
+   happens once, not on every keystroke. *)
+let () =
+  Stdlib_cache.set_stdlib_dir find_stdlib_dir;
+  Stdlib_cache.set_loader load_stdlib
+
 (* ------------------------------------------------------------------ *)
 (* Diagnostic conversion                                               *)
 (* ------------------------------------------------------------------ *)
@@ -1214,7 +1220,7 @@ let analyse ~filename ~src : t =
 
   | Ok raw_ast ->
     let desugared = March_desugar.Desugar.desugar_module raw_ast in
-    let stdlib_decls = load_stdlib () in
+    let stdlib_decls = Stdlib_cache.load () in
     (* Resolve cross-file imports (user imports + forge dep imports).
        Build the extra lib-path list from:
          1. forge.toml [deps] resolved to absolute lib/ dirs
