@@ -2,64 +2,79 @@
 
 ## Overview
 
-`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, completion, inlay hints, semantic tokens, and actor info — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, etc.).
+`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, completion, inlay hints, semantic tokens, code actions, signature help, references, rename, folding, code lens, and performance insights — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, Emacs, etc.). It can also be driven standalone via a stateless `march-lsp query` CLI (for scripts and LLMs).
+
+Because it is built on the real compiler pipeline (parse → desugar → typecheck → TIR), types and diagnostics are accurate, not re-implemented heuristics.
 
 ## Implementation Status
 
-**Implemented on branch `claude/vibrant-bartik` — pending merge to main.**
+Live and installed as `march-lsp` (built from `lsp/`). Transport: `linol`/`linol-lwt` over stdio.
 
-The LSP server needs a test suite before it can be merged. Tests are being written separately.
+See `specs/plans/2026-06-13-lsp-best-in-class.md` for the active plan to take the server to best-in-class / IDE-level quality (UTF-16 correctness, incremental analysis, sound symbol identity, context-aware completion, workspace model, standalone CLI).
 
 ## Features
 
 | Feature | Status |
 |---|---|
-| Diagnostics (type errors, parse errors) | ✅ |
-| Hover (show type at cursor) | ✅ |
-| Go-to-definition | ✅ |
-| Completion (keywords, in-scope names, stdlib) | ✅ |
-| Inlay hints (inferred types on let bindings) | ✅ |
-| Semantic tokens (syntax highlighting data) | ✅ |
-| Actor info (mailbox/state on Pid hover) | ✅ |
+| Diagnostics (type/parse/lexer errors, warnings, hints) | ✅ |
+| Hover (inferred type, doc string, perf insight, actor info) | ✅ |
+| Go-to-definition (functions, types, constructors, modules) | ✅ |
+| Completion (keywords, in-scope names, types, ctors, interfaces) | ✅ (flat — context-awareness planned) |
+| Inlay hints (inferred types) | ✅ |
+| Semantic tokens (full) | ✅ |
+| Document symbols | ✅ |
+| Code actions (match-exhaustiveness, De Morgan, make-linear, annotations, unused-import/binding, inspect, naming) | ✅ |
+| Signature help | ✅ |
+| Find references | ✅ |
+| Rename | ✅ (name-based — sound symbol identity planned) |
+| Folding ranges | ✅ |
+| Code lens (perf annotations) | ✅ |
+| Performance insights (TCO, closure capture, actor copy; TIR pipeline lenses) | ✅ |
+| Standalone CLI query mode | ✅ (`march-lsp query …`, see `lsp/docs/editors.md`) |
 
 ## Architecture
 
-Uses the **`linol`** OCaml library — a high-level LSP framework built on top of the `lsp` package, with Lwt-based async I/O. This was chosen over raw `lsp` package or `ocaml-lsp-server` for its cleaner API and less boilerplate.
+Uses the **`linol`** OCaml library — a high-level LSP framework on top of the `lsp` package, with Lwt-based async I/O. Chosen over the raw `lsp` package or `ocaml-lsp-server` for its cleaner API.
 
-### Key Files (on branch `claude/vibrant-bartik`)
+### Key Files
 
 ```
 lsp/
-├── dune              # Build target: march_lsp binary
-├── march_lsp.ml      # Main server: Linol.Server subclass, all handlers
-└── test/
-    ├── dune
-    └── test_lsp.ml   # Integration tests (in progress)
+├── bin/main.ml          # entry point (stdio LSP; `query` CLI subcommand)
+├── bin/query_cli.ml     # stateless CLI query mode entry
+├── lib/server.ml        # linol Server subclass: handlers + capabilities
+├── lib/analysis.ml      # compiler-pipeline-backed analysis engine
+├── lib/query.ml         # transport-agnostic query facade (shared by server + CLI)
+├── lib/position.ml      # span ↔ LSP range (via Utf16)
+├── lib/utf16.ml         # UTF-8 ↔ UTF-16 column mapping + line index
+├── lib/stdlib_cache.ml  # content-hashed stdlib parse/desugar memo
+├── lib/forge_config.ml  # project root + import path discovery
+├── docs/editors.md      # editor setup guides + CLI reference
+└── test/                # alcotest suites (test_lsp, test_utf16, test_query_cli)
 ```
 
 ## Usage
 
 ```sh
 # Build
-dune build lsp/march_lsp.exe
+dune build lsp/bin/main.exe
 
-# Start server (reads from stdin, writes to stdout — standard LSP transport)
-dune exec lsp/march_lsp.exe
+# Install the march-lsp binary into the opam switch
+dune install march-lsp
 
-# Configure in Neovim (example)
-vim.lsp.start({
-  name = "march",
-  cmd = { "march-lsp" },
-  filetypes = { "march" },
-})
+# Start the server (stdio transport)
+march-lsp
+
+# Standalone one-shot queries (JSON on stdout)
+march-lsp query hover       file.march --line 10 --col 4
+march-lsp query diagnostics file.march
+cat buffer.march | march-lsp query diagnostics buffer.march --stdin
 ```
 
-## Merge Blockers
-
-1. **Test suite** — `lsp/test/test_lsp.ml` needs to cover core LSP round-trips: initialize → open file → get diagnostics → hover → completion
-2. Once tests pass, PR from `claude/vibrant-bartik` → `main`
+Editor configuration snippets (Neovim, Helix, Zed, Emacs, VS Code) live in `lsp/docs/editors.md`.
 
 ## Related
 
 - `specs/features/zed-extension.md` — Tree-sitter grammar (separate from LSP; already on main)
 - `tree-sitter-march/` — Zed editor extension with full syntax highlighting
+- `specs/plans/2026-06-13-lsp-best-in-class.md` — best-in-class roadmap (active)
