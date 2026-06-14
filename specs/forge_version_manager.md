@@ -20,8 +20,9 @@ A first slice of this design is built; most of its value remains designed-but-un
 - **`forge toolchain list --remote`** (2026-06-13): lists versions available to install from the GitHub releases API, grouped into stable / nightly and marking the ones already installed (`Toolchain.classify_remote` + `list_remote`). This is the `forge list-all` of the spec, under the `toolchain` namespace.
 - **Auto-install a missing pinned toolchain** (2026-06-13): `Toolchain.ensure_installed` — `forge build`/`run` download the resolved pin/global toolchain automatically (rustup-style) when it isn't present, instead of erroring; no-op when already installed or nothing resolves. The `forge.toml` `march` constraint is checked first, so a rejected version is never downloaded.
 - **`forge upgrade`** (2026-06-13): installs the latest March (newest stable, else newest nightly via `resolve_tag None`) and makes it the active global toolchain; no-op when already on the latest (`Toolchain.upgrade`).
+- **Toolchain in `forge.lock` — record + drift-warn** (2026-06-13, Option B): `forge deps` records the resolved toolchain in a `[toolchain]` section; `forge build` warns (non-fatally) on drift and never overrides the `.march-version` pin (`Resolver_lockfile.write ?toolchain`/`read_toolchain`, `Toolchain.toolchain_drift`). See [Toolchain in the Lockfile](#toolchain-in-the-lockfile-record-dont-override).
 
-**Not yet built** — the remaining substance of this spec: recording the toolchain version in `forge.lock`; `forge shell-hook`.
+**Not yet built** — `forge shell-hook` (dropped — low value with the wrapper model); a `--frozen`/`--locked` enforce mode (future).
 
 ## Concepts
 
@@ -341,6 +342,27 @@ Options:
 
 This is a build-time check, not a fetch-time check. The source is still cached and reusable — it's the compilation step that refuses to proceed.
 
+### Toolchain in the Lockfile (record, don't override)
+
+**Decision (2026-06-13): the lockfile *records* the toolchain for drift detection; it never *overrides* the resolved version.**
+
+`forge deps` writes the active toolchain into a `[toolchain]` section of `forge.lock`:
+
+```toml
+[toolchain]
+version = "0.6.0"
+```
+
+On `forge build`, if that recorded version differs from the one actually resolved (project `.march-version`, else global), forge prints a **non-fatal warning** and proceeds:
+
+```
+warning: building with March 0.6.0, but forge.lock records 0.5.0; run `forge deps` to update the lock
+```
+
+**Why record-and-warn, not override.** `.march-version` is already an *exact, committed* pin (unlike dependency versions, which `forge.toml` specifies only as ranges and the lock pins exactly). Making the lock a *second* toolchain pin that silently wins would create two competing sources of truth: a developer editing `.march-version` would see their change ignored until the lock was regenerated. So `.march-version` stays authoritative and the lock entry is a record + drift signal — mirroring how `[manifest_hash]` *detects* `forge.toml` drift rather than overriding it. The section is optional and older lockfiles (without it) parse unchanged.
+
+**Future:** a `--frozen`/`--locked` flag could promote the drift warning to a hard error for CI, without changing the default record-and-warn behavior. (Unbuilt.)
+
 ## Download Source
 
 ### Stable Releases
@@ -511,7 +533,7 @@ A consolidated, prioritised list of what forge is still missing across version *
 ### Version management (this spec)
 
 1. ~~**Per-project toolchain pinning.**~~ ✅ **Done (2026-06-13).** `.march-version` + the [Version Resolution Order](#version-resolution-order) are implemented and wired into `forge build`/`run`/`check`/`test`, plus `forge toolchain pin`/`which`. See [Implementation Status](#implementation-status-as-of-2026-06-13). Remaining sub-items split into #2–#4 below.
-2. **Toolchain version in `forge.lock`.** Record the resolved compiler version alongside the dependency locks so a checkout reproduces both deps and compiler.
+2. ~~**Toolchain version in `forge.lock`.**~~ ✅ **Done (2026-06-13), Option B (record + drift-warn).** `forge deps` records it; `forge build` warns on drift without overriding the `.march-version` pin. See [Toolchain in the Lockfile](#toolchain-in-the-lockfile-record-dont-override).
 3. ~~**`forge.toml` `march` constraint enforcement** in `forge build`.~~ ✅ **Done (2026-06-13).** `Toolchain.check_constraint`; an optional `march = "~> X.Y"` under `[package]` blocks the build when the resolved toolchain doesn't satisfy it.
 4. ~~**Auto-install a missing pinned toolchain.**~~ ✅ **Done (2026-06-13).** `Toolchain.ensure_installed`; `forge build`/`run` download the resolved toolchain on demand.
 5. ~~**`forge upgrade` self-update.**~~ ✅ **Done (2026-06-13).** `Toolchain.upgrade` installs the latest March and activates it (no-op if already latest).

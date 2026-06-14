@@ -297,6 +297,14 @@ let build ~release ?(dump_phases=false) () =
     match Toolchain.ensure_installed () with
     | Error e -> Error e
     | Ok () ->
+    (* Option B: warn (never override) if forge.lock recorded a different
+       toolchain than the one resolved for this build. *)
+    (let lock = Filename.concat proj.Project.root "forge.lock" in
+     match Toolchain.toolchain_drift
+             ~locked:(Resolver_lockfile.read_toolchain lock)
+             ~resolved:(Toolchain.resolve_version ()) with
+     | Some w -> Printf.eprintf "%s\n%!" w
+     | None   -> ());
     let mode = if release then "release" else "debug" in
     let build_dir =
       Filename.concat proj.Project.root

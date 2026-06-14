@@ -98,6 +98,18 @@ let check_constraint ~resolved ~req =
          Switch to a compatible version (forge toolchain install/use), or update the constraint."
         resolved req)
 
+(* Drift between the toolchain recorded in forge.lock and the one actually
+   resolved for this build. Option B: record + warn, never override — so this
+   only produces a non-fatal warning, and only when both are known and differ. *)
+let toolchain_drift ~locked ~resolved =
+  match locked, resolved with
+  | Some l, Some r when l <> r ->
+    Some (Printf.sprintf
+      "warning: building with March %s, but forge.lock records %s; \
+       run `forge deps` to update the lock"
+      r l)
+  | _ -> None
+
 (* A shell prefix that puts the resolved toolchain's bin/ first on PATH, so a
    bare `march` in a forge subprocess uses the pinned/global version. Empty when
    nothing is resolved (PATH fallback). Error when a pin is not installed. *)
