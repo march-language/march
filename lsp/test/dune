@@ -28,3 +28,9 @@
  (modules test_incremental)
  (libraries march_ast march_parser march_lexer march_desugar
             march_typecheck march_lsp_lib linol.lsp alcotest))
+
+(test
+ (name test_jsonrpc)
+ (modules test_jsonrpc)
+ (libraries unix yojson alcotest)
+ (deps %{exe:../bin/main.exe}))
