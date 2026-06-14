@@ -414,6 +414,24 @@ let test_classify_remote_groups_and_marks () =
   Alcotest.(check (list (pair string bool))) "nightly group marks installed, order preserved"
     [ ("nightly-20260612", false); ("nightly-20260611", true) ] nightly
 
+(* auto-install of a missing pin (ensure_installed) ----------------------- *)
+(* The download-triggering branch needs the network and is covered e2e; here we
+   check the no-op branches that must NOT attempt an install. *)
+
+let test_ensure_installed_noop_when_present () =
+  let home = fresh_dir () in
+  Unix.putenv "MARCH_HOME" home;
+  install_fake home "0.6.0";
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir ".march-version") "0.6.0\n";
+  Alcotest.(check bool) "already-installed pin -> Ok without installing"
+    true (is_ok (Toolchain.ensure_installed ~cwd:dir ()))
+
+let test_ensure_installed_noop_when_unresolved () =
+  Unix.putenv "MARCH_HOME" (fresh_dir ());
+  Alcotest.(check bool) "nothing resolved -> Ok (PATH fallback, nothing to install)"
+    true (is_ok (Toolchain.ensure_installed ~cwd:(fresh_dir ()) ()))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -461,5 +479,7 @@ let () =
       Alcotest.test_case "constraint: skips non-semver tag"  `Quick test_constraint_skips_non_semver_tag;
       Alcotest.test_case "constraint: rejects malformed req" `Quick test_constraint_rejects_malformed_req;
       Alcotest.test_case "list --remote: groups + marks installed" `Quick test_classify_remote_groups_and_marks;
+      Alcotest.test_case "ensure_installed: no-op when present" `Quick test_ensure_installed_noop_when_present;
+      Alcotest.test_case "ensure_installed: no-op when unresolved" `Quick test_ensure_installed_noop_when_unresolved;
     ];
   ]

@@ -284,18 +284,17 @@ let build ~release ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
-    (* Fail early with an actionable message if the project pins a March version
-       that isn't installed (rather than falling through to a confusing error). *)
-    match Toolchain.march_command () with
-    | Error e -> Error e
-    | Ok _ ->
     (* Enforce an optional `march = "~> X.Y"` constraint in forge.toml against
-       the resolved toolchain. *)
+       the resolved toolchain — before any download. *)
     match
       match proj.Project.march_req, Toolchain.resolve_version () with
       | Some req, Some resolved -> Toolchain.check_constraint ~resolved ~req
       | _ -> Ok ()
     with
+    | Error e -> Error e
+    | Ok () ->
+    (* Auto-install the pinned/global toolchain if it isn't present yet. *)
+    match Toolchain.ensure_installed () with
     | Error e -> Error e
     | Ok () ->
     let mode = if release then "release" else "debug" in

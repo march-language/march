@@ -431,3 +431,18 @@ let install spec =
          if not on_path then
            Printf.printf "\nAdd March to your PATH:\n\n    export PATH=\"%s:$PATH\"\n" bd;
          Ok ())
+
+(* Ensure the toolchain resolved for [cwd] is installed: if a pinned/global
+   version is missing, download it (auto-install) rather than failing. No-op
+   when the version is already present or nothing resolves (PATH fallback). *)
+let ensure_installed ?(cwd = Sys.getcwd ()) () =
+  match resolve_version ~cwd () with
+  | None -> Ok ()
+  | Some tag ->
+    if Sys.file_exists (Filename.concat (version_dir tag) "bin/march") then Ok ()
+    else begin
+      Printf.eprintf "March %s is pinned but not installed; installing...\n%!" tag;
+      let r = install (Some tag) in
+      flush stdout;   (* surface install messages before the build/run output *)
+      r
+    end

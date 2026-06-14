@@ -23,8 +23,11 @@ let run ?(dump_phases=false) ?(compiled=false) () =
       if not (Sys.file_exists entry) then
         Error (Printf.sprintf "entry point not found: %s" entry)
       else
-      (* Resolve the toolchain (project .march-version pin, else global). Fail
-         early with an actionable message if a pinned version isn't installed. *)
+      (* Auto-install the resolved toolchain (project .march-version pin, else
+         global) if it isn't present, then route `march` to it via a PATH prefix. *)
+      match Toolchain.ensure_installed () with
+      | Error e -> Error e
+      | Ok () ->
       match Toolchain.path_prefix () with
       | Error e -> Error e
       | Ok toolchain_pfx ->
