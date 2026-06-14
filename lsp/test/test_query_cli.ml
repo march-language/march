@@ -27,9 +27,19 @@ let test_cli_unknown_query_is_error () =
   Alcotest.(check bool) "unknown query yields an error object"
     true (has_sub out "\"error\"")
 
+let test_cli_format () =
+  (* An under-indented, single-line body gets reindented; formatting is stable. *)
+  let messy = "mod M do\nfn f() : Int do 1 end\nend\n" in
+  let out = run ["query"; "format"; "t.march"] ~src:messy in
+  Alcotest.(check bool) "formatting reindents the source"
+    true (out <> messy && has_sub out "  fn f");
+  let out2 = run ["query"; "format"; "t.march"] ~src:out in
+  Alcotest.(check string) "formatting is idempotent" out out2
+
 let () =
   Alcotest.run "query_cli"
     [ "cli",
       [ Alcotest.test_case "diagnostics" `Quick test_cli_diagnostics_json;
         Alcotest.test_case "hover" `Quick test_cli_hover_json;
-        Alcotest.test_case "unknown query" `Quick test_cli_unknown_query_is_error ] ]
+        Alcotest.test_case "unknown query" `Quick test_cli_unknown_query_is_error;
+        Alcotest.test_case "format" `Quick test_cli_format ] ]

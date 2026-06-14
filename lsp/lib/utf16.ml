@@ -61,3 +61,21 @@ let byte_col_to_lsp_char (d : doc) ~line ~byte_col : int =
       loop (byte_i + len) (units + utf16_units_of_len len)
   in
   loop ls 0
+
+(* Collapse trailing blank lines / whitespace to exactly one newline. The March
+   formatter currently appends a blank line on every run (unbounded), so this
+   keeps LSP formatting idempotent regardless of that bug. *)
+let normalize_trailing (s : string) : string =
+  let i = ref (String.length s) in
+  while !i > 0
+        && (match s.[!i - 1] with '\n' | '\r' | ' ' | '\t' -> true | _ -> false) do
+    decr i
+  done;
+  if !i = 0 then "" else String.sub s 0 !i ^ "\n"
+
+(** End position (line, utf16 char) of the whole document — for a
+    full-document replace range, paired with the start (0, 0). *)
+let end_position (d : doc) : int * int =
+  let end_line = line_count d - 1 in
+  let byte_col = String.length d.src - line_start d end_line in
+  (end_line, byte_col_to_lsp_char d ~line:end_line ~byte_col)

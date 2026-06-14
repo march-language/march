@@ -252,6 +252,8 @@ class march_server =
           Some (`Bool true);
         ServerCapabilities.workspaceSymbolProvider =
           Some (`Bool true);
+        ServerCapabilities.documentFormattingProvider =
+          Some (`Bool true);
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
 
@@ -698,6 +700,37 @@ class march_server =
                   ("range", json_range (Pos.span_to_lsp_range s.Workspace.wsy_span))
                 ])
             ]) syms
+        in
+        Lwt.return (`List json)
+
+      end else if meth = "textDocument/formatting" then begin
+        let edits =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a ->
+               (* Don't format code that doesn't parse (format_source raises). *)
+               (try
+                  let formatted =
+                    Utf16.normalize_trailing
+                      (March_format.Format.format_source
+                         ~filename:a.Analysis.filename a.Analysis.src)
+                  in
+                  if formatted = a.Analysis.src then []
+                  else
+                    let (el, ec) = Utf16.end_position a.Analysis.doc in
+                    [ (el, ec, formatted) ]
+                with _ -> []))
+        in
+        let json = List.map (fun (el, ec, text) ->
+            `Assoc [
+              ("range", `Assoc [
+                  ("start", `Assoc [("line", `Int 0); ("character", `Int 0)]);
+                  ("end",   `Assoc [("line", `Int el); ("character", `Int ec)])]);
+              ("newText", `String text)
+            ]) edits
         in
         Lwt.return (`List json)
 

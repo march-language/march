@@ -124,6 +124,12 @@ let run_to_string (args : string list) ~src_override : string =
                            r.Lsp.Types.Range.end_.Lsp.Types.Position.character))))
        in
        "{\"references\":[" ^ String.concat "," (local_json @ cross_json) ^ "]}"
+     | "format" ->
+       (* Raw formatted source (like gofmt); unparseable input is returned
+          unchanged. Note: emitted verbatim, not wrapped in JSON. *)
+       (try Utf16.normalize_trailing
+              (March_format.Format.format_source ~filename:file src)
+        with _ -> src)
      | "diagnostics" ->
        (* Remap byte-column ranges to UTF-16 for client-consistent output. *)
        let ds = List.map (Position.remap_diagnostic a.Analysis.doc)
@@ -152,5 +158,7 @@ let run_to_string (args : string list) ~src_override : string =
 let main (argv : string array) : int =
   let out = run_to_string (Array.to_list argv) ~src_override:None in
   print_string out;
-  print_newline ();
+  (* Avoid a double trailing newline when output already ends with one (e.g.
+     formatted source), which would otherwise compound on each round-trip. *)
+  if not (out <> "" && out.[String.length out - 1] = '\n') then print_newline ();
   if String.length out >= 9 && String.sub out 0 9 = "{\"error\":" then 2 else 0
