@@ -169,6 +169,15 @@ let tag_of release =
      | _ -> None)
   | _ -> None
 
+let is_nightly tag = String.length tag >= 8 && String.sub tag 0 8 = "nightly-"
+
+(* Group remote release tags into (stable, nightly), preserving the input order
+   (the API returns newest-first), each paired with whether it is installed. *)
+let classify_remote ~remote ~installed =
+  let mark t = (t, List.mem t installed) in
+  let stable, nightly = List.partition (fun t -> not (is_nightly t)) remote in
+  (List.map mark stable, List.map mark nightly)
+
 (* Resolve a version spec to a concrete release tag. *)
 let resolve_tag spec =
   match spec with
@@ -294,6 +303,30 @@ let list () =
        let marker = if Some t = active then " (active)" else "" in
        Printf.printf "  %s%s\n" t marker) tags);
   Ok ()
+
+(* List versions available to install from GitHub releases, grouped by
+   stability, marking the ones already installed. *)
+let list_remote () =
+  match api_releases_json () with
+  | Error e -> Error e
+  | Ok json ->
+    let remote = match json with `List l -> List.filter_map tag_of l | _ -> [] in
+    let stable, nightly = classify_remote ~remote ~installed:(installed_tags ()) in
+    let print_group title items =
+      if items <> [] then begin
+        Printf.printf "%s\n" title;
+        List.iter (fun (t, inst) ->
+          if inst then Printf.printf "  \xe2\x9c\x93 %s (installed)\n" t
+          else Printf.printf "    %s\n" t) items
+      end
+    in
+    if stable = [] && nightly = [] then Printf.printf "No releases found.\n"
+    else begin
+      print_group "Stable releases:" stable;
+      if stable <> [] && nightly <> [] then print_newline ();
+      print_group "Nightly builds:" nightly
+    end;
+    Ok ()
 
 let use version =
   let dir = version_dir version in

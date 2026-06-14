@@ -62,7 +62,7 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 - ✅ **`forge.toml` `march` constraint enforcement** — `forge build` blocks when the resolved toolchain doesn't satisfy an optional `march = "~> X.Y"` under `[package]` (`Toolchain.check_constraint`, 4 unit tests; non-semver tags allowed through). `project.ml` gains a `march_req` field.
 - [ ] **Auto-install a missing pinned toolchain** (or a clear prompt) when a project pins an uninstalled version.
 - [ ] **`forge upgrade` self-update** — update the forge/march binaries in place (designed; unbuilt).
-- [ ] **`forge list-all` / `forge toolchain list --remote`** — list installable versions from the releases API.
+- ✅ **`forge toolchain list --remote`** — lists installable versions from the GitHub releases API, grouped stable/nightly, marking installed ones (`Toolchain.classify_remote`/`list_remote`, 1 unit test).
 - [ ] **`forge why <pkg>` / `forge tree` / `forge outdated`** — dependency introspection. `why` is nearly free given the PubGrub derivation tree already exists.
 - [ ] **`license` field (and `repository`/`homepage`/`keywords`) in `forge.toml`** — standard publishing metadata; currently unparsed.
 - [ ] **Registry server + network publish/fetch + `forge login`/`forge yank`** — `forge publish` validates locally only today (no server, no auth, no network fetch); distribution is git/path-only. Largest package-side gap ("Phase 6").

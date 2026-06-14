@@ -448,8 +448,13 @@ let toolchain_cmd =
       Term.(const run $ version)
   in
   let list_sub =
-    Cmd.v (Cmd.info "list" ~doc:"List installed March toolchains")
-      Term.(const (fun () -> handle (Toolchain.list ())) $ const ())
+    let remote =
+      Arg.(value & flag &
+           info ["remote"] ~doc:"List versions available to install from GitHub releases")
+    in
+    let run r = handle (if r then Toolchain.list_remote () else Toolchain.list ()) in
+    Cmd.v (Cmd.info "list" ~doc:"List installed March toolchains ($(b,--remote): installable versions)")
+      Term.(const run $ remote)
   in
   let uninstall_sub =
     let version =
