@@ -303,6 +303,28 @@ let test_bench_format_json () =
   Alcotest.(check bool) "json has name/seconds/ok" true
     (contains out "\"name\"" && contains out "\"a\"" && contains out "\"ok\"")
 
+(* forge version: semver bump + forge.toml rewrite ------------------------ *)
+
+let vstr = Resolver_version.to_string
+let vparse = Resolver_version.parse_exn
+
+let test_bump_patch () =
+  Alcotest.(check string) "patch" "1.2.4" (vstr (Versioning.bump Versioning.Patch (vparse "1.2.3")))
+let test_bump_minor () =
+  Alcotest.(check string) "minor resets patch" "1.3.0" (vstr (Versioning.bump Versioning.Minor (vparse "1.2.3")))
+let test_bump_major () =
+  Alcotest.(check string) "major resets minor+patch" "2.0.0" (vstr (Versioning.bump Versioning.Major (vparse "1.2.3")))
+let test_bump_clears_pre () =
+  Alcotest.(check string) "bump drops pre-release" "1.2.4" (vstr (Versioning.bump Versioning.Patch (vparse "1.2.3-alpha.1")))
+
+let test_rewrite_version_package_only () =
+  let toml =
+    "[package]\nname = \"x\"\nversion = \"1.2.3\"\n\n[deps]\nfoo = { version = \"9.9.9\" }\n" in
+  let out = Versioning.rewrite_version_line ~toml ~new_version:"1.3.0" in
+  Alcotest.(check bool) "package version bumped"   true  (contains out "version = \"1.3.0\"");
+  Alcotest.(check bool) "old version gone"         false (contains out "1.2.3");
+  Alcotest.(check bool) "dep version untouched"    true  (contains out "version = \"9.9.9\"")
+
 (* forge watch: change detection ------------------------------------------ *)
 
 let test_watch_no_change () =
@@ -642,6 +664,13 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "versioning", [
+      Alcotest.test_case "bump patch"               `Quick test_bump_patch;
+      Alcotest.test_case "bump minor resets patch"  `Quick test_bump_minor;
+      Alcotest.test_case "bump major resets lower"  `Quick test_bump_major;
+      Alcotest.test_case "bump clears pre-release"  `Quick test_bump_clears_pre;
+      Alcotest.test_case "rewrite [package].version only" `Quick test_rewrite_version_package_only;
     ];
     "bench", [
       Alcotest.test_case "bench_name: stem from path"   `Quick test_bench_name;
