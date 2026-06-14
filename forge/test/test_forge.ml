@@ -303,6 +303,50 @@ let test_bench_format_json () =
   Alcotest.(check bool) "json has name/seconds/ok" true
     (contains out "\"name\"" && contains out "\"a\"" && contains out "\"ok\"")
 
+(* forge workspaces ------------------------------------------------------- *)
+
+let test_workspace_parse_members () =
+  let toml = {|
+[workspace]
+members = ["app", "lib/core", "lib/web"]
+|} in
+  let doc = Toml.parse toml in
+  let members = Workspace.parse_members doc in
+  Alcotest.(check (list string)) "three members" ["app"; "lib/core"; "lib/web"] members
+
+let test_workspace_parse_members_empty () =
+  let doc = Toml.parse "" in
+  let members = Workspace.parse_members doc in
+  Alcotest.(check (list string)) "no workspace -> []" [] members
+
+let test_workspace_parse_members_no_key () =
+  let toml = "[workspace]\nsome_other = \"value\"\n" in
+  let doc = Toml.parse toml in
+  let members = Workspace.parse_members doc in
+  Alcotest.(check (list string)) "no members key -> []" [] members
+
+let test_workspace_find_root () =
+  let tmpdir = Filename.temp_dir "ws_root_test_" "" in
+  Fun.protect ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote tmpdir))) (fun () ->
+    let member_dir = Filename.concat tmpdir "app" in
+    Unix.mkdir member_dir 0o755;
+    let toml_content = "[workspace]\nmembers = [\"app\"]\n" in
+    let oc = open_out (Filename.concat tmpdir "forge.toml") in
+    output_string oc toml_content;
+    close_out oc;
+    let member_forge = Filename.concat member_dir "forge.toml" in
+    let oc2 = open_out member_forge in
+    output_string oc2 "[package]\nname = \"app\"\n";
+    close_out oc2;
+    let found = Workspace.find_root member_dir in
+    Alcotest.(check (option string)) "finds workspace root" (Some tmpdir) found)
+
+let test_workspace_find_root_none () =
+  let tmpdir = Filename.temp_dir "ws_noroot_test_" "" in
+  Fun.protect ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote tmpdir))) (fun () ->
+    let found = Workspace.find_root tmpdir in
+    Alcotest.(check (option string)) "no workspace -> None" None found)
+
 (* forge completions + external subcommands ------------------------------- *)
 
 let test_completion_bash () =
@@ -710,6 +754,13 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "workspace", [
+      Alcotest.test_case "parse_members: extracts list"    `Quick test_workspace_parse_members;
+      Alcotest.test_case "parse_members: no workspace -> []" `Quick test_workspace_parse_members_empty;
+      Alcotest.test_case "parse_members: no key -> []"     `Quick test_workspace_parse_members_no_key;
+      Alcotest.test_case "find_root: locates root"         `Quick test_workspace_find_root;
+      Alcotest.test_case "find_root: None when absent"     `Quick test_workspace_find_root_none;
     ];
     "cli-ext", [
       Alcotest.test_case "completions: bash"        `Quick test_completion_bash;

@@ -131,6 +131,11 @@ let new_cmd =
 
 (* ----------------------------------------------------------------- forge build *)
 
+let workspace_package_flag =
+  Arg.(value & opt (some string) None &
+       info ["p"; "package"] ~docv:"NAME"
+         ~doc:"In a workspace, build only the member named NAME.")
+
 let build_cmd =
   let release =
     Arg.(value & flag & info ["release"] ~doc:"Build in release mode")
@@ -143,13 +148,31 @@ let build_cmd =
     Arg.(value & flag & info ["frozen"; "locked"]
            ~doc:"Fail (don't re-resolve) if forge.lock is out of date with forge.toml.")
   in
-  let run r d f =
-    match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
-    | Ok binary -> Printf.printf "built: %s\n%!" binary
-    | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
+  let run r d f pkg =
+    let cwd = Sys.getcwd () in
+    match Workspace.find_root cwd with
+    | Some root when root = cwd ->
+      let members = Workspace.members_from_root root in
+      if members <> [] then
+        (match Workspace.run_for_members ~root ~members ~package:pkg
+                 (fun () ->
+                    match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+                    | Ok binary -> Printf.printf "built: %s\n%!" binary; Ok ()
+                    | Error m   -> Error m) with
+         | Ok ()   -> ()
+         | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
+      else begin
+        match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+        | Ok binary -> Printf.printf "built: %s\n%!" binary
+        | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
+      end
+    | _ ->
+      match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+      | Ok binary -> Printf.printf "built: %s\n%!" binary
+      | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
-    Term.(const run $ release $ dump_phases $ frozen)
+    Term.(const run $ release $ dump_phases $ frozen $ workspace_package_flag)
 
 (* ----------------------------------------------------------------- forge check *)
 
@@ -202,9 +225,21 @@ let test_cmd =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f s sp fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ()) in
+  let run v c f s sp fs pkg =
+    let cwd = Sys.getcwd () in
+    match Workspace.find_root cwd with
+    | Some root when root = cwd ->
+      let members = Workspace.members_from_root root in
+      if members <> [] then
+        handle (Workspace.run_for_members ~root ~members ~package:pkg
+                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ()))
+      else
+        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ())
+    | _ ->
+      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ())
+  in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ files)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ files $ workspace_package_flag)
 
 (* ------------------------------------------------------------------ forge lint *)
 
@@ -217,9 +252,21 @@ let lint_cmd =
     Arg.(value & flag &
          info ["all"] ~doc:"Also report hint-severity findings (off by default)")
   in
-  let run s a = handle (Cmd_lint.run ~strict:s ~all:a ()) in
+  let run s a pkg =
+    let cwd = Sys.getcwd () in
+    match Workspace.find_root cwd with
+    | Some root when root = cwd ->
+      let members = Workspace.members_from_root root in
+      if members <> [] then
+        handle (Workspace.run_for_members ~root ~members ~package:pkg
+                  (fun () -> Cmd_lint.run ~strict:s ~all:a ()))
+      else
+        handle (Cmd_lint.run ~strict:s ~all:a ())
+    | _ ->
+      handle (Cmd_lint.run ~strict:s ~all:a ())
+  in
   Cmd.v (Cmd.info "lint" ~doc:"Run the coding-standard rule checker")
-    Term.(const run $ strict $ all)
+    Term.(const run $ strict $ all $ workspace_package_flag)
 
 (* ---------------------------------------------------------------- forge format *)
 
