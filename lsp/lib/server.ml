@@ -290,6 +290,14 @@ class march_server =
            doc.Lsp.Types.TextDocumentIdentifier.uri);
       Lwt.return_unit
 
+    (* A document was saved → its on-disk content changed, so the workspace
+       index (built by reading files from disk) is stale. Clear it; the next
+       workspace/symbol or cross-file references query rebuilds lazily. *)
+    method! on_notif_doc_did_save ~notify_back:_ _params =
+      Hashtbl.clear ws_index;
+      Hashtbl.clear ws_index_full;
+      Lwt.return_unit
+
     method on_notif_doc_did_change ~notify_back vdoc _changes
         ~old_content:_ ~new_content =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
