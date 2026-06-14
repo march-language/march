@@ -88,6 +88,16 @@ let workspace_index_full () : Workspace.ws_index =
        Hashtbl.replace ws_index_full root idx;
        idx)
 
+(* Drop all cross-file caches built by reading files from disk. Called on
+   didSave (an open doc changed) and on didChangeWatchedFiles (any on-disk
+   .march changed, including non-open / dependency files). *)
+let invalidate_workspace_index () =
+  Hashtbl.clear ws_index;
+  Hashtbl.clear ws_index_full
+
+let workspace_index_is_empty () =
+  Hashtbl.length ws_index = 0 && Hashtbl.length ws_index_full = 0
+
 (* ------------------------------------------------------------------ *)
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
@@ -296,8 +306,20 @@ class march_server =
        index (built by reading files from disk) is stale. Clear it; the next
        workspace/symbol or cross-file references query rebuilds lazily. *)
     method! on_notif_doc_did_save ~notify_back:_ _params =
-      Hashtbl.clear ws_index;
-      Hashtbl.clear ws_index_full;
+      invalidate_workspace_index ();
+      Lwt.return_unit
+
+    (* A file changed on disk outside the editor's open-document flow (e.g. a
+       dependency edited in another window, or a build step). Clients that
+       watch the workspace send workspace/didChangeWatchedFiles, routed here by
+       linol as an "unhandled" notification. Drop the cross-file caches + the
+       cached deps env so the next query re-reads from disk. *)
+    method! on_notification_unhandled ~notify_back:_ n =
+      (match n with
+       | Lsp.Client_notification.DidChangeWatchedFiles _ ->
+         invalidate_workspace_index ();
+         Typecheck_cache.clear_deps ()
+       | _ -> ());
       Lwt.return_unit
 
     method on_notif_doc_did_change ~notify_back vdoc _changes

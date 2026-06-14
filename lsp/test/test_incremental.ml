@@ -87,6 +87,15 @@ let test_tir_pass_memoized () =
   Alcotest.(check bool) "tir insights memoized (same physical list)"
     true (a1.An.tir_fn_insights == a2.An.tir_fn_insights)
 
+(* ── Increment D: didChangeWatchedFiles invalidation ─────────────────────── *)
+
+let test_watched_invalidates () =
+  let open March_lsp_lib.Server in
+  Hashtbl.replace ws_index "fake-root" [];
+  Alcotest.(check bool) "index populated" false (workspace_index_is_empty ());
+  invalidate_workspace_index ();
+  Alcotest.(check bool) "index cleared" true (workspace_index_is_empty ())
+
 let () =
   Alcotest.run "incremental"
     [ "with_env_full",
@@ -100,4 +109,6 @@ let () =
         Alcotest.test_case "empty deps is base" `Quick test_deps_env_empty_is_base;
         Alcotest.test_case "clear_deps rebuilds" `Quick test_clear_deps_drops_cache ];
       "run_tir_pass",
-      [ Alcotest.test_case "memoized by source" `Quick test_tir_pass_memoized ] ]
+      [ Alcotest.test_case "memoized by source" `Quick test_tir_pass_memoized ];
+      "watched_files",
+      [ Alcotest.test_case "invalidate clears index" `Quick test_watched_invalidates ] ]
