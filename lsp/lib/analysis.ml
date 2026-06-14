@@ -2175,6 +2175,20 @@ let local_symbol_at (a : t) ~line ~character : int option =
   Option.map snd !best
 
 let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
+  (* Local binder under the cursor resolves by scope (shadow-correct). *)
+  match local_symbol_at a ~line ~character with
+  | Some id ->
+    (match Hashtbl.find_opt a.sym_defs id with
+     | Some def_sp ->
+       let path =
+         if def_sp.Ast.file = "" || def_sp.Ast.file = "<unknown>" then a.filename
+         else def_sp.Ast.file
+       in
+       let uri = Lsp.Types.DocumentUri.of_path path in
+       Some (Lsp.Types.Location.create ~uri
+               ~range:(Pos.span_to_lsp_range def_sp))
+     | None -> None)
+  | None ->
   let var_name =
     Hashtbl.fold (fun sp name found ->
         match found with
@@ -2375,8 +2389,35 @@ let doc_name_at (a : t) ~line ~character : string option =
   | None -> None
   | Some name -> doc_for a name
 
+let locations_of_spans (a : t) (spans : Ast.span list) : Lsp.Types.Location.t list =
+  List.filter_map (fun (sp : Ast.span) ->
+      if sp = Ast.dummy_span then None
+      else
+        let path =
+          if sp.Ast.file = "" || sp.Ast.file = "<unknown>" then a.filename
+          else sp.Ast.file
+        in
+        let uri   = Lsp.Types.DocumentUri.of_path path in
+        let range = Pos.span_to_lsp_range sp in
+        Some (Lsp.Types.Location.create ~uri ~range)
+    ) spans
+
 let references_at (a : t) ~include_declaration ~line ~character
     : Lsp.Types.Location.t list =
+  (* Local binder under the cursor: resolve by scope (shadow-correct). *)
+  match local_symbol_at a ~line ~character with
+  | Some id ->
+    let use_spans = try Hashtbl.find a.sym_id_uses id with Not_found -> [] in
+    let all_spans =
+      if include_declaration then
+        match Hashtbl.find_opt a.sym_defs id with
+        | Some def_sp -> def_sp :: use_spans
+        | None        -> use_spans
+      else use_spans
+    in
+    locations_of_spans a all_spans
+  | None ->
+  (* Otherwise top-level/stdlib: name-based resolution. *)
   let name_opt =
     let from_use =
       Hashtbl.fold (fun sp name found ->
@@ -2414,17 +2455,7 @@ let references_at (a : t) ~include_declaration ~line ~character
       else
         use_spans
     in
-    List.filter_map (fun (sp : Ast.span) ->
-        if sp = Ast.dummy_span then None
-        else
-          let path =
-            if sp.Ast.file = "" || sp.Ast.file = "<unknown>" then a.filename
-            else sp.Ast.file
-          in
-          let uri   = Lsp.Types.DocumentUri.of_path path in
-          let range = Pos.span_to_lsp_range sp in
-          Some (Lsp.Types.Location.create ~uri ~range)
-      ) all_spans
+    locations_of_spans a all_spans
 
 (** Return a flat list of [TextEdit.t] replacing every occurrence of the
     symbol at the cursor with [new_name], including its definition site. *)
