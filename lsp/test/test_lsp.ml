@@ -3114,11 +3114,62 @@ let test_user_symbol_wins_over_stdlib_name () =
       dl loc.Lsp.Types.Location.range.Lsp.Types.Range.start.Lsp.Types.Position.line
 
 (* ------------------------------------------------------------------ *)
+(* implementation / typeDefinition / documentHighlight                 *)
+(* ------------------------------------------------------------------ *)
+
+let test_implementation () =
+  let src = {|mod M do
+  interface Drawable(a) do
+    fn draw: a -> String
+  end
+  type Widget = Alpha | Beta
+  impl Drawable(Widget) do
+    fn draw(w) do "w" end
+  end
+end|} in
+  let a = analyse src in
+  let (il, ic) = pos_of src "interface Drawable" in
+  (* cursor on the interface name "Drawable" (after "interface ") *)
+  let locs = An.implementation_at a ~line:il ~character:(ic + 10) in
+  Alcotest.(check int) "interface resolves to its single impl" 1 (List.length locs)
+
+let test_type_definition () =
+  let src = {|mod M do
+  type Widget = Alpha | Beta
+  fn f(w : Widget) : Widget do w end
+end|} in
+  let a = analyse src in
+  let (wl, wc) = pos_of src "w end" in
+  let (dl, _)  = pos_of src "type Widget" in
+  (match An.type_definition_at a ~line:wl ~character:wc with
+   | None -> Alcotest.fail "expected a type definition for the value"
+   | Some l ->
+     Alcotest.(check int) "jumps to the type declaration line"
+       dl l.Lsp.Types.Location.range.Lsp.Types.Range.start.Lsp.Types.Position.line)
+
+let test_document_highlight () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1
+    x + x
+  end
+end|} in
+  let a = analyse src in
+  let (xl, xc) = pos_of src "x + x" in
+  let hls = An.document_highlights_at a ~line:xl ~character:xc in
+  Alcotest.(check int) "highlights the binding and both uses" 3 (List.length hls)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "march-lsp" [
+    "navigation extras", [
+      "go to implementation", `Quick, test_implementation;
+      "go to type definition", `Quick, test_type_definition;
+      "document highlight", `Quick, test_document_highlight;
+    ];
     "stdlib name collision", [
       "user symbol wins over stdlib name", `Quick, test_user_symbol_wins_over_stdlib_name;
     ];

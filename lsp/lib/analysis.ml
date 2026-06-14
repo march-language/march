@@ -130,6 +130,9 @@ type t = {
   (** Registered interfaces. *)
   impls       : (string * Tc.ty) list;
   (** Interface implementations: iface name → impl type. *)
+  impl_sites  : (string, Ast.span list) Hashtbl.t;
+  (** Interface name → spans of `impl <iface> for ...` declarations
+      (for textDocument/implementation). *)
   actors      : (string * Ast.actor_def) list;
   (** Actor definitions: name → def. *)
   doc_map     : (string, string) Hashtbl.t;
@@ -1287,6 +1290,23 @@ let collect_perf_insights
   List.iter scan_decl user_decls;
   !acc
 
+(* Interface name → spans of `impl <iface> for ...` declarations, for
+   textDocument/implementation (jump from an interface to its implementations).
+   The span is the interface name inside each impl. *)
+let collect_impl_sites (decls : Ast.decl list) : (string, Ast.span list) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  let rec go (d : Ast.decl) =
+    match d with
+    | Ast.DImpl (impl, _) ->
+      let key = impl.Ast.impl_iface.Ast.txt in
+      let prev = try Hashtbl.find tbl key with Not_found -> [] in
+      Hashtbl.replace tbl key (impl.Ast.impl_iface.Ast.span :: prev)
+    | Ast.DMod (_, _, ds, _) -> List.iter go ds
+    | _ -> ()
+  in
+  List.iter go decls;
+  tbl
+
 (* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
@@ -1319,6 +1339,7 @@ let analyse ~filename ~src : t =
       ctors            = [];
       interfaces       = [];
       impls            = [];
+      impl_sites       = Hashtbl.create 0;
       actors           = [];
       doc_map          = Hashtbl.create 0;
       refs_map         = Hashtbl.create 0;
@@ -1945,6 +1966,7 @@ let analyse ~filename ~src : t =
       impls      = Tc.StrMap.fold (fun k vs acc ->
                      List.fold_left (fun a v -> (k, v) :: a) acc vs)
                      final_env.Tc.impls [];
+      impl_sites = collect_impl_sites user_decls;
       actors;
       doc_map;
       refs_map;
@@ -2550,6 +2572,35 @@ let rename_at (a : t) ~line ~character ~new_name
   List.map (fun (loc : Lsp.Types.Location.t) ->
       Lsp.Types.TextEdit.create ~range:loc.range ~newText:new_name
     ) locs
+
+(* textDocument/implementation: from an interface name under the cursor, the
+   `impl <iface> for ...` declaration sites. *)
+let implementation_at (a : t) ~line ~character : Lsp.Types.Location.t list =
+  match name_at a ~line ~character with
+  | None -> []
+  | Some name ->
+    (match Hashtbl.find_opt a.impl_sites name with
+     | None -> []
+     | Some spans -> locations_of_spans a spans)
+
+(* textDocument/typeDefinition: from an expression under the cursor, the
+   definition of its (named) type. *)
+let type_definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
+  match ty_at a ~line ~character with
+  | Some (Tc.TCon (name, _)) ->
+    (match Hashtbl.find_opt a.def_map name with
+     | None -> None
+     | Some sp ->
+       (match locations_of_spans a [sp] with l :: _ -> Some l | [] -> None))
+  | _ -> None
+
+(* textDocument/documentHighlight: occurrences of the symbol under the cursor
+   within the current file (references, rendered as highlights). *)
+let document_highlights_at (a : t) ~line ~character : Lsp.Types.DocumentHighlight.t list =
+  references_at a ~include_declaration:true ~line ~character
+  |> List.map (fun (l : Lsp.Types.Location.t) ->
+         Lsp.Types.DocumentHighlight.create ~range:l.Lsp.Types.Location.range
+           ~kind:Lsp.Types.DocumentHighlightKind.Text ())
 
 (** Validate a rename request: return the identifier range if the symbol under
     the cursor is renameable (a function-local binding, or a top-level symbol
@@ -3683,6 +3734,20 @@ let query_rename_at (a : t) ~line ~utf16_char ~new_name =
 let query_prepare_rename_at (a : t) ~line ~utf16_char =
   prepare_rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
   |> Option.map (Pos.remap_range a.doc)
+
+let query_implementation_at (a : t) ~line ~utf16_char =
+  implementation_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (Pos.remap_location a.doc)
+
+let query_type_definition_at (a : t) ~line ~utf16_char =
+  type_definition_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> Option.map (Pos.remap_location a.doc)
+
+let query_document_highlights_at (a : t) ~line ~utf16_char =
+  document_highlights_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (fun (h : Lsp.Types.DocumentHighlight.t) ->
+         { h with Lsp.Types.DocumentHighlight.range =
+                    Pos.remap_range a.doc h.Lsp.Types.DocumentHighlight.range })
 
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)
