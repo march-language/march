@@ -63,7 +63,8 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 - ✅ **Auto-install a missing pinned toolchain** — `forge build`/`run` download the resolved pin/global toolchain on demand (`Toolchain.ensure_installed`, rustup-style) instead of erroring; constraint checked before download. 2 unit tests + live e2e.
 - ✅ **`forge upgrade`** — installs the latest March (newest stable, else newest nightly) and makes it active; no-op if already latest (`Toolchain.upgrade`, verified e2e).
 - ✅ **`forge toolchain list --remote`** — lists installable versions from the GitHub releases API, grouped stable/nightly, marking installed ones (`Toolchain.classify_remote`/`list_remote`, 1 unit test).
-- [ ] **`forge why <pkg>` / `forge tree` / `forge outdated`** — dependency introspection. `why` is nearly free given the PubGrub derivation tree already exists.
+- ✅ **`forge tree` / `forge why <pkg>`** — dependency-graph introspection (`deptree.ml` pure tree/path logic, 4 unit tests; `cmd_tree.ml` rebuilds edges from each installed dep's forge.toml since the lockfile has none). Diamonds and cycles handled.
+- [ ] **`forge outdated`** — show deps with newer compatible versions (needs the registry to know what's newer).
 - [ ] **`license` field (and `repository`/`homepage`/`keywords`) in `forge.toml`** — standard publishing metadata; currently unparsed.
 - [ ] **Registry server + network publish/fetch + `forge login`/`forge yank`** — `forge publish` validates locally only today (no server, no auth, no network fetch); distribution is git/path-only. Largest package-side gap ("Phase 6").
 - [ ] **Workspaces / monorepo** — multiple packages sharing a single lockfile.
