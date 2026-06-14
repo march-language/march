@@ -403,6 +403,17 @@ let test_constraint_rejects_malformed_req () =
   Alcotest.(check bool) "a malformed constraint is a config error"
     false (is_ok (Toolchain.check_constraint ~resolved:"0.5.0" ~req:"not-a-constraint"))
 
+(* remote version listing (forge toolchain list --remote) ----------------- *)
+
+let test_classify_remote_groups_and_marks () =
+  let remote = [ "v0.5.1"; "v0.5.0"; "nightly-20260612"; "nightly-20260611" ] in
+  let installed = [ "v0.5.0"; "nightly-20260611" ] in
+  let (stable, nightly) = Toolchain.classify_remote ~remote ~installed in
+  Alcotest.(check (list (pair string bool))) "stable group marks installed, order preserved"
+    [ ("v0.5.1", false); ("v0.5.0", true) ] stable;
+  Alcotest.(check (list (pair string bool))) "nightly group marks installed, order preserved"
+    [ ("nightly-20260612", false); ("nightly-20260611", true) ] nightly
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -449,5 +460,6 @@ let () =
       Alcotest.test_case "constraint: violated"              `Quick test_constraint_violated;
       Alcotest.test_case "constraint: skips non-semver tag"  `Quick test_constraint_skips_non_semver_tag;
       Alcotest.test_case "constraint: rejects malformed req" `Quick test_constraint_rejects_malformed_req;
+      Alcotest.test_case "list --remote: groups + marks installed" `Quick test_classify_remote_groups_and_marks;
     ];
   ]
