@@ -303,6 +303,25 @@ let test_bench_format_json () =
   Alcotest.(check bool) "json has name/seconds/ok" true
     (contains out "\"name\"" && contains out "\"a\"" && contains out "\"ok\"")
 
+(* forge licenses + --frozen --------------------------------------------- *)
+
+let test_licenses_format_human () =
+  let rows = [ ("foo", Some "1.2.0", Some "MIT"); ("bar", Some "0.1.0", None) ] in
+  let out = Cmd_licenses.format rows ~json:false in
+  Alcotest.(check bool) "shows a license"      true (contains out "foo" && contains out "MIT");
+  Alcotest.(check bool) "flags a missing one"  true (contains out "MISSING")
+
+let test_licenses_any_missing () =
+  Alcotest.(check bool) "missing present" true
+    (Cmd_licenses.any_missing [ ("a", None, Some "MIT"); ("b", None, None) ]);
+  Alcotest.(check bool) "all present" false
+    (Cmd_licenses.any_missing [ ("a", None, Some "MIT"); ("b", None, Some "BSD") ])
+
+let test_frozen_error () =
+  Alcotest.(check bool) "drift + frozen -> error" true  (Cmd_licenses.frozen_error ~drifted:true ~frozen:true);
+  Alcotest.(check bool) "drift, not frozen -> ok" false (Cmd_licenses.frozen_error ~drifted:true ~frozen:false);
+  Alcotest.(check bool) "no drift -> ok"          false (Cmd_licenses.frozen_error ~drifted:false ~frozen:true)
+
 (* forge version: semver bump + forge.toml rewrite ------------------------ *)
 
 let vstr = Resolver_version.to_string
@@ -664,6 +683,11 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "licenses", [
+      Alcotest.test_case "format: human + MISSING"  `Quick test_licenses_format_human;
+      Alcotest.test_case "any_missing"              `Quick test_licenses_any_missing;
+      Alcotest.test_case "frozen_error gate"        `Quick test_frozen_error;
     ];
     "versioning", [
       Alcotest.test_case "bump patch"               `Quick test_bump_patch;

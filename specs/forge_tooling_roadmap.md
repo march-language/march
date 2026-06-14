@@ -150,6 +150,8 @@ forge release                 # orchestrate: checks -> version bump -> tag (-> p
 
 ## 4. `forge licenses` + `--frozen`
 
+**Status: ✅ Implemented (2026-06-14)** — `forge/lib/cmd_licenses.ml` (pure `format`/`any_missing`/`frozen_error`, 3 unit tests; `collect` walks transitive deps reading each `forge.toml` license). `forge licenses [--json] [--strict]`; `forge build --frozen/--locked` errors on lockfile drift instead of re-resolving (via `Resolver_lockfile.has_drifted`). Verified e2e.
+
 **Motivation.** Two cheap CI/compliance wins that build directly on work already done. We now parse the `license` field (this session) and have lockfile drift detection (`Resolver_lockfile.has_drifted` + the toolchain drift); `forge licenses` surfaces the former across the dep tree, and `--frozen` promotes drift from a warning to a hard error for reproducible CI.
 
 **CLI surface.**

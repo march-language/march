@@ -282,10 +282,21 @@ let run_preprocessors ~proj ~src_dir ~gen_dir =
     !count
   end
 
-let build ~release ?(dump_phases=false) () =
+let build ~release ?(dump_phases=false) ?(frozen=false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
+    (* --frozen: a lockfile out of date with forge.toml is an error, not a
+       silent re-resolve (CI reproducibility). *)
+    let lock = Filename.concat proj.Project.root "forge.lock" in
+    let drifted =
+      Sys.file_exists lock
+      && Resolver_lockfile.has_drifted lock
+           (Project.read_file (Filename.concat proj.Project.root "forge.toml"))
+    in
+    if Cmd_licenses.frozen_error ~drifted ~frozen then
+      Error "forge.lock is out of date with forge.toml; --frozen forbids re-resolving — run `forge deps`"
+    else
     (* Enforce an optional `march = "~> X.Y"` constraint in forge.toml against
        the resolved toolchain — before any download. *)
     match

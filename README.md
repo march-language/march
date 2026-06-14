@@ -302,6 +302,12 @@ forge release                # clean tree -> build -> test -> bump + tag
 
 `forge fmt --check` and `forge lint` (which exits non-zero on errors) round out the CI checks.
 
+```bash
+forge licenses               # list each dependency and its declared license
+forge licenses --strict      # non-zero if any dependency has no license
+forge build --frozen         # CI: fail if forge.lock is out of date (don't re-resolve)
+```
+
 ## Language tour
 
 ### Values and bindings
