@@ -1391,11 +1391,19 @@ let analyse ~filename ~src : t =
         ~source_file:filename
         desugared
     in
-    let desugared =
+    (* Incremental typecheck: the stdlib is typechecked once into a cached
+       base env (Typecheck_cache); only the resolved deps + this file's own
+       decls are checked per edit, layered on top via the incremental path.
+       This replaces re-running the whole-module typechecker over
+       [stdlib @ deps @ user] on every keystroke. *)
+    let scratch = Typecheck_cache.(derive (base_env ())) in
+    let layered : Ast.module_ =
       { desugared with
-        Ast.mod_decls = stdlib_decls @ extra_decls @ desugared.Ast.mod_decls }
+        Ast.mod_decls = extra_decls @ desugared.Ast.mod_decls }
     in
-    let (errors, type_map, final_env) = Tc.check_module_full desugared in
+    let (errors, type_map, final_env) =
+      Tc.check_module_with_env_full scratch layered
+    in
     let def_map        = Hashtbl.create 64 in
     let use_map        = Hashtbl.create 64 in
     let doc_map        = Hashtbl.create 16 in
