@@ -61,7 +61,7 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 - [ ] **Toolchain version in `forge.lock`** — record the resolved compiler version alongside dependency locks so a checkout reproduces both deps and compiler.
 - ✅ **`forge.toml` `march` constraint enforcement** — `forge build` blocks when the resolved toolchain doesn't satisfy an optional `march = "~> X.Y"` under `[package]` (`Toolchain.check_constraint`, 4 unit tests; non-semver tags allowed through). `project.ml` gains a `march_req` field.
 - ✅ **Auto-install a missing pinned toolchain** — `forge build`/`run` download the resolved pin/global toolchain on demand (`Toolchain.ensure_installed`, rustup-style) instead of erroring; constraint checked before download. 2 unit tests + live e2e.
-- [ ] **`forge upgrade` self-update** — update the forge/march binaries in place (designed; unbuilt).
+- ✅ **`forge upgrade`** — installs the latest March (newest stable, else newest nightly) and makes it active; no-op if already latest (`Toolchain.upgrade`, verified e2e).
 - ✅ **`forge toolchain list --remote`** — lists installable versions from the GitHub releases API, grouped stable/nightly, marking installed ones (`Toolchain.classify_remote`/`list_remote`, 1 unit test).
 - [ ] **`forge why <pkg>` / `forge tree` / `forge outdated`** — dependency introspection. `why` is nearly free given the PubGrub derivation tree already exists.
 - [ ] **`license` field (and `repository`/`homepage`/`keywords`) in `forge.toml`** — standard publishing metadata; currently unparsed.

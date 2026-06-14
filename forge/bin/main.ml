@@ -481,6 +481,12 @@ let toolchain_cmd =
   Cmd.group (Cmd.info "toolchain" ~doc:"Manage installed March compiler versions")
     [ install_sub; use_sub; list_sub; uninstall_sub; pin_sub; which_sub ]
 
+(* ------------------------------------------------------------- forge upgrade *)
+
+let upgrade_cmd =
+  Cmd.v (Cmd.info "upgrade" ~doc:"Install the latest March and make it the active toolchain")
+    Term.(const (fun () -> handle (Toolchain.upgrade ())) $ const ())
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -622,7 +628,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      toolchain_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; upgrade_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

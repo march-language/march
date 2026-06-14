@@ -446,3 +446,20 @@ let ensure_installed ?(cwd = Sys.getcwd ()) () =
       flush stdout;   (* surface install messages before the build/run output *)
       r
     end
+
+(* `forge upgrade` — install the latest March (newest stable, else newest
+   nightly) and make it the active global toolchain. *)
+let upgrade () =
+  match resolve_tag None with
+  | Error e -> Error e
+  | Ok tag ->
+    if global_version () = Some tag then
+      (Printf.printf "Already on the latest March (%s)\n" tag; Ok ())
+    else begin
+      Printf.eprintf "Upgrading to March %s...\n%!" tag;
+      let installed =
+        if Sys.file_exists (Filename.concat (version_dir tag) "bin/march")
+        then Ok () else install (Some tag)
+      in
+      Result.bind installed (fun () -> use tag)
+    end
