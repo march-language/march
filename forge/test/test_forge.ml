@@ -276,6 +276,33 @@ let test_checksum_not_found () =
   Alcotest.(check (option string)) "unlisted file yields None (verify fails closed)"
     None (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
 
+(* shared test helper: substring containment *)
+let contains haystack needle =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec at i = i + nl <= hl && (String.sub haystack i nl = needle || at (i + 1)) in
+  nl = 0 || at 0
+
+(* forge bench: discovery + result formatting ----------------------------- *)
+
+let test_bench_name () =
+  Alcotest.(check string) "stem from path" "binary_trees"
+    (Cmd_bench.bench_name "bench/binary_trees.march")
+
+let test_bench_matches () =
+  Alcotest.(check bool) "empty filter matches all" true  (Cmd_bench.matches ~filter:"" "x");
+  Alcotest.(check bool) "substring match"          true  (Cmd_bench.matches ~filter:"tree" "binary_trees");
+  Alcotest.(check bool) "no match"                 false (Cmd_bench.matches ~filter:"zzz" "binary_trees")
+
+let test_bench_format_human () =
+  let out = Cmd_bench.format_results [ ("a", 1.5, true); ("b", 0.0, false) ] ~json:false in
+  Alcotest.(check bool) "shows a name and its time" true (contains out "a" && contains out "1.5");
+  Alcotest.(check bool) "marks a failed bench"      true (contains out "FAILED")
+
+let test_bench_format_json () =
+  let out = Cmd_bench.format_results [ ("a", 1.5, true) ] ~json:true in
+  Alcotest.(check bool) "json has name/seconds/ok" true
+    (contains out "\"name\"" && contains out "\"a\"" && contains out "\"ok\"")
+
 (* forge watch: change detection ------------------------------------------ *)
 
 let test_watch_no_change () =
@@ -403,11 +430,6 @@ let test_march_command_falls_back_to_path () =
   Unix.putenv "MARCH_HOME" (fresh_dir ());
   Alcotest.(check (result string string)) "no resolution -> bare 'march' on PATH"
     (Ok "march") (Toolchain.march_command ~cwd:(fresh_dir ()) ())
-
-let contains haystack needle =
-  let nl = String.length needle and hl = String.length haystack in
-  let rec at i = i + nl <= hl && (String.sub haystack i nl = needle || at (i + 1)) in
-  nl = 0 || at 0
 
 let test_path_prefix_installed () =
   let home = fresh_dir () in
@@ -620,6 +642,12 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "bench", [
+      Alcotest.test_case "bench_name: stem from path"   `Quick test_bench_name;
+      Alcotest.test_case "matches: filter predicate"    `Quick test_bench_matches;
+      Alcotest.test_case "format: human table"          `Quick test_bench_format_human;
+      Alcotest.test_case "format: json"                 `Quick test_bench_format_json;
     ];
     "watcher", [
       Alcotest.test_case "no change on identical snapshot"  `Quick test_watch_no_change;
