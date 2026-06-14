@@ -432,6 +432,33 @@ let test_ensure_installed_noop_when_unresolved () =
   Alcotest.(check bool) "nothing resolved -> Ok (PATH fallback, nothing to install)"
     true (is_ok (Toolchain.ensure_installed ~cwd:(fresh_dir ()) ()))
 
+(* dependency tree / why (Deptree) ---------------------------------------- *)
+
+let adj pairs name = Option.value ~default:[] (List.assoc_opt name pairs)
+
+let test_deptree_render () =
+  let g = [ ("app", ["a"; "b"]); ("a", ["c"]); ("b", []); ("c", []) ] in
+  let lines = Deptree.render_tree ~root:"app" ~deps_of:(adj g) in
+  Alcotest.(check (list string)) "ascii tree with connectors"
+    [ "app"; "├── a"; "│   └── c"; "└── b" ] lines
+
+let test_deptree_render_cycle_breaks () =
+  let g = [ ("app", ["a"]); ("a", ["app"]) ] in   (* cycle *)
+  let lines = Deptree.render_tree ~root:"app" ~deps_of:(adj g) in
+  Alcotest.(check (list string)) "cycle is marked and not re-expanded"
+    [ "app"; "└── a"; "    └── app (*)" ] lines
+
+let test_deptree_why_paths () =
+  let g = [ ("app", ["a"; "b"]); ("a", ["c"]); ("b", ["c"]); ("c", []) ] in
+  let paths = Deptree.why ~root:"app" ~deps_of:(adj g) ~target:"c" in
+  Alcotest.(check (list (list string))) "all paths from root to target"
+    [ ["app"; "a"; "c"]; ["app"; "b"; "c"] ] paths
+
+let test_deptree_why_none () =
+  let g = [ ("app", ["a"]); ("a", []) ] in
+  Alcotest.(check (list (list string))) "no path to an absent target"
+    [] (Deptree.why ~root:"app" ~deps_of:(adj g) ~target:"zzz")
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -481,5 +508,11 @@ let () =
       Alcotest.test_case "list --remote: groups + marks installed" `Quick test_classify_remote_groups_and_marks;
       Alcotest.test_case "ensure_installed: no-op when present" `Quick test_ensure_installed_noop_when_present;
       Alcotest.test_case "ensure_installed: no-op when unresolved" `Quick test_ensure_installed_noop_when_unresolved;
+    ];
+    "deptree", [
+      Alcotest.test_case "render: ascii tree"           `Quick test_deptree_render;
+      Alcotest.test_case "render: cycle breaks"         `Quick test_deptree_render_cycle_breaks;
+      Alcotest.test_case "why: all paths to target"     `Quick test_deptree_why_paths;
+      Alcotest.test_case "why: no path -> empty"        `Quick test_deptree_why_none;
     ];
   ]

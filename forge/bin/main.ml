@@ -487,6 +487,21 @@ let upgrade_cmd =
   Cmd.v (Cmd.info "upgrade" ~doc:"Install the latest March and make it the active toolchain")
     Term.(const (fun () -> handle (Toolchain.upgrade ())) $ const ())
 
+(* --------------------------------------------------------- forge tree / why *)
+
+let tree_cmd =
+  Cmd.v (Cmd.info "tree" ~doc:"Print the project dependency tree")
+    Term.(const (fun () -> handle (Cmd_tree.run_tree ())) $ const ())
+
+let why_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"PACKAGE" ~doc:"Dependency to explain")
+  in
+  let run n = handle (Cmd_tree.run_why n) in
+  Cmd.v (Cmd.info "why" ~doc:"Show why a package is in the dependency graph")
+    Term.(const run $ name)
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -628,7 +643,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      toolchain_cmd; upgrade_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; upgrade_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
