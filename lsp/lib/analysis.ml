@@ -136,6 +136,14 @@ type t = {
   (** Function name → doc string (from [fn_doc] field). *)
   refs_map    : (string, Ast.span list) Hashtbl.t;
   (** Inverted index: variable name → all use-site spans. *)
+  sym_defs    : (int, Ast.span) Hashtbl.t;
+  (** Local binder id → its definition span. *)
+  sym_uses    : (Ast.span, int) Hashtbl.t;
+  (** Use-site span → resolved local binder id (locals only). *)
+  sym_id_uses : (int, Ast.span list) Hashtbl.t;
+  (** Local binder id → all its use-site spans. *)
+  sym_name    : (int, string) Hashtbl.t;
+  (** Local binder id → name (for rename validation/display). *)
   call_sites  : call_site list;
   (** All call sites collected for signature-help queries. *)
   consumption : consumption list;
@@ -477,6 +485,144 @@ and collect_pat_defs ~def_map ~use_map (pat : Ast.pattern) =
   | Ast.PatRecord (fields, _) ->
     List.iter (fun (_, p) -> collect_pat_defs ~def_map ~use_map p) fields
   | Ast.PatWild _ | Ast.PatLit _ -> ()
+
+(* ------------------------------------------------------------------ *)
+(* Scope-aware local symbol resolution                                 *)
+(* ------------------------------------------------------------------ *)
+(* For function-LOCAL binders only (let-in-block, fn/lambda/let-fn      *)
+(* params, match-arm binders) assign a unique id per binding and a      *)
+(* use->id map resolved through a lexical scope stack. Top-level and    *)
+(* stdlib names are left to the name-based def_map/use_map. This is what *)
+(* makes go-to-def / references / rename scope-correct under shadowing. *)
+
+type scoped_syms = {
+  ss_defs    : (int, Ast.span) Hashtbl.t;
+  ss_uses    : (Ast.span, int) Hashtbl.t;
+  ss_id_uses : (int, Ast.span list) Hashtbl.t;
+  ss_name    : (int, string) Hashtbl.t;
+}
+
+let collect_scoped (decls : Ast.decl list) : scoped_syms =
+  let ss_defs = Hashtbl.create 64 in
+  let ss_uses = Hashtbl.create 64 in
+  let ss_id_uses = Hashtbl.create 64 in
+  let ss_name = Hashtbl.create 64 in
+  let next_id = ref 0 in
+  (* A scope is a stack of frames (innermost first); each frame maps a name to
+     the binder id currently in scope for it. *)
+  let fresh (n : Ast.name) : string * int =
+    incr next_id;
+    let id = !next_id in
+    Hashtbl.replace ss_defs id n.Ast.span;
+    Hashtbl.replace ss_name id n.Ast.txt;
+    (n.Ast.txt, id)
+  in
+  let resolve scope txt =
+    let rec go = function
+      | [] -> None
+      | frame :: rest ->
+        (match List.assoc_opt txt frame with Some id -> Some id | None -> go rest)
+    in
+    go scope
+  in
+  let record_use scope (n : Ast.name) =
+    match resolve scope n.Ast.txt with
+    | None -> ()  (* not a local: top-level/stdlib, handled by name maps *)
+    | Some id ->
+      Hashtbl.replace ss_uses n.Ast.span id;
+      let prev = try Hashtbl.find ss_id_uses id with Not_found -> [] in
+      Hashtbl.replace ss_id_uses id (n.Ast.span :: prev)
+  in
+  let rec pat_binders (pat : Ast.pattern) : (string * int) list =
+    match pat with
+    | Ast.PatVar n -> [ fresh n ]
+    | Ast.PatAs (p, n, _) -> fresh n :: pat_binders p
+    | Ast.PatCon (_, ps) | Ast.PatTuple (ps, _) -> List.concat_map pat_binders ps
+    | Ast.PatAtom (_, ps, _) -> List.concat_map pat_binders ps
+    | Ast.PatRecord (fields, _) ->
+      List.concat_map (fun (_, p) -> pat_binders p) fields
+    | Ast.PatWild _ | Ast.PatLit _ -> []
+  in
+  let param_binder (p : Ast.param) = fresh p.Ast.param_name in
+  let fn_param_binders (fps : Ast.fn_param list) : (string * int) list =
+    List.concat_map (fun fp ->
+      match fp with
+      | Ast.FPPat pat -> pat_binders pat
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> [ param_binder p ]
+    ) fps
+  in
+  let rec walk scope (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> record_use scope n
+    | Ast.ELam (params, body, _) ->
+      walk (List.map param_binder params :: scope) body
+    | Ast.ELetFn (name, params, _, body, _) ->
+      let fb = fresh name in
+      walk (List.map param_binder params :: ([ fb ] :: scope)) body
+    | Ast.EMatch (subj, branches, _) ->
+      walk scope subj;
+      List.iter (fun (br : Ast.branch) ->
+        let scope' = pat_binders br.Ast.branch_pat :: scope in
+        Option.iter (walk scope') br.Ast.branch_guard;
+        walk scope' br.Ast.branch_body) branches
+    | Ast.EBlock (exprs, _) ->
+      (* Thread a growing frame so a `let` is visible to later siblings. *)
+      let cur = ref [] in
+      List.iter (fun e ->
+        match e with
+        | Ast.ELet (b, _) ->
+          walk (!cur :: scope) b.Ast.bind_expr;   (* RHS sees prior, not itself *)
+          cur := pat_binders b.Ast.bind_pat @ !cur
+        | Ast.ELetFn (name, params, _, body, _) ->
+          let fb = fresh name in
+          cur := fb :: !cur;                       (* visible to siblings + self *)
+          walk (List.map param_binder params :: (!cur :: scope)) body
+        | other -> walk (!cur :: scope) other
+      ) exprs
+    | Ast.ELet (b, _) -> walk scope b.Ast.bind_expr
+    | Ast.EApp (f, args, _) -> walk scope f; List.iter (walk scope) args
+    | Ast.ECon (_, args, _) -> List.iter (walk scope) args
+    | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) -> List.iter (walk scope) es
+    | Ast.ERecord (fields, _) -> List.iter (fun (_, e) -> walk scope e) fields
+    | Ast.ERecordUpdate (e, fields, _) ->
+      walk scope e; List.iter (fun (_, e2) -> walk scope e2) fields
+    | Ast.EField (base, _, _) -> walk scope base
+    | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> walk scope e
+    | Ast.EIf (c, e1, e2, _) -> walk scope c; walk scope e1; walk scope e2
+    | Ast.ECond (arms, _) ->
+      List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
+    | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
+    | Ast.EAssert (e, _) -> walk scope e
+    | Ast.ESigil (_, content, _) -> walk scope content
+    | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _) | Ast.EResultRef _ -> ()
+  in
+  let walk_clause (cl : Ast.fn_clause) =
+    let scope = [ fn_param_binders cl.Ast.fc_params ] in
+    Option.iter (walk scope) cl.Ast.fc_guard;
+    walk scope cl.Ast.fc_body
+  in
+  let rec walk_decl (decl : Ast.decl) =
+    match decl with
+    | Ast.DFn (fn, _) -> List.iter walk_clause fn.Ast.fn_clauses
+    | Ast.DLet (_, b, _) -> walk [] b.Ast.bind_expr
+    | Ast.DActor (_, _, adef, _) ->
+      walk [] adef.Ast.actor_init;
+      List.iter (fun (h : Ast.actor_handler) -> walk [] h.Ast.ah_body)
+        adef.Ast.actor_handlers
+    | Ast.DMod (_, _, decls, _) -> List.iter walk_decl decls
+    | Ast.DImpl (impl, _) ->
+      List.iter (fun (_, (fn : Ast.fn_def)) -> List.iter walk_clause fn.Ast.fn_clauses)
+        impl.Ast.impl_methods
+    | Ast.DApp (app, _) ->
+      walk [] app.Ast.app_body;
+      Option.iter (walk []) app.Ast.app_on_start;
+      Option.iter (walk []) app.Ast.app_on_stop
+    | Ast.DTest (tdef, _) -> walk [] tdef.Ast.test_body
+    | Ast.DSetup (body, _) | Ast.DSetupAll (body, _) -> walk [] body
+    | _ -> ()
+  in
+  List.iter walk_decl decls;
+  { ss_defs; ss_uses; ss_id_uses; ss_name }
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib doc-string collection                                        *)
@@ -1176,6 +1322,10 @@ let analyse ~filename ~src : t =
       actors           = [];
       doc_map          = Hashtbl.create 0;
       refs_map         = Hashtbl.create 0;
+      sym_defs         = Hashtbl.create 0;
+      sym_uses         = Hashtbl.create 0;
+      sym_id_uses      = Hashtbl.create 0;
+      sym_name         = Hashtbl.create 0;
       call_sites       = [];
       consumption      = [];
       match_sites      = [];
@@ -1274,6 +1424,11 @@ let analyse ~filename ~src : t =
        functions with the same name take precedence (user docs overwrite). *)
     collect_docs ~doc_map stdlib_decls;
     List.iter (collect_decl ~def_map ~use_map ~doc_map ~calls:call_sites_acc ~actors_tbl) user_decls;
+    (* Scope-aware local symbol resolution (for shadow-correct def/refs/rename). *)
+    let { ss_defs = sym_defs; ss_uses = sym_uses;
+          ss_id_uses = sym_id_uses; ss_name = sym_name } =
+      collect_scoped user_decls
+    in
     (* Collect stdlib definitions into def_map for cross-stdlib go-to-definition.
        Use throw-away tables for use_map/doc_map/calls/actors so we don't pollute
        the user-file maps with stdlib-internal references. *)
@@ -1786,6 +1941,10 @@ let analyse ~filename ~src : t =
       actors;
       doc_map;
       refs_map;
+      sym_defs;
+      sym_uses;
+      sym_id_uses;
+      sym_name;
       call_sites;
       consumption;
       match_sites;
@@ -2000,7 +2159,36 @@ let type_at (a : t) ~line ~character : string option =
     in
     Some (Tc.pp_ty ty)
 
+(* Smallest local-binder use/def span containing the cursor -> its symbol id.
+   [None] means the cursor is not on a function-local binding (top-level/stdlib,
+   resolved by the name-based maps instead). *)
+let local_symbol_at (a : t) ~line ~character : int option =
+  let best = ref None in
+  let consider sp id =
+    if Pos.span_contains sp ~line ~character then
+      match !best with
+      | Some (bsp, _) when not (Pos.span_smaller sp bsp) -> ()
+      | _ -> best := Some (sp, id)
+  in
+  Hashtbl.iter (fun sp id -> consider sp id) a.sym_uses;
+  Hashtbl.iter (fun id sp -> consider sp id) a.sym_defs;
+  Option.map snd !best
+
 let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
+  (* Local binder under the cursor resolves by scope (shadow-correct). *)
+  match local_symbol_at a ~line ~character with
+  | Some id ->
+    (match Hashtbl.find_opt a.sym_defs id with
+     | Some def_sp ->
+       let path =
+         if def_sp.Ast.file = "" || def_sp.Ast.file = "<unknown>" then a.filename
+         else def_sp.Ast.file
+       in
+       let uri = Lsp.Types.DocumentUri.of_path path in
+       Some (Lsp.Types.Location.create ~uri
+               ~range:(Pos.span_to_lsp_range def_sp))
+     | None -> None)
+  | None ->
   let var_name =
     Hashtbl.fold (fun sp name found ->
         match found with
@@ -2201,8 +2389,35 @@ let doc_name_at (a : t) ~line ~character : string option =
   | None -> None
   | Some name -> doc_for a name
 
+let locations_of_spans (a : t) (spans : Ast.span list) : Lsp.Types.Location.t list =
+  List.filter_map (fun (sp : Ast.span) ->
+      if sp = Ast.dummy_span then None
+      else
+        let path =
+          if sp.Ast.file = "" || sp.Ast.file = "<unknown>" then a.filename
+          else sp.Ast.file
+        in
+        let uri   = Lsp.Types.DocumentUri.of_path path in
+        let range = Pos.span_to_lsp_range sp in
+        Some (Lsp.Types.Location.create ~uri ~range)
+    ) spans
+
 let references_at (a : t) ~include_declaration ~line ~character
     : Lsp.Types.Location.t list =
+  (* Local binder under the cursor: resolve by scope (shadow-correct). *)
+  match local_symbol_at a ~line ~character with
+  | Some id ->
+    let use_spans = try Hashtbl.find a.sym_id_uses id with Not_found -> [] in
+    let all_spans =
+      if include_declaration then
+        match Hashtbl.find_opt a.sym_defs id with
+        | Some def_sp -> def_sp :: use_spans
+        | None        -> use_spans
+      else use_spans
+    in
+    locations_of_spans a all_spans
+  | None ->
+  (* Otherwise top-level/stdlib: name-based resolution. *)
   let name_opt =
     let from_use =
       Hashtbl.fold (fun sp name found ->
@@ -2240,17 +2455,7 @@ let references_at (a : t) ~include_declaration ~line ~character
       else
         use_spans
     in
-    List.filter_map (fun (sp : Ast.span) ->
-        if sp = Ast.dummy_span then None
-        else
-          let path =
-            if sp.Ast.file = "" || sp.Ast.file = "<unknown>" then a.filename
-            else sp.Ast.file
-          in
-          let uri   = Lsp.Types.DocumentUri.of_path path in
-          let range = Pos.span_to_lsp_range sp in
-          Some (Lsp.Types.Location.create ~uri ~range)
-      ) all_spans
+    locations_of_spans a all_spans
 
 (** Return a flat list of [TextEdit.t] replacing every occurrence of the
     symbol at the cursor with [new_name], including its definition site. *)
@@ -2262,6 +2467,56 @@ let rename_at (a : t) ~line ~character ~new_name
   List.map (fun (loc : Lsp.Types.Location.t) ->
       Lsp.Types.TextEdit.create ~range:loc.range ~newText:new_name
     ) locs
+
+(** Validate a rename request: return the identifier range if the symbol under
+    the cursor is renameable (a function-local binding, or a top-level symbol
+    defined in this file), or [None] to reject (stdlib symbols, keywords,
+    literals, whitespace). Used for textDocument/prepareRename. *)
+let prepare_rename_at (a : t) ~line ~character : Lsp.Types.Range.t option =
+  (* Smallest local-binder span (use or def) under the cursor. *)
+  let smallest_local =
+    let best = ref None in
+    let consider sp =
+      if Pos.span_contains sp ~line ~character then
+        match !best with
+        | Some b when not (Pos.span_smaller sp b) -> ()
+        | _ -> best := Some sp
+    in
+    Hashtbl.iter (fun sp _ -> consider sp) a.sym_uses;
+    Hashtbl.iter (fun _ sp -> consider sp) a.sym_defs;
+    !best
+  in
+  match smallest_local with
+  | Some sp -> Some (Pos.span_to_lsp_range sp)  (* locals are always renameable *)
+  | None ->
+    (* Top-level: find the name under the cursor and allow only if its
+       definition lives in this user file (reject stdlib / unresolved). *)
+    let hit =
+      let from_use =
+        Hashtbl.fold (fun sp name acc ->
+            match acc with
+            | Some _ -> acc
+            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+          ) a.use_map None
+      in
+      match from_use with
+      | Some _ -> from_use
+      | None ->
+        Hashtbl.fold (fun name sp acc ->
+            match acc with
+            | Some _ -> acc
+            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+          ) a.def_map None
+    in
+    (match hit with
+     | None -> None
+     | Some (sp, name) ->
+       (match Hashtbl.find_opt a.def_map name with
+        | Some def_sp
+          when def_sp.Ast.file = a.filename
+            || def_sp.Ast.file = "" || def_sp.Ast.file = "<unknown>" ->
+          Some (Pos.span_to_lsp_range sp)
+        | _ -> None))
 
 (** Convert 0-indexed (line, character) to a byte offset in [src]. *)
 let offset_of_pos src line character =
@@ -3341,6 +3596,10 @@ let query_references_at (a : t) ~include_declaration ~line ~utf16_char =
 let query_rename_at (a : t) ~line ~utf16_char ~new_name =
   rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char) ~new_name
   |> List.map (Pos.remap_text_edit a.doc)
+
+let query_prepare_rename_at (a : t) ~line ~utf16_char =
+  prepare_rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> Option.map (Pos.remap_range a.doc)
 
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)

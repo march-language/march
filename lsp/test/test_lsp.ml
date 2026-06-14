@@ -2865,6 +2865,73 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Scope-aware symbol identity (Phase 3)                               *)
+(* ------------------------------------------------------------------ *)
+
+let test_scoped_shadow_distinct () =
+  (* 'x' is a param of outer; the inner lambda shadows it with its own 'x'.
+     The lambda-body use of x and the outer-body use of x must resolve to
+     DIFFERENT binders. *)
+  let src =
+    "mod M do\n\
+    \  fn outer(x: Int) : Int do\n\
+    \    let inner = fn (x: Int) -> x + 1\n\
+    \    x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let lambda_x = An.local_symbol_at a ~line:2 ~character:31 in (* x in lambda body *)
+  let outer_x  = An.local_symbol_at a ~line:3 ~character:4  in (* x in outer body *)
+  Alcotest.(check bool) "lambda-body x resolves to a local" true (lambda_x <> None);
+  Alcotest.(check bool) "outer-body x resolves to a local"  true (outer_x  <> None);
+  Alcotest.(check bool) "shadowed x's are distinct binders" true (lambda_x <> outer_x)
+
+let test_rename_respects_shadowing () =
+  (* Renaming the inner (lambda) x must touch ONLY the lambda's binder+use
+     (both on line 2), never the outer x (lines 1 and 3) — and vice versa.
+     The old name-based rename mixed them. *)
+  let src =
+    "mod M do\n\
+    \  fn outer(x: Int) : Int do\n\
+    \    let inner = fn (x: Int) -> x + 1\n\
+    \    x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let start_lines es =
+    List.sort compare
+      (List.map (fun (e : Lsp.Types.TextEdit.t) ->
+         e.Lsp.Types.TextEdit.range.Lsp.Types.Range.start.Lsp.Types.Position.line)
+         es)
+  in
+  let lam = An.rename_at a ~line:2 ~character:31 ~new_name:"q" in
+  let out = An.rename_at a ~line:3 ~character:4  ~new_name:"q" in
+  Alcotest.(check (list int)) "lambda x rename stays in the lambda (line 2 only)"
+    [2; 2] (start_lines lam);
+  Alcotest.(check (list int)) "outer x rename hits outer def+use (lines 1,3) only"
+    [1; 3] (start_lines out)
+
+let test_prepare_rename_validates () =
+  (* prepareRename accepts a local binding and rejects keywords/whitespace. *)
+  let src =
+    "mod M do\n\
+    \  fn outer(x: Int) : Int do\n\
+    \    let inner = fn (x: Int) -> x + 1\n\
+    \    x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "a local variable is renameable"
+    true  (An.prepare_rename_at a ~line:3 ~character:4 <> None);
+  Alcotest.(check bool) "a keyword is not renameable"
+    false (An.prepare_rename_at a ~line:1 ~character:2 <> None);
+  Alcotest.(check bool) "whitespace is not renameable"
+    false (An.prepare_rename_at a ~line:3 ~character:1 <> None)
+
+(* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2972,6 +3039,11 @@ let () =
     ];
     "query facade", [
       "hover returns a transport-agnostic record", `Quick, test_query_hover_record;
+    ];
+    "symbol identity", [
+      "shadowed locals resolve to distinct binders", `Quick, test_scoped_shadow_distinct;
+      "rename respects shadowing", `Quick, test_rename_respects_shadowing;
+      "prepareRename validates the target", `Quick, test_prepare_rename_validates;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
