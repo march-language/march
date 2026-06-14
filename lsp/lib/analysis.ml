@@ -2136,10 +2136,10 @@ let rec unwrap_arrows (ty : Tc.ty) : string list * string =
     (Tc.pp_ty param :: more, ret)
   | _                       -> ([], Tc.pp_ty ty)
 
-let type_at (a : t) ~line ~character : string option =
-  (* Only consider spans from the current file — the type_map is shared with
-     stdlib declarations whose spans have the same line/col numbers as user
-     code, causing false matches if we don't filter by file. *)
+(* Raw inferred type of the smallest user-file span containing the cursor.
+   Only considers current-file spans (the type_map is shared with stdlib whose
+   spans collide on line/col). *)
+let ty_at (a : t) ~line ~character : Tc.ty option =
   let is_user_span (sp : Ast.span) =
     sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
   in
@@ -2157,7 +2157,10 @@ let type_at (a : t) ~line ~character : string option =
           else (best_sp, best_ty)
         ) (List.hd candidates) (List.tl candidates)
     in
-    Some (Tc.pp_ty ty)
+    Some ty
+
+let type_at (a : t) ~line ~character : string option =
+  Option.map Tc.pp_ty (ty_at a ~line ~character)
 
 (* Smallest local-binder use/def span containing the cursor -> its symbol id.
    [None] means the cursor is not on a function-local binding (top-level/stdlib,
@@ -2234,7 +2237,49 @@ let keywords = [
   "true"; "false"; "linear"; "affine"; "pub";
 ]
 
-let completions_at (a : t) ~line:_ ~character:_ =
+(* Dot-completion: when the cursor sits in `receiver.<prefix>`, complete the
+   members of the receiver's type instead of dumping the global namespace.
+   Currently handles a single-identifier receiver of record type (structural
+   TRecord); returns [None] for any non-dot or unresolved context so the caller
+   falls back to the general completion list. *)
+let dot_completions (a : t) ~line ~character : Lsp.Types.CompletionItem.t list option =
+  let open Lsp.Types in
+  let is_ident_char c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    || (c >= '0' && c <= '9') || c = '_'
+  in
+  let src = a.src in
+  let n = String.length src in
+  let ls = Utf16.line_start a.doc line in
+  let off = ls + character in
+  if off < 0 || off > n then None
+  else begin
+    (* Skip the identifier prefix currently being typed (may be empty). *)
+    let i = ref off in
+    while !i > 0 && is_ident_char src.[!i - 1] do decr i done;
+    if not (!i > 0 && src.[!i - 1] = '.') then None
+    else begin
+      (* Receiver: the identifier immediately left of the dot, on this line. *)
+      let k = ref (!i - 2) in
+      while !k >= 0 && (src.[!k] = ' ' || src.[!k] = '\t') do decr k done;
+      let rcv_end = !k in
+      while !k >= 0 && is_ident_char src.[!k] do decr k done;
+      let rcv_start = !k + 1 in
+      if rcv_start > rcv_end || rcv_end < ls then None
+      else
+        match ty_at a ~line ~character:(rcv_end - ls) with
+        | Some (Tc.TRecord flds) ->
+          Some (List.map (fun (fname, fty) ->
+              CompletionItem.create ~label:fname
+                ~kind:CompletionItemKind.Field ~detail:(Tc.pp_ty fty) ()) flds)
+        | _ -> None
+    end
+  end
+
+let completions_at (a : t) ~line ~character =
+  match dot_completions a ~line ~character with
+  | Some items -> items   (* in `receiver.`: only the receiver's members *)
+  | None ->
   let open Lsp.Types in
   let kw_items = List.map (fun kw ->
       CompletionItem.create ~label:kw ~kind:CompletionItemKind.Keyword ()
