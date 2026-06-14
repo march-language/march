@@ -2468,6 +2468,56 @@ let rename_at (a : t) ~line ~character ~new_name
       Lsp.Types.TextEdit.create ~range:loc.range ~newText:new_name
     ) locs
 
+(** Validate a rename request: return the identifier range if the symbol under
+    the cursor is renameable (a function-local binding, or a top-level symbol
+    defined in this file), or [None] to reject (stdlib symbols, keywords,
+    literals, whitespace). Used for textDocument/prepareRename. *)
+let prepare_rename_at (a : t) ~line ~character : Lsp.Types.Range.t option =
+  (* Smallest local-binder span (use or def) under the cursor. *)
+  let smallest_local =
+    let best = ref None in
+    let consider sp =
+      if Pos.span_contains sp ~line ~character then
+        match !best with
+        | Some b when not (Pos.span_smaller sp b) -> ()
+        | _ -> best := Some sp
+    in
+    Hashtbl.iter (fun sp _ -> consider sp) a.sym_uses;
+    Hashtbl.iter (fun _ sp -> consider sp) a.sym_defs;
+    !best
+  in
+  match smallest_local with
+  | Some sp -> Some (Pos.span_to_lsp_range sp)  (* locals are always renameable *)
+  | None ->
+    (* Top-level: find the name under the cursor and allow only if its
+       definition lives in this user file (reject stdlib / unresolved). *)
+    let hit =
+      let from_use =
+        Hashtbl.fold (fun sp name acc ->
+            match acc with
+            | Some _ -> acc
+            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+          ) a.use_map None
+      in
+      match from_use with
+      | Some _ -> from_use
+      | None ->
+        Hashtbl.fold (fun name sp acc ->
+            match acc with
+            | Some _ -> acc
+            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+          ) a.def_map None
+    in
+    (match hit with
+     | None -> None
+     | Some (sp, name) ->
+       (match Hashtbl.find_opt a.def_map name with
+        | Some def_sp
+          when def_sp.Ast.file = a.filename
+            || def_sp.Ast.file = "" || def_sp.Ast.file = "<unknown>" ->
+          Some (Pos.span_to_lsp_range sp)
+        | _ -> None))
+
 (** Convert 0-indexed (line, character) to a byte offset in [src]. *)
 let offset_of_pos src line character =
   let n = String.length src in
@@ -3546,6 +3596,10 @@ let query_references_at (a : t) ~include_declaration ~line ~utf16_char =
 let query_rename_at (a : t) ~line ~utf16_char ~new_name =
   rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char) ~new_name
   |> List.map (Pos.remap_text_edit a.doc)
+
+let query_prepare_rename_at (a : t) ~line ~utf16_char =
+  prepare_rename_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> Option.map (Pos.remap_range a.doc)
 
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)

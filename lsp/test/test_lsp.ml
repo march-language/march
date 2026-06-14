@@ -2913,6 +2913,24 @@ let test_rename_respects_shadowing () =
   Alcotest.(check (list int)) "outer x rename hits outer def+use (lines 1,3) only"
     [1; 3] (start_lines out)
 
+let test_prepare_rename_validates () =
+  (* prepareRename accepts a local binding and rejects keywords/whitespace. *)
+  let src =
+    "mod M do\n\
+    \  fn outer(x: Int) : Int do\n\
+    \    let inner = fn (x: Int) -> x + 1\n\
+    \    x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "a local variable is renameable"
+    true  (An.prepare_rename_at a ~line:3 ~character:4 <> None);
+  Alcotest.(check bool) "a keyword is not renameable"
+    false (An.prepare_rename_at a ~line:1 ~character:2 <> None);
+  Alcotest.(check bool) "whitespace is not renameable"
+    false (An.prepare_rename_at a ~line:3 ~character:1 <> None)
+
 (* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
@@ -3025,6 +3043,7 @@ let () =
     "symbol identity", [
       "shadowed locals resolve to distinct binders", `Quick, test_scoped_shadow_distinct;
       "rename respects shadowing", `Quick, test_rename_respects_shadowing;
+      "prepareRename validates the target", `Quick, test_prepare_rename_validates;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;

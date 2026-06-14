@@ -195,7 +195,8 @@ class march_server =
         ServerCapabilities.referencesProvider =
           Some (`Bool true);
         ServerCapabilities.renameProvider =
-          Some (`Bool true);
+          Some (`RenameOptions
+                  (Lsp.Types.RenameOptions.create ~prepareProvider:true ()));
         ServerCapabilities.signatureHelpProvider =
           Some sig_help;
         ServerCapabilities.foldingRangeProvider =
@@ -468,6 +469,20 @@ class march_server =
                  ("uri",   `String (Lsp.Types.DocumentUri.to_string loc.uri));
                  ("range", json_range loc.range)
                ]) locs))
+
+      end else if meth = "textDocument/prepareRename" then begin
+        let (line, utf16_char) = get_position () in
+        let range =
+          match get_td_uri () with
+          | None -> None
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> None
+             | Some a -> Analysis.query_prepare_rename_at a ~line ~utf16_char)
+        in
+        (match range with
+         | None -> Lwt.return `Null               (* reject the rename *)
+         | Some r -> Lwt.return (json_range r))
 
       end else if meth = "textDocument/rename" then begin
         let new_name =
