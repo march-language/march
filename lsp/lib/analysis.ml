@@ -2461,6 +2461,30 @@ let locations_of_spans (a : t) (spans : Ast.span list) : Lsp.Types.Location.t li
         Some (Lsp.Types.Location.create ~uri ~range)
     ) spans
 
+(* The (top-level) name under the cursor, filtered to user-file spans. Used by
+   the server to query cross-file references/definition. Returns [None] when the
+   cursor is not on a resolvable name. *)
+let name_at (a : t) ~line ~character : string option =
+  let from_use =
+    Hashtbl.fold (fun sp name acc ->
+        match acc with
+        | Some _ -> acc
+        | None ->
+          if span_in_user_file a sp && Pos.span_contains sp ~line ~character
+          then Some name else None)
+      a.use_map None
+  in
+  match from_use with
+  | Some _ -> from_use
+  | None ->
+    Hashtbl.fold (fun name sp acc ->
+        match acc with
+        | Some _ -> acc
+        | None ->
+          if span_in_user_file a sp && Pos.span_contains sp ~line ~character
+          then Some name else None)
+      a.def_map None
+
 let references_at (a : t) ~include_declaration ~line ~character
     : Lsp.Types.Location.t list =
   (* Local binder under the cursor: resolve by scope (shadow-correct). *)

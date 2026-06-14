@@ -75,6 +75,19 @@ let workspace_index () : Workspace.ws_symbol list =
        Hashtbl.replace ws_index root idx;
        idx)
 
+(* Full index (defs + uses) for cross-file references. *)
+let ws_index_full : (string, Workspace.ws_index) Hashtbl.t = Hashtbl.create 1
+let workspace_index_full () : Workspace.ws_index =
+  match project_root () with
+  | None -> { Workspace.wsi_defs = []; wsi_uses = [] }
+  | Some root ->
+    (match Hashtbl.find_opt ws_index_full root with
+     | Some idx -> idx
+     | None ->
+       let idx = Workspace.index_project_full ~root in
+       Hashtbl.replace ws_index_full root idx;
+       idx)
+
 (* ------------------------------------------------------------------ *)
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
@@ -499,7 +512,31 @@ class march_server =
             (match get_analysis uri with
              | None -> []
              | Some a ->
-               Analysis.query_references_at a ~include_declaration ~line ~utf16_char)
+               (* Current file: live, scope-correct, UTF-16-remapped results. *)
+               let local =
+                 Analysis.query_references_at a ~include_declaration ~line ~utf16_char
+               in
+               (* Other files: name-based cross-file references, but ONLY for a
+                  top-level symbol (locals are file-scoped). *)
+               let byte_col =
+                 Utf16.lsp_char_to_byte_col a.Analysis.doc ~line ~utf16_char
+               in
+               let cross =
+                 match Analysis.local_symbol_at a ~line ~character:byte_col with
+                 | Some _ -> []
+                 | None ->
+                   (match Analysis.name_at a ~line ~character:byte_col with
+                    | None -> []
+                    | Some name ->
+                      let cur = a.Analysis.filename in
+                      Workspace.references_across (workspace_index_full ()) name
+                      |> List.filter (fun (f, _) -> f <> cur)
+                      |> List.map (fun (f, sp) ->
+                             Lsp.Types.Location.create
+                               ~uri:(Lsp.Types.DocumentUri.of_path f)
+                               ~range:(Pos.span_to_lsp_range sp)))
+               in
+               local @ cross)
         in
         Lwt.return
           (`List (List.map (fun (loc : Lsp.Types.Location.t) ->

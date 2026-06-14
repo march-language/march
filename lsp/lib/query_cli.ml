@@ -90,12 +90,40 @@ let run_to_string (args : string list) ~src_override : string =
           Printf.sprintf "{\"definition\":{\"uri\":%s,\"range\":%s}}"
             (jstr l.Query.loc_uri) (jrange l.Query.loc_range))
      | "references" ->
-       let locs = Query.references a ~include_declaration:true ~line ~utf16_char:col in
-       let one (l : Query.location) =
-         Printf.sprintf "{\"uri\":%s,\"range\":%s}" (jstr l.Query.loc_uri)
-           (jrange l.Query.loc_range)
+       (* Current file (live, scope-correct). *)
+       let local = Query.references a ~include_declaration:true ~line ~utf16_char:col in
+       let local_json =
+         List.map (fun (l : Query.location) ->
+             Printf.sprintf "{\"uri\":%s,\"range\":%s}" (jstr l.Query.loc_uri)
+               (jrange l.Query.loc_range)) local
        in
-       "{\"references\":[" ^ String.concat "," (List.map one locs) ^ "]}"
+       (* Other files: name-based cross-file refs for a top-level symbol. *)
+       let byte_col = Utf16.lsp_char_to_byte_col a.Analysis.doc ~line ~utf16_char:col in
+       let cross_json =
+         match Analysis.local_symbol_at a ~line ~character:byte_col with
+         | Some _ -> []
+         | None ->
+           (match Analysis.name_at a ~line ~character:byte_col with
+            | None -> []
+            | Some name ->
+              let root =
+                match Forge_config.find_forge_root (Filename.dirname file) with
+                | Some r -> r | None -> Filename.dirname file
+              in
+              Workspace.references_across (Workspace.index_project_full ~root) name
+              |> List.filter (fun (f, _) -> f <> a.Analysis.filename)
+              |> List.map (fun (f, (sp : March_ast.Ast.span)) ->
+                     let r = Position.span_to_lsp_range sp in
+                     Printf.sprintf "{\"uri\":%s,\"range\":%s}"
+                       (jstr (Lsp.Types.DocumentUri.to_string
+                                (Lsp.Types.DocumentUri.of_path f)))
+                       (jrange
+                          (r.Lsp.Types.Range.start.Lsp.Types.Position.line,
+                           r.Lsp.Types.Range.start.Lsp.Types.Position.character,
+                           r.Lsp.Types.Range.end_.Lsp.Types.Position.line,
+                           r.Lsp.Types.Range.end_.Lsp.Types.Position.character))))
+       in
+       "{\"references\":[" ^ String.concat "," (local_json @ cross_json) ^ "]}"
      | "diagnostics" ->
        (* Remap byte-column ranges to UTF-16 for client-consistent output. *)
        let ds = List.map (Position.remap_diagnostic a.Analysis.doc)

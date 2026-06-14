@@ -2984,6 +2984,23 @@ let test_workspace_index_cross_file () =
   Alcotest.(check string) "alpha is indexed from its own file"
     "a.march" alpha.W.wsy_file
 
+let test_workspace_cross_file_references () =
+  let module W = March_lsp_lib.Workspace in
+  let files =
+    [ ("a.march", "mod A do\n  fn shared() : Int do 1 end\nend\n");
+      ("b.march",
+       "mod B do\n  fn use1() : Int do shared() end\n  fn use2() : Int do shared() + 1 end\nend\n") ]
+  in
+  let idx = W.index_full files in
+  let refs = W.references_across idx "shared" in
+  (* 1 definition in a.march + 2 uses in b.march. *)
+  Alcotest.(check int) "all cross-file occurrences of 'shared'" 3 (List.length refs);
+  let files_of =
+    List.sort_uniq compare (List.map (fun (f, _) -> Filename.basename f) refs)
+  in
+  Alcotest.(check (list string)) "references span both files"
+    [ "a.march"; "b.march" ] files_of
+
 (* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
@@ -3130,6 +3147,7 @@ let () =
     ];
     "workspace symbols", [
       "index + query across files", `Quick, test_workspace_index_cross_file;
+      "cross-file references", `Quick, test_workspace_cross_file_references;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;

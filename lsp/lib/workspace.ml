@@ -63,6 +63,101 @@ let symbols_of_source ~filename ~src : ws_symbol list =
 let index_sources (files : (string * string) list) : ws_symbol list =
   List.concat_map (fun (f, src) -> symbols_of_source ~filename:f ~src) files
 
+(* ------------------------------------------------------------------ *)
+(* Use-site indexing (for cross-file references)                       *)
+(* ------------------------------------------------------------------ *)
+
+type ws_use = { wsu_name : string; wsu_file : string; wsu_span : Ast.span }
+
+let uses_of_decls ~filename (decls : Ast.decl list) : ws_use list =
+  let acc = ref [] in
+  let add (n : Ast.name) =
+    acc := { wsu_name = n.Ast.txt; wsu_file = filename; wsu_span = n.Ast.span } :: !acc
+  in
+  let rec we (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> add n
+    | Ast.ECon (n, args, _) -> add n; List.iter we args
+    | Ast.EApp (f, args, _) -> we f; List.iter we args
+    | Ast.ELet (b, _) -> we b.Ast.bind_expr
+    | Ast.ELetFn (_, _, _, body, _) -> we body
+    | Ast.ELam (_, body, _) -> we body
+    | Ast.EMatch (s, brs, _) ->
+      we s;
+      List.iter (fun (br : Ast.branch) ->
+          wp br.Ast.branch_pat;
+          Option.iter we br.Ast.branch_guard;
+          we br.Ast.branch_body) brs
+    | Ast.EBlock (es, _) -> List.iter we es
+    | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) -> List.iter we es
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> we e) fs
+    | Ast.ERecordUpdate (e, fs, _) -> we e; List.iter (fun (_, e2) -> we e2) fs
+    | Ast.EField (base, field, _) -> add field; we base
+    | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> we e
+    | Ast.EIf (c, a, b, _) -> we c; we a; we b
+    | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> we c; we b) arms
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> we a; we b
+    | Ast.EAssert (e, _) -> we e
+    | Ast.ESigil (_, c, _) -> we c
+    | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _) | Ast.EResultRef _ -> ()
+  and wp (p : Ast.pattern) =
+    match p with
+    | Ast.PatCon (n, ps) -> add n; List.iter wp ps
+    | Ast.PatAs (p, _, _) -> wp p
+    | Ast.PatTuple (ps, _) | Ast.PatAtom (_, ps, _) -> List.iter wp ps
+    | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> wp p) fs
+    | Ast.PatVar _ | Ast.PatWild _ | Ast.PatLit _ -> ()
+  in
+  let rec wd (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, _) ->
+      List.iter (fun (cl : Ast.fn_clause) ->
+          Option.iter we cl.Ast.fc_guard; we cl.Ast.fc_body) fn.Ast.fn_clauses
+    | Ast.DLet (_, b, _) -> we b.Ast.bind_expr
+    | Ast.DActor (_, _, adef, _) ->
+      we adef.Ast.actor_init;
+      List.iter (fun (h : Ast.actor_handler) -> we h.Ast.ah_body) adef.Ast.actor_handlers
+    | Ast.DMod (_, _, ds, _) -> List.iter wd ds
+    | Ast.DImpl (impl, _) ->
+      List.iter (fun (_, (fn : Ast.fn_def)) ->
+          List.iter (fun (cl : Ast.fn_clause) -> we cl.Ast.fc_body) fn.Ast.fn_clauses)
+        impl.Ast.impl_methods
+    | Ast.DApp (app, _) ->
+      we app.Ast.app_body;
+      Option.iter we app.Ast.app_on_start;
+      Option.iter we app.Ast.app_on_stop
+    | Ast.DTest (t, _) -> we t.Ast.test_body
+    | Ast.DSetup (b, _) | Ast.DSetupAll (b, _) -> we b
+    | _ -> ()
+  in
+  List.iter wd decls;
+  List.rev !acc
+
+let uses_of_source ~filename ~src : ws_use list =
+  match parse_source ~filename ~src with
+  | None -> []
+  | Some decls -> uses_of_decls ~filename decls
+
+type ws_index = { wsi_defs : ws_symbol list; wsi_uses : ws_use list }
+
+let index_full (files : (string * string) list) : ws_index =
+  { wsi_defs = index_sources files;
+    wsi_uses = List.concat_map (fun (f, src) -> uses_of_source ~filename:f ~src) files }
+
+(* All def + use occurrences of [name] across the project (name-based). *)
+let references_across (idx : ws_index) (name : string) : (string * Ast.span) list =
+  let defs =
+    List.filter_map (fun (s : ws_symbol) ->
+        if s.wsy_name = name then Some (s.wsy_file, s.wsy_span) else None)
+      idx.wsi_defs
+  in
+  let uses =
+    List.filter_map (fun (u : ws_use) ->
+        if u.wsu_name = name then Some (u.wsu_file, u.wsu_span) else None)
+      idx.wsi_uses
+  in
+  defs @ uses
+
 (* Case-insensitive subsequence match (the common fuzzy "Ctrl-T" behaviour). *)
 let matches (query : string) (name : string) : bool =
   let q = String.lowercase_ascii query and name = String.lowercase_ascii name in
@@ -116,3 +211,6 @@ let discover_sources ~root : (string * string) list =
 
 let index_project ~root : ws_symbol list =
   index_sources (discover_sources ~root)
+
+let index_project_full ~root : ws_index =
+  index_full (discover_sources ~root)
