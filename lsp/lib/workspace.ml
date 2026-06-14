@@ -76,3 +76,43 @@ let matches (query : string) (name : string) : bool =
 
 let query_symbols (index : ws_symbol list) (q : string) : ws_symbol list =
   if q = "" then index else List.filter (fun s -> matches q s.wsy_name) index
+
+(* ------------------------------------------------------------------ *)
+(* On-disk project discovery                                           *)
+(* ------------------------------------------------------------------ *)
+
+let skip_dir name =
+  match name with
+  | "_build" | "_build_wt" | ".git" | ".claude" | "node_modules" | "_opam" -> true
+  | _ -> false
+
+let rec walk_dir acc dir =
+  match Sys.readdir dir with
+  | exception _ -> acc
+  | entries ->
+    Array.fold_left (fun acc name ->
+        if skip_dir name then acc
+        else
+          let path = Filename.concat dir name in
+          if (try Sys.is_directory path with _ -> false) then walk_dir acc path
+          else if Filename.check_suffix name ".march" then path :: acc
+          else acc)
+      acc entries
+
+let read_file path =
+  try
+    let ic = open_in_bin path in
+    Fun.protect ~finally:(fun () -> close_in ic) (fun () ->
+      let n = in_channel_length ic in
+      let b = Bytes.create n in
+      really_input ic b 0 n;
+      Some (Bytes.to_string b))
+  with _ -> None
+
+let discover_sources ~root : (string * string) list =
+  walk_dir [] root
+  |> List.filter_map (fun p ->
+         match read_file p with Some s -> Some (p, s) | None -> None)
+
+let index_project ~root : ws_symbol list =
+  index_sources (discover_sources ~root)
