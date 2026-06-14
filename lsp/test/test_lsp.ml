@@ -3159,6 +3159,28 @@ end|} in
   let hls = An.document_highlights_at a ~line:xl ~character:xc in
   Alcotest.(check int) "highlights the binding and both uses" 3 (List.length hls)
 
+let test_completion_scoped_locals () =
+  let src = {|mod M do
+  fn f(alpha : Int) : Int do
+    let beta = 1
+    HOLE
+  end
+  fn g(gamma : Int) : Int do gamma end
+end|} in
+  let a = analyse src in
+  let (hl, hc) = pos_of src "HOLE" in
+  let items  = An.completions_at a ~line:hl ~character:hc in
+  let labels = List.map (fun (i : Lsp.Types.CompletionItem.t) ->
+      i.Lsp.Types.CompletionItem.label) items in
+  let has x = List.mem x labels in
+  Alcotest.(check bool) "in-scope param offered"  true  (has "alpha");
+  Alcotest.(check bool) "in-scope let offered"    true  (has "beta");
+  Alcotest.(check bool) "out-of-scope local hidden" false (has "gamma");
+  let alpha = List.find (fun (i : Lsp.Types.CompletionItem.t) ->
+      i.Lsp.Types.CompletionItem.label = "alpha") items in
+  Alcotest.(check (option string)) "locals rank first (sortText 0)"
+    (Some "0") alpha.Lsp.Types.CompletionItem.sortText
+
 (* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
@@ -3169,6 +3191,9 @@ let () =
       "go to implementation", `Quick, test_implementation;
       "go to type definition", `Quick, test_type_definition;
       "document highlight", `Quick, test_document_highlight;
+    ];
+    "completion depth", [
+      "in-scope locals offered and ranked first", `Quick, test_completion_scoped_locals;
     ];
     "stdlib name collision", [
       "user symbol wins over stdlib name", `Quick, test_user_symbol_wins_over_stdlib_name;

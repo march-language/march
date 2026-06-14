@@ -147,6 +147,8 @@ type t = {
   (** Local binder id → all its use-site spans. *)
   sym_name    : (int, string) Hashtbl.t;
   (** Local binder id → name (for rename validation/display). *)
+  sym_scope   : (int, Ast.span) Hashtbl.t;
+  (** Local binder id → span it is visible within (for scope-precise completion). *)
   call_sites  : call_site list;
   (** All call sites collected for signature-help queries. *)
   consumption : consumption list;
@@ -503,6 +505,7 @@ type scoped_syms = {
   ss_uses    : (Ast.span, int) Hashtbl.t;
   ss_id_uses : (int, Ast.span list) Hashtbl.t;
   ss_name    : (int, string) Hashtbl.t;
+  ss_scope   : (int, Ast.span) Hashtbl.t;  (* binder id -> span it is visible in *)
 }
 
 let collect_scoped (decls : Ast.decl list) : scoped_syms =
@@ -510,7 +513,12 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
   let ss_uses = Hashtbl.create 64 in
   let ss_id_uses = Hashtbl.create 64 in
   let ss_name = Hashtbl.create 64 in
+  let ss_scope = Hashtbl.create 64 in
   let next_id = ref 0 in
+  (* Record the scope span each binder in [frame] is visible within. *)
+  let set_scope frame sp =
+    List.iter (fun (_, id) -> Hashtbl.replace ss_scope id sp) frame
+  in
   (* A scope is a stack of frames (innermost first); each frame maps a name to
      the binder id currently in scope for it. *)
   let fresh (n : Ast.name) : string * int =
@@ -557,29 +565,40 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
   let rec walk scope (e : Ast.expr) =
     match e with
     | Ast.EVar n -> record_use scope n
-    | Ast.ELam (params, body, _) ->
-      walk (List.map param_binder params :: scope) body
-    | Ast.ELetFn (name, params, _, body, _) ->
+    | Ast.ELam (params, body, sp) ->
+      let frame = List.map param_binder params in
+      set_scope frame sp;
+      walk (frame :: scope) body
+    | Ast.ELetFn (name, params, _, body, sp) ->
       let fb = fresh name in
-      walk (List.map param_binder params :: ([ fb ] :: scope)) body
-    | Ast.EMatch (subj, branches, _) ->
+      let frame = List.map param_binder params in
+      set_scope (fb :: frame) sp;
+      walk (frame :: ([ fb ] :: scope)) body
+    | Ast.EMatch (subj, branches, msp) ->
       walk scope subj;
       List.iter (fun (br : Ast.branch) ->
-        let scope' = pat_binders br.Ast.branch_pat :: scope in
+        let frame = pat_binders br.Ast.branch_pat in
+        set_scope frame msp;  (* over-approx: visible across the match *)
+        let scope' = frame :: scope in
         Option.iter (walk scope') br.Ast.branch_guard;
         walk scope' br.Ast.branch_body) branches
-    | Ast.EBlock (exprs, _) ->
+    | Ast.EBlock (exprs, bsp) ->
       (* Thread a growing frame so a `let` is visible to later siblings. *)
       let cur = ref [] in
       List.iter (fun e ->
         match e with
         | Ast.ELet (b, _) ->
           walk (!cur :: scope) b.Ast.bind_expr;   (* RHS sees prior, not itself *)
-          cur := pat_binders b.Ast.bind_pat @ !cur
-        | Ast.ELetFn (name, params, _, body, _) ->
+          let bs = pat_binders b.Ast.bind_pat in
+          set_scope bs bsp;
+          cur := bs @ !cur
+        | Ast.ELetFn (name, params, _, body, sp) ->
           let fb = fresh name in
+          set_scope [ fb ] bsp;                    (* name visible in the block *)
           cur := fb :: !cur;                       (* visible to siblings + self *)
-          walk (List.map param_binder params :: (!cur :: scope)) body
+          let frame = List.map param_binder params in
+          set_scope frame sp;                      (* params only in its body *)
+          walk (frame :: (!cur :: scope)) body
         | other -> walk (!cur :: scope) other
       ) exprs
     | Ast.ELet (b, _) -> walk scope b.Ast.bind_expr
@@ -600,7 +619,9 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _) | Ast.EResultRef _ -> ()
   in
   let walk_clause (cl : Ast.fn_clause) =
-    let scope = [ fn_param_binders cl.Ast.fc_params ] in
+    let frame = fn_param_binders cl.Ast.fc_params in
+    set_scope frame cl.Ast.fc_span;
+    let scope = [ frame ] in
     Option.iter (walk scope) cl.Ast.fc_guard;
     walk scope cl.Ast.fc_body
   in
@@ -625,7 +646,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | _ -> ()
   in
   List.iter walk_decl decls;
-  { ss_defs; ss_uses; ss_id_uses; ss_name }
+  { ss_defs; ss_uses; ss_id_uses; ss_name; ss_scope }
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib doc-string collection                                        *)
@@ -1347,6 +1368,7 @@ let analyse ~filename ~src : t =
       sym_uses         = Hashtbl.create 0;
       sym_id_uses      = Hashtbl.create 0;
       sym_name         = Hashtbl.create 0;
+      sym_scope        = Hashtbl.create 0;
       call_sites       = [];
       consumption      = [];
       match_sites      = [];
@@ -1447,7 +1469,8 @@ let analyse ~filename ~src : t =
     List.iter (collect_decl ~def_map ~use_map ~doc_map ~calls:call_sites_acc ~actors_tbl) user_decls;
     (* Scope-aware local symbol resolution (for shadow-correct def/refs/rename). *)
     let { ss_defs = sym_defs; ss_uses = sym_uses;
-          ss_id_uses = sym_id_uses; ss_name = sym_name } =
+          ss_id_uses = sym_id_uses; ss_name = sym_name;
+          ss_scope = sym_scope } =
       collect_scoped user_decls
     in
     (* Collect stdlib definitions into def_map for cross-stdlib go-to-definition.
@@ -1974,6 +1997,7 @@ let analyse ~filename ~src : t =
       sym_uses;
       sym_id_uses;
       sym_name;
+      sym_scope;
       call_sites;
       consumption;
       match_sites;
@@ -2312,6 +2336,28 @@ let dot_completions (a : t) ~line ~character : Lsp.Types.CompletionItem.t list o
     end
   end
 
+(* Distinct names of function-local bindings (params, lets, lambda/match
+   binders) that are in scope at the cursor and defined before it. *)
+let scope_locals_at (a : t) ~line ~character : string list =
+  let seen = Hashtbl.create 16 in
+  let out = ref [] in
+  Hashtbl.iter (fun id scope_sp ->
+      if Pos.span_contains scope_sp ~line ~character then
+        match Hashtbl.find_opt a.sym_defs id with
+        | None -> ()
+        | Some def_sp ->
+          let dl = def_sp.Ast.start_line - 1 in
+          let before =
+            dl < line || (dl = line && def_sp.Ast.start_col <= character)
+          in
+          if before then begin
+            let name = try Hashtbl.find a.sym_name id with Not_found -> "" in
+            if name <> "" && name.[0] <> '_' && not (Hashtbl.mem seen name)
+            then (Hashtbl.replace seen name (); out := name :: !out)
+          end)
+    a.sym_scope;
+  !out
+
 let completions_at (a : t) ~line ~character =
   match dot_completions a ~line ~character with
   | Some items -> items   (* in `receiver.`: only the receiver's members *)
@@ -2380,7 +2426,23 @@ let completions_at (a : t) ~line ~character =
       ("~R", "Regex sigil", "~R\"${1:pattern}\"");
       ("~J", "JSON sigil", "~J\"${1:json}\"");
     ] in
-  kw_items @ var_items @ type_items @ ctor_items @ iface_items @ sigil_items
+  (* In-scope local bindings — offered first (they weren't offered at all
+     before). *)
+  let local_items = List.map (fun name ->
+      CompletionItem.create ~label:name ~kind:CompletionItemKind.Variable ()
+    ) (scope_locals_at a ~line ~character) in
+  (* Rank by category via sortText: locals < keywords < top-level/stdlib values
+     < types < constructors < interfaces < sigils. *)
+  let rank s items =
+    List.map (fun it -> { it with CompletionItem.sortText = Some s }) items
+  in
+  rank "0" local_items
+  @ rank "1" kw_items
+  @ rank "2" var_items
+  @ rank "3" type_items
+  @ rank "4" ctor_items
+  @ rank "5" iface_items
+  @ rank "6" sigil_items
 
 let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
