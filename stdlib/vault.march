@@ -99,7 +99,7 @@ mod Vault do
   lock, so concurrent callers racing on the same key cannot both succeed —
   exactly one receives `true`. Use it as a lock or an idempotency claim.
   """
-  fn put_new(table, key, value) do
+  fn put_new(table, key, value) : Bool do
     vault_put_new(table, key, value, 0)
   end
 
@@ -107,7 +107,7 @@ mod Vault do
   Like `put_new`, but the claimed entry expires after `ttl_secs` seconds so a
   caller that crashes after claiming the key does not hold it forever.
   """
-  fn put_new_ttl(table, key, value, ttl_secs) do
+  fn put_new_ttl(table, key, value, ttl_secs) : Bool do
     vault_put_new(table, key, value, ttl_secs)
   end
 
@@ -117,7 +117,7 @@ mod Vault do
   the key is preserved. Concurrent increments do not lose updates (unlike a
   `get` + `set` pair).
   """
-  fn incr(table, key, delta) do
+  fn incr(table, key, delta) : Int do
     vault_incr(table, key, delta)
   end
 
@@ -129,12 +129,12 @@ mod Vault do
   non-list entry starts from the empty list; `max <= 0` keeps everything. Any
   existing TTL is preserved. Ideal for fixed-size ring buffers and inboxes.
   """
-  fn push_capped(table, key, value, max) do
+  fn push_capped(table, key, value, max) : Unit do
     vault_push_capped(table, key, value, max)
   end
 
   doc "Return the number of live (non-expired) entries in the table."
-  fn size(table) do
+  fn size(table) : Int do
     vault_size(table)
   end
 
@@ -156,7 +156,7 @@ mod Vault do
   end
 
   doc "Return true if `key` exists in the table and has not expired."
-  fn has(table, key) do
+  fn has(table, key) : Bool do
     match vault_get(table, key) do
     Some(_) -> true
     None    -> false
