@@ -110,6 +110,8 @@ forge bench --json          # machine-readable timings (for CI tracking)
 
 ## 3. Release ergonomics — `forge version` / `forge release`
 
+**Status: ✅ Implemented (2026-06-14)** — `forge/lib/versioning.ml` (pure `bump`/`rewrite_version_line`, 5 unit tests) + `cmd_version.ml` + `cmd_release.ml`, wired in `main.ml`. `forge version` prints/bumps (patch|minor|major or explicit), rewriting `[package].version` only; `--tag` requires a clean tree, commits the bump, and tags `vX.Y.Z`. `forge release` gates clean-tree → build → test → bump+tag. (`forge format --check` + lint CI exit already existed.) Verified e2e.
+
 **Motivation.** Cutting a release today is manual: edit `forge.toml`, tag git, run checks. Two small commands remove the friction. (Note: `forge format --check` and `forge lint`'s non-zero CI exit **already exist** — `cmd_format.ml` takes `~check`, `cmd_lint.ml` returns `Error "lint found errors"` — so the "CI modes" part of this item is done; this section is the *version/release* part.)
 
 **CLI surface.**

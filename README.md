@@ -291,6 +291,17 @@ forge bench tree       # only benchmarks whose name contains "tree"
 forge bench --json     # machine-readable timings for CI tracking
 ```
 
+## Releasing a package
+
+```bash
+forge version                # print the current version
+forge version patch          # 1.2.3 -> 1.2.4 (rewrites [package].version)
+forge version minor --tag    # bump, commit, and tag vX.Y.Z (needs a clean tree)
+forge release                # clean tree -> build -> test -> bump + tag
+```
+
+`forge fmt --check` and `forge lint` (which exits non-zero on errors) round out the CI checks.
+
 ## Language tour
 
 ### Values and bindings

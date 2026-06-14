@@ -504,6 +504,27 @@ let watch_cmd =
   Cmd.v (Cmd.info "watch" ~doc:"Rebuild/retest/rerun on source changes")
     Term.(const run $ action $ interval $ clear)
 
+(* --------------------------------------------------- forge version / release *)
+
+let version_cmd =
+  let spec =
+    Arg.(value & pos 0 string "" &
+         info [] ~docv:"BUMP" ~doc:"$(b,patch), $(b,minor), $(b,major), or an explicit $(b,X.Y.Z); omit to print the current version.")
+  in
+  let tag = Arg.(value & flag & info ["tag"] ~doc:"Commit the bump and create a git tag $(b,vX.Y.Z).") in
+  let run s t = handle (Cmd_version.run ~spec:s ~tag:t ()) in
+  Cmd.v (Cmd.info "version" ~doc:"Print or bump the project version")
+    Term.(const run $ spec $ tag)
+
+let release_cmd =
+  let bump =
+    Arg.(value & opt string "patch" &
+         info ["bump"] ~docv:"KIND" ~doc:"Version bump for the release: patch|minor|major.")
+  in
+  let run b = handle (Cmd_release.run ~bump:b ()) in
+  Cmd.v (Cmd.info "release" ~doc:"Guarded release: clean tree -> build -> test -> bump + tag")
+    Term.(const run $ bump)
+
 (* ------------------------------------------------------------- forge bench *)
 
 let bench_cmd =
@@ -672,7 +693,8 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
+      tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
