@@ -3,6 +3,7 @@
 
 module Tc = March_typecheck.Typecheck
 module An = March_lsp_lib.Analysis
+module Ast = March_ast.Ast
 
 (* Wrap bare declarations in a module so they parse (March requires an
    explicit `mod Name do ... end`). *)
@@ -53,6 +54,29 @@ let test_incremental_matches_diagnostics () =
   let b = An.analyse ~filename:"t.march" ~src:ok in
   Alcotest.(check bool) "clean file has no errors" true (no_error_diags b)
 
+(* ── Increment B: cached deps env ────────────────────────────────────────── *)
+
+let test_deps_env_memoized () =
+  let base = TCache.base_env () in
+  let deps = (parse "  fn dep_fn() : Int do 7 end").Ast.mod_decls in
+  let e1 = TCache.deps_env base ~deps in
+  let e2 = TCache.deps_env base ~deps in
+  Alcotest.(check bool) "deps env memoized" true (e1 == e2);
+  Alcotest.(check bool) "dep_fn bound in deps env" true (Tc.StrMap.mem "dep_fn" e1.Tc.vars);
+  Alcotest.(check bool) "deps env distinct from base" true (e1 != base)
+
+let test_deps_env_empty_is_base () =
+  let base = TCache.base_env () in
+  Alcotest.(check bool) "no deps -> base" true (TCache.deps_env base ~deps:[] == base)
+
+let test_clear_deps_drops_cache () =
+  let base = TCache.base_env () in
+  let deps = (parse "  fn dep_fn2() : Int do 9 end").Ast.mod_decls in
+  let e1 = TCache.deps_env base ~deps in
+  TCache.clear_deps ();
+  let e2 = TCache.deps_env base ~deps in
+  Alcotest.(check bool) "rebuilt after clear" true (e1 != e2)
+
 let () =
   Alcotest.run "incremental"
     [ "with_env_full",
@@ -60,4 +84,8 @@ let () =
       "base_env",
       [ Alcotest.test_case "memoized" `Quick test_base_env_memoized;
         Alcotest.test_case "derive isolates mutable state" `Quick test_derive_isolates_type_map;
-        Alcotest.test_case "incremental matches diagnostics" `Quick test_incremental_matches_diagnostics ] ]
+        Alcotest.test_case "incremental matches diagnostics" `Quick test_incremental_matches_diagnostics ];
+      "deps_env",
+      [ Alcotest.test_case "memoized by content" `Quick test_deps_env_memoized;
+        Alcotest.test_case "empty deps is base" `Quick test_deps_env_empty_is_base;
+        Alcotest.test_case "clear_deps rebuilds" `Quick test_clear_deps_drops_cache ] ]
