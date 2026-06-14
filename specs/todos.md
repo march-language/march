@@ -43,6 +43,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Tooling: Forge Build Tool
 
+- ✅ **Shell completions + external subcommands** — `forge completions bash|zsh|fish` prints a ready-to-source completion script; `forge-<cmd>` binaries on PATH are exec'd when `<cmd>` is not a built-in (built-ins always win). `forge/lib/cli_ext.ml` (pure `completion_script`/`external_subcommand`, 6 unit tests). Item #5 of `specs/forge_tooling_roadmap.md`.
 - ✅ **`forge watch`** — reruns build/test/run on source changes (polls `lib/ src/ test/ config/` + `forge.toml`); never exits on failure. `forge/lib/watcher.ml` (pure `changed`, 5 unit tests) + `cmd_watch.ml`. Item #1 of `specs/forge_tooling_roadmap.md`.
 - ✅ **`forge bench`** — compiles + runs `bench/*.march` at `--opt 2`, reports wall-clock times (table or `--json`), name-substring filter. `forge/lib/cmd_bench.ml` (pure `bench_name`/`matches`/`format_results`, 4 unit tests). Item #2 of the tooling roadmap.
 - ✅ **`forge version` / `forge release`** — bump `[package].version` (patch/minor/major or explicit), `--tag` commits + tags `vX.Y.Z`; `release` gates clean→build→test→bump+tag. `forge/lib/versioning.ml` (pure `bump`/`rewrite_version_line`, 5 unit tests) + `cmd_version.ml`/`cmd_release.ml`. Item #3 of the tooling roadmap (fmt --check + lint CI already existed).
@@ -70,9 +71,9 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 - ✅ **`forge toolchain list --remote`** — lists installable versions from the GitHub releases API, grouped stable/nightly, marking installed ones (`Toolchain.classify_remote`/`list_remote`, 1 unit test).
 - ✅ **`forge tree` / `forge why <pkg>`** — dependency-graph introspection (`deptree.ml` pure tree/path logic, 4 unit tests; `cmd_tree.ml` rebuilds edges from each installed dep's forge.toml since the lockfile has none). Diamonds and cycles handled.
 - [ ] **`forge outdated`** — show deps with newer compatible versions (needs the registry to know what's newer).
-- ✅ **`license`/`repository`/`homepage` in `forge.toml`** — parsed into the project record (`project.ml`); `forge new` scaffolds a `license` placeholder; `forge publish` nudges when unset (2 unit tests). `keywords` (array) deferred — TOML parser has no array type.
+- ✅ **`license`/`repository`/`homepage` in `forge.toml`** — parsed into the project record (`project.ml`); `forge new` scaffolds a `license` placeholder; `forge publish` nudges when unset (2 unit tests). `keywords` (array) now feasible — TOML parser gained `Array` support.
 - [ ] **Registry server + network publish/fetch + `forge login`/`forge yank`** — `forge publish` validates locally only today (no server, no auth, no network fetch); distribution is git/path-only. Largest package-side gap ("Phase 6").
-- [ ] **Workspaces / monorepo** — multiple packages sharing a single lockfile.
+- ✅ **Workspaces / monorepo — Phase 1** — `[workspace].members` in `forge.toml`; `forge build`/`test`/`lint` iterate all members at the workspace root (dep order TBD — currently declaration order); `-p <name>` selector for a single member; `Workspace.find_root` walks up parents; `Workspace.parse_members` (TOML array) pure + 5 unit tests. TOML parser now supports arrays (`Array` variant + `get_string_list`). Phase 2 (unified `forge.lock`) and Phase 3 (topological order, `--changed`) are future work.
 - [ ] **Vendoring / explicit offline mode** (`forge vendor`, `--offline`) — partly mitigated by the CAS cache; no explicit story.
 - [ ] **Optional dependencies / feature flags** — conditional deps and compile-time features (a language-design question).
 - [ ] **Full AST-based semver-compat checking on publish** — `Resolver_api_surface` is text-heuristic; linearity/generic diffing needs compiler integration.

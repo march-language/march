@@ -4,6 +4,7 @@
 type value =
   | Str of string
   | InlineTable of (string * value) list
+  | Array of value list
 
 type document = {
   sections : (string * (string * value) list) list;
@@ -76,14 +77,37 @@ let rec parse_value s i =
   | '{' ->
     let (tbl, i') = parse_inline_table s (i + 1) in
     (InlineTable tbl, i')
+  | '[' ->
+    let (arr, i') = parse_array s (i + 1) in
+    (Array arr, i')
   | _ ->
     let start = i in
     let i = ref i in
-    while !i < n && s.[!i] <> ',' && s.[!i] <> '}' && s.[!i] <> '#' do
+    while !i < n && s.[!i] <> ',' && s.[!i] <> '}' && s.[!i] <> ']' && s.[!i] <> '#' do
       incr i
     done;
     let v = String.trim (String.sub s start (!i - start)) in
     (Str v, !i)
+
+and parse_array s i =
+  let n = String.length s in
+  let i = ref (skip_ws s i) in
+  let items = ref [] in
+  if !i < n && s.[!i] = ']' then ([], !i + 1)
+  else begin
+    let stop = ref false in
+    while not !stop do
+      let (v, i2) = parse_value s !i in
+      items := v :: !items;
+      i := skip_ws s i2;
+      if !i >= n then fail "unterminated array";
+      (match s.[!i] with
+       | ']' -> stop := true; incr i
+       | ',' -> i := skip_ws s (!i + 1)
+       | c   -> fail (Printf.sprintf "expected ',' or ']', got '%c'" c))
+    done;
+    (List.rev !items, !i)
+  end
 
 and parse_inline_table s i =
   let n = String.length s in
@@ -161,3 +185,9 @@ let get_table pairs key =
   match List.assoc_opt key pairs with
   | Some (InlineTable t) -> Some t
   | _ -> None
+
+let get_string_list pairs key =
+  match List.assoc_opt key pairs with
+  | Some (Array items) ->
+    List.filter_map (function Str s -> Some s | _ -> None) items
+  | _ -> []

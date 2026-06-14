@@ -123,7 +123,7 @@ let parse_deps_section dep_pairs =
         (match parse_dep_table tbl with
          | Some dep -> Some (dep_name, dep)
          | None     -> None)
-      | Toml.Str _ -> None
+      | Toml.Str _ | Toml.Array _ -> None
     ) dep_pairs
 
 (** Parse deps from dot-sections like [deps.depot] and [dev-deps.name]. *)

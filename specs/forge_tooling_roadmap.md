@@ -188,6 +188,8 @@ forge deps --frozen
 
 ## 5. Shell completions + external subcommands
 
+**Status: ✅ Implemented (2026-06-14)** — `forge/lib/cli_ext.ml` (pure `completion_script ~shell ~subcommands` + `external_subcommand ~known ~argv1 ~path_lookup`, 6 unit tests). `forge completions bash|zsh|fish` prints a ready-to-source script listing all built-in subcommands. External dispatch: the pre-dispatch block in `main.ml` looks for a `forge-<cmd>` binary on PATH and `Unix.execv`s it — built-ins always win. Verified e2e (forge-hello exec'd with args; forge build unaffected by a shadow forge-build binary).
+
 **Motivation.** Completions are table-stakes DX; external subcommands (`forge-x` on PATH → `forge x`, the git/cargo pattern) let the ecosystem extend forge without touching core — the cheapest possible extensibility.
 
 **CLI surface.**
@@ -217,6 +219,8 @@ forge mytool ...                   # if not built-in, exec `forge-mytool` from P
 ---
 
 ## 6. Workspaces
+
+**Status: Phase 1 ✅ Implemented (2026-06-14)** — `forge/lib/workspace.ml`: pure `parse_members` (reads `[workspace].members` TOML array, 3 unit tests) + `find_root` (walks up for workspace forge.toml, 2 unit tests) + `members_from_root` + `run_for_members` (chdir-per-member iteration). TOML parser gained `Array of value list` + `get_string_list`. `forge build`, `forge test`, `forge lint` detect workspace root and iterate all members (or `-p <name>` for one). Verified e2e: two-member workspace builds both on `forge build`; `-p app` selects only `app`. Phase 2 (unified forge.lock) and Phase 3 (topological order + `--changed`) remain.
 
 **Motivation.** The one big *structural* feature, and the one most painful to retrofit later — it touches project discovery, resolution, the lockfile, and every command. A monorepo of related March packages (e.g. an app + its libraries) should build/test/lint as a unit with one shared lockfile. Worth designing early even if built last.
 
