@@ -282,6 +282,15 @@ forge watch --clear --interval 200
 
 It never exits on a build/test failure — it reports and keeps watching. Ctrl-C stops it.
 
+`forge bench` compiles and runs every benchmark under `bench/` (each `bench/*.march`
+is a standalone program), built at `--opt 2`, reporting wall-clock times:
+
+```bash
+forge bench            # run all
+forge bench tree       # only benchmarks whose name contains "tree"
+forge bench --json     # machine-readable timings for CI tracking
+```
+
 ## Language tour
 
 ### Values and bindings

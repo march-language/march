@@ -504,6 +504,18 @@ let watch_cmd =
   Cmd.v (Cmd.info "watch" ~doc:"Rebuild/retest/rerun on source changes")
     Term.(const run $ action $ interval $ clear)
 
+(* ------------------------------------------------------------- forge bench *)
+
+let bench_cmd =
+  let name =
+    Arg.(value & pos 0 string "" &
+         info [] ~docv:"NAME" ~doc:"Run only benchmarks whose name contains this substring.")
+  in
+  let json = Arg.(value & flag & info ["json"] ~doc:"Emit timings as JSON.") in
+  let run n j = handle (Cmd_bench.run ~filter:n ~json:j ()) in
+  Cmd.v (Cmd.info "bench" ~doc:"Compile and run benchmarks under bench/")
+    Term.(const run $ name $ json)
+
 (* --------------------------------------------------------- forge tree / why *)
 
 let tree_cmd =
@@ -660,7 +672,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      toolchain_cmd; upgrade_cmd; watch_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

@@ -69,6 +69,8 @@ forge watch --clear               # clear the screen before each run
 
 ## 2. `forge bench`
 
+**Status: ✅ Implemented (2026-06-14)** — `forge/lib/cmd_bench.ml` (pure `bench_name`/`matches`/`format_results`, 4 unit tests) + `bench_cmd` in `main.ml`. Discovers `bench/*.march`, compiles each at `--opt 2` via `Cmd_build.compile_entry`, runs + times it, prints a table or `--json`. Optional name-substring filter. Verified e2e.
+
 **Motivation.** March already ships `bench/*.march`, a `bench/dune`, `bench/RESULTS.md`, and a `specs/benchmarks.md` mapping features to benchmarks — but there's no first-class way to run them. `CLAUDE.md` even instructs running benchmarks after feature changes. `forge bench` makes that a one-liner and gives regression-tracking output.
 
 **CLI surface.**
