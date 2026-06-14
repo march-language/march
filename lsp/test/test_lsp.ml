@@ -2932,6 +2932,35 @@ let test_prepare_rename_validates () =
     false (An.prepare_rename_at a ~line:3 ~character:1 <> None)
 
 (* ------------------------------------------------------------------ *)
+(* Context-aware completion (Phase 4)                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_dot_completion_record_fields () =
+  (* In 'r.x' where r : { x : Int, y : Int }, completion offers exactly the
+     record's fields — not the whole keyword/var namespace. *)
+  let src =
+    "mod M do\n\
+    \  fn f() : Int do\n\
+    \    let r = { x = 1, y = 2 }\n\
+    \    r.x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let labels items =
+    List.sort compare
+      (List.map (fun (i : Lsp.Types.CompletionItem.t) ->
+         i.Lsp.Types.CompletionItem.label) items)
+  in
+  let dot = An.completions_at a ~line:3 ~character:6 in
+  Alcotest.(check (list string)) "dot-completion offers exactly the record fields"
+    [ "x"; "y" ] (labels dot);
+  (* A non-dot position still returns the general (much larger) list. *)
+  let flat = An.completions_at a ~line:1 ~character:2 in
+  Alcotest.(check bool) "non-dot context returns the general list"
+    true (List.length flat > 2)
+
+(* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3044,6 +3073,9 @@ let () =
       "shadowed locals resolve to distinct binders", `Quick, test_scoped_shadow_distinct;
       "rename respects shadowing", `Quick, test_rename_respects_shadowing;
       "prepareRename validates the target", `Quick, test_prepare_rename_validates;
+    ];
+    "context-aware completion", [
+      "dot-completion offers record fields", `Quick, test_dot_completion_record_fields;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
