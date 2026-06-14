@@ -184,9 +184,11 @@ let lib_path_env proj =
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
   (* Put the resolved toolchain (project .march-version pin, else global) first
-     on PATH so the bare `march` in the commands below uses the pinned version. *)
+     on PATH so the bare `march` in the commands below uses the pinned version.
+     Quote each path so a metachar in a project/dep path can't inject shell. *)
   let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
-  Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx (String.concat ":" all_lib_paths)
+  let quoted = String.concat ":" (List.map Filename.quote all_lib_paths) in
+  Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx quoted
 
 (** Typecheck [file] via [march --check].
     Returns [true] on clean exit, [false] on any compiler error.
@@ -289,7 +291,12 @@ let build ~release ?(dump_phases=false) () =
     match
       match proj.Project.march_req, Toolchain.resolve_version () with
       | Some req, Some resolved -> Toolchain.check_constraint ~resolved ~req
-      | _ -> Ok ()
+      | Some req, None ->
+        Printf.eprintf
+          "warning: forge.toml requires march %s, but no toolchain is pinned or \
+           active; cannot verify it (using `march` on PATH)\n%!" req;
+        Ok ()
+      | None, _ -> Ok ()
     with
     | Error e -> Error e
     | Ok () ->
