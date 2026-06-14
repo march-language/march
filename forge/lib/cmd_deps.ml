@@ -242,7 +242,8 @@ let run () =
     (* Install all deps *)
     if all_deps = [] then begin
       Printf.printf "no dependencies declared\n%!";
-      Resolver_lockfile.write lock_path [] ~manifest_hash:
+      Resolver_lockfile.write ~toolchain:(Toolchain.resolve_version ())
+        lock_path [] ~manifest_hash:
         (Resolver_lockfile.compute_manifest_hash toml_content);
       Ok ()
     end else begin
@@ -253,7 +254,8 @@ let run () =
       let entries = List.filter_map (fun (_, r) ->
           match r with Ok e -> Some e | Error _ -> None) results in
       let mhash = Resolver_lockfile.compute_manifest_hash toml_content in
-      Resolver_lockfile.write lock_path entries ~manifest_hash:mhash;
+      Resolver_lockfile.write ~toolchain:(Toolchain.resolve_version ())
+        lock_path entries ~manifest_hash:mhash;
       if errors = [] then Ok ()
       else Error (String.concat "\n" errors)
     end

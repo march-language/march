@@ -459,6 +459,32 @@ let test_deptree_why_none () =
   Alcotest.(check (list (list string))) "no path to an absent target"
     [] (Deptree.why ~root:"app" ~deps_of:(adj g) ~target:"zzz")
 
+(* toolchain recorded in forge.lock (Option B: record + drift-warn) -------- *)
+
+let test_lockfile_records_toolchain () =
+  let lock = Filename.concat (fresh_dir ()) "forge.lock" in
+  Resolver_lockfile.write ~toolchain:(Some "0.5.0") lock [] ~manifest_hash:"abc";
+  Alcotest.(check (option string)) "toolchain recorded and read back"
+    (Some "0.5.0") (Resolver_lockfile.read_toolchain lock)
+
+let test_lockfile_no_toolchain () =
+  let lock = Filename.concat (fresh_dir ()) "forge.lock" in
+  Resolver_lockfile.write lock [] ~manifest_hash:"abc";
+  Alcotest.(check (option string)) "no toolchain section -> None"
+    None (Resolver_lockfile.read_toolchain lock)
+
+let test_drift_warns_on_mismatch () =
+  Alcotest.(check bool) "locked != resolved -> warning"
+    true (Toolchain.toolchain_drift ~locked:(Some "0.5.0") ~resolved:(Some "0.7.0") <> None)
+
+let test_drift_silent_on_match () =
+  Alcotest.(check bool) "locked == resolved -> no warning"
+    true (Toolchain.toolchain_drift ~locked:(Some "0.5.0") ~resolved:(Some "0.5.0") = None)
+
+let test_drift_silent_when_unlocked () =
+  Alcotest.(check bool) "no lock entry -> no warning (record-only, never override)"
+    true (Toolchain.toolchain_drift ~locked:None ~resolved:(Some "0.7.0") = None)
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -514,5 +540,12 @@ let () =
       Alcotest.test_case "render: cycle breaks"         `Quick test_deptree_render_cycle_breaks;
       Alcotest.test_case "why: all paths to target"     `Quick test_deptree_why_paths;
       Alcotest.test_case "why: no path -> empty"        `Quick test_deptree_why_none;
+    ];
+    "lockfile-toolchain", [
+      Alcotest.test_case "records + reads back toolchain" `Quick test_lockfile_records_toolchain;
+      Alcotest.test_case "absent toolchain -> None"       `Quick test_lockfile_no_toolchain;
+      Alcotest.test_case "drift: warns on mismatch"       `Quick test_drift_warns_on_mismatch;
+      Alcotest.test_case "drift: silent on match"         `Quick test_drift_silent_on_match;
+      Alcotest.test_case "drift: silent when unlocked"    `Quick test_drift_silent_when_unlocked;
     ];
   ]
