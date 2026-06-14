@@ -2865,6 +2865,29 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Scope-aware symbol identity (Phase 3)                               *)
+(* ------------------------------------------------------------------ *)
+
+let test_scoped_shadow_distinct () =
+  (* 'x' is a param of outer; the inner lambda shadows it with its own 'x'.
+     The lambda-body use of x and the outer-body use of x must resolve to
+     DIFFERENT binders. *)
+  let src =
+    "mod M do\n\
+    \  fn outer(x: Int) : Int do\n\
+    \    let inner = fn (x: Int) -> x + 1\n\
+    \    x\n\
+    \  end\n\
+     end\n"
+  in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let lambda_x = An.local_symbol_at a ~line:2 ~character:31 in (* x in lambda body *)
+  let outer_x  = An.local_symbol_at a ~line:3 ~character:4  in (* x in outer body *)
+  Alcotest.(check bool) "lambda-body x resolves to a local" true (lambda_x <> None);
+  Alcotest.(check bool) "outer-body x resolves to a local"  true (outer_x  <> None);
+  Alcotest.(check bool) "shadowed x's are distinct binders" true (lambda_x <> outer_x)
+
+(* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2972,6 +2995,9 @@ let () =
     ];
     "query facade", [
       "hover returns a transport-agnostic record", `Quick, test_query_hover_record;
+    ];
+    "symbol identity", [
+      "shadowed locals resolve to distinct binders", `Quick, test_scoped_shadow_distinct;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
