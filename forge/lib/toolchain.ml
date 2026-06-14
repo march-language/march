@@ -34,11 +34,26 @@ let bin_dir ()      = Filename.concat (march_home ()) "bin"
 
 (* ----------------------------------------------------- project pin ------ *)
 
-(* Read a `.march-version` file: its first non-empty trimmed line, or None. *)
+(* A safe release tag / version: non-empty, not a path component (`.`/`..`),
+   and only `[A-Za-z0-9._-]`. Tags become filesystem paths (versions/<tag>) and
+   URL components, so anything else (a `/`, shell metachars, …) is rejected to
+   prevent path traversal and injection from a crafted `.march-version` or arg. *)
+let valid_tag s =
+  s <> "" && s <> "." && s <> ".." && String.length s <= 128
+  && String.for_all (fun c ->
+       (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+       || (c >= '0' && c <= '9') || c = '-' || c = '.' || c = '_') s
+
+(* Read a `.march-version` file: its first non-empty trimmed line, or None. A
+   malformed/unsafe pin is ignored (with a warning) rather than trusted. *)
 let read_version_file path =
   if Sys.file_exists path then
     match In_channel.with_open_text path In_channel.input_line with
-    | Some line -> let v = String.trim line in if v = "" then None else Some v
+    | Some line ->
+      let v = String.trim line in
+      if v = "" then None
+      else if valid_tag v then Some v
+      else (Printf.eprintf "warning: ignoring invalid version %S in %s\n%!" v path; None)
     | None | exception _ -> None
   else None
 
@@ -190,21 +205,28 @@ let classify_remote ~remote ~installed =
   let stable, nightly = List.partition (fun t -> not (is_nightly t)) remote in
   (List.map mark stable, List.map mark nightly)
 
+(* Pick the default install tag from the release list (newest-first): the
+   newest stable (non-nightly), else the newest nightly. Consistent with
+   [classify_remote]'s stable/nightly split. *)
+let default_tag tags =
+  match List.find_opt (fun t -> not (is_nightly t)) tags with
+  | Some _ as s -> s
+  | None -> List.find_opt is_nightly tags
+
 (* Resolve a version spec to a concrete release tag. *)
 let resolve_tag spec =
   match spec with
-  | Some "nightly" | None ->
+  | None ->
     Result.bind (api_releases_json ()) (fun json ->
       let tags = match json with `List l -> List.filter_map tag_of l | _ -> [] in
-      let stable = List.find_opt (fun t -> String.length t > 0 && t.[0] = 'v') tags in
-      match spec, stable with
-      | None, Some t -> Ok t                       (* prefer newest stable *)
-      | _ ->
-        (match List.find_opt (fun t ->
-             String.length t >= 8 && String.sub t 0 8 = "nightly-") tags with
-         | Some t -> Ok t
-         | None -> Error "no releases found"))
-  | Some tag -> Ok tag
+      match default_tag tags with Some t -> Ok t | None -> Error "no releases found")
+  | Some "nightly" ->
+    Result.bind (api_releases_json ()) (fun json ->
+      let tags = match json with `List l -> List.filter_map tag_of l | _ -> [] in
+      match List.find_opt is_nightly tags with Some t -> Ok t | None -> Error "no nightly releases found")
+  | Some tag ->
+    if valid_tag tag then Ok tag
+    else Error (Printf.sprintf "invalid version %S" tag)
 
 (* Find the (tarball_url, checksums_url) assets for [platform] in [tag]. *)
 let asset_urls ~tag ~platform =
@@ -277,8 +299,8 @@ let write_wrappers () =
   List.iter (fun tool ->
     let path = Filename.concat (bin_dir ()) tool in
     let oc = open_out path in
-    Printf.fprintf oc "#!/bin/sh\nexec \"%s/current/bin/%s\" \"$@\"\n" home tool;
-    close_out oc;
+    Fun.protect ~finally:(fun () -> close_out oc) (fun () ->
+      Printf.fprintf oc "#!/bin/sh\nexec \"%s/current/bin/%s\" \"$@\"\n" home tool);
     Unix.chmod path 0o755)
     ["march"; "forge"]
 
@@ -341,6 +363,7 @@ let list_remote () =
     Ok ()
 
 let use version =
+  if not (valid_tag version) then Error (Printf.sprintf "invalid version %S" version) else
   let dir = version_dir version in
   if not (Sys.file_exists dir) then
     Error (Printf.sprintf "toolchain %s is not installed (forge toolchain install %s)" version version)
@@ -352,6 +375,7 @@ let use version =
   end
 
 let uninstall version =
+  if not (valid_tag version) then Error (Printf.sprintf "invalid version %S" version) else
   let dir = version_dir version in
   if not (Sys.file_exists dir) then
     Error (Printf.sprintf "toolchain %s is not installed" version)
@@ -363,10 +387,11 @@ let uninstall version =
 
 (* Write a `.march-version` pin in the current directory. *)
 let pin version =
+  if not (valid_tag version) then Error (Printf.sprintf "invalid version %S" version) else
   let path = Filename.concat (Sys.getcwd ()) ".march-version" in
   let oc = open_out path in
-  output_string oc (version ^ "\n");
-  close_out oc;
+  Fun.protect ~finally:(fun () -> close_out oc)
+    (fun () -> output_string oc (version ^ "\n"));
   Printf.printf "Pinned March %s for this project (%s)\n" version path;
   if not (Sys.file_exists (Filename.concat (version_dir version) "bin/march")) then
     Printf.printf "note: %s is not installed yet. Run: forge toolchain install %s\n" version version;
@@ -394,11 +419,13 @@ let install spec =
   let* tag = resolve_tag spec in
   Printf.eprintf "Release: %s\n%!" tag;
   let* (tarball_url, sums_url) = asset_urls ~tag ~platform in
-  (* Work in a temp dir, then move into place. *)
-  let tmp = Filename.concat (Filename.get_temp_dir_name ())
-      (Printf.sprintf "forge-toolchain-%d" (Unix.getpid ())) in
-  let* () = run (Printf.sprintf "rm -rf %s && mkdir -p %s"
-                   (Filename.quote tmp) (Filename.quote tmp)) in
+  (* Work in a race-free temp dir UNDER ~/.march so the final move into
+     versions/<tag> is a same-filesystem rename, not a cross-fs copy that could
+     fail partway and leave the destination destroyed. *)
+  let* () = run (Printf.sprintf "mkdir -p %s" (Filename.quote (versions_dir ()))) in
+  let* tmp = Result.map String.trim
+      (capture (Printf.sprintf "mktemp -d %s"
+                  (Filename.quote (Filename.concat (versions_dir ()) "forge-toolchain-XXXXXX")))) in
   Fun.protect ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmp))))
     (fun () ->
        let tarball = Filename.concat tmp (Filename.basename tarball_url) in

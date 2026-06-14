@@ -53,7 +53,9 @@ let run ?(dump_phases=false) ?(compiled=false) () =
           @ (if Sys.file_exists config_dir then [config_dir] else [])
         in
         let lib_path_env =
-          Printf.sprintf "%sMARCH_LIB_PATH=%s" toolchain_pfx (String.concat ":" extra_dirs)
+          (* Quote each path: a shell metachar in a project/dep path must not inject. *)
+          let quoted = String.concat ":" (List.map Filename.quote extra_dirs) in
+          Printf.sprintf "%sMARCH_LIB_PATH=%s" toolchain_pfx quoted
         in
         let dump_flag = if dump_phases then " --dump-phases" else "" in
         let cmd = Printf.sprintf "%s march%s %s"

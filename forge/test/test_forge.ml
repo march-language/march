@@ -276,6 +276,25 @@ let test_checksum_not_found () =
   Alcotest.(check (option string)) "unlisted file yields None (verify fails closed)"
     None (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
 
+(* tag validation + default-tag selection (review fixes) ------------------ *)
+
+let test_valid_tag () =
+  List.iter (fun t -> Alcotest.(check bool) t true (Toolchain.valid_tag t))
+    [ "v0.1.0"; "nightly-20260612"; "0.5.0"; "a_b.c-1" ];
+  List.iter (fun t -> Alcotest.(check bool) t false (Toolchain.valid_tag t))
+    [ ""; "."; ".."; "../../tmp/evil"; "a/b"; "x;reboot"; "$(id)"; "a b"; "a\nb" ]
+
+let test_default_tag_prefers_stable () =
+  Alcotest.(check (option string)) "newest stable wins over nightlies"
+    (Some "v0.5.1") (Toolchain.default_tag [ "v0.5.1"; "nightly-20260612"; "v0.5.0" ])
+
+let test_default_tag_nightly_fallback () =
+  Alcotest.(check (option string)) "nightly fallback when no stable"
+    (Some "nightly-20260612") (Toolchain.default_tag [ "nightly-20260612"; "nightly-20260611" ])
+
+let test_default_tag_empty () =
+  Alcotest.(check (option string)) "empty -> None" None (Toolchain.default_tag [])
+
 (* per-project toolchain pin (.march-version) resolution ------------------- *)
 
 let mkdir_p path =
@@ -540,6 +559,10 @@ let () =
       Alcotest.test_case "checksum: standard format"         `Quick test_checksum_standard;
       Alcotest.test_case "checksum: legacy sha256 prefix"    `Quick test_checksum_legacy_prefix;
       Alcotest.test_case "checksum: unlisted file -> None"   `Quick test_checksum_not_found;
+      Alcotest.test_case "valid_tag accepts/rejects"         `Quick test_valid_tag;
+      Alcotest.test_case "default_tag: prefers stable"       `Quick test_default_tag_prefers_stable;
+      Alcotest.test_case "default_tag: nightly fallback"     `Quick test_default_tag_nightly_fallback;
+      Alcotest.test_case "default_tag: empty -> None"        `Quick test_default_tag_empty;
       Alcotest.test_case "pin: read from current dir"        `Quick test_pin_in_current_dir;
       Alcotest.test_case "pin: walks up to ancestor"         `Quick test_pin_walks_up_parents;
       Alcotest.test_case "pin: absent -> None"               `Quick test_pin_absent;
