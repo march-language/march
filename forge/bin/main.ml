@@ -487,6 +487,23 @@ let upgrade_cmd =
   Cmd.v (Cmd.info "upgrade" ~doc:"Install the latest March and make it the active toolchain")
     Term.(const (fun () -> handle (Toolchain.upgrade ())) $ const ())
 
+(* ------------------------------------------------------------- forge watch *)
+
+let watch_cmd =
+  let action =
+    Arg.(value & pos 0 string "build" &
+         info [] ~docv:"ACTION" ~doc:"What to rerun on change: $(b,build), $(b,test), or $(b,run).")
+  in
+  let interval =
+    Arg.(value & opt int 300 & info ["interval"] ~docv:"MS" ~doc:"Poll interval in milliseconds.")
+  in
+  let clear =
+    Arg.(value & flag & info ["clear"] ~doc:"Clear the screen before each run.")
+  in
+  let run a i c = handle (Cmd_watch.run ~action:a ~interval:i ~clear:c ()) in
+  Cmd.v (Cmd.info "watch" ~doc:"Rebuild/retest/rerun on source changes")
+    Term.(const run $ action $ interval $ clear)
+
 (* --------------------------------------------------------- forge tree / why *)
 
 let tree_cmd =
@@ -643,7 +660,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      toolchain_cmd; upgrade_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      toolchain_cmd; upgrade_cmd; watch_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
