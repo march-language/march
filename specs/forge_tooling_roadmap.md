@@ -26,6 +26,8 @@ Every feature section has the same shape:
 
 ## 1. `forge watch`
 
+**Status: ✅ Implemented (2026-06-14)** — `forge/lib/watcher.ml` (pure `changed`/`snapshot_of`, 5 unit tests) + `forge/lib/cmd_watch.ml` + `watch_cmd` in `main.ml`. Polling watcher over `lib/ src/ test/ config/` + `forge.toml`, reruns `build`/`test`/`run`, never exits on failure. Verified e2e (touch → rerun).
+
 **Motivation.** The highest-frequency dev loop is *edit → build/test → read output*. A watch mode that rebuilds (or re-tests/re-runs) on save removes the manual round-trip — the single biggest day-to-day DX win, and fully self-contained (no registry, no network).
 
 **CLI surface.**

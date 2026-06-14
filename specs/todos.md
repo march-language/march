@@ -43,6 +43,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Tooling: Forge Build Tool
 
+- ✅ **`forge watch`** — reruns build/test/run on source changes (polls `lib/ src/ test/ config/` + `forge.toml`); never exits on failure. `forge/lib/watcher.ml` (pure `changed`, 5 unit tests) + `cmd_watch.ml`. Item #1 of `specs/forge_tooling_roadmap.md`.
+
 - ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`, `forge search`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
 - ✅ **`forge search` — Hoogle-style search** — `lib/search/search.ml` (new `march_search` library): Levenshtein fuzzy name search, type-signature component matching, doc-keyword search, combined search (AND-semantics). JSON index cache at `.march/search-index.json`. `forge/lib/cmd_search.ml` wires up cmdliner with `--type`, `--doc`, `--limit`, `--json`, `--rebuild` flags. 25 tests in `test/test_search.ml` (levenshtein, name search, type search, doc search, combined, JSON roundtrip, stdlib integration).
 - ✅ **`forge bastion` command group + scaffold fixes** — *(Moved to bastion repo)* `forge bastion new/server/routes/gen` commands (`cmd_bastion_new.ml`, `cmd_bastion_server.ml`, `cmd_bastion_routes.ml`, `cmd_bastion_gen.ml`, `gen_auth.ml`, `scaffold_bastion.ml`, `cmd_assets.ml`) removed from `forge/` and ported to the bastion repo. `forge bastion` subcommands now ship alongside the framework they scaffold.
