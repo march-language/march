@@ -2,7 +2,7 @@
 
 ## Overview
 
-`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, completion (incl. dot-completion), inlay hints, semantic tokens, code actions, signature help, find references (incl. cross-file), rename (scope-correct), folding, code lens, performance insights, **workspace symbols**, and **document formatting** — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, Emacs, etc.). It can also be driven standalone via a stateless `march-lsp query` CLI (for scripts and LLMs).
+`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, go-to-implementation, go-to-type-definition, completion (dot-completion + scope-precise locals), inlay hints, semantic tokens, document highlight, code actions, signature help, find references (incl. cross-file), rename (scope-correct), folding, code lens, performance insights, **workspace symbols**, and **document formatting** — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, Emacs, etc.). It can also be driven standalone via a stateless `march-lsp query` CLI (for scripts and LLMs).
 
 Because it is built on the real compiler pipeline (parse → desugar → typecheck → TIR), types and diagnostics are accurate, not re-implemented heuristics.
 
@@ -10,7 +10,7 @@ Because it is built on the real compiler pipeline (parse → desugar → typeche
 
 Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/main.exe` or the installed `march-lsp`). Transport: `linol`/`linol-lwt` over stdio.
 
-**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–4 and Phase 5 increments 1–3 are implemented and merged**, plus document formatting:
+**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–4 and Phase 5 increments 1–3 are implemented and merged**, plus document formatting, navigation extras, logging, and completion-depth improvements:
 
 - **Phase 0** — UTF-16 position correctness end-to-end (`utf16.ml` line index + boundary remap; advertises `positionEncoding`); removed dead `bin/march_lsp.ml`.
 - **Phase 1** — stdlib parse/desugar memoized (`stdlib_cache.ml`); error-resilient analysis (`analyse_resilient`); version-guarded + crash-isolated background TIR fiber.
@@ -21,8 +21,11 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 - **Phase 5.2** — **cross-file find-references** (use-site index merged with live current-file results, top-level symbols only).
 - **Phase 5.3** — workspace index invalidation on `didSave`.
 - **Formatting** — `documentFormattingProvider` + CLI `format`, via `march_format` (idempotent guard in `utf16.ml`).
+- **Navigation extras** — `textDocument/implementation` (interface → its impls, via `collect_impl_sites`), `textDocument/typeDefinition` (value → its named type's decl), `textDocument/documentHighlight` (occurrences under cursor).
+- **Logging** — `window/logMessage` on document open (first editor-visible observability).
+- **Completion depth** — scope-precise local bindings (`collect_scoped` records a scope span per binder) offered first via `sortText` ranking.
 
-**Remaining (Phase 5):** the incremental typecheck engine (CAS sig/impl invalidation firewall — deferred; the dominant latency win already shipped in Phase 1's stdlib memo); module-qualified precision for cross-file references (currently name-based); `didChangeWatchedFiles` for non-editor disk changes.
+**Remaining (Phase 5):** the incremental typecheck engine (CAS sig/impl invalidation firewall — deferred; the dominant latency win already shipped in Phase 1's stdlib memo); module-qualified precision for cross-file references (currently name-based); richer completion (auto-import, qualified `Module.`, postfix); `didChangeWatchedFiles` for non-editor disk changes. A separate **compiler-side** issue: user `type` declarations are shadowed by same-named stdlib types in the typecheck environment (the type-level analogue of the def_map collision the LSP already fixes) — fixable only in the typechecker.
 
 ## Features
 
@@ -31,9 +34,12 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 | Diagnostics (type/parse/lexer errors, warnings, hints) | ✅ |
 | Hover (inferred type, doc string, perf insight, actor info) | ✅ |
 | Go-to-definition (functions, types, constructors, modules) | ✅ scope-correct |
-| Completion | ✅ dot-completion for record fields; flat list otherwise |
+| Go-to-implementation (interface → impls) | ✅ |
+| Go-to-type-definition | ✅ |
+| Completion | ✅ dot-completion (record fields) + scope-precise locals, `sortText`-ranked |
 | Inlay hints (inferred types) | ✅ |
 | Semantic tokens (full) | ✅ |
+| Document highlight (occurrences under cursor) | ✅ |
 | Document symbols | ✅ |
 | Workspace symbols (project-wide) | ✅ |
 | Code actions (match-exhaustiveness, De Morgan, make-linear, annotations, unused-import/binding, inspect, naming) | ✅ |
@@ -45,6 +51,7 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 | Code lens (perf annotations) | ✅ |
 | Performance insights (TCO, closure capture, actor copy; TIR pipeline lenses) | ✅ |
 | Position encoding | ✅ UTF-16 (advertised) |
+| Logging (`window/logMessage`) | ✅ on document open |
 | Standalone CLI query mode | ✅ `march-lsp query hover\|definition\|references\|completions\|diagnostics\|format …`, `--stdin` |
 
 ## Architecture
