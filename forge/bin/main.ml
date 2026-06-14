@@ -113,13 +113,17 @@ let build_cmd =
     Arg.(value & flag & info ["dump-phases"]
            ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
   in
-  let run r d =
-    match Cmd_build.build ~release:r ~dump_phases:d () with
+  let frozen =
+    Arg.(value & flag & info ["frozen"; "locked"]
+           ~doc:"Fail (don't re-resolve) if forge.lock is out of date with forge.toml.")
+  in
+  let run r d f =
+    match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
     | Ok binary -> Printf.printf "built: %s\n%!" binary
     | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
-    Term.(const run $ release $ dump_phases)
+    Term.(const run $ release $ dump_phases $ frozen)
 
 (* ----------------------------------------------------------------- forge check *)
 
@@ -504,6 +508,15 @@ let watch_cmd =
   Cmd.v (Cmd.info "watch" ~doc:"Rebuild/retest/rerun on source changes")
     Term.(const run $ action $ interval $ clear)
 
+(* ---------------------------------------------------------- forge licenses *)
+
+let licenses_cmd =
+  let json = Arg.(value & flag & info ["json"] ~doc:"Emit as JSON.") in
+  let strict = Arg.(value & flag & info ["strict"] ~doc:"Exit non-zero if any dependency has no license.") in
+  let run j s = handle (Cmd_licenses.run ~json:j ~strict:s ()) in
+  Cmd.v (Cmd.info "licenses" ~doc:"List each dependency and its declared license")
+    Term.(const run $ json $ strict)
+
 (* --------------------------------------------------- forge version / release *)
 
 let version_cmd =
@@ -694,7 +707,7 @@ let () =
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
-      tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
