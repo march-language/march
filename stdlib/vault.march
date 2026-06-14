@@ -121,6 +121,18 @@ mod Vault do
     vault_incr(table, key, delta)
   end
 
+  doc """
+  Atomically append `value` to the list stored at `key` (newest at the tail)
+  and keep only the last `max` elements. The whole read-append-trim-write runs
+  under the shard lock, so concurrent pushes to the same bounded buffer do not
+  clobber each other (unlike a `get` + `List.append` + `set`). A missing or
+  non-list entry starts from the empty list; `max <= 0` keeps everything. Any
+  existing TTL is preserved. Ideal for fixed-size ring buffers and inboxes.
+  """
+  fn push_capped(table, key, value, max) do
+    vault_push_capped(table, key, value, max)
+  end
+
   doc "Return the number of live (non-expired) entries in the table."
   fn size(table) do
     vault_size(table)

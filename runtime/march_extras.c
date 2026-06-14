@@ -853,6 +853,79 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
     return nv;
 }
 
+/* ── march_vault_push_capped ──────────────────────────────────────────── */
+/* Atomic bounded list push: append `value` to the March list at `key` (newest
+ * at the tail) and keep only the last `max_n` elements, all under one lock.
+ * A missing/expired/non-list entry starts from the empty list; max_n <= 0 keeps
+ * everything. March list layout: Nil = [hdr], Cons = [hdr][head@16][tail@24],
+ * tag@8 (0 = Nil, 1 = Cons). Returns Unit. */
+void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t max_n) {
+    vault_data *vd = vault_get_data(handle);
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    int64_t now = vault_now_ms();
+    pthread_mutex_lock(&vd->mutex);
+
+    vault_node *match = NULL;
+    for (vault_node *p = vd->buckets[h]; p; p = p->next) {
+        if (strcmp(p->key, key) == 0) { match = p; break; }
+    }
+    int live = match && (match->expires_ms == 0 || now <= match->expires_ms);
+    void *old_list = live ? match->value : NULL;
+
+    /* Count current elements. */
+    int64_t count = 0;
+    for (void *c = old_list; c && *(int32_t *)((char *)c + 8) == 1;
+         c = *(void **)((char *)c + 24)) count++;
+
+    int64_t total = count + 1;
+    int64_t keep  = (max_n > 0 && total > max_n) ? max_n : total;
+    int64_t drop  = total - keep;
+
+    /* Collect heads (old, oldest-first) then the appended value. */
+    void **arr = malloc((size_t)total * sizeof(void *));
+    int64_t idx = 0;
+    for (void *c = old_list; c && *(int32_t *)((char *)c + 8) == 1;
+         c = *(void **)((char *)c + 24)) {
+        arr[idx++] = *(void **)((char *)c + 16);
+    }
+    arr[count] = value;
+
+    /* Build the kept window [drop .. total-1], head = oldest kept, tail-first.
+     * incrc each kept element so the new list owns a reference. */
+    void *list = march_alloc(16); /* Nil (tag 0) */
+    for (int64_t i = total - 1; i >= drop; i--) {
+        march_incrc(arr[i]);
+        void *cons = march_alloc(16 + 16);
+        *(int32_t *)((char *)cons + 8) = 1; /* Cons */
+        *(void **)((char *)cons + 16)  = arr[i];
+        *(void **)((char *)cons + 24)  = list;
+        list = cons;
+    }
+    free(arr);
+
+    if (match) {
+        /* Release the old value (the live list, or a stale expired one). Its
+         * teardown decrc's each old head once: kept heads net zero (we incrc'd
+         * them above), dropped heads are freed. */
+        march_decrc(match->value);
+        match->value = list;
+        if (!live) match->expires_ms = 0;
+        pthread_mutex_unlock(&vd->mutex);
+        free(key);
+    } else {
+        vault_node *nn = malloc(sizeof(vault_node));
+        nn->key        = key; /* ownership transferred */
+        nn->expires_ms = 0;
+        nn->value      = list;
+        nn->next       = vd->buckets[h];
+        vd->buckets[h] = nn;
+        vd->count++;
+        pthread_mutex_unlock(&vd->mutex);
+    }
+    return march_alloc(16); /* Unit */
+}
+
 /* ── march_vault_get ──────────────────────────────────────────────────── */
 
 void *march_vault_get(void *handle, void *key_val) {

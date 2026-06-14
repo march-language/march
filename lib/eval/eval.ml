@@ -5704,6 +5704,36 @@ let base_env : env =
         VInt nv
       | _ -> eval_error "vault_incr: expected (VaultTable, key, Int)"))
 
+  (* Atomic bounded list push: append [value] to the list stored at [key]
+     (newest at the tail) and keep only the last [max] elements, all under one
+     shard lock. A missing or non-list entry starts from the empty list; max <= 0
+     keeps everything. Any existing TTL is preserved. Closes the
+     get -> append -> set race for ring buffers / inboxes. *)
+  ; ("vault_push_capped", VBuiltin ("vault_push_capped", function
+      | [VVaultHandle id; key; value; VInt max_n] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        let (cur, expiry) =
+          match Hashtbl.find_opt shard.vs_data k with
+          | Some row when vault_row_live row -> (list_elems [] row.vr_value, row.vr_expiry)
+          | _ -> ([], None)
+        in
+        let appended = cur @ [value] in
+        let len = List.length appended in
+        let capped =
+          if max_n > 0 && len > max_n
+          then List.filteri (fun i _ -> i >= len - max_n) appended
+          else appended
+        in
+        let new_list =
+          List.fold_right (fun x acc -> VCon ("Cons", [x; acc])) capped (VCon ("Nil", [])) in
+        Hashtbl.replace shard.vs_data k { vr_value = new_list; vr_expiry = expiry };
+        Mutex.unlock shard.vs_mutex;
+        VUnit
+      | _ -> eval_error "vault_push_capped: expected (VaultTable, key, value, Int)"))
+
   ; ("vault_get", VBuiltin ("vault_get", function
       | [VVaultHandle id; key] ->
         let tbl = vault_lookup id in

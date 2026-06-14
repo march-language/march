@@ -34,7 +34,7 @@ let impure_builtins = [
   "process_set_env";
   (* Mutable state *)
   "march_set_global"; "vault_set"; "vault_drop"; "vault_update";
-  "vault_put_new"; "vault_incr";
+  "vault_put_new"; "vault_incr"; "vault_push_capped";
   (* Partial / diverging: integer division and remainder panic on a zero
      divisor (see march_checked_idiv/imod/umod in the runtime), matching the
      interpreter's "<op>: division by zero".  That divergence is observable,

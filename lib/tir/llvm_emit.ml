@@ -378,7 +378,7 @@ let is_builtin_fn name =
                  "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount";
                  (* Vault (key-value store) builtins *)
                  "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl";
-                 "vault_put_new"; "vault_incr";
+                 "vault_put_new"; "vault_incr"; "vault_push_capped";
                  "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys";
                  "vault_ns_set"; "vault_ns_get"; "vault_ns_drop";
                  (* IOList builtins *)
@@ -659,6 +659,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "vault_set_ttl"      -> Some Tir.TUnit
   | "vault_put_new"      -> Some Tir.TBool
   | "vault_incr"         -> Some Tir.TInt
+  | "vault_push_capped"  -> Some Tir.TUnit
   | "vault_get"          -> Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]))
   | "vault_drop"         -> Some Tir.TUnit
   | "vault_update"       -> Some Tir.TUnit
@@ -926,6 +927,7 @@ let mangle_extern : string -> string = function
   | "vault_set_ttl"      -> "march_vault_set_ttl"
   | "vault_put_new"      -> "march_vault_put_new"
   | "vault_incr"         -> "march_vault_incr"
+  | "vault_push_capped"  -> "march_vault_push_capped"
   | "vault_get"          -> "march_vault_get"
   | "vault_drop"         -> "march_vault_drop"
   | "vault_update"       -> "march_vault_update"
@@ -4201,6 +4203,7 @@ declare ptr  @march_vault_set(ptr %table, ptr %key, ptr %value)
 declare ptr  @march_vault_set_ttl(ptr %table, ptr %key, ptr %value, i64 %ttl)
 declare i64  @march_vault_put_new(ptr %table, ptr %key, ptr %value, i64 %ttl)
 declare i64  @march_vault_incr(ptr %table, ptr %key, i64 %delta)
+declare ptr  @march_vault_push_capped(ptr %table, ptr %key, ptr %value, i64 %max)
 declare ptr  @march_vault_get(ptr %table, ptr %key)
 declare ptr  @march_vault_drop(ptr %table, ptr %key)
 declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
