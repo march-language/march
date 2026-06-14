@@ -253,7 +253,7 @@ march/
 │   ├── test_supervision.ml   # 15 tests (actor supervision policies)
 │   └── test_oracle.ml        # oracle tests (requires MARCH_BIN env var)
 ├── lsp/
-│   └── test/test_lsp.ml      # 147 tests (initialize/diagnostics/hover/goto-def/completion/inlay hints/perf-insights)
+│   └── test/                 # 159 (test_lsp) + 4 (utf16) + 2 (query_cli) + 10 (test_incremental) + 1 (test_jsonrpc, stdio integration). Phase 5 incremental typecheck engine: stdlib+deps typechecked once into cached envs (typecheck_cache.ml), only the edited file rechecked per keystroke; run_tir_pass memoized; did_change debounced; didChangeWatchedFiles invalidation.
 └── forge/
     ├── lib/
     │   ├── resolver_version.ml       # semver parse/compare/~> constraint expansion

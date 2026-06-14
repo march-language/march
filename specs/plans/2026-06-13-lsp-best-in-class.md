@@ -1107,6 +1107,8 @@ git commit -m "docs(lsp): editor setup guide (Neovim/Helix/Zed/Emacs/VS Code) + 
 
 **Trigger:** at Phase 5 start, write `specs/plans/2026-06-13-lsp-incremental-engine.md`; depends on Phase 3.
 
+**Status: DONE.** Written and executed as `specs/plans/2026-06-13-lsp-incremental-engine.md`. The shipped engine caches the *typed environment* (stdlib once, deps once by content hash) one layer above Phase 1's parse memo, re-checking only the edited file per keystroke via `Tc.check_module_with_env_full` — capturing the dominant cost with the existing incremental typechecker rather than the originally-seeded AST-level sig/impl firewall (deferred as Increment G: the existing CAS `Serialize` is TIR-only, and the stdlib+deps prefix that dominates latency is already removed). Also shipped: `run_tir_pass` source-hash memo, `didChangeWatchedFiles` invalidation, `did_change` debounce, JSON-RPC stdio integration tests. The 159-test LSP suite stays green, proving the layered checker matches the whole-module checker.
+
 ---
 
 ## Overall Testing Strategy

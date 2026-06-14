@@ -10,7 +10,7 @@ Because it is built on the real compiler pipeline (parse → desugar → typeche
 
 Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/main.exe` or the installed `march-lsp`). Transport: `linol`/`linol-lwt` over stdio.
 
-**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–4 and Phase 5 increments 1–3 are implemented and merged**, plus document formatting:
+**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–5 are implemented and merged**, plus document formatting:
 
 - **Phase 0** — UTF-16 position correctness end-to-end (`utf16.ml` line index + boundary remap; advertises `positionEncoding`); removed dead `bin/march_lsp.ml`.
 - **Phase 1** — stdlib parse/desugar memoized (`stdlib_cache.ml`); error-resilient analysis (`analyse_resilient`); version-guarded + crash-isolated background TIR fiber.
@@ -20,9 +20,10 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 - **Phase 5.1** (`...-lsp-workspace.md`) — **workspace symbols** (`workspace.ml` parse-only indexer + `workspace/symbol`); `forge_config` wired for project-root discovery.
 - **Phase 5.2** — **cross-file find-references** (use-site index merged with live current-file results, top-level symbols only).
 - **Phase 5.3** — workspace index invalidation on `didSave`.
+- **Phase 5.4** (`...-lsp-incremental-engine.md`) — **incremental typecheck engine**: the stdlib is typechecked once into a cached base env (`typecheck_cache.ml`) and forge deps once into a deps env keyed by their content; only the edited file's own decls are re-checked per keystroke (via `Tc.check_module_with_env_full`), replacing the previous whole-program re-typecheck of `stdlib @ deps @ user` on every change. Also: `run_tir_pass` insights memoized by source hash; `didChangeWatchedFiles` invalidates the workspace + deps caches; `did_change` debounced (coalesces keystroke bursts); JSON-RPC integration tests over stdio.
 - **Formatting** — `documentFormattingProvider` + CLI `format`, via `march_format` (idempotent guard in `utf16.ml`).
 
-**Remaining (Phase 5):** the incremental typecheck engine (CAS sig/impl invalidation firewall — deferred; the dominant latency win already shipped in Phase 1's stdlib memo); module-qualified precision for cross-file references (currently name-based); `didChangeWatchedFiles` for non-editor disk changes.
+**Remaining (Phase 5):** a per-def in-file typecheck firewall (AST-level `sig_hash`/`impl_hash` for the user file's own defs — deferred; requires canonical serialization of the full surface AST, and the dominant cost is already removed by caching the stdlib+deps prefix); module-qualified precision for cross-file references (currently name-based). See the deferred "Increment G" in `specs/plans/2026-06-13-lsp-incremental-engine.md`.
 
 ## Features
 
@@ -64,9 +65,10 @@ lsp/
 ├── lib/position.ml      # span ↔ LSP range + outbound remap (via Utf16)
 ├── lib/utf16.ml         # UTF-8 ↔ UTF-16 column mapping, line index, trailing-newline normalize
 ├── lib/stdlib_cache.ml  # content-hashed stdlib parse/desugar memo
+├── lib/typecheck_cache.ml # memoized typed stdlib + deps envs (incremental check)
 ├── lib/forge_config.ml  # project root + import path discovery
 ├── docs/editors.md      # editor setup guides + CLI reference
-└── test/                # alcotest suites (test_lsp, test_utf16, test_query_cli)
+└── test/                # alcotest suites (test_lsp, test_utf16, test_query_cli, test_incremental, test_jsonrpc)
 ```
 
 ## Usage
