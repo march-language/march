@@ -303,6 +303,33 @@ let test_bench_format_json () =
   Alcotest.(check bool) "json has name/seconds/ok" true
     (contains out "\"name\"" && contains out "\"a\"" && contains out "\"ok\"")
 
+(* forge completions + external subcommands ------------------------------- *)
+
+let test_completion_bash () =
+  let s = Cli_ext.completion_script ~shell:"bash" ~subcommands:[ "build"; "watch" ] in
+  Alcotest.(check bool) "bash: complete + names" true (contains s "complete" && contains s "build" && contains s "watch")
+
+let test_completion_zsh () =
+  let s = Cli_ext.completion_script ~shell:"zsh" ~subcommands:[ "build"; "watch" ] in
+  Alcotest.(check bool) "zsh: compdef + names" true (contains s "compdef" && contains s "watch")
+
+let test_completion_fish () =
+  let s = Cli_ext.completion_script ~shell:"fish" ~subcommands:[ "build"; "watch" ] in
+  Alcotest.(check bool) "fish: complete -c forge + names" true (contains s "complete -c forge" && contains s "watch")
+
+let test_external_found () =
+  let lookup n = if n = "forge-hello" then Some "/x/forge-hello" else None in
+  Alcotest.(check (option string)) "unknown cmd resolves to forge-<x>"
+    (Some "/x/forge-hello") (Cli_ext.external_subcommand ~known:[ "build" ] ~argv1:"hello" ~path_lookup:lookup)
+
+let test_external_builtin_wins () =
+  Alcotest.(check (option string)) "built-in is never shadowed"
+    None (Cli_ext.external_subcommand ~known:[ "build" ] ~argv1:"build" ~path_lookup:(fun _ -> Some "/x/forge-build"))
+
+let test_external_not_found () =
+  Alcotest.(check (option string)) "no forge-<x> on PATH -> None"
+    None (Cli_ext.external_subcommand ~known:[ "build" ] ~argv1:"nope" ~path_lookup:(fun _ -> None))
+
 (* forge licenses + --frozen --------------------------------------------- *)
 
 let test_licenses_format_human () =
@@ -683,6 +710,14 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "cli-ext", [
+      Alcotest.test_case "completions: bash"        `Quick test_completion_bash;
+      Alcotest.test_case "completions: zsh"         `Quick test_completion_zsh;
+      Alcotest.test_case "completions: fish"        `Quick test_completion_fish;
+      Alcotest.test_case "external: unknown -> forge-x" `Quick test_external_found;
+      Alcotest.test_case "external: built-in wins"  `Quick test_external_builtin_wins;
+      Alcotest.test_case "external: not found"      `Quick test_external_not_found;
     ];
     "licenses", [
       Alcotest.test_case "format: human + MISSING"  `Quick test_licenses_format_human;

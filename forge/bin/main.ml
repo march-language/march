@@ -7,6 +7,14 @@ let handle = function
   | Ok ()   -> ()
   | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
 
+let known_builtin_names =
+  [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "format";
+    "interactive"; "i"; "clean"; "deps"; "add"; "publish";
+    "install"; "uninstall"; "archives"; "update"; "verify";
+    "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
+    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "help";
+    "completions" ]
+
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
    built-in command.  We intercept these before cmdliner so unknown commands
@@ -75,6 +83,24 @@ let () =
          Printf.eprintf "error: unknown command '%s'\n%!" cmd;
          Printf.eprintf "hint:  install the %s archive with: forge install %s\n%!" ns ns;
          exit 1)
+    end;
+    (* Intercept external forge-<cmd> binaries on PATH *)
+    if cmd.[0] <> '-' then begin
+      let path_lookup name =
+        let path = try Sys.getenv "PATH" with Not_found -> "" in
+        let dirs = String.split_on_char ':' path in
+        List.find_map (fun dir ->
+            let full = Filename.concat dir name in
+            if Sys.file_exists full then Some full else None
+          ) dirs
+      in
+      match Cli_ext.external_subcommand
+              ~known:known_builtin_names ~argv1:cmd ~path_lookup with
+      | Some exe ->
+        let rest = Array.sub Sys.argv 2 (max 0 (Array.length Sys.argv - 2)) in
+        let argv = Array.append [| exe |] rest in
+        Unix.execv exe argv
+      | None -> ()
     end
   end
 
@@ -674,6 +700,19 @@ let phases_cmd =
            ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
     Term.(const run $ port)
 
+(* --------------------------------------------------------- forge completions *)
+
+let completions_cmd =
+  let shell =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"SHELL" ~doc:"Shell to generate completions for: $(b,bash), $(b,zsh), or $(b,fish).")
+  in
+  let run sh =
+    print_string (Cli_ext.completion_script ~shell:sh ~subcommands:known_builtin_names)
+  in
+  Cmd.v (Cmd.info "completions" ~doc:"Print a shell completion script")
+    Term.(const run $ shell)
+
 (* --------------------------------------------------------------------- root *)
 
 let archive_man_blocks () =
@@ -707,7 +746,8 @@ let () =
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
-      licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
+      licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
+      completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
