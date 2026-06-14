@@ -22,3 +22,9 @@
  (name test_query_cli)
  (modules test_query_cli)
  (libraries march_lsp_lib alcotest))
+
+(test
+ (name test_incremental)
+ (modules test_incremental)
+ (libraries march_ast march_parser march_lexer march_desugar
+            march_typecheck march_lsp_lib linol.lsp alcotest))

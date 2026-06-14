@@ -6234,6 +6234,12 @@ let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t 
     [env] should be the environment produced by loading stdlib
     (via [base_env] + repeated [check_decl] calls).  The [type_map]
     inside [env] is mutated in place with new span→type entries. *)
+
+(* Side channel for [check_module_with_env_full]: the last final env produced
+   by [check_module_with_env].  Set at the end of pass 2; read immediately by
+   the [_full] wrapper.  Single-threaded use only (LSP analyse / REPL JIT). *)
+let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.create 0))
+
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let errors = env.errors in
   let type_map = env.type_map in
@@ -6338,10 +6344,19 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
     ) env m.Ast.mod_decls
   in
   (* Pass 2: full checking of new declarations *)
-  let _final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  last_with_env_final := final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
+
+(** Like [check_module_with_env] but also returns the final typing env.
+    The LSP needs the env (ctors/vars/types/interfaces/impls) for completion
+    and constructor enumeration; the non-[_full] form discards it. *)
+let check_module_with_env_full (env : env) (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
+  let (errs, tm) = check_module_with_env env m in
+  (errs, tm, !last_with_env_final)
 
 (** Like [check_module] but also returns the final typing environment.
     Used by the LSP for hover/completion.  Delegates to [check_module_core]
