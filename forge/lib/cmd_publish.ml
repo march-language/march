@@ -20,6 +20,11 @@ let run ~old_source_dir ~dry_run () =
     let name    = proj.Project.name in
     let version = proj.Project.version in
     Printf.printf "publishing %s %s...\n%!" name version;
+    (* Publishing hygiene: nudge (non-fatal) when no license is declared. *)
+    (match proj.Project.license with
+     | Some l when String.trim l <> "" -> ()
+     | _ -> Printf.eprintf
+              "warning: no `license` field in forge.toml; consider adding one (e.g. license = \"MIT\")\n%!");
 
     (* Semver check: only when a previous source tree is given *)
     let semver_ok =

@@ -65,7 +65,7 @@ _Full prioritised list and rationale in `specs/forge_version_manager.md § Gaps 
 - ✅ **`forge toolchain list --remote`** — lists installable versions from the GitHub releases API, grouped stable/nightly, marking installed ones (`Toolchain.classify_remote`/`list_remote`, 1 unit test).
 - ✅ **`forge tree` / `forge why <pkg>`** — dependency-graph introspection (`deptree.ml` pure tree/path logic, 4 unit tests; `cmd_tree.ml` rebuilds edges from each installed dep's forge.toml since the lockfile has none). Diamonds and cycles handled.
 - [ ] **`forge outdated`** — show deps with newer compatible versions (needs the registry to know what's newer).
-- [ ] **`license` field (and `repository`/`homepage`/`keywords`) in `forge.toml`** — standard publishing metadata; currently unparsed.
+- ✅ **`license`/`repository`/`homepage` in `forge.toml`** — parsed into the project record (`project.ml`); `forge new` scaffolds a `license` placeholder; `forge publish` nudges when unset (2 unit tests). `keywords` (array) deferred — TOML parser has no array type.
 - [ ] **Registry server + network publish/fetch + `forge login`/`forge yank`** — `forge publish` validates locally only today (no server, no auth, no network fetch); distribution is git/path-only. Largest package-side gap ("Phase 6").
 - [ ] **Workspaces / monorepo** — multiple packages sharing a single lockfile.
 - [ ] **Vendoring / explicit offline mode** (`forge vendor`, `--offline`) — partly mitigated by the CAS cache; no explicit story.

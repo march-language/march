@@ -544,7 +544,7 @@ A consolidated, prioritised list of what forge is still missing across version *
 7. **Registry server + network publish/fetch.** `forge publish` validates locally only — there is no registry server, no `forge login`/auth/tokens, and no network fetch. Real distribution is git/path-only today. Largest package-side gap (already noted as "Phase 6" in the publish path).
 8. **`forge yank <version>`** — retract a published version. Missing.
 9. **Introspection: `forge tree`, `forge why <pkg>`, `forge outdated`.** ✅ **`tree`/`why` done (2026-06-13)** — `forge/lib/deptree.ml` (pure tree render + path queries, unit-tested) + `cmd_tree.ml` reconstructs edges by reading each installed dep's `forge.toml` (the lockfile has none). **`outdated`** still pending (needs the registry to know newer versions).
-10. **`license` field** (and `repository`/`homepage`/`keywords`) in `forge.toml` — standard publishing metadata; currently unparsed.
+10. **`license`/`repository`/`homepage` in `forge.toml`.** ✅ **Done (2026-06-13).** Parsed into the project record; `forge new` scaffolds a `license` placeholder; `forge publish` nudges (non-fatally) when none is set. `keywords` (a TOML array) deferred — the forge TOML parser has no array type yet.
 11. **Workspaces / monorepo** — multiple packages in one repo sharing a single lockfile.
 12. **Vendoring / explicit offline mode** (`forge vendor`, `--offline`) — partly mitigated by the CAS cache, but there is no explicit vendor/offline story (overlaps with "Offline mode" under Future Work).
 13. **Optional dependencies / feature flags** — conditional deps and compile-time features. A language-design question, not just a missing command.

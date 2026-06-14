@@ -14,7 +14,7 @@ let snake_to_pascal s =
 
 let forge_toml name project_type =
   Printf.sprintf
-    "[package]\nname = \"%s\"\nversion = \"0.1.0\"\ntype = \"%s\"\ndescription = \"\"\nauthor = \"\"\n\n[deps]\n"
+    "[package]\nname = \"%s\"\nversion = \"0.1.0\"\ntype = \"%s\"\ndescription = \"\"\nauthor = \"\"\nlicense = \"\"\n\n[deps]\n"
     name (Project.project_type_to_string project_type)
 
 let lib_source name = function
