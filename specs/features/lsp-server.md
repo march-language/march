@@ -2,15 +2,27 @@
 
 ## Overview
 
-`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, completion, inlay hints, semantic tokens, code actions, signature help, references, rename, folding, code lens, and performance insights — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, Emacs, etc.). It can also be driven standalone via a stateless `march-lsp query` CLI (for scripts and LLMs).
+`march-lsp` is a Language Server Protocol server for the March language. It provides IDE features — diagnostics, hover types, go-to-definition, completion (incl. dot-completion), inlay hints, semantic tokens, code actions, signature help, find references (incl. cross-file), rename (scope-correct), folding, code lens, performance insights, **workspace symbols**, and **document formatting** — to any LSP-compatible editor (VS Code, Neovim, Helix, Zed, Emacs, etc.). It can also be driven standalone via a stateless `march-lsp query` CLI (for scripts and LLMs).
 
 Because it is built on the real compiler pipeline (parse → desugar → typecheck → TIR), types and diagnostics are accurate, not re-implemented heuristics.
 
 ## Implementation Status
 
-Live and installed as `march-lsp` (built from `lsp/`). Transport: `linol`/`linol-lwt` over stdio.
+Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/main.exe` or the installed `march-lsp`). Transport: `linol`/`linol-lwt` over stdio.
 
-See `specs/plans/2026-06-13-lsp-best-in-class.md` for the active plan to take the server to best-in-class / IDE-level quality (UTF-16 correctness, incremental analysis, sound symbol identity, context-aware completion, workspace model, standalone CLI).
+**Best-in-class plan `specs/plans/2026-06-13-lsp-best-in-class.md` — Phases 0–4 and Phase 5 increments 1–3 are implemented and merged**, plus document formatting:
+
+- **Phase 0** — UTF-16 position correctness end-to-end (`utf16.ml` line index + boundary remap; advertises `positionEncoding`); removed dead `bin/march_lsp.ml`.
+- **Phase 1** — stdlib parse/desugar memoized (`stdlib_cache.ml`); error-resilient analysis (`analyse_resilient`); version-guarded + crash-isolated background TIR fiber.
+- **Phase 2** — transport-agnostic `Query` facade; stateless `march-lsp query` CLI; editor setup docs (`lsp/docs/editors.md`).
+- **Phase 3** (`...-lsp-symbol-identity.md`) — scope-aware local symbol resolver; **shadow-correct** go-to-definition / references / rename; `prepareRename`. Also: top-level def/refs/hover filter to the user file and prefer user defs over same-named stdlib (no stdlib-collision).
+- **Phase 4** (`...-lsp-completion.md`) — context-aware **dot-completion** for record fields.
+- **Phase 5.1** (`...-lsp-workspace.md`) — **workspace symbols** (`workspace.ml` parse-only indexer + `workspace/symbol`); `forge_config` wired for project-root discovery.
+- **Phase 5.2** — **cross-file find-references** (use-site index merged with live current-file results, top-level symbols only).
+- **Phase 5.3** — workspace index invalidation on `didSave`.
+- **Formatting** — `documentFormattingProvider` + CLI `format`, via `march_format` (idempotent guard in `utf16.ml`).
+
+**Remaining (Phase 5):** the incremental typecheck engine (CAS sig/impl invalidation firewall — deferred; the dominant latency win already shipped in Phase 1's stdlib memo); module-qualified precision for cross-file references (currently name-based); `didChangeWatchedFiles` for non-editor disk changes.
 
 ## Features
 
@@ -18,19 +30,22 @@ See `specs/plans/2026-06-13-lsp-best-in-class.md` for the active plan to take th
 |---|---|
 | Diagnostics (type/parse/lexer errors, warnings, hints) | ✅ |
 | Hover (inferred type, doc string, perf insight, actor info) | ✅ |
-| Go-to-definition (functions, types, constructors, modules) | ✅ |
-| Completion (keywords, in-scope names, types, ctors, interfaces) | ✅ (flat — context-awareness planned) |
+| Go-to-definition (functions, types, constructors, modules) | ✅ scope-correct |
+| Completion | ✅ dot-completion for record fields; flat list otherwise |
 | Inlay hints (inferred types) | ✅ |
 | Semantic tokens (full) | ✅ |
 | Document symbols | ✅ |
+| Workspace symbols (project-wide) | ✅ |
 | Code actions (match-exhaustiveness, De Morgan, make-linear, annotations, unused-import/binding, inspect, naming) | ✅ |
 | Signature help | ✅ |
-| Find references | ✅ |
-| Rename | ✅ (name-based — sound symbol identity planned) |
+| Find references | ✅ incl. cross-file (name-based for top-level symbols) |
+| Rename | ✅ scope-correct + `prepareRename` validation |
+| Document formatting | ✅ full-document, via `march_format` |
 | Folding ranges | ✅ |
 | Code lens (perf annotations) | ✅ |
 | Performance insights (TCO, closure capture, actor copy; TIR pipeline lenses) | ✅ |
-| Standalone CLI query mode | ✅ (`march-lsp query …`, see `lsp/docs/editors.md`) |
+| Position encoding | ✅ UTF-16 (advertised) |
+| Standalone CLI query mode | ✅ `march-lsp query hover\|definition\|references\|completions\|diagnostics\|format …`, `--stdin` |
 
 ## Architecture
 
@@ -41,12 +56,13 @@ Uses the **`linol`** OCaml library — a high-level LSP framework on top of the 
 ```
 lsp/
 ├── bin/main.ml          # entry point (stdio LSP; `query` CLI subcommand)
-├── bin/query_cli.ml     # stateless CLI query mode entry
 ├── lib/server.ml        # linol Server subclass: handlers + capabilities
 ├── lib/analysis.ml      # compiler-pipeline-backed analysis engine
 ├── lib/query.ml         # transport-agnostic query facade (shared by server + CLI)
-├── lib/position.ml      # span ↔ LSP range (via Utf16)
-├── lib/utf16.ml         # UTF-8 ↔ UTF-16 column mapping + line index
+├── lib/query_cli.ml     # stateless CLI query logic (hover/def/refs/diag/format)
+├── lib/workspace.ml     # cross-file symbol + use-site index (workspace/symbol, x-file refs)
+├── lib/position.ml      # span ↔ LSP range + outbound remap (via Utf16)
+├── lib/utf16.ml         # UTF-8 ↔ UTF-16 column mapping, line index, trailing-newline normalize
 ├── lib/stdlib_cache.ml  # content-hashed stdlib parse/desugar memo
 ├── lib/forge_config.ml  # project root + import path discovery
 ├── docs/editors.md      # editor setup guides + CLI reference
@@ -65,9 +81,11 @@ dune install march-lsp
 # Start the server (stdio transport)
 march-lsp
 
-# Standalone one-shot queries (JSON on stdout)
+# Standalone one-shot queries (JSON on stdout; `format` emits raw source)
 march-lsp query hover       file.march --line 10 --col 4
+march-lsp query references  file.march --line 10 --col 4
 march-lsp query diagnostics file.march
+march-lsp query format      file.march
 cat buffer.march | march-lsp query diagnostics buffer.march --stdin
 ```
 
@@ -75,6 +93,6 @@ Editor configuration snippets (Neovim, Helix, Zed, Emacs, VS Code) live in `lsp/
 
 ## Related
 
-- `specs/features/zed-extension.md` — Tree-sitter grammar (separate from LSP; already on main)
-- `tree-sitter-march/` — Zed editor extension with full syntax highlighting
-- `specs/plans/2026-06-13-lsp-best-in-class.md` — best-in-class roadmap (active)
+- `specs/plans/2026-06-13-lsp-best-in-class.md` — best-in-class roadmap (master plan)
+- `specs/plans/2026-06-13-lsp-symbol-identity.md`, `…-lsp-completion.md`, `…-lsp-workspace.md` — phase sub-plans
+- `specs/features/zed-extension.md` / `tree-sitter-march/` — Tree-sitter grammar (separate from LSP)
