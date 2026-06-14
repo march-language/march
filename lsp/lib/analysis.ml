@@ -2011,6 +2011,17 @@ let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
     per-function TIR insights and code lens items.  Called asynchronously
     after the synchronous [analyse] completes so the editor sees AST-level
     diagnostics immediately and TIR-level hints arrive shortly after. *)
+(* Memo of the TIR-derived insight fields keyed by source text. The TIR
+   pipeline (lower→mono→defun→…→escape) is expensive and produces insights
+   (not artifacts), so the CAS artifact store does not fit; a source-hash memo
+   makes a background fiber re-firing for unchanged text return instantly.
+   Value = (tir_fn_insights, code_lens_items, tir-derived perf_insights). The
+   tir perf insights are stored alone and recombined with the input analysis's
+   own perf_insights on replay. *)
+let tir_pass_cache :
+  (string, tir_fn_insight list * code_lens_item list * perf_insight list) Hashtbl.t
+  = Hashtbl.create 16
+
 let run_tir_pass (a : t) : t =
   (* Skip if there are errors — the TIR pipeline would fail on broken source. *)
   let has_errors = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
@@ -2019,6 +2030,12 @@ let run_tir_pass (a : t) : t =
   in
   if has_errors then a
   else
+    let cache_key = March_cas.Blake3.hash_string a.src in
+    match Hashtbl.find_opt tir_pass_cache cache_key with
+    | Some (tir_fn_insights, code_lens_items, tir_perf_insights) ->
+      { a with tir_fn_insights; code_lens_items;
+               perf_insights = a.perf_insights @ tir_perf_insights }
+    | None ->
     try
       (* Re-lex and parse the original source to get a fresh Ast.module_.
          (The Analysis.t record does not store the parsed AST itself.) *)
@@ -2129,6 +2146,8 @@ let run_tir_pass (a : t) : t =
               else None
           ) tir_fn_insights
       in
+      Hashtbl.replace tir_pass_cache cache_key
+        (tir_fn_insights, code_lens_items, tir_perf_insights);
       { a with
         tir_fn_insights;
         code_lens_items;

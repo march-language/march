@@ -77,6 +77,16 @@ let test_clear_deps_drops_cache () =
   let e2 = TCache.deps_env base ~deps in
   Alcotest.(check bool) "rebuilt after clear" true (e1 != e2)
 
+(* ── Increment C: run_tir_pass source-hash memo ──────────────────────────── *)
+
+let test_tir_pass_memoized () =
+  let src = "mod M do\n  fn f(x: Int) : Int do x + 1 end\nend\n" in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let a1 = An.run_tir_pass a in
+  let a2 = An.run_tir_pass a in
+  Alcotest.(check bool) "tir insights memoized (same physical list)"
+    true (a1.An.tir_fn_insights == a2.An.tir_fn_insights)
+
 let () =
   Alcotest.run "incremental"
     [ "with_env_full",
@@ -88,4 +98,6 @@ let () =
       "deps_env",
       [ Alcotest.test_case "memoized by content" `Quick test_deps_env_memoized;
         Alcotest.test_case "empty deps is base" `Quick test_deps_env_empty_is_base;
-        Alcotest.test_case "clear_deps rebuilds" `Quick test_clear_deps_drops_cache ] ]
+        Alcotest.test_case "clear_deps rebuilds" `Quick test_clear_deps_drops_cache ];
+      "run_tir_pass",
+      [ Alcotest.test_case "memoized by source" `Quick test_tir_pass_memoized ] ]
