@@ -40,6 +40,42 @@ let get_analysis uri =
   Hashtbl.find_opt doc_cache (Lsp.Types.DocumentUri.to_string uri)
 
 (* ------------------------------------------------------------------ *)
+(* Workspace symbol index (cross-file)                                 *)
+(* ------------------------------------------------------------------ *)
+
+let ws_index : (string, Workspace.ws_symbol list) Hashtbl.t = Hashtbl.create 1
+
+(* Derive the project root from any open document's directory, walking up to a
+   forge.toml when present. *)
+let project_root () : string option =
+  let from_doc =
+    Hashtbl.fold (fun _ (a : Analysis.t) acc ->
+        match acc with
+        | Some _ -> acc
+        | None ->
+          if a.Analysis.filename <> "" && a.Analysis.filename <> "<unknown>"
+          then Some (Filename.dirname a.Analysis.filename)
+          else None)
+      doc_cache None
+  in
+  match from_doc with
+  | Some dir ->
+    (match Forge_config.find_forge_root dir with Some r -> Some r | None -> Some dir)
+  | None -> (try Some (Sys.getcwd ()) with _ -> None)
+
+(* Built once per root and cached (invalidation on disk change is a follow-up). *)
+let workspace_index () : Workspace.ws_symbol list =
+  match project_root () with
+  | None -> []
+  | Some root ->
+    (match Hashtbl.find_opt ws_index root with
+     | Some idx -> idx
+     | None ->
+       let idx = Workspace.index_project ~root in
+       Hashtbl.replace ws_index root idx;
+       idx)
+
+(* ------------------------------------------------------------------ *)
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -200,6 +236,8 @@ class march_server =
         ServerCapabilities.signatureHelpProvider =
           Some sig_help;
         ServerCapabilities.foldingRangeProvider =
+          Some (`Bool true);
+        ServerCapabilities.workspaceSymbolProvider =
           Some (`Bool true);
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
@@ -592,6 +630,31 @@ class march_server =
           ) ranges
         in
         Lwt.return (`List json_ranges)
+
+      end else if meth = "workspace/symbol" then begin
+        let query =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "query" fields with
+             | Some (`String s) -> s | _ -> "")
+          | _ -> ""
+        in
+        let syms = Workspace.query_symbols (workspace_index ()) query in
+        (* Cap to keep responses bounded; names are ASCII so the byte-column
+           span maps to UTF-16 directly. *)
+        let syms = List.filteri (fun i _ -> i < 200) syms in
+        let json = List.map (fun (s : Workspace.ws_symbol) ->
+            let uri = Lsp.Types.DocumentUri.of_path s.Workspace.wsy_file in
+            `Assoc [
+              ("name", `String s.Workspace.wsy_name);
+              ("kind", Lsp.Types.SymbolKind.yojson_of_t s.Workspace.wsy_kind);
+              ("location", `Assoc [
+                  ("uri",   `String (Lsp.Types.DocumentUri.to_string uri));
+                  ("range", json_range (Pos.span_to_lsp_range s.Workspace.wsy_span))
+                ])
+            ]) syms
+        in
+        Lwt.return (`List json)
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)

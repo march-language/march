@@ -2961,6 +2961,30 @@ let test_dot_completion_record_fields () =
     true (List.length flat > 2)
 
 (* ------------------------------------------------------------------ *)
+(* Workspace symbols (Phase 5)                                         *)
+(* ------------------------------------------------------------------ *)
+
+let test_workspace_index_cross_file () =
+  let module W = March_lsp_lib.Workspace in
+  let files =
+    [ ("a.march",
+       "mod A do\n  fn alpha() : Int do 1 end\n  type Color = Red | Green\nend\n");
+      ("b.march", "mod B do\n  fn beta() : Int do 2 end\nend\n") ]
+  in
+  let idx = W.index_sources files in
+  let names q =
+    List.sort compare
+      (List.map (fun (s : W.ws_symbol) -> s.W.wsy_name) (W.query_symbols idx q))
+  in
+  Alcotest.(check (list string)) "exact name finds the symbol" [ "alpha" ] (names "alpha");
+  Alcotest.(check (list string)) "subsequence query matches" [ "Color" ] (names "Clr");
+  Alcotest.(check int) "all five top-level symbols indexed across files"
+    5 (List.length idx);
+  let alpha = List.find (fun (s : W.ws_symbol) -> s.W.wsy_name = "alpha") idx in
+  Alcotest.(check string) "alpha is indexed from its own file"
+    "a.march" alpha.W.wsy_file
+
+(* ------------------------------------------------------------------ *)
 (* Query facade (Phase 2)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3076,6 +3100,9 @@ let () =
     ];
     "context-aware completion", [
       "dot-completion offers record fields", `Quick, test_dot_completion_record_fields;
+    ];
+    "workspace symbols", [
+      "index + query across files", `Quick, test_workspace_index_cross_file;
     ];
     "position", [
       Alcotest.test_case "span_to_range single-line"    `Quick test_span_to_range_single_line;
