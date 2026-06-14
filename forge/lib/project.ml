@@ -41,6 +41,9 @@ type project = {
   root          : string;
   entrypoint    : string option;
   march_req     : string option;  (** optional `march = "~> X.Y"` toolchain constraint *)
+  license       : string option;  (** SPDX license id, e.g. "MIT" *)
+  repository    : string option;  (** source repository URL *)
+  homepage      : string option;  (** project homepage URL *)
   deps          : (string * dep) list;
   dev_deps      : (string * dep) list;
   patches       : patch list;
@@ -186,6 +189,9 @@ let load_from root =
   let author      = Option.value ~default:""       (Toml.get_string pkg "author") in
   let entrypoint  = Toml.get_string pkg "entrypoint" in
   let march_req   = Toml.get_string pkg "march" in
+  let license     = Toml.get_string pkg "license" in
+  let repository  = Toml.get_string pkg "repository" in
+  let homepage    = Toml.get_string pkg "homepage" in
   (* [deps] inline + section forms *)
   let inline_deps   = parse_deps_section (Toml.get_section doc "deps") in
   let section_deps  = parse_section_deps "deps" doc in
@@ -211,8 +217,8 @@ let load_from root =
     ) (Toml.get_section doc "preprocessors")
   in
   { name; version; project_type = project_type_of_string type_str;
-    description; author; root; entrypoint; march_req; deps; dev_deps; patches;
-    archive_tasks; archive_deps; preprocessors }
+    description; author; root; entrypoint; march_req; license; repository; homepage;
+    deps; dev_deps; patches; archive_tasks; archive_deps; preprocessors }
 
 let load_from_dir dir =
   try Ok (load_from dir)

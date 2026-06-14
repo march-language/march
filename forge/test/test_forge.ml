@@ -485,6 +485,30 @@ let test_drift_silent_when_unlocked () =
   Alcotest.(check bool) "no lock entry -> no warning (record-only, never override)"
     true (Toolchain.toolchain_drift ~locked:None ~resolved:(Some "0.7.0") = None)
 
+(* forge.toml metadata fields (license / repository / homepage) ----------- *)
+
+let test_project_metadata_fields () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\n\
+     name = \"x\"\n\
+     license = \"MIT\"\n\
+     repository = \"https://github.com/o/x\"\n\
+     homepage = \"https://x.dev\"\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p ->
+    Alcotest.(check (option string)) "license"    (Some "MIT") p.Project.license;
+    Alcotest.(check (option string)) "repository" (Some "https://github.com/o/x") p.Project.repository;
+    Alcotest.(check (option string)) "homepage"   (Some "https://x.dev") p.Project.homepage
+
+let test_project_metadata_absent () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p -> Alcotest.(check (option string)) "absent license -> None" None p.Project.license
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -547,5 +571,9 @@ let () =
       Alcotest.test_case "drift: warns on mismatch"       `Quick test_drift_warns_on_mismatch;
       Alcotest.test_case "drift: silent on match"         `Quick test_drift_silent_on_match;
       Alcotest.test_case "drift: silent when unlocked"    `Quick test_drift_silent_when_unlocked;
+    ];
+    "metadata", [
+      Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
+      Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
     ];
   ]
