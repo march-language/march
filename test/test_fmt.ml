@@ -217,6 +217,23 @@ end|} in
   check_parses "format fixpoint" src;
   check_idempotent "format fixpoint" src
 
+let test_trailing_blank_insensitive () =
+  (* Extra trailing blank lines in the INPUT must not change the output, so a
+     formatted file never accumulates trailing blank lines across runs. (The
+     formatter already satisfies this; this locks it in.) *)
+  let src = {|mod Test do
+
+fn f() : Int do
+  1
+end
+
+end|} in
+  let once = fmt src in
+  let with_blanks = fmt (once ^ "\n\n\n") in
+  Alcotest.(check string) "trailing blanks don't change output" once with_blanks;
+  (* And a second pass over the padded output is still stable. *)
+  Alcotest.(check string) "stable after re-format" once (fmt with_blanks)
+
 (* ------------------------------------------------------------------ *)
 (* Stdlib file roundtrip                                               *)
 (* ------------------------------------------------------------------ *)
@@ -287,6 +304,7 @@ let () =
       test_case "doc comment"     `Quick test_doc_comment;
       test_case "type alias"      `Quick test_type_alias;
       test_case "format fixpoint" `Quick test_format_fixpoint;
+      test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
     ];
     "stdlib", [
       test_case "list"    `Quick test_stdlib_list;
