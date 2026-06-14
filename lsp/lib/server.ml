@@ -23,6 +23,12 @@ let bump_version vt uri =
 let is_current vt uri v =
   match Hashtbl.find_opt vt uri with Some n -> n = v | None -> false
 
+(* Debounce window for did_change: an edit's analyse is deferred by this many
+   seconds and runs only if no newer edit for the same document arrived during
+   the window (checked via [is_current]). Coalesces bursts of keystrokes so a
+   full analyse + TIR pass runs once per typing pause, not per character. *)
+let debounce_window = 0.05
+
 let analyse_and_cache uri src =
   let filename =
     try  Lsp.Types.DocumentUri.to_path uri
@@ -327,24 +333,35 @@ class march_server =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
       let uri_str = Lsp.Types.DocumentUri.to_string uri in
       let v = bump_version versions uri_str in
-      let a = analyse_and_cache uri new_content in
-      (* Same two-phase publish: AST diagnostics now; TIR insights in a guarded
-         fiber that only publishes if this edit is still the current one. *)
+      (* Debounced + version-guarded: defer the analyse by [debounce_window];
+         a newer keystroke supersedes this one (is_current becomes false) so
+         only the latest edit in a burst is analysed. Then the same two-phase
+         publish — AST diagnostics, then TIR insights — each version-guarded so
+         a slow pass can never flicker a newer edit's results, and crash-
+         isolated so a TIR-pass bug cannot take down the server. *)
       Lwt.dont_wait
         (fun () ->
-           if is_current versions uri_str v then begin
-             let a2 = Analysis.run_tir_pass a in
-             if is_current versions uri_str v then begin
-               Hashtbl.replace doc_cache uri_str a2;
-               notify_back#send_diagnostic
-                 (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
-             end else Lwt.return_unit
-           end else Lwt.return_unit)
+           Lwt.bind (Lwt_unix.sleep debounce_window) (fun () ->
+             if not (is_current versions uri_str v) then Lwt.return_unit
+             else begin
+               let a = analyse_and_cache uri new_content in
+               Lwt.bind
+                 (notify_back#send_diagnostic
+                    (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
+                 (fun () ->
+                    if is_current versions uri_str v then begin
+                      let a2 = Analysis.run_tir_pass a in
+                      if is_current versions uri_str v then begin
+                        Hashtbl.replace doc_cache uri_str a2;
+                        notify_back#send_diagnostic
+                          (List.map (Pos.remap_diagnostic a2.Analysis.doc) a2.Analysis.diagnostics)
+                      end else Lwt.return_unit
+                    end else Lwt.return_unit)
+             end))
         (fun exn ->
-           Printf.eprintf "march-lsp: TIR fiber error: %s\n%!"
+           Printf.eprintf "march-lsp: did_change fiber error: %s\n%!"
              (Printexc.to_string exn));
-      notify_back#send_diagnostic
-        (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
+      Lwt.return_unit
 
     (* -------------------------------------------------------------- *)
     (* Hover                                                           *)

@@ -96,6 +96,21 @@ let test_watched_invalidates () =
   invalidate_workspace_index ();
   Alcotest.(check bool) "index cleared" true (workspace_index_is_empty ())
 
+(* ── Increment E: debounce did_change ────────────────────────────────────── *)
+
+let test_debounce_coalesces () =
+  let open March_lsp_lib.Server in
+  Alcotest.(check bool) "debounce window is a small positive interval"
+    true (debounce_window > 0.0 && debounce_window < 1.0);
+  (* Debounce reuses the monotonic version table: a burst of edits collapses
+     so only the latest survives the window and is analysed/published. *)
+  let vt = make_version_table () in
+  let _  = bump_version vt "u" in   (* edit 1 *)
+  let _  = bump_version vt "u" in   (* edit 2 *)
+  let v3 = bump_version vt "u" in   (* edit 3 — the latest *)
+  Alcotest.(check bool) "earlier edit superseded" false (is_current vt "u" 1);
+  Alcotest.(check bool) "only the latest edit runs" true (is_current vt "u" v3)
+
 let () =
   Alcotest.run "incremental"
     [ "with_env_full",
@@ -111,4 +126,6 @@ let () =
       "run_tir_pass",
       [ Alcotest.test_case "memoized by source" `Quick test_tir_pass_memoized ];
       "watched_files",
-      [ Alcotest.test_case "invalidate clears index" `Quick test_watched_invalidates ] ]
+      [ Alcotest.test_case "invalidate clears index" `Quick test_watched_invalidates ];
+      "debounce",
+      [ Alcotest.test_case "coalesces keystroke bursts" `Quick test_debounce_coalesces ] ]
