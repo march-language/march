@@ -19,8 +19,9 @@ A first slice of this design is built; most of its value remains designed-but-un
 
 - **`forge toolchain list --remote`** (2026-06-13): lists versions available to install from the GitHub releases API, grouped into stable / nightly and marking the ones already installed (`Toolchain.classify_remote` + `list_remote`). This is the `forge list-all` of the spec, under the `toolchain` namespace.
 - **Auto-install a missing pinned toolchain** (2026-06-13): `Toolchain.ensure_installed` — `forge build`/`run` download the resolved pin/global toolchain automatically (rustup-style) when it isn't present, instead of erroring; no-op when already installed or nothing resolves. The `forge.toml` `march` constraint is checked first, so a rejected version is never downloaded.
+- **`forge upgrade`** (2026-06-13): installs the latest March (newest stable, else newest nightly via `resolve_tag None`) and makes it the active global toolchain; no-op when already on the latest (`Toolchain.upgrade`).
 
-**Not yet built** — the remaining substance of this spec: recording the toolchain version in `forge.lock`; `forge upgrade` self-update; `forge shell-hook`.
+**Not yet built** — the remaining substance of this spec: recording the toolchain version in `forge.lock`; `forge shell-hook`.
 
 ## Concepts
 
@@ -513,7 +514,7 @@ A consolidated, prioritised list of what forge is still missing across version *
 2. **Toolchain version in `forge.lock`.** Record the resolved compiler version alongside the dependency locks so a checkout reproduces both deps and compiler.
 3. ~~**`forge.toml` `march` constraint enforcement** in `forge build`.~~ ✅ **Done (2026-06-13).** `Toolchain.check_constraint`; an optional `march = "~> X.Y"` under `[package]` blocks the build when the resolved toolchain doesn't satisfy it.
 4. ~~**Auto-install a missing pinned toolchain.**~~ ✅ **Done (2026-06-13).** `Toolchain.ensure_installed`; `forge build`/`run` download the resolved toolchain on demand.
-5. **`forge upgrade` self-update** of the forge/march binaries (designed under [Self-Update](#self-update); unbuilt).
+5. ~~**`forge upgrade` self-update.**~~ ✅ **Done (2026-06-13).** `Toolchain.upgrade` installs the latest March and activates it (no-op if already latest).
 6. ~~**`forge list-all` / `forge toolchain list --remote`.**~~ ✅ **Done (2026-06-13).** `Toolchain.classify_remote`/`list_remote`; groups stable/nightly and marks installed.
 
 ### Package management (cross-cutting; see also [forge_archives.md](forge_archives.md))
