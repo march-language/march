@@ -767,6 +767,92 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     return march_alloc(16);
 }
 
+/* ── march_vault_put_new ──────────────────────────────────────────────── */
+/* Atomic insert-if-absent. Returns 1 if this call inserted `value`, 0 if a
+ * live entry already existed for `key`. ttl_secs <= 0 means no expiry. The
+ * check-and-insert happens under one lock, so concurrent callers racing on the
+ * same key cannot both win. Returned as i64 (March Bool ABI). */
+int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t ttl_secs) {
+    vault_data *vd = vault_get_data(handle);
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    int64_t now = vault_now_ms();
+    int64_t expires = (ttl_secs > 0) ? (now + ttl_secs * 1000LL) : 0;
+    pthread_mutex_lock(&vd->mutex);
+    vault_node *n = vd->buckets[h];
+    while (n) {
+        if (strcmp(n->key, key) == 0) {
+            if (n->expires_ms == 0 || now <= n->expires_ms) {
+                /* live entry already present — do not overwrite */
+                pthread_mutex_unlock(&vd->mutex);
+                free(key);
+                return 0;
+            }
+            /* expired entry — claim it in place */
+            march_decrc(n->value);
+            march_incrc(value);
+            n->value      = value;
+            n->expires_ms = expires;
+            pthread_mutex_unlock(&vd->mutex);
+            free(key);
+            return 1;
+        }
+        n = n->next;
+    }
+    /* absent — insert */
+    vault_node *nn = malloc(sizeof(vault_node));
+    nn->key        = key;
+    nn->expires_ms = expires;
+    march_incrc(value);
+    nn->value      = value;
+    nn->next       = vd->buckets[h];
+    vd->buckets[h] = nn;
+    vd->count++;
+    pthread_mutex_unlock(&vd->mutex);
+    return 1;
+}
+
+/* ── march_vault_incr ─────────────────────────────────────────────────── */
+/* Atomic integer add: read-add-write under one lock, returning the new value.
+ * A missing, expired, or non-integer entry is treated as 0. March ints are
+ * immediate, low-bit tagged ((n<<1)|1), so no refcounting is needed for the
+ * stored int; a previously-stored heap value is released if overwritten. Any
+ * existing TTL is preserved. Returned as i64 (March Int ABI). */
+int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
+    vault_data *vd = vault_get_data(handle);
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    int64_t now = vault_now_ms();
+    pthread_mutex_lock(&vd->mutex);
+    vault_node *n = vd->buckets[h];
+    while (n) {
+        if (strcmp(n->key, key) == 0) {
+            int live   = (n->expires_ms == 0 || now <= n->expires_ms);
+            int is_int = (((int64_t)n->value) & 1) != 0;
+            int64_t cur = (live && is_int) ? (((int64_t)n->value) >> 1) : 0;
+            if (live && !is_int) march_decrc(n->value); /* replacing a heap value */
+            int64_t nv = cur + delta;
+            n->value = (void *)(((uint64_t)nv << 1) | 1u);
+            if (!live) n->expires_ms = 0;
+            pthread_mutex_unlock(&vd->mutex);
+            free(key);
+            return nv;
+        }
+        n = n->next;
+    }
+    /* absent — insert delta */
+    int64_t nv = delta;
+    vault_node *nn = malloc(sizeof(vault_node));
+    nn->key        = key;
+    nn->expires_ms = 0;
+    nn->value      = (void *)(((uint64_t)nv << 1) | 1u);
+    nn->next       = vd->buckets[h];
+    vd->buckets[h] = nn;
+    vd->count++;
+    pthread_mutex_unlock(&vd->mutex);
+    return nv;
+}
+
 /* ── march_vault_get ──────────────────────────────────────────────────── */
 
 void *march_vault_get(void *handle, void *key_val) {
