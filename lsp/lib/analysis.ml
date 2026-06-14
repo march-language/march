@@ -1436,10 +1436,17 @@ let analyse ~filename ~src : t =
     let _slib_doc    = Hashtbl.create 0 in
     let _slib_calls  = ref [] in
     let _slib_actors = Hashtbl.create 0 in
+    (* Snapshot the user's definitions so the stdlib pass below (which writes the
+       same def_map) cannot shadow a user symbol that happens to share a name
+       with a stdlib one — go-to-definition on the user's symbol must land on
+       the user's file, not the stdlib. *)
+    let user_defs = Hashtbl.copy def_map in
     List.iter
       (collect_decl ~def_map ~use_map:_slib_use ~doc_map:_slib_doc
          ~calls:_slib_calls ~actors_tbl:_slib_actors)
       stdlib_decls;
+    (* User definitions win over same-named stdlib definitions. *)
+    Hashtbl.iter (fun name sp -> Hashtbl.replace def_map name sp) user_defs;
     let actors = Hashtbl.fold (fun k v acc -> (k, v) :: acc) actors_tbl [] in
     (* Build refs_map by inverting use_map *)
     let refs_map = Hashtbl.create 64 in
@@ -2177,6 +2184,13 @@ let local_symbol_at (a : t) ~line ~character : int option =
   Hashtbl.iter (fun id sp -> consider sp id) a.sym_defs;
   Option.map snd !best
 
+(* A span belongs to the file being analysed (not stdlib). Position scans that
+   find "the name under the cursor" MUST filter by this: stdlib decls share the
+   same (line,col) coordinate space, so an unfiltered scan can match a stdlib
+   span that merely collides with the cursor's line/col. *)
+let span_in_user_file (a : t) (sp : Ast.span) : bool =
+  sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+
 let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
   (* Local binder under the cursor resolves by scope (shadow-correct). *)
   match local_symbol_at a ~line ~character with
@@ -2197,7 +2211,7 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
         match found with
         | Some _ -> found
         | None ->
-          if Pos.span_contains sp ~line ~character then Some name
+          if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
           else None
       ) a.use_map None
   in
@@ -2210,7 +2224,7 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
           match found with
           | Some _ -> found
           | None ->
-            if Pos.span_contains sp ~line ~character then Some name
+            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
             else None
         ) a.def_map None
   in
@@ -2414,7 +2428,7 @@ let doc_name_at (a : t) ~line ~character : string option =
         match found with
         | Some _ -> found
         | None   ->
-          if Pos.span_contains sp ~line ~character then Some name
+          if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
           else None
       ) a.use_map None
   in
@@ -2426,7 +2440,7 @@ let doc_name_at (a : t) ~line ~character : string option =
           match found with
           | Some _ -> found
           | None   ->
-            if Pos.span_contains sp ~line ~character then Some name
+            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
             else None
         ) a.def_map None
   in
@@ -2469,7 +2483,7 @@ let references_at (a : t) ~include_declaration ~line ~character
           match found with
           | Some _ -> found
           | None   ->
-            if Pos.span_contains sp ~line ~character then Some name
+            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
             else None
         ) a.use_map None
     in
@@ -2480,7 +2494,7 @@ let references_at (a : t) ~include_declaration ~line ~character
           match found with
           | Some _ -> found
           | None   ->
-            if Pos.span_contains sp ~line ~character then Some name
+            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
             else None
         ) a.def_map None
   in
@@ -2541,7 +2555,7 @@ let prepare_rename_at (a : t) ~line ~character : Lsp.Types.Range.t option =
         Hashtbl.fold (fun sp name acc ->
             match acc with
             | Some _ -> acc
-            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+            | None -> if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some (sp, name) else None
           ) a.use_map None
       in
       match from_use with
@@ -2550,7 +2564,7 @@ let prepare_rename_at (a : t) ~line ~character : Lsp.Types.Range.t option =
         Hashtbl.fold (fun name sp acc ->
             match acc with
             | Some _ -> acc
-            | None -> if Pos.span_contains sp ~line ~character then Some (sp, name) else None
+            | None -> if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some (sp, name) else None
           ) a.def_map None
     in
     (match hit with

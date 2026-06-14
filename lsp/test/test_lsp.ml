@@ -3073,11 +3073,38 @@ let test_hover_after_unicode () =
       true (has_sub s "Int" && not (has_sub s "String"))
 
 (* ------------------------------------------------------------------ *)
+(* Top-level resolution vs stdlib (Phase 5 fix)                        *)
+(* ------------------------------------------------------------------ *)
+
+let test_user_symbol_wins_over_stdlib_name () =
+  (* A user fn named like a stdlib one ('abs') must resolve to the USER
+     definition: (1) def_map user-win over stdlib, and (2) the position scan
+     must filter stdlib spans that collide on (line,col). Go-to-def on the use
+     lands in the user file at the user's definition line. *)
+  let src =
+    "mod M do\n  fn abs(x : Int) : Int do x end\n  fn caller() : Int do abs(1) end\nend\n"
+  in
+  let a = analyse src in
+  let (ul, uc) = pos_of src "abs(1)" in
+  match An.definition_at a ~line:ul ~character:uc with
+  | None -> Alcotest.fail "expected a definition for the user 'abs'"
+  | Some loc ->
+    let uri = Lsp.Types.DocumentUri.to_string loc.Lsp.Types.Location.uri in
+    Alcotest.(check bool) "resolves to the user file, not stdlib"
+      true (has_sub uri "test.march" && not (has_sub uri "stdlib"));
+    let (dl, _) = pos_of src "fn abs" in
+    Alcotest.(check int) "jumps to the user definition line"
+      dl loc.Lsp.Types.Location.range.Lsp.Types.Range.start.Lsp.Types.Position.line
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "march-lsp" [
+    "stdlib name collision", [
+      "user symbol wins over stdlib name", `Quick, test_user_symbol_wins_over_stdlib_name;
+    ];
     "utf16 position encoding", [
       "hover resolves identifier on a unicode line", `Quick, test_hover_after_unicode;
     ];
