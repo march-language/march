@@ -15,8 +15,9 @@ A first slice of this design is built; most of its value remains designed-but-un
 - **Resolution:** `install` resolves `latest` (newest stable) with a newest-nightly fallback, plus explicit tags and `nightly`. Checksum verification is **fail-closed** (no asset / no matching entry / mismatch → refuse).
 - **Bootstrap:** the `install.sh` installer (`curl … | sh` from the stable `raw.githubusercontent.com/march-language/march/main/install.sh` URL) replaces the `marchup` script described under [Bootstrapping](#bootstrapping). `install.sh` and `forge toolchain` share the `~/.march` layout.
 - **Per-project pinning + Version Resolution Order** (2026-06-13): a `.march-version` file (walking up parent dirs) takes precedence over the global `current`, falling back to `march` on PATH (`Toolchain.find_pin` / `resolve_version` / `march_command` / `path_prefix`, all unit-tested). `forge build`, `run`, `check`, and `test` route `march` through the resolved toolchain via the shared `Cmd_build.lib_path_env` PATH prefix; `build`/`run` hard-error with an actionable message when a pin isn't installed. New commands: `forge toolchain pin <version>` (writes `.march-version`) and `forge toolchain which` (shows what a build here resolves to).
+- **`forge.toml` `march` constraint** (2026-06-13): an optional `march = "~> X.Y"` field under `[package]` is enforced by `forge build` — the resolved toolchain must satisfy it (`Toolchain.check_constraint`, using `Resolver_constraint`/`Resolver_version`), else the build is blocked with a clear message. Non-semver tags (e.g. `nightly-*`) are allowed through since they can't be evaluated.
 
-**Not yet built** — the remaining substance of this spec: the `forge.toml` `march` constraint check in `forge build`; recording the toolchain version in `forge.lock`; auto-installing a missing pinned toolchain; `forge upgrade` self-update; `forge shell-hook`; `forge list-all` / `forge toolchain list --remote`.
+**Not yet built** — the remaining substance of this spec: recording the toolchain version in `forge.lock`; auto-installing a missing pinned toolchain; `forge upgrade` self-update; `forge shell-hook`; `forge list-all` / `forge toolchain list --remote`.
 
 ## Concepts
 
@@ -507,7 +508,7 @@ A consolidated, prioritised list of what forge is still missing across version *
 
 1. ~~**Per-project toolchain pinning.**~~ ✅ **Done (2026-06-13).** `.march-version` + the [Version Resolution Order](#version-resolution-order) are implemented and wired into `forge build`/`run`/`check`/`test`, plus `forge toolchain pin`/`which`. See [Implementation Status](#implementation-status-as-of-2026-06-13). Remaining sub-items split into #2–#4 below.
 2. **Toolchain version in `forge.lock`.** Record the resolved compiler version alongside the dependency locks so a checkout reproduces both deps and compiler.
-3. **`forge.toml` `march` constraint enforcement** in `forge build` (designed under [Version Constraints in forge.toml](#version-constraints-in-forgetoml); unbuilt).
+3. ~~**`forge.toml` `march` constraint enforcement** in `forge build`.~~ ✅ **Done (2026-06-13).** `Toolchain.check_constraint`; an optional `march = "~> X.Y"` under `[package]` blocks the build when the resolved toolchain doesn't satisfy it.
 4. **Auto-install a missing pinned toolchain** (or a clear, actionable prompt) when a project pins a version that isn't installed.
 5. **`forge upgrade` self-update** of the forge/march binaries (designed under [Self-Update](#self-update); unbuilt).
 6. **`forge list-all` / `forge toolchain list --remote`** — list installable versions from the releases API.

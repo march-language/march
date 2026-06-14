@@ -383,6 +383,26 @@ let test_path_prefix_empty_on_fallback () =
   Alcotest.(check (result string string)) "no resolution -> empty prefix (use PATH)"
     (Ok "") (Toolchain.path_prefix ~cwd:(fresh_dir ()) ())
 
+(* forge.toml `march` constraint check ------------------------------------ *)
+
+let is_ok = function Ok () -> true | Error _ -> false
+
+let test_constraint_satisfied () =
+  Alcotest.(check bool) "0.5.3 satisfies ~> 0.5.0"
+    true (is_ok (Toolchain.check_constraint ~resolved:"0.5.3" ~req:"~> 0.5.0"))
+
+let test_constraint_violated () =
+  Alcotest.(check bool) "0.7.0 violates ~> 0.5.0"
+    false (is_ok (Toolchain.check_constraint ~resolved:"0.7.0" ~req:"~> 0.5.0"))
+
+let test_constraint_skips_non_semver_tag () =
+  Alcotest.(check bool) "a nightly tag can't be evaluated -> allowed through"
+    true (is_ok (Toolchain.check_constraint ~resolved:"nightly-20260612" ~req:"~> 0.5.0"))
+
+let test_constraint_rejects_malformed_req () =
+  Alcotest.(check bool) "a malformed constraint is a config error"
+    false (is_ok (Toolchain.check_constraint ~resolved:"0.5.0" ~req:"not-a-constraint"))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -425,5 +445,9 @@ let () =
       Alcotest.test_case "march_command: PATH fallback"      `Quick test_march_command_falls_back_to_path;
       Alcotest.test_case "path_prefix: installed -> PATH override" `Quick test_path_prefix_installed;
       Alcotest.test_case "path_prefix: fallback -> empty"    `Quick test_path_prefix_empty_on_fallback;
+      Alcotest.test_case "constraint: satisfied"             `Quick test_constraint_satisfied;
+      Alcotest.test_case "constraint: violated"              `Quick test_constraint_violated;
+      Alcotest.test_case "constraint: skips non-semver tag"  `Quick test_constraint_skips_non_semver_tag;
+      Alcotest.test_case "constraint: rejects malformed req" `Quick test_constraint_rejects_malformed_req;
     ];
   ]
