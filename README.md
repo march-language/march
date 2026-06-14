@@ -268,6 +268,20 @@ Available targets: `native` (default), `wasm64-wasi`, `wasm32-wasi`, `wasm32-unk
 dune runtest
 ```
 
+## Development workflow
+
+`forge watch` reruns a build, test run, or program on every source change — it
+watches `lib/`, `src/`, `test/`, `config/`, and `forge.toml`:
+
+```bash
+forge watch          # rebuild on change (default)
+forge watch test     # rerun the test suite on change
+forge watch run      # rerun the program on change
+forge watch --clear --interval 200
+```
+
+It never exits on a build/test failure — it reports and keeps watching. Ctrl-C stops it.
+
 ## Language tour
 
 ### Values and bindings

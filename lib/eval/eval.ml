@@ -5659,6 +5659,51 @@ let base_env : env =
         VUnit
       | _ -> eval_error "vault_set_ttl: expected (VaultTable, key, value, Int)"))
 
+  (* Atomic insert-if-absent: the read, the absence check, and the write all
+     happen under one shard lock, so concurrent callers racing on the same key
+     cannot both succeed — exactly one gets [true]. ttl_secs <= 0 means no
+     expiry. Use as a lock / idempotency claim. *)
+  ; ("vault_put_new", VBuiltin ("vault_put_new", function
+      | [VVaultHandle id; key; v; VInt ttl_secs] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        let shard = vault_shard_for k tbl.vt_shards in
+        let expiry =
+          if ttl_secs <= 0 then None
+          else Some (Unix.gettimeofday () +. float_of_int ttl_secs) in
+        Mutex.lock shard.vs_mutex;
+        let inserted =
+          match Hashtbl.find_opt shard.vs_data k with
+          | Some row when vault_row_live row -> false
+          | _ ->
+            Hashtbl.replace shard.vs_data k { vr_value = v; vr_expiry = expiry };
+            true
+        in
+        Mutex.unlock shard.vs_mutex;
+        VBool inserted
+      | _ -> eval_error "vault_put_new: expected (VaultTable, key, value, Int)"))
+
+  (* Atomic integer increment: read-add-write under one shard lock, returning
+     the new value. A missing or non-integer entry is treated as 0. Any
+     existing TTL is preserved. Concurrent increments do not lose updates. *)
+  ; ("vault_incr", VBuiltin ("vault_incr", function
+      | [VVaultHandle id; key; VInt delta] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        let (cur, expiry) =
+          match Hashtbl.find_opt shard.vs_data k with
+          | Some row when vault_row_live row ->
+            ((match row.vr_value with VInt n -> n | _ -> 0), row.vr_expiry)
+          | _ -> (0, None)
+        in
+        let nv = cur + delta in
+        Hashtbl.replace shard.vs_data k { vr_value = VInt nv; vr_expiry = expiry };
+        Mutex.unlock shard.vs_mutex;
+        VInt nv
+      | _ -> eval_error "vault_incr: expected (VaultTable, key, Int)"))
+
   ; ("vault_get", VBuiltin ("vault_get", function
       | [VVaultHandle id; key] ->
         let tbl = vault_lookup id in

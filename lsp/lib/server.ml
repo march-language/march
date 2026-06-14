@@ -270,6 +270,12 @@ class march_server =
           Some (`Bool true);
         ServerCapabilities.documentFormattingProvider =
           Some (`Bool true);
+        ServerCapabilities.implementationProvider =
+          Some (`Bool true);
+        ServerCapabilities.typeDefinitionProvider =
+          Some (`Bool true);
+        ServerCapabilities.documentHighlightProvider =
+          Some (`Bool true);
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
 
@@ -282,6 +288,12 @@ class march_server =
       let uri_str = Lsp.Types.DocumentUri.to_string uri in
       let v = bump_version versions uri_str in
       let a = analyse_and_cache uri content in
+      (* Surface analysis activity in the editor's LSP log (the only observability
+         the server previously had was stderr, which editors rarely show). *)
+      Lwt.async (fun () ->
+        notify_back#send_log_msg ~type_:Lsp.Types.MessageType.Info
+          (Printf.sprintf "analyzed %s: %d diagnostic(s)"
+             uri_str (List.length a.Analysis.diagnostics)));
       (* Run the TIR pipeline in a guarded background fiber: only publish if
          this edit is still current, and never let a TIR bug crash the server. *)
       Lwt.dont_wait
@@ -772,6 +784,56 @@ class march_server =
             ]) edits
         in
         Lwt.return (`List json)
+
+      end else if meth = "textDocument/implementation" then begin
+        let (line, utf16_char) = get_position () in
+        let locs =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a -> Analysis.query_implementation_at a ~line ~utf16_char)
+        in
+        Lwt.return
+          (`List (List.map (fun (l : Lsp.Types.Location.t) ->
+               `Assoc [
+                 ("uri",   `String (Lsp.Types.DocumentUri.to_string l.uri));
+                 ("range", json_range l.range)
+               ]) locs))
+
+      end else if meth = "textDocument/typeDefinition" then begin
+        let (line, utf16_char) = get_position () in
+        let loc =
+          match get_td_uri () with
+          | None -> None
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> None
+             | Some a -> Analysis.query_type_definition_at a ~line ~utf16_char)
+        in
+        (match loc with
+         | None -> Lwt.return `Null
+         | Some l ->
+           Lwt.return
+             (`Assoc [
+                ("uri",   `String (Lsp.Types.DocumentUri.to_string l.uri));
+                ("range", json_range l.range)
+              ]))
+
+      end else if meth = "textDocument/documentHighlight" then begin
+        let (line, utf16_char) = get_position () in
+        let hls =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a -> Analysis.query_document_highlights_at a ~line ~utf16_char)
+        in
+        Lwt.return
+          (`List (List.map (fun (h : Lsp.Types.DocumentHighlight.t) ->
+               `Assoc [ ("range", json_range h.range); ("kind", `Int 1) ]) hls))
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)

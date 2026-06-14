@@ -90,6 +90,37 @@ mod Vault do
     vault_update(table, key, f)
   end
 
+  doc """
+  Atomically insert `value` at `key` only if no live entry already exists.
+  Returns `true` if this call inserted the value, `false` if a live entry was
+  already present.
+
+  Unlike `set`, the check-and-insert is a single atomic step under the shard
+  lock, so concurrent callers racing on the same key cannot both succeed —
+  exactly one receives `true`. Use it as a lock or an idempotency claim.
+  """
+  fn put_new(table, key, value) do
+    vault_put_new(table, key, value, 0)
+  end
+
+  doc """
+  Like `put_new`, but the claimed entry expires after `ttl_secs` seconds so a
+  caller that crashes after claiming the key does not hold it forever.
+  """
+  fn put_new_ttl(table, key, value, ttl_secs) do
+    vault_put_new(table, key, value, ttl_secs)
+  end
+
+  doc """
+  Atomically add `delta` to the integer stored at `key` and return the new
+  value. A missing or non-integer entry is treated as 0. Any existing TTL on
+  the key is preserved. Concurrent increments do not lose updates (unlike a
+  `get` + `set` pair).
+  """
+  fn incr(table, key, delta) do
+    vault_incr(table, key, delta)
+  end
+
   doc "Return the number of live (non-expired) entries in the table."
   fn size(table) do
     vault_size(table)

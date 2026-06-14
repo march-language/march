@@ -276,6 +276,28 @@ let test_checksum_not_found () =
   Alcotest.(check (option string)) "unlisted file yields None (verify fails closed)"
     None (Toolchain.expected_hash_for ~sums ~file:"march-1.0-darwin-arm64.tar.gz")
 
+(* forge watch: change detection ------------------------------------------ *)
+
+let test_watch_no_change () =
+  let s = [ ("a", 1.0); ("b", 2.0) ] in
+  Alcotest.(check bool) "identical snapshot -> no change" false (Watcher.changed ~prev:s ~cur:s)
+
+let test_watch_mtime_advances () =
+  Alcotest.(check bool) "a file's mtime changed -> change"
+    true (Watcher.changed ~prev:[ ("a", 1.0) ] ~cur:[ ("a", 2.0) ])
+
+let test_watch_added () =
+  Alcotest.(check bool) "a file appeared -> change"
+    true (Watcher.changed ~prev:[ ("a", 1.0) ] ~cur:[ ("a", 1.0); ("b", 2.0) ])
+
+let test_watch_removed () =
+  Alcotest.(check bool) "a file disappeared -> change"
+    true (Watcher.changed ~prev:[ ("a", 1.0); ("b", 2.0) ] ~cur:[ ("a", 1.0) ])
+
+let test_watch_order_insensitive () =
+  Alcotest.(check bool) "same files, different order -> no change"
+    false (Watcher.changed ~prev:[ ("a", 1.0); ("b", 2.0) ] ~cur:[ ("b", 2.0); ("a", 1.0) ])
+
 (* tag validation + default-tag selection (review fixes) ------------------ *)
 
 let test_valid_tag () =
@@ -598,5 +620,12 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+    ];
+    "watcher", [
+      Alcotest.test_case "no change on identical snapshot"  `Quick test_watch_no_change;
+      Alcotest.test_case "mtime change -> change"           `Quick test_watch_mtime_advances;
+      Alcotest.test_case "added file -> change"             `Quick test_watch_added;
+      Alcotest.test_case "removed file -> change"           `Quick test_watch_removed;
+      Alcotest.test_case "order-insensitive"               `Quick test_watch_order_insensitive;
     ];
   ]
