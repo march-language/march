@@ -3472,6 +3472,111 @@ end|} in
   Alcotest.(check bool) "send-copies surfaced as inlays" true (copied >= send_copies)
 
 (* ------------------------------------------------------------------ *)
+(* Parameter-name inlay hints at call sites                            *)
+(* ------------------------------------------------------------------ *)
+
+(* Collect (label, line, character) for every Parameter-kind inlay hint. *)
+let param_hints ?(param_names = true) a =
+  let range = Lsp.Types.Range.create
+      ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+      ~end_:(Lsp.Types.Position.create ~line:1000 ~character:0) in
+  List.filter_map (fun (h : Lsp.Types.InlayHint.t) ->
+      match h.Lsp.Types.InlayHint.kind, h.Lsp.Types.InlayHint.label with
+      | Some Lsp.Types.InlayHintKind.Parameter, `String s ->
+        Some (s, h.position.line, h.position.character)
+      | _ -> None)
+    (An.inlay_hints_for ~param_names a range)
+
+let test_param_hint_two_arg_call () =
+  (* A 2-arg user call emits both `name:` hints, in order. *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller() : Int do
+    rect(10, 20)
+  end
+end|} in
+  let a = analyse src in
+  let labels = List.map (fun (s, _, _) -> s) (param_hints a) in
+  Alcotest.(check bool) "width: hint present" true (List.mem "width:" labels);
+  Alcotest.(check bool) "height: hint present" true (List.mem "height:" labels)
+
+let test_param_hint_positions_at_arg_start () =
+  (* Hints land at the START column of each argument expression. *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller() : Int do
+    rect(10, 20)
+  end
+end|} in
+  let a = analyse src in
+  let hs = param_hints a in
+  (* "    rect(10, 20)" — 0-indexed: '1' of "10" at col 9, '2' of "20" at col 13. *)
+  let width_pos = List.find_opt (fun (s, _, _) -> s = "width:") hs in
+  let height_pos = List.find_opt (fun (s, _, _) -> s = "height:") hs in
+  (match width_pos with
+   | Some (_, _, c) -> Alcotest.(check int) "width: at arg start col" 9 c
+   | None -> Alcotest.fail "missing width: hint");
+  (match height_pos with
+   | Some (_, _, c) -> Alcotest.(check int) "height: at arg start col" 13 c
+   | None -> Alcotest.fail "missing height: hint")
+
+let test_param_hint_suppress_redundant_identifier () =
+  (* foo(width) where the var IS named width is redundant → suppressed.
+     The second arg (a literal) keeps its hint. *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller(width: Int) : Int do
+    rect(width, 20)
+  end
+end|} in
+  let a = analyse src in
+  let labels = List.map (fun (s, _, _) -> s) (param_hints a) in
+  Alcotest.(check bool) "redundant width: suppressed" false
+    (List.mem "width:" labels);
+  Alcotest.(check bool) "non-redundant height: kept" true
+    (List.mem "height:" labels)
+
+let test_param_hint_suppress_single_arg () =
+  (* Single-argument calls add no value → suppressed. *)
+  let src = {|mod M do
+  fn inc(value: Int) : Int do value + 1 end
+  fn caller() : Int do
+    inc(41)
+  end
+end|} in
+  let a = analyse src in
+  let labels = List.map (fun (s, _, _) -> s) (param_hints a) in
+  Alcotest.(check bool) "single-arg hint suppressed" false
+    (List.mem "value:" labels)
+
+let test_param_hint_toggle_off () =
+  (* With param_names:false the hints disappear entirely. *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller() : Int do
+    rect(10, 20)
+  end
+end|} in
+  let a = analyse src in
+  let labels = List.map (fun (s, _, _) -> s) (param_hints ~param_names:false a) in
+  Alcotest.(check int) "no parameter hints when toggled off" 0
+    (List.length labels)
+
+let test_param_hint_config_toggle_parse () =
+  let parse = March_lsp_lib.Server.param_name_hints_from_settings in
+  let nested =
+    `Assoc [("march", `Assoc [("inlayHints",
+      `Assoc [("parameterNames", `Bool false)])])] in
+  Alcotest.(check (option bool)) "reads fully-qualified setting" (Some false)
+    (parse nested);
+  let stripped =
+    `Assoc [("inlayHints", `Assoc [("parameterNames", `Bool true)])] in
+  Alcotest.(check (option bool)) "reads prefix-stripped setting" (Some true)
+    (parse stripped);
+  Alcotest.(check (option bool)) "absent setting is None" None
+    (parse (`Assoc [("other", `Int 1)]))
+
+(* ------------------------------------------------------------------ *)
 (* documentHighlight Read/Write kinds                                  *)
 (* ------------------------------------------------------------------ *)
 
@@ -4476,6 +4581,14 @@ let () =
       "reuse hint on single-use allocation", `Quick, test_inlay_reuse_hint;
       "no reuse hint on scalar binding", `Quick, test_inlay_no_reuse_for_scalar;
       "send-copy surfaced as copied inlay", `Quick, test_inlay_copy_hint_wiring;
+    ];
+    "parameter-name inlay hints", [
+      "two-arg call emits both name: hints", `Quick, test_param_hint_two_arg_call;
+      "hints positioned at arg start", `Quick, test_param_hint_positions_at_arg_start;
+      "redundant identifier arg suppressed", `Quick, test_param_hint_suppress_redundant_identifier;
+      "single-arg call suppressed", `Quick, test_param_hint_suppress_single_arg;
+      "toggled off removes hints", `Quick, test_param_hint_toggle_off;
+      "config toggle parse", `Quick, test_param_hint_config_toggle_parse;
     ];
     "completion depth", [
       "in-scope locals offered and ranked first", `Quick, test_completion_scoped_locals;

@@ -3129,7 +3129,78 @@ let completions_at (a : t) ~line ~character =
   @ rank "6" sigil_items
   @ auto_items
 
-let inlay_hints_for ?(perf_annotations = true) (a : t) (range : Lsp.Types.Range.t) =
+(* ------------------------------------------------------------------ *)
+(* Parameter-name inlay hints at call sites                            *)
+(* ------------------------------------------------------------------ *)
+
+(** Build a map from (simple) function name → ordered parameter names, sourced
+    from user [DFn] declarations (including those nested inside [DMod]). Keyed by
+    the bare function name (last path segment), so both a plain call `add(..)`
+    and a qualified call `M.add(..)` resolve through the same entry.
+
+    Source/limitation: param names come ONLY from user functions in this file's
+    AST ([t.decls]). Stdlib / global function param names are not available here,
+    so calls into the stdlib get no parameter-name hints. The first clause of a
+    multi-clause function supplies the names. *)
+let build_param_name_map (decls : Ast.decl list) : (string, string list) Hashtbl.t =
+  let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  let rec go decls =
+    List.iter (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DFn (fd, _) ->
+          (match fd.Ast.fn_clauses with
+           | cl :: _ ->
+             let names = clause_param_names cl in
+             (* Only register when every param has a usable name, so we never
+                emit a misaligned hint for a function with pattern params. *)
+             if names <> [] && List.length names = List.length cl.Ast.fc_params
+             then Hashtbl.replace tbl fd.Ast.fn_name.Ast.txt names
+           | [] -> ())
+        | Ast.DMod (_, _, inner, _) -> go inner
+        | _ -> ()
+      ) decls
+  in
+  go decls;
+  tbl
+
+(** Resolve a call's callee expression to a simple function name.
+    - [EVar n]            → [n]                 (plain call: add(..))
+    - [EField (_, n, _)]  → [n]                 (qualified call: M.add(..))
+    Returns [None] for anything else (e.g. calling a computed function). *)
+let callee_simple_name (callee : Ast.expr) : string option =
+  match callee with
+  | Ast.EVar n -> Some n.Ast.txt
+  | Ast.EField (_, n, _) -> Some n.Ast.txt
+  | _ -> None
+
+(** Noise-reduction predicate: should the [param]-name hint on argument [arg]
+    be suppressed? Rules (documented for users):
+    1. Single-argument calls — one hint adds little and clutters common 1-arg
+       calls like `print(x)`; suppress.
+    2. The argument is a bare identifier whose name already equals the param
+       name — `foo(width)` where the var IS `width` is fully redundant.
+    3. The argument is a bare identifier that ends with the param name as a
+       `.`-suffix or `_`-suffix match (e.g. `set(self.width)` for param
+       `width`, or `make(max_width)` for param `width`) — the name is already
+       visible, so the hint is redundant. *)
+let suppress_param_hint ~(single_arg : bool) ~(param : string) (arg : Ast.expr) : bool =
+  if single_arg then true
+  else
+    match arg with
+    | Ast.EVar n ->
+      let v = n.Ast.txt in
+      v = param
+      || (let suffix sep = sep ^ param in
+          let ends_with s suf =
+            let ls = String.length s and lf = String.length suf in
+            ls >= lf && String.sub s (ls - lf) lf = suf
+          in
+          ends_with v (suffix ".") || ends_with v (suffix "_"))
+    | Ast.EField (_, n, _) -> n.Ast.txt = param
+    | _ -> false
+
+let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
+    (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
   let is_user_span (sp : Ast.span) =
     sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
@@ -3176,6 +3247,89 @@ let inlay_hints_for ?(perf_annotations = true) (a : t) (range : Lsp.Types.Range.
         | ActorSendCopy _ -> annotate pi.pi_span "⧉ copied"
         | _ -> ()
       ) a.perf_insights
+  end;
+  (* Parameter-name hints at call sites: foo(width: a, height: b).
+     Emitted at the START of each positional argument as a Parameter inlay. *)
+  if param_names then begin
+    let pmap = build_param_name_map a.decls in
+    (* Emit a Parameter hint [label] at the start of span [sp]. *)
+    let param_hint sp label =
+      if is_user_span sp && in_range sp then begin
+        let pos = Pos.create
+          ~line:(sp.Ast.start_line - 1) ~character:sp.Ast.start_col in
+        hints := InlayHint.create
+          ~position:pos ~label:(`String label)
+          ~kind:InlayHintKind.Parameter
+          ~paddingRight:true () :: !hints
+      end
+    in
+    let handle_call callee args =
+      match callee_simple_name callee with
+      | None -> ()
+      | Some name ->
+        (match Hashtbl.find_opt pmap name with
+         | None -> ()
+         | Some params ->
+           (* Respect arity: only pair up the args we have names for. Extra
+              args (variadic) or extra params (curried/partial) are skipped. *)
+           let single_arg = (match args with [_] -> true | _ -> false) in
+           let rec pair ps ax =
+             match ps, ax with
+             | p :: ps', arg :: ax' ->
+               if not (suppress_param_hint ~single_arg ~param:p arg) then
+                 param_hint (span_of_expr arg) (p ^ ":");
+               pair ps' ax'
+             | _ -> ()
+           in
+           pair params args)
+    in
+    (* Walk every expression reachable from user declarations, visiting each
+       EApp call site. Reuses span_of_expr for argument positions. *)
+    let rec walk_e (e : Ast.expr) =
+      (match e with
+       | Ast.EApp (callee, args, _) -> handle_call callee args
+       | _ -> ());
+      match e with
+      | Ast.EApp (callee, args, _) -> walk_e callee; List.iter walk_e args
+      | Ast.ECon (_, es, _) | Ast.ETuple (es, _) | Ast.EAtom (_, es, _)
+      | Ast.EBlock (es, _) -> List.iter walk_e es
+      | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> walk_e body
+      | Ast.ELet (b, _) -> walk_e b.Ast.bind_expr
+      | Ast.EMatch (subj, brs, _) ->
+        walk_e subj;
+        List.iter (fun (br : Ast.branch) ->
+            (match br.Ast.branch_guard with Some g -> walk_e g | None -> ());
+            walk_e br.Ast.branch_body) brs
+      | Ast.ECond (arms, _) ->
+        List.iter (fun (c, body) -> walk_e c; walk_e body) arms
+      | Ast.EIf (c, t, f, _) -> walk_e c; walk_e t; walk_e f
+      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk_e x; walk_e y
+      | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk_e e) fs
+      | Ast.ERecordUpdate (e, fs, _) ->
+        walk_e e; List.iter (fun (_, e) -> walk_e e) fs
+      | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+      | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) -> walk_e e
+      | Ast.EDbg (Some e, _) -> walk_e e
+      | _ -> ()
+    in
+    let rec walk_decls decls = List.iter walk_decl decls
+    and walk_decl (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fd, _) ->
+        List.iter (fun (cl : Ast.fn_clause) -> walk_e cl.Ast.fc_body)
+          fd.Ast.fn_clauses
+      | Ast.DLet (_, b, _) -> walk_e b.Ast.bind_expr
+      | Ast.DMod (_, _, inner, _) -> walk_decls inner
+      | Ast.DTest (td, _) -> walk_e td.Ast.test_body
+      | Ast.DDescribe (_, inner, _) -> walk_decls inner
+      | Ast.DSetup (e, _) | Ast.DSetupAll (e, _) -> walk_e e
+      | Ast.DApp (ad, _) ->
+        walk_e ad.Ast.app_body;
+        (match ad.Ast.app_on_start with Some e -> walk_e e | None -> ());
+        (match ad.Ast.app_on_stop with Some e -> walk_e e | None -> ())
+      | _ -> ()
+    in
+    walk_decls a.decls
   end;
   !hints
 

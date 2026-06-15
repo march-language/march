@@ -29,6 +29,26 @@ let perf_annotations_from_settings (settings : Yojson.Safe.t) : bool option =
   | Some _ as r -> r
   | None -> dig ["inlayHints"; "performanceAnnotations"] settings
 
+(* Whether to emit parameter-name inlay hints at call sites
+   (foo(width: a, height: b)). Toggled via `march.inlayHints.parameterNames`.
+   Defaults ON. *)
+let param_name_hints = ref true
+
+(* Read `march.inlayHints.parameterNames` (a bool) out of a
+   didChangeConfiguration `settings` payload. Accepts both the fully-qualified
+   path and the prefix-stripped form some clients send. None when absent. *)
+let param_name_hints_from_settings (settings : Yojson.Safe.t) : bool option =
+  let rec dig path j =
+    match path, j with
+    | [], `Bool b -> Some b
+    | k :: rest, `Assoc fields ->
+      (match List.assoc_opt k fields with Some j' -> dig rest j' | None -> None)
+    | _ -> None
+  in
+  match dig ["march"; "inlayHints"; "parameterNames"] settings with
+  | Some _ as r -> r
+  | None -> dig ["inlayHints"; "parameterNames"] settings
+
 (* Per-document cache of the last semantic-token result, for delta requests:
    uri → (resultId, token data). *)
 let sem_tokens_cache : (string, string * int array) Hashtbl.t = Hashtbl.create 16
@@ -458,6 +478,10 @@ class march_server =
          (match perf_annotations_from_settings
                   params.Lsp.Types.DidChangeConfigurationParams.settings with
           | Some b -> perf_annotations := b
+          | None -> ());
+         (match param_name_hints_from_settings
+                  params.Lsp.Types.DidChangeConfigurationParams.settings with
+          | Some b -> param_name_hints := b
           | None -> ())
        | _ -> ());
       Lwt.return_unit
@@ -581,7 +605,8 @@ class march_server =
           (* inlay_hints_for filters by line only, so the inbound range needs
              no column conversion; remap the outbound hint positions to UTF-16. *)
           let hs =
-            Analysis.inlay_hints_for ~perf_annotations:!perf_annotations a range in
+            Analysis.inlay_hints_for ~perf_annotations:!perf_annotations
+              ~param_names:!param_name_hints a range in
           if hs = [] then None
           else Some (List.map (Pos.remap_inlay_hint a.Analysis.doc) hs)
       in
