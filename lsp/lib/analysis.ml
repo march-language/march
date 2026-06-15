@@ -1787,6 +1787,8 @@ let analyse ~filename ~src : t =
             | Ast.DProtocol (_, _, sp) -> sp
             | Ast.DTest (_, sp)     -> sp
             | Ast.DDescribe (_, _, sp) -> sp
+            | Ast.DUse (_, sp)      -> sp
+            | Ast.DAlias (_, sp)    -> sp
             | _                     -> Ast.dummy_span
           in
           is_user_file sp
@@ -4215,13 +4217,218 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
       !lin_params
   in
 
+  (* ---- Destruct / case-split: variant-typed expr -> exhaustive match ---- *)
+  let destruct_actions =
+    let pred = function
+      | Ast.EVar _ | Ast.EField _ | Ast.EApp _ -> true
+      | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | None -> []
+    | Some e ->
+      let sp = span_of_expr e in
+      (match Option.map Tc.repr (Hashtbl.find_opt a.type_map sp) with
+       | Some (Tc.TCon (tyname, _)) ->
+         (* Constructors of [tyname], bare names only (drop qualified dups). *)
+         let seen = Hashtbl.create 8 in
+         let ctors =
+           List.filter_map (fun (cname, parent) ->
+               if parent = tyname && not (String.contains cname '.')
+                  && not (Hashtbl.mem seen cname)
+               then (Hashtbl.add seen cname (); Some cname) else None)
+             a.ctors in
+         let subj = slice_span src sp in
+         if ctors = [] || subj = "" then []
+         else begin
+           let indent = indent_of_line src (sp.Ast.start_line - 1) in
+           let arms =
+             List.map (fun c ->
+                 let ar = try List.assoc c a.ctor_arities with Not_found -> 0 in
+                 let binders =
+                   if ar = 0 then ""
+                   else "(" ^ String.concat ", "
+                          (List.init ar (fun i -> Printf.sprintf "x%d" i)) ^ ")" in
+                 Printf.sprintf "%s  %s%s -> ?" indent c binders) ctors in
+           let new_text =
+             Printf.sprintf "match %s do\n%s\n%send" subj
+               (String.concat "\n" arms) indent in
+           [CodeAction.create
+              ~title:(Printf.sprintf "Destruct `%s` into a match" subj)
+              ~kind:CodeActionKind.RefactorRewrite
+              ~edit:(mk_we [TextEdit.create ~range:(range_of_span sp) ~newText:new_text]) ()]
+         end
+       | _ -> [])
+  in
+
+  (* ---- Extract function: selected expr -> top-level fn capturing free locals ---- *)
+  let extract_fn_actions =
+    let pred = function
+      | Ast.EApp _ | Ast.ECon _ | Ast.EField _ | Ast.ERecord _
+      | Ast.ERecordUpdate _ | Ast.ETuple _ | Ast.EPipe _ | Ast.EIf _
+      | Ast.EMatch _ | Ast.EAtom _ -> true
+      | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | None -> []
+    | Some e ->
+      let sp = span_of_expr e in
+      let expr_text = slice_span src sp in
+      if expr_text = "" then []
+      else begin
+        (* Scoped free-variable analysis: collect EVar uses not bound within e. *)
+        let pat_names p =
+          let acc = ref [] in
+          let rec go = function
+            | Ast.PatVar n -> acc := n.Ast.txt :: !acc
+            | Ast.PatAs (p, n, _) -> go p; acc := n.Ast.txt :: !acc
+            | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+              List.iter go ps
+            | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> go p) fs
+            | _ -> () in
+          go p; !acc
+        in
+        let frees = ref [] in
+        let rec fv bound (e : Ast.expr) =
+          match e with
+          | Ast.EVar n -> if not (List.mem n.Ast.txt bound) then frees := (n.Ast.txt, n.Ast.span) :: !frees
+          | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+          | Ast.EApp (g, args, _) -> fv bound g; List.iter (fv bound) args
+          | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
+            List.iter (fv bound) args
+          | Ast.ELam (ps, body, _) ->
+            let b = List.fold_left (fun b (p : Ast.param) -> p.Ast.param_name.txt :: b) bound ps in
+            fv b body
+          | Ast.ELetFn (n, ps, _, body, _) ->
+            let b = n.Ast.txt :: List.fold_left (fun b (p : Ast.param) -> p.Ast.param_name.txt :: b) bound ps in
+            fv b body
+          | Ast.EBlock (es, _) ->
+            ignore (List.fold_left (fun b e -> match e with
+                | Ast.ELet (bd, _) -> fv b bd.Ast.bind_expr; pat_names bd.Ast.bind_pat @ b
+                | _ -> fv b e; b) bound es)
+          | Ast.ELet (bd, _) -> fv bound bd.Ast.bind_expr
+          | Ast.EMatch (s, brs, _) ->
+            fv bound s;
+            List.iter (fun (br : Ast.branch) ->
+                let b = pat_names br.branch_pat @ bound in
+                (match br.branch_guard with Some g -> fv b g | None -> ());
+                fv b br.branch_body) brs
+          | Ast.EIf (c, t, el, _) -> fv bound c; fv bound t; fv bound el
+          | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> fv bound c; fv bound b) arms
+          | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> fv bound a; fv bound b
+          | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> fv bound e) fs
+          | Ast.ERecordUpdate (e, fs, _) -> fv bound e; List.iter (fun (_, e) -> fv bound e) fs
+          | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+          | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> fv bound e
+        in
+        fv [] e;
+        (* Keep only locals (names not in the module/global env), de-duped, in use order. *)
+        let seen = Hashtbl.create 16 in
+        let params =
+          List.rev !frees
+          |> List.filter_map (fun (name, span) ->
+              if Hashtbl.mem seen name then None
+              else if List.mem_assoc name a.vars then (Hashtbl.add seen name (); None)
+              else begin
+                Hashtbl.add seen name ();
+                let ty_s = match Hashtbl.find_opt a.type_map span with
+                  | Some ty -> Some (Tc.pp_ty (Tc.repr ty)) | None -> None in
+                Some (name, ty_s)
+              end)
+        in
+        let param_text =
+          String.concat ", "
+            (List.map (fun (n, t) -> match t with Some t -> n ^ ": " ^ t | None -> n) params) in
+        let arg_text = String.concat ", " (List.map fst params) in
+        (* Insert the new function before the enclosing top-level fn. *)
+        let enclosing_line = ref None in
+        let rec scan_decl (d : Ast.decl) =
+          match d with
+          | Ast.DFn (fn, _) ->
+            List.iter (fun (cl : Ast.fn_clause) ->
+                let bsp = span_of_expr cl.Ast.fc_body in
+                if Pos.span_contains bsp ~line ~character then
+                  enclosing_line := Some fn.Ast.fn_name.Ast.span.Ast.start_line) fn.Ast.fn_clauses
+          | Ast.DMod (_, _, ds, _) -> List.iter scan_decl ds
+          | _ -> () in
+        List.iter scan_decl a.decls;
+        match !enclosing_line with
+        | None -> []
+        | Some fn_line ->
+          let indent = indent_of_line src (fn_line - 1) in
+          let new_fn =
+            Printf.sprintf "%sfn extracted(%s) do\n%s  %s\n%send\n\n"
+              indent param_text indent expr_text indent in
+          let insert_pos = Position.create ~line:(fn_line - 1) ~character:0 in
+          let insert_edit =
+            TextEdit.create ~range:(Range.create ~start:insert_pos ~end_:insert_pos) ~newText:new_fn in
+          let call_text = Printf.sprintf "extracted(%s)" arg_text in
+          let replace_edit = TextEdit.create ~range:(range_of_span sp) ~newText:call_text in
+          [CodeAction.create ~title:"Extract function"
+             ~kind:CodeActionKind.RefactorExtract
+             ~edit:(mk_we [insert_edit; replace_edit]) ()]
+      end
+  in
+
+  (* ---- Organize imports: sort + de-duplicate `use` declarations ---- *)
+  let organize_imports_actions =
+    (* Collect every `use` declaration (including inside nested modules). *)
+    let uses = ref [] in
+    let rec scan (d : Ast.decl) =
+      match d with
+      | Ast.DUse (_, sp) -> uses := sp :: !uses
+      | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+      | _ -> () in
+    List.iter scan a.decls;
+    let use_spans =
+      List.rev !uses
+      |> List.filter (fun (sp : Ast.span) ->
+          sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>")
+      |> List.sort (fun (a : Ast.span) b ->
+          compare (a.Ast.start_line, a.Ast.start_col) (b.Ast.start_line, b.Ast.start_col))
+    in
+    if List.length use_spans < 2 then []
+    else begin
+      let texts = List.map (fun sp -> String.trim (slice_span src sp)) use_spans in
+      (* Sorted + de-duplicated, first-occurrence wins. *)
+      let seen = Hashtbl.create 16 in
+      let organized =
+        List.sort_uniq String.compare
+          (List.filter (fun t ->
+               if t = "" || Hashtbl.mem seen t then false
+               else (Hashtbl.add seen t (); true)) texts)
+      in
+      (* Only offer if it actually changes the order or removes duplicates. *)
+      if organized = texts then []
+      else begin
+        let first = List.hd use_spans in
+        let indent = indent_of_line src (first.Ast.start_line - 1) in
+        let block = String.concat ("\n" ^ indent) organized in
+        (* Replace the first use with the organized block; delete the rest's lines. *)
+        let first_edit =
+          TextEdit.create ~range:(range_of_span first) ~newText:block in
+        let delete_edits =
+          List.filter_map (fun (sp : Ast.span) ->
+              if sp == first then None
+              else
+                let r = Range.create
+                    ~start:(Position.create ~line:(sp.Ast.start_line - 1) ~character:0)
+                    ~end_:(Position.create ~line:sp.Ast.end_line ~character:0) in
+                Some (TextEdit.create ~range:r ~newText:""))
+            use_spans
+        in
+        [CodeAction.create ~title:"Organize imports"
+           ~kind:CodeActionKind.SourceOrganizeImports
+           ~edit:(mk_we (first_edit :: delete_edits)) ()]
+      end
+    end
+  in
+
   introduce_pipe_actions @ remove_pipe_actions
   @ extract_var_actions @ inline_var_actions
   @ collapse_capture_actions @ expand_capture_actions
   @ hole_fill_actions @ auto_import_actions
   @ impl_scaffold_actions @ actor_boilerplate_actions
   @ session_scaffold_actions @ if_to_match_actions
-  @ linear_audit_actions
+  @ linear_audit_actions @ destruct_actions @ extract_fn_actions
+  @ organize_imports_actions
 
 (** Generate code actions relevant to the cursor position [line, character].
     Produces cursor- and diagnostic-driven quick fixes and refactorings;

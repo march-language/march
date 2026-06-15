@@ -3800,6 +3800,89 @@ let test_ast_actions_no_crash_on_error () =
   let acts = actions_at src "main" in
   Alcotest.(check bool) "no crash on malformed source" true (List.length acts >= 0)
 
+let test_destruct_offered () =
+  let src = {|mod M do
+  type Shape = Circle(Int) | Square(Int) | Point
+  fn area(s: Shape) do
+    s
+  end
+end
+|} in
+  let acts = actions_at src "    s\n" ~off:4 in
+  Alcotest.(check bool) "destruct offered" true (has_title acts "destruct");
+  let txt = all_edit_texts acts "destruct" in
+  Alcotest.(check bool) "match over s"       true (contains_sub txt "match s do");
+  Alcotest.(check bool) "covers Circle"      true (contains_sub txt "Circle");
+  Alcotest.(check bool) "covers Square"      true (contains_sub txt "Square");
+  Alcotest.(check bool) "covers Point"       true (contains_sub txt "Point");
+  Alcotest.(check bool) "binds ctor fields"  true (contains_sub txt "Circle(x0)")
+
+let test_destruct_not_offered_when_type_unknown () =
+  (* Polymorphic param: no concrete variant type -> no destruct. *)
+  let src = {|mod M do
+  fn area(s) do
+    s
+  end
+end
+|} in
+  let acts = actions_at src "    s\n" ~off:4 in
+  Alcotest.(check bool) "no destruct without a known type" false (has_title acts "destruct")
+
+let test_extract_function_offered () =
+  let src = {|mod M do
+  fn dist(x: Int, y: Int) do
+    sqrt(x * x + y * y)
+  end
+end
+|} in
+  let acts = actions_at src "+ y" in           (* cursor on the + spans the whole sum *)
+  Alcotest.(check bool) "extract function offered" true (has_title acts "extract function");
+  let txt = all_edit_texts acts "extract function" in
+  Alcotest.(check bool) "captures free locals x and y with types" true
+    (contains_sub txt "fn extracted(x: Int, y: Int)");
+  Alcotest.(check bool) "call passes the captured args" true (contains_sub txt "extracted(x, y)");
+  Alcotest.(check bool) "global sqrt not captured as a param" false
+    (contains_sub txt "sqrt:")
+
+let test_organize_imports_offered () =
+  let src = {|mod M do
+  use Zebra.{a}
+  use Apple.{b}
+  use Apple.{b}
+  use Mango
+  fn main() do 0 end
+end
+|} in
+  let acts = actions_at src "use Zebra" in
+  Alcotest.(check bool) "organize imports offered" true (has_title acts "organize imports");
+  let txt = all_edit_texts acts "organize imports" in
+  Alcotest.(check bool) "keeps Apple" true (contains_sub txt "use Apple.{b}");
+  Alcotest.(check bool) "keeps Mango" true (contains_sub txt "use Mango");
+  (* Sorted: Apple appears before Zebra in the organized block. *)
+  let block = (match List.find_opt (fun (c : Lsp.Types.CodeAction.t) ->
+      contains_sub c.title "organize imports") acts with
+      | Some c -> (match c.edit with
+          | Some e -> (match e.changes with
+              | Some ((_, (te :: _)) :: _) -> te.Lsp.Types.TextEdit.newText | _ -> "")
+          | None -> "")
+      | None -> "") in
+  let idx s sub = (* first index of sub in s, or -1 *)
+    let sl = String.length s and nl = String.length sub in
+    let rec f i = if i + nl > sl then -1
+                  else if String.sub s i nl = sub then i else f (i + 1) in f 0 in
+  Alcotest.(check bool) "Apple sorted before Zebra" true (idx block "Apple" < idx block "Zebra" && idx block "Apple" >= 0)
+
+let test_organize_imports_not_offered_when_sorted () =
+  let src = {|mod M do
+  use Apple.{b}
+  use Zebra.{a}
+  fn main() do 0 end
+end
+|} in
+  let acts = actions_at src "use Apple" in
+  Alcotest.(check bool) "no action when already sorted+unique" false
+    (has_title acts "organize imports")
+
 (* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
@@ -4111,6 +4194,11 @@ let () =
       "linear consumption audit",  `Quick, test_linear_audit_offered;
       "batch fix-all",             `Quick, test_batch_fix_all_offered;
       "no crash on malformed src", `Quick, test_ast_actions_no_crash_on_error;
+      "destruct / case-split",     `Quick, test_destruct_offered;
+      "destruct needs known type", `Quick, test_destruct_not_offered_when_type_unknown;
+      "extract function",          `Quick, test_extract_function_offered;
+      "organize imports",          `Quick, test_organize_imports_offered;
+      "organize imports: no-op when sorted", `Quick, test_organize_imports_not_offered_when_sorted;
     ];
     "perf insights phase 3: TIR pipeline", [
       "run_tir_pass does not crash",            `Quick, test_tir_pass_does_not_crash;
