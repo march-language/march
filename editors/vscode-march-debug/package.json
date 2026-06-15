@@ -1,0 +1,68 @@
+{
+  "name": "march-debug",
+  "displayName": "March Debugger",
+  "description": "Debug March programs from VS Code via the Debug Adapter Protocol.",
+  "version": "0.1.0",
+  "publisher": "march-language",
+  "engines": { "vscode": "^1.66.0" },
+  "categories": ["Debuggers"],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:march",
+    "onDebugDynamicConfigurations:march"
+  ],
+  "contributes": {
+    "breakpoints": [{ "language": "march" }],
+    "debuggers": [
+      {
+        "type": "march",
+        "label": "March",
+        "languages": ["march"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the .march file to debug.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at the first evaluated expression.",
+                "default": false
+              },
+              "marchPath": {
+                "type": "string",
+                "description": "Path to the `march` binary (the adapter runs `march dap`).",
+                "default": "march"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "march",
+            "request": "launch",
+            "name": "Debug March file",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "March: Launch current file",
+            "description": "Debug the active .march file.",
+            "body": {
+              "type": "march",
+              "request": "launch",
+              "name": "Debug ${1:current file}",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

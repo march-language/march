@@ -13,3 +13,10 @@ path = "tree-sitter-march"
 [language_servers.march-lsp]
 name = "March LSP"
 languages = ["March"]
+
+# Debug Adapter Protocol server (`march dap`, stdio transport). The Rust
+# `get_dap_binary` / `dap_request_kind` / `dap_config_to_scenario` hooks in
+# `src/lib.rs` launch the `march` binary with the `dap` argument. A matching
+# VS Code client lives in editors/vscode-march-debug/.
+[debug_adapters.march]
+# schema_path = "debug_adapter_schema.json"  # optional
