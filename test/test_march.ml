@@ -21440,6 +21440,152 @@ let test_compiled_check_property_passes () =
     end
   end
 
+(* Regression: a recursive nested closure that captures a variable used in its
+   loop condition produced WRONG results when compiled (interpreter was correct).
+   Root cause: lowering left the self-reference's return type as an unresolved
+   tyvar (recursive inference), so ECallPtr emitted `call ptr` and read the
+   apply fn's raw scalar i64 return as a tagged pointer; the case-merge / return
+   coercion then conditional-untagged it (ashr on odd values), so e.g. a
+   captured loop bound of 11 was read back as 5 and the loop terminated early.
+   This broke DateTime.to_timestamp (month_sum) and any code summing/looping in
+   a captured-bound nested closure.  Fix: ECallPtr falls back to the enclosing
+   function's return type for the self-recursive TFn(known_params)->'_ shape.
+   End-to-end guard: compile a program whose nested closure loops to a captured
+   bound and assert the (odd) result is correct (exit 0). *)
+let test_compiled_recursive_closure_capture () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_rcclosure" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "rc.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod RcClosure do\n\
+      \  fn f(m) do\n\
+      \    fn go(mi, acc) do\n\
+      \      if mi >= m do mi else go(mi + 1, acc + 1) end\n\
+      \    end\n\
+      \    go(1, 0)\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    if f(11) == 11 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "rcbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled recursive closure with captured bound returns correct value"
+        0 run_rc
+    end
+  end
+
+(* Regression: a user top-level function whose name collides with a stdlib
+   internal helper (the canonical accumulator name `go`) silently broke the
+   stdlib function.  Root cause: a local recursive fn's name was excluded from
+   its own free-variable set as a "top-level global" when a same-named top-level
+   fn existed, so defun didn't detect it as recursive — its self-call then linked
+   to the USER's top-level `go` instead of dispatching through its closure
+   (e.g. List.length returning 0/1 instead of the real length).  Three-part fix:
+   defun recursion-detection ignores the colliding top-level name; defun's
+   EApp→ECallPtr prefers locally-bound names; and emit_atom's top-level-fn
+   trampoline yields to a var_slot (local) binding of the same name.  End-to-end
+   guard: define a top-level `go`, build a list inside it, and assert
+   List.length is correct (exit 0). *)
+let test_compiled_helper_name_collision () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_namecollide" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "nc.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod NameCollide do\n\
+      \  fn go(i : Int, n : Int) : Int do\n\
+      \    if i >= n do 0\n\
+      \    else do\n\
+      \      let lst = Cons(\"a\", Cons(\"b\", Cons(\"c\", Nil)))\n\
+      \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
+      \    end end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    if go(0, 5) == 0 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "ncbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "stdlib List.length works despite a user top-level `go`" 0 run_rc
+    end
+  end
+
+(* Regression: a scalar (Bool/Int) stored in a Vault read back WRONG when
+   compiled.  Root cause: the value arg to march_vault_set (declared ptr value,
+   a heterogeneous slot) was passed with its natural llvm type — a Bool as raw
+   i64 1, stored untagged (0x1).  Vault.get -> Some(v) -> unwrap_or then
+   conditional-untags it (0x1 ashr -> 0 = false), so every Bool stored in a
+   Vault read back false (and Ints were halved).  This broke any code using
+   Vault for scalar state (e.g. conduit's dead-letter callback flag).  Fix: the
+   vault store builtins coerce their value arg to ptr (tagging scalars into the
+   uniform representation).  End-to-end guard: store true/Int, read back, exit
+   0 only if both round-trip. *)
+let test_compiled_vault_scalar_roundtrip () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_vaultscalar" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "v.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod VaultScalar do\n\
+      \  fn main() : Unit do\n\
+      \    let t = Vault.new(\"vs_test\")\n\
+      \    Vault.set(t, \"b\", true)\n\
+      \    Vault.set(t, \"n\", 4242)\n\
+      \    let b = Vault.get(t, \"b\") |> unwrap_or(false)\n\
+      \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+      \    if b && n == 4242 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "vbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
+    end
+  end
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -23302,5 +23448,11 @@ let () =
           test_dmod_test_body_qualifies_helper_refs;
         Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
           test_compiled_check_property_passes;
+        Alcotest.test_case "recursive nested closure with captured loop bound returns correct value" `Quick
+          test_compiled_recursive_closure_capture;
+        Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Quick
+          test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Quick
+          test_compiled_helper_name_collision;
       ]);
     ]
