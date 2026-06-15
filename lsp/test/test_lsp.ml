@@ -4914,6 +4914,37 @@ end|} in
   Alcotest.(check bool) "custom element not flagged" false flagged
 
 (* ------------------------------------------------------------------ *)
+(* ~H duplicate attribute lint                                         *)
+(* ------------------------------------------------------------------ *)
+
+let test_html_duplicate_attr () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<input type='a' type='b'>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/duplicate-attr") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "duplicate attr flagged" true has
+
+let test_html_no_duplicate_attr_for_distinct () =
+  (* <input type='a' name='b'> — two DIFFERENT attr names, must NOT be flagged. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<input type='a' name='b'>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/duplicate-attr") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "distinct attrs not flagged" false flagged
+
+(* ------------------------------------------------------------------ *)
 (* Island component name completion                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -5147,6 +5178,10 @@ let () =
     "~H unknown HTML tag lint", [
       "misspelled tag <dvi> flagged with did-you-mean div", `Quick, test_html_unknown_tag;
       "custom element my-widget not flagged",                `Quick, test_html_custom_element_not_flagged;
+    ];
+    "~H duplicate attribute lint", [
+      "duplicate type attr flagged",              `Quick, test_html_duplicate_attr;
+      "distinct attrs not flagged",               `Quick, test_html_no_duplicate_attr_for_distinct;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;

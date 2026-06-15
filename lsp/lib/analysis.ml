@@ -1976,6 +1976,123 @@ let open_tags_in_sigil ~(src : string) (s : h_sigil) : (string * Ast.span) list 
   done;
   List.rev !acc
 
+(** Pass 3.2 — duplicate attributes within a single HTML open tag.
+    Walks each sigil looking for open tags (same skipping rules as
+    [open_tags_in_sigil]: ${…} interpolations, comments, declarations,
+    and close tags are all skipped).  Inside each open tag's attribute
+    region (from just after the tag name to the closing '>'), attribute
+    names are tokenized as [A-Za-z_:][-A-Za-z0-9_:]* followed by an
+    optional [=value] where value may be bare, single-quoted, or
+    double-quoted.  A '${…}' interpolation inside the attribute region
+    is treated as a complete token and skipped so that its content
+    (which might contain '>') does not confuse the parser.
+    For every attribute name that appears a second or subsequent time in
+    the SAME tag, a [(name_span, message, "html/duplicate-attr")] entry
+    is emitted.  Offsets are mapped to source positions via
+    [ofs_to_pos src (hs_base_ofs + ofs)], exactly as the other passes
+    do. *)
+let dup_attrs_in_sigil ~(src : string) (s : h_sigil)
+    : (Ast.span * string * string) list =
+  let c = s.hs_content in
+  let n = String.length c in
+  (* A name char for tag names (tag_nc) or attribute names (attr_nc). *)
+  let tag_nc ch =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
+  (* Attribute name chars: additionally allow ':' (XML namespaces). *)
+  let attr_nc ch = tag_nc ch || ch = ':' in
+  (* Build a single-line Ast.span for an attribute name token at content-
+     relative byte offset [ofs] with length [len]. *)
+  let attr_name_span ofs len =
+    let (l, col) = ofs_to_pos src (s.hs_base_ofs + ofs) in
+    { Ast.file = ""; start_line = l; start_col = col;
+      end_line = l; end_col = col + len } in
+  let acc = ref [] in
+  let i = ref 0 in
+  while !i < n do
+    let ch = c.[!i] in
+    (* ${…} interpolation at top level: skip balanced braces. *)
+    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    (* <!-- … --> comment *)
+    else if ch = '<' && !i + 3 < n
+            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
+      i := !i + 4;
+      while !i + 2 < n
+            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
+    end
+    (* <!…> declaration/doctype *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
+      while !i < n && c.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    (* </tag> close tag — skip *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
+      let j = ref (!i + 2) in
+      while !j < n && tag_nc c.[!j] do incr j done;
+      while !j < n && c.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n)
+    end
+    (* <tag …> open tag — scan attribute region for duplicates. *)
+    else if ch = '<' && !i + 1 < n
+            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      (* Skip past the tag name. *)
+      let j = ref (!i + 1) in
+      while !j < n && tag_nc c.[!j] do incr j done;
+      (* Now scan the attribute region until we hit the closing '>'. *)
+      (* seen: association list of lowercase attr-name -> unit to detect dupes. *)
+      let seen = Hashtbl.create 4 in
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || c.[!j] <> '>') do
+        let d = c.[!j] in
+        if !inq then begin
+          if d = !q then inq := false;
+          incr j
+        end
+        (* ${…} interpolation inside attribute region — skip. *)
+        else if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
+          j := !j + 2; let depth = ref 1 in
+          while !depth > 0 && !j < n do
+            (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+            incr j
+          done
+        end
+        (* Start of a quoted value (following '='). *)
+        else if d = '"' || d = '\'' then begin
+          inq := true; q := d; incr j
+        end
+        (* Attribute name: starts with a letter, '_', or ':'. *)
+        else if (d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')
+                || d = '_' || d = ':' then begin
+          let name_ofs = !j in
+          while !j < n && attr_nc c.[!j] do incr j done;
+          let name_len = !j - name_ofs in
+          let name = String.lowercase_ascii (String.sub c name_ofs name_len) in
+          if Hashtbl.mem seen name then begin
+            (* Second (or later) occurrence — emit a duplicate-attr entry. *)
+            let span = attr_name_span name_ofs name_len in
+            acc := (span,
+                    Printf.sprintf "Duplicate attribute `%s`" name,
+                    "html/duplicate-attr") :: !acc
+          end else
+            Hashtbl.add seen name ()
+          (* Note: j already advanced past the name; loop continues with
+             whatever comes next (whitespace, '=', '>', etc.). *)
+        end
+        else incr j
+      done;
+      (* Advance past the '>'. *)
+      i := (if !j < n then !j + 1 else n)
+    end
+    else incr i
+  done;
+  List.rev !acc
+
 (** Collect HTML lint warnings for all ~H sigils.  Returns a list of
     [(span, message, diagnostic-code)] triples.  This is the shared
     accumulator — later lint passes (3.2 dup attrs, 3.3 void misuse,
@@ -1984,25 +2101,32 @@ let open_tags_in_sigil ~(src : string) (s : h_sigil) : (string * Ast.span) list 
 let collect_html_lint ~(src : string) (sigils : h_sigil list)
     : (Ast.span * string * string) list =
   (* Pass 3.1 — unknown / misspelled tag names. *)
-  List.concat_map (fun (s : h_sigil) ->
-    List.filter_map (fun (tag, span) ->
-      if List.mem tag html_known_elements then None
-      else if String.contains tag '-' then None   (* custom element / web component *)
-      else begin
-        let suggestion =
-          (* Nearest known tag by edit distance ≤ 2, else empty string. *)
-          let best = List.fold_left (fun (bd, bt) k ->
-              let d = levenshtein tag k in if d < bd then (d, k) else (bd, bt))
-            (max_int, "") html_known_elements in
-          match best with
-          | (d, k) when d <= 2 -> Printf.sprintf " (did you mean `<%s>`?)" k
-          | _ -> "" in
-        Some (span,
-              Printf.sprintf "Unknown HTML tag `<%s>`%s" tag suggestion,
-              "html/unknown-tag")
-      end)
-      (open_tags_in_sigil ~src s))
-  sigils
+  let unknown_tag_results =
+    List.concat_map (fun (s : h_sigil) ->
+      List.filter_map (fun (tag, span) ->
+        if List.mem tag html_known_elements then None
+        else if String.contains tag '-' then None   (* custom element / web component *)
+        else begin
+          let suggestion =
+            (* Nearest known tag by edit distance ≤ 2, else empty string. *)
+            let best = List.fold_left (fun (bd, bt) k ->
+                let d = levenshtein tag k in if d < bd then (d, k) else (bd, bt))
+              (max_int, "") html_known_elements in
+            match best with
+            | (d, k) when d <= 2 -> Printf.sprintf " (did you mean `<%s>`?)" k
+            | _ -> "" in
+          Some (span,
+                Printf.sprintf "Unknown HTML tag `<%s>`%s" tag suggestion,
+                "html/unknown-tag")
+        end)
+        (open_tags_in_sigil ~src s))
+    sigils
+  in
+  (* Pass 3.2 — duplicate attributes in a single open tag. *)
+  let dup_attr_results =
+    List.concat_map (dup_attrs_in_sigil ~src) sigils
+  in
+  unknown_tag_results @ dup_attr_results
 
 (** Return matched (open-name-span, close-name-span) pairs in one ~H sigil.
     Adapts the [scan_html_unclosed] walk: on a successful close-tag match, pop
