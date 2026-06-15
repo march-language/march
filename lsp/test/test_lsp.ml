@@ -4967,6 +4967,57 @@ let test_unknown_interface_still_errors () =
     (List.exists (fun m -> contains_sub m "Unknown interface") msgs)
 
 (* ------------------------------------------------------------------ *)
+(* ~H element folding ranges                                           *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_element_folding () =
+  (* Source has:
+     line 1: mod M do
+     line 2:   fn page() : IOList do
+     line 3:     ~H"""
+     line 4:     <ul>
+     line 5:       <li>a</li>
+     line 6:     </ul>
+     line 7:     """
+     line 8:   end
+     line 9: end
+     The <ul> open-tag name is on line 4; </ul> close-tag name is on line 6.
+     After conversion to 0-indexed: expected H-element fold startLine=3, endLine=5.
+     collect_fold_ranges (AST-based) produces fn/mod ranges but NOT H-element
+     ranges — those come from tag_pairs_in_sigil, which we wire in separately.
+     So before the fix, fold_ranges contains no range with startLine=3, endLine=5. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"""
+    <ul>
+      <li>a</li>
+    </ul>
+    """
+  end
+end|} in
+  let a = analyse src in
+  (* Verify the specific <ul> fold is present: startLine=3 (0-indexed line 4),
+     endLine=5 (0-indexed line 6). *)
+  let has_ul_fold = List.exists (fun (sl, el, _kind) ->
+      sl = 3 && el = 5) a.An.fold_ranges in
+  Alcotest.(check bool) "a multi-line ~H <ul> element fold (startLine=3 endLine=5)" true has_ul_fold
+
+let test_h_element_no_fold_for_single_line () =
+  (* A ~H sigil where all tags are on one line should produce no H-element fold
+     (the only fold ranges are function/mod regions from the AST). *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"""<li>a</li>"""
+  end
+end|} in
+  let a = analyse src in
+  (* No range should have startLine >= 2 AND endLine = startLine from H tags
+     because single-line tags span 0 lines delta. We just verify no crash and
+     that the function-level fold is still there. *)
+  let has_fn_fold = List.exists (fun (sl, el, _kind) -> el > sl) a.An.fold_ranges in
+  Alcotest.(check bool) "single-line ~H still has fn fold range" true has_fn_fold
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -5378,5 +5429,9 @@ let () =
       "debug command echoes (non-blocking)",   `Quick, test_resolve_debug_command_echoes;
       "run command builds forge shell",        `Quick, test_resolve_run_command_builds_forge_shell;
       "unknown command resolves gracefully",   `Quick, test_resolve_unknown_command;
+    ];
+    "~H element folding ranges", [
+      "multi-line ~H element produces fold range", `Quick, test_h_element_folding;
+      "single-line ~H does not crash",             `Quick, test_h_element_no_fold_for_single_line;
     ];
   ]

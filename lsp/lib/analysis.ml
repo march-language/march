@@ -1940,6 +1940,22 @@ let tag_pairs_in_sigil ~(src : string) (s : h_sigil) : (Ast.span * Ast.span) lis
   done;
   !pairs
 
+(** Collect folding ranges for matched HTML element pairs inside ~H sigils.
+    For each (open_name_span, close_name_span) pair where the close tag's
+    end_line > open tag's start_line, emit a (start_line_0idx, end_line_0idx, "region")
+    triple.  Spans from [tag_pairs_in_sigil] are 1-indexed; we convert to 0-indexed
+    here to match the convention used by [collect_fold_ranges]. *)
+let collect_h_fold_ranges ~(src : string) (sigils : h_sigil list)
+    : (int * int * string) list =
+  List.concat_map (fun (s : h_sigil) ->
+      List.filter_map (fun ((op, cl) : Ast.span * Ast.span) ->
+          if cl.Ast.end_line > op.Ast.start_line then
+            Some (op.Ast.start_line - 1, cl.Ast.end_line - 1, "region")
+          else
+            None
+        ) (tag_pairs_in_sigil ~src s)
+    ) sigils
+
 (* Every ~H sigil in [decls], with content recovered textually from [src]. *)
 let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
   let acc = ref [] in
@@ -2938,7 +2954,8 @@ let analyse ~filename ~src : t =
                            | ci :: _ -> (name, List.length ci.Tc.ci_arg_tys) :: acc
                            | [] -> acc)
                            final_env.Tc.ctors [];
-      fold_ranges      = collect_fold_ranges raw_ast;
+      fold_ranges      = collect_fold_ranges raw_ast
+                         @ collect_h_fold_ranges ~src h_sigils;
       annotation_sites = collect_annotation_sites raw_ast;
       unused_fns;
       html_issues;
