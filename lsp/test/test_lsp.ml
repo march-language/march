@@ -3377,6 +3377,130 @@ end|} in
     (kind_count Lsp.Types.DocumentHighlightKind.Read)
 
 (* ------------------------------------------------------------------ *)
+(* Semantic tokens delta                                               *)
+(* ------------------------------------------------------------------ *)
+
+let test_semantic_tokens_delta_middle () =
+  let (start, del, data) =
+    March_lsp_lib.Server.token_delta [|1;2;3;4|] [|1;9;3;4|] in
+  Alcotest.(check int) "start after common prefix" 1 start;
+  Alcotest.(check int) "deleteCount of changed span" 1 del;
+  Alcotest.(check (list int)) "replacement data" [9] (Array.to_list data)
+
+let test_semantic_tokens_delta_append () =
+  let (start, del, data) =
+    March_lsp_lib.Server.token_delta [|1;2|] [|1;2;5;6|] in
+  Alcotest.(check int) "start at end of old" 2 start;
+  Alcotest.(check int) "nothing deleted" 0 del;
+  Alcotest.(check (list int)) "appended data" [5;6] (Array.to_list data)
+
+let test_semantic_tokens_delta_identical () =
+  let (_, del, data) =
+    March_lsp_lib.Server.token_delta [|1;2;3|] [|1;2;3|] in
+  Alcotest.(check int) "no deletion for identical" 0 del;
+  Alcotest.(check int) "no replacement for identical" 0 (Array.length data)
+
+(* ------------------------------------------------------------------ *)
+(* Call hierarchy                                                      *)
+(* ------------------------------------------------------------------ *)
+
+let ch_src = {|mod M do
+  fn leaf(x) do x end
+  fn middle(x) do leaf(x) end
+  fn top(x) do middle(middle(x)) end
+end|}
+
+let test_call_hierarchy_prepare () =
+  let a = analyse ch_src in
+  let (l, c) = pos_of ch_src "middle(x) do" in
+  match An.query_prepare_call_hierarchy_at a ~line:l ~utf16_char:c with
+  | Some (name, _, _) -> Alcotest.(check string) "prepares the fn under cursor" "middle" name
+  | None -> Alcotest.fail "expected a call-hierarchy item for middle"
+
+let test_call_hierarchy_incoming () =
+  let a = analyse ch_src in
+  (* who calls `middle`? top, twice. *)
+  let calls = An.query_incoming_calls a "middle" in
+  let callers = List.map (fun ((n, _, _), _) -> n) calls in
+  Alcotest.(check bool) "top is an incoming caller of middle" true (List.mem "top" callers);
+  let top_ranges =
+    List.concat_map (fun ((n, _, _), rs) -> if n = "top" then rs else []) calls in
+  Alcotest.(check int) "top calls middle twice" 2 (List.length top_ranges)
+
+let test_call_hierarchy_outgoing () =
+  let a = analyse ch_src in
+  (* what does `middle` call? leaf. *)
+  let calls = An.query_outgoing_calls a "middle" in
+  let callees = List.map (fun ((n, _, _), _) -> n) calls in
+  Alcotest.(check bool) "middle calls leaf" true (List.mem "leaf" callees)
+
+(* ------------------------------------------------------------------ *)
+(* Inlay perf-annotations config toggle                                *)
+(* ------------------------------------------------------------------ *)
+
+let test_config_perf_toggle_parse () =
+  let parse = March_lsp_lib.Server.perf_annotations_from_settings in
+  let nested =
+    `Assoc [("march", `Assoc [("inlayHints",
+      `Assoc [("performanceAnnotations", `Bool false)])])] in
+  Alcotest.(check (option bool)) "reads fully-qualified setting" (Some false)
+    (parse nested);
+  let stripped =
+    `Assoc [("inlayHints", `Assoc [("performanceAnnotations", `Bool true)])] in
+  Alcotest.(check (option bool)) "reads prefix-stripped setting" (Some true)
+    (parse stripped);
+  Alcotest.(check (option bool)) "absent setting is None" None
+    (parse (`Assoc [("other", `Int 1)]))
+
+(* ------------------------------------------------------------------ *)
+(* selectionRange + linkedEditingRange                                 *)
+(* ------------------------------------------------------------------ *)
+
+let range_contains (o : Lsp.Types.Range.t) (i : Lsp.Types.Range.t) =
+  (o.start.line < i.start.line ||
+     (o.start.line = i.start.line && o.start.character <= i.start.character))
+  && (o.end_.line > i.end_.line ||
+     (o.end_.line = i.end_.line && o.end_.character >= i.end_.character))
+
+let test_selection_range_widens_outward () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1 + 2
+    x
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "1 + 2" in
+  let ranges = An.query_selection_range_at a ~line:l ~utf16_char:c in
+  Alcotest.(check bool) "selection chain has at least two levels" true
+    (List.length ranges >= 2);
+  (* each successive range must strictly contain the previous one *)
+  let rec widening = function
+    | r1 :: (r2 :: _ as rest) -> range_contains r2 r1 && widening rest
+    | _ -> true
+  in
+  Alcotest.(check bool) "ranges widen outward" true (widening ranges)
+
+let test_selection_range_empty_off_token () =
+  let src = "mod M do\n  fn f() : Int do 1 end\nend" in
+  let a = analyse src in
+  (* line 99 is past the file → no containing spans *)
+  let ranges = An.query_selection_range_at a ~line:99 ~utf16_char:0 in
+  Alcotest.(check int) "no ranges off the document" 0 (List.length ranges)
+
+let test_linked_editing_ranges () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1
+    x + x
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "x + x" in
+  let ranges = An.query_linked_editing_ranges_at a ~line:l ~utf16_char:c in
+  Alcotest.(check int) "links the binding and both uses of x" 3 (List.length ranges)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3387,6 +3511,24 @@ let () =
       "go to type definition", `Quick, test_type_definition;
       "document highlight", `Quick, test_document_highlight;
       "document highlight read/write kinds", `Quick, test_document_highlight_read_write_kinds;
+    ];
+    "semantic tokens delta", [
+      "delta diffs the changed middle", `Quick, test_semantic_tokens_delta_middle;
+      "delta handles pure append", `Quick, test_semantic_tokens_delta_append;
+      "delta is empty for identical", `Quick, test_semantic_tokens_delta_identical;
+    ];
+    "call hierarchy", [
+      "prepare returns fn under cursor", `Quick, test_call_hierarchy_prepare;
+      "incoming calls found", `Quick, test_call_hierarchy_incoming;
+      "outgoing calls found", `Quick, test_call_hierarchy_outgoing;
+    ];
+    "inlay config toggle", [
+      "perf-annotations setting parses", `Quick, test_config_perf_toggle_parse;
+    ];
+    "selection + linked editing", [
+      "selection range widens outward", `Quick, test_selection_range_widens_outward;
+      "selection range empty off token", `Quick, test_selection_range_empty_off_token;
+      "linked editing links all occurrences", `Quick, test_linked_editing_ranges;
     ];
     "semantic tokens", [
       "linear modifier on consumed-once binding", `Quick, test_semantic_tokens_linear_modifier;

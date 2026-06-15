@@ -21,6 +21,15 @@ type call_site = {
   cs_args     : Ast.expr list;  (** Argument expressions *)
 }
 
+(** A node in the per-file call graph (one per top-level function), for
+    textDocument/callHierarchy. *)
+type cg_node = {
+  cg_name      : string;
+  cg_name_span : Ast.span;            (** the function-name token (selectionRange) *)
+  cg_full_span : Ast.span;            (** the whole function declaration (range) *)
+  cg_calls     : (string * Ast.span) list;  (** (callee name, call-site span) within the body *)
+}
+
 (** A non-exhaustive match site extracted from diagnostics. *)
 type match_site = {
   ms_span          : Ast.span;         (** Span of the whole match expression *)
@@ -156,6 +165,8 @@ type t = {
   (** Local binder id → span it is visible within (for scope-precise completion). *)
   call_sites  : call_site list;
   (** All call sites collected for signature-help queries. *)
+  call_graph  : cg_node list;
+  (** Per-function call-graph nodes for textDocument/callHierarchy. *)
   consumption : consumption list;
   (** Linear/affine binding consumption records — used for make-linear actions. *)
   reuse_hints : Ast.span list;
@@ -829,6 +840,52 @@ let build_reuse_hints (decls : Ast.decl list) : Ast.span list =
     | _ -> ()
   ) decls;
   !result
+
+(** Build the per-file call graph: one node per top-level function, recording
+    its name/full spans and every (callee, call-site) within its body. *)
+let build_call_graph (decls : Ast.decl list) : cg_node list =
+  let collect_calls (body : Ast.expr) : (string * Ast.span) list =
+    let acc = ref [] in
+    let rec go (e : Ast.expr) =
+      (match e with
+       | Ast.EApp (Ast.EVar n, _, sp) -> acc := (n.Ast.txt, sp) :: !acc
+       | _ -> ());
+      match e with
+      | Ast.EApp (f, args, _) -> go f; List.iter go args
+      | Ast.ELet (b, _) -> go b.Ast.bind_expr
+      | Ast.EBlock (es, _) -> List.iter go es
+      | Ast.EMatch (subj, brs, _) ->
+        go subj; List.iter (fun (br : Ast.branch) -> go br.Ast.branch_body) brs
+      | Ast.EIf (c, t, f, _) -> go c; go t; go f
+      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go x; go y
+      | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+        List.iter go es
+      | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> go e) fs
+      | Ast.ERecordUpdate (e, fs, _) -> go e; List.iter (fun (_, e) -> go e) fs
+      | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+      | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) -> go e
+      | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> go b
+      | _ -> ()
+    in
+    go body; List.rev !acc
+  in
+  let nodes = ref [] in
+  let rec scan (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, dspan) ->
+      let calls =
+        List.concat_map (fun (cl : Ast.fn_clause) -> collect_calls cl.Ast.fc_body)
+          fn.Ast.fn_clauses
+      in
+      nodes := { cg_name = fn.Ast.fn_name.Ast.txt;
+                 cg_name_span = fn.Ast.fn_name.Ast.span;
+                 cg_full_span = dspan;
+                 cg_calls = calls } :: !nodes
+    | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+    | _ -> ()
+  in
+  List.iter scan decls;
+  !nodes
 
 (* ------------------------------------------------------------------ *)
 (* Fold-range and annotation-site collection                          *)
@@ -1555,6 +1612,7 @@ let analyse ~filename ~src : t =
       sym_name         = Hashtbl.create 0;
       sym_scope        = Hashtbl.create 0;
       call_sites       = [];
+      call_graph       = [];
       consumption      = [];
       reuse_hints      = [];
       match_sites      = [];
@@ -2192,6 +2250,7 @@ let analyse ~filename ~src : t =
       sym_name;
       sym_scope;
       call_sites;
+      call_graph       = build_call_graph user_decls;
       consumption;
       reuse_hints      = build_reuse_hints user_decls;
       match_sites;
@@ -2906,6 +2965,89 @@ let document_highlights_at (a : t) ~line ~character : Lsp.Types.DocumentHighligh
     in
     let reads = List.filter_map (mk Lsp.Types.DocumentHighlightKind.Read) use_spans in
     writes @ reads
+
+(* textDocument/linkedEditingRange: all occurrences (definition + uses) of the
+   symbol under the cursor, so the editor can edit them simultaneously. *)
+let linked_editing_ranges_at (a : t) ~line ~character : Ast.span list =
+  match symbol_spans_at a ~line ~character with
+  | None -> []
+  | Some (def_opt, use_spans) ->
+    (match def_opt with Some d -> d :: use_spans | None -> use_spans)
+    |> List.filter (fun sp -> sp <> Ast.dummy_span && span_in_user_file a sp)
+
+(* textDocument/selectionRange: the chain of nested AST spans containing the
+   position, innermost first. Built from the spans the analysis already records
+   (typed expressions, uses, definitions) — no raw AST needed. *)
+let selection_range_at (a : t) ~line ~character : Ast.span list =
+  let contains outer inner =
+    (outer.Ast.start_line < inner.Ast.start_line ||
+       (outer.Ast.start_line = inner.Ast.start_line &&
+        outer.Ast.start_col <= inner.Ast.start_col))
+    && (outer.Ast.end_line > inner.Ast.end_line ||
+       (outer.Ast.end_line = inner.Ast.end_line &&
+        outer.Ast.end_col >= inner.Ast.end_col))
+  in
+  let acc = Hashtbl.create 64 in
+  let consider sp =
+    if sp <> Ast.dummy_span && span_in_user_file a sp
+       && Pos.span_contains sp ~line ~character
+    then Hashtbl.replace acc sp ()
+  in
+  Hashtbl.iter (fun sp _ -> consider sp) a.type_map;
+  Hashtbl.iter (fun sp _ -> consider sp) a.use_map;
+  Hashtbl.iter (fun _ sp -> consider sp) a.def_map;
+  let area sp =
+    (sp.Ast.end_line - sp.Ast.start_line, sp.Ast.end_col - sp.Ast.start_col)
+  in
+  let sorted =
+    Hashtbl.fold (fun sp () l -> sp :: l) acc []
+    |> List.sort (fun a b -> compare (area a) (area b))
+  in
+  (* Walk from the smallest span outward, each step jumping to the smallest
+     strictly-larger span that contains the current one. *)
+  let rec build cur rest chain =
+    match List.find_opt (fun sp -> contains sp cur && not (contains cur sp)) rest with
+    | None -> List.rev (cur :: chain)
+    | Some parent ->
+      let rest' = List.filter (fun s -> s <> parent) rest in
+      build parent rest' (cur :: chain)
+  in
+  match sorted with
+  | [] -> []
+  | smallest :: rest -> build smallest rest []
+
+(* ---- Call hierarchy (per-file) ---- *)
+
+(* prepareCallHierarchy: the call-graph node for the function under the cursor. *)
+let prepare_call_hierarchy_at (a : t) ~line ~character : cg_node option =
+  match name_at a ~line ~character with
+  | None -> None
+  | Some name -> List.find_opt (fun n -> n.cg_name = name) a.call_graph
+
+(* incomingCalls: callers of [name] — each node that calls it, with the spans. *)
+let incoming_calls (a : t) (name : string) : (cg_node * Ast.span list) list =
+  List.filter_map (fun node ->
+      let spans =
+        List.filter_map (fun (callee, sp) -> if callee = name then Some sp else None)
+          node.cg_calls
+      in
+      if spans = [] then None else Some (node, spans)
+    ) a.call_graph
+
+(* outgoingCalls: functions [name] calls that resolve to a known node, grouped. *)
+let outgoing_calls (a : t) (name : string) : (cg_node * Ast.span list) list =
+  match List.find_opt (fun n -> n.cg_name = name) a.call_graph with
+  | None -> []
+  | Some node ->
+    let tbl = Hashtbl.create 8 in
+    List.iter (fun (callee, sp) ->
+        Hashtbl.replace tbl callee (sp :: (try Hashtbl.find tbl callee with Not_found -> []))
+      ) node.cg_calls;
+    Hashtbl.fold (fun callee spans acc ->
+        match List.find_opt (fun n -> n.cg_name = callee) a.call_graph with
+        | Some target -> (target, List.rev spans) :: acc
+        | None -> acc
+      ) tbl []
 
 (** Validate a rename request: return the identifier range if the symbol under
     the cursor is renameable (a function-local binding, or a top-level symbol
@@ -4053,6 +4195,37 @@ let query_document_highlights_at (a : t) ~line ~utf16_char =
   |> List.map (fun (h : Lsp.Types.DocumentHighlight.t) ->
          { h with Lsp.Types.DocumentHighlight.range =
                     Pos.remap_range a.doc h.Lsp.Types.DocumentHighlight.range })
+
+let query_linked_editing_ranges_at (a : t) ~line ~utf16_char =
+  linked_editing_ranges_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp))
+
+let query_selection_range_at (a : t) ~line ~utf16_char =
+  selection_range_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp))
+
+(* Call hierarchy query wrappers — return (name, range, selectionRange) tuples
+   already remapped to UTF-16, ready for the server to wrap as CallHierarchyItems. *)
+let cg_item (a : t) (n : cg_node) =
+  (n.cg_name,
+   Pos.remap_range a.doc (Pos.span_to_lsp_range n.cg_full_span),
+   Pos.remap_range a.doc (Pos.span_to_lsp_range n.cg_name_span))
+
+let query_prepare_call_hierarchy_at (a : t) ~line ~utf16_char =
+  prepare_call_hierarchy_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+  |> Option.map (cg_item a)
+
+let query_incoming_calls (a : t) (name : string) =
+  incoming_calls a name
+  |> List.map (fun (node, spans) ->
+         (cg_item a node,
+          List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp)) spans))
+
+let query_outgoing_calls (a : t) (name : string) =
+  outgoing_calls a name
+  |> List.map (fun (node, spans) ->
+         (cg_item a node,
+          List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp)) spans))
 
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)

@@ -10,6 +10,44 @@ module Pos = Position  (* our position utilities *)
 
 let doc_cache : (string, Analysis.t) Hashtbl.t = Hashtbl.create 16
 
+(* Whether to emit the FBIP performance inlay annotations (♻ reused / ⧉ copied).
+   Toggled by the client via `march.inlayHints.performanceAnnotations`. *)
+let perf_annotations = ref true
+
+(* Read `march.inlayHints.performanceAnnotations` (a bool) out of a
+   didChangeConfiguration `settings` payload. Accepts both the fully-qualified
+   path and the prefix-stripped form some clients send. None when absent. *)
+let perf_annotations_from_settings (settings : Yojson.Safe.t) : bool option =
+  let rec dig path j =
+    match path, j with
+    | [], `Bool b -> Some b
+    | k :: rest, `Assoc fields ->
+      (match List.assoc_opt k fields with Some j' -> dig rest j' | None -> None)
+    | _ -> None
+  in
+  match dig ["march"; "inlayHints"; "performanceAnnotations"] settings with
+  | Some _ as r -> r
+  | None -> dig ["inlayHints"; "performanceAnnotations"] settings
+
+(* Per-document cache of the last semantic-token result, for delta requests:
+   uri → (resultId, token data). *)
+let sem_tokens_cache : (string, string * int array) Hashtbl.t = Hashtbl.create 16
+let sem_tokens_counter = ref 0
+let next_result_id () =
+  incr sem_tokens_counter; string_of_int !sem_tokens_counter
+
+(* Minimal single-edit delta between two flat token arrays: trim the common
+   prefix and suffix, then describe the changed middle as one edit. *)
+let token_delta (old_data : int array) (new_data : int array)
+    : int * int * int array =
+  let ol = Array.length old_data and nl = Array.length new_data in
+  let p = ref 0 in
+  while !p < ol && !p < nl && old_data.(!p) = new_data.(!p) do incr p done;
+  let s = ref 0 in
+  while !s < (ol - !p) && !s < (nl - !p)
+        && old_data.(ol - 1 - !s) = new_data.(nl - 1 - !s) do incr s done;
+  (!p, ol - !p - !s, Array.sub new_data !p (nl - !p - !s))
+
 (* Monotonic per-document version. A background fiber (the TIR pass) only
    publishes if the document hasn't advanced since the fiber started, so a slow
    fiber for an old edit can't overwrite a newer analysis or flicker stale
@@ -272,7 +310,7 @@ class march_server =
       let sem_tokens =
         SemanticTokensOptions.create
           ~legend
-          ~full:(`Full (SemanticTokensOptions.create_full ~delta:false ()))
+          ~full:(`Full (SemanticTokensOptions.create_full ~delta:true ()))
           ()
       in
       let sig_help =
@@ -305,6 +343,12 @@ class march_server =
         ServerCapabilities.typeDefinitionProvider =
           Some (`Bool true);
         ServerCapabilities.documentHighlightProvider =
+          Some (`Bool true);
+        ServerCapabilities.selectionRangeProvider =
+          Some (`Bool true);
+        ServerCapabilities.linkedEditingRangeProvider =
+          Some (`Bool true);
+        ServerCapabilities.callHierarchyProvider =
           Some (`Bool true);
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
@@ -367,6 +411,11 @@ class march_server =
        | Lsp.Client_notification.DidChangeWatchedFiles _ ->
          invalidate_workspace_index ();
          Typecheck_cache.clear_deps ()
+       | Lsp.Client_notification.ChangeConfiguration params ->
+         (match perf_annotations_from_settings
+                  params.Lsp.Types.DidChangeConfigurationParams.settings with
+          | Some b -> perf_annotations := b
+          | None -> ())
        | _ -> ());
       Lwt.return_unit
 
@@ -477,7 +526,8 @@ class march_server =
         | Some a ->
           (* inlay_hints_for filters by line only, so the inbound range needs
              no column conversion; remap the outbound hint positions to UTF-16. *)
-          let hs = Analysis.inlay_hints_for a range in
+          let hs =
+            Analysis.inlay_hints_for ~perf_annotations:!perf_annotations a range in
           if hs = [] then None
           else Some (List.map (Pos.remap_inlay_hint a.Analysis.doc) hs)
       in
@@ -571,18 +621,49 @@ class march_server =
         ]
       in
       (* ---- dispatch ---- *)
+      let json_ints data =
+        `List (Array.to_list (Array.map (fun n -> `Int n) data))
+      in
       if meth = "textDocument/semanticTokens/full" then begin
-        let data =
-          match get_td_uri () with
-          | None -> [||]
-          | Some uri ->
-            (match get_analysis uri with
-             | None -> [||]
-             | Some a -> semantic_tokens_data a)
+        match get_td_uri () with
+        | None -> Lwt.return (`Assoc [("data", `List [])])
+        | Some uri ->
+          let data =
+            match get_analysis uri with None -> [||] | Some a -> semantic_tokens_data a in
+          let rid = next_result_id () in
+          Hashtbl.replace sem_tokens_cache
+            (Lsp.Types.DocumentUri.to_string uri) (rid, data);
+          Lwt.return (`Assoc [("resultId", `String rid); ("data", json_ints data)])
+
+      end else if meth = "textDocument/semanticTokens/full/delta" then begin
+        let prev_id =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "previousResultId" fields with
+             | Some (`String s) -> Some s | _ -> None)
+          | _ -> None
         in
-        Lwt.return
-          (`Assoc [("data",
-                    `List (Array.to_list (Array.map (fun n -> `Int n) data)))])
+        match get_td_uri () with
+        | None -> Lwt.return (`Assoc [("data", `List [])])
+        | Some uri ->
+          let key = Lsp.Types.DocumentUri.to_string uri in
+          let new_data =
+            match get_analysis uri with None -> [||] | Some a -> semantic_tokens_data a in
+          let rid = next_result_id () in
+          let cached = Hashtbl.find_opt sem_tokens_cache key in
+          Hashtbl.replace sem_tokens_cache key (rid, new_data);
+          (match cached with
+           | Some (old_id, old_data) when Some old_id = prev_id ->
+             let (start, delete_count, data) = token_delta old_data new_data in
+             Lwt.return (`Assoc [
+                 ("resultId", `String rid);
+                 ("edits", `List [ `Assoc [
+                     ("start", `Int start);
+                     ("deleteCount", `Int delete_count);
+                     ("data", json_ints data) ]]) ])
+           | _ ->
+             (* No matching baseline → fall back to a full response. *)
+             Lwt.return (`Assoc [("resultId", `String rid); ("data", json_ints new_data)]))
 
       end else if meth = "textDocument/references" then begin
         let include_declaration =
@@ -863,7 +944,125 @@ class march_server =
         in
         Lwt.return
           (`List (List.map (fun (h : Lsp.Types.DocumentHighlight.t) ->
-               `Assoc [ ("range", json_range h.range); ("kind", `Int 1) ]) hls))
+               let k = Option.value h.kind
+                         ~default:Lsp.Types.DocumentHighlightKind.Text in
+               `Assoc [ ("range", json_range h.range);
+                        ("kind", Lsp.Types.DocumentHighlightKind.yojson_of_t k) ]) hls))
+
+      end else if meth = "textDocument/selectionRange" then begin
+        (* Params carry a list of positions; return one nested SelectionRange
+           per position (innermost range first, each with its parent). *)
+        let positions =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "positions" fields with
+             | Some (`List ps) ->
+               List.map (fun p -> match p with
+                   | `Assoc pos ->
+                     let g k = match List.assoc_opt k pos with
+                       | Some (`Int n) -> n | _ -> 0 in
+                     (g "line", g "character")
+                   | _ -> (0, 0)) ps
+             | _ -> [])
+          | _ -> []
+        in
+        let nest ranges =
+          (* ranges innermost→outermost → a parent-linked SelectionRange JSON *)
+          List.fold_right (fun r child ->
+              `Assoc (("range", json_range r)
+                      :: (match child with `Null -> [] | c -> [("parent", c)])))
+            ranges `Null
+        in
+        let result =
+          match get_td_uri () with
+          | None -> List.map (fun _ -> `Null) positions
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> List.map (fun _ -> `Null) positions
+             | Some a ->
+               List.map (fun (line, utf16_char) ->
+                   nest (Analysis.query_selection_range_at a ~line ~utf16_char))
+                 positions)
+        in
+        Lwt.return (`List result)
+
+      end else if meth = "textDocument/prepareCallHierarchy" then begin
+        let (line, utf16_char) = get_position () in
+        match get_td_uri () with
+        | None -> Lwt.return `Null
+        | Some uri ->
+          (match get_analysis uri with
+           | None -> Lwt.return `Null
+           | Some a ->
+             (match Analysis.query_prepare_call_hierarchy_at a ~line ~utf16_char with
+              | None -> Lwt.return `Null
+              | Some (name, range, sel) ->
+                let item = Lsp.Types.CallHierarchyItem.create
+                    ~kind:Lsp.Types.SymbolKind.Function ~name
+                    ~range ~selectionRange:sel ~uri () in
+                Lwt.return (`List [Lsp.Types.CallHierarchyItem.yojson_of_t item])))
+
+      end else if meth = "callHierarchy/incomingCalls"
+               || meth = "callHierarchy/outgoingCalls" then begin
+        (* The client echoes back the item from prepareCallHierarchy. *)
+        let item_name, item_uri =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "item" fields with
+             | Some (`Assoc it) ->
+               let name = match List.assoc_opt "name" it with
+                 | Some (`String s) -> s | _ -> "" in
+               let uri = match List.assoc_opt "uri" it with
+                 | Some (`String u) ->
+                   let path =
+                     if String.length u >= 7 && String.sub u 0 7 = "file://"
+                     then String.sub u 7 (String.length u - 7) else u in
+                   Some (Lsp.Types.DocumentUri.of_path path)
+                 | _ -> None in
+               (name, uri)
+             | _ -> ("", None))
+          | _ -> ("", None)
+        in
+        let incoming = meth = "callHierarchy/incomingCalls" in
+        let calls =
+          match item_uri with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a ->
+               let mk_item (name, range, sel) =
+                 Lsp.Types.CallHierarchyItem.create
+                   ~kind:Lsp.Types.SymbolKind.Function ~name
+                   ~range ~selectionRange:sel ~uri ()
+               in
+               if incoming then
+                 Analysis.query_incoming_calls a item_name
+                 |> List.map (fun (it, ranges) ->
+                        Lsp.Types.CallHierarchyIncomingCall.yojson_of_t
+                          (Lsp.Types.CallHierarchyIncomingCall.create
+                             ~from:(mk_item it) ~fromRanges:ranges))
+               else
+                 Analysis.query_outgoing_calls a item_name
+                 |> List.map (fun (it, ranges) ->
+                        Lsp.Types.CallHierarchyOutgoingCall.yojson_of_t
+                          (Lsp.Types.CallHierarchyOutgoingCall.create
+                             ~to_:(mk_item it) ~fromRanges:ranges)))
+        in
+        Lwt.return (`List calls)
+
+      end else if meth = "textDocument/linkedEditingRange" then begin
+        let (line, utf16_char) = get_position () in
+        let ranges =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a -> Analysis.query_linked_editing_ranges_at a ~line ~utf16_char)
+        in
+        if ranges = [] then Lwt.return `Null
+        else Lwt.return (`Assoc [("ranges", `List (List.map json_range ranges))])
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)
