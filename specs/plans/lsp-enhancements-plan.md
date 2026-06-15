@@ -1220,7 +1220,7 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 | 7 | Dead code detection | ✅ Done | call-graph BFS, `unused_fns`, `unused_private_fn` |
 | 8 | Extract function | ✅ Done | "Extract function" action |
 | 9 | Extract variable | ✅ Done | "Extract variable" action |
-| 10 | Inline function/variable | 🟡 Partial | "Inline variable" done; inline *function* not |
+| 10 | Inline function/variable | ✅ Done | "Inline variable" + "Inline function" (single-clause, non-recursive, params→args) |
 | 11 | Convert between forms | ✅ Done | Introduce/Remove pipe, Convert if→match, Expand→lambda/Collapse |
 | 12 | Alias language feature | ⬜ Not started | `DAlias` AST exists; resolution pipeline not implemented |
 | 13 | Auto-alias code action | ⬜ Not started | depends on #12 |
@@ -1230,13 +1230,12 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 | 17 | Project-level diagnostics | ⬜ Not started | per-file/open-doc diagnostics only; no whole-project publish |
 | 18 | Call hierarchy | ✅ Done | `callHierarchyProvider`, prepare/incoming/outgoing |
 | 19 | Semantic selection | ✅ Done | `selectionRangeProvider`, `selection_range_at` |
-| 20 | Generate doc comment | ⬜ Not started | no generator found |
+| 20 | Generate doc comment | ✅ Done | "Generate doc comment" action (scaffolds doc + Arguments/Returns) |
 | 21 | Linked editing | ✅ Done | `linkedEditingRangeProvider`, `linked_editing_ranges_at` |
 | 22 | Import suggestions | ✅ Done | "Import X from Y" action + completion auto-import (`additionalTextEdits` + resolve) |
 
-**Summary: 17 done, 1 partial, 4 not started.** Remaining: #10 inline-function
-half (inline variable done), #12/#13 alias language feature + auto-alias (Phase 4
-compiler work), #17 project-level diagnostics (Phase 5), #20 generate doc comment.
+**Summary: 19 done, 0 partial, 3 not started.** Remaining: #12/#13 alias language
+feature + auto-alias (Phase 4 compiler work), #17 project-level diagnostics (Phase 5).
 
 ### Delivered beyond the original 22 features
 

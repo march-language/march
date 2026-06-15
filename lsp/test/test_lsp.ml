@@ -3884,6 +3884,52 @@ end
     (has_title acts "organize imports")
 
 (* ------------------------------------------------------------------ *)
+(* Generate doc comment + inline function (Phase 3/6)                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_generate_doc_comment () =
+  let src = {|mod M do
+  fn process(input, limit) : Int do
+    input
+  end
+end|} in
+  let acts = actions_at src "process" in
+  Alcotest.(check bool) "offers Generate doc comment" true
+    (has_title acts "Generate doc comment");
+  let edit = Option.value ~default:"" (edit_text_of acts "Generate doc comment") in
+  Alcotest.(check bool) "scaffold has doc string + param names" true
+    (contains_sub edit "doc \"" && contains_sub edit "input" && contains_sub edit "limit")
+
+let test_no_doc_comment_when_documented () =
+  let src = {|mod M do
+  doc "already documented"
+  fn process(x) : Int do x end
+end|} in
+  let acts = actions_at src "process" in
+  Alcotest.(check bool) "no action for an already-documented fn" false
+    (has_title acts "Generate doc comment")
+
+let test_inline_function () =
+  let src = {|mod M do
+  fn double(x) : Int do x + x end
+  fn f() : Int do double(21) end
+end|} in
+  let acts = actions_at src "double(21)" in
+  Alcotest.(check bool) "offers Inline function" true (has_title acts "Inline function");
+  let edit = Option.value ~default:"" (edit_text_of acts "Inline function") in
+  Alcotest.(check bool) "substitutes the argument into the body" true
+    (contains_sub edit "21 + 21")
+
+let test_no_inline_recursive_function () =
+  let src = {|mod M do
+  fn recur(n) : Int do recur(n) end
+  fn f() : Int do recur(3) end
+end|} in
+  let acts = actions_at src "recur(3)" in
+  Alcotest.(check bool) "no inline for a recursive function" false
+    (has_title acts "Inline function")
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3904,6 +3950,12 @@ let () =
       "prepare returns fn under cursor", `Quick, test_call_hierarchy_prepare;
       "incoming calls found", `Quick, test_call_hierarchy_incoming;
       "outgoing calls found", `Quick, test_call_hierarchy_outgoing;
+    ];
+    "refactor extras", [
+      "generate doc comment", `Quick, test_generate_doc_comment;
+      "no doc comment when documented", `Quick, test_no_doc_comment_when_documented;
+      "inline function", `Quick, test_inline_function;
+      "no inline for recursive fn", `Quick, test_no_inline_recursive_function;
     ];
     "auto-import", [
       "prefix before cursor", `Quick, test_prefix_at;

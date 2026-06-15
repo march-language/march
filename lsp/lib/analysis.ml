@@ -3610,6 +3610,31 @@ let is_ident_name name =
 (* AST-driven code actions (Phase 2+).                                  *)
 (* ==================================================================== *)
 
+(** Replace whole-identifier occurrences in [text] per the (name → replacement)
+    [subs] table. Identifier-aware (won't match substrings); does not track
+    shadowing — adequate for inlining a small single-clause function body. *)
+let substitute_idents (text : string) (subs : (string * string) list) : string =
+  let buf = Buffer.create (String.length text) in
+  let n = String.length text in
+  let is_id c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    || (c >= '0' && c <= '9') || c = '_' || c = '\''
+  in
+  let i = ref 0 in
+  while !i < n do
+    let c = text.[!i] in
+    if is_id c && (!i = 0 || not (is_id text.[!i - 1])) then begin
+      let j = ref !i in
+      while !j < n && is_id text.[!j] do incr j done;
+      let word = String.sub text !i (!j - !i) in
+      (match List.assoc_opt word subs with
+       | Some repl -> Buffer.add_string buf repl
+       | None -> Buffer.add_string buf word);
+      i := !j
+    end else begin Buffer.add_char buf c; incr i end
+  done;
+  Buffer.contents buf
+
 let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
   let open Lsp.Types in
   let uri = DocumentUri.of_path a.filename in
@@ -4421,6 +4446,77 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
     end
   in
 
+  (* ---- Generate doc comment (Feature 20) ---- *)
+  (* Cursor on an undocumented function name → insert a scaffolded doc string. *)
+  let doc_comment_actions =
+    let found = ref None in
+    let rec scan (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fn, dsp) when fn.Ast.fn_doc = None && at fn.Ast.fn_name.Ast.span ->
+        found := Some (fn, dsp)
+      | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+      | _ -> ()
+    in
+    List.iter scan a.decls;
+    match !found with
+    | None -> []
+    | Some (fn, dsp) ->
+      let pnames = match fn.Ast.fn_clauses with cl :: _ -> clause_param_names cl | [] -> [] in
+      let args =
+        if pnames = [] then ""
+        else "\n\nArguments:\n" ^ String.concat "\n" (List.map (fun n -> "- " ^ n) pnames)
+      in
+      let ret = match fn.Ast.fn_ret_ty with Some _ -> "\n\nReturns: TODO" | None -> "" in
+      let indent = String.make dsp.Ast.start_col ' ' in
+      let scaffold =
+        Printf.sprintf "doc \"TODO: describe %s.%s%s\"\n%s" fn.Ast.fn_name.Ast.txt args ret indent
+      in
+      let pos = Position.create ~line:(dsp.Ast.start_line - 1) ~character:dsp.Ast.start_col in
+      let edit = TextEdit.create ~range:(Range.create ~start:pos ~end_:pos) ~newText:scaffold in
+      [CodeAction.create ~title:"Generate doc comment"
+         ~kind:CodeActionKind.RefactorRewrite ~edit:(mk_we [edit]) ()]
+  in
+
+  (* ---- Inline function (Feature 10b) ---- *)
+  (* Cursor on a call f(args) where f is a single-clause, non-recursive function
+     with simple-name params → substitute the body, params → arg expressions. *)
+  let inline_fn_actions =
+    let pred = function Ast.EApp (Ast.EVar _, _, _) -> true | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.EApp (Ast.EVar fname, args, callsp)) ->
+      let target = ref None in
+      let rec scan (d : Ast.decl) =
+        match d with
+        | Ast.DFn (fn, _) when fn.Ast.fn_name.Ast.txt = fname.Ast.txt -> target := Some fn
+        | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+        | _ -> ()
+      in
+      List.iter scan a.decls;
+      (match !target with
+       | Some fn when List.length fn.Ast.fn_clauses = 1 ->
+         let cl = List.hd fn.Ast.fn_clauses in
+         let pnames = clause_param_names cl in
+         if List.length pnames = List.length args
+            && List.length pnames = List.length cl.Ast.fc_params  (* all params are simple names *)
+            && not (contains_call fn.Ast.fn_name.Ast.txt cl.Ast.fc_body)  (* non-recursive *)
+         then begin
+           let arg_texts =
+             List.map (fun e ->
+                 let t = slice_span src (span_of_expr e) in
+                 match e with Ast.EVar _ | Ast.ELit _ -> t | _ -> "(" ^ t ^ ")") args
+           in
+           let body_text = slice_span src (span_of_expr cl.Ast.fc_body) in
+           let substituted = substitute_idents body_text (List.combine pnames arg_texts) in
+           let edit =
+             TextEdit.create ~range:(range_of_span callsp) ~newText:("(" ^ substituted ^ ")")
+           in
+           [CodeAction.create ~title:(Printf.sprintf "Inline function `%s`" fname.Ast.txt)
+              ~kind:CodeActionKind.RefactorInline ~edit:(mk_we [edit]) ()]
+         end else []
+       | _ -> [])
+    | _ -> []
+  in
+
   introduce_pipe_actions @ remove_pipe_actions
   @ extract_var_actions @ inline_var_actions
   @ collapse_capture_actions @ expand_capture_actions
@@ -4429,6 +4525,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
   @ session_scaffold_actions @ if_to_match_actions
   @ linear_audit_actions @ destruct_actions @ extract_fn_actions
   @ organize_imports_actions
+  @ doc_comment_actions @ inline_fn_actions
 
 (** Generate code actions relevant to the cursor position [line, character].
     Produces cursor- and diagnostic-driven quick fixes and refactorings;
