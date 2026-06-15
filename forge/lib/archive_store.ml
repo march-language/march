@@ -163,7 +163,19 @@ let extract_archive ~name ~src_dir =
                      (Filename.quote src_forge) (Filename.quote dst_forge))
     else 0
   in
-  if rc1 <> 0 || rc2 <> 0 then
+  (* Copy lib/ directory — task modules (forge/*.march) routinely import the
+     tool's implementation modules from lib/ (e.g. march_doc's MarchDoc), so the
+     archive is unusable without it. lib_paths_for_root puts lib/ + its subdirs
+     on MARCH_LIB_PATH when the task runs. *)
+  let src_lib = Filename.concat src_dir "lib" in
+  let dst_lib = Filename.concat dest "lib" in
+  let rc3 =
+    if Sys.file_exists src_lib then
+      Sys.command (Printf.sprintf "cp -r %s %s"
+                     (Filename.quote src_lib) (Filename.quote dst_lib))
+    else 0
+  in
+  if rc1 <> 0 || rc2 <> 0 || rc3 <> 0 then
     Error (Printf.sprintf "failed to extract archive for '%s'" name)
   else begin
     let hash = Resolver_cas_package.store_directory ~name ~source:("archive:" ^ name) dest in
@@ -248,12 +260,27 @@ let read_tasks_from_toml toml_path =
       ) doc.Toml.sections
 
 (** Lib paths to add to MARCH_LIB_PATH for tasks running from an archive root.
-    Includes lib/ (for sibling module imports like Forge.Scaffold) and forge/
-    at the root level (for CAS-extracted archives). *)
+    Includes lib/ AND all of its descendant directories (so tasks can import
+    modules that live in lib/ subfolders, e.g. march_doc's lib/march_doc/
+    submodules), plus forge/ at the root level (for CAS-extracted archives).
+    The recursive lib/ expansion mirrors cmd_build's collect_lib_dirs. *)
 let lib_paths_for_root archive_root =
   let lib_dir   = Filename.concat archive_root "lib" in
   let forge_dir = Filename.concat archive_root "forge" in
-  List.filter Sys.file_exists [lib_dir; forge_dir]
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else begin
+      let acc = d :: acc in
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
+      Array.fold_left (fun acc name ->
+          let path = Filename.concat d name in
+          if Sys.is_directory path then walk acc path else acc)
+        acc entries
+    end
+  in
+  let lib_dirs = List.rev (walk [] lib_dir) in
+  lib_dirs @ List.filter Sys.file_exists [forge_dir]
 
 (** Given a command like "bastion.new", return (task_file, lib_paths) or None.
     Checks project-local deps first, then global archives. *)
