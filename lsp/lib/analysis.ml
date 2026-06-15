@@ -137,10 +137,17 @@ type tir_fn_insight = {
   tfi_heap_allocs    : int;      (** EAlloc nodes — remaining heap allocations *)
 }
 
-(** A code lens annotation that appears above a function definition. *)
+(** A code lens annotation that appears above a function definition.
+
+    A lens may be a plain informational annotation (perf summary — no command)
+    or an actionable lens that carries an LSP [Command]: a stable command id
+    plus JSON arguments the client passes back via [workspace/executeCommand].
+    [cl_command]/[cl_args] are [None]/[] for the perf-summary lenses. *)
 type code_lens_item = {
-  cl_range : Lsp.Types.Range.t;  (** Position of the function name (for the lens line) *)
-  cl_title : string;             (** Summary text shown above the function *)
+  cl_range   : Lsp.Types.Range.t;  (** Position of the function name (for the lens line) *)
+  cl_title   : string;             (** Title text shown on the lens *)
+  cl_command : string option;      (** LSP command id, e.g. "march.runTest" (None = informational) *)
+  cl_args    : Yojson.Safe.t list; (** Arguments for the command, e.g. [file_uri; test_name] *)
 }
 
 (** Full analysis result for one document. *)
@@ -1844,6 +1851,113 @@ let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue lis
   !issues
 
 (* ------------------------------------------------------------------ *)
+(* Actionable Run / Debug code lenses                                  *)
+(* ------------------------------------------------------------------ *)
+
+(** Build a single-line lens range pinned to the start of [sp]. CodeLens
+    titles render on their own line above the target, so a zero-width range
+    at the declaration's first line/col is what editors expect. *)
+let lens_range_of_span (sp : Ast.span) : Lsp.Types.Range.t =
+  let r = Pos.span_to_lsp_range sp in
+  Lsp.Types.Range.create ~start:r.Lsp.Types.Range.start ~end_:r.Lsp.Types.Range.start
+
+(** Produce the actionable Run / Debug code lenses for a document: a
+    [▶ Run] + [🐞 Debug] pair above every [test "…"] block (including those
+    nested in [describe]/[mod]) and above [fn main].
+
+    These are emitted unconditionally in [analyse] — independent of the TIR
+    pipeline — so they appear even when the optimizer cannot run. The command
+    ids are stable so generic clients can wire them up; arguments are
+    [file_uri, test_name] for tests and [file_uri] for main. *)
+let build_action_lenses ~filename (decls : Ast.decl list) : code_lens_item list =
+  let file_uri =
+    Lsp.Types.DocumentUri.to_string (Lsp.Types.DocumentUri.of_path filename)
+  in
+  let acc = ref [] in
+  let add ~range ~title ~command ~args =
+    acc := { cl_range = range; cl_title = title;
+             cl_command = Some command; cl_args = args } :: !acc
+  in
+  let test_lenses ~range name =
+    let args = [ `String file_uri; `String name ] in
+    add ~range ~title:"▶ Run"   ~command:"march.runTest"   ~args;
+    add ~range ~title:"🐞 Debug" ~command:"march.debugTest" ~args
+  in
+  let main_lenses ~range =
+    let args = [ `String file_uri ] in
+    add ~range ~title:"▶ Run"   ~command:"march.run"   ~args;
+    add ~range ~title:"🐞 Debug" ~command:"march.debug" ~args
+  in
+  let rec walk decls =
+    List.iter (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DTest (t, sp) ->
+          test_lenses ~range:(lens_range_of_span sp) t.Ast.test_name
+        | Ast.DFn (fd, sp) when fd.Ast.fn_name.Ast.txt = "main" ->
+          main_lenses ~range:(lens_range_of_span sp)
+        | Ast.DDescribe (_, ds, _) | Ast.DMod (_, _, ds, _) -> walk ds
+        | _ -> ()
+      ) decls
+  in
+  walk decls;
+  List.rev !acc
+
+(** Outcome of resolving a code-lens command into something the server can act
+    on. [RunShell] is a shell command line the server executes (forge test /
+    forge run); [DebugEcho] is a structured payload the editor uses to launch
+    its own interactive DAP session — the LSP must NOT block on an interactive
+    debugger, so for debug commands we echo back the command + args and let the
+    client drive `march dap`. [Unknown] is an unrecognised command id. *)
+type lens_command =
+  | RunShell  of { description : string; shell : string }
+  | DebugEcho of { description : string; debug_command : string;
+                   dap : string; args : Yojson.Safe.t list }
+  | Unknown   of string
+
+(** Convert a file:// URI back to a filesystem path. *)
+let path_of_uri uri =
+  if String.length uri >= 7 && String.sub uri 0 7 = "file://"
+  then String.sub uri 7 (String.length uri - 7)
+  else uri
+
+(** Pure resolver for [workspace/executeCommand]. Maps a command id + JSON
+    arguments to a [lens_command]. Kept pure (no shelling-out) so it can be
+    unit-tested; the server executes the [RunShell] case. *)
+let resolve_lens_command ~command ~(args : Yojson.Safe.t list) : lens_command =
+  let str_arg i =
+    match List.nth_opt args i with Some (`String s) -> Some s | _ -> None
+  in
+  match command, str_arg 0, str_arg 1 with
+  | "march.runTest", Some uri, Some test_name ->
+    let path = path_of_uri uri in
+    (* `forge test` filters by test name via --filter=PATTERN; pass the file so
+       the runner targets this suite, and the filter to scope to one test. *)
+    let shell =
+      Printf.sprintf "forge test --filter=%s %s"
+        (Filename.quote test_name) (Filename.quote path)
+    in
+    RunShell { description =
+                 Printf.sprintf "Running test %S in %s" test_name (Filename.basename path);
+               shell }
+  | "march.run", Some uri, _ ->
+    let path = path_of_uri uri in
+    (* `forge run` builds and runs the current project (fn main). *)
+    RunShell { description = Printf.sprintf "Running %s" (Filename.basename path);
+               shell = "forge run" }
+  | "march.debugTest", Some uri, Some test_name ->
+    DebugEcho { description =
+                  Printf.sprintf "Launch debugger for test %S" test_name;
+                debug_command = command;
+                dap = "march dap";
+                args = [ `String uri; `String test_name ] }
+  | "march.debug", Some uri, _ ->
+    DebugEcho { description = "Launch debugger for main";
+                debug_command = command;
+                dap = "march dap";
+                args = [ `String uri ] }
+  | _ -> Unknown command
+
+(* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -2571,7 +2685,7 @@ let analyse ~filename ~src : t =
       demorgan_sites;
       perf_insights;
       tir_fn_insights  = [];
-      code_lens_items  = [];
+      code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
       protocols        =
         List.filter_map (function
@@ -2631,9 +2745,16 @@ let run_tir_pass (a : t) : t =
   if has_errors then a
   else
     let cache_key = March_cas.Blake3.hash_string a.src in
+    (* Preserve the actionable Run/Debug lenses already built in [analyse]
+       (those carry a command); the TIR pass only ADDS informational perf
+       lenses, it must not drop the action lenses. *)
+    let action_lenses =
+      List.filter (fun cl -> cl.cl_command <> None) a.code_lens_items
+    in
     match Hashtbl.find_opt tir_pass_cache cache_key with
     | Some (tir_fn_insights, code_lens_items, tir_perf_insights) ->
-      { a with tir_fn_insights; code_lens_items;
+      { a with tir_fn_insights;
+               code_lens_items = action_lenses @ code_lens_items;
                perf_insights = a.perf_insights @ tir_perf_insights }
     | None ->
     try
@@ -2700,8 +2821,10 @@ let run_tir_pass (a : t) : t =
               in
               if parts = [] then None
               else Some {
-                cl_range = Pos.span_to_lsp_range sp;
-                cl_title = String.concat " · " (List.rev parts);
+                cl_range   = Pos.span_to_lsp_range sp;
+                cl_title   = String.concat " · " (List.rev parts);
+                cl_command = None;   (* informational perf summary — not clickable *)
+                cl_args    = [];
               }
           ) tir_fn_insights
       in
@@ -2750,7 +2873,7 @@ let run_tir_pass (a : t) : t =
         (tir_fn_insights, code_lens_items, tir_perf_insights);
       { a with
         tir_fn_insights;
-        code_lens_items;
+        code_lens_items = action_lenses @ code_lens_items;
         perf_insights = a.perf_insights @ tir_perf_insights;
       }
     with _ ->

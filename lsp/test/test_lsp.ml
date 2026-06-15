@@ -3045,6 +3045,119 @@ end
   Alcotest.(check bool) "all code lens items have titles" true all_titled
 
 (* ------------------------------------------------------------------ *)
+(* Actionable Run / Debug code lenses + executeCommand                  *)
+(* ------------------------------------------------------------------ *)
+
+(** Collect the command ids of all actionable lenses (cl_command = Some _). *)
+let action_lens_commands (a : An.t) =
+  List.filter_map (fun (cl : An.code_lens_item) -> cl.An.cl_command)
+    a.An.code_lens_items
+
+(** A test block yields a Run + Debug lens with the right command ids. *)
+let test_action_lens_for_test_block () =
+  let src = {|
+mod Demo do
+  test "adds numbers" do
+    assert(1 + 1 == 2)
+  end
+end
+|} in
+  let a = analyse src in
+  let cmds = action_lens_commands a in
+  Alcotest.(check bool) "has march.runTest"   true (List.mem "march.runTest" cmds);
+  Alcotest.(check bool) "has march.debugTest" true (List.mem "march.debugTest" cmds);
+  (* test name must be carried as the second argument *)
+  let run_lens =
+    List.find (fun (cl : An.code_lens_item) -> cl.An.cl_command = Some "march.runTest")
+      a.An.code_lens_items
+  in
+  let names =
+    List.filter_map (function `String s -> Some s | _ -> None) run_lens.An.cl_args
+  in
+  Alcotest.(check bool) "run lens carries test name" true (List.mem "adds numbers" names)
+
+(** fn main yields a Run + Debug lens with march.run / march.debug. *)
+let test_action_lens_for_main () =
+  let src = {|
+mod App do
+  fn main() do
+    println("hi")
+  end
+end
+|} in
+  let a = analyse src in
+  let cmds = action_lens_commands a in
+  Alcotest.(check bool) "has march.run"   true (List.mem "march.run" cmds);
+  Alcotest.(check bool) "has march.debug" true (List.mem "march.debug" cmds)
+
+(** A file with no tests and no main yields no actionable lenses. *)
+let test_action_lens_absent_without_runnables () =
+  let src = {|
+mod Lib do
+  fn helper(x: Int) -> Int do x + 1 end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check int) "no actionable lenses" 0 (List.length (action_lens_commands a))
+
+(** Action lenses survive the TIR pass (must not be dropped by perf lenses). *)
+let test_action_lens_survive_tir_pass () =
+  let src = {|
+mod App do
+  fn main() do
+    println("hi")
+  end
+  test "t" do
+    assert(true)
+  end
+end
+|} in
+  let a  = analyse src in
+  let a2 = An.run_tir_pass a in
+  let cmds = action_lens_commands a2 in
+  Alcotest.(check bool) "march.run survives"      true (List.mem "march.run" cmds);
+  Alcotest.(check bool) "march.runTest survives"  true (List.mem "march.runTest" cmds)
+
+(** resolve_lens_command maps debug commands to a non-blocking DebugEcho. *)
+let test_resolve_debug_command_echoes () =
+  let r =
+    An.resolve_lens_command ~command:"march.debugTest"
+      ~args:[ `String "file:///tmp/x.march"; `String "my test" ]
+  in
+  match r with
+  | An.DebugEcho { debug_command; dap; _ } ->
+    Alcotest.(check string) "echoes command id" "march.debugTest" debug_command;
+    Alcotest.(check bool) "references march dap" true
+      (let needle = "march dap" in
+       let n = String.length needle and m = String.length dap in
+       let rec scan i = i + n <= m && (String.sub dap i n = needle || scan (i+1)) in
+       scan 0)
+  | _ -> Alcotest.fail "expected DebugEcho for march.debugTest"
+
+(** resolve_lens_command maps run commands to a forge shell invocation. *)
+let test_resolve_run_command_builds_forge_shell () =
+  let r =
+    An.resolve_lens_command ~command:"march.runTest"
+      ~args:[ `String "file:///tmp/x.march"; `String "my test" ]
+  in
+  match r with
+  | An.RunShell { shell; _ } ->
+    let contains hay needle =
+      let n = String.length needle and m = String.length hay in
+      let rec scan i = i + n <= m && (String.sub hay i n = needle || scan (i+1)) in
+      n = 0 || scan 0
+    in
+    Alcotest.(check bool) "invokes forge test" true (contains shell "forge test");
+    Alcotest.(check bool) "passes --filter"    true (contains shell "--filter")
+  | _ -> Alcotest.fail "expected RunShell for march.runTest"
+
+(** Unknown command ids resolve to Unknown rather than raising. *)
+let test_resolve_unknown_command () =
+  match An.resolve_lens_command ~command:"march.bogus" ~args:[] with
+  | An.Unknown c -> Alcotest.(check string) "echoes unknown id" "march.bogus" c
+  | _ -> Alcotest.fail "expected Unknown for unrecognised command"
+
+(* ------------------------------------------------------------------ *)
 (* Scope-aware symbol identity (Phase 3)                               *)
 (* ------------------------------------------------------------------ *)
 
@@ -4869,5 +4982,14 @@ let () =
       "HOF indirect-call insight",              `Quick, test_tir_indirect_call_insight;
       "tir_fn_insights field populated",        `Quick, test_tir_fn_insights_field_populated;
       "code lens consistent with TIR insights", `Quick, test_code_lens_consistent_with_tir_insights;
+    ];
+    "runnable code lenses", [
+      "test block yields run+debug lenses",   `Quick, test_action_lens_for_test_block;
+      "fn main yields run+debug lenses",       `Quick, test_action_lens_for_main;
+      "no runnables -> no action lenses",      `Quick, test_action_lens_absent_without_runnables;
+      "action lenses survive TIR pass",        `Quick, test_action_lens_survive_tir_pass;
+      "debug command echoes (non-blocking)",   `Quick, test_resolve_debug_command_echoes;
+      "run command builds forge shell",        `Quick, test_resolve_run_command_builds_forge_shell;
+      "unknown command resolves gracefully",   `Quick, test_resolve_unknown_command;
     ];
   ]

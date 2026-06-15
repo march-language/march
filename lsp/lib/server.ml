@@ -414,7 +414,13 @@ class march_server =
                   (Lsp.Types.DiagnosticOptions.create
                      ~interFileDependencies:true ~workspaceDiagnostics:true ()));
         ServerCapabilities.codeLensProvider =
-          Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
+          Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ());
+        (* Advertise the runnable code-lens commands so generic clients know
+           which command ids they may forward via workspace/executeCommand. *)
+        ServerCapabilities.executeCommandProvider =
+          Some (Lsp.Types.ExecuteCommandOptions.create
+                  ~commands:[ "march.runTest"; "march.debugTest";
+                              "march.run";     "march.debug" ] ()) }
 
     (* -------------------------------------------------------------- *)
     (* Document synchronisation                                        *)
@@ -885,12 +891,20 @@ class march_server =
                  a.Analysis.code_lens_items)
         in
         let json_items = List.map (fun (cl : Analysis.code_lens_item) ->
+            (* Actionable lenses carry a real command id + arguments; the
+               informational perf-summary lenses fall back to a client-side
+               noop so they still render as a title-only annotation. *)
+            let command_id, args =
+              match cl.Analysis.cl_command with
+              | Some id -> id, cl.Analysis.cl_args
+              | None    -> "march.perf.noop", []
+            in
             `Assoc [
               ("range", json_range cl.cl_range);
               ("command", `Assoc [
                 ("title",   `String cl.cl_title);
-                ("command", `String "march.perf.noop");
-                ("arguments", `List [])
+                ("command", `String command_id);
+                ("arguments", `List args)
               ])
             ]
           ) items
@@ -1142,6 +1156,56 @@ class march_server =
         in
         if ranges = [] then Lwt.return `Null
         else Lwt.return (`Assoc [("ranges", `List (List.map json_range ranges))])
+
+      end else if meth = "workspace/executeCommand" then begin
+        (* Runnable code lenses dispatch here. RUN commands (march.runTest /
+           march.run) shell out to forge and return a short summary. DEBUG
+           commands (march.debugTest / march.debug) do NOT block on an
+           interactive debugger — launching a DAP session is the editor's job —
+           so we return a structured echo (command id + args + the `march dap`
+           invocation) that the client uses to start its own debug session. *)
+        let command, args =
+          match params with
+          | Some (`Assoc fields) ->
+            let c = match List.assoc_opt "command" fields with
+              | Some (`String s) -> s | _ -> "" in
+            let a = match List.assoc_opt "arguments" fields with
+              | Some (`List l) -> l | _ -> [] in
+            (c, a)
+          | _ -> ("", [])
+        in
+        let result =
+          match Analysis.resolve_lens_command ~command ~args with
+          | Analysis.RunShell { description; shell } ->
+            let rc = Sys.command shell in
+            `Assoc [
+              ("status",   `String (if rc = 0 then "ok" else "error"));
+              ("kind",     `String "run");
+              ("command",  `String command);
+              ("shell",    `String shell);
+              ("exitCode", `Int rc);
+              ("message",  `String
+                 (Printf.sprintf "%s — %s (exit %d)" description
+                    (if rc = 0 then "passed" else "failed") rc))
+            ]
+          | Analysis.DebugEcho { description; debug_command; dap; args } ->
+            `Assoc [
+              ("status",  `String "debug");
+              ("kind",    `String "debug");
+              ("command", `String debug_command);
+              ("dap",     `String dap);
+              ("arguments", `List args);
+              ("message", `String description)
+            ]
+          | Analysis.Unknown c ->
+            `Assoc [
+              ("status",  `String "error");
+              ("kind",    `String "unknown");
+              ("command", `String c);
+              ("message", `String (Printf.sprintf "Unknown command: %s" c))
+            ]
+        in
+        Lwt.return result
 
       end else if meth = "workspace/diagnostic" then begin
         (* Whole-project diagnostics: analyse every .march file under the project
