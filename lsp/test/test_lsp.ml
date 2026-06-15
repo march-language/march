@@ -2605,26 +2605,28 @@ let has_non_tail_call insights =
 (** Captures must exclude top-level/global functions (a closure doesn't allocate
     to hold references to statically-known top-level functions). *)
 let test_closure_capture_excludes_globals () =
+  (* Two closures share {a, b}; helper1/helper2 are globals, not captures. *)
   let src = {|mod M do
   fn helper1(x : Int) : Int do x end
   fn helper2(x : Int) : Int do x end
   fn make() do
     let a = 1
     let b = 2
-    let c = 3
-    fn _ -> a + b + c + helper1(0) + helper2(0)
+    let f = fn _ -> a + b + helper1(0)
+    let g = fn _ -> a + b + helper2(0)
+    f
   end
 end|} in
   match List.find_opt (fun (pi : An.perf_insight) ->
       match pi.An.pi_kind with An.ClosureCapture _ -> true | _ -> false)
       (perf_insights_of src) with
-  | None -> Alcotest.fail "expected a closure-capture insight for 3 local captures"
+  | None -> Alcotest.fail "expected a closure-capture insight for the shared {a,b}"
   | Some pi ->
     (match pi.An.pi_kind with
      | An.ClosureCapture { pi_count; pi_names } ->
        Alcotest.(check bool) "top-level functions excluded from captures" true
          (not (List.mem "helper1" pi_names) && not (List.mem "helper2" pi_names));
-       Alcotest.(check int) "counts only the 3 genuine local captures" 3 pi_count
+       Alcotest.(check int) "counts only the 2 genuine shared captures" 2 pi_count
      | _ -> ())
 
 (** Helper: true if insights list contains at least one ClosureCapture
@@ -2710,7 +2712,22 @@ end
 (* ---- Closure capture tests ---- *)
 
 let test_perf_large_closure_detected () =
-  (* fn captures a, b, c, d (4 values) — should warn *)
+  (* TWO closures capture the same set {a, b, c, d} — repeated clump, warns *)
+  let src = {|
+mod Test do
+  fn make_fn(a: Int, b: Int, c: Int, d: Int): Int do
+    let f = fn x -> a + b + c + d + x
+    let g = fn y -> a + b + c + d + y
+    f(0) + g(0)
+  end
+end
+|} in
+  Alcotest.(check bool) "repeated capture group (4 values, 2 sites) detected" true
+    (has_large_closure (perf_insights_of src))
+
+let test_perf_small_closure_not_flagged () =
+  (* A SINGLE closure capturing many values is no longer flagged —
+     the hint only fires when the same set appears across ≥2 closures *)
   let src = {|
 mod Test do
   fn make_fn(a: Int, b: Int, c: Int, d: Int): Int do
@@ -2719,28 +2736,16 @@ mod Test do
   end
 end
 |} in
-  Alcotest.(check bool) "large closure (4 captures) detected" true
-    (has_large_closure (perf_insights_of src))
-
-let test_perf_small_closure_not_flagged () =
-  (* fn captures a, b (2 values) — below threshold, no hint *)
-  let src = {|
-mod Test do
-  fn make_fn(a: Int, b: Int): Int do
-    let f = fn x -> a + b + x
-    f(0)
-  end
-end
-|} in
-  Alcotest.(check bool) "small closure (2 captures) not flagged" false
-    (has_large_closure (perf_insights_of src))
+  Alcotest.(check bool) "lone closure (single site) not flagged" false
+    (has_large_closure ~min_count:2 (perf_insights_of src))
 
 let test_perf_closure_capture_hint_in_diagnostics () =
   let src = {|
 mod Test do
   fn make_fn(a: Int, b: Int, c: Int): Int do
     let f = fn x -> a + b + c + x
-    f(0)
+    let g = fn y -> a + b + c + y
+    f(0) + g(0)
   end
 end
 |} in
@@ -2758,7 +2763,8 @@ let test_perf_closure_count_accurate () =
 mod Test do
   fn make_fn(a: Int, b: Int, c: Int, d: Int, e: Int): Int do
     let f = fn x -> a + b + c + d + e + x
-    f(0)
+    let g = fn y -> a + b + c + d + e + y
+    f(0) + g(0)
   end
 end
 |} in
@@ -2769,7 +2775,7 @@ end
       | _ -> best
     ) 0 insights
   in
-  Alcotest.(check bool) "closure captures 5 variables" true (cap_count = 5)
+  Alcotest.(check bool) "shared capture set has 5 variables" true (cap_count = 5)
 
 (* ---- Actor send copy tests ---- *)
 
@@ -4160,12 +4166,14 @@ end|} in
 (* ------------------------------------------------------------------ *)
 
 let test_extract_captures_action () =
+  (* Two closures share {a, b}; extract builds ONE shared record + rewrites both. *)
   let src = {|mod M do
   fn helper(x : Int) : Int do x end
   fn make() do
     let a = 1
     let b = 2
     let f = fn _ -> a + b + helper(0)
+    let g = fn _ -> a + b + helper(0)
     f
   end
 end|} in
@@ -4181,12 +4189,29 @@ end|} in
   Alcotest.(check bool) "rewrites the body to captured.a" true
     (contains_sub edit "captured.a")
 
+let test_no_extract_captures_for_single_site () =
+  (* A lone closure (one site) no longer warns, and offers no extract. *)
+  let src = {|mod M do
+  fn make() do
+    let a = 1
+    let b = 2
+    let f = fn _ -> a + b
+    f
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "fn _ ->" in
+  let acts = An.code_actions_at a ~line:l ~character:c ~diagnostics:a.An.diagnostics () in
+  Alcotest.(check bool) "no extract action for a single closure" false
+    (has_title acts "captured values")
+
 let test_no_extract_captures_for_globals_only () =
   (* lambda only references globals + its own param → no genuine captures *)
   let src = {|mod M do
   fn helper(x : Int) : Int do x end
   fn make() do
     let f = fn y -> helper(y)
+    let g = fn z -> helper(z)
     f
   end
 end|} in
@@ -4337,7 +4362,8 @@ let () =
       "unannotated params not bundleable", `Quick, test_unannotated_params_not_bundleable;
     ];
     "extract closure captures to record", [
-      "offered for 2+ genuine captures", `Quick, test_extract_captures_action;
+      "offered for 2+ closures sharing a capture set", `Quick, test_extract_captures_action;
+      "not offered for a single closure", `Quick, test_no_extract_captures_for_single_site;
       "not offered when only globals captured", `Quick, test_no_extract_captures_for_globals_only;
     ];
     "project diagnostics", [
