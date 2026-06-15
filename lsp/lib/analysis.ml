@@ -2774,14 +2774,44 @@ let analyse ~filename ~src : t =
             ())
         html_issues
     in
+    let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
+    let mi = module_index_of_vars vars_list in
+    let island_diags =
+      if mi = [] then []
+      else
+        List.concat_map (fun (s : h_sigil) ->
+          List.filter_map (fun (isl : island_ref) ->
+            match List.assoc_opt isl.isl_name mi with
+            | None ->
+              Some (Lsp.Types.Diagnostic.create
+                ~range:(Pos.span_to_lsp_range isl.isl_name_span)
+                ~severity:Lsp.Types.DiagnosticSeverity.Warning
+                ~message:(`String (Printf.sprintf
+                  "Island component `%s` is not a known module." isl.isl_name))
+                ~source:"march"
+                ~code:(`String "html/unknown-island")
+                ())
+            | Some members ->
+              if List.mem "create" members && List.mem "render" members then None
+              else Some (Lsp.Types.Diagnostic.create
+                ~range:(Pos.span_to_lsp_range isl.isl_name_span)
+                ~severity:Lsp.Types.DiagnosticSeverity.Warning
+                ~message:(`String (Printf.sprintf
+                  "`%s` is not a valid island: it must define `create` and `render`." isl.isl_name))
+                ~source:"march"
+                ~code:(`String "html/unknown-island")
+                ()))
+            (islands_in_sigil ~src s))
+          h_sigils
+    in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
       @ !dead_code_diags
       @ unused_fn_diags
       @ perf_diags
       @ html_diags
+      @ island_diags
     in
-    let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
     { src; filename; doc; type_map; def_map; use_map;
       vars       = vars_list;
       types      = Tc.StrMap.bindings final_env.Tc.types;
@@ -2804,7 +2834,7 @@ let analyse ~filename ~src : t =
       call_sites;
       call_graph       = build_call_graph user_decls;
       imports          = build_imports user_decls;
-      module_index     = module_index_of_vars vars_list;
+      module_index     = mi;
       consumption;
       reuse_hints      = build_reuse_hints user_decls;
       match_sites;

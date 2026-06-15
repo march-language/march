@@ -4772,6 +4772,40 @@ end|} in
     "Counter" (String.sub src start_ofs name_len)
 
 (* ------------------------------------------------------------------ *)
+(* <island> component validation diagnostics                           *)
+(* ------------------------------------------------------------------ *)
+
+let test_island_unknown_module () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<island name='Nope' />"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unknown-island") -> true | _ -> false)
+    a.An.diagnostics in
+  Alcotest.(check bool) "unknown island flagged" true has
+
+let test_island_valid_not_flagged () =
+  let src = {|mod Counter do
+  fn create(n : Int) : Int do n end
+  fn render(s : Int) : IOList do ~H"<p>${s}</p>" end
+end
+mod M do
+  fn page() : IOList do
+    ~H"<island name='Counter' />"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unknown-island") -> true | _ -> false)
+    a.An.diagnostics in
+  Alcotest.(check bool) "valid island not flagged" false flagged
+
+(* ------------------------------------------------------------------ *)
 (* Cross-file project analysis                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -4885,6 +4919,10 @@ let () =
       "collect_h_sigils: one sigil found with correct content and offset", `Quick, test_h_sigils_collected;
       "islands_in_sigil: finds one island by name",                        `Quick, test_island_parse;
       "islands_in_sigil: name span lands on correct line and text",        `Quick, test_island_name_span;
+    ];
+    "island component validation", [
+      "unknown island module emits html/unknown-island diagnostic", `Quick, test_island_unknown_module;
+      "valid island with create+render is not flagged",             `Quick, test_island_valid_not_flagged;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
