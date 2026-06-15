@@ -199,46 +199,18 @@ forge deps update bastion   # update specific package
 
 ## LSP Server
 
-The March LSP server provides IDE features for any editor that supports the Language Server Protocol.
+March ships `march-lsp`, a Language Server Protocol server built on the
+compiler's own parse/typecheck pipeline, so diagnostics, hover types, and
+completions are always accurate. It provides diagnostics, hover, go-to-definition
+and find-references (cross-file), completions with auto-import, a large
+code-action suite, rename, signature help, inlay hints, semantic tokens, call
+hierarchy, workspace symbols, and per-function performance insights. A Debug
+Adapter Protocol server (`march dap`) and a standalone JSON query CLI ship
+alongside it.
 
-Binary location after build:
-```
-_build/default/lsp/bin/march_lsp.exe
-```
-
-### Features
-
-| Feature | Description |
-|---------|-------------|
-| **Diagnostics** | Type errors, unused variables, exhaustiveness warnings reported inline |
-| **Hover** | Type of the expression under the cursor; docstring if available |
-| **Go to Definition** | Jump to where a function, type, or module is defined |
-| **Find References** | All uses of a name across the project |
-| **Completions** | Context-aware: module members after `.`, keywords, in-scope names |
-| **Code Actions** | Quick fixes, add missing match arms, insert typed holes |
-| **Rename** | Rename a symbol across the project |
-| **Performance Insights** | Inlay hints for tail-call optimization, closure captures, FBIP reuse |
-| **Code Lens** | Per-function annotations: `⚡ 2 stack-allocated · ♻ 1 in-place` |
-
-### Performance Insights
-
-The LSP runs the full TIR pipeline asynchronously and reports optimization results as inlay hints and code lens items:
-
-- `⚡ stack-allocated` — value promoted to stack (no heap allocation)
-- `♻ in-place` — FBIP: value reused in-place without allocation
-- `⚠ non-tail call` — recursive call that's not in tail position
-- `📦 closure captures N values` — closure with many captured variables
-
-### Configuring the LSP
-
-In your editor's LSP configuration, point to the binary:
-
-```json
-{
-  "command": "/path/to/march/_build/default/lsp/bin/march_lsp.exe",
-  "filetypes": ["march"]
-}
-```
+**See the dedicated [LSP & Editors]({{ site.baseurl }}/lsp) page** for the full feature list,
+per-editor setup (Neovim, Helix, Zed, Emacs, VS Code), the `march-lsp query`
+CLI, and the DAP debugger.
 
 ---
 
