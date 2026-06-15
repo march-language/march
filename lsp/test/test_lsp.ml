@@ -5007,6 +5007,51 @@ end|} in
   Alcotest.(check bool) "normal div pair not flagged" false flagged
 
 (* ------------------------------------------------------------------ *)
+(* ~H unsafe interpolation inside <script>/<style> lint               *)
+(* ------------------------------------------------------------------ *)
+
+let test_html_unsafe_interpolation () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<script>var x = ${userInput}</script>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unsafe-interpolation") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "interpolation in <script> flagged" true has
+
+let test_html_unsafe_interpolation_style () =
+  (* Interpolation inside <style> must also be flagged. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<style>body { color: ${color}; }</style>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unsafe-interpolation") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "interpolation in <style> flagged" true has
+
+let test_html_safe_interpolation_in_text () =
+  (* Interpolation in normal HTML text is safe (auto-escaped) — must NOT be flagged. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<p>${name}</p>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unsafe-interpolation") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "interpolation in normal text not flagged" false flagged
+
+(* ------------------------------------------------------------------ *)
 (* Island component name completion                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -5250,6 +5295,11 @@ let () =
       "self-closing non-void <div/> flagged as html/self-closing-nonvoid", `Quick, test_html_self_closing_nonvoid;
       "void self-closing <br/> not flagged",  `Quick, test_html_void_self_closing_ok;
       "normal pair <div></div> not flagged",  `Quick, test_html_normal_pair_ok;
+    ];
+    "~H unsafe interpolation lint", [
+      "interpolation inside <script> flagged as html/unsafe-interpolation", `Quick, test_html_unsafe_interpolation;
+      "interpolation inside <style> flagged as html/unsafe-interpolation",  `Quick, test_html_unsafe_interpolation_style;
+      "interpolation in normal text NOT flagged",                            `Quick, test_html_safe_interpolation_in_text;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;

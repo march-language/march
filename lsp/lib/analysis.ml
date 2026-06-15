@@ -2180,6 +2180,119 @@ let void_misuse_in_sigil ~(src : string) (s : h_sigil)
   done;
   List.rev !acc
 
+(** Pass 3.4 — XSS risk: [${…}] interpolation inside [<script>] or [<style>]
+    elements.  HTML auto-escaping in normal text is safe, but inside these
+    raw-content elements the browser does NOT apply HTML entity decoding, so
+    interpolated values can inject arbitrary JS/CSS.
+
+    The scanner walks the sigil content tracking whether the cursor is currently
+    inside a [<script>] or [<style>] element.  When [in_raw_context = true] every
+    [\${] start emits an [(span, message, "html/unsafe-interpolation")] entry.
+    While [in_raw_context = false] [\${…}] regions are skipped as usual
+    (balanced braces).
+
+    Tag detection:
+    - [<script …>] or [<style …>] (with optional attrs) → set [in_raw_context]
+    - [</script>] or [</style>]                         → clear [in_raw_context]
+    - All other tags, comments, [<!…>], and attribute regions are scanned
+      in the usual way (skipping quoted attr values) so we don't mistake
+      attribute content for the element body. *)
+let unsafe_interpolation_in_sigil ~(src : string) (s : h_sigil)
+    : (Ast.span * string * string) list =
+  let c = s.hs_content in
+  let n = String.length c in
+  let is_nc ch =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
+  (* Build a single-line span for the two-character "${" at content-relative
+     byte offset [ofs]. *)
+  let interp_span ofs =
+    let (l, col) = ofs_to_pos src (s.hs_base_ofs + ofs) in
+    { Ast.file = ""; start_line = l; start_col = col;
+      end_line = l; end_col = col + 2 } in
+  let acc = ref [] in
+  let i = ref 0 in
+  (* Whether we are currently inside a <script> or <style> element body. *)
+  let in_raw = ref false in
+  while !i < n do
+    let ch = c.[!i] in
+    (* ${…} interpolation *)
+    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
+      if !in_raw then begin
+        (* Flag it — interpolation inside a raw JS/CSS context. *)
+        acc := (interp_span !i,
+                "Interpolation inside <script>/<style> is not HTML-escaped \
+                 for this context; ensure the value is safe.",
+                "html/unsafe-interpolation") :: !acc
+      end;
+      (* Skip the balanced braces in either case so we don't confuse
+         brace chars inside the expression with close-tags. *)
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    (* <!-- … --> comment: skip entirely *)
+    else if ch = '<' && !i + 3 < n
+            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
+      i := !i + 4;
+      while !i + 2 < n
+            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
+    end
+    (* <!…> declaration/doctype: skip to '>' *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
+      while !i < n && c.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    (* </tag> close tag *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
+      let ns = !i + 2 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      while !j < n && c.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n);
+      if tag = "script" || tag = "style" then
+        in_raw := false
+    end
+    (* <tag …> open tag *)
+    else if ch = '<' && !i + 1 < n
+            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ns = !i + 1 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      (* Skip attribute region (respecting quoted values and ${} interps). *)
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (not (!inq) && c.[!j] <> '>' || !inq) do
+        let d = c.[!j] in
+        if !inq then begin
+          if d = !q then inq := false;
+          incr j
+        end
+        else if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
+          j := !j + 2; let depth = ref 1 in
+          while !depth > 0 && !j < n do
+            (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+            incr j
+          done
+        end
+        else if d = '"' || d = '\'' then begin
+          inq := true; q := d; incr j
+        end
+        else if d = '>' then
+          () (* loop condition will exit *)
+        else incr j
+      done;
+      i := (if !j < n then !j + 1 else n);
+      if tag = "script" || tag = "style" then
+        in_raw := true
+    end
+    else incr i
+  done;
+  List.rev !acc
+
 (** Collect HTML lint warnings for all ~H sigils.  Returns a list of
     [(span, message, diagnostic-code)] triples.  This is the shared
     accumulator — later lint passes (3.2 dup attrs, 3.3 void misuse,
@@ -2218,7 +2331,11 @@ let collect_html_lint ~(src : string) (sigils : h_sigil list)
   let void_misuse_results =
     List.concat_map (void_misuse_in_sigil ~src) sigils
   in
-  unknown_tag_results @ dup_attr_results @ void_misuse_results
+  (* Pass 3.4 — XSS risk: ${…} interpolation inside <script>/<style>. *)
+  let unsafe_interp_results =
+    List.concat_map (unsafe_interpolation_in_sigil ~src) sigils
+  in
+  unknown_tag_results @ dup_attr_results @ void_misuse_results @ unsafe_interp_results
 
 (** Return matched (open-name-span, close-name-span) pairs in one ~H sigil.
     Adapts the [scan_html_unclosed] walk: on a successful close-tag match, pop
