@@ -18,7 +18,11 @@ let make_debug_ctx ~on_dbg : Eval.debug_ctx =
     dc_enabled         = true;
     dc_depth           = 0;
     dc_on_dbg          = Some on_dbg;
-    dc_actor_log       = [] }
+    dc_actor_log       = [];
+    dc_breakpoints     = Hashtbl.create 16;
+    dc_step            = Eval.Run;
+    dc_on_pause        = None;
+    dc_last_line       = None }
 
 (** Install [ctx] as the active debug context. *)
 let install ctx =

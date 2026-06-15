@@ -1,0 +1,8 @@
+(library
+ (name march_dap)
+ (libraries
+  threads.posix
+  yojson
+  march_ast
+  march_eval
+  march_debug))

@@ -1713,6 +1713,69 @@ let () =
           ~jit_ctx:(Some jit_ctx) ~preload_file ());
     exit 0
   end;
+  if Array.length argv >= 2 && argv.(1) = "dap" then begin
+    (* Debug Adapter Protocol server (editor debugger).
+       The program to debug is supplied by the editor via the DAP `launch`
+       request, not on the command line. We run it through the interpreter
+       under a debug context driven by the DAP session. *)
+
+    (* Build a runnable for a source path: parse → desugar → prepend stdlib →
+       run_module (the same shape as the interpreter run path). The session
+       installs the debug context; this thunk must not install its own. *)
+    let make_program path () =
+      let src =
+        let ic = open_in path in
+        let n = in_channel_length ic in
+        let b = Bytes.create n in
+        really_input ic b 0 n; close_in ic; Bytes.to_string b
+      in
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+      let module_ast =
+        March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+      let desugared = March_desugar.Desugar.desugar_module module_ast in
+      let stdlib_decls = load_stdlib () in
+      let combined =
+        { desugared with
+          March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls } in
+      March_eval.Eval.module_loader := Some (fun mod_name ->
+        match March_modules.Module_registry.find_stdlib_file mod_name with
+        | None -> ()
+        | Some p -> March_eval.Eval.eval_stdlib_decls (load_stdlib_file p));
+      March_eval.Eval.clear_march_stack ();
+      March_eval.Eval.run_module combined
+    in
+
+    (* Take over fd 1 for the DAP protocol: keep the original stdout for framed
+       DAP messages and redirect the program's own stdout to a pipe that we
+       forward as DAP `output` events. *)
+    let real_out_fd = Unix.dup Unix.stdout in
+    let real_oc = Unix.out_channel_of_descr real_out_fd in
+    let (pipe_r, pipe_w) = Unix.pipe () in
+    Unix.dup2 pipe_w Unix.stdout;
+    Unix.close pipe_w;
+    set_binary_mode_in stdin true;
+
+    let session =
+      March_dap.Dap_session.create ~ic:stdin ~oc:real_oc ~make_program in
+    let _reader =
+      Thread.create (fun () ->
+          let buf = Bytes.create 4096 in
+          let rec loop () =
+            match Unix.read pipe_r buf 0 4096 with
+            | 0 -> ()
+            | n ->
+              March_dap.Dap_session.send_output session
+                ~category:"stdout" (Bytes.sub_string buf 0 n);
+              loop ()
+            | exception _ -> ()
+          in loop ()) ()
+    in
+    March_dap.Dap_session.serve session;
+    exit 0
+  end;
   let files = ref [] in
   let specs = [
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");

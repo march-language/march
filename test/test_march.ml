@@ -8083,6 +8083,10 @@ let test_trace_recording () =
     dc_depth     = 0;
     dc_on_dbg    = None;
     dc_actor_log = [];
+    dc_breakpoints = Hashtbl.create 16;
+    dc_step        = March_eval.Eval.Run;
+    dc_on_pause    = None;
+    dc_last_line   = None;
   } in
   March_eval.Eval.debug_ctx := Some ctx;
   let src = "1 + 2" in
@@ -8181,6 +8185,10 @@ let test_trace_overflow () =
     dc_depth     = 0;
     dc_on_dbg    = None;
     dc_actor_log = [];
+    dc_breakpoints = Hashtbl.create 16;
+    dc_step        = March_eval.Eval.Run;
+    dc_on_pause    = None;
+    dc_last_line   = None;
   } in
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3 + 4" in

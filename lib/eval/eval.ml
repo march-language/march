@@ -494,6 +494,16 @@ type actor_msg_event = {
   ame_frame_idx    : int;            (* trace ring index at time of dispatch *)
 }
 
+(** Stepping mode for an editor-driven (DAP) debug session.
+    The [int] payloads record the call depth captured when the step was
+    requested, so step-over/step-out know which frame to return to. *)
+type step_mode =
+  | Run                  (* continue until a breakpoint is hit *)
+  | Pause                (* stop at the next evaluated expression *)
+  | StepInto             (* stop at the next source line, descending into calls *)
+  | StepOver of int      (* stop at the next line at depth <= captured depth *)
+  | StepOut  of int      (* stop once depth < captured depth *)
+
 type debug_ctx = {
   dc_trace         : trace_frame ring;
   mutable dc_pos   : int;       (* navigation cursor; 0 = most recent *)
@@ -501,6 +511,17 @@ type debug_ctx = {
   mutable dc_depth : int;       (* current call depth *)
   mutable dc_on_dbg : (env -> unit) option;
   mutable dc_actor_log : actor_msg_event list;  (* per-actor message history *)
+  (* ---- Editor-driven stepping (DAP). Unused by the terminal REPL debugger. ---- *)
+  mutable dc_breakpoints : (string * int, unit) Hashtbl.t;
+  (* Active breakpoints keyed by (file, 1-indexed line). *)
+  mutable dc_step : step_mode;
+  (* Current stepping intent; consulted on every evaluated expression. *)
+  mutable dc_on_pause : (env -> span -> unit) option;
+  (* Called when execution should stop; blocks the eval thread until the
+     controller assigns the next [dc_step] and resumes. None = no pausing. *)
+  mutable dc_last_line : (string * int) option;
+  (* Last (file,line) we stopped on — suppresses re-stopping on the same
+     source line as evaluation walks its sub-expressions. *)
 }
 
 (** Snapshot the current actor state. Deep-copies mutable fields. *)
@@ -6667,6 +6688,38 @@ and eval_match (env : env) (match_span : span) (v : value) (branches : branch li
   in
   go 0 branches
 
+(** Editor-driven (DAP) pause check. Consulted on every evaluated expression
+    when a debug context with an [dc_on_pause] callback is installed.
+
+    Stops (calls [dc_on_pause], which blocks until the controller assigns the
+    next [dc_step] and resumes) when the current source line first becomes
+    active and either a breakpoint sits on it or the active step mode says so.
+    Tracking the last line — updated on every call — gives line-granular
+    stepping (no stop on each sub-expression of a line) while still re-stopping
+    when control loops back to the same line. *)
+and maybe_pause (ctx : debug_ctx) (env : env) (e : expr) : unit =
+  match ctx.dc_on_pause with
+  | None -> ()
+  | Some on_pause ->
+    let sp = span_of_expr e in
+    let line = sp.start_line in
+    if line <= 0 then ()
+    else begin
+      let key = (sp.file, line) in
+      let line_changed = ctx.dc_last_line <> Some key in
+      ctx.dc_last_line <- Some key;
+      let hit_bp = line_changed && Hashtbl.mem ctx.dc_breakpoints key in
+      let step_stop =
+        match ctx.dc_step with
+        | Run        -> false
+        | Pause      -> true
+        | StepInto   -> line_changed
+        | StepOver d -> line_changed && ctx.dc_depth <= d
+        | StepOut  d -> line_changed && ctx.dc_depth <  d
+      in
+      if step_stop || hit_bp then on_pause env sp
+    end
+
 (** Tracing wrapper around [eval_expr_inner].
     When debug mode is active, records a [trace_frame] for every evaluation step.
     When [!debug_ctx] is None, this is a single pointer deref — zero overhead.
@@ -6678,6 +6731,7 @@ and eval_expr (env : env) (e : expr) : value =
   | None | Some { dc_enabled = false; _ } ->
     eval_expr_inner env e
   | Some ctx ->
+    maybe_pause ctx env e;
     let outcome =
       try `Ok (eval_expr_inner env e)
       with exn -> `Err exn

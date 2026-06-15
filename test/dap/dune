@@ -1,0 +1,4 @@
+(test
+ (name test_dap)
+ (libraries yojson alcotest unix)
+ (deps %{exe:../../bin/main.exe}))
