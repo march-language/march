@@ -2629,6 +2629,51 @@ end|} in
        Alcotest.(check int) "counts only the 2 genuine shared captures" 2 pi_count
      | _ -> ())
 
+(* Regression: closures buried inside an ~H"…" sigil must be visible to the
+   closure-capture analysis. The old hand walk in collect_lambda_captures fell
+   through to `_ -> ()` on ESigil (and ECond), so closures inside interpolated
+   templates were invisible. Two closures share {a, b} → one ClosureCapture. *)
+let test_closure_capture_inside_sigil () =
+  let src = {|mod M do
+  fn page() do
+    let a = 1
+    let b = 2
+    ~H"<div>${fn _ -> a + b}${fn _ -> a + b}</div>"
+  end
+end|} in
+  match List.find_opt (fun (pi : An.perf_insight) ->
+      match pi.An.pi_kind with An.ClosureCapture _ -> true | _ -> false)
+      (perf_insights_of src) with
+  | None ->
+    Alcotest.fail "expected a closure-capture insight for closures inside ~H sigil"
+  | Some pi ->
+    (match pi.An.pi_kind with
+     | An.ClosureCapture { pi_count; pi_names } ->
+       Alcotest.(check int) "two genuine shared captures inside sigil" 2 pi_count;
+       Alcotest.(check bool) "captures are a and b" true
+         (List.mem "a" pi_names && List.mem "b" pi_names)
+     | _ -> ())
+
+(* Regression: closures inside a `match do … end` boolean chain (ECond, which
+   survives desugar) must also be visible. Old hand walk fell through ECond. *)
+let test_closure_capture_inside_cond () =
+  let src = {|mod M do
+  fn pick(n : Int) do
+    let a = 1
+    let b = 2
+    match do
+      n > 0 -> fn _ -> a + b
+      _ -> fn _ -> a + b
+    end
+  end
+end|} in
+  Alcotest.(check bool) "closure-capture insight found inside match do (ECond)" true
+    (List.exists (fun (pi : An.perf_insight) ->
+         match pi.An.pi_kind with
+         | An.ClosureCapture { pi_count; _ } -> pi_count = 2
+         | _ -> false)
+       (perf_insights_of src))
+
 (** Helper: true if insights list contains at least one ClosureCapture
     with [pi_count] ≥ [min_count]. *)
 let has_large_closure ?(min_count = 3) insights =
@@ -5041,6 +5086,8 @@ let () =
       "closure_capture hint in diagnostics",      `Quick, test_perf_closure_capture_hint_in_diagnostics;
       "closure count is accurate",                `Quick, test_perf_closure_count_accurate;
       "captures exclude top-level functions",     `Quick, test_closure_capture_excludes_globals;
+      "closures inside ~H sigil are seen",         `Quick, test_closure_capture_inside_sigil;
+      "closures inside match do (ECond) are seen", `Quick, test_closure_capture_inside_cond;
     ];
     "perf insights: actor send copy", [
       "actor send analysis does not crash",           `Quick, test_perf_actor_send_copy_detected;

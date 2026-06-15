@@ -1180,6 +1180,34 @@ let rec pat_bound_names (pat : Ast.pattern) =
     List.concat_map (fun (_, p) -> pat_bound_names p) fs
   | _ -> []
 
+(** Visit every sub-expression of [e] (including [e] itself), pre-order. *)
+let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
+  f e;
+  match e with
+  | Ast.EApp (g, args, _) -> iter_expr f g; List.iter (iter_expr f) args
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
+    List.iter (iter_expr f) args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> iter_expr f body
+  | Ast.EBlock (es, _) -> List.iter (iter_expr f) es
+  | Ast.ELet (b, _) -> iter_expr f b.Ast.bind_expr
+  | Ast.EMatch (subj, brs, _) ->
+    iter_expr f subj;
+    List.iter (fun (br : Ast.branch) ->
+        (match br.branch_guard with Some g -> iter_expr f g | None -> ());
+        iter_expr f br.branch_body) brs
+  | Ast.ECond (arms, _) ->
+    List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
+  | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
+  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
+  | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
+  | Ast.ERecordUpdate (e2, fs, _) ->
+    iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
+  | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
+  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
+  | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
+  | Ast.EDbg (None, _) -> ()
+
 (** Collect free variable names in [body] that are not the lambda's own
     [params].  These are the values the closure must capture. *)
 let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
@@ -1239,33 +1267,23 @@ let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
 let collect_lambda_captures is_global (body : Ast.expr)
   : (Ast.span * Ast.span * string list) list =
   let found = ref [] in
-  let rec walk (e : Ast.expr) =
-    (match e with
-     | Ast.ELam (params, lbody, sp) ->
-       let caps =
-         lambda_free_vars params lbody
-         |> List.filter (fun nm -> not (is_global nm))
-         |> List.sort_uniq String.compare
-       in
-       if List.length caps >= 2 then
-         found := (sp, span_of_expr lbody, caps) :: !found;
-       walk lbody
-     | Ast.EApp (f, args, _) -> walk f; List.iter walk args
-     | Ast.EBlock (es, _) -> List.iter walk es
-     | Ast.ELet (b, _) -> walk b.Ast.bind_expr
-     | Ast.ELetFn (_, _, _, b, _) -> walk b
-     | Ast.EIf (c, t, f, _) -> walk c; walk t; walk f
-     | Ast.EMatch (subj, brs, _) ->
-       walk subj; List.iter (fun (br : Ast.branch) -> walk br.Ast.branch_body) brs
-     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk a; walk b
-     | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) -> List.iter walk es
-     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk e) fs
-     | Ast.ERecordUpdate (e, fs, _) -> walk e; List.iter (fun (_, e) -> walk e) fs
-     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
-     | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) -> walk e
-     | _ -> ())
-  in
-  walk body; !found
+  (* [iter_expr] is the canonical generic visitor: it descends INTO ELam bodies
+     (so nested lambdas are still collected, matching the old [walk lbody]) and
+     covers every form including ECond and ESigil (the ~H interpolation) that
+     the old hand walk fell through on. *)
+  iter_expr (fun e ->
+      match e with
+      | Ast.ELam (params, lbody, sp) ->
+        let caps =
+          lambda_free_vars params lbody
+          |> List.filter (fun nm -> not (is_global nm))
+          |> List.sort_uniq String.compare
+        in
+        if List.length caps >= 2 then
+          found := (sp, span_of_expr lbody, caps) :: !found
+      | _ -> ())
+    body;
+  !found
 
 (* A ClosureCapture insight fires only when the SAME genuine capture set (≥2
    values) is shared by ≥2 closures in [body] — a clump that travels together,
@@ -3890,34 +3908,6 @@ let indent_of_line src line0 =
     Buffer.add_char buf src.[!i]; incr i
   done;
   Buffer.contents buf
-
-(** Visit every sub-expression of [e] (including [e] itself), pre-order. *)
-let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
-  f e;
-  match e with
-  | Ast.EApp (g, args, _) -> iter_expr f g; List.iter (iter_expr f) args
-  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
-    List.iter (iter_expr f) args
-  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> iter_expr f body
-  | Ast.EBlock (es, _) -> List.iter (iter_expr f) es
-  | Ast.ELet (b, _) -> iter_expr f b.Ast.bind_expr
-  | Ast.EMatch (subj, brs, _) ->
-    iter_expr f subj;
-    List.iter (fun (br : Ast.branch) ->
-        (match br.branch_guard with Some g -> iter_expr f g | None -> ());
-        iter_expr f br.branch_body) brs
-  | Ast.ECond (arms, _) ->
-    List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
-  | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
-  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
-  | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
-  | Ast.ERecordUpdate (e2, fs, _) ->
-    iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
-  | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
-  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
-  | Ast.EDbg (Some e2, _) -> iter_expr f e2
-  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
-  | Ast.EDbg (None, _) -> ()
 
 (** Visit every expression occurring in declaration [d] (recursing into
     nested modules). *)

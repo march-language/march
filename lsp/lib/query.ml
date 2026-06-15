@@ -37,7 +37,10 @@ let references (a : Analysis.t) ~include_declaration ~line ~utf16_char : locatio
   |> List.map location_of
 
 let diagnostics (a : Analysis.t) : Lsp.Types.Diagnostic.t list =
-  a.Analysis.diagnostics
+  (* [a.diagnostics] carry byte-column ranges; remap to UTF-16 to honour this
+     module's "positions are UTF-16" contract (the server does the same in
+     [on_req_diagnostic]). *)
+  List.map (Position.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics
 
 let completions (a : Analysis.t) ~line ~utf16_char : Lsp.Types.CompletionItem.t list =
   Analysis.query_completions_at a ~line ~utf16_char
@@ -55,6 +58,10 @@ type symbol = { sym_name : string; sym_kind : string; sym_range : int * int * in
 let symbols (a : Analysis.t) : symbol list =
   match Analysis.document_symbols a with
   | `DocumentSymbol syms ->
+    (* [document_symbols] ranges are byte columns; remap to UTF-16 (the server
+       does this via [Pos.remap_document_symbol] in [on_req_symbol]) so the
+       module's "positions are UTF-16" contract holds. *)
+    let syms = List.map (Position.remap_document_symbol a.Analysis.doc) syms in
     List.map (fun (s : Lsp.Types.DocumentSymbol.t) ->
         let r = s.Lsp.Types.DocumentSymbol.range in
         let kind =

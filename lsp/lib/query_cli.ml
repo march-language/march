@@ -146,9 +146,8 @@ let run_to_string (args : string list) ~src_override : string =
               (March_format.Format.format_source ~filename:file src)
         with _ -> src)
      | "diagnostics" ->
-       (* Remap byte-column ranges to UTF-16 for client-consistent output. *)
-       let ds = List.map (Position.remap_diagnostic a.Analysis.doc)
-                  (Query.diagnostics a) in
+       (* [Query.diagnostics] already returns UTF-16 ranges. *)
+       let ds = Query.diagnostics a in
        let one (d : Lsp.Types.Diagnostic.t) =
          let r = d.Lsp.Types.Diagnostic.range in
          Printf.sprintf "{\"message\":%s,\"range\":%s}" (jstr (diag_message d))
