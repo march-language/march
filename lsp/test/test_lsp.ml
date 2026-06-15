@@ -4851,6 +4851,32 @@ end|} in
   Alcotest.(check bool) "valid island not flagged" false flagged
 
 (* ------------------------------------------------------------------ *)
+(* Island component name completion                                    *)
+(* ------------------------------------------------------------------ *)
+
+let test_island_name_completion () =
+  (* Cursor immediately after name=' inside an ~H sigil should offer modules
+     that are valid island components (have both create and render members).
+     pos_of finds the start of "name='" — the cursor is 6 bytes further right,
+     just after the opening quote. *)
+  let src = {|mod App do
+  mod Counter do
+    fn create(n : Int) : Int do n end
+    fn render(s : Int) : IOList do ~H"<p>${s}</p>" end
+  end
+  fn page() : IOList do
+    ~H"<island name='"
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "name='" in
+  (* +6 = length of "name='" — positions cursor just after the opening quote *)
+  let items = An.completions_at a ~line:l ~character:(c + 6) in
+  let labels = List.map (fun (it : Lsp.Types.CompletionItem.t) -> it.label) items in
+  Alcotest.(check bool) "offers Counter as an island component" true
+    (List.mem "Counter" labels)
+
+(* ------------------------------------------------------------------ *)
 (* Cross-file project analysis                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -4968,6 +4994,9 @@ let () =
     "island component validation", [
       "known module lacking create/render emits html/unknown-island", `Quick, test_island_known_but_invalid_flagged;
       "valid island with create+render is not flagged",               `Quick, test_island_valid_not_flagged;
+    ];
+    "island component name completion", [
+      "Counter offered after name=' in ~H sigil", `Quick, test_island_name_completion;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;

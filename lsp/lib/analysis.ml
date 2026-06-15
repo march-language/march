@@ -3425,9 +3425,54 @@ let import_text_edit (a : t) ~module_ ~name : Lsp.Types.TextEdit.t option =
   let fallback_line = if fallback_line = max_int then 2 else fallback_line in
   compute_import_edit ~imports:a.imports ~fallback_line ~module_ ~name
 
+(** Detect if [prefix] (text from sigil start to cursor) ends with
+    [name=''] or [name=""] and the nearest preceding '<' begins '<island'. *)
+let is_island_name_context (prefix : string) : bool =
+  (* Must end with name=single-quote or name=double-quote *)
+  let n = String.length prefix in
+  let suffix_match =
+    (n >= 6 && String.sub prefix (n - 6) 6 = "name='")
+    || (n >= 6 && String.sub prefix (n - 6) 6 = "name=\"")
+  in
+  if not suffix_match then false
+  else begin
+    (* Scan back for the nearest '<' and check the tag starts with 'island' *)
+    let i = ref (n - 7) in
+    while !i >= 0 && prefix.[!i] <> '<' do decr i done;
+    if !i < 0 then false
+    else
+      let rest_len = n - !i in
+      rest_len >= 7 && String.sub prefix !i 7 = "<island"
+  end
+
 let completions_at (a : t) ~line ~character =
   match dot_completions a ~line ~character with
   | Some items -> items   (* in `receiver.`: only the receiver's members *)
+  | None ->
+  (* ------------------------------------------------------------------ *)
+  (* Island-name context: cursor just after <island name=' or name=''    *)
+  (* ------------------------------------------------------------------ *)
+  (* pos_to_ofs takes 1-indexed line; line here is 0-indexed *)
+  let cur_ofs = pos_to_ofs a.src (line + 1) character in
+  let island_items =
+    List.find_map (fun (s : h_sigil) ->
+        if s.hs_base_ofs <= cur_ofs && cur_ofs <= s.hs_close_ofs then begin
+          let rel = cur_ofs - s.hs_base_ofs in
+          let prefix = String.sub s.hs_content 0 rel in
+          if is_island_name_context prefix then
+            Some (List.filter_map (fun (name, members) ->
+                if List.mem "create" members && List.mem "render" members then
+                  Some (Lsp.Types.CompletionItem.create
+                          ~label:name
+                          ~kind:Lsp.Types.CompletionItemKind.Class ())
+                else None
+              ) a.module_index)
+          else None
+        end else None
+      ) a.h_sigils
+  in
+  (match island_items with
+  | Some items -> items
   | None ->
   let open Lsp.Types in
   let kw_items = List.map (fun kw ->
@@ -3527,6 +3572,7 @@ let completions_at (a : t) ~line ~character =
   @ rank "5" iface_items
   @ rank "6" sigil_items
   @ auto_items
+  ) (* end match island_items *)
 
 (* ------------------------------------------------------------------ *)
 (* Parameter-name inlay hints at call sites                            *)
