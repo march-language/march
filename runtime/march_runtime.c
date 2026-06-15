@@ -2898,19 +2898,24 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
  */
 void march_send_checked(void *cap, void *msg) {
     if (!cap || !IS_HEAP_PTR(cap)) {
-        if (msg) march_decrc(msg);
+        march_decrc(msg);
         return;
     }
     int64_t *cap_words = (int64_t *)cap;
     void    *actor     = (void *)(uintptr_t)cap_words[2];
     int64_t  pidx      = cap_words[3];
     int64_t  epoch     = cap_words[4];
-    march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
-        if (msg) march_decrc(msg);
+    if (revoc_contains(pidx, epoch)) {
+        march_decrc(msg);
         return;
     }
-    march_send(actor, msg);
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
+        march_decrc(msg);
+        return;
+    }
+    void *result = march_send(actor, msg);
+    march_decrc(result);
 }
 
 /* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */
