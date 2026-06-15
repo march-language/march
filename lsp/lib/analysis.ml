@@ -2051,10 +2051,21 @@ let dup_attrs_in_sigil ~(src : string) (s : h_sigil)
       while !j < n && (!inq || c.[!j] <> '>') do
         let d = c.[!j] in
         if !inq then begin
-          if d = !q then inq := false;
-          incr j
+          (* ${…} inside a quoted attribute value — skip balanced braces so
+             that a string literal inside the interpolation using the SAME
+             quote char does not prematurely close the outer attribute quote. *)
+          if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
+            j := !j + 2; let depth = ref 1 in
+            while !depth > 0 && !j < n do
+              (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+              incr j
+            done
+          end else begin
+            if d = !q then inq := false;
+            incr j
+          end
         end
-        (* ${…} interpolation inside attribute region — skip. *)
+        (* ${…} interpolation inside attribute region (outside quotes) — skip. *)
         else if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
           j := !j + 2; let depth = ref 1 in
           while !depth > 0 && !j < n do
@@ -2441,7 +2452,7 @@ let collect_h_fold_ranges ~(src : string) (sigils : h_sigil list)
 let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
   let acc = ref [] in
   let consider name (sp : Ast.span) =
-    if String.uppercase_ascii name = "H" then begin
+    if name = "H" then begin
       let start_ofs = pos_to_ofs src sp.Ast.start_line sp.Ast.start_col in
       match extract_h_content src start_ofs (String.length name) with
       | None -> ()
@@ -2505,12 +2516,45 @@ let islands_in_sigil ~(src : string) (s : h_sigil) : island_ref list =
     in
     go start
   in
+  (* Scan forward from [start] respecting quoted attribute values and
+     ${...} interpolations, returning the offset of the first '>' that
+     is NOT inside a quote or interpolation (i.e. the real tag-end). *)
+  let tag_end_from start =
+    let j = ref start in
+    while !j < n && c.[!j] <> '>' do
+      let ch = c.[!j] in
+      if ch = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
+        (* ${...} interpolation: skip balanced braces *)
+        j := !j + 2; let depth = ref 1 in
+        while !depth > 0 && !j < n do
+          (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+          incr j
+        done
+      end else if ch = '"' || ch = '\'' then begin
+        (* Quoted attribute value: skip until matching close quote,
+           also skipping ${...} inside the value. *)
+        let q = ch in
+        incr j;
+        while !j < n && c.[!j] <> q do
+          if c.[!j] = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
+            j := !j + 2; let depth = ref 1 in
+            while !depth > 0 && !j < n do
+              (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+              incr j
+            done
+          end else
+            incr j
+        done;
+        if !j < n then incr j  (* skip closing quote *)
+      end else
+        incr j
+    done;
+    !j  (* offset of '>' or n if not found *)
+  in
   let i = ref 0 in
   while !i < n do
     if !i + 7 <= n && String.sub c !i 7 = "<island" then begin
-      let tag_end =
-        match find_from ">" !i with -1 -> n | e -> e
-      in
+      let tag_end = tag_end_from !i in
       (* Try to extract name='X' or name="X" within the tag. *)
       let name_at q =
         let p = "name=" ^ String.make 1 q in
@@ -2543,8 +2587,9 @@ let islands_in_sigil ~(src : string) (s : h_sigil) : island_ref list =
   done;
   List.rev !out
 
-(* Collect unclosed-tag issues across all ~H sigils in [decls]. *)
-let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue list =
+(* Collect unclosed-tag issues across a precomputed list of ~H sigils.
+   Accepts the already-computed [h_sigil list] to avoid a redundant AST walk. *)
+let collect_html_issues ~(src : string) (sigils : h_sigil list) : html_issue list =
   let issues = ref [] in
   List.iter (fun (s : h_sigil) ->
       let unclosed = scan_html_unclosed s.hs_content in
@@ -2563,7 +2608,7 @@ let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue lis
                         hi_insert_span = insert_span; hi_closer = closer } :: !issues)
           unclosed
       end)
-    (collect_h_sigils ~src decls);
+    sigils;
   !issues
 
 (* ------------------------------------------------------------------ *)
@@ -3343,7 +3388,7 @@ let analyse ~filename ~src : t =
         type_map user_decls in
     let perf_diags = List.map perf_insight_to_diag perf_insights in
     let h_sigils = collect_h_sigils ~src user_decls in
-    let html_issues = collect_html_issues ~src user_decls in
+    let html_issues = collect_html_issues ~src h_sigils in
     let html_diags =
       List.map (fun (hi : html_issue) ->
           Lsp.Types.Diagnostic.create
@@ -7253,37 +7298,71 @@ let autoclose_tag_at (a : t) ~line ~character : Lsp.Types.TextEdit.t option =
         (* The character just before the cursor must be '>'. *)
         if pn = 0 || pre.[pn - 1] <> '>' then None
         else begin
-          (* Find the nearest '<' that starts an open (not close) tag. *)
-          let i = ref (pn - 2) in
-          (* skip back over any attribute text, respecting quotes *)
-          while !i >= 0 && pre.[!i] <> '<' do decr i done;
-          if !i < 0 then None
+          (* Scan FORWARD through [pre] with ${…}/quote-aware skip rules,
+             tracking the last '<tag' that was encountered at the top level
+             (not inside an interpolation or quoted attribute value).
+             The last such open-tag position is the tag whose '>' we just typed. *)
+          let last_open_lt = ref (-1) in  (* offset of last real '<tag' *)
+          let k = ref 0 in
+          while !k < pn - 1 do  (* pn-1 is the trailing '>' itself *)
+            let ch = pre.[!k] in
+            (* ${…} interpolation: skip balanced braces *)
+            if ch = '$' && !k + 1 < pn && pre.[!k + 1] = '{' then begin
+              k := !k + 2; let depth = ref 1 in
+              while !depth > 0 && !k < pn do
+                (match pre.[!k] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+                incr k
+              done
+            end
+            (* Quoted attribute value: skip until matching close quote,
+               also skipping ${…} inside the value. *)
+            else if (ch = '"' || ch = '\'') then begin
+              let q = ch in
+              incr k;
+              while !k < pn && pre.[!k] <> q do
+                if pre.[!k] = '$' && !k + 1 < pn && pre.[!k + 1] = '{' then begin
+                  k := !k + 2; let depth = ref 1 in
+                  while !depth > 0 && !k < pn do
+                    (match pre.[!k] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+                    incr k
+                  done
+                end else
+                  incr k
+              done;
+              if !k < pn then incr k  (* skip closing quote *)
+            end
+            (* '<' at top level — check if it's a real open tag. *)
+            else if ch = '<' then begin
+              if !k + 1 < pn then begin
+                let nx = pre.[!k + 1] in
+                if (nx >= 'a' && nx <= 'z') || (nx >= 'A' && nx <= 'Z') then
+                  last_open_lt := !k
+              end;
+              incr k
+            end
+            else incr k
+          done;
+          if !last_open_lt < 0 then None
           else begin
-            let lt = !i in
-            (* Must be '<' followed by a letter — open tag, not '</' or '<!--' *)
+            let lt = !last_open_lt in
             if lt + 1 >= pn then None
             else begin
-              let first = pre.[lt + 1] in
-              if not ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))
-              then None
+              (* Parse the tag name at lt+1. *)
+              let j = ref (lt + 1) in
+              while !j < pn && is_nc pre.[!j] do incr j done;
+              let tag = String.lowercase_ascii (String.sub pre (lt + 1) (!j - lt - 1)) in
+              (* Self-closing: char before '>' is '/' *)
+              let self_closing = pn >= 2 && pre.[pn - 2] = '/' in
+              (* Void element *)
+              let is_void = List.mem tag html_void_elements in
+              (* Island element (self-renders; skip) *)
+              let is_island = tag = "island" in
+              if self_closing || is_void || is_island then None
               else begin
-                (* Parse the tag name *)
-                let j = ref (lt + 1) in
-                while !j < pn && is_nc pre.[!j] do incr j done;
-                let tag = String.lowercase_ascii (String.sub pre (lt + 1) (!j - lt - 1)) in
-                (* Self-closing: char before '>' is '/' *)
-                let self_closing = pn >= 2 && pre.[pn - 2] = '/' in
-                (* Void element *)
-                let is_void = List.mem tag html_void_elements in
-                (* Island element (self-renders; skip) *)
-                let is_island = tag = "island" in
-                if self_closing || is_void || is_island then None
-                else begin
-                  let open Lsp.Types in
-                  let pos = Position.create ~line ~character in
-                  let range = Range.create ~start:pos ~end_:pos in
-                  Some (TextEdit.create ~range ~newText:("</" ^ tag ^ ">"))
-                end
+                let open Lsp.Types in
+                let pos = Position.create ~line ~character in
+                let range = Range.create ~start:pos ~end_:pos in
+                Some (TextEdit.create ~range ~newText:("</" ^ tag ^ ">"))
               end
             end
           end

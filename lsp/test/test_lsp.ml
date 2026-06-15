@@ -5225,6 +5225,84 @@ end|} in
   | Some _ -> Alcotest.fail "should not auto-close void element <br>"
 
 (* ------------------------------------------------------------------ *)
+(* Bug 1 regression: autoclose_tag_at with ${} interpolation          *)
+(* ------------------------------------------------------------------ *)
+
+(* Typing > after a div whose class attribute contains an interpolation
+   that contains a string literal with a less-than sign must auto-close
+   the outer div, not a span from inside the interpolation.
+   Triple-quoted sigil is used so the inner span string is valid March. *)
+let test_autoclose_tag_with_interpolation_lt () =
+  (* Triple-quoted sigil: class="${"<span>"}" -- the <span> is inside ${},
+     not real HTML. The typed > closes the outer <div>. *)
+  let src = "mod M do\n  fn page() : IOList do\n    ~H\"\"\"<div class=\"${\"<span>\"}\">\"\"\"  \n  end\nend" in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  (* pos_of finds the closing angle-bracket of the div open-tag;
+     advancing by 2 puts the cursor just after the > character. *)
+  let (line, col_of_gt) = pos_of src "\">" in
+  let character = col_of_gt + 2 in
+  (match An.autoclose_tag_at a ~line ~character with
+  | Some te ->
+    Alcotest.(check string) "autoclose inserts </div> not </span>"
+      "</div>" te.Lsp.Types.TextEdit.newText
+  | None ->
+    Alcotest.fail "expected auto-close edit for outer <div>")
+
+(* ------------------------------------------------------------------ *)
+(* Bug 2 regression: dup_attrs false positive with ${} in quoted val  *)
+(* ------------------------------------------------------------------ *)
+
+let test_dup_attr_no_false_positive_with_interp_in_quoted_val () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"""<div class="${"format"}" format="x">"""
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "html/duplicate-attr") -> true | _ -> false)
+    a.An.diagnostics in
+  Alcotest.(check bool)
+    "interpolation inside quoted value must not cause false dup-attr" false flagged
+
+(* ------------------------------------------------------------------ *)
+(* Bug 3 regression: islands_in_sigil with '>' inside attribute value *)
+(* ------------------------------------------------------------------ *)
+
+(* An island tag whose data attribute value contains a closing angle bracket:
+   name='Counter' must still be found despite the misleading '>' in data-x. *)
+let test_island_gt_in_attr_value () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<island data-x=\">\" name='Counter' />"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let islands = List.concat_map (An.islands_in_sigil ~src) a.An.h_sigils in
+  Alcotest.(check int) "one island found despite '>' in attr value" 1
+    (List.length islands);
+  let isl = List.hd islands in
+  Alcotest.(check string) "island name is Counter" "Counter" isl.An.isl_name
+
+(* ------------------------------------------------------------------ *)
+(* Nit A regression: ~h (lowercase) must NOT be treated as ~H sigil   *)
+(* ------------------------------------------------------------------ *)
+
+let test_lowercase_h_sigil_not_collected () =
+  (* ~h"…" with lowercase h must not be collected as an HTML sigil. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~h"<div>"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  Alcotest.(check int) "lowercase ~h sigil not collected as H sigil" 0
+    (List.length a.An.h_sigils)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -5663,5 +5741,15 @@ let () =
     "~H auto-close on typing >", [
       "autoclose_tag_at inserts </div> after <div>", `Quick, test_autoclose_tag;
       "autoclose_tag_at returns None for void element <br>", `Quick, test_autoclose_void_tag;
+      "autoclose with ${} interp containing '<' closes outer tag", `Quick, test_autoclose_tag_with_interpolation_lt;
+    ];
+    "~H duplicate attr lint: interpolation edge cases", [
+      "no false dup-attr when attr value contains ${} with same-named key", `Quick, test_dup_attr_no_false_positive_with_interp_in_quoted_val;
+    ];
+    "~H island: '>' in attribute value", [
+      "island name found even when data attr value contains '>'", `Quick, test_island_gt_in_attr_value;
+    ];
+    "~H sigil exact-case match", [
+      "lowercase ~h sigil not collected as HTML sigil", `Quick, test_lowercase_h_sigil_not_collected;
     ];
   ]
