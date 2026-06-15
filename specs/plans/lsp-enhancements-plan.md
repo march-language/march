@@ -1237,6 +1237,22 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 **Summary: all 22 features done.** Minor follow-ups only: #13b unbound-module →
 suggest alias; #17 shared whole-project type environment (currently per-file).
 
+## Phase 7 — Editor-integration gaps (kicked off 2026-06-15)
+
+A feature-coverage audit (capabilities + handlers + code-lens/inlay payloads)
+found the LSP broad but missing four high-leverage, March-specific integrations.
+Each is being implemented by a dedicated subagent in its own git worktree (to
+avoid `server.ml`/`analysis.ml` clobbering), then integrated.
+
+| # | Feature | Status | Notes |
+|---|---------|--------|-------|
+| 23 | **Run/Debug code lenses** | 🚧 In progress | Code lenses currently carry only a static title (no `Command`), and there is **no `workspace/executeCommand`**. Add actionable `▶ Run` / `🐞 Debug` lenses above `test` blocks, doctests, and `main`, wired through `workspace/executeCommand` to `forge test` / `march dap`. Highest UX-per-effort: reuses the existing test runner + DAP debugger. Touches `analysis.ml` (lens generation with `Command`), `server.ml` (executeCommandProvider + handler, codeLens command payloads). |
+| 24 | **Standalone `march-lsp query` CLI** | 🚧 In progress | The transport-agnostic `query.ml` core already exists; `lsp/bin/query_cli.ml` was planned (best-in-class Phase 2) but never built. Add `march-lsp query <feature> <file> --line N --col M` emitting JSON to stdout, so an LLM/CI can drive the analyzer headless. Touches `lsp/bin/query_cli.ml` (new), `lsp/bin/main.ml` (dispatch), `lsp/bin/dune`. Low overlap with the others. |
+| 25 | **Parameter-name inlay hints** | 🚧 In progress | Inlays today are types + FBIP only. Add `foo(width:, height:)` parameter-name hints at call sites (positional args in a functional language). Touches `analysis.ml` inlay generation (+ the existing `march.inlayHints.*` toggle pattern). |
+| 26 | **DAP inline values** (`textDocument/inlineValue`) | 🚧 In progress | Pairs with the existing DAP debugger to render variable values inline while stepping. Add `inlineValueProvider` capability + handler computing `InlineValueVariableLookup`/`InlineValueText` over the in-scope bindings of the stopped frame. Touches `server.ml` (capability + handler) and `analysis.ml` (in-scope binding spans). |
+
+Integration order after the subagents finish: #24 (mostly new files) → #25 (analysis-only) → #23 and #26 (resolve the shared `server.ml` capability-block / handler-dispatch conflicts last). Update this table to ✅ Done and move the items into the list below as each lands, per the spec-maintenance rule.
+
 ### Delivered beyond the original 22 features
 
 Work that shipped but was not a numbered feature in this plan:
