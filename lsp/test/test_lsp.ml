@@ -2602,6 +2602,31 @@ let has_non_tail_call insights =
       | _ -> false
     ) insights
 
+(** Captures must exclude top-level/global functions (a closure doesn't allocate
+    to hold references to statically-known top-level functions). *)
+let test_closure_capture_excludes_globals () =
+  let src = {|mod M do
+  fn helper1(x : Int) : Int do x end
+  fn helper2(x : Int) : Int do x end
+  fn make() do
+    let a = 1
+    let b = 2
+    let c = 3
+    fn _ -> a + b + c + helper1(0) + helper2(0)
+  end
+end|} in
+  match List.find_opt (fun (pi : An.perf_insight) ->
+      match pi.An.pi_kind with An.ClosureCapture _ -> true | _ -> false)
+      (perf_insights_of src) with
+  | None -> Alcotest.fail "expected a closure-capture insight for 3 local captures"
+  | Some pi ->
+    (match pi.An.pi_kind with
+     | An.ClosureCapture { pi_count; pi_names } ->
+       Alcotest.(check bool) "top-level functions excluded from captures" true
+         (not (List.mem "helper1" pi_names) && not (List.mem "helper2" pi_names));
+       Alcotest.(check int) "counts only the 3 genuine local captures" 3 pi_count
+     | _ -> ())
+
 (** Helper: true if insights list contains at least one ClosureCapture
     with [pi_count] ≥ [min_count]. *)
 let has_large_closure ?(min_count = 3) insights =
@@ -4134,6 +4159,43 @@ end|} in
 (* Introduce parameter object (data clump → record) detection          *)
 (* ------------------------------------------------------------------ *)
 
+let test_extract_captures_action () =
+  let src = {|mod M do
+  fn helper(x : Int) : Int do x end
+  fn make() do
+    let a = 1
+    let b = 2
+    let f = fn _ -> a + b + helper(0)
+    f
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "fn _ ->" in
+  let acts = An.code_actions_at a ~line:l ~character:c ~diagnostics:a.An.diagnostics () in
+  Alcotest.(check bool) "offers extract-captures action" true (has_title acts "captured values");
+  let edit = all_edit_texts acts "captured values" in
+  Alcotest.(check bool) "record groups the local captures a, b" true
+    (contains_sub edit "a = a" && contains_sub edit "b = b");
+  Alcotest.(check bool) "excludes the global function helper" false
+    (contains_sub edit "helper = helper");
+  Alcotest.(check bool) "rewrites the body to captured.a" true
+    (contains_sub edit "captured.a")
+
+let test_no_extract_captures_for_globals_only () =
+  (* lambda only references globals + its own param → no genuine captures *)
+  let src = {|mod M do
+  fn helper(x : Int) : Int do x end
+  fn make() do
+    let f = fn y -> helper(y)
+    f
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "fn y ->" in
+  let acts = An.code_actions_at a ~line:l ~character:c ~diagnostics:a.An.diagnostics () in
+  Alcotest.(check bool) "no extract action when nothing genuine is captured" false
+    (has_title acts "captured values")
+
 let test_bundleable_fn_detected () =
   let src = {|mod M do
   fn area(width : Int, height : Int) : Int do width * height end
@@ -4273,6 +4335,10 @@ let () =
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
       "single param not bundleable", `Quick, test_single_param_not_bundleable;
       "unannotated params not bundleable", `Quick, test_unannotated_params_not_bundleable;
+    ];
+    "extract closure captures to record", [
+      "offered for 2+ genuine captures", `Quick, test_extract_captures_action;
+      "not offered when only globals captured", `Quick, test_no_extract_captures_for_globals_only;
     ];
     "project diagnostics", [
       "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;
@@ -4550,6 +4616,7 @@ let () =
       "small closure (2 captures) not flagged",   `Quick, test_perf_small_closure_not_flagged;
       "closure_capture hint in diagnostics",      `Quick, test_perf_closure_capture_hint_in_diagnostics;
       "closure count is accurate",                `Quick, test_perf_closure_count_accurate;
+      "captures exclude top-level functions",     `Quick, test_closure_capture_excludes_globals;
     ];
     "perf insights: actor send copy", [
       "actor send analysis does not crash",           `Quick, test_perf_actor_send_copy_detected;

@@ -1226,10 +1226,12 @@ let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
   Hashtbl.fold (fun k () acc -> k :: acc) fvs []
 
 (** Walk [e] collecting perf insights for lambdas with ≥3 captures. *)
-let rec closure_capture_check (e : Ast.expr) acc =
+let rec closure_capture_check is_global (e : Ast.expr) acc =
   match e with
   | Ast.ELam (params, body, sp) ->
-    let caps = lambda_free_vars params body in
+    (* Genuine captures are local bindings only — exclude top-level/stdlib
+       functions and other globals, which a closure does not allocate to hold. *)
+    let caps = List.filter (fun nm -> not (is_global nm)) (lambda_free_vars params body) in
     let n = List.length caps in
     let acc =
       if n >= 3 then
@@ -1244,31 +1246,31 @@ let rec closure_capture_check (e : Ast.expr) acc =
           pi_message = msg } :: acc
       else acc
     in
-    closure_capture_check body acc  (* still recurse for nested lambdas *)
+    closure_capture_check is_global body acc  (* still recurse for nested lambdas *)
   | Ast.EApp (f, args, _) ->
-    let acc = closure_capture_check f acc in
-    List.fold_left (fun a e -> closure_capture_check e a) acc args
+    let acc = closure_capture_check is_global f acc in
+    List.fold_left (fun a e -> closure_capture_check is_global e a) acc args
   | Ast.EBlock (es, _) ->
-    List.fold_left (fun a e -> closure_capture_check e a) acc es
-  | Ast.ELet (b, _) -> closure_capture_check b.Ast.bind_expr acc
-  | Ast.ELetFn (_, _, _, body, _) -> closure_capture_check body acc
+    List.fold_left (fun a e -> closure_capture_check is_global e a) acc es
+  | Ast.ELet (b, _) -> closure_capture_check is_global b.Ast.bind_expr acc
+  | Ast.ELetFn (_, _, _, body, _) -> closure_capture_check is_global body acc
   | Ast.EIf (c, t, f, _) ->
-    closure_capture_check c (closure_capture_check t (closure_capture_check f acc))
+    closure_capture_check is_global c (closure_capture_check is_global t (closure_capture_check is_global f acc))
   | Ast.EMatch (subj, brs, _) ->
-    let acc = closure_capture_check subj acc in
-    List.fold_left (fun a (br : Ast.branch) -> closure_capture_check br.Ast.branch_body a) acc brs
+    let acc = closure_capture_check is_global subj acc in
+    List.fold_left (fun a (br : Ast.branch) -> closure_capture_check is_global br.Ast.branch_body a) acc brs
   | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
-    closure_capture_check a (closure_capture_check b acc)
+    closure_capture_check is_global a (closure_capture_check is_global b acc)
   | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
-    List.fold_left (fun a e -> closure_capture_check e a) acc es
+    List.fold_left (fun a e -> closure_capture_check is_global e a) acc es
   | Ast.ERecord (fs, _) ->
-    List.fold_left (fun a (_, e) -> closure_capture_check e a) acc fs
+    List.fold_left (fun a (_, e) -> closure_capture_check is_global e a) acc fs
   | Ast.ERecordUpdate (e, fs, _) ->
-    List.fold_left (fun a (_, e2) -> closure_capture_check e2 a)
-      (closure_capture_check e acc) fs
+    List.fold_left (fun a (_, e2) -> closure_capture_check is_global e2 a)
+      (closure_capture_check is_global e acc) fs
   | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
   | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) ->
-    closure_capture_check e acc
+    closure_capture_check is_global e acc
   | _ -> acc
 
 (** True when [ty] is a heap-allocated type that will be deep-copied on send
@@ -1609,6 +1611,7 @@ let recursive_alloc_check fn_name (body : Ast.expr) acc =
 (** Run all perf insight passes over [user_decls] and return the collected
     insights (Phase-1 AST passes + Phase-2 heuristics). *)
 let collect_perf_insights
+    ~(is_global : string -> bool)
     (type_map : (Ast.span, Tc.ty) Hashtbl.t)
     (user_decls : Ast.decl list) : perf_insight list =
   let acc = ref [] in
@@ -1619,13 +1622,13 @@ let collect_perf_insights
       add_all (tco_check_fn fn []);
       let fn_name = fn.Ast.fn_name.Ast.txt in
       List.iter (fun (cl : Ast.fn_clause) ->
-          add_all (closure_capture_check cl.Ast.fc_body []);
+          add_all (closure_capture_check is_global cl.Ast.fc_body []);
           add_all (send_copy_check type_map cl.Ast.fc_body []);
           add_all (indirect_call_check (clause_param_names cl) cl.Ast.fc_body []);
           add_all (recursive_alloc_check fn_name cl.Ast.fc_body [])
         ) fn.Ast.fn_clauses
     | Ast.DLet (_, b, _) ->
-      add_all (closure_capture_check b.Ast.bind_expr []);
+      add_all (closure_capture_check is_global b.Ast.bind_expr []);
       add_all (send_copy_check type_map b.Ast.bind_expr [])
     | Ast.DMod (_, _, decls, _) ->
       List.iter scan_decl decls
@@ -2488,7 +2491,10 @@ let analyse ~filename ~src : t =
     in
     List.iter collect_dm_decl user_decls;
     let demorgan_sites = !demorgan_acc in
-    let perf_insights = collect_perf_insights type_map user_decls in
+    let perf_insights =
+      collect_perf_insights
+        ~is_global:(fun n -> Tc.StrMap.mem n final_env.Tc.vars)
+        type_map user_decls in
     let perf_diags = List.map perf_insight_to_diag perf_insights in
     let html_issues = collect_html_issues ~src user_decls in
     let html_diags =
@@ -4846,6 +4852,66 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
     | _ -> []
   in
 
+  (* ---- Extract closure captures into a record (data clump in a closure) ---- *)
+  (* Cursor on a lambda capturing >=2 genuine local values → insert a record
+     `let captured = { a = a, b = b }` before the enclosing statement and rewrite
+     the body's captures to `captured.a`. Globals/top-level fns are not captures. *)
+  let extract_captures_actions =
+    let is_global n = List.mem_assoc n a.vars in
+    match smallest_expr_at a ~line ~character ~pred:(function Ast.ELam _ -> true | _ -> false) with
+    | Some (Ast.ELam (params, body, lam_sp)) ->
+      let caps =
+        lambda_free_vars params body
+        |> List.filter (fun n -> not (is_global n))
+        |> List.sort_uniq String.compare
+      in
+      if List.length caps < 2 then []
+      else begin
+        let body_sp = span_of_expr body in
+        (* Find the innermost block element (statement) that CONTAINS the whole
+           lambda — that's where `let captured = …` goes. An element inside the
+           lambda body can't contain the lambda, so it won't be chosen.
+           iter_decl_exprs visits every expr (outer blocks before inner), so the
+           last write wins → innermost enclosing statement. *)
+        (* Inclusive span ⊇ span (boundary-safe: the enclosing `let f = <lambda>`
+           ends exactly where the lambda ends). *)
+        let contains_lambda (s : Ast.span) =
+          (s.Ast.start_line < lam_sp.Ast.start_line
+           || (s.Ast.start_line = lam_sp.Ast.start_line && s.Ast.start_col <= lam_sp.Ast.start_col))
+          && (s.Ast.end_line > lam_sp.Ast.end_line
+              || (s.Ast.end_line = lam_sp.Ast.end_line && s.Ast.end_col >= lam_sp.Ast.end_col))
+        in
+        let target = ref None in
+        let we (e : Ast.expr) =
+          match e with
+          | Ast.EBlock (es, _) ->
+            List.iter (fun el ->
+                if contains_lambda (span_of_expr el) then target := Some (span_of_expr el)) es
+          | _ -> ()
+        in
+        List.iter (fun d -> iter_decl_exprs we d) a.decls;
+        match !target with
+        | None -> []   (* lambda not in a statement position we can prepend to *)
+        | Some stmt_sp ->
+          let indent = String.make stmt_sp.Ast.start_col ' ' in
+          let record = "{ " ^ String.concat ", " (List.map (fun c -> c ^ " = " ^ c) caps) ^ " }" in
+          let ins_pos =
+            Position.create ~line:(stmt_sp.Ast.start_line - 1) ~character:0 in
+          let insert_edit =
+            TextEdit.create ~range:(Range.create ~start:ins_pos ~end_:ins_pos)
+              ~newText:(Printf.sprintf "%slet captured = %s\n" indent record) in
+          let body_text = slice_span src body_sp in
+          let rewritten =
+            substitute_idents body_text (List.map (fun c -> (c, "captured." ^ c)) caps) in
+          let body_edit = TextEdit.create ~range:(range_of_span body_sp) ~newText:rewritten in
+          [CodeAction.create
+             ~title:(Printf.sprintf "Extract %d captured values into a record" (List.length caps))
+             ~kind:CodeActionKind.RefactorRewrite
+             ~edit:(mk_we [insert_edit; body_edit]) ()]
+      end
+    | _ -> []
+  in
+
   introduce_pipe_actions @ remove_pipe_actions
   @ extract_var_actions @ inline_var_actions
   @ collapse_capture_actions @ expand_capture_actions
@@ -4855,6 +4921,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
   @ linear_audit_actions @ destruct_actions @ extract_fn_actions
   @ organize_imports_actions
   @ doc_comment_actions @ inline_fn_actions @ auto_alias_actions
+  @ extract_captures_actions
 
 (** Generate code actions relevant to the cursor position [line, character].
     Produces cursor- and diagnostic-driven quick fixes and refactorings;
