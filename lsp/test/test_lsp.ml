@@ -3435,6 +3435,78 @@ let test_call_hierarchy_outgoing () =
   Alcotest.(check bool) "middle calls leaf" true (List.mem "leaf" callees)
 
 (* ------------------------------------------------------------------ *)
+(* Auto-import on completion                                           *)
+(* ------------------------------------------------------------------ *)
+
+let test_prefix_at () =
+  let src = "mod M do\n  fn f() do hel end\nend" in
+  let a = analyse src in
+  let (l, c) = pos_of src "hel" in
+  Alcotest.(check string) "trailing identifier before cursor" "hel"
+    (An.prefix_at a ~line:l ~character:(c + 3))
+
+let test_prefix_at_qualified_is_empty () =
+  let src = "mod M do\n  fn f() do Map.g end\nend" in
+  let a = analyse src in
+  let (l, c) = pos_of src "Map.g" in
+  (* cursor right after `Map.` (before g): char before run is '.' → empty *)
+  Alcotest.(check string) "qualified access yields no bare prefix" ""
+    (An.prefix_at a ~line:l ~character:(c + 4))
+
+(* The candidate logic is pure over (module_index, imports, prefix) so it is
+   testable without a loaded stdlib. *)
+let idx = [("Map", ["empty"; "entries"]); ("Set", ["empty"; "union"])]
+
+let test_auto_import_offers_unimported () =
+  let cands = An.auto_import_candidates ~module_index:idx ~imports:[] ~prefix:"emp" in
+  Alcotest.(check bool) "offers Map.empty" true (List.mem ("empty", "Map") cands);
+  Alcotest.(check bool) "offers Set.empty (collision → both)" true
+    (List.mem ("empty", "Set") cands);
+  Alcotest.(check bool) "does not offer prefix-mismatched entries" false
+    (List.mem ("entries", "Map") cands)
+
+let test_auto_import_skips_imported () =
+  let imports = [ { An.ii_module = "Map"; ii_sel = An.ISAll;
+                    ii_span = mk_span 1 0 1 9 } ] in
+  let cands = An.auto_import_candidates ~module_index:idx ~imports ~prefix:"emp" in
+  Alcotest.(check bool) "Map.empty already imported (UseAll) → not offered" false
+    (List.mem ("empty", "Map") cands);
+  Alcotest.(check bool) "Set.empty still offered" true (List.mem ("empty", "Set") cands)
+
+let test_auto_import_short_prefix_empty () =
+  Alcotest.(check int) "prefix under 2 chars yields nothing" 0
+    (List.length (An.auto_import_candidates ~module_index:idx ~imports:[] ~prefix:"e"))
+
+let mk_name txt sl sc el ec = { Ast.txt; span = mk_span sl sc el ec }
+
+let test_import_edit_merge () =
+  (* `use Foo.{a, b}` on line 2 → merging `c` appends after `b`. *)
+  let imports = [ { An.ii_module = "Foo";
+                    ii_sel = An.ISNames [ mk_name "a" 2 11 2 12; mk_name "b" 2 14 2 15 ];
+                    ii_span = mk_span 2 2 2 16 } ] in
+  match An.compute_import_edit ~imports ~fallback_line:3 ~module_:"Foo" ~name:"c" with
+  | None -> Alcotest.fail "expected a merge edit for an existing use list"
+  | Some e ->
+    Alcotest.(check string) "merge appends ', c'" ", c" e.Lsp.Types.TextEdit.newText
+
+let test_import_edit_insert_after_existing () =
+  (* A `use Bar.*` exists but no `use Baz` → insert a fresh line after it. *)
+  let imports = [ { An.ii_module = "Bar"; ii_sel = An.ISAll; ii_span = mk_span 2 2 2 10 } ] in
+  match An.compute_import_edit ~imports ~fallback_line:3 ~module_:"Baz" ~name:"a" with
+  | None -> Alcotest.fail "expected a fresh import insert"
+  | Some e ->
+    Alcotest.(check bool) "inserts `use Baz.{a}`" true
+      (str_contains ~sub:"use Baz.{a}" e.Lsp.Types.TextEdit.newText)
+
+let test_import_edit_insert_no_imports () =
+  (* No imports at all → insert at the fallback line. *)
+  match An.compute_import_edit ~imports:[] ~fallback_line:2 ~module_:"Baz" ~name:"a" with
+  | None -> Alcotest.fail "expected a fresh import insert"
+  | Some e ->
+    Alcotest.(check bool) "inserts `use Baz.{a}`" true
+      (str_contains ~sub:"use Baz.{a}" e.Lsp.Types.TextEdit.newText)
+
+(* ------------------------------------------------------------------ *)
 (* Inlay perf-annotations config toggle                                *)
 (* ------------------------------------------------------------------ *)
 
@@ -3521,6 +3593,16 @@ let () =
       "prepare returns fn under cursor", `Quick, test_call_hierarchy_prepare;
       "incoming calls found", `Quick, test_call_hierarchy_incoming;
       "outgoing calls found", `Quick, test_call_hierarchy_outgoing;
+    ];
+    "auto-import", [
+      "prefix before cursor", `Quick, test_prefix_at;
+      "qualified access has no bare prefix", `Quick, test_prefix_at_qualified_is_empty;
+      "offers un-imported symbol", `Quick, test_auto_import_offers_unimported;
+      "skips already-imported symbol", `Quick, test_auto_import_skips_imported;
+      "short prefix offers nothing", `Quick, test_auto_import_short_prefix_empty;
+      "merge into existing use list", `Quick, test_import_edit_merge;
+      "insert after existing import", `Quick, test_import_edit_insert_after_existing;
+      "insert when no imports", `Quick, test_import_edit_insert_no_imports;
     ];
     "inlay config toggle", [
       "perf-annotations setting parses", `Quick, test_config_perf_toggle_parse;
