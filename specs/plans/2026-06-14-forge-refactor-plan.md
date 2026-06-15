@@ -12,6 +12,7 @@ cmdliner in `forge/lib/cmd_refactor.ml` and registered in `forge/bin/main.ml`.
 - `forge refactor move Decl dest.march [--dry-run]`
 - `forge refactor replace '<pat>' '<tmpl>' [--dry-run]`
 - `forge refactor fix [--dry-run]`
+- `forge refactor bundle <Fn> [--record NAME] [--dry-run]` — introduce a parameter object: bundle the function's parameters into a generated record, rewriting the signature, body, and every call site project-wide. v1: single-clause, annotated params; recursive calls rewritten as call sites may need touch-up. Note: arg source is recovered by splitting the call's paren contents on top-level commas, since string-literal spans in the parser only cover the opening quote.
 
 ## Engine (`lib/refactor/refactor.ml`, library `march_refactor`)
 

@@ -109,6 +109,33 @@ let test_replace_codemod () =
   let a = read root "a.march" in
   Alcotest.(check bool) "args swapped" true (contains a "swap(2, 1)")
 
+let test_bundle_param_object () =
+  let root = mk_project [
+    "a.march", "mod A do\n  fn connect(host: String, port: Int, timeout: Int) do\n    open(host, port, timeout)\n  end\nend\n";
+    "b.march", "mod B do\n  fn go() do A.connect(\"localhost\", 8080, 30) end\nend\n";
+  ] in
+  (match R.bundle_fn ~root ~fn_name:"connect" ~dry_run:false () with
+   | Ok o ->
+     Alcotest.(check int) "two files changed" 2 (List.length o.R.changes);
+     Alcotest.(check int) "nothing skipped"   0 (List.length o.R.skipped)
+   | Error e -> Alcotest.failf "bundle failed: %s" e);
+  let a = read root "a.march" and b = read root "b.march" in
+  Alcotest.(check bool) "record type generated"   true
+    (contains a "type ConnectArgs = { host : String");
+  Alcotest.(check bool) "signature takes record"  true (contains a "fn connect(args: ConnectArgs)");
+  Alcotest.(check bool) "body uses args.host"      true (contains a "args.host");
+  Alcotest.(check bool) "body uses args.port"      true (contains a "args.port");
+  Alcotest.(check bool) "call site rewritten (string arg intact)" true
+    (contains b "{ host = \"localhost\", port = 8080, timeout = 30 }")
+
+let test_bundle_requires_annotations () =
+  let root = mk_project [
+    "a.march", "mod A do\n  fn f(x, y) do x + y end\nend\n";
+  ] in
+  (match R.bundle_fn ~root ~fn_name:"f" ~dry_run:false () with
+   | Ok _ -> Alcotest.fail "should have errored on unannotated params"
+   | Error _ -> ())
+
 let () =
   Alcotest.run "refactor" [
     "rename", [
@@ -125,5 +152,9 @@ let () =
     ];
     "replace", [
       Alcotest.test_case "call-shape codemod"     `Quick test_replace_codemod;
+    ];
+    "bundle", [
+      Alcotest.test_case "introduce parameter object" `Quick test_bundle_param_object;
+      Alcotest.test_case "requires annotated params"  `Quick test_bundle_requires_annotations;
     ];
   ]
