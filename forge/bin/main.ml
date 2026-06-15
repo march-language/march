@@ -308,8 +308,19 @@ let refactor_cmd =
     Cmd.v (Cmd.info "fix" ~doc:"Apply safe naming-convention fixes (snake_case functions) project-wide")
       Term.(const run $ dry)
   in
+  let bundle =
+    let fn = Arg.(required & pos 0 (some string) None & info [] ~docv:"FN") in
+    let record =
+      Arg.(value & opt string "" &
+           info ["record"; "r"] ~docv:"NAME"
+             ~doc:"Name for the generated record type (default: <Fn>Args)") in
+    let run f r d = handle (Cmd_refactor.bundle ~fn_name:f ~record:r ~dry_run:d ()) in
+    Cmd.v (Cmd.info "bundle"
+             ~doc:"Introduce a parameter object: bundle FN's parameters into a generated record, rewriting the function and all call sites")
+      Term.(const run $ fn $ record $ dry)
+  in
   Cmd.group (Cmd.info "refactor" ~doc:"Project-wide, parser-based refactorings")
-    [ rename; move; replace; fix ]
+    [ rename; move; replace; fix; bundle ]
 
 (* ---------------------------------------------------------------- forge format *)
 

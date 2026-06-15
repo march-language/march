@@ -53,3 +53,10 @@ let replace ~pat ~tmpl ~dry_run () =
       match Refactor.replace_project ~root ~pat ~tmpl ~dry_run with
       | Ok o -> print_outcome ~dry_run o; Ok ()
       | Error e -> Error e)
+
+let bundle ~fn_name ~record ~dry_run () =
+  with_root (fun root ->
+      let record_name = if record = "" then None else Some record in
+      match Refactor.bundle_fn ~root ~fn_name ?record_name ~dry_run () with
+      | Ok o -> print_outcome ~dry_run o; Ok ()
+      | Error e -> Error e)
