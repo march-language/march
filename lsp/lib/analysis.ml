@@ -21,6 +21,19 @@ type call_site = {
   cs_args     : Ast.expr list;  (** Argument expressions *)
 }
 
+(** A `use`/`import` declaration, simplified for auto-import bookkeeping. *)
+type import_sel =
+  | ISAll                    (** use M.* / import M — all members bare *)
+  | ISNames of Ast.name list (** use M.{a,b} — listed members bare (names keep spans) *)
+  | ISExcept of string list  (** import M, except: [..] — all but listed, bare *)
+  | ISSingle                 (** use M — qualified access only, nothing bare *)
+
+type import_info = {
+  ii_module : string;     (** dotted module path, e.g. "Map" or "Collections.Map" *)
+  ii_sel    : import_sel;
+  ii_span   : Ast.span;   (** span of the whole use/import declaration *)
+}
+
 (** A node in the per-file call graph (one per top-level function), for
     textDocument/callHierarchy. *)
 type cg_node = {
@@ -167,6 +180,11 @@ type t = {
   (** All call sites collected for signature-help queries. *)
   call_graph  : cg_node list;
   (** Per-function call-graph nodes for textDocument/callHierarchy. *)
+  imports     : import_info list;
+  (** `use`/`import` declarations in this file, for auto-import on completion. *)
+  module_index : (string * string list) list;
+  (** Importable modules (stdlib + deps) → their public function/value names,
+      the candidate pool for auto-import on completion. *)
   consumption : consumption list;
   (** Linear/affine binding consumption records — used for make-linear actions. *)
   reuse_hints : Ast.span list;
@@ -886,6 +904,53 @@ let build_call_graph (decls : Ast.decl list) : cg_node list =
   in
   List.iter scan decls;
   !nodes
+
+(** Collect `use`/`import` declarations (including those in nested modules). *)
+let build_imports (decls : Ast.decl list) : import_info list =
+  let rec scan (d : Ast.decl) =
+    match d with
+    | Ast.DUse (u, sp) ->
+      let m = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) u.Ast.use_path) in
+      let sel = match u.Ast.use_sel with
+        | Ast.UseAll       -> ISAll
+        | Ast.UseSingle    -> ISSingle
+        | Ast.UseNames ns  -> ISNames ns
+        | Ast.UseExcept ns -> ISExcept (List.map (fun (n : Ast.name) -> n.Ast.txt) ns)
+      in
+      [ { ii_module = m; ii_sel = sel; ii_span = sp } ]
+    | Ast.DMod (_, _, ds, _) -> List.concat_map scan ds
+    | _ -> []
+  in
+  List.concat_map scan decls
+
+(** Index importable modules → their member short-names, derived from the
+    qualified entries (`Mod.member`) the typecheck env already holds for the
+    stdlib and deps. This is the candidate pool for auto-import. *)
+let module_index_of_vars (vars : (string * 'a) list) : (string * string list) list =
+  let tbl = Hashtbl.create 256 in
+  List.iter (fun (key, _) ->
+      match String.rindex_opt key '.' with
+      | Some d when d > 0 && d < String.length key - 1 ->
+        let short = String.sub key (d + 1) (String.length key - d - 1) in
+        if short.[0] >= 'a' && short.[0] <= 'z' then begin
+          let m = String.sub key 0 d in
+          Hashtbl.replace tbl m
+            (short :: (try Hashtbl.find tbl m with Not_found -> []))
+        end
+      | _ -> ()
+    ) vars;
+  Hashtbl.fold (fun k v acc -> (k, List.sort_uniq compare v) :: acc) tbl []
+
+(** True when [module_] already makes [name] available as a bare identifier. *)
+let module_imports_bare (imports : import_info list) ~module_ ~name : bool =
+  List.exists (fun ii ->
+      ii.ii_module = module_ &&
+      match ii.ii_sel with
+      | ISAll -> true
+      | ISExcept ns -> not (List.mem name ns)
+      | ISNames ns -> List.exists (fun (n : Ast.name) -> n.Ast.txt = name) ns
+      | ISSingle -> false
+    ) imports
 
 (* ------------------------------------------------------------------ *)
 (* Fold-range and annotation-site collection                          *)
@@ -1613,6 +1678,8 @@ let analyse ~filename ~src : t =
       sym_scope        = Hashtbl.create 0;
       call_sites       = [];
       call_graph       = [];
+      imports          = [];
+      module_index     = [];
       consumption      = [];
       reuse_hints      = [];
       match_sites      = [];
@@ -2230,8 +2297,9 @@ let analyse ~filename ~src : t =
       @ unused_fn_diags
       @ perf_diags
     in
+    let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
     { src; filename; doc; type_map; def_map; use_map;
-      vars       = Tc.StrMap.bindings final_env.Tc.vars;
+      vars       = vars_list;
       types      = Tc.StrMap.bindings final_env.Tc.types;
       ctors      = Tc.StrMap.fold (fun name cis acc ->
                      match cis with ci :: _ -> (name, ci.Tc.ci_type) :: acc | [] -> acc)
@@ -2251,6 +2319,8 @@ let analyse ~filename ~src : t =
       sym_scope;
       call_sites;
       call_graph       = build_call_graph user_decls;
+      imports          = build_imports user_decls;
+      module_index     = module_index_of_vars vars_list;
       consumption;
       reuse_hints      = build_reuse_hints user_decls;
       match_sites;
@@ -2630,6 +2700,94 @@ let scope_locals_at (a : t) ~line ~character : string list =
     a.sym_scope;
   !out
 
+(* The identifier prefix immediately before the cursor. Empty when the cursor
+   is not on a bare identifier (e.g. right after a `.`, which is a qualified
+   access handled by dot-completion, not auto-import). *)
+let prefix_at (a : t) ~line ~character : string =
+  match List.nth_opt (String.split_on_char '\n' a.src) line with
+  | None -> ""
+  | Some text ->
+    let c = min character (String.length text) in
+    let is_id ch =
+      (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+      || (ch >= '0' && ch <= '9') || ch = '_' || ch = '\''
+    in
+    let i = ref c in
+    while !i > 0 && is_id text.[!i - 1] do decr i done;
+    if !i > 0 && text.[!i - 1] = '.' then ""   (* qualified access, not auto-import *)
+    else String.sub text !i (c - !i)
+
+(* Auto-import candidates: members of importable modules ([module_index]) whose
+   short name starts with [prefix] and that [imports] does not already bring in
+   bare. Returns (short_name, module) pairs; modules sharing a name each yield an
+   entry. Pure over its inputs (prefix-gated ≥2 chars, capped) so it is unit-
+   testable without a loaded stdlib. *)
+let auto_import_candidates ~module_index ~imports ~prefix : (string * string) list =
+  if String.length prefix < 2 then []
+  else begin
+    let plen = String.length prefix in
+    let out = ref [] in
+    List.iter (fun (m, names) ->
+        List.iter (fun short ->
+            if String.length short >= plen
+               && String.sub short 0 plen = prefix
+               && String.length short > 0 && short.[0] >= 'a' && short.[0] <= 'z'
+               && not (module_imports_bare imports ~module_:m ~name:short)
+            then out := (short, m) :: !out
+          ) names
+      ) module_index;
+    List.filteri (fun i _ -> i < 50) (List.sort_uniq compare !out)
+  end
+
+(* The TextEdit (byte columns) that imports [name] from [module_], computed
+   purely from the file's [imports] and a [fallback_line] (1-indexed line to put
+   a brand-new import on when the file has none): merge into an existing
+   `use M.{...}` if present, else insert a fresh `use M.{name}` line. *)
+let compute_import_edit ~imports ~fallback_line ~module_ ~name
+    : Lsp.Types.TextEdit.t option =
+  let open Lsp.Types in
+  let zero_width line0 col =
+    Range.create ~start:(Position.create ~line:line0 ~character:col)
+      ~end_:(Position.create ~line:line0 ~character:col)
+  in
+  let named =
+    List.find_opt (fun ii ->
+        ii.ii_module = module_ &&
+        (match ii.ii_sel with ISNames _ -> true | _ -> false)) imports
+  in
+  match named with
+  | Some { ii_sel = ISNames (_ :: _ as names); _ } ->
+    let last = List.nth names (List.length names - 1) in
+    let sp = last.Ast.span in
+    Some (TextEdit.create ~range:(zero_width (sp.Ast.end_line - 1) sp.Ast.end_col)
+            ~newText:(", " ^ name))
+  | _ ->
+    (match imports with
+     | _ :: _ ->
+       let last =
+         List.fold_left (fun acc ii ->
+             if ii.ii_span.Ast.end_line > acc.ii_span.Ast.end_line then ii else acc)
+           (List.hd imports) imports
+       in
+       let indent = String.make last.ii_span.Ast.start_col ' ' in
+       Some (TextEdit.create
+               ~range:(zero_width (last.ii_span.Ast.end_line - 1) last.ii_span.Ast.end_col)
+               ~newText:(Printf.sprintf "\n%suse %s.{%s}" indent module_ name))
+     | [] ->
+       Some (TextEdit.create ~range:(zero_width (fallback_line - 1) 0)
+               ~newText:(Printf.sprintf "  use %s.{%s}\n" module_ name)))
+
+let import_text_edit (a : t) ~module_ ~name : Lsp.Types.TextEdit.t option =
+  (* New imports go on the first user declaration line (>= 2 to stay inside the
+     enclosing `mod`), defaulting to line 2. *)
+  let fallback_line =
+    Hashtbl.fold (fun _ sp acc ->
+        if span_in_user_file a sp && sp.Ast.start_line >= 2
+        then min acc sp.Ast.start_line else acc) a.def_map max_int
+  in
+  let fallback_line = if fallback_line = max_int then 2 else fallback_line in
+  compute_import_edit ~imports:a.imports ~fallback_line ~module_ ~name
+
 let completions_at (a : t) ~line ~character =
   match dot_completions a ~line ~character with
   | Some items -> items   (* in `receiver.`: only the receiver's members *)
@@ -2703,8 +2861,24 @@ let completions_at (a : t) ~line ~character =
   let local_items = List.map (fun name ->
       CompletionItem.create ~label:name ~kind:CompletionItemKind.Variable ()
     ) (scope_locals_at a ~line ~character) in
+  (* Auto-import candidates: un-imported qualified members matching the typed
+     prefix. Ranked last; the import edit is computed lazily on resolve, so each
+     item only carries the (module, name) in [data]. *)
+  let auto_items =
+    auto_import_candidates
+      ~module_index:a.module_index ~imports:a.imports
+      ~prefix:(prefix_at a ~line ~character)
+    |> List.map (fun (short, m) ->
+        CompletionItem.create ~label:short
+          ~kind:CompletionItemKind.Function
+          ~detail:(Printf.sprintf "auto-import from %s" m)
+          ~sortText:"9"
+          ~data:(`Assoc [("autoImport",
+                          `Assoc [("module", `String m); ("name", `String short)])])
+          ())
+  in
   (* Rank by category via sortText: locals < keywords < top-level/stdlib values
-     < types < constructors < interfaces < sigils. *)
+     < types < constructors < interfaces < sigils < auto-imports. *)
   let rank s items =
     List.map (fun it -> { it with CompletionItem.sortText = Some s }) items
   in
@@ -2715,6 +2889,7 @@ let completions_at (a : t) ~line ~character =
   @ rank "4" ctor_items
   @ rank "5" iface_items
   @ rank "6" sigil_items
+  @ auto_items
 
 let inlay_hints_for ?(perf_annotations = true) (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
@@ -4226,6 +4401,9 @@ let query_outgoing_calls (a : t) (name : string) =
   |> List.map (fun (node, spans) ->
          (cg_item a node,
           List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp)) spans))
+
+let query_import_text_edit (a : t) ~module_ ~name =
+  import_text_edit a ~module_ ~name |> Option.map (Pos.remap_text_edit a.doc)
 
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)

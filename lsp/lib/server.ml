@@ -282,6 +282,7 @@ class march_server =
     method config_completion =
       Some (Lsp.Types.CompletionOptions.create
               ~triggerCharacters:["." ; "|" ; " " ; "~"]
+              ~resolveProvider:true   (* auto-import edits computed lazily *)
               ())
 
     method config_inlay_hints =
@@ -508,10 +509,21 @@ class march_server =
     method on_req_completion ~notify_back:_ ~id:_ ~uri ~pos ~ctx:_
         ~workDoneToken:_ ~partialResultToken:_ _doc =
       let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
+      let uri_str = Lsp.Types.DocumentUri.to_string uri in
       let items =
         match get_analysis uri with
         | None -> []
         | Some a -> Analysis.query_completions_at a ~line ~utf16_char
+      in
+      (* Auto-import items need the document URI so completionItem/resolve can
+         re-fetch the analysis and compute the import edit. *)
+      let items =
+        List.map (fun (it : Lsp.Types.CompletionItem.t) ->
+            match it.data with
+            | Some (`Assoc fs) when List.mem_assoc "autoImport" fs ->
+              { it with data = Some (`Assoc (("uri", `String uri_str) :: fs)) }
+            | _ -> it)
+          items
       in
       Lwt.return (Some (`List items))
 
@@ -1063,6 +1075,40 @@ class march_server =
         in
         if ranges = [] then Lwt.return `Null
         else Lwt.return (`Assoc [("ranges", `List (List.map json_range ranges))])
+
+      end else if meth = "completionItem/resolve" then begin
+        (* Lazily compute the auto-import additionalTextEdit for the accepted
+           item, using the (module, name, uri) stashed in its `data`. *)
+        match params with
+        | Some (`Assoc fields) ->
+          let edit =
+            match List.assoc_opt "data" fields with
+            | Some (`Assoc data) ->
+              (match List.assoc_opt "autoImport" data, List.assoc_opt "uri" data with
+               | Some (`Assoc ai), Some (`String u) ->
+                 let g k = match List.assoc_opt k ai with
+                   | Some (`String s) -> s | _ -> "" in
+                 let m = g "module" and n = g "name" in
+                 let path =
+                   if String.length u >= 7 && String.sub u 0 7 = "file://"
+                   then String.sub u 7 (String.length u - 7) else u in
+                 let uri = Lsp.Types.DocumentUri.of_path path in
+                 (match get_analysis uri with
+                  | Some a -> Analysis.query_import_text_edit a ~module_:m ~name:n
+                  | None -> None)
+               | _ -> None)
+            | _ -> None
+          in
+          (match edit with
+           | None -> Lwt.return (`Assoc fields)
+           | Some (e : Lsp.Types.TextEdit.t) ->
+             let fields =
+               List.filter (fun (k, _) -> k <> "additionalTextEdits") fields in
+             Lwt.return (`Assoc (("additionalTextEdits",
+                                  `List [ `Assoc [ ("range", json_range e.range);
+                                                   ("newText", `String e.newText) ]])
+                                 :: fields)))
+        | _ -> Lwt.return `Null
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)
