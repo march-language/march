@@ -3952,6 +3952,41 @@ end|} in
   Alcotest.(check bool) "no alias for a single use" false
     (has_title acts "alias Collections.HashMap")
 
+let test_remove_unused_function () =
+  let src = {|mod M do
+  pfn helper() : Int do 2 end
+  fn main() : Int do 1 end
+end|} in
+  (* helper is private and never called → dead; cursor on its name *)
+  let acts = actions_at src "helper" in
+  Alcotest.(check bool) "offers Remove unused function" true
+    (has_title acts "Remove unused function");
+  Alcotest.(check (option string)) "deletes the declaration (empty newText)"
+    (Some "") (edit_text_of acts "Remove unused function")
+
+let test_no_remove_used_function () =
+  let src = {|mod M do
+  pfn helper() : Int do 2 end
+  fn main() : Int do helper() end
+end|} in
+  let acts = actions_at src "helper" in
+  Alcotest.(check bool) "no remove action for a used function" false
+    (has_title acts "Remove unused function")
+
+let test_remove_unreachable_code () =
+  let src = {|mod M do
+  fn f() : Int do
+    panic("boom")
+    42
+  end
+end|} in
+  (* `42` is unreachable after the diverging panic → diagnostic-driven quickfix *)
+  let acts = actions_at src "panic" in
+  Alcotest.(check bool) "offers Remove unreachable code" true
+    (has_title acts "Remove unreachable code");
+  Alcotest.(check (option string)) "deletes the dead line (empty newText)"
+    (Some "") (edit_text_of acts "Remove unreachable code")
+
 (* ------------------------------------------------------------------ *)
 (* Project-level diagnostics (Feature 17)                              *)
 (* ------------------------------------------------------------------ *)
@@ -3997,6 +4032,9 @@ let () =
       "no inline for recursive fn", `Quick, test_no_inline_recursive_function;
       "auto-alias repeated prefix", `Quick, test_auto_alias_repeated_prefix;
       "no auto-alias below threshold", `Quick, test_no_auto_alias_below_threshold;
+      "remove unused function", `Quick, test_remove_unused_function;
+      "no remove for used function", `Quick, test_no_remove_used_function;
+      "remove unreachable code", `Quick, test_remove_unreachable_code;
     ];
     "auto-import", [
       "prefix before cursor", `Quick, test_prefix_at;

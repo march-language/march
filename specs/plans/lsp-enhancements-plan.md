@@ -1252,7 +1252,10 @@ Work that shipped but was not a numbered feature in this plan:
 - **More code actions** — typed-hole fill, implement-missing-methods scaffold,
   MPST session-handler / Client-module scaffold, make-linear / linear audit,
   rename-to-snake_case, wrap/remove-inspect, remove-unused-import, organize
-  imports, destructure-into-match (case split).
+  imports, destructure-into-match (case split), and **dead-code removal**
+  (diagnostic-driven quickfixes: "Remove unused function", "Remove unreachable
+  code" — wired through the `fix_registry`, pairing with the Feature 7 dead-code
+  detection).
 - **DAP editor debugger** (`lib/dap/`, `march dap`, VS Code ext) — separate effort.
 - **forge refactor CLI** (`lib/refactor/`, `forge refactor`) — separate effort.
 - **Incremental typecheck engine** (Phase 5 infra) — cached base/deps envs,

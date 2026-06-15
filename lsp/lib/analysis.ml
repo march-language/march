@@ -3548,16 +3548,72 @@ let apply_fix_registry (a : t) (diags : Lsp.Types.Diagnostic.t list)
          | Some gen -> gen a diag)
     ) diags
 
-(* The following diagnostic codes have registered fix generators.
-   Inline code_actions_at handlers provide cursor-position accuracy for most;
-   the registry entries serve as the extension point for tooling that queries
-   fixes by code without a cursor position.  They return [] by default to
-   avoid duplicating the inline logic — override via register_fix at any time. *)
+(** The first backtick-quoted substring of [msg], e.g. the name in
+    "Private function `foo` is never used". *)
+let backtick_name (msg : string) : string option =
+  match String.index_opt msg '`' with
+  | None -> None
+  | Some i ->
+    (match String.index_from_opt msg (i + 1) '`' with
+     | None -> None
+     | Some j -> Some (String.sub msg (i + 1) (j - i - 1)))
+
+(* Quickfix: "Remove unused function `f`" — delete the whole declaration of the
+   private function named in the `dead-code/unused-private-fn` diagnostic. *)
+let remove_unused_fn_fix (a : t) (diag : Lsp.Types.Diagnostic.t)
+    : Lsp.Types.CodeAction.t list =
+  let open Lsp.Types in
+  let msg = match diag.message with `String s -> s | _ -> "" in
+  match backtick_name msg with
+  | None -> []
+  | Some name ->
+    let dsp = ref None in
+    let rec scan (d : Ast.decl) = match d with
+      | Ast.DFn (fn, sp) when fn.Ast.fn_name.Ast.txt = name -> dsp := Some sp
+      | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+      | _ -> ()
+    in
+    List.iter scan a.decls;
+    (match !dsp with
+     | None -> []
+     | Some sp ->
+       let del = TextEdit.create
+         ~range:(Range.create
+                   ~start:(Position.create ~line:(sp.Ast.start_line - 1) ~character:0)
+                   ~end_:(Position.create ~line:sp.Ast.end_line ~character:0))
+         ~newText:"" in
+       let uri = DocumentUri.of_path a.filename in
+       [CodeAction.create ~title:(Printf.sprintf "Remove unused function `%s`" name)
+          ~kind:CodeActionKind.QuickFix ~diagnostics:[diag]
+          ~isPreferred:true
+          ~edit:(WorkspaceEdit.create ~changes:[(uri, [del])] ()) ()])
+
+(* Quickfix: "Remove unreachable code" — delete the line range of the dead
+   statement flagged by `dead-code/unreachable-after-diverge`. Line-based so it
+   is correct regardless of column encoding. *)
+let remove_unreachable_fix (a : t) (diag : Lsp.Types.Diagnostic.t)
+    : Lsp.Types.CodeAction.t list =
+  let open Lsp.Types in
+  let r = diag.range in
+  let del = TextEdit.create
+    ~range:(Range.create
+              ~start:(Position.create ~line:r.start.line ~character:0)
+              ~end_:(Position.create ~line:(r.end_.line + 1) ~character:0))
+    ~newText:"" in
+  let uri = DocumentUri.of_path a.filename in
+  [CodeAction.create ~title:"Remove unreachable code"
+     ~kind:CodeActionKind.QuickFix ~diagnostics:[diag]
+     ~isPreferred:true
+     ~edit:(WorkspaceEdit.create ~changes:[(uri, [del])] ()) ()]
+
+(* The following diagnostic codes have registered fix generators. Dead-code
+   removals are diagnostic-driven quickfixes (lightbulb on the warning); the
+   others return [] and are handled by cursor-position inline handlers. *)
 let () =
   register_fix "non_exhaustive_match"  (fun _a _diag -> []);
   register_fix "unused_binding"        (fun _a _diag -> []);
-  register_fix "dead-code/unused-private-fn"         (fun _a _diag -> []);
-  register_fix "dead-code/unreachable-after-diverge" (fun _a _diag -> []);
+  register_fix "dead-code/unused-private-fn"         remove_unused_fn_fix;
+  register_fix "dead-code/unreachable-after-diverge" remove_unreachable_fix;
   register_fix "unused_import"         (fun _a _diag -> [])
 
 (** Render a surface [Ast.ty] back to March source syntax (best-effort,
