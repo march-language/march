@@ -3641,6 +3641,45 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
       ) branches;
     check_exhaustiveness env msp scrut_ty branches
 
+  (* Constructor in check mode: when the bare constructor name is ambiguous
+     across types, use the expected type to pick the candidate whose parent
+     type matches — mirroring the pattern path ([infer_pattern]'s by_expected
+     logic). Without this, the catch-all below would route through [infer_expr],
+     whose [lookup_ctor] makes a registration-order-dependent pick; if it
+     guesses the wrong type the result fails to unify. Resolving by expected
+     type also lets nested constructors disambiguate recursively (the args are
+     checked against the chosen constructor's field types). *)
+  | Ast.ECon (name, args, sp), exp_ty
+    when (not (String.contains name.txt '.'))
+         && (match exp_ty with TCon _ -> true | _ -> false)
+         && List.length (all_ctors_named name.txt env) > 1 ->
+    (match (match exp_ty with
+            | TCon (tn, _) -> lookup_ctor_in_type name.txt tn env
+            | _ -> None) with
+     | Some ci ->
+       let arg_tys, result_ty = instantiate_ctor env ci in
+       let n_expected = List.length arg_tys in
+       let n_got      = List.length args in
+       if n_expected <> n_got then begin
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Constructor `%s` expects %d argument(s) but I got %d."
+              name.txt n_expected n_got);
+         List.iter (fun a -> ignore (infer_expr env a)) args
+       end else begin
+         List.iter2 (fun arg arg_ty ->
+             check_expr env arg arg_ty
+               ~reason:(Some (RBuiltin
+                 (Printf.sprintf "Argument to constructor `%s`." name.txt)))
+           ) args arg_tys;
+         unify env ~span:sp ~reason result_ty expected
+       end
+     | None ->
+       (* Expected type doesn't name a type defining this constructor —
+          fall back to inference so the normal mismatch error is produced. *)
+       let inferred = infer_expr env e in
+       unify env ~span:sp ~reason inferred expected)
+
   (* All other expressions: infer then unify *)
   | _ ->
     let inferred = infer_expr env e in
