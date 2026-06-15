@@ -417,6 +417,31 @@ end|} in
   let loc = An.definition_at a ~line ~character:col in
   Alcotest.(check bool) "type name in decl resolves" true (loc <> None)
 
+let test_island_goto_def () =
+  (* Cursor on the component name inside <island name='Counter' /> should
+     go to the definition of the Counter module (Counter.create or Counter).
+     A March file must be a single top-level module, so Counter is a nested mod. *)
+  let src = {|mod App do
+  mod Counter do
+    fn create(n : Int) : Int do n end
+    fn render(s : Int) : Int do s end
+  end
+  fn page() : Int do
+    ~H"<island name='Counter' />"
+    0
+  end
+end|} in
+  let a = analyse src in
+  (* "Counter' />" only appears inside the island tag name attribute *)
+  let (line, col) = pos_of src "Counter' />" in
+  (* col is the 'C' of Counter inside name='Counter' — inside isl_name_span *)
+  (match An.definition_at a ~line ~character:col with
+   | Some loc ->
+     (* The definition should point into the Counter module (lines 1-4, 0-indexed) *)
+     Alcotest.(check bool) "jumps into Counter" true
+       (loc.Lsp.Types.Location.range.Lsp.Types.Range.start.Lsp.Types.Position.line <= 3)
+   | None -> Alcotest.fail "expected a definition for the island component")
+
 (* ------------------------------------------------------------------ *)
 (* 6. Analysis — hover types (type_at)                                 *)
 (* ------------------------------------------------------------------ *)
@@ -5063,6 +5088,7 @@ let () =
       Alcotest.test_case "constructor pattern resolves"         `Quick test_definition_at_constructor_pattern;
       Alcotest.test_case "definition-site fallback"             `Quick test_definition_at_type_definition_site;
       Alcotest.test_case "type name in decl resolves"           `Quick test_definition_at_type_name;
+      Alcotest.test_case "island component name resolves"       `Quick test_island_goto_def;
     ];
     "hover-types", [
       Alcotest.test_case "no type at module keyword"      `Quick test_type_at_no_position;

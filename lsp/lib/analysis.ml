@@ -3111,6 +3111,43 @@ let span_in_user_file (a : t) (sp : Ast.span) : bool =
   sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
 
 let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
+  (* Island component name: cursor inside <island name='X' /> in a ~H sigil.
+     Try X.create, then X.render, then X (the module name) in def_map. *)
+  let island_result =
+    List.fold_left (fun found (s : h_sigil) ->
+        match found with
+        | Some _ -> found
+        | None ->
+          List.fold_left (fun found2 (isl : island_ref) ->
+              match found2 with
+              | Some _ -> found2
+              | None ->
+                if Pos.span_contains isl.isl_name_span ~line ~character then
+                  let name = isl.isl_name in
+                  let try_keys = [name ^ ".create"; name ^ ".render"; name] in
+                  List.fold_left (fun hit k ->
+                      match hit with
+                      | Some _ -> hit
+                      | None ->
+                        (match Hashtbl.find_opt a.def_map k with
+                         | None -> None
+                         | Some def_sp ->
+                           let path =
+                             if def_sp.Ast.file = "" || def_sp.Ast.file = "<unknown>"
+                             then a.filename
+                             else def_sp.Ast.file
+                           in
+                           Some (Lsp.Types.Location.create
+                                   ~uri:(Lsp.Types.DocumentUri.of_path path)
+                                   ~range:(Pos.span_to_lsp_range def_sp)))
+                    ) None try_keys
+                else None
+            ) found (islands_in_sigil ~src:a.src s)
+      ) None a.h_sigils
+  in
+  match island_result with
+  | Some _ -> island_result
+  | None ->
   (* Local binder under the cursor resolves by scope (shadow-correct). *)
   match local_symbol_at a ~line ~character with
   | Some id ->
