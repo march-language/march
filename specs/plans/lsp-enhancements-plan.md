@@ -1241,17 +1241,20 @@ suggest alias; #17 shared whole-project type environment (currently per-file).
 
 A feature-coverage audit (capabilities + handlers + code-lens/inlay payloads)
 found the LSP broad but missing four high-leverage, March-specific integrations.
-Each is being implemented by a dedicated subagent in its own git worktree (to
-avoid `server.ml`/`analysis.ml` clobbering), then integrated.
+Each was implemented by a dedicated subagent in its own git worktree (to avoid
+`server.ml`/`analysis.ml` clobbering), then integrated by cherry-picking the four
+feature commits onto the multi-site `main` base in order (#24 → #25 → #23 → #26);
+only #26's `server.ml`/`progress.md` needed manual conflict resolution (two
+adjacent `on_unknown_request` branches + a shared summary line — both kept).
+**All four shipped 2026-06-15.** Combined: build exit 0, full suite **1446** tests
+and **260** in the main LSP suite (+6 `query_cli`, +others) all green.
 
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
-| 23 | **Run/Debug code lenses** | 🚧 In progress | Code lenses currently carry only a static title (no `Command`), and there is **no `workspace/executeCommand`**. Add actionable `▶ Run` / `🐞 Debug` lenses above `test` blocks, doctests, and `main`, wired through `workspace/executeCommand` to `forge test` / `march dap`. Highest UX-per-effort: reuses the existing test runner + DAP debugger. Touches `analysis.ml` (lens generation with `Command`), `server.ml` (executeCommandProvider + handler, codeLens command payloads). |
-| 24 | **Standalone `march-lsp query` CLI** | 🚧 In progress | The transport-agnostic `query.ml` core already exists; `lsp/bin/query_cli.ml` was planned (best-in-class Phase 2) but never built. Add `march-lsp query <feature> <file> --line N --col M` emitting JSON to stdout, so an LLM/CI can drive the analyzer headless. Touches `lsp/bin/query_cli.ml` (new), `lsp/bin/main.ml` (dispatch), `lsp/bin/dune`. Low overlap with the others. |
-| 25 | **Parameter-name inlay hints** | 🚧 In progress | Inlays today are types + FBIP only. Add `foo(width:, height:)` parameter-name hints at call sites (positional args in a functional language). Touches `analysis.ml` inlay generation (+ the existing `march.inlayHints.*` toggle pattern). |
-| 26 | **DAP inline values** (`textDocument/inlineValue`) | 🚧 In progress | Pairs with the existing DAP debugger to render variable values inline while stepping. Add `inlineValueProvider` capability + handler computing `InlineValueVariableLookup`/`InlineValueText` over the in-scope bindings of the stopped frame. Touches `server.ml` (capability + handler) and `analysis.ml` (in-scope binding spans). |
-
-Integration order after the subagents finish: #24 (mostly new files) → #25 (analysis-only) → #23 and #26 (resolve the shared `server.ml` capability-block / handler-dispatch conflicts last). Update this table to ✅ Done and move the items into the list below as each lands, per the spec-maintenance rule.
+| 23 | **Run/Debug code lenses** | ✅ Done | Actionable `▶ Run` / `🐞 Debug` lenses above `test` blocks and `fn main`, wired through `workspace/executeCommand` (`executeCommandProvider`). `code_lens_item` extended with `cl_command`/`cl_args`; `build_action_lenses` (analysis.ml) emits `march.runTest`/`march.debugTest` (args carry the test name) and `march.run`/`march.debug`. Run shells out to `forge test --filter=<name>` / `forge run`; Debug is non-blocking — echoes a payload for the client to launch `march dap`. Perf-summary lenses preserved (`run_tir_pass` appends). Pure `resolve_lens_command` for unit testing. +7 tests. |
+| 24 | **Standalone `march-lsp query` CLI** | ✅ Done | `march-lsp query <feature> <file> [--line N --col M] [--stdin]` → JSON on stdout; dispatched from `main.ml` on `argv.(1)="query"`. Features: `hover · type · definition · references · completions · diagnostics · symbols · format`. 1-based positions (human-friendly), 0-based UTF-16 ranges out; exit 2 + `{"error":…}` on failure. `query.ml` core (pre-existing) gained `type_at`/`symbols` wrappers. +6 tests. |
+| 25 | **Parameter-name inlay hints** | ✅ Done | `foo(width:, height:)` `Parameter`-kind inlays at call sites. `build_param_name_map` keys function → ordered param names off `t.decls` (user functions only; registered only when every clause-0 param is named). Resolves plain + qualified callees; arity-safe. Noise suppression: single-arg calls, bare-identifier-equals-param, `x.param`/`_param`/`.param`. Gated by `march.inlayHints.parameterNames` (default ON). +6 tests. **Limitation:** no param names for stdlib/global calls. |
+| 26 | **DAP inline values** (`textDocument/inlineValue`) | ✅ Done | `inlineValueProvider` + a defensive `textDocument/inlineValue` handler (never throws). `Analysis.query_inline_values` walks the scoped, shadow-correct symbol tables, returns one `InlineValueVariableLookup` per visible local within the range and at/above the stopped line, deduped by name (nearest the stop). Function-local bindings only. +5 tests. |
 
 ### Delivered beyond the original 22 features
 
