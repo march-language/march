@@ -2700,6 +2700,69 @@ end
   ignore has_send_insight;
   Alcotest.(check bool) "actor send analysis completes without exception" true true
 
+(* ---- Phase 2: indirect call + recursive allocation ---- *)
+
+let has_indirect_call insights =
+  List.exists (fun (pi : An.perf_insight) ->
+      match pi.An.pi_kind with An.IndirectCall _ -> true | _ -> false) insights
+
+let has_recursive_alloc insights =
+  List.exists (fun (pi : An.perf_insight) ->
+      match pi.An.pi_kind with An.RecursiveAlloc _ -> true | _ -> false) insights
+
+let test_perf_indirect_call_on_param () =
+  (* `f` is a parameter, so `f(x)` dispatches through a function pointer. *)
+  let src = {|
+mod Test do
+  pfn apply(f, x) do f(x) end
+end
+|} in
+  Alcotest.(check bool) "calling a parameter is an indirect call" true
+    (has_indirect_call (perf_insights_of src))
+
+let test_perf_direct_call_not_indirect () =
+  (* Calling a top-level function is a direct call — not flagged. *)
+  let src = {|
+mod Test do
+  pfn g(x) do x end
+  pfn h(x) do g(x) end
+end
+|} in
+  Alcotest.(check bool) "top-level call is not indirect" false
+    (has_indirect_call (perf_insights_of src))
+
+let test_perf_recursive_alloc_in_arm () =
+  (* `Cons(...)` allocates inside an arm of the self-recursive `build`. *)
+  let src = {|
+mod Test do
+  type L = Nil | Cons(Int, L)
+  pfn build(n) do
+    match n do
+      0 -> Nil
+      _ -> Cons(n, build(n - 1))
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "allocation in a recursive match arm is flagged" true
+    (has_recursive_alloc (perf_insights_of src))
+
+let test_perf_alloc_not_recursive_not_flagged () =
+  (* `wrap` is not self-recursive, so its arm allocation is not flagged. *)
+  let src = {|
+mod Test do
+  type L = Nil | Cons(Int, L)
+  pfn wrap(n) do
+    match n do
+      0 -> Nil
+      _ -> Cons(n, Nil)
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "allocation in non-recursive fn not flagged" false
+    (has_recursive_alloc (perf_insights_of src))
+
 (* ---- perf_insight_at hover tests ---- *)
 
 let test_perf_insight_at_returns_message_at_call_site () =
@@ -3569,6 +3632,12 @@ let () =
     "perf insights: actor send copy", [
       "actor send analysis does not crash",           `Quick, test_perf_actor_send_copy_detected;
       "actor send completes without exception",       `Quick, test_perf_actor_send_copy_in_diagnostics_when_type_known;
+    ];
+    "perf insights phase 2: indirect calls + recursive alloc", [
+      "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;
+      "top-level call is not indirect",               `Quick, test_perf_direct_call_not_indirect;
+      "allocation in recursive arm flagged",          `Quick, test_perf_recursive_alloc_in_arm;
+      "allocation in non-recursive fn not flagged",   `Quick, test_perf_alloc_not_recursive_not_flagged;
     ];
     "perf insights: hover integration", [
       "perf_insight_at returns message at call site", `Quick, test_perf_insight_at_returns_message_at_call_site;
