@@ -236,6 +236,9 @@ type t = {
       and protocol scaffolding). *)
   protocols        : (string * Ast.protocol_def) list;
   (** Session-type protocol definitions: name → def (for scaffolding). *)
+  param_name_map   : (string, string list) Hashtbl.t;
+  (** Precomputed function-name → ordered param-names table, built once from
+      [decls] and reused on every inlay-hint request for parameter-name hints. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -1534,6 +1537,40 @@ let clause_param_names (cl : Ast.fn_clause) : string list =
       | _ -> None
     ) cl.Ast.fc_params
 
+(** Build a map from (simple) function name → ordered parameter names, sourced
+    from user [DFn] declarations (including those nested inside [DMod]). Keyed by
+    the bare function name (last path segment), so both a plain call `add(..)`
+    and a qualified call `M.add(..)` resolve through the same entry.
+
+    Precomputed once when the analysis record is constructed and cached on
+    [t.param_name_map] so parameter-name inlay hints don't re-walk all
+    declarations per request.
+
+    Source/limitation: param names come ONLY from user functions in this file's
+    AST ([t.decls]). Stdlib / global function param names are not available here,
+    so calls into the stdlib get no parameter-name hints. The first clause of a
+    multi-clause function supplies the names. *)
+let build_param_name_map (decls : Ast.decl list) : (string, string list) Hashtbl.t =
+  let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  let rec go decls =
+    List.iter (fun (d : Ast.decl) ->
+        match d with
+        | Ast.DFn (fd, _) ->
+          (match fd.Ast.fn_clauses with
+           | cl :: _ ->
+             let names = clause_param_names cl in
+             (* Only register when every param has a usable name, so we never
+                emit a misaligned hint for a function with pattern params. *)
+             if names <> [] && List.length names = List.length cl.Ast.fc_params
+             then Hashtbl.replace tbl fd.Ast.fn_name.Ast.txt names
+           | [] -> ())
+        | Ast.DMod (_, _, inner, _) -> go inner
+        | _ -> ()
+      ) decls
+  in
+  go decls;
+  tbl
+
 (** Phase-2 heuristic: a call whose callee is one of [params] dispatches through
     a function pointer (an indirect call). Calling a parameter is the canonical
     higher-order indirect call. *)
@@ -2036,7 +2073,8 @@ let analyse ~filename ~src : t =
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
-      protocols         = [] }
+      protocols         = [];
+      param_name_map    = build_param_name_map [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -2708,7 +2746,8 @@ let analyse ~filename ~src : t =
       protocols        =
         List.filter_map (function
             | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)
-            | _ -> None) user_decls }
+            | _ -> None) user_decls;
+      param_name_map   = build_param_name_map user_decls }
 
 (* ------------------------------------------------------------------ *)
 (* Phase 3: TIR pipeline analysis                                      *)
@@ -3333,36 +3372,6 @@ let completions_at (a : t) ~line ~character =
 (* Parameter-name inlay hints at call sites                            *)
 (* ------------------------------------------------------------------ *)
 
-(** Build a map from (simple) function name → ordered parameter names, sourced
-    from user [DFn] declarations (including those nested inside [DMod]). Keyed by
-    the bare function name (last path segment), so both a plain call `add(..)`
-    and a qualified call `M.add(..)` resolve through the same entry.
-
-    Source/limitation: param names come ONLY from user functions in this file's
-    AST ([t.decls]). Stdlib / global function param names are not available here,
-    so calls into the stdlib get no parameter-name hints. The first clause of a
-    multi-clause function supplies the names. *)
-let build_param_name_map (decls : Ast.decl list) : (string, string list) Hashtbl.t =
-  let tbl : (string, string list) Hashtbl.t = Hashtbl.create 64 in
-  let rec go decls =
-    List.iter (fun (d : Ast.decl) ->
-        match d with
-        | Ast.DFn (fd, _) ->
-          (match fd.Ast.fn_clauses with
-           | cl :: _ ->
-             let names = clause_param_names cl in
-             (* Only register when every param has a usable name, so we never
-                emit a misaligned hint for a function with pattern params. *)
-             if names <> [] && List.length names = List.length cl.Ast.fc_params
-             then Hashtbl.replace tbl fd.Ast.fn_name.Ast.txt names
-           | [] -> ())
-        | Ast.DMod (_, _, inner, _) -> go inner
-        | _ -> ()
-      ) decls
-  in
-  go decls;
-  tbl
-
 (** Resolve a call's callee expression to a simple function name.
     - [EVar n]            → [n]                 (plain call: add(..))
     - [EField (_, n, _)]  → [n]                 (qualified call: M.add(..))
@@ -3398,6 +3407,34 @@ let suppress_param_hint ~(single_arg : bool) ~(param : string) (arg : Ast.expr) 
           ends_with v (suffix ".") || ends_with v (suffix "_"))
     | Ast.EField (_, n, _) -> n.Ast.txt = param
     | _ -> false
+
+(** Visit every sub-expression of [e] (including [e] itself), pre-order. *)
+let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
+  f e;
+  match e with
+  | Ast.EApp (g, args, _) -> iter_expr f g; List.iter (iter_expr f) args
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
+    List.iter (iter_expr f) args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> iter_expr f body
+  | Ast.EBlock (es, _) -> List.iter (iter_expr f) es
+  | Ast.ELet (b, _) -> iter_expr f b.Ast.bind_expr
+  | Ast.EMatch (subj, brs, _) ->
+    iter_expr f subj;
+    List.iter (fun (br : Ast.branch) ->
+        (match br.branch_guard with Some g -> iter_expr f g | None -> ());
+        iter_expr f br.branch_body) brs
+  | Ast.ECond (arms, _) ->
+    List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
+  | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
+  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
+  | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
+  | Ast.ERecordUpdate (e2, fs, _) ->
+    iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
+  | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
+  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
+  | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
+  | Ast.EDbg (None, _) -> ()
 
 let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
     (a : t) (range : Lsp.Types.Range.t) =
@@ -3451,7 +3488,7 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
   (* Parameter-name hints at call sites: foo(width: a, height: b).
      Emitted at the START of each positional argument as a Parameter inlay. *)
   if param_names then begin
-    let pmap = build_param_name_map a.decls in
+    let pmap = a.param_name_map in
     (* Emit a Parameter hint [label] at the start of span [sp]. *)
     let param_hint sp label =
       if is_user_span sp && in_range sp then begin
@@ -3483,34 +3520,14 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
            in
            pair params args)
     in
-    (* Walk every expression reachable from user declarations, visiting each
-       EApp call site. Reuses span_of_expr for argument positions. *)
-    let rec walk_e (e : Ast.expr) =
-      (match e with
-       | Ast.EApp (callee, args, _) -> handle_call callee args
-       | _ -> ());
-      match e with
-      | Ast.EApp (callee, args, _) -> walk_e callee; List.iter walk_e args
-      | Ast.ECon (_, es, _) | Ast.ETuple (es, _) | Ast.EAtom (_, es, _)
-      | Ast.EBlock (es, _) -> List.iter walk_e es
-      | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> walk_e body
-      | Ast.ELet (b, _) -> walk_e b.Ast.bind_expr
-      | Ast.EMatch (subj, brs, _) ->
-        walk_e subj;
-        List.iter (fun (br : Ast.branch) ->
-            (match br.Ast.branch_guard with Some g -> walk_e g | None -> ());
-            walk_e br.Ast.branch_body) brs
-      | Ast.ECond (arms, _) ->
-        List.iter (fun (c, body) -> walk_e c; walk_e body) arms
-      | Ast.EIf (c, t, f, _) -> walk_e c; walk_e t; walk_e f
-      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk_e x; walk_e y
-      | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk_e e) fs
-      | Ast.ERecordUpdate (e, fs, _) ->
-        walk_e e; List.iter (fun (_, e) -> walk_e e) fs
-      | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
-      | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) -> walk_e e
-      | Ast.EDbg (Some e, _) -> walk_e e
-      | _ -> ()
+    (* Visit each EApp call site reachable from user declarations. The generic
+       [iter_expr] visitor handles the full expression grammar (so call sites
+       nested in cond/sigil/spawn/etc. are covered too); we only walk decls to
+       reach the top-level expressions to feed it. *)
+    let walk_e = iter_expr (fun e ->
+        match e with
+        | Ast.EApp (callee, args, _) -> handle_call callee args
+        | _ -> ())
     in
     let rec walk_decls decls = List.iter walk_decl decls
     and walk_decl (d : Ast.decl) =

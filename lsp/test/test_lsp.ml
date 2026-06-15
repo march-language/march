@@ -3720,6 +3720,43 @@ end|} in
   Alcotest.(check int) "no parameter hints when toggled off" 0
     (List.length labels)
 
+let test_param_hint_nested_in_cond () =
+  (* A call nested inside an `if` branch body still gets parameter-name hints.
+     Exercises the generic iter_expr traversal over the EIf form. *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller(flag: Bool) : Int do
+    if flag do
+      rect(10, 20)
+    else
+      0
+    end
+  end
+end|} in
+  let a = analyse src in
+  let labels = List.map (fun (s, _, _) -> s) (param_hints a) in
+  Alcotest.(check bool) "width: hint inside if branch" true
+    (List.mem "width:" labels);
+  Alcotest.(check bool) "height: hint inside if branch" true
+    (List.mem "height:" labels)
+
+let test_param_hint_map_cached () =
+  (* The param-name map is precomputed once and stored on the analysis record;
+     repeated inlay-hint requests read the same cached table (identity-equal). *)
+  let src = {|mod M do
+  fn rect(width: Int, height: Int) : Int do width * height end
+  fn caller() : Int do
+    rect(10, 20)
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "cached param_name_map has rect entry" true
+    (Option.is_some (Hashtbl.find_opt a.March_lsp_lib.Analysis.param_name_map "rect"));
+  (* Two requests yield identical labels, reusing the cached map. *)
+  let labels1 = List.map (fun (s, _, _) -> s) (param_hints a) in
+  let labels2 = List.map (fun (s, _, _) -> s) (param_hints a) in
+  Alcotest.(check (list string)) "stable hints across requests" labels1 labels2
+
 let test_param_hint_config_toggle_parse () =
   let parse = March_lsp_lib.Server.param_name_hints_from_settings in
   let nested =
@@ -4849,6 +4886,8 @@ let () =
       "redundant identifier arg suppressed", `Quick, test_param_hint_suppress_redundant_identifier;
       "single-arg call suppressed", `Quick, test_param_hint_suppress_single_arg;
       "toggled off removes hints", `Quick, test_param_hint_toggle_off;
+      "hints on call nested in if branch", `Quick, test_param_hint_nested_in_cond;
+      "param-name map cached on record", `Quick, test_param_hint_map_cached;
       "config toggle parse", `Quick, test_param_hint_config_toggle_parse;
     ];
     "completion depth", [
