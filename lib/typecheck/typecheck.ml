@@ -388,6 +388,13 @@ type env = {
       imported module's concrete scheme, and check_fn then unifies the
       local definition against the WRONG function's type (manifesting as
       nonsense arity/type errors on the local fn's header). *)
+  fn_arities : int StrMap.t;
+  (** Declared parameter count of functions DEFINED in the current module
+      scope (populated alongside [local_fns] in the pass-1 prebind).  March
+      has no partial application — calling a known function with the wrong
+      number of arguments panics at runtime (and the compiler miscompiles
+      under-application into a body call with a garbage argument).  Used to
+      reject wrong-arity calls of these functions at the call site. *)
 }
 
 let make_env errors type_map = {
@@ -398,6 +405,7 @@ let make_env errors type_map = {
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   local_fns = StrMap.empty;
+  fn_arities = StrMap.empty;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -1008,6 +1016,17 @@ let builtin_bindings : (string * scheme) list =
        runtime/march_runtime.c. *)
     ("__try_call",     Mono
         (TArrow (TArrow (t_bool, t_bool), t_result t_bool t_string)));
+    (* Value-carrying try: ∀a. (Bool -> a) -> Result(a, String).  Unlike
+       __try_call, the thunk's result type is the type variable `a`, so the
+       compiled thunk returns its value in the uniform representation (heap
+       pointers raw, immediates low-bit-tagged).  __try_call_val stores that
+       uniform value into the Ok field as-is — exactly how __try_call already
+       stores the heap march_string into its Err field — so a heap result
+       (e.g. a nested Result) round-trips without corruption.  Used by
+       Depot.Transaction.run to guard a callback that returns Result(v, String).
+       See __try_call_val in runtime/march_runtime.c. *)
+    ("__try_call_val", poly1 (fun a ->
+        TArrow (TArrow (t_bool, a), t_result a t_string)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
@@ -3117,7 +3136,42 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
-      infer_app env sp f_ty args 0
+      (* Reject wrong-arity calls of known (module-defined) functions.  March
+         has no partial application: under-application panics at runtime (and
+         the compiler miscompiles it into a body call with a garbage arg), and
+         curried-style over-application of a function-returning function also
+         panics.  infer_app, being curried, silently accepts these.  We only
+         flag a direct call of a name in [fn_arities] whose actual callee type
+         is at least as deep as its declared arity — so a local binding that
+         shadows the name (different shape) is never falsely rejected. *)
+      let arity_error =
+        match f with
+        | Ast.EVar name ->
+          (match StrMap.find_opt name.txt env.fn_arities with
+           | Some arity ->
+             let n_args = List.length args in
+             let rec count_arrows t =
+               match repr t with TArrow (_, r) -> 1 + count_arrows r | _ -> 0 in
+             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args)
+             else None
+           | None -> None)
+        | _ -> None
+      in
+      (match arity_error with
+       | Some (name, arity, n_args) ->
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Function `%s` expects %d argument%s, but got %d.\n\
+               March has no partial application — a call must supply all arguments."
+              name.txt arity (if arity = 1 then "" else "s") n_args);
+         (* Return the declared return type so downstream inference stays sane. *)
+         let rec peel n t =
+           if n <= 0 then t
+           else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
+         peel arity f_ty
+       | None ->
+         infer_app env sp f_ty args 0)
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
@@ -5022,7 +5076,10 @@ let rec check_decl env (d : Ast.decl) : env =
     let pre_env = List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) ->
-          let e = { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns } in
+          let arity = match def.fn_clauses with
+            | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
+          let e = { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
+                           fn_arities = StrMap.add def.fn_name.txt arity e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
       ) { env with local_fns = StrMap.empty } decls in
@@ -6123,7 +6180,10 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
       | Ast.DFn (def, _) ->
         (* Record the name as locally defined so bulk imports cannot clobber
            its binding (local definitions shadow imports — see env.local_fns). *)
-        let env = { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns } in
+        let arity = match def.fn_clauses with
+          | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
+        let env = { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns;
+                             fn_arities = StrMap.add def.fn_name.txt arity env.fn_arities } in
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
