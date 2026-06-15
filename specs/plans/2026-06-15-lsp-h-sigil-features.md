@@ -25,7 +25,8 @@
 - ✅ **Tier 3** — 3.1 unknown-tag (Levenshtein), 3.2 duplicate-attr, 3.3 void/self-closing, 3.4 unsafe-interpolation. **3.5 (a11y) not done** (optional).
 - ⏸️ **Tier 4** — still a sub-plan seed (full `${…}` interpolation intelligence). Not started.
 
-**Deferred follow-up (from the final review):** unify the ~6 hand-written HTML tag scanners (`scan_html_unclosed`, `open_tags_in_sigil`, `dup_attrs_in_sigil`, `void_misuse_in_sigil`, `unsafe_interpolation_in_sigil`, `tag_pairs_in_sigil`) into ONE event tokenizer (`tokenize_h_content : string -> html_event list`); each pass becomes a small fold. Removes ~250 lines and fixes shared skip-rule edge cases at the source. The review's 3 correctness bugs (autoclose/dup-attr/island `>`-in-attr) were patched surgically in the meantime.
+- ✅ **Scanner unification (done)** — the ~6 hand-written HTML tag scanners (`scan_html_unclosed`, `open_tags_in_sigil`, `dup_attrs_in_sigil`, `void_misuse_in_sigil`, `unsafe_interpolation_in_sigil`, `tag_pairs_in_sigil`) now fold over ONE event tokenizer `tokenize_h_content : string -> html_event list` (`HEOpenTag`/`HECloseTag`/`HEInterp`) — the single source of truth for the skip rules (including the 3 patched edge cases). Scanner region −232 lines (analysis.ml −213 net). All 292 LSP / 1446 full tests unchanged + green. `islands_in_sigil` and `autoclose_tag_at` intentionally left as-is (they need intra-tag offsets / operate on a content prefix; behavior-identical, fixes preserved).
+- The review's 3 correctness bugs (autoclose/dup-attr/island `>`-in-attr) + 2 nits (exact `~H` match, no AST re-walk) were patched surgically (`62211d0`) before the unification.
 
 ## Background: how `~H` works today
 
