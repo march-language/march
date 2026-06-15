@@ -1805,12 +1805,13 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
                     e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
                     e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
                | _ ->
-                 let pa = frsh "pa" in let pb = frsh "pb" in
-                 e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
-                 e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
-                 let c = frsh "c" in
-                 e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
-                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c));
+                 (* Generic (TVar) field: the static type gives no comparison
+                    strategy, so dispatch on the runtime shape via march_poly_eq
+                    (immediates by value, heap strings by content).  A plain
+                    pointer compare here broke structural equality for generic
+                    containers of strings, e.g. List(a) where a is a String at
+                    runtime — `["10"] == ["10"]` from distinct allocations. *)
+                 e (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" ok fva fvb));
               let oki = frsh "oki" in
               e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
               let nxt = if fi = nf - 1 then lbl_eq else cont_lbls.(fi + 1) in
@@ -4319,6 +4320,7 @@ declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+declare i64  @march_poly_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins
 declare i64    @march_compare_int(i64 %x, i64 %y)
 declare i64    @march_compare_float(double %x, double %y)
@@ -4811,6 +4813,8 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
           ) enum_ctors;
           Buffer.add_string buf2
             "\ndeclare i64 @march_string_eq(ptr, ptr)\n";
+          Buffer.add_string buf2
+            "\ndeclare i64 @march_poly_eq(ptr, ptr)\n";
           Buffer.add_string buf2
             "\ndefine dllexport ptr @march_island_msg_from_name(ptr %data, i32 %len) {\nentry:\n";
           (* Allocate a temporary string for the input *)

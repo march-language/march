@@ -395,6 +395,27 @@ int64_t march_string_eq(void *a, void *b) {
     return sa->len == sb->len && memcmp(sa->data, sb->data, (size_t)sa->len) == 0 ? 1 : 0;
 }
 
+/* Equality for a value of statically-unknown (generic / TVar) type, as stored
+ * in a polymorphic slot.  Used by structural-eq codegen for generic ADT fields,
+ * where the static type gives no comparison strategy.  Dispatch on the runtime
+ * shape:
+ *   - identical bits (same pointer or same tagged immediate) -> equal;
+ *   - any tagged immediate (low bit set) or non-heap value -> compare by value
+ *     (handled by the identity check above; differing immediates are not equal);
+ *   - two heap strings (MARCH_STRING_TAG) -> compare by content;
+ *   - other heap values (nested ADTs/records reached through an erased slot) ->
+ *     fall back to identity, since a full structural compare needs static type
+ *     info unavailable here.  This is no worse than the previous pointer compare
+ *     and fixes the common case of generic containers of strings. */
+int64_t march_poly_eq(void *a, void *b) {
+    if (a == b) return 1;
+    if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
+    if (((march_hdr *)a)->tag == MARCH_STRING_TAG &&
+        ((march_hdr *)b)->tag == MARCH_STRING_TAG)
+        return march_string_eq(a, b);
+    return 0;
+}
+
 int64_t march_string_byte_length(void *s) {
     return s ? ((march_string *)s)->len : 0;
 }
