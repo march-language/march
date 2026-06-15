@@ -4122,6 +4122,18 @@ end|} in
   let (l, c) = pos_of src "x + x" in
   let ranges = An.query_linked_editing_ranges_at a ~line:l ~utf16_char:c in
   Alcotest.(check int) "links the binding and both uses of x" 3 (List.length ranges)
+
+let test_tag_pair_linked_edit () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div><span>x</span></div>"
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "<div>" in
+  let spans = An.linked_editing_ranges_at a ~line:l ~character:(c + 1) in  (* on 'd' of open <div> *)
+  Alcotest.(check int) "open + close div linked" 2 (List.length spans)
+
 (* Phase 2+ AST-driven code actions                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -5053,6 +5065,7 @@ let () =
       "selection range widens outward", `Quick, test_selection_range_widens_outward;
       "selection range empty off token", `Quick, test_selection_range_empty_off_token;
       "linked editing links all occurrences", `Quick, test_linked_editing_ranges;
+      "linked editing links ~H open+close tag pair", `Quick, test_tag_pair_linked_edit;
     ];
     "semantic tokens", [
       "linear modifier on consumed-once binding", `Quick, test_semantic_tokens_linear_modifier;

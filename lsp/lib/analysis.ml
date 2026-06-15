@@ -4038,6 +4038,22 @@ let document_highlights_at (a : t) ~line ~character : Lsp.Types.DocumentHighligh
 (* textDocument/linkedEditingRange: all occurrences (definition + uses) of the
    symbol under the cursor, so the editor can edit them simultaneously. *)
 let linked_editing_ranges_at (a : t) ~line ~character : Ast.span list =
+  (* First check: if the cursor is on an HTML tag name inside a ~H sigil,
+     return the open/close tag name spans so the editor renames both at once. *)
+  let tag_pair_result =
+    List.find_map (fun (s : h_sigil) ->
+        let pairs = tag_pairs_in_sigil ~src:a.src s in
+        List.find_map (fun (op, cl) ->
+            if Pos.span_contains op ~line ~character
+            || Pos.span_contains cl ~line ~character then
+              Some [op; cl]
+            else None
+          ) pairs
+      ) a.h_sigils
+  in
+  match tag_pair_result with
+  | Some spans -> spans
+  | None ->
   match symbol_spans_at a ~line ~character with
   | None -> []
   | Some (def_opt, use_spans) ->
