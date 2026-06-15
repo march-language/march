@@ -1856,6 +1856,90 @@ let pos_to_ofs (src : string) (line1 : int) (col : int) : int =
   while !cur < line1 && !i < n do (if src.[!i] = '\n' then incr cur); incr i done;
   min (!i + col) n
 
+(** Return matched (open-name-span, close-name-span) pairs in one ~H sigil.
+    Adapts the [scan_html_unclosed] walk: on a successful close-tag match, pop
+    the matching open off the stack and record both tag-NAME spans (mapped to
+    absolute source positions via [ofs_to_pos]).  Void and self-closing tags
+    are skipped, as are [${…}] interpolations and [<!-- … -->] comments. *)
+let tag_pairs_in_sigil ~(src : string) (s : h_sigil) : (Ast.span * Ast.span) list =
+  let c = s.hs_content in
+  let n = String.length c in
+  let is_nc ch =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
+  (* Build a single-line Ast.span for a tag-name at content-relative byte
+     offset [name_ofs] with length [name_len]. *)
+  let name_span name_ofs name_len =
+    let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
+    { Ast.file = ""; start_line = l; start_col = col;
+      end_line = l; end_col = col + name_len } in
+  (* Stack entries: (lowercase-tag-name, name-offset-in-content, name-len) *)
+  let stack = ref [] and pairs = ref [] and i = ref 0 in
+  while !i < n do
+    let ch = c.[!i] in
+    (* ${…} interpolation: skip balanced braces *)
+    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    (* <!-- … --> comment *)
+    else if ch = '<' && !i + 3 < n
+            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
+      i := !i + 4;
+      while !i + 2 < n
+            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
+    end
+    (* <!doctype …> or other declarations *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
+      while !i < n && c.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    (* </tag> close tag *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
+      let ns = !i + 2 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let close_name_ofs = ns and close_name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns close_name_len) in
+      while !j < n && c.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n);
+      (* Pop down to the matching open; skip any unmatched opens above it. *)
+      let rec pop = function
+        | (t, o, ln) :: r when t = tag ->
+          pairs := (name_span o ln, name_span close_name_ofs close_name_len)
+                   :: !pairs;
+          r
+        | _ :: r -> pop r
+        | [] -> [] in
+      stack := pop !stack
+    end
+    (* <tag …> open tag *)
+    else if ch = '<' && !i + 1 < n
+            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ns = !i + 1 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      (* Advance past attributes, respecting quoted values so '>' inside a
+         quoted attribute string does not terminate the tag early. *)
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || c.[!j] <> '>') do
+        let d = c.[!j] in
+        (if !inq then (if d = !q then inq := false)
+         else if d = '"' || d = '\'' then (inq := true; q := d));
+        incr j
+      done;
+      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
+      i := (if !j < n then !j + 1 else n);
+      if not self && not (List.mem tag html_void_elements) then
+        stack := (tag, name_ofs, name_len) :: !stack
+    end
+    else incr i
+  done;
+  !pairs
+
 (* Every ~H sigil in [decls], with content recovered textually from [src]. *)
 let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
   let acc = ref [] in
@@ -3911,22 +3995,45 @@ let type_definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
 (* textDocument/documentHighlight: occurrences of the symbol under the cursor
    within the current file (references, rendered as highlights). *)
 let document_highlights_at (a : t) ~line ~character : Lsp.Types.DocumentHighlight.t list =
-  match symbol_spans_at a ~line ~character with
-  | None -> []
-  | Some (def_opt, use_spans) ->
-    (* The binding site is a Write; every use site is a Read. *)
-    let mk kind (sp : Ast.span) =
-      if sp = Ast.dummy_span then None
-      else Some (Lsp.Types.DocumentHighlight.create
-                   ~range:(Pos.span_to_lsp_range sp) ~kind ())
-    in
-    let writes =
-      match def_opt with
-      | Some sp -> Option.to_list (mk Lsp.Types.DocumentHighlightKind.Write sp)
-      | None    -> []
-    in
-    let reads = List.filter_map (mk Lsp.Types.DocumentHighlightKind.Read) use_spans in
-    writes @ reads
+  (* First check: if the cursor is on an HTML tag name inside a ~H sigil,
+     highlight the matching open/close pair. *)
+  let tag_pair_result =
+    List.find_map (fun (s : h_sigil) ->
+        let pairs = tag_pairs_in_sigil ~src:a.src s in
+        List.find_map (fun (op, cl) ->
+            if Pos.span_contains op ~line ~character
+            || Pos.span_contains cl ~line ~character then
+              Some [
+                Lsp.Types.DocumentHighlight.create
+                  ~range:(Pos.span_to_lsp_range op)
+                  ~kind:Lsp.Types.DocumentHighlightKind.Text ();
+                Lsp.Types.DocumentHighlight.create
+                  ~range:(Pos.span_to_lsp_range cl)
+                  ~kind:Lsp.Types.DocumentHighlightKind.Text ();
+              ]
+            else None
+          ) pairs
+      ) a.h_sigils
+  in
+  match tag_pair_result with
+  | Some hls -> hls
+  | None ->
+    match symbol_spans_at a ~line ~character with
+    | None -> []
+    | Some (def_opt, use_spans) ->
+      (* The binding site is a Write; every use site is a Read. *)
+      let mk kind (sp : Ast.span) =
+        if sp = Ast.dummy_span then None
+        else Some (Lsp.Types.DocumentHighlight.create
+                     ~range:(Pos.span_to_lsp_range sp) ~kind ())
+      in
+      let writes =
+        match def_opt with
+        | Some sp -> Option.to_list (mk Lsp.Types.DocumentHighlightKind.Write sp)
+        | None    -> []
+      in
+      let reads = List.filter_map (mk Lsp.Types.DocumentHighlightKind.Read) use_spans in
+      writes @ reads
 
 (* textDocument/linkedEditingRange: all occurrences (definition + uses) of the
    symbol under the cursor, so the editor can edit them simultaneously. *)

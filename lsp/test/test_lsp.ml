@@ -3818,6 +3818,19 @@ end|} in
   Alcotest.(check int) "both use sites are Reads" 2
     (kind_count Lsp.Types.DocumentHighlightKind.Read)
 
+let test_tag_pair_highlight () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div><span>x</span></div>"
+  end
+end|} in
+  let a = analyse src in
+  (* cursor on the 'd' of the opening <div>: pos_of "<div>" gives col of '<',
+     +1 moves onto 'd' which is inside the open-tag name span *)
+  let (l, c) = pos_of src "<div>" in
+  let hls = An.document_highlights_at a ~line:l ~character:(c + 1) in
+  Alcotest.(check int) "open + close div highlighted" 2 (List.length hls)
+
 (* ------------------------------------------------------------------ *)
 (* DAP inline values (textDocument/inlineValue)                        *)
 (* ------------------------------------------------------------------ *)
@@ -4956,6 +4969,7 @@ let () =
       "go to type definition", `Quick, test_type_definition;
       "document highlight", `Quick, test_document_highlight;
       "document highlight read/write kinds", `Quick, test_document_highlight_read_write_kinds;
+      "document highlight ~H tag pair", `Quick, test_tag_pair_highlight;
     ];
     "dap inline values", [
       "locals in range reported",            `Quick, test_inline_values_locals_in_range;
