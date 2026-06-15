@@ -1389,7 +1389,9 @@ end
          | Some m ->
            List.exists (fun (_, edits) ->
                List.exists (fun (e : Lsp.Types.TextEdit.t) ->
-                   String.contains e.newText '|'
+                   (* a generated arm contains an arrow `->` and no leading `|` *)
+                   String.contains e.newText '>'
+                   && not (String.contains e.newText '|')
                  ) edits
              ) m
        in
@@ -2025,12 +2027,12 @@ end
            List.exists (fun (_, edits) ->
                List.exists (fun (e : Lsp.Types.TextEdit.t) ->
                    let t = e.newText in
-                   (* Nullary: should be "| Triangle ->" not "| Triangle(" *)
+                   (* Nullary: should be "Triangle ->" not "Triangle(" *)
                    let n = String.length t in
                    let has_bare = ref false in
-                   let sn_bare = 11 in  (* "| Triangle " = 11 chars *)
+                   let sn_bare = 9 in  (* "Triangle " = 9 chars (no leading pipe) *)
                    for i = 0 to n - sn_bare do
-                     if String.sub t i sn_bare = "| Triangle " then has_bare := true
+                     if String.sub t i sn_bare = "Triangle " then has_bare := true
                    done;
                    let has_params = ref false in
                    let sn_paren = 9 in  (* "Triangle(" = 9 chars *)
@@ -3988,6 +3990,60 @@ end|} in
     (Some "") (edit_text_of acts "Remove unreachable code")
 
 (* ------------------------------------------------------------------ *)
+(* Bug fixes: annotation record-type guard + missing-case arm syntax   *)
+(* ------------------------------------------------------------------ *)
+
+let test_add_missing_case_no_leading_pipe () =
+  (* March match arms have no leading `|`; the generated arm must not add one
+     (a `|` after the existing newline is a double separator → parse error). *)
+  let src = {|mod M do
+  type Dir = North | South
+  fn label(d : Dir) : Int do
+    match d do
+      North -> 1
+    end
+  end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match d" in
+  let acts = An.code_actions_at a ~line ~character:col ~diagnostics:a.An.diagnostics () in
+  let arm =
+    match List.find_opt (fun (c : Lsp.Types.CodeAction.t) ->
+        contains_sub c.title "missing case") acts with
+    | Some c -> all_edit_texts [c] "missing case"
+    | None -> Alcotest.fail "expected an Add-missing-case action"
+  in
+  Alcotest.(check bool) "arm mentions the missing constructor" true
+    (contains_sub arm "South");
+  Alcotest.(check bool) "arm has NO leading pipe" false
+    (String.contains arm '|')
+
+let test_no_annotation_for_record_return () =
+  (* A function returning an (anonymous/structural) record has no valid surface
+     annotation — the action must NOT be offered (it would insert `{ … }` which
+     does not parse after `->`). *)
+  let src = {|mod M do
+  type R = { a : Int, b : Int }
+  fn mk(x : Int) do
+    { a = x, b = x }
+  end
+end|} in
+  let acts = actions_at src "mk" in
+  Alcotest.(check bool) "no return annotation for a record-typed return" false
+    (has_title acts "Add return type annotation")
+
+let test_annotation_offered_for_scalar_return () =
+  (* Sanity: a normal Int-returning fn still gets `-> Int`. *)
+  let src = {|mod M do
+  fn compute(x : Int) do x + 1 end
+end|} in
+  let acts = actions_at src "compute" in
+  Alcotest.(check bool) "return annotation offered for Int" true
+    (has_title acts "Add return type annotation");
+  Alcotest.(check bool) "suggests -> Int" true
+    (contains_sub (all_edit_texts acts "return type") "Int")
+
+(* ------------------------------------------------------------------ *)
 (* Project-level diagnostics (Feature 17)                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -4021,6 +4077,11 @@ let () =
       "prepare returns fn under cursor", `Quick, test_call_hierarchy_prepare;
       "incoming calls found", `Quick, test_call_hierarchy_incoming;
       "outgoing calls found", `Quick, test_call_hierarchy_outgoing;
+    ];
+    "annotation + missing-case fixes", [
+      "add missing case has no leading pipe", `Quick, test_add_missing_case_no_leading_pipe;
+      "no annotation for record return", `Quick, test_no_annotation_for_record_return;
+      "annotation offered for scalar return", `Quick, test_annotation_offered_for_scalar_return;
     ];
     "project diagnostics", [
       "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;

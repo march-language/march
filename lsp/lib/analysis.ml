@@ -4744,13 +4744,16 @@ let code_actions_at (a : t) ~line ~character
   in
   (* Helper: generate arm text for one missing case using typed stubs. *)
   let arm_text_for_case (ms : match_site) case =
+    (* March match arms are `pattern -> body` with NO leading `|` (arms separate
+       on newline). A leading `|` after the existing newline is a double
+       separator → parse error. *)
     match List.assoc_opt case ms.ms_ctor_sigs with
     | None | Some [] ->
-      Printf.sprintf "| %s ->\n    ?\n" case
+      Printf.sprintf "%s ->\n    ?\n" case
     | Some arg_tys ->
       let base_names = List.map name_from_ast_ty arg_tys in
       let names = dedup_names base_names in
-      Printf.sprintf "| %s(%s) ->\n    ?\n" case (String.concat ", " names)
+      Printf.sprintf "%s(%s) ->\n    ?\n" case (String.concat ", " names)
   in
   (* Helper: given a match_site, compute the insert position just before 'end' *)
   let insert_pos_for_match_site (ms : match_site) =
@@ -4899,6 +4902,11 @@ let code_actions_at (a : t) ~line ~character
       ) a.src;
     Position.create ~line:!e_line ~character:!e_col
   in
+  (* A rendered type is annotatable only if it has a valid surface form in
+     annotation position. Anonymous/structural record types print as `{ … }`
+     (TRecord carries no nominal name), which March's parser rejects after `->`
+     or `:` — so refuse to generate an annotation that would break the file. *)
+  let annotatable_ty_str s = not (String.contains s '{') in
   let make_annotation_action site =
     if not (Pos.span_contains site.as_name_span ~line ~character) then None
     else begin
@@ -4911,6 +4919,11 @@ let code_actions_at (a : t) ~line ~character
          | None -> None
          | Some ty ->
            let ty_str = Tc.pp_ty ty in
+           (* Anonymous record types render as `{ … }`, which March's parser
+              does not accept in annotation position — skip rather than produce
+              an edit that would break the file. *)
+           if not (annotatable_ty_str ty_str) then None
+           else
            let insert_line = site.as_name_span.Ast.start_line - 1 in
            let insert_col  = site.as_name_span.Ast.end_col in
            let pos   = Position.create ~line:insert_line ~character:insert_col in
@@ -4926,6 +4939,8 @@ let code_actions_at (a : t) ~line ~character
          | None -> None
          | Some ty ->
            let (_, ret_str) = unwrap_arrows ty in
+           if not (annotatable_ty_str ret_str) then None
+           else
            (* Find the "do" keyword after the fn name to determine insert position *)
            let fn_ofs =
              offset_of_pos a.src
@@ -4949,6 +4964,8 @@ let code_actions_at (a : t) ~line ~character
          | None -> None
          | Some ty ->
            let ty_str = Tc.pp_ty ty in
+           if not (annotatable_ty_str ty_str) then None
+           else
            let insert_line = site.as_name_span.Ast.start_line - 1 in
            let insert_col  = site.as_name_span.Ast.end_col in
            let pos   = Position.create ~line:insert_line ~character:insert_col in
