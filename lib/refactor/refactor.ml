@@ -77,6 +77,11 @@ let span_bounds src (sp : Ast.span) =
   ( offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col,
     offset_of_pos src (sp.Ast.end_line - 1) sp.Ast.end_col )
 
+(** Source text covered by [sp], or "" if out of bounds. *)
+let slice_span src (sp : Ast.span) =
+  let (s, e) = span_bounds src sp in
+  if e > s && s >= 0 && e <= String.length src then String.sub src s (e - s) else ""
+
 (** Apply [edits] to [src] (descending by start; overlapping edits dropped). *)
 let apply_edits src (edits : edit list) : string =
   let sorted =
@@ -617,3 +622,237 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) -> sp
   | Ast.EVar n -> n.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
+
+(* ------------------------------------------------------------------ *)
+(* bundle — introduce a parameter object (record) for a function       *)
+(* ------------------------------------------------------------------ *)
+
+(** Render a surface [Ast.ty] back to March source (best-effort). *)
+let rec surface_ty (t : Ast.ty) : string =
+  match t with
+  | Ast.TyCon (n, [])   -> n.Ast.txt
+  | Ast.TyCon (n, args) ->
+    n.Ast.txt ^ "(" ^ String.concat ", " (List.map surface_ty args) ^ ")"
+  | Ast.TyVar n         -> n.Ast.txt
+  | Ast.TyArrow (a, b)  -> surface_ty a ^ " -> " ^ surface_ty b
+  | Ast.TyTuple ts      -> "(" ^ String.concat ", " (List.map surface_ty ts) ^ ")"
+  | Ast.TyRecord fs     ->
+    "{ " ^ String.concat ", "
+             (List.map (fun (n, t) -> n.Ast.txt ^ ": " ^ surface_ty t) fs) ^ " }"
+  | Ast.TyLinear (_, t) -> "linear " ^ surface_ty t
+  | Ast.TyNat n         -> string_of_int n
+  | Ast.TyNatOp (op, a, b) ->
+    surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ") ^ surface_ty b
+  | Ast.TyChan (r, p)   -> "Chan(" ^ r.Ast.txt ^ ", " ^ p.Ast.txt ^ ")"
+
+(** Split [s] on top-level commas, respecting (), [], {} nesting and string
+    literals. Used to recover argument source text without trusting per-arg
+    spans (string-literal spans in the parser only cover the opening quote). *)
+let split_top_commas (s : string) : string list =
+  let n = String.length s in
+  let parts = ref [] and start = ref 0 and depth = ref 0 and instr = ref false in
+  let i = ref 0 in
+  while !i < n do
+    let c = s.[!i] in
+    (if !instr then (if c = '\\' then incr i else if c = '"' then instr := false)
+     else match c with
+       | '"' -> instr := true
+       | '(' | '[' | '{' -> incr depth
+       | ')' | ']' | '}' -> if !depth > 0 then decr depth
+       | ',' when !depth = 0 ->
+         parts := String.sub s !start (!i - !start) :: !parts; start := !i + 1
+       | _ -> ());
+    incr i
+  done;
+  parts := String.sub s !start (n - !start) :: !parts;
+  List.rev_map String.trim !parts
+
+let pascal_case name =
+  String.concat ""
+    (List.map (fun p ->
+         if p = "" then ""
+         else String.make 1 (Char.uppercase_ascii p.[0]) ^ String.sub p 1 (String.length p - 1))
+       (String.split_on_char '_' name))
+
+(** Spans of unshadowed references to any name in [targets] within [e]. *)
+let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span) list =
+  let acc = ref [] in
+  let pat_names p =
+    let r = ref [] in
+    let rec go = function
+      | Ast.PatVar n -> r := n.Ast.txt :: !r
+      | Ast.PatAs (p, n, _) -> go p; r := n.Ast.txt :: !r
+      | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) -> List.iter go ps
+      | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> go p) fs
+      | _ -> () in
+    go p; !r in
+  let rec walk bound (e : Ast.expr) =
+    match e with
+    | Ast.EVar n ->
+      if List.mem n.Ast.txt targets && not (List.mem n.Ast.txt bound)
+      then acc := (n.Ast.txt, n.Ast.span) :: !acc
+    | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+    | Ast.EApp (g, args, _) -> walk bound g; List.iter (walk bound) args
+    | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
+      List.iter (walk bound) args
+    | Ast.ELam (ps, body, _) ->
+      walk (List.fold_left (fun b (p : Ast.param) -> p.Ast.param_name.txt :: b) bound ps) body
+    | Ast.ELetFn (n, ps, _, body, _) ->
+      walk (n.Ast.txt :: List.fold_left (fun b (p : Ast.param) -> p.Ast.param_name.txt :: b) bound ps) body
+    | Ast.EBlock (es, _) ->
+      ignore (List.fold_left (fun b e -> match e with
+          | Ast.ELet (bd, _) -> walk b bd.Ast.bind_expr; pat_names bd.Ast.bind_pat @ b
+          | _ -> walk b e; b) bound es)
+    | Ast.ELet (bd, _) -> walk bound bd.Ast.bind_expr
+    | Ast.EMatch (s, brs, _) ->
+      walk bound s;
+      List.iter (fun (br : Ast.branch) ->
+          let b = pat_names br.branch_pat @ bound in
+          (match br.branch_guard with Some g -> walk b g | None -> ());
+          walk b br.branch_body) brs
+    | Ast.EIf (c, t, el, _) -> walk bound c; walk bound t; walk bound el
+    | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> walk bound c; walk bound b) arms
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk bound a; walk bound b
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk bound e) fs
+    | Ast.ERecordUpdate (e, fs, _) -> walk bound e; List.iter (fun (_, e) -> walk bound e) fs
+    | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> walk bound e in
+  walk [] e;
+  !acc
+
+(** Bundle the parameters of [fn_name] into a generated record, rewriting the
+    function's signature and body and every call site across the project. v1
+    limits: single-clause function, all parameters type-annotated. A recursive
+    call in the body is rewritten as a call site and may need manual touch-up. *)
+let bundle_fn ~root ~fn_name ?record_name ~dry_run () : (outcome, string) result =
+  let files = discover_march_files root in
+  let found = ref None in
+  List.iter (fun path ->
+      if !found = None then
+        match (try Some (read_file path) with _ -> None) with
+        | None -> ()
+        | Some src ->
+          (match parse_string ~filename:path src with
+           | None -> ()
+           | Some m ->
+             let rec scan ds =
+               List.iter (fun d -> if !found = None then match d with
+                   | Ast.DFn (fn, _) when fn.Ast.fn_name.Ast.txt = fn_name ->
+                     found := Some (path, src, fn)
+                   | Ast.DMod (_, _, ds, _) -> scan ds | _ -> ()) ds in
+             scan m.Ast.mod_decls))
+    files;
+  match !found with
+  | None -> Error (Printf.sprintf "no function named `%s` found" fn_name)
+  | Some (def_path, def_src, fn) ->
+    (match fn.Ast.fn_clauses with
+     | [cl] ->
+       let extracted =
+         List.map (fun p -> match p with
+             | Ast.FPNamed { Ast.param_name; param_ty = Some ty; _ } -> Ok (param_name.Ast.txt, ty)
+             | Ast.FPNamed { Ast.param_name; _ } -> Error param_name.Ast.txt
+             | Ast.FPPat (Ast.PatVar n) -> Error n.Ast.txt
+             | _ -> Error "<param>") cl.Ast.fc_params in
+       (match List.find_opt (function Error _ -> true | _ -> false) extracted with
+        | Some (Error nm) ->
+          Error (Printf.sprintf "parameter `%s` has no type annotation (required to bundle)" nm)
+        | _ ->
+          let params = List.map (function Ok x -> x | Error _ -> assert false) extracted in
+          if params = [] then Error "function has no parameters to bundle"
+          else begin
+            let rn = match record_name with Some r -> r | None -> pascal_case fn_name ^ "Args" in
+            let pvar = "args" in
+            let def_edits = ref [] in
+            (* (a) insert the record type before the function *)
+            let name_sp = fn.Ast.fn_name.Ast.span in
+            let line_start = offset_of_pos def_src (name_sp.Ast.start_line - 1) 0 in
+            let indent =
+              let b = Buffer.create 8 in let i = ref line_start in
+              while !i < String.length def_src && (def_src.[!i] = ' ' || def_src.[!i] = '\t') do
+                Buffer.add_char b def_src.[!i]; incr i done; Buffer.contents b in
+            let fields_decl =
+              String.concat ", " (List.map (fun (n, t) -> Printf.sprintf "%s : %s" n (surface_ty t)) params) in
+            let type_text = Printf.sprintf "%stype %s = { %s }\n\n" indent rn fields_decl in
+            def_edits := { e_start = line_start; e_stop = line_start; e_repl = type_text } :: !def_edits;
+            (* (b) replace the parameter list with `(args: RN)` *)
+            let (_, name_end) = span_bounds def_src name_sp in
+            let n = String.length def_src in
+            let popen = ref name_end in
+            while !popen < n && def_src.[!popen] <> '(' do incr popen done;
+            (if !popen < n then begin
+                let depth = ref 0 and j = ref !popen and stop = ref (-1) in
+                while !j < n && !stop < 0 do
+                  (match def_src.[!j] with '(' -> incr depth | ')' -> decr depth | _ -> ());
+                  if !depth = 0 then stop := !j else incr j
+                done;
+                if !stop > !popen then
+                  def_edits := { e_start = !popen + 1; e_stop = !stop;
+                                 e_repl = Printf.sprintf "%s: %s" pvar rn } :: !def_edits
+              end);
+            (* (c) rewrite body references to params -> args.param *)
+            let pnames = List.map fst params in
+            List.iter (fun (nm, sp) ->
+                let (s, e) = span_bounds def_src sp in
+                if e > s then
+                  def_edits := { e_start = s; e_stop = e; e_repl = pvar ^ "." ^ nm } :: !def_edits)
+              (unshadowed_uses pnames cl.Ast.fc_body);
+            (* --- call-site edits across all files --- *)
+            let changes = ref [] and skipped = ref [] in
+            let nparams = List.length params in
+            let process path src extra =
+              match parse_string ~filename:path src with
+              | None -> if extra <> [] then skipped := (path, "result would not parse") :: !skipped
+              | Some m ->
+                let edits = ref extra in
+                iter_app_exprs (fun callee args _sp ->
+                    let target = match callee with
+                      | Ast.EVar n -> n.Ast.txt = fn_name
+                      | Ast.EField (_, fld, _) -> fld.Ast.txt = fn_name
+                      | _ -> false in
+                    if target && List.length args = nparams then begin
+                      (* Find the call's parens by scanning from the callee start
+                         (per-arg spans are unreliable for string literals). *)
+                      let (cstart, _) = span_bounds src (span_of_expr callee) in
+                      let slen = String.length src in
+                      let popen = ref cstart in
+                      while !popen < slen && src.[!popen] <> '(' do incr popen done;
+                      if !popen < slen then begin
+                        let depth = ref 0 and j = ref !popen and pclose = ref (-1) in
+                        while !j < slen && !pclose < 0 do
+                          (match src.[!j] with '(' -> incr depth | ')' -> decr depth | _ -> ());
+                          if !depth = 0 then pclose := !j else incr j
+                        done;
+                        if !pclose > !popen then begin
+                          let inner = String.sub src (!popen + 1) (!pclose - !popen - 1) in
+                          let arg_texts = split_top_commas inner in
+                          if List.length arg_texts = nparams then begin
+                            let fields =
+                              String.concat ", "
+                                (List.map2 (fun (pn, _) at -> Printf.sprintf "%s = %s" pn at)
+                                   params arg_texts) in
+                            edits := { e_start = !popen + 1; e_stop = !pclose;
+                                       e_repl = Printf.sprintf "{ %s }" fields } :: !edits
+                          end
+                        end
+                      end
+                    end) m;
+                if !edits <> [] then begin
+                  let updated = apply_edits src !edits in
+                  match parse_string ~filename:path updated with
+                  | None -> skipped := (path, "result would not parse") :: !skipped
+                  | Some _ ->
+                    if not dry_run then write_file path updated;
+                    changes := { fc_path = path; fc_old = src; fc_new = updated;
+                                 fc_count = List.length !edits } :: !changes
+                end
+            in
+            List.iter (fun path ->
+                match (try Some (read_file path) with _ -> None) with
+                | None -> ()
+                | Some src ->
+                  let extra = if path = def_path then !def_edits else [] in
+                  process path src extra)
+              files;
+            Ok { changes = List.rev !changes; skipped = List.rev !skipped }
+          end)
+     | _ -> Error "can only bundle single-clause functions")
