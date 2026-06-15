@@ -119,4 +119,14 @@ mod Result do
     end
   end
 
+  impl Eq(Result(a, e)) when Eq(a), Eq(e) do
+    fn eq(x, y) do
+      match (x, y) do
+      (Ok(a),  Ok(b))  -> a == b
+      (Err(a), Err(b)) -> a == b
+      _                -> false
+      end
+    end
+  end
+
 end
