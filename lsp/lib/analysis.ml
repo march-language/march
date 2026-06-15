@@ -84,6 +84,11 @@ type perf_insight_kind =
       (** Perceus detected [pi_count] in-place memory reuse opportunities (FBIP). *)
   | TirIndirectCall of { pi_fn_name : string; pi_count : int }
       (** [pi_count] calls in this function go through a function pointer. *)
+  (* Phase 2 — AST heuristics (synchronous, no TIR pass needed) *)
+  | IndirectCall of { pi_callee : string }
+      (** A call whose callee is a parameter — dispatched through a pointer. *)
+  | RecursiveAlloc of { pi_alloc : string }
+      (** An allocation inside an arm of a self-recursive function (GC pressure). *)
 
 (** A performance insight produced by static AST analysis. *)
 type perf_insight = {
@@ -1331,6 +1336,8 @@ let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
     | StackPromoted _  -> Lsp.Types.DiagnosticSeverity.Hint,    "perf/stack-promoted"
     | FbipReuse _      -> Lsp.Types.DiagnosticSeverity.Hint,    "perf/fbip-reuse"
     | TirIndirectCall _ -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/indirect-call"
+    | IndirectCall _    -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/indirect-call"
+    | RecursiveAlloc _  -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/recursive-alloc"
   in
   Lsp.Types.Diagnostic.create
     ~range
@@ -1340,8 +1347,129 @@ let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
     ~code:(`String code)
     ()
 
-(** Run all three Phase-1 perf insight passes over [user_decls] and return
-    the collected insights. *)
+(** Parameter names bound by a function clause (named or bare-pattern). *)
+let clause_param_names (cl : Ast.fn_clause) : string list =
+  List.filter_map (function
+      | Ast.FPNamed p -> Some p.Ast.param_name.Ast.txt
+      | Ast.FPPat (Ast.PatVar n) -> Some n.Ast.txt
+      | _ -> None
+    ) cl.Ast.fc_params
+
+(** Phase-2 heuristic: a call whose callee is one of [params] dispatches through
+    a function pointer (an indirect call). Calling a parameter is the canonical
+    higher-order indirect call. *)
+let indirect_call_check (params : string list) (e : Ast.expr) acc =
+  let rec go e acc =
+    match e with
+    | Ast.EApp (Ast.EVar n, args, sp) when List.mem n.Ast.txt params ->
+      let pi =
+        { pi_span    = sp;
+          pi_kind    = IndirectCall { pi_callee = n.Ast.txt };
+          pi_message = Printf.sprintf
+            "`%s` is a parameter, so this call dispatches through a function pointer (an indirect call). If the target is statically known, a direct call is faster." n.Ast.txt }
+      in
+      List.fold_left (fun a e -> go e a) (pi :: acc) args
+    | Ast.EApp (f, args, _) ->
+      List.fold_left (fun a e -> go e a) (go f acc) args
+    | Ast.ELet (b, _) -> go b.Ast.bind_expr acc
+    | Ast.EBlock (es, _) -> List.fold_left (fun a e -> go e a) acc es
+    | Ast.EMatch (subj, brs, _) ->
+      List.fold_left (fun a (br : Ast.branch) -> go br.Ast.branch_body a)
+        (go subj acc) brs
+    | Ast.EIf (c, t, f, _) -> go f (go t (go c acc))
+    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go y (go x acc)
+    | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+      List.fold_left (fun a e -> go e a) acc es
+    | Ast.ERecord (fs, _) -> List.fold_left (fun a (_, e) -> go e a) acc fs
+    | Ast.ERecordUpdate (e, fs, _) ->
+      List.fold_left (fun a (_, e) -> go e a) (go e acc) fs
+    | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+    | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) -> go e acc
+    | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> go body acc
+    | _ -> acc
+  in
+  go e acc
+
+(** True when [e] contains a call to [fn_name] (self-recursion). *)
+let rec contains_call fn_name (e : Ast.expr) =
+  match e with
+  | Ast.EApp (Ast.EVar n, args, _) ->
+    n.Ast.txt = fn_name || List.exists (contains_call fn_name) args
+  | Ast.EApp (f, args, _) ->
+    contains_call fn_name f || List.exists (contains_call fn_name) args
+  | Ast.ELet (b, _) -> contains_call fn_name b.Ast.bind_expr
+  | Ast.EBlock (es, _) -> List.exists (contains_call fn_name) es
+  | Ast.EMatch (subj, brs, _) ->
+    contains_call fn_name subj ||
+    List.exists (fun (br : Ast.branch) -> contains_call fn_name br.Ast.branch_body) brs
+  | Ast.EIf (c, t, f, _) ->
+    contains_call fn_name c || contains_call fn_name t || contains_call fn_name f
+  | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) ->
+    contains_call fn_name x || contains_call fn_name y
+  | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+    List.exists (contains_call fn_name) es
+  | Ast.ERecord (fs, _) -> List.exists (fun (_, e) -> contains_call fn_name e) fs
+  | Ast.ERecordUpdate (e, fs, _) ->
+    contains_call fn_name e || List.exists (fun (_, e) -> contains_call fn_name e) fs
+  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+  | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) -> contains_call fn_name e
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> contains_call fn_name body
+  | _ -> false
+
+(** Phase-2 heuristic: in a self-recursive function, allocations (constructor /
+    record / tuple) inside a match/if arm run on every recursive step — a hot
+    path for GC pressure (and a candidate for FBIP reuse). *)
+let recursive_alloc_check fn_name (body : Ast.expr) acc =
+  if not (contains_call fn_name body) then acc
+  else begin
+    let is_alloc = function
+      | Ast.ECon (_, _ :: _, _) | Ast.ERecord _
+      | Ast.ETuple _ | Ast.ERecordUpdate _ -> true
+      | _ -> false
+    in
+    let alloc_desc = function
+      | Ast.ECon (n, _, _) -> Printf.sprintf "`%s(...)`" n.Ast.txt
+      | Ast.ERecord _ -> "a record"
+      | Ast.ETuple _ -> "a tuple"
+      | Ast.ERecordUpdate _ -> "a record update"
+      | _ -> "a value"
+    in
+    let acc = ref acc in
+    let rec walk ~in_arm e =
+      if in_arm && is_alloc e then begin
+        let sp = span_of_expr e in
+        acc := { pi_span    = sp;
+                 pi_kind    = RecursiveAlloc { pi_alloc = alloc_desc e };
+                 pi_message = Printf.sprintf
+                   "%s is allocated inside an arm of the recursive `%s`, so it runs on every step. If it is loop-invariant, hoist it out; otherwise consider whether FBIP reuse applies."
+                   (alloc_desc e) fn_name } :: !acc
+      end;
+      match e with
+      | Ast.EMatch (subj, brs, _) ->
+        walk ~in_arm subj;
+        List.iter (fun (br : Ast.branch) -> walk ~in_arm:true br.Ast.branch_body) brs
+      | Ast.EIf (c, t, f, _) ->
+        walk ~in_arm c; walk ~in_arm:true t; walk ~in_arm:true f
+      | Ast.EApp (f, args, _) -> walk ~in_arm f; List.iter (walk ~in_arm) args
+      | Ast.ELet (b, _) -> walk ~in_arm b.Ast.bind_expr
+      | Ast.EBlock (es, _) -> List.iter (walk ~in_arm) es
+      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk ~in_arm x; walk ~in_arm y
+      | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+        List.iter (walk ~in_arm) es
+      | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk ~in_arm e) fs
+      | Ast.ERecordUpdate (e, fs, _) ->
+        walk ~in_arm e; List.iter (fun (_, e) -> walk ~in_arm e) fs
+      | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+      | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) -> walk ~in_arm e
+      | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> walk ~in_arm b
+      | _ -> ()
+    in
+    walk ~in_arm:false body;
+    !acc
+  end
+
+(** Run all perf insight passes over [user_decls] and return the collected
+    insights (Phase-1 AST passes + Phase-2 heuristics). *)
 let collect_perf_insights
     (type_map : (Ast.span, Tc.ty) Hashtbl.t)
     (user_decls : Ast.decl list) : perf_insight list =
@@ -1351,9 +1479,12 @@ let collect_perf_insights
     match d with
     | Ast.DFn (fn, _) ->
       add_all (tco_check_fn fn []);
+      let fn_name = fn.Ast.fn_name.Ast.txt in
       List.iter (fun (cl : Ast.fn_clause) ->
           add_all (closure_capture_check cl.Ast.fc_body []);
-          add_all (send_copy_check type_map cl.Ast.fc_body [])
+          add_all (send_copy_check type_map cl.Ast.fc_body []);
+          add_all (indirect_call_check (clause_param_names cl) cl.Ast.fc_body []);
+          add_all (recursive_alloc_check fn_name cl.Ast.fc_body [])
         ) fn.Ast.fn_clauses
     | Ast.DLet (_, b, _) ->
       add_all (closure_capture_check b.Ast.bind_expr []);
