@@ -15,6 +15,18 @@
 
 ---
 
+## Execution status (2026-06-15)
+
+**Tiers 0–3 implemented** via subagent-driven development (14 feature commits + 1 review-fix commit). 292 `march-lsp` tests, full suite green.
+
+- ✅ **Task 0** — `collect_h_sigils` + position mapping; `collect_html_issues` refactored onto it.
+- ✅ **Tier 1** — 1.1 parse `<island>`, 1.2 validate (**conservative**: only flags a loaded module missing `create`/`render`, not unknown names — per-file analysis can't see cross-file components, so flagging unknowns would false-positive), 1.3 go-to-def, 1.4 completion. **1.5 (props typecheck / hover) deferred** behind Tier 4.
+- ✅ **Tier 2** — 2.1 tag-pair highlight (`tag_pairs_in_sigil`), 2.2 linked editing, 2.3 folding, 2.4 auto-close on `>` (`onTypeFormatting`).
+- ✅ **Tier 3** — 3.1 unknown-tag (Levenshtein), 3.2 duplicate-attr, 3.3 void/self-closing, 3.4 unsafe-interpolation. **3.5 (a11y) not done** (optional).
+- ⏸️ **Tier 4** — still a sub-plan seed (full `${…}` interpolation intelligence). Not started.
+
+**Deferred follow-up (from the final review):** unify the ~6 hand-written HTML tag scanners (`scan_html_unclosed`, `open_tags_in_sigil`, `dup_attrs_in_sigil`, `void_misuse_in_sigil`, `unsafe_interpolation_in_sigil`, `tag_pairs_in_sigil`) into ONE event tokenizer (`tokenize_h_content : string -> html_event list`); each pass becomes a small fold. Removes ~250 lines and fixes shared skip-rule edge cases at the source. The review's 3 correctness bugs (autoclose/dup-attr/island `>`-in-attr) were patched surgically in the meantime.
+
 ## Background: how `~H` works today
 
 - `~H"…"` is an HTML template sigil (`Ast.ESigil ("H", interp_expr, span)`). It desugars (`lib/desugar/desugar.ml:105+`) to an IOList. `${expr}` interpolations are auto-escaped (`html_auto_escape`). `<island name='Counter' props=${e} />` tags desugar to `IslandView.island_ssr("Counter", Json.to_string(to_json(Counter.create(e))), IOList.to_string(Counter.render(Counter.create(e))))` — i.e. the island contract is the module functions **`create`** and **`render`** (NOT `init`).
