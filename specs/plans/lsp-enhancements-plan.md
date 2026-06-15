@@ -1203,30 +1203,61 @@ Add `code : string option` to `March_errors.Errors.diagnostic`. Update all `Erro
 
 ## Feature Status Tracking
 
-| # | Feature | Status |
-|---|---------|--------|
-| 1 | Snippet completions | ⬜ Not started |
-| 2 | Folding ranges | ⬜ Not started |
-| 3 | Add type annotation | ⬜ Not started |
-| 4 | Remove unused binding | ⬜ Not started |
-| 5 | Enhanced match generation | ⬜ Not started |
-| 6 | Diagnostics-driven quickfixes | ⬜ Not started |
-| 7 | Dead code detection | ⬜ Not started |
-| 8 | Extract function | ⬜ Not started |
-| 9 | Extract variable | ⬜ Not started |
-| 10 | Inline function/variable | ⬜ Not started |
-| 11 | Convert between forms | ⬜ Not started |
-| 12 | Alias language feature | ⬜ Not started |
-| 13 | Auto-alias code action | ⬜ Not started |
-| 14 | Workspace symbol search | ⬜ Not started |
-| 15 | Cross-file go-to-definition | ⬜ Not started |
-| 16 | Cross-file find references | ⬜ Not started |
-| 17 | Project-level diagnostics | ⬜ Not started |
-| 18 | Call hierarchy | ⬜ Not started |
-| 19 | Semantic selection | ⬜ Not started |
-| 20 | Generate doc comment | ⬜ Not started |
-| 21 | Linked editing | ⬜ Not started |
-| 22 | Import suggestions | ⬜ Not started |
+**Reconciled 2026-06-15** against the actual merged code (`lsp/lib/analysis.ml`,
+`lsp/lib/server.ml`) after work landed across several agents/sessions (LSP
+phases 1–5, perf insights, code actions, DAP debugger, forge refactor). Status
+is evidence-based — a feature is ✅ only if its capability/handler/code-action
+title is present in source. `todos.md` holds the per-item implementation notes.
+
+| # | Feature | Status | Evidence |
+|---|---------|--------|----------|
+| 1 | Snippet completions | ✅ Done | `completions_at` insertText snippets |
+| 2 | Folding ranges | ✅ Done | `foldingRangeProvider`, `collect_fold_ranges` |
+| 3 | Add type annotation | ✅ Done | "Add type/return/parameter type annotation" + batch |
+| 4 | Remove unused binding | ✅ Done | "Prefix with underscore", "Remove unused binding", fix-all |
+| 5 | Enhanced match generation | ✅ Done | "Add all N missing cases", `ms_missing_cases` |
+| 6 | Diagnostics-driven quickfixes | ✅ Done | `fix_registry` / `apply_fix_registry`, "Fix all" |
+| 7 | Dead code detection | ✅ Done | call-graph BFS, `unused_fns`, `unused_private_fn` |
+| 8 | Extract function | ✅ Done | "Extract function" action |
+| 9 | Extract variable | ✅ Done | "Extract variable" action |
+| 10 | Inline function/variable | 🟡 Partial | "Inline variable" done; inline *function* not |
+| 11 | Convert between forms | ✅ Done | Introduce/Remove pipe, Convert if→match, Expand→lambda/Collapse |
+| 12 | Alias language feature | ⬜ Not started | `DAlias` AST exists; resolution pipeline not implemented |
+| 13 | Auto-alias code action | ⬜ Not started | depends on #12 |
+| 14 | Workspace symbol search | ✅ Done | `workspaceSymbolProvider`, `workspace/symbol`, `query_symbols` |
+| 15 | Cross-file go-to-definition | ✅ Done | workspace index + `definition` cross-file path |
+| 16 | Cross-file find references | ✅ Done | `references_across`, `workspace_index_full` |
+| 17 | Project-level diagnostics | ⬜ Not started | per-file/open-doc diagnostics only; no whole-project publish |
+| 18 | Call hierarchy | ✅ Done | `callHierarchyProvider`, prepare/incoming/outgoing |
+| 19 | Semantic selection | ✅ Done | `selectionRangeProvider`, `selection_range_at` |
+| 20 | Generate doc comment | ⬜ Not started | no generator found |
+| 21 | Linked editing | ✅ Done | `linkedEditingRangeProvider`, `linked_editing_ranges_at` |
+| 22 | Import suggestions | ✅ Done | "Import X from Y" action + completion auto-import (`additionalTextEdits` + resolve) |
+
+**Summary: 17 done, 1 partial, 4 not started.** Remaining: #10 inline-function
+half (inline variable done), #12/#13 alias language feature + auto-alias (Phase 4
+compiler work), #17 project-level diagnostics (Phase 5), #20 generate doc comment.
+
+### Delivered beyond the original 22 features
+
+Work that shipped but was not a numbered feature in this plan:
+
+- **Semantic tokens** — ownership modifiers (`linear`/`affine`), use-site type/ctor
+  fidelity, and `~delta:true` full/delta encoding.
+- **documentHighlight** — Read/Write kinds (was Text-only).
+- **FBIP performance inlay hints** — `♻ reused` / `⧉ copied`, toggleable via
+  `march.inlayHints.performanceAnnotations` (didChangeConfiguration).
+- **Performance Insights Phases 1–3** — TCO/non-tail-call, actor send-copy,
+  closure-capture, indirect-call, recursive-arm allocation (AST); stack-promotion,
+  FBIP reuse, indirect-call (async TIR pass); per-function code lens.
+- **More code actions** — typed-hole fill, implement-missing-methods scaffold,
+  MPST session-handler / Client-module scaffold, make-linear / linear audit,
+  rename-to-snake_case, wrap/remove-inspect, remove-unused-import, organize
+  imports, destructure-into-match (case split).
+- **DAP editor debugger** (`lib/dap/`, `march dap`, VS Code ext) — separate effort.
+- **forge refactor CLI** (`lib/refactor/`, `forge refactor`) — separate effort.
+- **Incremental typecheck engine** (Phase 5 infra) — cached base/deps envs,
+  per-keystroke single-file recheck, debounce, watched-file invalidation.
 
 ---
 
