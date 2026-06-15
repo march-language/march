@@ -422,7 +422,11 @@ class march_server =
         ServerCapabilities.executeCommandProvider =
           Some (Lsp.Types.ExecuteCommandOptions.create
                   ~commands:[ "march.runTest"; "march.debugTest";
-                              "march.run";     "march.debug" ] ()) }
+                              "march.run";     "march.debug" ] ());
+        (* Auto-close HTML tags inside ~H sigils when the user types '>'. *)
+        ServerCapabilities.documentOnTypeFormattingProvider =
+          Some (Lsp.Types.DocumentOnTypeFormattingOptions.create
+                  ~firstTriggerCharacter:">" ()) }
 
     (* -------------------------------------------------------------- *)
     (* Document synchronisation                                        *)
@@ -1311,6 +1315,35 @@ class march_server =
                                                    ("newText", `String e.newText) ]])
                                  :: fields)))
         | _ -> Lwt.return `Null
+
+      end else if meth = "textDocument/onTypeFormatting" then begin
+        (* Auto-close HTML tags in ~H sigils when the user types '>'.
+           Params: { textDocument: {uri}, position: {line, character}, ch: string }
+           Returns: TextEdit list (one edit) or empty list. *)
+        let (line, utf16_char) = get_position () in
+        let edit =
+          match get_td_uri () with
+          | None -> None
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> None
+             | Some a ->
+               let byte_col =
+                 Utf16.lsp_char_to_byte_col a.Analysis.doc ~line ~utf16_char
+               in
+               (match Analysis.autoclose_tag_at a ~line ~character:byte_col with
+                | None -> None
+                | Some e -> Some (Pos.remap_text_edit a.Analysis.doc e)))
+        in
+        (match edit with
+         | None -> Lwt.return (`List [])
+         | Some (e : Lsp.Types.TextEdit.t) ->
+           Lwt.return (`List [
+             `Assoc [
+               ("range",   json_range e.range);
+               ("newText", `String e.newText)
+             ]
+           ]))
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)

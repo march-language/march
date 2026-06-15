@@ -6738,6 +6738,66 @@ let project_diagnostics (sources : (string * string) list)
       (path, List.map (Pos.remap_diagnostic a.doc) a.diagnostics))
     sources
 
+(* textDocument/onTypeFormatting: when the user types '>' finishing an open
+   HTML tag inside a ~H sigil, return a TextEdit inserting the matching </tag>
+   at the cursor.  Returns None when the '>' does not close a real, non-void,
+   non-self-closing, non-island open tag.
+
+   [line] is 0-indexed; [character] is a BYTE column (callers in the public
+   query_* wrapper convert UTF-16 before calling here). *)
+let autoclose_tag_at (a : t) ~line ~character : Lsp.Types.TextEdit.t option =
+  (* pos_to_ofs takes 1-indexed line *)
+  let cur = pos_to_ofs a.src (line + 1) character in
+  let is_nc c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    || (c >= '0' && c <= '9') || c = '-' || c = '_'
+  in
+  List.find_map (fun (s : h_sigil) ->
+      if s.hs_base_ofs <= cur && cur <= s.hs_close_ofs then begin
+        let rel = cur - s.hs_base_ofs in
+        let pre = String.sub s.hs_content 0 rel in
+        let pn  = String.length pre in
+        (* The character just before the cursor must be '>'. *)
+        if pn = 0 || pre.[pn - 1] <> '>' then None
+        else begin
+          (* Find the nearest '<' that starts an open (not close) tag. *)
+          let i = ref (pn - 2) in
+          (* skip back over any attribute text, respecting quotes *)
+          while !i >= 0 && pre.[!i] <> '<' do decr i done;
+          if !i < 0 then None
+          else begin
+            let lt = !i in
+            (* Must be '<' followed by a letter — open tag, not '</' or '<!--' *)
+            if lt + 1 >= pn then None
+            else begin
+              let first = pre.[lt + 1] in
+              if not ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))
+              then None
+              else begin
+                (* Parse the tag name *)
+                let j = ref (lt + 1) in
+                while !j < pn && is_nc pre.[!j] do incr j done;
+                let tag = String.lowercase_ascii (String.sub pre (lt + 1) (!j - lt - 1)) in
+                (* Self-closing: char before '>' is '/' *)
+                let self_closing = pn >= 2 && pre.[pn - 2] = '/' in
+                (* Void element *)
+                let is_void = List.mem tag html_void_elements in
+                (* Island element (self-renders; skip) *)
+                let is_island = tag = "island" in
+                if self_closing || is_void || is_island then None
+                else begin
+                  let open Lsp.Types in
+                  let pos = Position.create ~line ~character in
+                  let range = Range.create ~start:pos ~end_:pos in
+                  Some (TextEdit.create ~range ~newText:("</" ^ tag ^ ">"))
+                end
+              end
+            end
+          end
+        end
+      end else None
+    ) a.h_sigils
+
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)
 (* When an edit leaves the buffer unparseable, [analyse] returns empty     *)

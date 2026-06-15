@@ -5018,6 +5018,37 @@ end|} in
   Alcotest.(check bool) "single-line ~H still has fn fold range" true has_fn_fold
 
 (* ------------------------------------------------------------------ *)
+(* ~H auto-close on typing >                                           *)
+(* ------------------------------------------------------------------ *)
+
+let test_autoclose_tag () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div>"
+  end
+end|} in
+  let a = analyse src in
+  (* cursor right after the '>' of <div>; pos_of gives start of "<div>" *)
+  let (l, c) = pos_of src "<div>" in
+  let after = c + 5 in   (* past "<div>" -> just after '>' *)
+  match An.autoclose_tag_at a ~line:l ~character:after with
+  | Some te -> Alcotest.(check string) "inserts </div>" "</div>" te.Lsp.Types.TextEdit.newText
+  | None -> Alcotest.fail "expected an auto-close edit for <div>"
+
+let test_autoclose_void_tag () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<br>"
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "<br>" in
+  let after = c + 4 in   (* just after '>' of <br> *)
+  match An.autoclose_tag_at a ~line:l ~character:after with
+  | None -> ()   (* void element: no auto-close *)
+  | Some _ -> Alcotest.fail "should not auto-close void element <br>"
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -5433,5 +5464,9 @@ let () =
     "~H element folding ranges", [
       "multi-line ~H element produces fold range", `Quick, test_h_element_folding;
       "single-line ~H does not crash",             `Quick, test_h_element_no_fold_for_single_line;
+    ];
+    "~H auto-close on typing >", [
+      "autoclose_tag_at inserts </div> after <div>", `Quick, test_autoclose_tag;
+      "autoclose_tag_at returns None for void element <br>", `Quick, test_autoclose_void_tag;
     ];
   ]
