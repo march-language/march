@@ -2776,33 +2776,43 @@ let analyse ~filename ~src : t =
     in
     let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
     let mi = module_index_of_vars vars_list in
+    (* Island component validation.
+       Conservative policy: we ONLY flag an island name when we can
+       CONFIRM it is wrong — i.e. the name IS visible in module_index
+       (as a top-level, bare-named module in the typecheck env) but
+       lacks the required `create` and/or `render` functions.
+
+       We do NOT flag names that are absent from module_index.  Two
+       common legitimate cases would be falsely flagged otherwise:
+         1. Nested modules (e.g. `mod App do mod Counter do … end end`)
+            are keyed as "App.Counter" in module_index, not "Counter".
+         2. Components defined in sibling files are not loaded into the
+            per-file typecheck env, so they are simply absent.
+
+       An editor warning that fires on correct code is worse than a
+       missing warning, so we err on the side of silence for the
+       "unknown name" case. *)
     let island_diags =
-      if mi = [] then []
-      else
-        List.concat_map (fun (s : h_sigil) ->
-          List.filter_map (fun (isl : island_ref) ->
-            match List.assoc_opt isl.isl_name mi with
-            | None ->
-              Some (Lsp.Types.Diagnostic.create
-                ~range:(Pos.span_to_lsp_range isl.isl_name_span)
-                ~severity:Lsp.Types.DiagnosticSeverity.Warning
-                ~message:(`String (Printf.sprintf
-                  "Island component `%s` is not a known module." isl.isl_name))
-                ~source:"march"
-                ~code:(`String "html/unknown-island")
-                ())
-            | Some members ->
-              if List.mem "create" members && List.mem "render" members then None
-              else Some (Lsp.Types.Diagnostic.create
-                ~range:(Pos.span_to_lsp_range isl.isl_name_span)
-                ~severity:Lsp.Types.DiagnosticSeverity.Warning
-                ~message:(`String (Printf.sprintf
-                  "`%s` is not a valid island: it must define `create` and `render`." isl.isl_name))
-                ~source:"march"
-                ~code:(`String "html/unknown-island")
-                ()))
-            (islands_in_sigil ~src s))
-          h_sigils
+      List.concat_map (fun (s : h_sigil) ->
+        List.filter_map (fun (isl : island_ref) ->
+          match List.assoc_opt isl.isl_name mi with
+          | None ->
+            (* Cannot confirm the module is wrong — could be a nested or
+               cross-file component not visible here.  Stay silent. *)
+            None
+          | Some members ->
+            if List.mem "create" members && List.mem "render" members then None
+            else Some (Lsp.Types.Diagnostic.create
+              ~range:(Pos.span_to_lsp_range isl.isl_name_span)
+              ~severity:Lsp.Types.DiagnosticSeverity.Warning
+              ~message:(`String (Printf.sprintf
+                "`%s` is a known module but is not a valid island: \
+                 it must define `create` and `render`." isl.isl_name))
+              ~source:"march"
+              ~code:(`String "html/unknown-island")
+              ()))
+          (islands_in_sigil ~src s))
+        h_sigils
     in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))

@@ -4800,30 +4800,50 @@ end|} in
 (* <island> component validation diagnostics                           *)
 (* ------------------------------------------------------------------ *)
 
-let test_island_unknown_module () =
-  let src = {|mod M do
-  fn page() : IOList do
-    ~H"<island name='Nope' />"
+let test_island_known_but_invalid_flagged () =
+  (* A nested module IS visible in module_index by its bare name, so when
+     it lacks `create` or `render` we CAN confirm it is a misuse and flag it.
+     BadCounter has `create` but no `render` — must emit html/unknown-island. *)
+  let src = {|mod App do
+  mod BadCounter do
+    fn create(n : Int) : Int do n end
+  end
+  fn page() : Int do
+    ~H"<island name='BadCounter' />"
+    0
   end
 end|} in
   let a = An.analyse ~filename:"test.march" ~src in
+  (* Guard: the sigil was seen, so the file parsed and the analysis ran
+     (this prevents the test from passing vacuously on a parse failure). *)
+  Alcotest.(check bool) "sigil was collected (file parsed)" true
+    (a.An.h_sigils <> []);
   let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
     match d.Lsp.Types.Diagnostic.code with
     | Some (`String "html/unknown-island") -> true | _ -> false)
     a.An.diagnostics in
-  Alcotest.(check bool) "unknown island flagged" true has
+  Alcotest.(check bool) "known-but-invalid island flagged" true has
 
 let test_island_valid_not_flagged () =
-  let src = {|mod Counter do
-  fn create(n : Int) : Int do n end
-  fn render(s : Int) : IOList do ~H"<p>${s}</p>" end
-end
-mod M do
-  fn page() : IOList do
+  (* A nested module with both `create` and `render` is a correct island
+     component.  Its bare name IS visible in module_index, so we can
+     confirm it is correct and must NOT emit a false-positive warning.
+     Uses a single top-level `mod` (March only allows one per file). *)
+  let src = {|mod App do
+  mod Counter do
+    fn create(n : Int) : Int do n end
+    fn render(s : Int) : Int do s end
+  end
+  fn page() : Int do
     ~H"<island name='Counter' />"
+    0
   end
 end|} in
   let a = An.analyse ~filename:"test.march" ~src in
+  (* Guard: the sigil was seen, so the file parsed and the analysis ran
+     (this prevents the test from passing vacuously on a parse failure). *)
+  Alcotest.(check bool) "sigil was collected (file parsed)" true
+    (a.An.h_sigils <> []);
   let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
     match d.Lsp.Types.Diagnostic.code with
     | Some (`String "html/unknown-island") -> true | _ -> false)
@@ -4946,8 +4966,8 @@ let () =
       "islands_in_sigil: name span lands on correct line and text",        `Quick, test_island_name_span;
     ];
     "island component validation", [
-      "unknown island module emits html/unknown-island diagnostic", `Quick, test_island_unknown_module;
-      "valid island with create+render is not flagged",             `Quick, test_island_valid_not_flagged;
+      "known module lacking create/render emits html/unknown-island", `Quick, test_island_known_but_invalid_flagged;
+      "valid island with create+render is not flagged",               `Quick, test_island_valid_not_flagged;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
