@@ -10283,6 +10283,54 @@ let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
   Alcotest.(check bool) "task handle is decrc'd by caller" true
     (ir_contains ir "march_decrc_local")
 
+(** Phase 5: task_yield() must emit call void @march_sched_yield(), not a no-op. *)
+let test_compile_task_yield_actually_yields () =
+  let ir = emit_actor_ir {|mod TaskYieldTest do
+    fn main() : Unit do
+      let _ = task_yield()
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "yields via sched_yield" true
+    (ir_contains ir "call void @march_sched_yield()")
+
+(** Phase 5: task_reductions() must read from @march_tls_reductions, not return literal 0. *)
+let test_compile_task_reductions_reads_tls () =
+  let ir = emit_actor_ir {|mod TaskReductionsTest do
+    fn main() : Int do
+      task_reductions()
+    end
+  end|} in
+  Alcotest.(check bool) "reads TLS reductions" true
+    (ir_contains ir "load i64, ptr @march_tls_reductions")
+
+(** Phase 5: task_await must emit call to @march_task_await, not inline field load. *)
+let test_compile_task_await_in_ir () =
+  let ir = emit_actor_ir {|mod TaskAwaitTest do
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      task_await(t)
+    end
+  end|} in
+  Alcotest.(check bool) "uses march_task_await" true
+    (ir_contains ir "call ptr @march_task_await")
+
+(** Phase 5: cancel token builtins must emit the correct C extern calls. *)
+let test_compile_cancel_token_ir () =
+  let ir = emit_actor_ir {|mod CancelTokenTest do
+    fn main() do
+      let tok = task_cancel_token_new()
+      let _ = task_is_cancelled(tok)
+      task_cancel(tok)
+    end
+  end|} in
+  Alcotest.(check bool) "cancel_token_new declared" true
+    (ir_contains ir "march_cancel_token_new");
+  Alcotest.(check bool) "cancel_token_cancel declared" true
+    (ir_contains ir "march_cancel_token_cancel");
+  Alcotest.(check bool) "cancel_token_is_cancelled declared" true
+    (ir_contains ir "march_cancel_token_is_cancelled")
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_async_send_queues_not_dispatches () =
@@ -22644,6 +22692,15 @@ let () =
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
           Alcotest.test_case "task_spawn heap-alloc no RC underflow" `Quick
             (with_reset test_compile_task_spawn_heap_alloc_no_rc_underflow);
+          (* Phase 5: compiled IR correctness *)
+          Alcotest.test_case "task_yield emits sched_yield"        `Quick
+            (with_reset test_compile_task_yield_actually_yields);
+          Alcotest.test_case "task_reductions reads TLS"           `Quick
+            (with_reset test_compile_task_reductions_reads_tls);
+          Alcotest.test_case "task_await uses march_task_await"    `Quick
+            (with_reset test_compile_task_await_in_ir);
+          Alcotest.test_case "cancel token IR correctness"         `Quick
+            (with_reset test_compile_cancel_token_ir);
           (* Phase 5B: cancel tokens *)
           Alcotest.test_case "cancel token new"          `Quick (with_reset test_cancel_token_new);
           Alcotest.test_case "cancel token cancel"       `Quick (with_reset test_cancel_token_cancel);

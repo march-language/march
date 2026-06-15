@@ -1,3 +1,4 @@
+(* Interpreter-only scaffolding. Not wired to the C green-thread runtime. *)
 (** Cooperative scheduler with reduction-counted preemption.
 
     Each actor/task gets a budget of [max_reductions] reductions per quantum.

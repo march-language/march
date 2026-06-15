@@ -1,3 +1,4 @@
+(* Interpreter-only scaffolding. Not wired to the C green-thread runtime. *)
 (** Lock-free multi-producer/single-consumer mailbox queue.
     Based on Michael-Scott queue using OCaml 5 Atomic. *)
 

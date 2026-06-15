@@ -138,8 +138,14 @@ void   *march_send(void *actor, void *msg);
 /* Process all actors in the run queue (called automatically by march_send). */
 void    march_run_scheduler(void);
 /* Spawn a March thunk closure (fn () -> T) as an async green thread.
- * Returns a boxed Task handle. */
+ * Returns a boxed Task handle (32 bytes: header + proc ptr + result ptr). */
 void   *march_task_spawn_thunk(void *clo_ptr);
+/* Wait for a task to complete; returns Ok(result) or Err(msg). */
+void   *march_task_await(void *task_obj);
+/* Spawn a thunk closure with a cancel token; yields cancel checks. */
+void   *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr);
+/* Mark a task's green thread as DEAD (cooperative cancel). */
+void    march_task_cancel_by_id(void *task_obj);
 
 /* Float builtins. */
 double  march_float_abs(double f);

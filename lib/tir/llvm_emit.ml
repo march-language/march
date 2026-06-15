@@ -2224,23 +2224,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let r = emit_load_field ctx task_ptr 0 inner_ty in
     (inner_ty, r)
 
-  (* task_await(task_ptr) → always Ok in Phase 1; unbox + rebox as Ok *)
+  (* task_await(task_ptr) → delegate to march_task_await C runtime *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
-    let (_, task_ptr) = emit_atom ctx a in
-    let inner_ty = match a with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
-         | _ -> "ptr")
-      | _ -> "ptr"
-    in
-    let val_v = emit_load_field ctx task_ptr 0 inner_ty in
-    let ok_ptr = emit_heap_alloc ctx 1 1 in
-    emit_store_field ctx ok_ptr 0 inner_ty val_v;
-    ("ptr", ok_ptr)
+    let (_, tp) = emit_atom ctx a in
+    let r = fresh ctx "tawait" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
+    ("ptr", r)
 
-  (* task_yield() → no-op in Phase 1 *)
+  (* task_yield() → cooperative yield via march_sched_yield *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
+    emit ctx "call void @march_sched_yield()";
     ("i64", "0")
 
   (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)
@@ -2251,8 +2244,46 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result clo_ptr);
     ("ptr", result)
 
-  (* task_reductions() → 0 in Phase 1 *)
+  (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
+    if ctx.repl then ("i64", "0")
+    else begin
+      let r = fresh ctx "reds" in
+      emit ctx (Printf.sprintf "%s = load i64, ptr @march_tls_reductions" r);
+      ("i64", r)
+    end
+
+  (* task_cancel_token_new() → allocate a new cancel token *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "task_cancel_token_new" ->
+    let r = fresh ctx "ctok" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_cancel_token_new()" r);
+    ("ptr", r)
+
+  (* task_cancel(tok) → cancel the token *)
+  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_cancel" ->
+    let (_, tp) = emit_atom ctx tok in
+    emit ctx (Printf.sprintf "call void @march_cancel_token_cancel(ptr %s)" tp);
+    ("i64", "0")
+
+  (* task_is_cancelled(tok) → check if token is cancelled *)
+  | Tir.EApp (f, [tok]) when f.Tir.v_name = "task_is_cancelled" ->
+    let (_, tp) = emit_atom ctx tok in
+    let r = fresh ctx "isc" in
+    emit ctx (Printf.sprintf "%s = call i64 @march_cancel_token_is_cancelled(ptr %s)" r tp);
+    ("i64", r)
+
+  (* task_spawn_with_cancel(clo, tok) → spawn with cancel token *)
+  | Tir.EApp (f, [clo; tok]) when f.Tir.v_name = "task_spawn_with_cancel" ->
+    let (_, cp) = emit_atom ctx clo in
+    let (_, tp) = emit_atom ctx tok in
+    let r = fresh ctx "tswc" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_with_cancel_thunk(ptr %s, ptr %s)" r cp tp);
+    ("ptr", r)
+
+  (* task_cancel_by_id(task) → mark task's proc as DEAD *)
+  | Tir.EApp (f, [t]) when f.Tir.v_name = "task_cancel_by_id" ->
+    let (_, tp) = emit_atom ctx t in
+    emit ctx (Printf.sprintf "call void @march_task_cancel_by_id(ptr %s)" tp);
     ("i64", "0")
 
   (* get_work_pool() → null sentinel in Phase 1 *)
@@ -4478,6 +4509,13 @@ declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
 declare void @march_actor_reply(ptr %ref, ptr %result)
 declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
 |};
     (* In REPL mode the reduction check is skipped, so march_tls_reductions and
        march_yield_from_compiled are never referenced — omitting them avoids
@@ -4611,6 +4649,13 @@ declare i64  @march_mpst_close(ptr %ep)
 declare void @march_yield_from_compiled()
 declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
 |}
 
 let emit_main_wrapper (buf : Buffer.t) =

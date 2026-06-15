@@ -1,3 +1,4 @@
+(* Interpreter-only scaffolding. Not wired to the C green-thread runtime. *)
 (** Work-stealing pool with Chase-Lev deques.
 
     Each worker thread maintains a deque. The owning thread pushes/pops

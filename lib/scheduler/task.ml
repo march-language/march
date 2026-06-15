@@ -1,3 +1,4 @@
+(* Interpreter-only scaffolding. Not wired to the C green-thread runtime. *)
 (** Task representation for the scheduler.
     A task is a lightweight unit of work — either cooperative or work-stealing. *)
 

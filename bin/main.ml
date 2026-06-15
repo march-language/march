@@ -292,12 +292,12 @@ let ensure_runtime_so () =
     let extras_c   = Filename.concat runtime_dir "march_extras.c" in
     let compress_c = Filename.concat runtime_dir "march_compress.c" in
     let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
+    let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
     let extra_files =
       if Sys.file_exists http_c then
         let sha1_c    = Filename.concat runtime_dir "sha1.c" in
         let base64_c  = Filename.concat runtime_dir "base64.c" in
         let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
-        let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
         let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
         let io_c      = Filename.concat runtime_dir "march_http_io.c" in
         let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
@@ -306,7 +306,7 @@ let ensure_runtime_so () =
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
           (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
           (opt_file compress_c)
-      else Printf.sprintf "%s%s" (opt_file extras_c) (opt_file compress_c)
+      else Printf.sprintf "%s%s%s" (opt_file sched_c) (opt_file extras_c) (opt_file compress_c)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
     let tls_c = Filename.concat runtime_dir "march_tls.c" in
@@ -1256,21 +1256,21 @@ let compile filename =
             let extras_c2   = Filename.concat runtime_dir "march_extras.c" in
             let compress_c2 = Filename.concat runtime_dir "march_compress.c" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
+            let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let extra_c_files =
               if Sys.file_exists http_c then
                 let sha1_c    = Filename.concat runtime_dir "sha1.c" in
                 let base64_c  = Filename.concat runtime_dir "base64.c" in
                 let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
-                let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
                 let io_c      = Filename.concat runtime_dir "march_http_io.c" in
                 let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
                 let tls_c2    = Filename.concat runtime_dir "march_tls.c" in
                 Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
-                  (opt_file2 simd_c) (opt_file2 sched_c) (opt_file2 resp_c)
+                  (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c)
                   (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
-              else Printf.sprintf "%s%s" (opt_file2 extras_c2) (opt_file2 compress_c2)
+              else Printf.sprintf "%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
             in
             (* OpenSSL flags for TLS *)
             let tls_c2 = Filename.concat runtime_dir "march_tls.c" in

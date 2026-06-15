@@ -1248,6 +1248,17 @@ void *march_spawn(void *actor) {
 
 /* ── Lightweight task spawn ──────────────────────────────────────────────── */
 
+/* Forward declarations for Result helpers defined later in this file. */
+static void *mk_ok(void *value);
+static void *mk_err_cstr(const char *msg);
+
+/* Wrapper struct passed to the trampoline so it can access both the closure
+ * and the Task heap object (to store the result on completion). */
+typedef struct {
+    void     *clo;   /* thunk closure pointer (ownership transferred from caller) */
+    int64_t  *task;  /* Task heap object (weak ref — Task outlives the thread) */
+} march_thunk_arg;
+
 /* Green-thread trampoline for task_spawn thunk closures.
  * A March thunk closure has layout:
  *   offset  0..7 : ref count (i64)
@@ -1255,23 +1266,38 @@ void *march_spawn(void *actor) {
  *   offset 12..15: padding
  *   offset 16..23: apply fn ptr (fn(closure_ptr, i64) -> result_ptr)
  *
- * Called from the green-thread entry via march_sched_spawn. */
+ * Called from the green-thread entry via march_sched_spawn.
+ *
+ * The Task object layout (32 bytes):
+ *   word 0 (offset  0): ref count  (i64)
+ *   word 1 (offset  8): tag+pad    (i32+i32)
+ *   word 2 (offset 16): march_proc* handle  (field 0)
+ *   word 3 (offset 24): result ptr  (field 1, written on completion)
+ */
 static void march_thunk_trampoline(void *arg) {
-    void *clo = arg;
+    march_thunk_arg *wa = (march_thunk_arg *)arg;
+    void *clo = wa->clo;
+    int64_t *task = wa->task;
+    free(wa);  /* free the small wrapper; clo and task are separately managed */
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
-    apply(clo, (int64_t)0);
+    void *result = apply(clo, (int64_t)0);
+    /* Store the return value into the task object's result field (word 3). */
+    if (task) {
+        task[3] = (int64_t)(uintptr_t)result;  /* field 1 at offset 24 */
+    }
     march_decrc(clo);   /* release the reference taken at spawn time */
     march_sched_exit();
 }
 
 /* Spawn a thunk closure (fn () -> T) as an async green thread.
  *
- * Layout of the returned Task object (24 bytes):
+ * Layout of the returned Task object (32 bytes):
  *   offset  0..7 : ref count (i64)
  *   offset  8..11: tag = 0 (i32)
  *   offset 12..15: padding
  *   offset 16..23: field 0 = march_proc* (green thread handle)
+ *   offset 24..31: field 1 = result ptr (written by trampoline on exit)
  *
  * The caller can pass this to task_await / kill. */
 void *march_task_spawn_thunk(void *clo_ptr) {
@@ -1283,14 +1309,68 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * reference to the task.  No IncRC needed here; the closure's existing
      * rc=1 is the task's reference, released by march_decrc in the trampoline. */
     march_ensure_sched_started();   /* start background scheduler if needed */
-    march_proc *p = march_sched_spawn(march_thunk_trampoline, clo_ptr);
-    /* Box the process pointer as a Task handle.
-     * march_alloc initialises rc=1, tag=0; only the proc pointer needs setting. */
-    int64_t *task = (int64_t *)march_alloc(24);
+    /* Allocate Task at 32 bytes (header + proc ptr + result ptr). */
+    int64_t *task = (int64_t *)march_alloc(32);
+    march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
+    if (!wa) { return (void *)task; }
+    wa->clo  = clo_ptr;
+    wa->task = task;
+    march_proc *p = march_sched_spawn(march_thunk_trampoline, wa);
     if (task) {
-        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16 */
+        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16: proc handle */
+        task[3] = (int64_t)0;              /* field 1 at offset 24: result (init null) */
     }
     return (void *)task;
+}
+
+/* Wait for a task to complete and return Ok(result).
+ *
+ * Spins via march_sched_yield() until the task's green thread reaches
+ * PROC_DEAD, then reads the result stored by march_thunk_trampoline and
+ * boxes it as Ok(result). */
+void *march_task_await(void *task_obj) {
+    if (!task_obj) return mk_err_cstr("task_await: null task");
+    int64_t *task = (int64_t *)task_obj;
+    march_proc *p = (march_proc *)(uintptr_t)task[2];
+    if (!p) return mk_err_cstr("task_await: null proc");
+    while (atomic_load_explicit(&p->status, memory_order_acquire) != PROC_DEAD)
+        march_sched_yield();
+    void *result = (void *)(uintptr_t)task[3];
+    return mk_ok(result);
+}
+
+/* Spawn a thunk closure with an associated cancel token.
+ * If tok is non-NULL, its cancellation is checked at yield points inside the
+ * green thread.  Behaves like march_task_spawn_thunk otherwise. */
+void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
+    if (!g_sched_initialized) {
+        march_sched_init();
+        g_sched_initialized = 1;
+    }
+    march_ensure_sched_started();
+    int64_t *task = (int64_t *)march_alloc(32);
+    march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
+    if (!wa) { return (void *)task; }
+    wa->clo  = clo_ptr;
+    wa->task = task;
+    march_cancel_token *tok = (march_cancel_token *)tok_ptr;
+    march_proc *p = march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
+    if (task) {
+        task[2] = (int64_t)(uintptr_t)p;
+        task[3] = (int64_t)0;
+    }
+    return (void *)task;
+}
+
+/* Cancel the task identified by task_obj by marking its green thread DEAD.
+ * This is a best-effort cooperative cancellation: if the thread is currently
+ * running it will be stopped at the next yield point. */
+void march_task_cancel_by_id(void *task_obj) {
+    if (!task_obj) return;
+    int64_t *task = (int64_t *)task_obj;
+    march_proc *p = (march_proc *)(uintptr_t)task[2];
+    if (!p) return;
+    atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
 }
 
 /* Read an int64 state field by 0-based index from an actor struct.
