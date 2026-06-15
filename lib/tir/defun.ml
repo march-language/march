@@ -286,9 +286,19 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
     match e with
     | Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar ref_var))
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
-      (* Check for self-recursion before excluding self from free vars. *)
+      (* Check for self-recursion before excluding self from free vars.
+         Detect recursion with fn.fn_name REMOVED from the top-level exclusion
+         set: a local fn whose name collides with a top-level fn (e.g. a stdlib
+         helper `go` and a user top-level `go`) would otherwise have its own
+         self-reference dropped as a "top-level global", so recursion goes
+         undetected — the lifted apply then never binds `self = $clo` and the
+         self-call links to the SAME-NAMED top-level function (silently calling
+         the wrong code). The capture set [fvs_raw] still uses the full
+         [top_level] so genuine top-level refs are not captured. *)
+      let rec_fvs = free_vars_of_expr (StringSet.remove fn.Tir.fn_name top_level)
+                      fn.Tir.fn_body fn.Tir.fn_params in
+      let is_recursive = List.exists (fun (v : Tir.var) -> v.Tir.v_name = fn.Tir.fn_name) rec_fvs in
       let fvs_raw = free_vars_of_expr top_level fn.Tir.fn_body fn.Tir.fn_params in
-      let is_recursive = List.exists (fun (v : Tir.var) -> v.Tir.v_name = fn.Tir.fn_name) fvs_raw in
       (* Exclude the function's own name from free variables: recursive
          calls use $clo in the lifted apply fn, so self-capture would
          create a circular allocation. *)
@@ -419,9 +429,16 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
        ELetRec, and locally-bound names that are called are necessarily callable
        (closures), never operators/builtins (which are never let/param-bound). *)
     | Tir.EApp (f_var, args)
-      when not (StringSet.mem f_var.Tir.v_name top_level)
-        && ((match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)
-            || StringSet.mem f_var.Tir.v_name bound) ->
+      when StringSet.mem f_var.Tir.v_name bound
+        || (not (StringSet.mem f_var.Tir.v_name top_level)
+            && (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)) ->
+      (* A locally-bound name (ELetRec/let/param) is a closure pointer and MUST
+         dispatch through ECallPtr — even when a top-level function shares the
+         name.  Otherwise a stdlib helper's local `go` (the canonical accumulator
+         idiom) compiles to a direct `@go` call that links to a USER top-level
+         `go` of the same name, silently calling the wrong function (e.g.
+         List.length returning 0).  Locally-bound names shadow top-level, so the
+         `bound` check must take priority over the top-level check. *)
       Tir.ECallPtr (Tir.AVar f_var, args)
 
     (* Recurse into all other forms *)

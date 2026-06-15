@@ -1169,7 +1169,13 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Phase 1: work pool is a null sentinel *)
     ("ptr", "null")
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
-                 && (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false) ->
+                 && (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false)
+                 && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
+    (* A LOCAL binding of the same name (var_slot entry) shadows the top-level
+       function — fall through to the local-load path below.  Without this guard
+       a recursive closure's self-reference (`let go = $clo`) whose name collides
+       with a user top-level `go` would be wrapped in a $clo_wrap trampoline that
+       calls the WRONG (top-level) @go instead of dispatching through $clo. *)
     (* Top-level function used as a first-class value — wrap in a closure.
        Closure layout: header(16) + field0(fn_ptr).
        The apply wrapper expects (clo, args…) and just forwards to the
@@ -2458,6 +2464,54 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     when f.Tir.v_name = "int_min_value" ->
     ("i64", "-9223372036854775808")
 
+  (* ── Vault stores: the value is a heterogeneous void pointer and MUST be the
+     uniform tagged representation so it round-trips through Vault.get →
+     Some(v) → unwrap_or, which conditional-untags.  The general EApp path
+     below passes each arg with its NATURAL llvm type, so a Bool/Int value
+     would reach march_vault_set as a raw i64 (e.g. true→0x1) and be read back
+     untagged (0x1 ashr→0 = false).  Coerce the value arg to ptr (tags scalars
+     via (n<<1)|1, leaves heap pointers unchanged); table/key are already ptr,
+     trailing ttl/max stay i64. *)
+  | Tir.EApp (f, [tbl; key; value])
+    when f.Tir.v_name = "vault_set" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vv = emit_atom_as ctx "ptr" value in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_set(ptr %s, ptr %s, ptr %s)" vt vk vv);
+    ("i64", "0")
+
+  | Tir.EApp (f, [tbl; key; value; ttl])
+    when f.Tir.v_name = "vault_set_ttl" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vv = emit_atom_as ctx "ptr" value in
+    let vttl = emit_atom_as ctx "i64" ttl in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_set_ttl(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vttl);
+    ("i64", "0")
+
+  | Tir.EApp (f, [tbl; key; value; ttl])
+    when f.Tir.v_name = "vault_put_new" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vv = emit_atom_as ctx "ptr" value in
+    let vttl = emit_atom_as ctx "i64" ttl in
+    let r = fresh ctx "ar" in
+    emit ctx (Printf.sprintf
+      "%s = call i64 @march_vault_put_new(ptr %s, ptr %s, ptr %s, i64 %s)" r vt vk vv vttl);
+    ("i64", r)
+
+  | Tir.EApp (f, [tbl; key; value; maxn])
+    when f.Tir.v_name = "vault_push_capped" ->
+    let vt = emit_atom_as ctx "ptr" tbl in
+    let vk = emit_atom_as ctx "ptr" key in
+    let vv = emit_atom_as ctx "ptr" value in
+    let vmax = emit_atom_as ctx "i64" maxn in
+    emit ctx (Printf.sprintf
+      "call ptr @march_vault_push_capped(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vmax);
+    ("i64", "0")
+
   (* ── EApp of a locally-bound closure variable ────────────────────── *)
   (* If f has a var_slot alloca AND is not a top-level function, it is a
      local closure — redirect to ECallPtr dispatch.
@@ -2601,26 +2655,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ECallPtr (Tir.AVar f, args)
     when is_builtin_fn f.Tir.v_name
       && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
-    let arg_strs = List.map (fun a ->
-        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
-      ) args in
-    let args_str = String.concat ", " arg_strs in
-    let fname = match Hashtbl.find_opt ctx.extern_map f.Tir.v_name with
-      | Some c_name -> c_name
-      | None -> mangle_extern f.Tir.v_name in
-    let ret_tir = match builtin_ret_ty f.Tir.v_name with
-      | Some t -> t
-      | None -> fn_ret_tir f.Tir.v_ty
-    in
-    let ret_ty = llvm_ret_ty ret_tir in
-    if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
-      ("i64", "0")
-    end else begin
-      let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
-      (ret_ty, r)
-    end
+    (* Redirect to the EApp path so builtins get consistent per-argument
+       coercion — in particular the vault store builtins (vault_set etc.)
+       coerce their heterogeneous value arg to a tagged ptr there.  Emitting
+       the call directly here with each arg's natural llvm type would pass a
+       Bool/Int value as a raw i64 to march_vault_set(ptr value), storing it
+       untagged so Vault.get reads it back wrong. *)
+    emit_expr ctx (Tir.EApp (f, args))
 
 
   (* ── ECallPtr where callee AVar has no local alloca slot ─────────── *)
@@ -2759,6 +2800,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             | _ -> Tir.TVar "_")
          | other -> other)
       | _ -> Tir.TVar "_"
+    in
+    (* Self-recursive closure calls surface as TFn(known_params) -> '_: the
+       return type was left as an unresolved tyvar during recursive inference
+       in lowering, even though the lifted apply fn has a concrete return type
+       (e.g. a local [fn go(mi, acc) -> Int] whose body self-calls [go]).  With
+       an erased return we'd emit `call ptr` and read the apply fn's raw scalar
+       i64 return as a tagged pointer; the enclosing case-merge / return
+       coercion then conditional-untags it (ashr on odd values), corrupting odd
+       Int results.  A self-recursive call returns the enclosing function's own
+       return type, so fall back to ctx.ret_ty when it is concrete.  Guarded to
+       the TFn-with-known-params shape so fully-erased closure values (genuine
+       TVar callees that may return heap pointers) keep the ptr ABI. *)
+    let callee_is_tfn = match fn_atom with
+      | Tir.AVar v -> (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false)
+      | _ -> false
+    in
+    let ret_tir =
+      match ret_tir with
+      | Tir.TVar _ when callee_is_tfn ->
+        (match ctx.ret_ty with Tir.TVar _ -> ret_tir | concrete -> concrete)
+      | _ -> ret_tir
     in
     let ret_ty = llvm_ret_ty ret_tir in
     let orig_param_llvm_tys = match fn_atom with

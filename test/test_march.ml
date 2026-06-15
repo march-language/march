@@ -21498,6 +21498,56 @@ let test_compiled_recursive_closure_capture () =
     end
   end
 
+(* Regression: a user top-level function whose name collides with a stdlib
+   internal helper (the canonical accumulator name `go`) silently broke the
+   stdlib function.  Root cause: a local recursive fn's name was excluded from
+   its own free-variable set as a "top-level global" when a same-named top-level
+   fn existed, so defun didn't detect it as recursive — its self-call then linked
+   to the USER's top-level `go` instead of dispatching through its closure
+   (e.g. List.length returning 0/1 instead of the real length).  Three-part fix:
+   defun recursion-detection ignores the colliding top-level name; defun's
+   EApp→ECallPtr prefers locally-bound names; and emit_atom's top-level-fn
+   trampoline yields to a var_slot (local) binding of the same name.  End-to-end
+   guard: define a top-level `go`, build a list inside it, and assert
+   List.length is correct (exit 0). *)
+let test_compiled_helper_name_collision () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_namecollide" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "nc.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod NameCollide do\n\
+      \  fn go(i : Int, n : Int) : Int do\n\
+      \    if i >= n do 0\n\
+      \    else do\n\
+      \      let lst = Cons(\"a\", Cons(\"b\", Cons(\"c\", Nil)))\n\
+      \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
+      \    end end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    if go(0, 5) == 0 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "ncbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "stdlib List.length works despite a user top-level `go`" 0 run_rc
+    end
+  end
+
 (* Regression: a scalar (Bool/Int) stored in a Vault read back WRONG when
    compiled.  Root cause: the value arg to march_vault_set (declared ptr value,
    a heterogeneous slot) was passed with its natural llvm type — a Bool as raw
@@ -23410,5 +23460,7 @@ let () =
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Quick
           test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Quick
+          test_compiled_helper_name_collision;
       ]);
     ]
