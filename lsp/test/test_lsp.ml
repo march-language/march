@@ -3712,6 +3712,102 @@ end|} in
     (kind_count Lsp.Types.DocumentHighlightKind.Read)
 
 (* ------------------------------------------------------------------ *)
+(* DAP inline values (textDocument/inlineValue)                        *)
+(* ------------------------------------------------------------------ *)
+
+(* Extract the (variableName, range) of every InlineValueVariableLookup. *)
+let inline_lookups (vs : Lsp.Types.InlineValue.t list) =
+  List.filter_map (function
+    | `InlineValueVariableLookup (l : Lsp.Types.InlineValueVariableLookup.t) ->
+      Some (Option.value ~default:"" l.Lsp.Types.InlineValueVariableLookup.variableName, l)
+    | _ -> None) vs
+
+let test_inline_values_locals_in_range () =
+  let src = {|mod M do
+  fn f() : Int do
+    let a = 1
+    let b = 2
+    a + b
+  end
+end|} in
+  let a = analyse src in
+  (* Stopped on the `a + b` line; range covers the whole body. *)
+  let (stopped_line, _) = pos_of src "a + b" in
+  let vs = An.query_inline_values a
+      ~range_start_line:1 ~range_end_line:5 ~stopped_line in
+  let names = List.map fst (inline_lookups vs) |> List.sort compare in
+  Alcotest.(check (list string)) "reports both locals a and b"
+    ["a"; "b"] names
+
+let test_inline_values_lookup_names_and_positions () =
+  let src = {|mod M do
+  fn f() : Int do
+    let a = 1
+    let b = 2
+    a + b
+  end
+end|} in
+  let a = analyse src in
+  let (stopped_line, _) = pos_of src "a + b" in
+  let vs = An.query_inline_values a
+      ~range_start_line:1 ~range_end_line:5 ~stopped_line in
+  let lookups = inline_lookups vs in
+  let find n = List.assoc_opt n lookups in
+  (* `a`'s nearest-to-stopped occurrence is the use on the `a + b` line. *)
+  (match find "a" with
+   | Some l ->
+     Alcotest.(check bool) "a lookup is case-sensitive" true
+       l.Lsp.Types.InlineValueVariableLookup.caseSensitiveLookup;
+     Alcotest.(check int) "a lookup sits on the stopped line" stopped_line
+       l.Lsp.Types.InlineValueVariableLookup.range.Lsp.Types.Range.start.Lsp.Types.Position.line
+   | None -> Alcotest.fail "expected a lookup for a");
+  (match find "b" with
+   | Some _ -> ()
+   | None -> Alcotest.fail "expected a lookup for b")
+
+let test_inline_values_excludes_below_stopped_line () =
+  let src = {|mod M do
+  fn f() : Int do
+    let a = 1
+    let b = 2
+    a + b
+  end
+end|} in
+  let a = analyse src in
+  (* Stopped on the `let a = 1` line: b (defined below) must be excluded. *)
+  let (stopped_line, _) = pos_of src "let a = 1" in
+  let vs = An.query_inline_values a
+      ~range_start_line:1 ~range_end_line:5 ~stopped_line in
+  let names = List.map fst (inline_lookups vs) in
+  Alcotest.(check bool) "a (at/above stopped line) included" true
+    (List.mem "a" names);
+  Alcotest.(check bool) "b (below stopped line) excluded" false
+    (List.mem "b" names)
+
+let test_inline_values_dedup_by_name () =
+  (* `x` is used twice on the stopped line; only one lookup should be emitted. *)
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1
+    x + x
+  end
+end|} in
+  let a = analyse src in
+  let (stopped_line, _) = pos_of src "x + x" in
+  let vs = An.query_inline_values a
+      ~range_start_line:1 ~range_end_line:4 ~stopped_line in
+  let xs = List.filter (fun (n, _) -> n = "x") (inline_lookups vs) in
+  Alcotest.(check int) "exactly one lookup for x" 1 (List.length xs)
+
+let test_inline_values_no_crash_on_error_buffer () =
+  let src = "mod M do\n  fn f( : Int do\n    let a =\n" in
+  let a = analyse src in
+  let vs = An.query_inline_values a
+      ~range_start_line:0 ~range_end_line:3 ~stopped_line:3 in
+  Alcotest.(check bool) "error buffer yields a (possibly empty) list, no crash"
+    true (List.length vs >= 0)
+
+(* ------------------------------------------------------------------ *)
 (* Semantic tokens delta                                               *)
 (* ------------------------------------------------------------------ *)
 
@@ -4620,6 +4716,13 @@ let () =
       "go to type definition", `Quick, test_type_definition;
       "document highlight", `Quick, test_document_highlight;
       "document highlight read/write kinds", `Quick, test_document_highlight_read_write_kinds;
+    ];
+    "dap inline values", [
+      "locals in range reported",            `Quick, test_inline_values_locals_in_range;
+      "lookup names and positions",          `Quick, test_inline_values_lookup_names_and_positions;
+      "excludes vars below stopped line",    `Quick, test_inline_values_excludes_below_stopped_line;
+      "de-dup by variable name",             `Quick, test_inline_values_dedup_by_name;
+      "no crash on error buffer",            `Quick, test_inline_values_no_crash_on_error_buffer;
     ];
     "semantic tokens delta", [
       "delta diffs the changed middle", `Quick, test_semantic_tokens_delta_middle;

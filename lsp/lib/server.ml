@@ -405,6 +405,8 @@ class march_server =
           Some (`Bool true);
         ServerCapabilities.selectionRangeProvider =
           Some (`Bool true);
+        ServerCapabilities.inlineValueProvider =
+          Some (`Bool true);
         ServerCapabilities.linkedEditingRangeProvider =
           Some (`Bool true);
         ServerCapabilities.callHierarchyProvider =
@@ -1206,6 +1208,55 @@ class march_server =
             ]
         in
         Lwt.return result
+      end else if meth = "textDocument/inlineValue" then begin
+        (* DAP inline values: while stopped at a breakpoint, the editor asks for
+           the in-scope variables in the visible [range]; we return one
+           InlineValueVariableLookup per visible local at/above the stopped line
+           and let the debugger resolve live values. Robust on error buffers:
+           missing/garbled params degrade to an empty list, never an exception. *)
+        let line_of obj key =
+          match obj with
+          | `Assoc o ->
+            (match List.assoc_opt key o with
+             | Some (`Assoc p) ->
+               (match List.assoc_opt "line" p with Some (`Int n) -> n | _ -> 0)
+             | _ -> 0)
+          | _ -> 0
+        in
+        let range_obj, ctx_obj =
+          match params with
+          | Some (`Assoc fields) ->
+            (Option.value ~default:`Null (List.assoc_opt "range" fields),
+             Option.value ~default:`Null (List.assoc_opt "context" fields))
+          | _ -> (`Null, `Null)
+        in
+        let range_start_line = line_of range_obj "start" in
+        let range_end_line   = line_of range_obj "end" in
+        (* Stopped line comes from context.stoppedLocation; if absent, allow the
+           whole requested range (no cutoff) by using its end line. *)
+        let stopped_loc =
+          match ctx_obj with
+          | `Assoc o -> Option.value ~default:`Null (List.assoc_opt "stoppedLocation" o)
+          | _ -> `Null
+        in
+        let stopped_line =
+          match stopped_loc with
+          | `Null -> range_end_line
+          | _ -> line_of stopped_loc "start"
+        in
+        let values =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a ->
+               (try
+                  Analysis.query_inline_values a
+                    ~range_start_line ~range_end_line ~stopped_line
+                with _ -> []))
+        in
+        Lwt.return (`List (List.map Lsp.Types.InlineValue.yojson_of_t values))
 
       end else if meth = "workspace/diagnostic" then begin
         (* Whole-project diagnostics: analyse every .march file under the project

@@ -3061,6 +3061,65 @@ let scope_locals_at (a : t) ~line ~character : string list =
     a.sym_scope;
   !out
 
+(* ------------------------------------------------------------------ *)
+(* DAP inline values (textDocument/inlineValue)                        *)
+(* ------------------------------------------------------------------ *)
+(* While the debugger is stopped at a line, the editor requests inline  *)
+(* values for the currently-visible range. We return the in-scope local *)
+(* variables (bindings + uses) whose span lies within that range and    *)
+(* at/above the stopped line as InlineValueVariableLookups, letting the *)
+(* debugger resolve their live values. We de-duplicate by variable name *)
+(* keeping the occurrence nearest the stopped line, so the editor draws *)
+(* one inline value per variable instead of one per textual occurrence. *)
+
+(* True if [sp] starts within the inclusive 0-indexed line band
+   [range_start_line, range_end_line] and is at/above [stopped_line]. *)
+let span_in_inline_band (sp : Ast.span)
+    ~range_start_line ~range_end_line ~stopped_line : bool =
+  let l = sp.Ast.start_line - 1 in  (* 0-indexed *)
+  l >= range_start_line && l <= range_end_line && l <= stopped_line
+
+(* The variables (local bindings + uses) visible within [range] and at/above
+   the stopped line. [range_start_line]/[range_end_line]/[stopped_line] are
+   0-indexed LSP lines. Returns InlineValueVariableLookups with byte-column
+   ranges; the UTF-16 query wrapper remaps them. De-duplicated by variable
+   name, keeping the occurrence whose line is closest to (but not below) the
+   stopped line. Error-resilient: pulls only from the scoped symbol tables,
+   never throws. *)
+let inline_values_at (a : t) ~range_start_line ~range_end_line ~stopped_line
+    : Lsp.Types.InlineValue.t list =
+  (* name -> (best span so far, its 0-indexed line). "Best" = nearest the
+     stopped line from above (largest line <= stopped_line). *)
+  let best : (string, Ast.span * int) Hashtbl.t = Hashtbl.create 32 in
+  let consider name sp =
+    if name <> "" && name.[0] <> '_' && span_in_user_file a sp
+       && span_in_inline_band sp ~range_start_line ~range_end_line ~stopped_line
+    then begin
+      let l = sp.Ast.start_line - 1 in
+      match Hashtbl.find_opt best name with
+      | Some (_, prev_l) when prev_l >= l -> ()      (* keep the closer one *)
+      | _ -> Hashtbl.replace best name (sp, l)
+    end
+  in
+  (* Every local binder id: its definition span and all its use spans are
+     candidate occurrences. The scoped tables are already shadow-correct, so
+     a use only appears under the name of the binding it actually resolves to. *)
+  Hashtbl.iter (fun id def_sp ->
+      let name = try Hashtbl.find a.sym_name id with Not_found -> "" in
+      consider name def_sp;
+      let uses = try Hashtbl.find a.sym_id_uses id with Not_found -> [] in
+      List.iter (consider name) uses)
+    a.sym_defs;
+  Hashtbl.fold (fun name (sp, _) acc ->
+      let lookup =
+        Lsp.Types.InlineValueVariableLookup.create
+          ~caseSensitiveLookup:true
+          ~range:(Pos.span_to_lsp_range sp)
+          ~variableName:name ()
+      in
+      `InlineValueVariableLookup lookup :: acc)
+    best []
+
 (* The identifier prefix immediately before the cursor. Empty when the cursor
    is not on a bare identifier (e.g. right after a `.`, which is a qualified
    access handled by dot-completion, not auto-import). *)
@@ -6274,6 +6333,24 @@ let query_linked_editing_ranges_at (a : t) ~line ~utf16_char =
 let query_selection_range_at (a : t) ~line ~utf16_char =
   selection_range_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
   |> List.map (fun sp -> Pos.remap_range a.doc (Pos.span_to_lsp_range sp))
+
+(* DAP inline values. The line band is encoding-independent, so only the
+   outbound lookup ranges need UTF-16 remapping. *)
+let query_inline_values (a : t) ~range_start_line ~range_end_line ~stopped_line =
+  inline_values_at a ~range_start_line ~range_end_line ~stopped_line
+  |> List.map (function
+    | `InlineValueVariableLookup (l : Lsp.Types.InlineValueVariableLookup.t) ->
+      `InlineValueVariableLookup
+        { l with Lsp.Types.InlineValueVariableLookup.range =
+                   Pos.remap_range a.doc l.Lsp.Types.InlineValueVariableLookup.range }
+    | `InlineValueText (t : Lsp.Types.InlineValueText.t) ->
+      `InlineValueText
+        { t with Lsp.Types.InlineValueText.range =
+                   Pos.remap_range a.doc t.Lsp.Types.InlineValueText.range }
+    | `InlineValueEvaluatableExpression (e : Lsp.Types.InlineValueEvaluatableExpression.t) ->
+      `InlineValueEvaluatableExpression
+        { e with Lsp.Types.InlineValueEvaluatableExpression.range =
+                   Pos.remap_range a.doc e.Lsp.Types.InlineValueEvaluatableExpression.range })
 
 (* Call hierarchy query wrappers — return (name, range, selectionRange) tuples
    already remapped to UTF-16, ready for the server to wrap as CallHierarchyItems. *)
