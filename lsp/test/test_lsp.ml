@@ -16,6 +16,7 @@ module Lsp  = Linol_lsp.Lsp
 module Ast  = March_ast.Ast
 module Pos  = March_lsp_lib.Position
 module An   = March_lsp_lib.Analysis
+module Qy   = March_lsp_lib.Query
 
 (* ------------------------------------------------------------------ *)
 (* Helpers                                                             *)
@@ -2132,6 +2133,78 @@ end
          (has joined "->"))
 
 (* ------------------------------------------------------------------ *)
+(* 24b. Named-record nominal-name recovery in rendered types          *)
+(* ------------------------------------------------------------------ *)
+
+(** Hover on a fn returning a declared record renders the record's name,
+    not the structural `{ … }` form. *)
+let test_named_record_hover_shows_name () =
+  let src = {|mod Test do
+  type R = { a : Int, b : Int }
+  fn mk(x : Int) do
+    { a = x, b = x }
+  end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "mk" in
+  let r = Qy.hover a ~line ~utf16_char:col in
+  match r.Qy.h_type with
+  | None -> Alcotest.fail "expected a hover type for mk"
+  | Some s ->
+    Alcotest.(check bool) "hover renders record name R" true
+      (s = "Int -> R");
+    Alcotest.(check bool) "hover has no structural braces" true
+      (not (String.contains s '{'))
+
+(** "Add return type annotation" is offered for a fn returning a named
+    record, and the inserted annotation uses the record name (no braces),
+    so it parses as valid March. *)
+let test_named_record_return_annotation_uses_name () =
+  let src = {|mod Test do
+  type R = { a : Int, b : Int }
+  fn mk(x : Int) do
+    { a = x, b = x }
+  end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "mk" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let ret_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let t = String.lowercase_ascii ca.title in
+      let n = String.length t and sn = 6 in
+      let found = ref false in
+      for i = 0 to n - sn do
+        if String.sub t i sn = "return" then found := true
+      done;
+      !found
+    ) acts in
+  match ret_act with
+  | None ->
+    Alcotest.fail "expected return type annotation action for named-record return"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let texts =
+         match edit.changes with
+         | None -> []
+         | Some m -> List.concat_map (fun (_, edits) ->
+             List.map (fun (e : Lsp.Types.TextEdit.t) -> e.newText) edits) m
+       in
+       let all = String.concat "" texts in
+       let contains hay needle =
+         let n = String.length hay and sn = String.length needle in
+         let found = ref false in
+         for i = 0 to n - sn do
+           if String.sub hay i sn = needle then found := true
+         done; !found
+       in
+       Alcotest.(check bool) "annotation uses record name R" true
+         (contains all "R");
+       Alcotest.(check bool) "annotation has no structural braces" true
+         (not (String.contains all '{')))
+
+(* ------------------------------------------------------------------ *)
 (* 25. P1.7 — Function parameter type annotation                      *)
 (* ------------------------------------------------------------------ *)
 
@@ -4009,10 +4082,12 @@ end|} in
   Alcotest.(check bool) "arm has NO leading pipe" false
     (String.contains arm '|')
 
-let test_no_annotation_for_record_return () =
-  (* A function returning an (anonymous/structural) record has no valid surface
-     annotation — the action must NOT be offered (it would insert `{ … }` which
-     does not parse after `->`). *)
+let test_annotation_for_named_record_return () =
+  (* A function returning a *named* record now recovers the declared name in
+     pp_ty (renders as `R`, not `{ … }`), so the action IS offered and inserts a
+     valid surface annotation. (March has no anonymous-record annotation syntax,
+     so the only records that flow here are named; truly unnameable records still
+     render with braces and are skipped by the annotatable_ty_str guard.) *)
   let src = {|mod M do
   type R = { a : Int, b : Int }
   fn mk(x : Int) do
@@ -4020,7 +4095,7 @@ let test_no_annotation_for_record_return () =
   end
 end|} in
   let acts = actions_at src "mk" in
-  Alcotest.(check bool) "no return annotation for a record-typed return" false
+  Alcotest.(check bool) "return annotation offered for a named-record return" true
     (has_title acts "Add return type annotation")
 
 let test_annotation_offered_for_scalar_return () =
@@ -4164,7 +4239,7 @@ let () =
     ];
     "annotation + missing-case fixes", [
       "add missing case has no leading pipe", `Quick, test_add_missing_case_no_leading_pipe;
-      "no annotation for record return", `Quick, test_no_annotation_for_record_return;
+      "annotation offered for named record", `Quick, test_annotation_for_named_record_return;
       "annotation offered for scalar return", `Quick, test_annotation_offered_for_scalar_return;
     ];
     "~H unclosed tags", [
@@ -4413,6 +4488,10 @@ let () =
       "AnnFnReturn site created",       `Quick, test_fn_return_annotation_site_created;
       "action offered on fn name",      `Quick, test_fn_return_annotation_action_offered;
       "edit inserts ': T' colon form",  `Quick, test_fn_return_annotation_edit_inserts_colon;
+    ];
+    "named-record name recovery", [
+      "hover renders record name",      `Quick, test_named_record_hover_shows_name;
+      "return annotation uses name",    `Quick, test_named_record_return_annotation_uses_name;
     ];
     "p1.7: fn param type annotation", [
       "AnnFnParam site created",        `Quick, test_fn_param_annotation_site_created;

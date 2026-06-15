@@ -196,6 +196,66 @@ let tvar_display_name id =
     in
     Hashtbl.add _tvar_names id n; n
 
+(* -----------------------------------------------------------------
+   Nominal-name recovery for structural record types.
+
+   [TRecord] carries no nominal name (records unify purely structurally),
+   so a declared `type R = { … }` is indistinguishable from an anonymous
+   record by the time it reaches [pp_ty].  To recover the declared name for
+   display (hover, inlay hints, "add type annotation"), we maintain a
+   global index keyed by the record's *field-name signature* (the sorted,
+   comma-joined field names).  The index is populated at every record-type
+   declaration site during typechecking.
+
+   Ambiguity: if two distinct record types share an identical field-name
+   set, recovery would be unsound, so we mark that signature poisoned
+   (mapped to [None]) and [pp_ty] then falls back to structural rendering.
+
+   This index only affects *rendering* — never unification, generalization,
+   lowering, or codegen — so it cannot change type-checking semantics. *)
+let _record_names : (string, string option) Hashtbl.t = Hashtbl.create 64
+
+(** Build the field-name signature for a record's field list. *)
+let record_field_sig (flds : (string * 'a) list) =
+  flds
+  |> List.map fst
+  |> List.sort String.compare
+  |> String.concat ","
+
+(** Register that a record type named [name] has the given field-name list.
+    Idempotent for the same (signature, name) pair; poisons the signature if
+    a different name later claims the same field set.  Qualified names
+    (containing '.') do not poison a previously-registered bare name, and an
+    unqualified name is preferred for display. *)
+let register_record_name ~name (field_names : string list) =
+  let sg =
+    field_names |> List.sort String.compare |> String.concat ","
+  in
+  if sg <> "" then
+    match Hashtbl.find_opt _record_names sg with
+    | None -> Hashtbl.replace _record_names sg (Some name)
+    | Some (Some existing) when existing = name -> ()
+    | Some (Some existing) ->
+      (* Prefer an unqualified (bare) name; treat a qualified alias of the
+         same underlying type as non-conflicting. *)
+      let bare s = match String.rindex_opt s '.' with
+        | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+        | None -> s
+      in
+      if bare existing = bare name then begin
+        (* Same simple name (one is qualified) — keep the bare form. *)
+        if String.contains existing '.' && not (String.contains name '.') then
+          Hashtbl.replace _record_names sg (Some name)
+      end else
+        Hashtbl.replace _record_names sg None  (* genuine ambiguity: poison *)
+    | Some None -> ()  (* already poisoned *)
+
+(** Recover the declared name for a record's field list, if unambiguous. *)
+let recover_record_name (flds : (string * 'a) list) =
+  match Hashtbl.find_opt _record_names (record_field_sig flds) with
+  | Some (Some name) -> Some name
+  | _ -> None
+
 let rec pp_ty ?(parens = false) t =
   let t = repr t in
   let s = match t with
@@ -218,8 +278,11 @@ let rec pp_ty ?(parens = false) t =
       Printf.sprintf "(%s)" (String.concat ", " (List.map (pp_ty ~parens:false) ts))
     | TRecord [] -> "{}"
     | TRecord flds ->
-      let fs = List.map (fun (n, t) -> n ^ " : " ^ pp_ty t) flds in
-      "{ " ^ String.concat ", " fs ^ " }"
+      (match recover_record_name flds with
+       | Some name -> name
+       | None ->
+         let fs = List.map (fun (n, t) -> n ^ " : " ^ pp_ty t) flds in
+         "{ " ^ String.concat ", " fs ^ " }")
     | TLin (Ast.Linear,        t) -> "linear " ^ pp_ty ~parens:true t
     | TLin (Ast.Affine,        t) -> "affine " ^ pp_ty ~parens:true t
     | TLin (Ast.Unrestricted,  t) -> pp_ty t
@@ -4986,6 +5049,7 @@ let rec check_decl env (d : Ast.decl) : env =
            in
            (f.fld_name.txt, fty)
          ) fields in
+       register_record_name ~name:name.txt (List.map fst field_pairs);
        { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
      | Ast.TDAlias _ -> env1)
 
@@ -6120,6 +6184,8 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
                 to a structural TRecord, not an opaque TCon. *)
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+             register_record_name ~name:name.txt (List.map fst field_pairs);
+             register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
@@ -6217,6 +6283,7 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
          | Ast.TDRecord fields ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+           register_record_name ~name:name.txt (List.map fst field_pairs);
            { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
@@ -6340,6 +6407,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
            | Ast.TDRecord fields ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+             register_record_name ~name:name.txt (List.map fst field_pairs);
+             register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
@@ -6378,6 +6447,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | Ast.TDRecord fields ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+           register_record_name ~name:name.txt (List.map fst field_pairs);
            { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->

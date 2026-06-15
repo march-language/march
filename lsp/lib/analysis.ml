@@ -5103,9 +5103,12 @@ let code_actions_at (a : t) ~line ~character
     Position.create ~line:!e_line ~character:!e_col
   in
   (* A rendered type is annotatable only if it has a valid surface form in
-     annotation position. Anonymous/structural record types print as `{ … }`
-     (TRecord carries no nominal name), which March's parser rejects after `->`
-     or `:` — so refuse to generate an annotation that would break the file. *)
+     annotation position. Named record types now recover their declared name in
+     [Tc.pp_ty] and render as a bare identifier (e.g. `R`), which is a valid
+     annotation — so those are allowed through. Only *anonymous*/unnameable
+     structural records still print as `{ … }`, which March's parser rejects
+     after `->` or `:`; refuse those so we never emit an annotation that would
+     break the file. The `{` test distinguishes the two cases. *)
   let annotatable_ty_str s = not (String.contains s '{') in
   let make_annotation_action site =
     if not (Pos.span_contains site.as_name_span ~line ~character) then None
