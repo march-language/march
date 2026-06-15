@@ -150,6 +150,15 @@ type code_lens_item = {
   cl_args    : Yojson.Safe.t list; (** Arguments for the command, e.g. [file_uri; test_name] *)
 }
 
+(** One ~H sigil, with the byte offsets needed to map an in-content offset
+    back to a source position via [ofs_to_pos src (hs_base_ofs + o)]. *)
+type h_sigil = {
+  hs_content   : string;    (** raw text between the quotes (interpolation + tags verbatim) *)
+  hs_base_ofs  : int;       (** byte offset in src of hs_content.[0] *)
+  hs_close_ofs : int;       (** byte offset of the closing quote *)
+  hs_span      : Ast.span;  (** the ESigil span (start = the `~`) *)
+}
+
 (** Full analysis result for one document. *)
 type t = {
   src         : string;
@@ -218,6 +227,8 @@ type t = {
   (** Private function names that are never reachable from any public root. *)
   html_issues : html_issue list;
   (** Unclosed HTML tags found inside ~H sigils (detection + close quickfix). *)
+  h_sigils : h_sigil list;
+  (** Every ~H sigil in the file, for HTML-aware features. *)
   type_matches : (string * match_site list) list;
   (** All match sites grouped by matched type name (for bulk file-scope fixes). *)
   naming_violations : naming_violation list;
@@ -1845,31 +1856,17 @@ let pos_to_ofs (src : string) (line1 : int) (col : int) : int =
   while !cur < line1 && !i < n do (if src.[!i] = '\n' then incr cur); incr i done;
   min (!i + col) n
 
-(* Collect unclosed-tag issues across all ~H sigils in [decls]. *)
-let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue list =
-  let issues = ref [] in
+(* Every ~H sigil in [decls], with content recovered textually from [src]. *)
+let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
+  let acc = ref [] in
   let consider name (sp : Ast.span) =
     if String.uppercase_ascii name = "H" then begin
       let start_ofs = pos_to_ofs src sp.Ast.start_line sp.Ast.start_col in
       match extract_h_content src start_ofs (String.length name) with
       | None -> ()
       | Some (content, cbase, close_ofs) ->
-        let unclosed = scan_html_unclosed content in
-        if unclosed <> [] then begin
-          let (cl, cc) = ofs_to_pos src close_ofs in
-          let insert_span =
-            { Ast.file = ""; start_line = cl; start_col = cc; end_line = cl; end_col = cc } in
-          let closer =
-            String.concat "" (List.map (fun (t, _) -> "</" ^ t ^ ">") unclosed) in
-          List.iter (fun (tag, ofs) ->
-              let (ol, oc) = ofs_to_pos src (cbase + ofs) in
-              let open_span =
-                { Ast.file = ""; start_line = ol; start_col = oc;
-                  end_line = ol; end_col = oc + 1 + String.length tag } in
-              issues := { hi_open_span = open_span; hi_tag = tag;
-                          hi_insert_span = insert_span; hi_closer = closer } :: !issues)
-            unclosed
-        end
+        acc := { hs_content = content; hs_base_ofs = cbase;
+                 hs_close_ofs = close_ofs; hs_span = sp } :: !acc
     end
   in
   let rec ex (e : Ast.expr) =
@@ -1902,7 +1899,29 @@ let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue lis
     | Ast.DDescribe (_, ds, _) | Ast.DMod (_, _, ds, _) -> List.iter dl ds
     | _ -> ()
   in
-  List.iter dl decls;
+  List.iter dl decls; List.rev !acc
+
+(* Collect unclosed-tag issues across all ~H sigils in [decls]. *)
+let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue list =
+  let issues = ref [] in
+  List.iter (fun (s : h_sigil) ->
+      let unclosed = scan_html_unclosed s.hs_content in
+      if unclosed <> [] then begin
+        let (cl, cc) = ofs_to_pos src s.hs_close_ofs in
+        let insert_span =
+          { Ast.file = ""; start_line = cl; start_col = cc; end_line = cl; end_col = cc } in
+        let closer =
+          String.concat "" (List.map (fun (t, _) -> "</" ^ t ^ ">") unclosed) in
+        List.iter (fun (tag, ofs) ->
+            let (ol, oc) = ofs_to_pos src (s.hs_base_ofs + ofs) in
+            let open_span =
+              { Ast.file = ""; start_line = ol; start_col = oc;
+                end_line = ol; end_col = oc + 1 + String.length tag } in
+            issues := { hi_open_span = open_span; hi_tag = tag;
+                        hi_insert_span = insert_span; hi_closer = closer } :: !issues)
+          unclosed
+      end)
+    (collect_h_sigils ~src decls);
   !issues
 
 (* ------------------------------------------------------------------ *)
@@ -2066,6 +2085,7 @@ let analyse ~filename ~src : t =
       annotation_sites = [];
       unused_fns        = [];
       html_issues       = [];
+      h_sigils          = [];
       type_matches      = [];
       naming_violations = [];
       demorgan_sites    = [];
@@ -2680,6 +2700,7 @@ let analyse ~filename ~src : t =
         ~is_global:(fun n -> Tc.StrMap.mem n final_env.Tc.vars)
         type_map user_decls in
     let perf_diags = List.map perf_insight_to_diag perf_insights in
+    let h_sigils = collect_h_sigils ~src user_decls in
     let html_issues = collect_html_issues ~src user_decls in
     let html_diags =
       List.map (fun (hi : html_issue) ->
@@ -2736,6 +2757,7 @@ let analyse ~filename ~src : t =
       annotation_sites = collect_annotation_sites raw_ast;
       unused_fns;
       html_issues;
+      h_sigils;
       type_matches;
       naming_violations;
       demorgan_sites;

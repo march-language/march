@@ -4719,6 +4719,24 @@ end|} in
     (contains_sub edit "</p></div>")
 
 (* ------------------------------------------------------------------ *)
+(* ~H sigil traversal: collect_h_sigils                               *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_sigils_collected () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div>${name}</div>"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  Alcotest.(check int) "one ~H sigil found" 1 (List.length a.An.h_sigils);
+  let s = List.hd a.An.h_sigils in
+  Alcotest.(check bool) "content captured" true
+    (contains_sub s.An.hs_content "<div>");
+  let (l, _c) = An.ofs_to_pos src (s.An.hs_base_ofs + 0) in
+  Alcotest.(check int) "content base maps to the sigil's line" 3 l
+
+(* ------------------------------------------------------------------ *)
 (* Cross-file project analysis                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -4827,6 +4845,9 @@ let () =
       "void elements ok", `Quick, test_html_void_no_issue;
       "self-closing ok", `Quick, test_html_self_closing_no_issue;
       "close quickfix inserts closers", `Quick, test_html_close_quickfix;
+    ];
+    "~H sigil traversal", [
+      "collect_h_sigils: one sigil found with correct content and offset", `Quick, test_h_sigils_collected;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
