@@ -3408,34 +3408,6 @@ let suppress_param_hint ~(single_arg : bool) ~(param : string) (arg : Ast.expr) 
     | Ast.EField (_, n, _) -> n.Ast.txt = param
     | _ -> false
 
-(** Visit every sub-expression of [e] (including [e] itself), pre-order. *)
-let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
-  f e;
-  match e with
-  | Ast.EApp (g, args, _) -> iter_expr f g; List.iter (iter_expr f) args
-  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
-    List.iter (iter_expr f) args
-  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> iter_expr f body
-  | Ast.EBlock (es, _) -> List.iter (iter_expr f) es
-  | Ast.ELet (b, _) -> iter_expr f b.Ast.bind_expr
-  | Ast.EMatch (subj, brs, _) ->
-    iter_expr f subj;
-    List.iter (fun (br : Ast.branch) ->
-        (match br.branch_guard with Some g -> iter_expr f g | None -> ());
-        iter_expr f br.branch_body) brs
-  | Ast.ECond (arms, _) ->
-    List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
-  | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
-  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
-  | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
-  | Ast.ERecordUpdate (e2, fs, _) ->
-    iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
-  | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
-  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
-  | Ast.EDbg (Some e2, _) -> iter_expr f e2
-  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
-  | Ast.EDbg (None, _) -> ()
-
 let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
     (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
