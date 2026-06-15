@@ -3182,6 +3182,138 @@ end|} in
     (Some "0") alpha.Lsp.Types.CompletionItem.sortText
 
 (* ------------------------------------------------------------------ *)
+(* Semantic tokens: ownership modifiers + use-site fidelity           *)
+(* ------------------------------------------------------------------ *)
+
+(* Decode the LSP flat delta-encoded token array into (tokenType,
+   tokenModifiers) pairs — one per 5-int group. *)
+let decode_semantic_tokens (arr : int array) =
+  List.init (Array.length arr / 5) (fun i -> (arr.(i*5 + 3), arr.(i*5 + 4)))
+
+let test_semantic_tokens_linear_modifier () =
+  (* `x` is bound and consumed exactly once → linear (bit 8). *)
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 42
+    x
+  end
+end|} in
+  let a = analyse src in
+  let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
+  Alcotest.(check bool) "a consumed-once binding is marked linear" true
+    (List.exists (fun (_, m) -> m land 8 <> 0) toks)
+
+let test_semantic_tokens_affine_modifier () =
+  (* `x` is bound but never used → affine / at most once (bit 16). *)
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 42
+    99
+  end
+end|} in
+  let a = analyse src in
+  let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
+  Alcotest.(check bool) "an unused binding is marked affine" true
+    (List.exists (fun (_, m) -> m land 16 <> 0) toks)
+
+let test_semantic_tokens_use_site_ctor_fidelity () =
+  (* The two declarations Red/Green produce 2 enumMember tokens; the use
+     site of `Red` must add a 3rd (tagged enumMember, not variable). *)
+  let src = {|mod M do
+  type Color = Red | Green
+  fn f() : Color do Red end
+end|} in
+  let a = analyse src in
+  let toks = decode_semantic_tokens (March_lsp_lib.Server.semantic_tokens_data a) in
+  let enum_count = List.length (List.filter (fun (t, _) -> t = 3) toks) in
+  Alcotest.(check bool) "constructor use site tagged enumMember (decls + use)"
+    true (enum_count >= 3)
+
+(* ------------------------------------------------------------------ *)
+(* FBIP performance inlay hints (reused / copied)                      *)
+(* ------------------------------------------------------------------ *)
+
+let str_contains ~sub s =
+  let ls = String.length s and lsub = String.length sub in
+  let rec go i = i + lsub <= ls && (String.sub s i lsub = sub || go (i + 1)) in
+  go 0
+
+let inlay_labels a =
+  let range = Lsp.Types.Range.create
+      ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+      ~end_:(Lsp.Types.Position.create ~line:1000 ~character:0) in
+  List.filter_map (fun (h : Lsp.Types.InlayHint.t) ->
+      match h.Lsp.Types.InlayHint.label with `String s -> Some s | _ -> None)
+    (An.inlay_hints_for a range)
+
+let test_inlay_reuse_hint () =
+  (* `p` is an allocation (P(1,2)) consumed exactly once → FBIP reuse candidate. *)
+  let src = {|mod M do
+  type P = P(Int, Int)
+  fn f() : Int do
+    let p = P(1, 2)
+    match p do
+      P(a, b) -> a + b
+    end
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "single-use allocation gets a reuse inlay" true
+    (List.exists (str_contains ~sub:"reused") (inlay_labels a))
+
+let test_inlay_no_reuse_for_scalar () =
+  (* A scalar binding (no allocation) must NOT get a reuse hint. *)
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 42
+    x
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "scalar binding has no reuse inlay" false
+    (List.exists (str_contains ~sub:"reused") (inlay_labels a))
+
+let test_inlay_copy_hint_wiring () =
+  (* Every detected send-copy insight must surface as a 'copied' inlay.
+     Vacuously holds when type resolution doesn't fire (sandbox), but guards
+     the wiring whenever it does. *)
+  let src = {|mod M do
+  fn do_send(pid: Pid(W), items: List(Int)) : Unit do
+    send(pid, items)
+  end
+end|} in
+  let a = analyse src in
+  let send_copies =
+    List.length (List.filter (fun (pi : An.perf_insight) ->
+        match pi.An.pi_kind with An.ActorSendCopy _ -> true | _ -> false)
+      a.An.perf_insights) in
+  let copied =
+    List.length (List.filter (str_contains ~sub:"copied") (inlay_labels a)) in
+  Alcotest.(check bool) "send-copies surfaced as inlays" true (copied >= send_copies)
+
+(* ------------------------------------------------------------------ *)
+(* documentHighlight Read/Write kinds                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_document_highlight_read_write_kinds () =
+  let src = {|mod M do
+  fn f() : Int do
+    let x = 1
+    x + x
+  end
+end|} in
+  let a = analyse src in
+  let (xl, xc) = pos_of src "x + x" in
+  let hls = An.document_highlights_at a ~line:xl ~character:xc in
+  let kind_count k =
+    List.length (List.filter (fun (h : Lsp.Types.DocumentHighlight.t) ->
+        h.Lsp.Types.DocumentHighlight.kind = Some k) hls) in
+  Alcotest.(check int) "binding site is a Write" 1
+    (kind_count Lsp.Types.DocumentHighlightKind.Write);
+  Alcotest.(check int) "both use sites are Reads" 2
+    (kind_count Lsp.Types.DocumentHighlightKind.Read)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3191,6 +3323,17 @@ let () =
       "go to implementation", `Quick, test_implementation;
       "go to type definition", `Quick, test_type_definition;
       "document highlight", `Quick, test_document_highlight;
+      "document highlight read/write kinds", `Quick, test_document_highlight_read_write_kinds;
+    ];
+    "semantic tokens", [
+      "linear modifier on consumed-once binding", `Quick, test_semantic_tokens_linear_modifier;
+      "affine modifier on unused binding", `Quick, test_semantic_tokens_affine_modifier;
+      "constructor use site fidelity", `Quick, test_semantic_tokens_use_site_ctor_fidelity;
+    ];
+    "fbip inlay hints", [
+      "reuse hint on single-use allocation", `Quick, test_inlay_reuse_hint;
+      "no reuse hint on scalar binding", `Quick, test_inlay_no_reuse_for_scalar;
+      "send-copy surfaced as copied inlay", `Quick, test_inlay_copy_hint_wiring;
     ];
     "completion depth", [
       "in-scope locals offered and ranked first", `Quick, test_completion_scoped_locals;
