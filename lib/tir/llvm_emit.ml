@@ -563,6 +563,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "is_alive"                    -> Some Tir.TBool
   | "send" | "send_linear"        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   | "spawn"                        -> Some (Tir.TPtr Tir.TUnit)
+  | "receive"                      -> Some (Tir.TPtr Tir.TUnit)
   | "actor_get_int"               -> Some Tir.TInt
   | "actor_call"                  -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]))
   | "actor_reply"                 -> Some Tir.TUnit
