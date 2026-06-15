@@ -287,6 +287,64 @@ let fn_ret_tir (ty : Tir.ty) : Tir.ty =
   | Tir.TFn (_, ret) -> ret
   | other -> other
 
+(** True for defunctionalized closure apply wrappers ("<fn>$apply$<uid>").
+
+    These are dispatched indirectly through a closure struct whose fn-pointer
+    is type-erased, so all wrappers for a given source `(a) -> b` MUST share one
+    calling convention.  We pin that convention to the generic ptr ABI:
+
+      - The wrapper RETURNS its result in the ptr slot (scalar values tagged via
+        the i64->ptr coercion; heap pointers pass through unchanged).
+      - Every call site reads the result as ptr and lets the consumer untag
+        through the usual ptr->scalar `coerce`.
+
+    Without this, inference gives a concrete-return lambda (e.g. `fn x -> x > 0`)
+    an `i64` ABI but leaves a polymorphic-return lambda (e.g. `fn r -> r.active`,
+    a dynamic field read that yields a *tagged* generic value) a `ptr` ABI.
+    Stored in the same list and called through one variable typed `(_) -> Bool`,
+    the dispatch picks `call i64` for both and reinterprets the polymorphic
+    wrapper's tagged `3`/`1` as a raw scalar — inverting Bool field predicates.
+    Void wrappers keep the `void` ABI (no value to carry). *)
+let is_apply_fn (name : string) : bool =
+  let marker = "$apply$" in
+  let nl = String.length name and ml = String.length marker in
+  let rec scan i =
+    i + ml <= nl && (String.sub name i ml = marker || scan (i + 1))
+  in
+  nl >= ml && scan 0
+
+(** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
+    result in the generic ptr ABI shared by all closure dispatch (see
+    [is_apply_fn]).  A closure struct's fn-pointer is type-erased, so a thin
+    closure wrapping a named function MUST present the same ptr ABI as a lambda
+    apply wrapper — otherwise the ECallPtr dispatch (which reads ptr) would
+    misread a concrete `i64`/`double` return (e.g. a Bool-returning predicate
+    passed to List.filter, read back tagged and inverted).  Scalars are tagged
+    `(n<<1)|1` and floats bitcast into the ptr slot; the consumer untags via the
+    usual ptr->scalar coerce.  void wrappers carry no value (ret ptr null). *)
+let clo_wrap_define wrap_name decl_str target_ret fn_name call_args =
+  if target_ret = "void" then
+    Printf.sprintf
+      "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
+      wrap_name decl_str fn_name call_args
+  else if target_ret = "ptr" then
+    Printf.sprintf
+      "define ptr @%s(%s) {\nentry:\n  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
+      wrap_name decl_str fn_name call_args
+  else if target_ret = "double" then
+    Printf.sprintf
+      "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  \
+       %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  \
+       ret ptr %%rp\n}\n\n"
+      wrap_name decl_str fn_name call_args
+  else
+    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
+    Printf.sprintf
+      "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  \
+       %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
+       %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
+      wrap_name decl_str target_ret fn_name call_args
+
 (** Allocation size in bytes for [n] fields. *)
 let alloc_size n = 16 + n * 8
 
@@ -1215,16 +1273,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       let all_arg_decls = "%_clo" :: arg_names in
       let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
       let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-      if target_ret = "void" then
-        Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
-             wrap_name decl_str fn_name call_args)
-      else
-        (* Pass the return value through unchanged — ECallPtr reads it with the
-           concrete return type (i64, double, or ptr), so no tagging is needed. *)
-        Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n\n"
-             target_ret wrap_name decl_str target_ret fn_name call_args target_ret)
+      Buffer.add_string ctx.extra_fns
+        (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in
@@ -1307,14 +1357,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          let all_decls   = "%_clo" :: arg_names in
          let decl_str    = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_decls) in
          let call_args   = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-         if target_ret = "void" then
-           Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
-                wrap_name decl_str fn_name call_args)
-         else
-           Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n\n"
-                target_ret wrap_name decl_str target_ret fn_name call_args target_ret)
+         Buffer.add_string ctx.extra_fns
+           (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
        end;
        let hp  = fresh ctx "cwrap" in
        emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -2564,7 +2608,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
     in
-    let ret_ty = llvm_ret_ty ret_tir in
+    (* Apply wrappers use the generic ptr ABI (see [is_apply_fn]); known_call
+       rewrites ECallPtr→EApp(apply_fn, ...) for non-escaping closures, so this
+       direct path must read the result as ptr too. *)
+    let ret_ty =
+      if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ret_tir in
     (* If the function is not known (not in top_fns, not a builtin, not an extern),
        emit a forward declaration into the preamble so LLVM does not reject the IR
        with "use of undefined value".  This covers interface dispatch calls that were
@@ -2822,7 +2870,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         (match ctx.ret_ty with Tir.TVar _ -> ret_tir | concrete -> concrete)
       | _ -> ret_tir
     in
-    let ret_ty = llvm_ret_ty ret_tir in
+    (* This is the indirect closure-struct dispatch: the fn-pointer always
+       targets a closure apply wrapper, which uses the generic ptr ABI (see
+       [is_apply_fn]).  Read the result as ptr regardless of the call-site Fn
+       annotation (which may say a concrete scalar like Bool) and let the
+       consumer untag via coerce.  void wrappers keep void. *)
+    let ret_ty =
+      let base = llvm_ret_ty ret_tir in
+      if base = "void" then "void" else "ptr"
+    in
     let orig_param_llvm_tys = match fn_atom with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
@@ -3465,6 +3521,50 @@ and emit_case ctx scrut_atom branches default_opt =
     | _ -> None
   in
 
+  (* True iff [body] reuses the scrutinee's own storage via an
+     [EReuse (AVar scrut_name, ...)] anywhere it could execute.
+
+     This is the "reuse" counterpart of [strip_scrut_decrc].  When an arm both
+     extracts heap fields (inherited from the scrutinee with NO dup) AND reuses
+     the scrutinee box at the tail (the FBIP whole-cell-reuse pattern, e.g.
+     [Bytes.slice]: [Bytes(xs) -> ... reuse b as Bytes(...)]), the box-level
+     RC check lives at the EReuse site — which is too late.  The extracted
+     fields were already moved into a consuming callee (e.g. list_drop, which
+     FBIP-reuses xs's cons cells in place) UPSTREAM of the EReuse.  When the
+     scrutinee is shared (RC > 1) the EReuse takes its dec+alloc-fresh path and
+     the original box survives, still pointing at those now-destroyed children
+     → use-after-free in the caller (the [b len = 0] bug).
+
+     The fix mirrors the leading-dec shared path: read the scrutinee RC at
+     branch ENTRY (a non-consuming load — the EReuse still owns and consumes the
+     box reference at the tail) and, on the shared path, IncRC each extracted
+     heap field BEFORE the body consumes them.  RC(scrut box) is invariant
+     between entry and the EReuse (the body consumes the CHILDREN, never the box
+     header), so the entry check and the EReuse check observe the same value and
+     stay consistent. *)
+  let rec body_reuses_scrut scrut_name e =
+    match e with
+    | Tir.EReuse (Tir.AVar v, _, _) -> String.equal v.Tir.v_name scrut_name
+    | Tir.ELet (v, e1, e2) ->
+      body_reuses_scrut scrut_name e1
+      || (not (String.equal v.Tir.v_name scrut_name)
+          && body_reuses_scrut scrut_name e2)
+    | Tir.ESeq (e1, e2) ->
+      body_reuses_scrut scrut_name e1 || body_reuses_scrut scrut_name e2
+    | Tir.ECase (_, branches, default) ->
+      List.exists (fun br ->
+        not (List.exists (fun bv ->
+               String.equal bv.Tir.v_name scrut_name) br.Tir.br_vars)
+        && body_reuses_scrut scrut_name br.Tir.br_body) branches
+      || Option.fold ~none:false
+           ~some:(body_reuses_scrut scrut_name) default
+    | Tir.ELetRec (fns, body) ->
+      not (List.exists (fun fn ->
+             String.equal fn.Tir.fn_name scrut_name) fns)
+      && body_reuses_scrut scrut_name body
+    | _ -> false
+  in
+
   (* Per-branch var_slot snapshot.
 
      Each ECase branch introduces its own bindings via [alloca_name], which
@@ -3564,6 +3664,34 @@ and emit_case ctx scrut_atom branches default_opt =
            emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
            emit_label ctx body_lbl;
            rest   (* emit the rest of the body without the leading dec_rc *)
+         | None when body_reuses_scrut sn br.Tir.br_body ->
+           (* Reuse counterpart of the leading-dec shared path.  The scrutinee
+              box is NOT freed at entry — the tail EReuse consumes it.  So here
+              we only READ the RC (non-consuming) and, when shared (RC > 1),
+              IncRC the extracted heap fields before the body moves them into a
+              consuming callee.  No dec/free at entry: the EReuse performs the
+              single box-level dec on its rc>1 path. *)
+           let rc = fresh ctx "scrut_rc" in
+           emit ctx (Printf.sprintf
+             "%s = load atomic i64, ptr %s monotonic, align 8" rc scrut_val);
+           let shared = fresh ctx "scrut_shared" in
+           emit ctx (Printf.sprintf "%s = icmp sgt i64 %s, 1" shared rc);
+           let unique_lbl = fresh_block ctx "rb_unique" in
+           let shared_lbl = fresh_block ctx "rb_shared" in
+           let body_lbl   = fresh_block ctx "rb_body" in
+           emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                            shared shared_lbl unique_lbl);
+           (* Shared path: dup each extracted heap field. *)
+           emit_label ctx shared_lbl;
+           List.iter (fun fv ->
+             emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv)
+           ) fields;
+           emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
+           (* Unique path: nothing to do. *)
+           emit_label ctx unique_lbl;
+           emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
+           emit_label ctx body_lbl;
+           br.Tir.br_body
          | None -> br.Tir.br_body)
       | _ -> br.Tir.br_body
     in
@@ -3805,7 +3933,15 @@ let emit_fn ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.var_llvm_ty;
   ctx.ret_ty <- fn.Tir.fn_ret_ty;
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
-  let ret_ty       = llvm_ret_ty fn.Tir.fn_ret_ty in
+  (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
+     single calling convention works regardless of whether the lambda's return
+     type was inferred concretely or left polymorphic.  The body result is
+     coerced to ptr below (tagging scalars), matching what every call site
+     reads.  void wrappers keep void — there is no value to carry. *)
+  let ret_ty =
+    let base = llvm_ret_ty fn.Tir.fn_ret_ty in
+    if is_apply_fn fn.Tir.fn_name && base <> "void" then "ptr" else base
+  in
 
   (* Detect self-tail-recursion: only do TCO when the function calls itself
      in tail position and is not a closure apply fn (those have a clo arg). *)

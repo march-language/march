@@ -9422,8 +9422,15 @@ let test_int_tag_coerce_ir () =
 let test_int_tag_wrapper_ir () =
   (* inc_fn is a top-level function returning i64; passing it as a value to
      list_apply forces the codegen to emit a closure wrapper around inc_fn.
-     The wrapper must use concrete types (i64 param/return) matching ECallPtr's
-     call-site type annotation — no tagging. *)
+     Closure fn-pointers are type-erased and dispatched uniformly, so every
+     wrapper ($clo_wrap and $lam$apply) shares ONE calling convention: the
+     generic ptr ABI.  The wrapper takes concrete params but returns its result
+     in the ptr slot — an i64 result is tagged (n<<1)|1 so the dispatch's
+     conditional untag recovers it, and so an Int >= 4096 is never mistaken for a
+     heap pointer by march_incrc.  (A prior "concrete i64 return" variant avoided
+     tagging but could not carry a *polymorphic* return, e.g. a lambda whose body
+     is a dynamic record-field read — the dispatch read the tagged generic value
+     as a raw scalar.  Uniform ptr ABI fixes both.) *)
   let src = {|mod Test do
     fn inc_fn(x : Int) : Int do x + 1 end
     fn list_apply(f : Int -> Int, xs : List(Int)) : List(Int) do
@@ -9441,11 +9448,11 @@ let test_int_tag_wrapper_ir () =
     try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
     with Not_found -> false
   in
-  (* The closure wrapper must use concrete types — i64 param and i64 return —
-     and pass the value through without tagging. *)
-  Alcotest.(check bool) "wrapper: define i64 return"  true (ir_has "define i64 @inc_fn$clo_wrap");
-  Alcotest.(check bool) "wrapper: i64 param"          true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: no tagging (no shl)" false (ir_has "shl i64 %r, 1")
+  (* The wrapper returns ptr (generic ABI), keeps a concrete i64 param, and tags
+     its scalar result so the ECallPtr dispatch can untag it on read. *)
+  Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
+  Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
