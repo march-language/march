@@ -8,7 +8,7 @@ let handle = function
   | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
 
 let known_builtin_names =
-  [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "format";
+  [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "refactor"; "format";
     "interactive"; "i"; "clean"; "deps"; "add"; "publish";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
@@ -267,6 +267,49 @@ let lint_cmd =
   in
   Cmd.v (Cmd.info "lint" ~doc:"Run the coding-standard rule checker")
     Term.(const run $ strict $ all $ workspace_package_flag)
+
+(* -------------------------------------------------------------- forge refactor *)
+
+let refactor_cmd =
+  let dry =
+    Arg.(value & flag &
+         info ["dry-run"; "n"] ~doc:"Preview changes without writing any files") in
+  let kind =
+    Arg.(value & opt string "any" &
+         info ["kind"] ~docv:"K"
+           ~doc:"Restrict rename to one category: fn, type, ctor, module, field, var, or any") in
+  let rename =
+    let old_ = Arg.(required & pos 0 (some string) None & info [] ~docv:"OLD") in
+    let new_ = Arg.(required & pos 1 (some string) None & info [] ~docv:"NEW") in
+    let pat =
+      Arg.(value & flag &
+           info ["pattern"; "p"] ~doc:"Treat OLD as a regex; NEW may use \\1 backreferences") in
+    let run o n k p d = handle (Cmd_refactor.rename ~old_name:o ~new_name:n ~kind:k ~pattern:p ~dry_run:d ()) in
+    Cmd.v (Cmd.info "rename" ~doc:"Rename a symbol and all its references project-wide")
+      Term.(const run $ old_ $ new_ $ kind $ pat $ dry)
+  in
+  let move =
+    let decl = Arg.(required & pos 0 (some string) None & info [] ~docv:"DECL") in
+    let dest = Arg.(required & pos 1 (some string) None & info [] ~docv:"DEST.march") in
+    let run dc ds d = handle (Cmd_refactor.move ~decl:dc ~dest:ds ~dry_run:d ()) in
+    Cmd.v (Cmd.info "move" ~doc:"Move a top-level declaration to another file")
+      Term.(const run $ decl $ dest $ dry)
+  in
+  let replace =
+    let p = Arg.(required & pos 0 (some string) None & info [] ~docv:"PATTERN") in
+    let t = Arg.(required & pos 1 (some string) None & info [] ~docv:"TEMPLATE") in
+    let run pp tt d = handle (Cmd_refactor.replace ~pat:pp ~tmpl:tt ~dry_run:d ()) in
+    Cmd.v (Cmd.info "replace"
+             ~doc:"Structural find-and-replace; PATTERN/TEMPLATE use \\$metavariables, e.g. 'f(\\$a, \\$b)' 'g(\\$b, \\$a)'")
+      Term.(const run $ p $ t $ dry)
+  in
+  let fix =
+    let run d = handle (Cmd_refactor.fix ~dry_run:d ()) in
+    Cmd.v (Cmd.info "fix" ~doc:"Apply safe naming-convention fixes (snake_case functions) project-wide")
+      Term.(const run $ dry)
+  in
+  Cmd.group (Cmd.info "refactor" ~doc:"Project-wide, parser-based refactorings")
+    [ rename; move; replace; fix ]
 
 (* ---------------------------------------------------------------- forge format *)
 
@@ -789,7 +832,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
