@@ -363,6 +363,53 @@ let test_tc_hole () =
   end|} in
   Alcotest.(check bool) "hole is not an error" false (has_errors ctx)
 
+(* Arity checking: March has no partial application, so a wrong-arity call of a
+   known (module-defined) function is a compile-time error.  Previously the
+   curried typechecker silently accepted under-application; the compiler then
+   miscompiled it into a body call with a garbage argument (a runtime hang),
+   which is how a conduit test typo — fake_workflow_storage_new() with 0 args —
+   became a non-deterministic hang. *)
+let test_tc_arity_under_application () =
+  let ctx = typecheck {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Unit do let _ = add(1) () end
+  end|} in
+  Alcotest.(check bool) "under-application is an error" true (has_errors ctx)
+
+let test_tc_arity_zero_args () =
+  let ctx = typecheck {|mod Test do
+    fn mk(name : String) : Int do string_byte_length(name) end
+    fn main() : Unit do let _ = mk() () end
+  end|} in
+  Alcotest.(check bool) "0-arg call of 1-arg fn is an error" true (has_errors ctx)
+
+let test_tc_arity_over_application () =
+  let ctx = typecheck {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Unit do let _ = add(1, 2, 3) () end
+  end|} in
+  Alcotest.(check bool) "over-application is an error" true (has_errors ctx)
+
+let test_tc_arity_correct_ok () =
+  let ctx = typecheck {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Unit do let _ = add(1, 2) () end
+  end|} in
+  Alcotest.(check bool) "correct-arity call: no error" false (has_errors ctx)
+
+let test_tc_arity_fn_returning_fn_ok () =
+  (* Full application of an arity-1 function that RETURNS a function must NOT be
+     flagged as under-application — the result is a value, not a partial app. *)
+  let ctx = typecheck {|mod Test do
+    fn make_adder(n : Int) : (Int) -> Int do fn x -> x + n end
+    fn main() : Unit do
+      let f = make_adder(5)
+      let _ = f(2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "full app of fn-returning-fn: no error" false (has_errors ctx)
+
 (* ── Fix 1: Interface constraint discharge ──────────────────────────────── *)
 
 let test_interface_constraint_satisfied () =
@@ -21448,6 +21495,56 @@ let test_compiled_check_property_passes () =
     end
   end
 
+(* ── __try_call_val: heap Ok payload round-trips + panic caught ──────────────
+   __try_call_val : (Bool -> a) -> Result(a, String) is the value-carrying
+   sibling of __try_call.  Where __try_call must tag its Bool Ok field,
+   __try_call_val stores the thunk's uniform-repr result verbatim so a HEAP
+   value (here a String) survives the round-trip without corruption.  End-to-end
+   guard: compile a program that (a) reads back a heap Ok payload and (b) catches
+   a panicking thunk as Err, asserting it exits 0.  Skips when the compiler /
+   clang / runtime is unavailable, like the sibling tests. *)
+let test_compiled_try_call_val_heap_roundtrip () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_trycallval" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "tcv.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod TryCallVal do\n\
+      \  describe \"__try_call_val\" do\n\
+      \    test \"heap Ok payload round-trips\" do\n\
+      \      match __try_call_val(fn _ -> \"hello world\") do\n\
+      \        Ok(s)  -> assert s == \"hello world\"\n\
+      \        Err(_) -> assert false\n\
+      \      end\n\
+      \    end\n\
+      \    test \"panicking thunk is caught as Err\" do\n\
+      \      match __try_call_val(fn _ -> do let _ = 1 / 0 \"unreached\" end) do\n\
+      \        Ok(_)  -> assert false\n\
+      \        Err(_) -> assert true\n\
+      \      end\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "tbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled __try_call_val heap round-trip + panic catch exits 0" 0 run_rc
+    end
+  end
+
 (* Regression: a recursive nested closure that captures a variable used in its
    loop condition produced WRONG results when compiled (interpreter was correct).
    Root cause: lowering left the self-reference's return type as an unresolved
@@ -21726,6 +21823,11 @@ let () =
           Alcotest.test_case "match expression"    `Quick test_tc_match;
           Alcotest.test_case "undefined variable"  `Quick test_tc_undefined_var;
           Alcotest.test_case "typed hole"          `Quick test_tc_hole;
+          Alcotest.test_case "arity: under-application is error"   `Quick test_tc_arity_under_application;
+          Alcotest.test_case "arity: 0-arg call of 1-arg fn error" `Quick test_tc_arity_zero_args;
+          Alcotest.test_case "arity: over-application is error"    `Quick test_tc_arity_over_application;
+          Alcotest.test_case "arity: correct call is ok"           `Quick test_tc_arity_correct_ok;
+          Alcotest.test_case "arity: fn returning fn is ok"        `Quick test_tc_arity_fn_returning_fn_ok;
           Alcotest.test_case "actor handler extra field"   `Quick test_actor_handler_extra_field;
           Alcotest.test_case "actor handler missing field" `Quick test_actor_handler_missing_field;
           Alcotest.test_case "actor handler correct"       `Quick test_actor_handler_correct;
@@ -23456,6 +23558,8 @@ let () =
           test_dmod_test_body_qualifies_helper_refs;
         Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
           test_compiled_check_property_passes;
+        Alcotest.test_case "__try_call_val: heap Ok payload round-trips + panic caught (compiled)" `Quick
+          test_compiled_try_call_val_heap_roundtrip;
         Alcotest.test_case "recursive nested closure with captured loop bound returns correct value" `Quick
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Quick
