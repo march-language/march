@@ -1901,6 +1901,67 @@ let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
   in
   List.iter dl decls; List.rev !acc
 
+(** A reference to an [<island name='X' ...>] component found inside a ~H sigil. *)
+type island_ref = {
+  isl_name      : string;   (** module name from name='…' or name="…" *)
+  isl_name_span : Ast.span; (** span of the NAME text (for def/diag/highlight) *)
+  isl_has_props : bool;     (** true when a [props=] attribute is present in the tag *)
+}
+
+(** Find every [<island name='X' …>] tag in one h_sigil, returning the name's
+    source span so callers can validate, navigate, or complete it. *)
+let islands_in_sigil ~(src : string) (s : h_sigil) : island_ref list =
+  let c = s.hs_content in
+  let n = String.length c in
+  let out = ref [] in
+  (* Return byte offset of [pat] within c at/after [start], or -1. *)
+  let find_from pat start =
+    let pl = String.length pat in
+    let rec go k =
+      if k + pl > n then -1
+      else if String.sub c k pl = pat then k
+      else go (k + 1)
+    in
+    go start
+  in
+  let i = ref 0 in
+  while !i < n do
+    if !i + 7 <= n && String.sub c !i 7 = "<island" then begin
+      let tag_end =
+        match find_from ">" !i with -1 -> n | e -> e
+      in
+      (* Try to extract name='X' or name="X" within the tag. *)
+      let name_at q =
+        let p = "name=" ^ String.make 1 q in
+        let k = find_from p !i in
+        if k < 0 || k >= tag_end then None
+        else begin
+          let vs = k + String.length p in
+          let ve =
+            match find_from (String.make 1 q) vs with
+            | -1 -> tag_end
+            | e  -> e
+          in
+          Some (String.sub c vs (ve - vs), vs, ve)
+        end
+      in
+      (match (match name_at '\'' with None -> name_at '"' | r -> r) with
+       | Some (nm, vs, _ve) ->
+         let (l, col) = ofs_to_pos src (s.hs_base_ofs + vs) in
+         let span =
+           { Ast.file = ""; start_line = l; start_col = col;
+             end_line = l; end_col = col + String.length nm }
+         in
+         let pk = find_from "props=" !i in
+         let has_props = pk >= 0 && pk < tag_end in
+         out := { isl_name = nm; isl_name_span = span; isl_has_props = has_props } :: !out
+       | None -> ());
+      i := tag_end + 1
+    end else
+      incr i
+  done;
+  List.rev !out
+
 (* Collect unclosed-tag issues across all ~H sigils in [decls]. *)
 let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue list =
   let issues = ref [] in

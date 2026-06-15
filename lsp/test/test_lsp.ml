@@ -4737,6 +4737,41 @@ end|} in
   Alcotest.(check int) "content base maps to the sigil's line" 3 l
 
 (* ------------------------------------------------------------------ *)
+(* ~H island tag parser: islands_in_sigil                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_island_parse () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<island name='Counter' />"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let islands = List.concat_map (An.islands_in_sigil ~src) a.An.h_sigils in
+  Alcotest.(check int) "one island" 1 (List.length islands);
+  let isl = List.hd islands in
+  Alcotest.(check string) "module name" "Counter" isl.An.isl_name
+
+let test_island_name_span () =
+  (* The name 'Counter' starts on line 3. Verify isl_name_span.start_line = 3
+     and that slicing src at the span yields the 7-character string "Counter". *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<island name='Counter' />"
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let islands = List.concat_map (An.islands_in_sigil ~src) a.An.h_sigils in
+  let isl = List.hd islands in
+  let sp = isl.An.isl_name_span in
+  Alcotest.(check int) "name span on line 3" 3 sp.Ast.start_line;
+  (* Recover the text the span covers via pos_to_ofs round-trip. *)
+  let start_ofs = An.pos_to_ofs src sp.Ast.start_line sp.Ast.start_col in
+  let name_len  = String.length isl.An.isl_name in
+  Alcotest.(check string) "span text is Counter"
+    "Counter" (String.sub src start_ofs name_len)
+
+(* ------------------------------------------------------------------ *)
 (* Cross-file project analysis                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -4848,6 +4883,8 @@ let () =
     ];
     "~H sigil traversal", [
       "collect_h_sigils: one sigil found with correct content and offset", `Quick, test_h_sigils_collected;
+      "islands_in_sigil: finds one island by name",                        `Quick, test_island_parse;
+      "islands_in_sigil: name span lands on correct line and text",        `Quick, test_island_name_span;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
