@@ -4517,6 +4517,79 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
     | _ -> []
   in
 
+  (* ---- Auto-alias for a repeated module prefix (Feature 13a) ---- *)
+  (* Cursor on a qualified `A.B.foo` whose multi-segment module prefix `A.B`
+     appears >= 3 times → insert `alias A.B` and rewrite uses to `B.foo`. *)
+  let auto_alias_actions =
+    let rec module_prefix = function
+      | Ast.EVar n          -> Some n.Ast.txt
+      | Ast.ECon (n, [], _) -> Some n.Ast.txt
+      | Ast.EField (inner, f, _) ->
+        (match module_prefix inner with Some p -> Some (p ^ "." ^ f.Ast.txt) | None -> None)
+      | _ -> None
+    in
+    let rec root_span = function
+      | Ast.EVar n          -> Some n.Ast.span
+      | Ast.ECon (n, _, _)  -> Some n.Ast.span
+      | Ast.EField (inner, _, _) -> root_span inner
+      | _ -> None
+    in
+    (* (prefix, field, full-chain span) for every qualified field access. The
+       node's own span covers only the field, so span the whole `A.B.foo`. *)
+    let quals =
+      List.filter_map (fun e -> match e with
+          | Ast.EField (base, field, _) ->
+            (match module_prefix base, root_span base with
+             | Some p, Some rs when String.contains p '.' ->
+               let full = { Ast.file = rs.Ast.file;
+                            start_line = rs.Ast.start_line; start_col = rs.Ast.start_col;
+                            end_line = field.Ast.span.Ast.end_line;
+                            end_col = field.Ast.span.Ast.end_col } in
+               Some (p, field, full)
+             | _ -> None)
+          | _ -> None)
+        (all_exprs a.decls)
+    in
+    let count p = List.length (List.filter (fun (p', _, _) -> p' = p) quals) in
+    match List.find_opt (fun (_, _, sp) -> at sp) quals with
+    | Some (prefix, _, _) when count prefix >= 3 ->
+      let short =
+        match List.rev (String.split_on_char '.' prefix) with s :: _ -> s | [] -> prefix in
+      (* Rewrite each `prefix.field` → `short.field`. *)
+      let rewrites =
+        List.filter_map (fun (p, field, sp) ->
+            if p = prefix
+            then Some (TextEdit.create ~range:(range_of_span sp)
+                         ~newText:(short ^ "." ^ field.Ast.txt))
+            else None) quals
+      in
+      (* Insert `alias <prefix>` before the first declaration of the module
+         body (the file's top module body is stored directly in [a.decls]). *)
+      let decl_line (d : Ast.decl) = match d with
+        | Ast.DFn (fn, _)         -> fn.Ast.fn_name.Ast.span.Ast.start_line
+        | Ast.DType (_, _, _, _, sp) | Ast.DLet (_, _, sp)
+        | Ast.DApp (_, sp) | Ast.DImpl (_, sp) | Ast.DAlias (_, sp) -> sp.Ast.start_line
+        | Ast.DMod (n, _, _, _) | Ast.DActor (_, n, _, _) -> n.Ast.span.Ast.start_line
+        | _ -> max_int
+      in
+      let first = List.fold_left (fun acc d -> min acc (decl_line d)) max_int a.decls in
+      if first = max_int then []
+      else begin
+        let indent = String.make 2 ' ' in
+        let pos = Position.create ~line:(first - 1) ~character:0 in
+        let alias_edit =
+          TextEdit.create ~range:(Range.create ~start:pos ~end_:pos)
+            ~newText:(Printf.sprintf "%salias %s\n" indent prefix)
+        in
+        [CodeAction.create
+           ~title:(Printf.sprintf "Add `alias %s` and shorten %d use(s)"
+                     prefix (List.length rewrites))
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:(mk_we (alias_edit :: rewrites)) ()]
+      end
+    | _ -> []
+  in
+
   introduce_pipe_actions @ remove_pipe_actions
   @ extract_var_actions @ inline_var_actions
   @ collapse_capture_actions @ expand_capture_actions
@@ -4525,7 +4598,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
   @ session_scaffold_actions @ if_to_match_actions
   @ linear_audit_actions @ destruct_actions @ extract_fn_actions
   @ organize_imports_actions
-  @ doc_comment_actions @ inline_fn_actions
+  @ doc_comment_actions @ inline_fn_actions @ auto_alias_actions
 
 (** Generate code actions relevant to the cursor position [line, character].
     Produces cursor- and diagnostic-driven quick fixes and refactorings;

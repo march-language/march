@@ -3929,6 +3929,29 @@ end|} in
   Alcotest.(check bool) "no inline for a recursive function" false
     (has_title acts "Inline function")
 
+let test_auto_alias_repeated_prefix () =
+  let src = {|mod App do
+  fn a() : Int do Collections.HashMap.empty() end
+  fn b() : Int do Collections.HashMap.insert() end
+  fn c() : Int do Collections.HashMap.get() end
+end|} in
+  let acts = actions_at src "Collections.HashMap.empty" in
+  Alcotest.(check bool) "offers auto-alias for a 3x-repeated prefix" true
+    (has_title acts "alias Collections.HashMap");
+  let edits = all_edit_texts acts "alias Collections.HashMap" in
+  Alcotest.(check bool) "inserts the alias declaration" true
+    (contains_sub edits "alias Collections.HashMap");
+  Alcotest.(check bool) "rewrites uses to the short name" true
+    (contains_sub edits "HashMap.empty")
+
+let test_no_auto_alias_below_threshold () =
+  let src = {|mod App do
+  fn a() : Int do Collections.HashMap.empty() end
+end|} in
+  let acts = actions_at src "Collections.HashMap.empty" in
+  Alcotest.(check bool) "no alias for a single use" false
+    (has_title acts "alias Collections.HashMap")
+
 (* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
@@ -3956,6 +3979,8 @@ let () =
       "no doc comment when documented", `Quick, test_no_doc_comment_when_documented;
       "inline function", `Quick, test_inline_function;
       "no inline for recursive fn", `Quick, test_no_inline_recursive_function;
+      "auto-alias repeated prefix", `Quick, test_auto_alias_repeated_prefix;
+      "no auto-alias below threshold", `Quick, test_no_auto_alias_below_threshold;
     ];
     "auto-import", [
       "prefix before cursor", `Quick, test_prefix_at;

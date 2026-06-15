@@ -1222,8 +1222,8 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 | 9 | Extract variable | ✅ Done | "Extract variable" action |
 | 10 | Inline function/variable | ✅ Done | "Inline variable" + "Inline function" (single-clause, non-recursive, params→args) |
 | 11 | Convert between forms | ✅ Done | Introduce/Remove pipe, Convert if→match, Expand→lambda/Collapse |
-| 12 | Alias language feature | ⬜ Not started | `DAlias` AST exists; resolution pipeline not implemented |
-| 13 | Auto-alias code action | ⬜ Not started | depends on #12 |
+| 12 | Alias language feature | ✅ Done | typecheck re-exports `Orig.*`→`Short.*` + eval (`DAlias`); verified `alias List as L; L.length(...)` |
+| 13 | Auto-alias code action | ✅ Done | "Add `alias A.B`" for a repeated multi-segment prefix (≥3 uses) + rewrites; #13b (unbound-module suggestion) is a minor follow-up |
 | 14 | Workspace symbol search | ✅ Done | `workspaceSymbolProvider`, `workspace/symbol`, `query_symbols` |
 | 15 | Cross-file go-to-definition | ✅ Done | workspace index + `definition` cross-file path |
 | 16 | Cross-file find references | ✅ Done | `references_across`, `workspace_index_full` |
@@ -1234,8 +1234,8 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 | 21 | Linked editing | ✅ Done | `linkedEditingRangeProvider`, `linked_editing_ranges_at` |
 | 22 | Import suggestions | ✅ Done | "Import X from Y" action + completion auto-import (`additionalTextEdits` + resolve) |
 
-**Summary: 19 done, 0 partial, 3 not started.** Remaining: #12/#13 alias language
-feature + auto-alias (Phase 4 compiler work), #17 project-level diagnostics (Phase 5).
+**Summary: 21 done, 0 partial, 1 not started.** Remaining: #17 project-level
+diagnostics (Phase 5). Minor follow-up: #13b unbound-module → suggest alias.
 
 ### Delivered beyond the original 22 features
 
