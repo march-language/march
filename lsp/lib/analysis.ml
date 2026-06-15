@@ -176,6 +176,12 @@ type t = {
   (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
   code_lens_items  : code_lens_item list;
   (** Code lens annotations for display above function definitions. *)
+  decls            : Ast.decl list;
+  (** Raw (pre-desugar) user declarations — retained for AST-driven code
+      actions (pipe, extract/inline variable, capture, typed holes, actor
+      and protocol scaffolding). *)
+  protocols        : (string * Ast.protocol_def) list;
+  (** Session-type protocol definitions: name → def (for scaffolding). *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -1382,7 +1388,9 @@ let analyse ~filename ~src : t =
       demorgan_sites    = [];
       perf_insights     = [];
       tir_fn_insights   = [];
-      code_lens_items   = [] }
+      code_lens_items   = [];
+      decls             = [];
+      protocols         = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -1465,6 +1473,9 @@ let analyse ~filename ~src : t =
             | Ast.DInterface (i, _) -> i.iface_name.Ast.span
             | Ast.DImpl (_, sp)     -> sp
             | Ast.DApp (_, sp)      -> sp
+            | Ast.DProtocol (_, _, sp) -> sp
+            | Ast.DTest (_, sp)     -> sp
+            | Ast.DDescribe (_, _, sp) -> sp
             | _                     -> Ast.dummy_span
           in
           is_user_file sp
@@ -2022,7 +2033,12 @@ let analyse ~filename ~src : t =
       demorgan_sites;
       perf_insights;
       tir_fn_insights  = [];
-      code_lens_items  = [] }
+      code_lens_items  = [];
+      decls            = user_decls;
+      protocols        =
+        List.filter_map (function
+            | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)
+            | _ -> None) user_decls }
 
 (* ------------------------------------------------------------------ *)
 (* Phase 3: TIR pipeline analysis                                      *)
@@ -2751,6 +2767,108 @@ let offset_of_pos src line character =
   done;
   !i + character
 
+(* ==================================================================== *)
+(* AST-driven code action helpers (Phase 2+).                           *)
+(*                                                                       *)
+(* These walk the retained raw user AST ([a.decls]) to power the         *)
+(* refactoring actions that need structural information: pipe            *)
+(* introduce/remove, extract/inline variable, expand/collapse function   *)
+(* capture, typed-hole fills, and actor/protocol scaffolding.            *)
+(* ==================================================================== *)
+
+(** Byte [start, end) of a span within [src]. *)
+let span_byte_bounds src (sp : Ast.span) =
+  let s = offset_of_pos src (sp.Ast.start_line - 1) sp.Ast.start_col in
+  let e = offset_of_pos src (sp.Ast.end_line   - 1) sp.Ast.end_col in
+  (s, e)
+
+(** Source text covered by [sp], or "" if out of bounds. *)
+let slice_span src (sp : Ast.span) =
+  let (s, e) = span_byte_bounds src sp in
+  if e > s && s >= 0 && e <= String.length src then String.sub src s (e - s)
+  else ""
+
+(** Leading whitespace (indentation) of the source line [line0] (0-indexed). *)
+let indent_of_line src line0 =
+  let start = offset_of_pos src line0 0 in
+  let n = String.length src in
+  let buf = Buffer.create 8 in
+  let i = ref start in
+  while !i < n && (src.[!i] = ' ' || src.[!i] = '\t') do
+    Buffer.add_char buf src.[!i]; incr i
+  done;
+  Buffer.contents buf
+
+(** Visit every sub-expression of [e] (including [e] itself), pre-order. *)
+let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
+  f e;
+  match e with
+  | Ast.EApp (g, args, _) -> iter_expr f g; List.iter (iter_expr f) args
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) ->
+    List.iter (iter_expr f) args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> iter_expr f body
+  | Ast.EBlock (es, _) -> List.iter (iter_expr f) es
+  | Ast.ELet (b, _) -> iter_expr f b.Ast.bind_expr
+  | Ast.EMatch (subj, brs, _) ->
+    iter_expr f subj;
+    List.iter (fun (br : Ast.branch) ->
+        (match br.branch_guard with Some g -> iter_expr f g | None -> ());
+        iter_expr f br.branch_body) brs
+  | Ast.ECond (arms, _) ->
+    List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
+  | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
+  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
+  | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
+  | Ast.ERecordUpdate (e2, fs, _) ->
+    iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
+  | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
+  | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
+  | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
+  | Ast.EDbg (None, _) -> ()
+
+(** Visit every expression occurring in declaration [d] (recursing into
+    nested modules). *)
+let rec iter_decl_exprs (f : Ast.expr -> unit) (d : Ast.decl) =
+  match d with
+  | Ast.DFn (fn, _) ->
+    List.iter (fun (cl : Ast.fn_clause) ->
+        (match cl.fc_guard with Some g -> iter_expr f g | None -> ());
+        iter_expr f cl.fc_body) fn.fn_clauses
+  | Ast.DLet (_, b, _) -> iter_expr f b.Ast.bind_expr
+  | Ast.DActor (_, _, adef, _) ->
+    iter_expr f adef.Ast.actor_init;
+    List.iter (fun (h : Ast.actor_handler) -> iter_expr f h.ah_body)
+      adef.Ast.actor_handlers
+  | Ast.DTest (t, _) -> iter_expr f t.Ast.test_body
+  | Ast.DDescribe (_, decls, _) -> List.iter (iter_decl_exprs f) decls
+  | Ast.DMod (_, _, decls, _) -> List.iter (iter_decl_exprs f) decls
+  | _ -> ()
+
+(** All sub-expressions across [decls]. *)
+let all_exprs (decls : Ast.decl list) : Ast.expr list =
+  let acc = ref [] in
+  List.iter (iter_decl_exprs (fun e -> acc := e :: !acc)) decls;
+  !acc
+
+(** The smallest expression satisfying [pred] that contains the cursor. *)
+let smallest_expr_at (a : t) ~line ~character ~(pred : Ast.expr -> bool)
+    : Ast.expr option =
+  let cands =
+    List.filter (fun e ->
+        let sp = span_of_expr e in
+        (sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>")
+        && Pos.span_contains sp ~line ~character
+        && pred e)
+      (all_exprs a.decls)
+  in
+  match cands with
+  | [] -> None
+  | x :: xs ->
+    Some (List.fold_left (fun best e ->
+        if Pos.span_smaller (span_of_expr e) (span_of_expr best) then e else best)
+        x xs)
+
 (** Count the number of top-level commas in [src] between positions
     [from_ofs] (exclusive) and [to_ofs] (exclusive).
     "Top-level" means not inside nested parens/brackets/braces. *)
@@ -2906,15 +3024,675 @@ let () =
   register_fix "dead-code/unreachable-after-diverge" (fun _a _diag -> []);
   register_fix "unused_import"         (fun _a _diag -> [])
 
+(** Render a surface [Ast.ty] back to March source syntax (best-effort,
+    used for generated scaffolds). *)
+let rec surface_ty (t : Ast.ty) : string =
+  match t with
+  | Ast.TyCon (n, [])   -> n.Ast.txt
+  | Ast.TyCon (n, args) ->
+    n.Ast.txt ^ "(" ^ String.concat ", " (List.map surface_ty args) ^ ")"
+  | Ast.TyVar n         -> n.Ast.txt
+  | Ast.TyArrow (a, b)  -> surface_ty a ^ " -> " ^ surface_ty b
+  | Ast.TyTuple ts      -> "(" ^ String.concat ", " (List.map surface_ty ts) ^ ")"
+  | Ast.TyRecord fs     ->
+    "{ " ^ String.concat ", "
+             (List.map (fun (n, t) -> n.Ast.txt ^ ": " ^ surface_ty t) fs) ^ " }"
+  | Ast.TyLinear (_, t) -> "linear " ^ surface_ty t
+  | Ast.TyNat n         -> string_of_int n
+  | Ast.TyNatOp (op, a, b) ->
+    surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ")
+    ^ surface_ty b
+  | Ast.TyChan (r, p)   -> "Chan(" ^ r.Ast.txt ^ ", " ^ p.Ast.txt ^ ")"
+
+(** Split a surface arrow type into (param types, return type). *)
+let rec split_arrow (t : Ast.ty) : Ast.ty list * Ast.ty =
+  match t with
+  | Ast.TyArrow (a, b) -> let ps, r = split_arrow b in (a :: ps, r)
+  | _ -> ([], t)
+
+let scheme_ty = function Tc.Mono t -> t | Tc.Poly (_, _, t) -> t
+
+(** Head type-constructor name of a resolved [Tc.ty], if any. *)
+let ty_head_name (t : Tc.ty) : string option =
+  match Tc.repr t with
+  | Tc.TCon (n, _) -> Some n
+  | _ -> None
+
+(** Number of leading arrows (arity) of a resolved [Tc.ty]. *)
+let rec ty_arrow_arity (t : Tc.ty) : int =
+  match Tc.repr t with
+  | Tc.TArrow (_, rest) -> 1 + ty_arrow_arity rest
+  | _ -> 0
+
+(** Is [name] a plain identifier (vs. an operator like `+`, `==`, `|>`)? *)
+let is_ident_name name =
+  String.length name > 0 &&
+  (let c = name.[0] in
+   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_')
+
+(* ==================================================================== *)
+(* AST-driven code actions (Phase 2+).                                  *)
+(* ==================================================================== *)
+
+let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
+  let open Lsp.Types in
+  let uri = DocumentUri.of_path a.filename in
+  let src = a.src in
+  let mk_we edits = WorkspaceEdit.create ~changes:[(uri, edits)] () in
+  let range_of_span (sp : Ast.span) =
+    Range.create
+      ~start:(Position.create ~line:(sp.Ast.start_line - 1) ~character:sp.Ast.start_col)
+      ~end_:(Position.create ~line:(sp.Ast.end_line - 1) ~character:sp.Ast.end_col)
+  in
+  let at sp = Pos.span_contains sp ~line ~character in
+
+  (* ---- P1.2: Introduce pipe ---- *)
+  (* f(arg0, rest...)  →  arg0 |> f(rest...)  *)
+  let introduce_pipe_actions =
+    let pred = function
+      | Ast.EApp (callee, _ :: _, _) ->
+        (match callee with
+         | Ast.EVar n -> is_ident_name n.Ast.txt
+         | Ast.EField _ -> true
+         | _ -> false)
+      | _ -> false
+    in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.EApp (callee, arg0 :: rest, sp)) ->
+      let callee_text = slice_span src (span_of_expr callee) in
+      let arg0_text   = slice_span src (span_of_expr arg0) in
+      if callee_text = "" || arg0_text = "" then []
+      else begin
+        let rest_text = List.map (fun e -> slice_span src (span_of_expr e)) rest in
+        let new_text =
+          Printf.sprintf "%s |> %s(%s)" arg0_text callee_text
+            (String.concat ", " rest_text)
+        in
+        let edit = TextEdit.create ~range:(range_of_span sp) ~newText:new_text in
+        [CodeAction.create ~title:"Introduce pipe"
+           ~kind:CodeActionKind.RefactorRewrite ~edit:(mk_we [edit]) ()]
+      end
+    | _ -> []
+  in
+
+  (* ---- P1.2: Remove pipe ---- *)
+  (* a |> f(b) |> g()  →  g(f(a, b))  *)
+  let remove_pipe_actions =
+    (* Pick the LARGEST pipe chain containing the cursor so the whole chain
+       collapses in one action. *)
+    let pipes =
+      List.filter (function
+          | Ast.EPipe (_, _, sp) -> at sp
+          | _ -> false)
+        (all_exprs a.decls)
+    in
+    match pipes with
+    | [] -> []
+    | x :: xs ->
+      let outer =
+        List.fold_left (fun best e ->
+            if Pos.span_smaller (span_of_expr best) (span_of_expr e) then e else best)
+          x xs
+      in
+      let rec to_call (e : Ast.expr) : string =
+        match e with
+        | Ast.EPipe (l, r, _) ->
+          let lt = to_call l in
+          (match r with
+           | Ast.EApp (callee, args, _) ->
+             let callee_text = slice_span src (span_of_expr callee) in
+             let arg_texts = List.map (fun e -> slice_span src (span_of_expr e)) args in
+             Printf.sprintf "%s(%s)" callee_text (String.concat ", " (lt :: arg_texts))
+           | Ast.EVar n -> Printf.sprintf "%s(%s)" n.Ast.txt lt
+           | _ -> Printf.sprintf "%s(%s)" (slice_span src (span_of_expr r)) lt)
+        | _ -> slice_span src (span_of_expr e)
+      in
+      let sp = span_of_expr outer in
+      let edit = TextEdit.create ~range:(range_of_span sp) ~newText:(to_call outer) in
+      [CodeAction.create ~title:"Remove pipe"
+         ~kind:CodeActionKind.RefactorRewrite ~edit:(mk_we [edit]) ()]
+  in
+
+  (* ---- P1.3: Extract variable ---- *)
+  let extract_var_actions =
+    let pred = function
+      | Ast.EApp _ | Ast.ECon _ | Ast.EField _ | Ast.ERecord _
+      | Ast.ERecordUpdate _ | Ast.ETuple _ | Ast.EAtom _ | Ast.EPipe _ -> true
+      | _ -> false
+    in
+    match smallest_expr_at a ~line ~character ~pred with
+    | None -> []
+    | Some e ->
+      let sp = span_of_expr e in
+      let expr_text = slice_span src sp in
+      if expr_text = "" then []
+      else begin
+        (* Suggest a name from the inferred type, else a generic one. *)
+        let name =
+          match Hashtbl.find_opt a.type_map sp with
+          | Some ty ->
+            (match ty_head_name ty with
+             | Some h when is_ident_name h -> String.lowercase_ascii h
+             | _ -> "value")
+          | None -> "value"
+        in
+        let indent = indent_of_line src (sp.Ast.start_line - 1) in
+        let insert_pos =
+          Position.create ~line:(sp.Ast.start_line - 1) ~character:0 in
+        let insert_edit =
+          TextEdit.create
+            ~range:(Range.create ~start:insert_pos ~end_:insert_pos)
+            ~newText:(Printf.sprintf "%slet %s = %s\n" indent name expr_text)
+        in
+        let replace_edit =
+          TextEdit.create ~range:(range_of_span sp) ~newText:name in
+        [CodeAction.create ~title:"Extract variable"
+           ~kind:CodeActionKind.RefactorExtract
+           ~edit:(mk_we [insert_edit; replace_edit]) ()]
+      end
+  in
+
+  (* ---- P1.4: Inline variable ---- *)
+  let inline_var_actions =
+    (* Locate a `let <name> = rhs` whose name is under the cursor. *)
+    let found = ref None in
+    let rec scan_block (es : Ast.expr list) =
+      List.iter (fun e -> match e with
+          | Ast.ELet (b, let_sp) ->
+            (match b.Ast.bind_pat with
+             | Ast.PatVar nm when at nm.Ast.span ->
+               found := Some (nm, b.Ast.bind_expr, let_sp)
+             | _ -> ());
+            scan_one b.Ast.bind_expr
+          | _ -> scan_one e) es
+    and scan_one e =
+      match e with
+      | Ast.EBlock (es, _) -> scan_block es
+      | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> scan_one body
+      | Ast.EMatch (subj, brs, _) ->
+        scan_one subj;
+        List.iter (fun (br : Ast.branch) -> scan_one br.branch_body) brs
+      | Ast.EIf (c, t, el, _) -> scan_one c; scan_one t; scan_one el
+      | Ast.EApp (f, args, _) -> scan_one f; List.iter scan_one args
+      | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> scan_one l; scan_one r
+      | Ast.ELet (b, _) -> scan_one b.Ast.bind_expr
+      | _ -> ()
+    in
+    List.iter (fun d -> iter_decl_exprs (fun e ->
+        match e with Ast.EBlock (es, _) -> scan_block es | _ -> ()) d) a.decls;
+    match !found with
+    | None -> []
+    | Some (nm, rhs, let_sp) ->
+      (* Use spans gathered by the (proven) consumption pass. *)
+      let uses =
+        List.fold_left (fun acc (c : consumption) ->
+            if c.con_name = nm.Ast.txt && c.con_def = let_sp then c.con_uses @ acc
+            else acc) [] a.consumption
+      in
+      if uses = [] then []
+      else begin
+        let rhs_text = slice_span src (span_of_expr rhs) in
+        (* Parenthesize compound RHS so precedence is preserved at use sites. *)
+        let needs_parens = match rhs with
+          | Ast.EPipe _ | Ast.EIf _ | Ast.EMatch _ | Ast.ELam _ | Ast.EAnnot _ -> true
+          | Ast.EApp (Ast.EVar n, _ :: _, _) -> not (is_ident_name n.Ast.txt)
+          | _ -> false
+        in
+        let value = if needs_parens then "(" ^ rhs_text ^ ")" else rhs_text in
+        let use_edits =
+          List.map (fun (sp : Ast.span) ->
+              TextEdit.create ~range:(range_of_span sp) ~newText:value) uses
+        in
+        (* Delete the whole let line(s). *)
+        let del_edit =
+          TextEdit.create
+            ~range:(Range.create
+                      ~start:(Position.create ~line:(let_sp.Ast.start_line - 1) ~character:0)
+                      ~end_:(Position.create ~line:let_sp.Ast.end_line ~character:0))
+            ~newText:""
+        in
+        [CodeAction.create
+           ~title:(Printf.sprintf "Inline variable `%s`" nm.Ast.txt)
+           ~kind:CodeActionKind.RefactorInline
+           ~edit:(mk_we (del_edit :: use_edits)) ()]
+      end
+  in
+
+  (* ---- P1.9: Collapse function capture (eta-contraction) ---- *)
+  (* fn (x) -> f(x)  →  f  *)
+  let collapse_capture_actions =
+    let pred = function Ast.ELam _ -> true | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.ELam (params, Ast.EApp (callee, args, _), sp))
+      when List.length params = List.length args && params <> [] ->
+      let param_names = List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) params in
+      let args_are_params =
+        List.for_all2 (fun pn a -> match a with
+            | Ast.EVar n -> n.Ast.txt = pn
+            | _ -> false) param_names args
+      in
+      (* The callee must not itself mention the bound params. *)
+      let callee_text = slice_span src (span_of_expr callee) in
+      let callee_ok =
+        match callee with
+        | Ast.EVar n -> not (List.mem n.Ast.txt param_names)
+        | Ast.EField _ -> true
+        | _ -> false
+      in
+      if args_are_params && callee_ok && callee_text <> "" then
+        [CodeAction.create
+           ~title:(Printf.sprintf "Collapse to `%s`" callee_text)
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:(mk_we [TextEdit.create ~range:(range_of_span sp) ~newText:callee_text])
+           ()]
+      else []
+    | _ -> []
+  in
+
+  (* ---- P1.9: Expand function capture (eta-expansion) ---- *)
+  (* a function-valued identifier `f`  →  fn (_x0, _x1) -> f(_x0, _x1) *)
+  let expand_capture_actions =
+    (* Spans of identifiers appearing in callee position — expanding those
+       would be wrong (it would wrap the function being applied). *)
+    let callee_spans = Hashtbl.create 16 in
+    List.iter (function
+        | Ast.EApp (callee, _, _) ->
+          Hashtbl.replace callee_spans (span_of_expr callee) ()
+        | _ -> ())
+      (all_exprs a.decls);
+    let pred = function
+      | Ast.EVar _ as e -> not (Hashtbl.mem callee_spans (span_of_expr e))
+      | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.EVar n as e) when is_ident_name n.Ast.txt ->
+      let sp = span_of_expr e in
+      let arity =
+        match Hashtbl.find_opt a.type_map sp with
+        | Some ty -> ty_arrow_arity ty
+        | None ->
+          (match List.assoc_opt n.Ast.txt a.vars with
+           | Some sch -> ty_arrow_arity (scheme_ty sch)
+           | None -> 0)
+      in
+      if arity <= 0 || arity > 8 then []
+      else begin
+        let ps = List.init arity (fun i -> Printf.sprintf "_x%d" i) in
+        let new_text =
+          Printf.sprintf "fn (%s) -> %s(%s)"
+            (String.concat ", " ps) n.Ast.txt (String.concat ", " ps)
+        in
+        [CodeAction.create ~title:"Expand to lambda"
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:(mk_we [TextEdit.create ~range:(range_of_span sp) ~newText:new_text]) ()]
+      end
+    | _ -> []
+  in
+
+  (* ---- P2.1: Typed hole fills ---- *)
+  let hole_fill_actions =
+    let pred = function Ast.EHole _ -> true | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.EHole (_, sp)) ->
+      let expected = Option.map Tc.repr (Hashtbl.find_opt a.type_map sp) in
+      let suggestions =
+        match expected with
+        | None -> []
+        | Some ty ->
+          let head = ty_head_name ty in
+          (* Literals for base types. *)
+          let lits = match head with
+            | Some "Int"    -> ["0"]
+            | Some "Float"  -> ["0.0"]
+            | Some "String" -> ["\"\""]
+            | Some "Bool"   -> ["true"; "false"]
+            | Some "Char"   -> ["' '"]
+            | Some "Unit"   -> ["()"]
+            | _ -> []
+          in
+          (* Constructors producing the expected type. Prefer the unqualified
+             form; skip module-qualified duplicates ("Mod.Ctor"). *)
+          let ctors = match head with
+            | None -> []
+            | Some h ->
+              List.filter_map (fun (cname, parent) ->
+                  if String.contains cname '.' then None
+                  else if parent = h || parent = h ^ "()" then
+                    let ar = try List.assoc cname a.ctor_arities with Not_found -> 0 in
+                    if ar = 0 then Some cname
+                    else Some (Printf.sprintf "%s(%s)" cname
+                                 (String.concat ", " (List.init ar (fun _ -> "?"))))
+                  else None) a.ctors
+          in
+          (* In-scope (non-function) variables whose head type matches. *)
+          let vars = match head with
+            | None -> []
+            | Some h ->
+              List.filter_map (fun (vn, sch) ->
+                  if String.length vn > 0 && vn.[0] = '_' then None
+                  else if String.contains vn '.' then None
+                  else
+                    let ty = scheme_ty sch in
+                    match ty_head_name ty with
+                    | Some vh when vh = h && is_ident_name vn
+                                && ty_arrow_arity ty = 0
+                                && not (List.mem_assoc vn a.ctors) -> Some vn
+                    | _ -> None) a.vars
+          in
+          let all = lits @ ctors @ vars in
+          (* De-dup preserving order, cap the count. *)
+          let seen = Hashtbl.create 16 in
+          List.filter (fun s ->
+              if Hashtbl.mem seen s then false
+              else (Hashtbl.add seen s (); true)) all
+      in
+      let suggestions = List.filteri (fun i _ -> i < 12) suggestions in
+      List.map (fun s ->
+          CodeAction.create
+            ~title:(Printf.sprintf "Fill hole with `%s`" s)
+            ~kind:CodeActionKind.QuickFix
+            ~edit:(mk_we [TextEdit.create ~range:(range_of_span sp) ~newText:s]) ())
+        suggestions
+    | _ -> []
+  in
+
+  (* ---- P1.5: Auto-import (use ModuleName) ---- *)
+  let auto_import_actions =
+    (* Build an index of unqualified-name → modules that define it, from the
+       qualified entries in def_map (keys like "List.map"). *)
+    let head_name e = match e with
+      | Ast.EVar n -> Some (n.Ast.txt, n.Ast.span)
+      | Ast.ECon (n, _, _) -> Some (n.Ast.txt, n.Ast.span)
+      | Ast.EField (Ast.ECon (m, [], _), fld, fsp) ->
+        Some (m.Ast.txt ^ "." ^ fld.Ast.txt, fsp)
+      (* `name(args)` and `Mod.fn(args)` — peer through the call to the callee. *)
+      | Ast.EApp (Ast.EVar n, _, _) -> Some (n.Ast.txt, n.Ast.span)
+      | Ast.EApp (Ast.EField (Ast.ECon (m, [], _), fld, fsp), _, _) ->
+        Some (m.Ast.txt ^ "." ^ fld.Ast.txt, fsp)
+      | _ -> None
+    in
+    let pred e = head_name e <> None in
+    match smallest_expr_at a ~line ~character ~pred with
+    | None -> []
+    | Some e ->
+      (match head_name e with
+       | None -> []
+       | Some (qname, _) ->
+         (* Resolve the base name that may need importing. *)
+         let base, modpath =
+           match String.index_opt qname '.' with
+           | Some i -> (String.sub qname 0 i, Some (String.sub qname 0 i))
+           | None -> (qname, None)
+         in
+         (* Already resolvable? Then no import needed. *)
+         let in_scope =
+           List.mem_assoc base a.vars
+           || List.mem_assoc base a.ctors
+           || List.mem_assoc base a.types
+           || (match modpath with Some m -> List.mem_assoc m a.types | None -> false)
+         in
+         if in_scope then []
+         else begin
+           (* Find modules that define `base` as `Mod.base`. *)
+           let modules =
+             Hashtbl.fold (fun k _ acc ->
+                 match String.rindex_opt k '.' with
+                 | Some i when String.sub k (i + 1) (String.length k - i - 1) = base ->
+                   let m = String.sub k 0 i in
+                   if List.mem m acc then acc else m :: acc
+                 | _ -> acc) a.def_map []
+           in
+           let modules = List.sort String.compare modules in
+           (* Insert `use Mod.{base}` at the top of the first user decl's line. *)
+           let insert_line =
+             List.fold_left (fun best d ->
+                 let sp = match d with
+                   | Ast.DFn (fn, _) -> fn.fn_name.span
+                   | Ast.DLet (_, _, sp) | Ast.DType (_, _, _, _, sp)
+                   | Ast.DActor (_, _, _, sp) | Ast.DImpl (_, sp)
+                   | Ast.DUse (_, sp) -> sp
+                   | Ast.DMod (n, _, _, _) -> n.Ast.span
+                   | _ -> Ast.dummy_span
+                 in
+                 if sp.Ast.start_line > 0 && sp.Ast.start_line - 1 < best
+                 then sp.Ast.start_line - 1 else best)
+               max_int a.decls
+           in
+           let insert_line = if insert_line = max_int then 0 else insert_line in
+           let indent = indent_of_line src insert_line in
+           List.map (fun m ->
+               let pos = Position.create ~line:insert_line ~character:0 in
+               let edit = TextEdit.create
+                   ~range:(Range.create ~start:pos ~end_:pos)
+                   ~newText:(Printf.sprintf "%suse %s.{%s}\n" indent m base) in
+               CodeAction.create
+                 ~title:(Printf.sprintf "Import `%s` from `%s`" base m)
+                 ~kind:CodeActionKind.QuickFix ~edit:(mk_we [edit]) ())
+             modules
+         end)
+  in
+
+  (* ---- P1.6: Generate interface impl scaffold ---- *)
+  let impl_scaffold_actions =
+    let impl_at =
+      List.find_map (function
+          | Ast.DImpl (idef, sp) when at sp -> Some (idef, sp)
+          | _ -> None) a.decls
+    in
+    match impl_at with
+    | None -> []
+    | Some (idef, sp) ->
+      (match List.assoc_opt idef.Ast.impl_iface.Ast.txt a.interfaces with
+       | None -> []
+       | Some iface ->
+         let implemented =
+           List.map (fun (n, _) -> n.Ast.txt) idef.Ast.impl_methods in
+         let missing =
+           List.filter (fun (md : Ast.method_decl) ->
+               not (List.mem md.Ast.md_name.txt implemented))
+             iface.Ast.iface_methods
+         in
+         if missing = [] then []
+         else begin
+           let indent = indent_of_line src (sp.Ast.start_line - 1) ^ "  " in
+           let stub (md : Ast.method_decl) =
+             let params, _ret = split_arrow md.Ast.md_ty in
+             let param_list =
+               List.mapi (fun i pt -> Printf.sprintf "p%d: %s" i (surface_ty pt)) params in
+             Printf.sprintf "%sfn %s(%s) do ? end\n"
+               indent md.Ast.md_name.txt (String.concat ", " param_list)
+           in
+           let body = String.concat "" (List.map stub missing) in
+           (* Insert just before the impl block's closing `end`. *)
+           (match find_end_before_span src sp with
+            | None -> []
+            | Some end_ofs ->
+              let l = ref 0 and c = ref 0 and cl = ref 0 and cc = ref 0 in
+              String.iteri (fun i _ ->
+                  if i = end_ofs then begin l := !cl; c := !cc end;
+                  if src.[i] = '\n' then begin incr cl; cc := 0 end else incr cc) src;
+              let pos = Position.create ~line:!l ~character:!c in
+              let edit = TextEdit.create
+                  ~range:(Range.create ~start:pos ~end_:pos) ~newText:body in
+              [CodeAction.create
+                 ~title:(Printf.sprintf "Implement %d missing method(s)"
+                           (List.length missing))
+                 ~kind:CodeActionKind.QuickFix ~edit:(mk_we [edit]) ()])
+         end)
+  in
+
+  (* ---- P3.1: Actor boilerplate (client wrappers) ---- *)
+  let actor_boilerplate_actions =
+    let actor_at =
+      List.find_map (function
+          | Ast.DActor (_, n, adef, sp) when at n.Ast.span || at sp ->
+            Some (n.Ast.txt, adef, sp)
+          | _ -> None) a.decls
+    in
+    match actor_at with
+    | None -> []
+    | Some (name, adef, sp) ->
+      let wrappers =
+        List.map (fun (h : Ast.actor_handler) ->
+            let msg = h.Ast.ah_msg.txt in
+            let params =
+              List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) h.Ast.ah_params in
+            let plist = String.concat ", " ("pid" :: params) in
+            let payload =
+              if params = [] then msg
+              else Printf.sprintf "%s(%s)" msg (String.concat ", " params) in
+            Printf.sprintf "  fn %s(%s) do send(pid, %s) end\n"
+              (String.lowercase_ascii msg) plist payload)
+          adef.Ast.actor_handlers
+      in
+      let body =
+        Printf.sprintf "\nmod %sClient do\n%send\n" name (String.concat "" wrappers) in
+      (* Insert after the actor declaration's last line. *)
+      let pos = Position.create ~line:sp.Ast.end_line ~character:0 in
+      let edit = TextEdit.create ~range:(Range.create ~start:pos ~end_:pos) ~newText:body in
+      [CodeAction.create
+         ~title:(Printf.sprintf "Generate %sClient module" name)
+         ~kind:CodeActionKind.RefactorRewrite ~edit:(mk_we [edit]) ()]
+  in
+
+  (* ---- P3.2: Session-type scaffolding ---- *)
+  let session_scaffold_actions =
+    let proto_at =
+      List.find_map (function
+          | Ast.DProtocol (n, pd, sp) when at n.Ast.span || at sp ->
+            Some (n.Ast.txt, pd, sp)
+          | _ -> None) a.decls
+    in
+    match proto_at with
+    | None -> []
+    | Some (name, pd, sp) ->
+      let rec steps_text indent ss =
+        String.concat ""
+          (List.map (fun (st : Ast.protocol_step) -> match st with
+               | Ast.ProtoMsg (from, _to, ty) ->
+                 Printf.sprintf "%s-- %s sends %s\n%ssend(ch, ?)\n%slet _ = receive(ch)\n"
+                   indent from.Ast.txt (surface_ty ty) indent indent
+               | Ast.ProtoLoop inner ->
+                 Printf.sprintf "%sloop do\n%s%send\n" indent
+                   (steps_text (indent ^ "  ") inner) indent
+               | Ast.ProtoChoice (role, branches) ->
+                 Printf.sprintf "%s-- choice by %s\n%smatch receive(ch) do\n%s%send\n"
+                   indent role.Ast.txt indent
+                   (String.concat ""
+                      (List.map (fun (lbl, inner) ->
+                           Printf.sprintf "%s  %s ->\n%s" indent lbl.Ast.txt
+                             (steps_text (indent ^ "    ") inner)) branches))
+                   indent)
+             ss)
+      in
+      let body =
+        Printf.sprintf "\nfn handle_%s(ch) do\n%s  close(ch)\nend\n"
+          (String.lowercase_ascii name) (steps_text "  " pd.Ast.proto_steps) in
+      let pos = Position.create ~line:sp.Ast.end_line ~character:0 in
+      let edit = TextEdit.create ~range:(Range.create ~start:pos ~end_:pos) ~newText:body in
+      [CodeAction.create
+         ~title:(Printf.sprintf "Generate %s session handler" name)
+         ~kind:CodeActionKind.RefactorRewrite ~edit:(mk_we [edit]) ()]
+  in
+
+  (* ---- P2.7 / case-to-match: convert `if` to `match` ---- *)
+  let if_to_match_actions =
+    let pred = function Ast.EIf _ -> true | _ -> false in
+    match smallest_expr_at a ~line ~character ~pred with
+    | Some (Ast.EIf (cond, t, el, sp))
+      when slice_span src (span_of_expr t) <> ""
+        && slice_span src (span_of_expr el) <> ""
+        && slice_span src (span_of_expr cond) <> "" ->
+      let t_text = slice_span src (span_of_expr t) in
+      (* Equality-chain form: if subj == K do .. else if subj == K2 .. *)
+      let eq_parts e = match e with
+        | Ast.EApp (Ast.EVar op, [Ast.EVar subj; rhs], _) when op.Ast.txt = "==" ->
+          Some (subj.Ast.txt, slice_span src (span_of_expr rhs))
+        | _ -> None
+      in
+      let new_text =
+        match eq_parts cond with
+        | Some (subj, k0) ->
+          let buf = Buffer.create 128 in
+          Buffer.add_string buf (Printf.sprintf "match %s do\n" subj);
+          let rec emit kpat body rest =
+            Buffer.add_string buf (Printf.sprintf "  %s -> %s\n" kpat
+                                     (slice_span src (span_of_expr body)));
+            match rest with
+            | Ast.EIf (c2, t2, e2, _) ->
+              (match eq_parts c2 with
+               | Some (s2, k2) when s2 = subj -> emit k2 t2 e2
+               | _ -> Buffer.add_string buf (Printf.sprintf "  _ -> %s\n"
+                                               (slice_span src (span_of_expr rest))))
+            | _ -> Buffer.add_string buf (Printf.sprintf "  _ -> %s\n"
+                                            (slice_span src (span_of_expr rest)))
+          in
+          emit k0 t el;
+          Buffer.add_string buf "end";
+          Buffer.contents buf
+        | None ->
+          let e_text = slice_span src (span_of_expr el) in
+          Printf.sprintf "match %s do\n  true -> %s\n  false -> %s\nend"
+            (slice_span src (span_of_expr cond)) t_text e_text
+      in
+      [CodeAction.create ~title:"Convert if to match"
+         ~kind:CodeActionKind.RefactorRewrite
+         ~edit:(mk_we [TextEdit.create ~range:(range_of_span sp) ~newText:new_text]) ()]
+    | _ -> []
+  in
+
+  (* ---- P3.3: Linear consumption audit ---- *)
+  (* Flag a linear binding (a `linear` function parameter, or a `let linear`
+     binding) that is never consumed, or report how many times it is. *)
+  let linear_audit_actions =
+    (* Collect (name, name_span, body_expr) for every linear parameter. *)
+    let lin_params = ref [] in
+    let scan_clause (cl : Ast.fn_clause) =
+      List.iter (function
+          | Ast.FPNamed p | Ast.FPDefault (p, _)
+            when p.Ast.param_lin = Ast.Linear || p.Ast.param_lin = Ast.Affine ->
+            lin_params := (p.Ast.param_name, cl.fc_body) :: !lin_params
+          | _ -> ()) cl.fc_params
+    in
+    let rec scan_decl (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fn, _) -> List.iter scan_clause fn.fn_clauses
+      | Ast.DMod (_, _, ds, _) -> List.iter scan_decl ds
+      | _ -> ()
+    in
+    List.iter scan_decl a.decls;
+    List.filter_map (fun ((nm : Ast.name), body) ->
+        if not (Pos.span_contains nm.Ast.span ~line ~character) then None
+        else begin
+          let uses = find_uses nm.Ast.txt body [] in
+          if uses = [] then
+            Some (CodeAction.create
+                    ~title:(Printf.sprintf
+                              "Linear `%s` is never consumed (must be used exactly once)"
+                              nm.Ast.txt)
+                    ~kind:CodeActionKind.QuickFix
+                    ~edit:(mk_we []) ())
+          else
+            Some (CodeAction.create
+                    ~title:(Printf.sprintf "Linear `%s` is consumed at %d site(s)"
+                              nm.Ast.txt (List.length uses))
+                    ~kind:CodeActionKind.QuickFix
+                    ~edit:(mk_we []) ())
+        end)
+      !lin_params
+  in
+
+  introduce_pipe_actions @ remove_pipe_actions
+  @ extract_var_actions @ inline_var_actions
+  @ collapse_capture_actions @ expand_capture_actions
+  @ hole_fill_actions @ auto_import_actions
+  @ impl_scaffold_actions @ actor_boilerplate_actions
+  @ session_scaffold_actions @ if_to_match_actions
+  @ linear_audit_actions
+
 (** Generate code actions relevant to the cursor position [line, character].
-    Produces:
-    - "Make `x` linear" for single-use non-linear let bindings at cursor.
-    - "Add missing case: P" quickfix for non-exhaustive matches at cursor.
-    - "Add all N missing cases" when multiple cases missing for one match.
-    - "Fix all incomplete T matches in file" when multiple match sites.
-    - "Add type annotation" for unannotated let bindings at cursor.
-    - "Prefix with underscore / Remove unused binding" for unused variables.
-    - Registry-driven fixes for any diagnostic with a registered code. *)
+    Produces cursor- and diagnostic-driven quick fixes and refactorings;
+    see [ast_code_actions] for the AST-driven refactorings (pipe, extract,
+    inline, capture, holes, scaffolding). *)
 let code_actions_at (a : t) ~line ~character
     ?(diagnostics : Lsp.Types.Diagnostic.t list = [])
     ()
@@ -3717,10 +4495,33 @@ let code_actions_at (a : t) ~line ~character
         end
       ) a.demorgan_sites
   in
+  (* ---- P3.8: Batch "Fix all" — prefix every unused binding in the file ---- *)
+  let batch_fix_all_actions =
+    let prefix_edits =
+      List.filter_map (fun (diag : Lsp.Types.Diagnostic.t) ->
+          match diag.code with
+          | Some (`String "unused_binding") ->
+            let pos = diag.range.Lsp.Types.Range.start in
+            Some (TextEdit.create
+                    ~range:(Range.create ~start:pos ~end_:pos) ~newText:"_")
+          | _ -> None)
+        a.diagnostics
+    in
+    if List.length prefix_edits < 2 then []
+    else
+      let uri = DocumentUri.of_path a.filename in
+      [CodeAction.create
+         ~title:(Printf.sprintf "Fix all: prefix %d unused bindings with `_`"
+                   (List.length prefix_edits))
+         ~kind:CodeActionKind.SourceFixAll
+         ~edit:(WorkspaceEdit.create ~changes:[(uri, prefix_edits)] ()) ()]
+  in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
   @ wrap_inspect_actions @ remove_inspect_actions
   @ naming_actions @ demorgan_actions
+  @ batch_fix_all_actions
+  @ ast_code_actions a ~line ~character
   @ registry_actions
 
 let actor_info_at (a : t) ~line ~character : string option =

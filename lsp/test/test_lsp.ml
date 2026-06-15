@@ -3182,6 +3182,236 @@ end|} in
     (Some "0") alpha.Lsp.Types.CompletionItem.sortText
 
 (* ------------------------------------------------------------------ *)
+(* Phase 2+ AST-driven code actions                                    *)
+(* ------------------------------------------------------------------ *)
+
+(** Lower-cased substring test. *)
+let contains_sub hay needle =
+  let h = String.lowercase_ascii hay and n = String.lowercase_ascii needle in
+  let hl = String.length h and nl = String.length n in
+  let rec f i = if i + nl > hl then false
+                else if String.sub h i nl = n then true else f (i + 1) in
+  f 0
+
+(** Code actions at the cursor located at the first occurrence of [sub] in
+    [src], optionally offset by [off] characters. *)
+let actions_at ?(off = 0) src sub =
+  let a = analyse src in
+  let (line, c0) = pos_of src sub in
+  An.code_actions_at a ~line ~character:(c0 + off) ~diagnostics:a.An.diagnostics ()
+
+let has_title acts title =
+  List.exists (fun (c : Lsp.Types.CodeAction.t) -> contains_sub c.title title) acts
+
+(** First edit text of the first action whose title contains [title]. *)
+let edit_text_of acts title =
+  match List.find_opt (fun (c : Lsp.Types.CodeAction.t) -> contains_sub c.title title) acts with
+  | None -> None
+  | Some c ->
+    (match c.edit with
+     | None -> None
+     | Some e ->
+       (match e.changes with
+        | Some ((_, (te :: _)) :: _) -> Some te.Lsp.Types.TextEdit.newText
+        | _ -> None))
+
+(** Concatenation of all edit newTexts of the matching action. *)
+let all_edit_texts acts title =
+  match List.find_opt (fun (c : Lsp.Types.CodeAction.t) -> contains_sub c.title title) acts with
+  | None -> ""
+  | Some c ->
+    (match c.edit with
+     | None -> ""
+     | Some e ->
+       (match e.changes with
+        | None -> ""
+        | Some chs ->
+          String.concat "|"
+            (List.concat_map (fun (_, es) ->
+                 List.map (fun (te : Lsp.Types.TextEdit.t) -> te.newText) es) chs)))
+
+let test_introduce_pipe_offered () =
+  let src = {|mod M do
+  fn f(x) do x end
+  fn g(x) do x end
+  fn main() do f(g(3)) end
+end
+|} in
+  let acts = actions_at src "f(g(3))" in
+  Alcotest.(check bool) "introduce pipe offered" true (has_title acts "introduce pipe");
+  Alcotest.(check string) "introduce pipe edit"
+    "g(3) |> f()" (Option.value ~default:"" (edit_text_of acts "introduce pipe"))
+
+let test_remove_pipe_offered () =
+  let src = {|mod M do
+  fn f(x) do x end
+  fn g(x) do x end
+  fn main() do 3 |> g() |> f() end
+end
+|} in
+  let acts = actions_at src "3 |>" in
+  Alcotest.(check bool) "remove pipe offered" true (has_title acts "remove pipe");
+  Alcotest.(check string) "remove pipe collapses chain"
+    "f(g(3))" (Option.value ~default:"" (edit_text_of acts "remove pipe"))
+
+let test_extract_variable_offered () =
+  let src = {|mod M do
+  fn sqr(a) do a * a end
+  fn main() do
+    let d = sqr(3 + 4)
+    d
+  end
+end
+|} in
+  let acts = actions_at src "sqr(3" in
+  Alcotest.(check bool) "extract variable offered" true (has_title acts "extract variable");
+  let txt = all_edit_texts acts "extract variable" in
+  Alcotest.(check bool) "extract inserts let binding" true (contains_sub txt "let ")
+
+let test_inline_variable_offered () =
+  let src = {|mod M do
+  fn main() do
+    let g = 99
+    g + g
+  end
+end
+|} in
+  let acts = actions_at src "g = " in
+  Alcotest.(check bool) "inline variable offered" true (has_title acts "inline variable");
+  let txt = all_edit_texts acts "inline variable" in
+  Alcotest.(check bool) "inline substitutes value" true (contains_sub txt "99")
+
+let test_collapse_capture_offered () =
+  let src = {|mod M do
+  fn trim(x) do x end
+  fn main() do map(items, fn (x) -> trim(x)) end
+end
+|} in
+  let acts = actions_at src "fn (x) -> trim" in
+  Alcotest.(check bool) "collapse to function offered" true (has_title acts "collapse to")
+
+let test_expand_capture_offered () =
+  let src = {|mod M do
+  fn trim(x) do x end
+  fn use_it(f) do f end
+  fn main() do use_it(trim) end
+end
+|} in
+  let acts = actions_at src "use_it(trim)" ~off:7 in
+  Alcotest.(check bool) "expand to lambda offered" true (has_title acts "expand to lambda")
+
+let test_hole_fill_variant () =
+  let src = {|mod M do
+  type Col = Red | Grn | Blu
+  fn pick() : Col do ? end
+end
+|} in
+  let acts = actions_at src "? end" in
+  Alcotest.(check bool) "fill hole offered" true (has_title acts "fill hole");
+  Alcotest.(check bool) "fills with Red" true (has_title acts "Red")
+
+let test_hole_fill_bool () =
+  let src = {|mod M do
+  fn pick() : Bool do ? end
+end
+|} in
+  let acts = actions_at src "? end" in
+  Alcotest.(check bool) "fills with true" true (has_title acts "true");
+  Alcotest.(check bool) "fills with false" true (has_title acts "false")
+
+let test_impl_scaffold_offered () =
+  let src = {|mod T do
+  interface Greet(a) do
+    fn hello: a -> String
+  end
+  type P = P(Int)
+  impl Greet(P) do
+  end
+end
+|} in
+  let acts = actions_at src "impl Greet" in
+  Alcotest.(check bool) "impl scaffold offered" true (has_title acts "missing method");
+  let txt = all_edit_texts acts "missing method" in
+  Alcotest.(check bool) "scaffold stubs hello" true (contains_sub txt "fn hello")
+
+let test_auto_import_offered () =
+  let src = {|mod M do
+  mod Helper do
+    fn special() do 1 end
+  end
+  fn main() do special() end
+end
+|} in
+  let acts = actions_at src "do special()" ~off:3 in
+  Alcotest.(check bool) "auto-import offered" true (has_title acts "import `special`");
+  let txt = all_edit_texts acts "import `special`" in
+  Alcotest.(check bool) "inserts use Helper" true (contains_sub txt "use Helper")
+
+let test_actor_boilerplate_offered () =
+  let src = {|mod M do
+  actor Counter do
+    state { count: Int }
+    init { count = 0 }
+    on Inc() do
+      count
+    end
+  end
+end
+|} in
+  let acts = actions_at src "actor Counter" in
+  Alcotest.(check bool) "actor client offered" true (has_title acts "CounterClient");
+  let txt = all_edit_texts acts "CounterClient" in
+  Alcotest.(check bool) "client has inc wrapper" true (contains_sub txt "fn inc")
+
+let test_session_scaffold_offered () =
+  let src = {|mod M do
+  protocol Ping do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+end
+|} in
+  let acts = actions_at src "protocol Ping" in
+  Alcotest.(check bool) "session handler offered" true (has_title acts "session handler");
+  let txt = all_edit_texts acts "session handler" in
+  Alcotest.(check bool) "handler uses receive" true (contains_sub txt "receive")
+
+let test_if_to_match_offered () =
+  let src = {|mod M do
+  fn main() do
+    let x = 1
+    if x == 1 do 10 else 20 end
+  end
+end
+|} in
+  let acts = actions_at src "if x ==" in
+  Alcotest.(check bool) "convert if to match offered" true (has_title acts "convert if to match");
+  let txt = all_edit_texts acts "convert if to match" in
+  Alcotest.(check bool) "produces match" true (contains_sub txt "match x")
+
+let test_linear_audit_offered () =
+  let src = {|mod M do
+  fn consume(linear x : Int) : Int do x end
+end
+|} in
+  let acts = actions_at src "linear x" ~off:7 in
+  Alcotest.(check bool) "linear audit offered" true (has_title acts "linear `x`")
+
+let test_batch_fix_all_offered () =
+  let src = {|mod M do
+  fn f(aa, bb) do 0 end
+end
+|} in
+  let acts = actions_at src "fn f" in
+  Alcotest.(check bool) "batch fix-all offered" true (has_title acts "fix all")
+
+let test_ast_actions_no_crash_on_error () =
+  (* Unparseable / partially-typed source must not crash the action pass. *)
+  let src = "mod M do\n  fn main() do f(g( end\nend\n" in
+  let acts = actions_at src "main" in
+  Alcotest.(check bool) "no crash on malformed source" true (List.length acts >= 0)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3429,6 +3659,24 @@ let () =
     ];
     "perf insights: hover integration", [
       "perf_insight_at returns message at call site", `Quick, test_perf_insight_at_returns_message_at_call_site;
+    ];
+    "phase2+: ast-driven code actions", [
+      "introduce pipe",            `Quick, test_introduce_pipe_offered;
+      "remove pipe",               `Quick, test_remove_pipe_offered;
+      "extract variable",          `Quick, test_extract_variable_offered;
+      "inline variable",           `Quick, test_inline_variable_offered;
+      "collapse function capture", `Quick, test_collapse_capture_offered;
+      "expand function capture",   `Quick, test_expand_capture_offered;
+      "typed hole fill (variant)", `Quick, test_hole_fill_variant;
+      "typed hole fill (bool)",    `Quick, test_hole_fill_bool;
+      "interface impl scaffold",   `Quick, test_impl_scaffold_offered;
+      "auto-import",               `Quick, test_auto_import_offered;
+      "actor boilerplate",         `Quick, test_actor_boilerplate_offered;
+      "session scaffolding",       `Quick, test_session_scaffold_offered;
+      "convert if to match",       `Quick, test_if_to_match_offered;
+      "linear consumption audit",  `Quick, test_linear_audit_offered;
+      "batch fix-all",             `Quick, test_batch_fix_all_offered;
+      "no crash on malformed src", `Quick, test_ast_actions_no_crash_on_error;
     ];
     "perf insights phase 3: TIR pipeline", [
       "run_tir_pass does not crash",            `Quick, test_tir_pass_does_not_crash;
