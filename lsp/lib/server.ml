@@ -146,6 +146,43 @@ let workspace_index_is_empty () =
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
 
+(* "Introduce parameter object" — when the cursor is on a bundleable function,
+   run the march_refactor bundle engine (dry-run, so it computes but does not
+   write) and surface its project-wide rewrite as a multi-file WorkspaceEdit.
+   This is the cross-file part a single-file code action otherwise can't do. *)
+let bundle_actions (a : Analysis.t) ~line ~character : Lsp.Types.CodeAction.t list =
+  let module R = March_refactor.Refactor in
+  match Analysis.bundleable_fn_at a ~line ~character with
+  | None -> []
+  | Some fn_name ->
+    (match project_root () with
+     | None -> []
+     | Some root ->
+       (match (try R.bundle_fn ~root ~fn_name ~dry_run:true () with _ -> Error "exn") with
+        | Error _ -> []
+        | Ok outcome when outcome.R.changes = [] -> []
+        | Ok outcome ->
+          let open Lsp.Types in
+          let changes =
+            List.map (fun (fc : R.file_change) ->
+                (* Whole-document replace: range from (0,0) to the end of the
+                   old content (byte columns ≈ UTF-16 for typical code). *)
+                let el = ref 0 and ec = ref 0 in
+                String.iter (fun ch ->
+                    if ch = '\n' then (incr el; ec := 0) else incr ec) fc.R.fc_old;
+                let edit = TextEdit.create
+                    ~range:(Range.create
+                              ~start:(Position.create ~line:0 ~character:0)
+                              ~end_:(Position.create ~line:!el ~character:!ec))
+                    ~newText:fc.R.fc_new in
+                (DocumentUri.of_path fc.R.fc_path, [edit]))
+              outcome.R.changes
+          in
+          [CodeAction.create
+             ~title:(Printf.sprintf "Introduce parameter object for `%s`" fn_name)
+             ~kind:CodeActionKind.RefactorRewrite
+             ~edit:(WorkspaceEdit.create ~changes ()) ()]))
+
 let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t)
     (diagnostics : Lsp.Types.Diagnostic.t list) :
     Lsp.Types.CodeAction.t list =
@@ -156,8 +193,9 @@ let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t)
       ~utf16_char:range.Lsp.Types.Range.start.Lsp.Types.Position.character
   in
   (* Outbound: remap edit ranges back to UTF-16 for the client. *)
-  Analysis.code_actions_at a ~line ~character ~diagnostics ()
-  |> List.map (Pos.remap_code_action a.Analysis.doc)
+  (Analysis.code_actions_at a ~line ~character ~diagnostics ()
+   |> List.map (Pos.remap_code_action a.Analysis.doc))
+  @ bundle_actions a ~line ~character
 
 (* ------------------------------------------------------------------ *)
 (* Semantic tokens encoding                                            *)

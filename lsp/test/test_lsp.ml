@@ -4044,6 +4044,37 @@ end|} in
     (contains_sub (all_edit_texts acts "return type") "Int")
 
 (* ------------------------------------------------------------------ *)
+(* Introduce parameter object (data clump → record) detection          *)
+(* ------------------------------------------------------------------ *)
+
+let test_bundleable_fn_detected () =
+  let src = {|mod M do
+  fn area(width : Int, height : Int) : Int do width * height end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "area" in
+  Alcotest.(check (option string)) "fn with >=2 annotated params is bundleable"
+    (Some "area") (An.bundleable_fn_at a ~line:l ~character:c)
+
+let test_single_param_not_bundleable () =
+  let src = {|mod M do
+  fn neg(x : Int) : Int do 0 - x end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "neg" in
+  Alcotest.(check (option string)) "single-param fn is not bundleable"
+    None (An.bundleable_fn_at a ~line:l ~character:c)
+
+let test_unannotated_params_not_bundleable () =
+  let src = {|mod M do
+  fn add(x, y) do x + y end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "add" in
+  Alcotest.(check (option string)) "unannotated params are not bundleable"
+    None (An.bundleable_fn_at a ~line:l ~character:c)
+
+(* ------------------------------------------------------------------ *)
 (* Project-level diagnostics (Feature 17)                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -4082,6 +4113,11 @@ let () =
       "add missing case has no leading pipe", `Quick, test_add_missing_case_no_leading_pipe;
       "no annotation for record return", `Quick, test_no_annotation_for_record_return;
       "annotation offered for scalar return", `Quick, test_annotation_offered_for_scalar_return;
+    ];
+    "introduce parameter object", [
+      "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
+      "single param not bundleable", `Quick, test_single_param_not_bundleable;
+      "unannotated params not bundleable", `Quick, test_unannotated_params_not_bundleable;
     ];
     "project diagnostics", [
       "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;

@@ -5656,6 +5656,30 @@ let query_outgoing_calls (a : t) (name : string) =
 let query_import_text_edit (a : t) ~module_ ~name =
   import_text_edit a ~module_ ~name |> Option.map (Pos.remap_text_edit a.doc)
 
+(* The name of the function under the cursor that is eligible for the
+   "introduce parameter object" refactor: a single-clause function with ≥2
+   fully-annotated parameters (the `forge refactor bundle` preconditions).
+   [character] is a byte column. The actual project-wide rewrite is performed
+   by the march_refactor engine in the server. *)
+let bundleable_fn_at (a : t) ~line ~character : string option =
+  let result = ref None in
+  let rec scan (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, _)
+      when Pos.span_contains fn.Ast.fn_name.Ast.span ~line ~character ->
+      (match fn.Ast.fn_clauses with
+       | [cl] ->
+         let ps = cl.Ast.fc_params in
+         if List.length ps >= 2
+            && List.for_all (function Ast.FPNamed _ -> true | _ -> false) ps
+         then result := Some fn.Ast.fn_name.Ast.txt
+       | _ -> ())
+    | Ast.DMod (_, _, ds, _) -> List.iter scan ds
+    | _ -> ()
+  in
+  List.iter scan a.decls;
+  !result
+
 (* Project-level diagnostics (Feature 17): analyse each (file, source) and
    return its UTF-16-remapped diagnostics. Per-file analysis resolves imported
    modules (so cross-file import errors surface); a shared whole-project type
