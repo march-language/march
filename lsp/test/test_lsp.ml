@@ -2130,7 +2130,27 @@ end
        let joined = String.concat "|" texts in
        Alcotest.(check bool) "edit uses `: T` colon form" true (has joined ": Int");
        Alcotest.(check bool) "edit does NOT use the invalid `->` form" false
-         (has joined "->"))
+         (has joined "->");
+       (* Round-trip: applying the edit must yield source that actually parses
+          (the `-> T` form would be a parse error and never reach this). *)
+       let te =
+         match edit.changes with
+         | Some ((_, (te :: _)) :: _) -> te
+         | _ -> Alcotest.fail "expected a text edit" in
+       let offset_of s ln ch =
+         let i = ref 0 and l = ref 0 and n = String.length s in
+         while !l < ln && !i < n do (if s.[!i] = '\n' then incr l); incr i done;
+         !i + ch in
+       let s0 = offset_of src te.range.start.line te.range.start.character in
+       let patched =
+         String.sub src 0 s0 ^ te.newText
+         ^ String.sub src s0 (String.length src - s0) in
+       let a2 = analyse patched in
+       Alcotest.(check bool) "annotated source parses (fn in def_map)" true
+         (Hashtbl.mem a2.An.def_map "double");
+       Alcotest.(check int) "annotated source has no error diagnostics" 0
+         (List.length (List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+              d.severity = Some Lsp.Types.DiagnosticSeverity.Error) a2.An.diagnostics)))
 
 (* ------------------------------------------------------------------ *)
 (* 24b. Named-record nominal-name recovery in rendered types          *)
