@@ -1,8 +1,10 @@
 (** Stateless one-shot CLI: analyse one file, answer one query, print JSON.
 
     Designed for editors without a persistent client, for scripts, and for LLMs
-    (which can pipe an unsaved buffer via --stdin). All positions are 0-indexed
-    UTF-16, matching the LSP convention. Output is a single JSON object. *)
+    (which can pipe an unsaved buffer via --stdin). [--line]/[--col] are 1-based
+    on the command line (human-friendly), counted in UTF-16 code units, and are
+    converted to the 0-based LSP convention internally. Emitted ranges remain
+    0-based UTF-16 (LSP). Output is a single JSON object. *)
 
 module Lsp = Linol_lsp.Lsp
 
@@ -77,12 +79,25 @@ let run_to_string (args : string list) ~src_override : string =
         else read_file file
     in
     let a = Analysis.analyse ~filename:file ~src in
-    let line = int_flag argv "--line" 0 and col = int_flag argv "--col" 0 in
+    (* CLI positions are 1-based for humans; the analysis engine (and LSP) use
+       0-based. Default to the first line/col when a flag is omitted. Clamp at 0
+       so a stray 0 from a caller still lands on the first line/col. *)
+    let line = max 0 (int_flag argv "--line" 1 - 1)
+    and col = max 0 (int_flag argv "--col" 1 - 1) in
     (match feature with
      | "hover" ->
        let r = Query.hover a ~line ~utf16_char:col in
        Printf.sprintf "{\"type\":%s,\"doc\":%s,\"perf\":%s}"
          (opt_str r.Query.h_type) (opt_str r.Query.h_doc) (opt_str r.Query.h_perf)
+     | "type" ->
+       (* Just the inferred type at the position. *)
+       Printf.sprintf "{\"type\":%s}" (opt_str (Query.type_at a ~line ~utf16_char:col))
+     | "symbols" ->
+       let one (s : Query.symbol) =
+         Printf.sprintf "{\"name\":%s,\"kind\":%s,\"range\":%s}"
+           (jstr s.Query.sym_name) (jstr s.Query.sym_kind) (jrange s.Query.sym_range)
+       in
+       "{\"symbols\":[" ^ String.concat "," (List.map one (Query.symbols a)) ^ "]}"
      | "definition" ->
        (match Query.definition a ~line ~utf16_char:col with
         | None -> "{\"definition\":null}"
@@ -152,8 +167,9 @@ let run_to_string (args : string list) ~src_override : string =
        "{\"completions\":[" ^ String.concat "," (List.map label items) ^ "]}"
      | other -> Printf.sprintf "{\"error\":%s}" (jstr ("unknown query: " ^ other)))
   | _ ->
-    "{\"error\":\"usage: march-lsp query <feature> <file> \
-     [--line N --col M] [--stdin]\"}"
+    "{\"error\":\"usage: march-lsp query \
+     <hover|type|definition|references|completions|diagnostics|symbols|format> \
+     <file> [--line N --col M] [--stdin]  (line/col are 1-based)\"}"
 
 let main (argv : string array) : int =
   let out = run_to_string (Array.to_list argv) ~src_override:None in

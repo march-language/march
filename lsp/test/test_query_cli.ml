@@ -19,8 +19,23 @@ let test_cli_diagnostics_json () =
 
 let test_cli_hover_json () =
   let src = "mod M do\n  fn f() : Int do 41 end\nend\n" in
-  let out = run ["query"; "hover"; "t.march"; "--line"; "1"; "--col"; "5"] ~src in
+  (* 1-based: line 2 is the fn body; col 6 is on the `f` identifier. *)
+  let out = run ["query"; "hover"; "t.march"; "--line"; "2"; "--col"; "6"] ~src in
   Alcotest.(check bool) "json has a type field" true (has_sub out "\"type\"")
+
+let test_cli_type_json () =
+  let src = "mod M do\n  fn f() : Int do 41 end\nend\n" in
+  (* 1-based position on `f`; the dedicated `type` feature returns just a type. *)
+  let out = run ["query"; "type"; "t.march"; "--line"; "2"; "--col"; "6"] ~src in
+  Alcotest.(check bool) "json has a type field" true (has_sub out "\"type\"")
+
+let test_cli_symbols_json () =
+  let src = "mod M do\n  fn f() : Int do 41 end\n  fn g() : Int do 7 end\nend\n" in
+  let out = run ["query"; "symbols"; "t.march"] ~src in
+  Alcotest.(check bool) "json has a symbols array" true (has_sub out "\"symbols\"");
+  Alcotest.(check bool) "lists function f" true (has_sub out "\"f\"");
+  Alcotest.(check bool) "lists function g" true (has_sub out "\"g\"");
+  Alcotest.(check bool) "reports a kind" true (has_sub out "\"kind\"")
 
 let test_cli_unknown_query_is_error () =
   let out = run ["query"; "bogus"; "t.march"] ~src:"mod M do\nend\n" in
@@ -41,5 +56,7 @@ let () =
     [ "cli",
       [ Alcotest.test_case "diagnostics" `Quick test_cli_diagnostics_json;
         Alcotest.test_case "hover" `Quick test_cli_hover_json;
+        Alcotest.test_case "type" `Quick test_cli_type_json;
+        Alcotest.test_case "symbols" `Quick test_cli_symbols_json;
         Alcotest.test_case "unknown query" `Quick test_cli_unknown_query_is_error;
         Alcotest.test_case "format" `Quick test_cli_format ] ]

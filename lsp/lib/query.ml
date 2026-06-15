@@ -41,3 +41,34 @@ let diagnostics (a : Analysis.t) : Lsp.Types.Diagnostic.t list =
 
 let completions (a : Analysis.t) ~line ~utf16_char : Lsp.Types.CompletionItem.t list =
   Analysis.query_completions_at a ~line ~utf16_char
+
+(* Just the inferred type at a position (the hover [h_type] component, exposed
+   on its own so the CLI's [type] feature need not reach into [Analysis]). *)
+let type_at (a : Analysis.t) ~line ~utf16_char : string option =
+  Analysis.query_type_at a ~line ~utf16_char
+
+(* (name, kind, range) for every top-level symbol in the file, where [kind] is
+   a short tag ("function" | "type" | "constructor" | "interface") and [range]
+   is UTF-16 (start_line, start_char, end_line, end_char). *)
+type symbol = { sym_name : string; sym_kind : string; sym_range : int * int * int * int }
+
+let symbols (a : Analysis.t) : symbol list =
+  match Analysis.document_symbols a with
+  | `DocumentSymbol syms ->
+    List.map (fun (s : Lsp.Types.DocumentSymbol.t) ->
+        let r = s.Lsp.Types.DocumentSymbol.range in
+        let kind =
+          match s.Lsp.Types.DocumentSymbol.kind with
+          | Lsp.Types.SymbolKind.Class -> "type"
+          | Lsp.Types.SymbolKind.EnumMember -> "constructor"
+          | Lsp.Types.SymbolKind.Interface -> "interface"
+          | _ -> "function"
+        in
+        { sym_name = s.Lsp.Types.DocumentSymbol.name;
+          sym_kind = kind;
+          sym_range =
+            (r.Lsp.Types.Range.start.Lsp.Types.Position.line,
+             r.Lsp.Types.Range.start.Lsp.Types.Position.character,
+             r.Lsp.Types.Range.end_.Lsp.Types.Position.line,
+             r.Lsp.Types.Range.end_.Lsp.Types.Position.character) }) syms
+  | `SymbolInformation _ -> []

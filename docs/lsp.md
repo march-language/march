@@ -186,22 +186,33 @@ scripts, CI, and LLM tooling:
 
 ```sh
 march-lsp query hover       file.march --line 10 --col 4
+march-lsp query type        file.march --line 10 --col 4   # inferred type only
 march-lsp query definition  file.march --line 10 --col 4
 march-lsp query references  file.march --line 10 --col 4
 march-lsp query completions file.march --line 10 --col 4
 march-lsp query diagnostics file.march
+march-lsp query symbols     file.march                     # top-level symbols
+march-lsp query format      file.march                     # formatted source (not JSON)
 
 # Analyse an unsaved buffer piped on stdin (the path is only used for messages):
 cat buffer.march | march-lsp query diagnostics buffer.march --stdin
 ```
 
-`--line`/`--col` are 0-indexed UTF-16. Exit status is `0` on success and `2` on a
-usage error (the JSON then has an `"error"` field).
+`--line`/`--col` are **1-based** on the command line (human-friendly), counted in
+UTF-16 code units, and converted to the 0-based LSP convention internally; ranges
+in the JSON output are 0-based UTF-16 (LSP). Exit status is `0` on success and
+`2` on a usage error (the JSON then has an `"error"` field).
 
 ```sh
+$ march-lsp query type good.march --line 3 --col 6
+{"type":"Int"}
+
 $ march-lsp query diagnostics bad.march
 {"diagnostics":[{"message":"I expected `Bool` but found `Int`.","range":{"start":{"line":1,"character":18},"end":{"line":1,"character":22}}}]}
 ```
+
+`symbols` reports every symbol visible to the analysis (open file plus loaded
+stdlib/workspace modules), matching the LSP `documentSymbol` request.
 
 ---
 

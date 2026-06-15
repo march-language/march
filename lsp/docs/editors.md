@@ -70,19 +70,31 @@ JSON object and exit — no LSP handshake, no persistent process:
 
 ```sh
 march-lsp query hover       file.march --line 10 --col 4
+march-lsp query type        file.march --line 10 --col 4   # inferred type only
 march-lsp query definition  file.march --line 10 --col 4
 march-lsp query references  file.march --line 10 --col 4
 march-lsp query completions file.march --line 10 --col 4
 march-lsp query diagnostics file.march
+march-lsp query symbols     file.march                     # top-level symbols
+march-lsp query format      file.march                     # formatted source (not JSON)
 
 # Analyse an unsaved buffer piped on stdin (the path is only used for messages):
 cat buffer.march | march-lsp query diagnostics buffer.march --stdin
 ```
 
-`--line`/`--col` are 0-indexed UTF-16. Exit status is `0` on success and `2` on
-a usage error (the JSON then has an `"error"` field). Example:
+`--line`/`--col` are **1-based** on the command line (human-friendly) and counted
+in UTF-16 code units; they are converted to the 0-based LSP convention
+internally. Ranges in the emitted JSON are 0-based UTF-16 (LSP). Exit status is
+`0` on success and `2` on a usage error (the JSON then has an `"error"` field).
+Examples:
 
 ```sh
+$ march-lsp query type good.march --line 3 --col 6
+{"type":"Int"}
+
 $ march-lsp query diagnostics bad.march
 {"diagnostics":[{"message":"I expected `Bool` but found `Int`.","range":{"start":{"line":1,"character":18},"end":{"line":1,"character":22}}}]}
 ```
+
+Note: `symbols` reports every symbol visible to the analysis (the open file plus
+any loaded stdlib/workspace modules), matching the LSP `documentSymbol` request.
