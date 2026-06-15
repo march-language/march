@@ -351,6 +351,10 @@ class march_server =
           Some (`Bool true);
         ServerCapabilities.callHierarchyProvider =
           Some (`Bool true);
+        ServerCapabilities.diagnosticProvider =
+          Some (`DiagnosticOptions
+                  (Lsp.Types.DiagnosticOptions.create
+                     ~interFileDependencies:true ~workspaceDiagnostics:true ()));
         ServerCapabilities.codeLensProvider =
           Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
 
@@ -1075,6 +1079,26 @@ class march_server =
         in
         if ranges = [] then Lwt.return `Null
         else Lwt.return (`Assoc [("ranges", `List (List.map json_range ranges))])
+
+      end else if meth = "workspace/diagnostic" then begin
+        (* Whole-project diagnostics: analyse every .march file under the project
+           root and return a full report per file (capped to bound the work). *)
+        let items =
+          match project_root () with
+          | None -> []
+          | Some root ->
+            let sources = Workspace.discover_sources ~root in
+            let sources = List.filteri (fun i _ -> i < 200) sources in
+            Analysis.project_diagnostics sources
+            |> List.map (fun (path, diags) ->
+                   let uri = Lsp.Types.DocumentUri.of_path path in
+                   `Assoc [
+                     ("kind", `String "full");
+                     ("uri", `String (Lsp.Types.DocumentUri.to_string uri));
+                     ("items", `List (List.map Lsp.Types.Diagnostic.yojson_of_t diags))
+                   ])
+        in
+        Lwt.return (`Assoc [("items", `List items)])
 
       end else if meth = "completionItem/resolve" then begin
         (* Lazily compute the auto-import additionalTextEdit for the accepted

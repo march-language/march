@@ -1227,15 +1227,15 @@ title is present in source. `todos.md` holds the per-item implementation notes.
 | 14 | Workspace symbol search | ✅ Done | `workspaceSymbolProvider`, `workspace/symbol`, `query_symbols` |
 | 15 | Cross-file go-to-definition | ✅ Done | workspace index + `definition` cross-file path |
 | 16 | Cross-file find references | ✅ Done | `references_across`, `workspace_index_full` |
-| 17 | Project-level diagnostics | ⬜ Not started | per-file/open-doc diagnostics only; no whole-project publish |
+| 17 | Project-level diagnostics | ✅ Done | `workspace/diagnostic` pull: analyses every `.march` under the project root, per-file full reports (`project_diagnostics`). Shared whole-project type env is a future refinement |
 | 18 | Call hierarchy | ✅ Done | `callHierarchyProvider`, prepare/incoming/outgoing |
 | 19 | Semantic selection | ✅ Done | `selectionRangeProvider`, `selection_range_at` |
 | 20 | Generate doc comment | ✅ Done | "Generate doc comment" action (scaffolds doc + Arguments/Returns) |
 | 21 | Linked editing | ✅ Done | `linkedEditingRangeProvider`, `linked_editing_ranges_at` |
 | 22 | Import suggestions | ✅ Done | "Import X from Y" action + completion auto-import (`additionalTextEdits` + resolve) |
 
-**Summary: 21 done, 0 partial, 1 not started.** Remaining: #17 project-level
-diagnostics (Phase 5). Minor follow-up: #13b unbound-module → suggest alias.
+**Summary: all 22 features done.** Minor follow-ups only: #13b unbound-module →
+suggest alias; #17 shared whole-project type environment (currently per-file).
 
 ### Delivered beyond the original 22 features
 

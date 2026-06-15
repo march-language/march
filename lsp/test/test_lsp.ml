@@ -3953,6 +3953,19 @@ end|} in
     (has_title acts "alias Collections.HashMap")
 
 (* ------------------------------------------------------------------ *)
+(* Project-level diagnostics (Feature 17)                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_project_diagnostics () =
+  let good = "mod A do\n  fn f() : Int do 1 end\nend" in
+  let bad  = "mod B do\n  fn g() : Int do \"oops\" end\nend" in
+  let reports = An.project_diagnostics [("a.march", good); ("b.march", bad)] in
+  let diags_of f =
+    match List.assoc_opt f reports with Some ds -> ds | None -> [] in
+  Alcotest.(check int) "clean file has no diagnostics" 0 (List.length (diags_of "a.march"));
+  Alcotest.(check bool) "broken file reports a diagnostic" true (diags_of "b.march" <> [])
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -3973,6 +3986,9 @@ let () =
       "prepare returns fn under cursor", `Quick, test_call_hierarchy_prepare;
       "incoming calls found", `Quick, test_call_hierarchy_incoming;
       "outgoing calls found", `Quick, test_call_hierarchy_outgoing;
+    ];
+    "project diagnostics", [
+      "per-file diagnostics across the workspace", `Quick, test_project_diagnostics;
     ];
     "refactor extras", [
       "generate doc comment", `Quick, test_generate_doc_comment;

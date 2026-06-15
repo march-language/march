@@ -5583,6 +5583,17 @@ let query_outgoing_calls (a : t) (name : string) =
 let query_import_text_edit (a : t) ~module_ ~name =
   import_text_edit a ~module_ ~name |> Option.map (Pos.remap_text_edit a.doc)
 
+(* Project-level diagnostics (Feature 17): analyse each (file, source) and
+   return its UTF-16-remapped diagnostics. Per-file analysis resolves imported
+   modules (so cross-file import errors surface); a shared whole-project type
+   environment is a future refinement. *)
+let project_diagnostics (sources : (string * string) list)
+    : (string * Lsp.Types.Diagnostic.t list) list =
+  List.map (fun (path, src) ->
+      let a = analyse ~filename:path ~src in
+      (path, List.map (Pos.remap_diagnostic a.doc) a.diagnostics))
+    sources
+
 (* ---------------------------------------------------------------------- *)
 (* Error-resilient analysis.                                               *)
 (* When an edit leaves the buffer unparseable, [analyse] returns empty     *)
