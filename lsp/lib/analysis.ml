@@ -1749,6 +1749,54 @@ let html_void_elements =
   [ "area"; "base"; "br"; "col"; "embed"; "hr"; "img"; "input"; "link";
     "meta"; "param"; "source"; "track"; "wbr" ]
 
+(* Comprehensive set of known HTML elements (includes March's <island>).
+   Tags with a '-' in their name are custom elements and are checked
+   separately — they are always allowed. *)
+let html_known_elements =
+  [ (* sections *)
+    "html"; "head"; "body"; "header"; "footer"; "main"; "nav";
+    "section"; "article"; "aside";
+    (* grouping *)
+    "div"; "p"; "span"; "ul"; "ol"; "li"; "dl"; "dt"; "dd";
+    "figure"; "figcaption"; "blockquote"; "pre"; "hr";
+    (* text *)
+    "a"; "strong"; "em"; "b"; "i"; "u"; "small"; "mark"; "code";
+    "kbd"; "sub"; "sup"; "br"; "wbr"; "q"; "cite"; "time"; "abbr";
+    (* headings *)
+    "h1"; "h2"; "h3"; "h4"; "h5"; "h6";
+    (* media *)
+    "img"; "picture"; "source"; "audio"; "video"; "track"; "canvas";
+    "svg"; "iframe"; "embed"; "object";
+    (* tables *)
+    "table"; "thead"; "tbody"; "tfoot"; "tr"; "td"; "th"; "caption";
+    "colgroup"; "col";
+    (* forms *)
+    "form"; "input"; "textarea"; "button"; "select"; "option";
+    "optgroup"; "label"; "fieldset"; "legend"; "datalist"; "output";
+    "progress"; "meter";
+    (* meta/head *)
+    "meta"; "link"; "title"; "style"; "script"; "base"; "template";
+    "slot"; "noscript";
+    (* misc *)
+    "details"; "summary"; "dialog"; "data"; "address"; "ins"; "del";
+    "bdi"; "bdo"; "ruby"; "rt"; "rp"; "area"; "map"; "param";
+    (* march island *)
+    "island" ]
+
+(* Levenshtein edit distance between two strings (standard DP). *)
+let levenshtein (a : string) (b : string) : int =
+  let m = String.length a and n = String.length b in
+  let dp = Array.init (m + 1) (fun i -> Array.init (n + 1) (fun j ->
+    if i = 0 then j else if j = 0 then i else 0)) in
+  for i = 1 to m do
+    for j = 1 to n do
+      dp.(i).(j) <-
+        if a.[i-1] = b.[j-1] then dp.(i-1).(j-1)
+        else 1 + (min dp.(i-1).(j) (min dp.(i).(j-1) dp.(i-1).(j-1)))
+    done
+  done;
+  dp.(m).(n)
+
 (* Scan HTML [content] and return the open tags left unclosed, as
    (tag, offset-of-'<'-in-content), innermost-first. Skips `${…}` interpolation,
    `<!-- … -->` comments, `<!doctype …>`, void elements and self-closing tags;
@@ -1855,6 +1903,106 @@ let pos_to_ofs (src : string) (line1 : int) (col : int) : int =
   let cur = ref 1 and i = ref 0 in
   while !cur < line1 && !i < n do (if src.[!i] = '\n' then incr cur); incr i done;
   min (!i + col) n
+
+(** Scan one ~H sigil and return a list of [(lowercase_tag, name_span)]
+    for every open tag found (skipping [${…}] interpolations, HTML comments,
+    declarations, and self-closing tags).  Void elements ARE included so
+    callers can decide whether to check them.
+
+    This is a shared helper used by [collect_html_lint] (task 3.1) and
+    available for subsequent lint passes (3.2 dup attrs, 3.3 void misuse,
+    3.4 XSS) that need the same tag enumeration. *)
+let open_tags_in_sigil ~(src : string) (s : h_sigil) : (string * Ast.span) list =
+  let c = s.hs_content in
+  let n = String.length c in
+  let is_nc ch =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
+  let name_span name_ofs name_len =
+    let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
+    { Ast.file = ""; start_line = l; start_col = col;
+      end_line = l; end_col = col + name_len } in
+  let acc = ref [] and i = ref 0 in
+  while !i < n do
+    let ch = c.[!i] in
+    (* ${…} interpolation: skip balanced braces *)
+    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    (* <!-- … --> comment *)
+    else if ch = '<' && !i + 3 < n
+            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
+      i := !i + 4;
+      while !i + 2 < n
+            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
+    end
+    (* <!…> declaration/doctype *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
+      while !i < n && c.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    (* </tag> close tag — skip *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
+      let j = ref (!i + 2) in
+      while !j < n && is_nc c.[!j] do incr j done;
+      while !j < n && c.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n)
+    end
+    (* <tag …> open tag *)
+    else if ch = '<' && !i + 1 < n
+            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ns = !i + 1 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      (* Advance past attributes, respecting quoted values. *)
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || c.[!j] <> '>') do
+        let d = c.[!j] in
+        (if !inq then (if d = !q then inq := false)
+         else if d = '"' || d = '\'' then (inq := true; q := d));
+        incr j
+      done;
+      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
+      i := (if !j < n then !j + 1 else n);
+      if not self then
+        acc := (tag, name_span name_ofs name_len) :: !acc
+    end
+    else incr i
+  done;
+  List.rev !acc
+
+(** Collect HTML lint warnings for all ~H sigils.  Returns a list of
+    [(span, message, diagnostic-code)] triples.  This is the shared
+    accumulator — later lint passes (3.2 dup attrs, 3.3 void misuse,
+    3.4 XSS) add their own results to it via [collect_html_lint] or a
+    wrapper that calls it and appends. *)
+let collect_html_lint ~(src : string) (sigils : h_sigil list)
+    : (Ast.span * string * string) list =
+  (* Pass 3.1 — unknown / misspelled tag names. *)
+  List.concat_map (fun (s : h_sigil) ->
+    List.filter_map (fun (tag, span) ->
+      if List.mem tag html_known_elements then None
+      else if String.contains tag '-' then None   (* custom element / web component *)
+      else begin
+        let suggestion =
+          (* Nearest known tag by edit distance ≤ 2, else empty string. *)
+          let best = List.fold_left (fun (bd, bt) k ->
+              let d = levenshtein tag k in if d < bd then (d, k) else (bd, bt))
+            (max_int, "") html_known_elements in
+          match best with
+          | (d, k) when d <= 2 -> Printf.sprintf " (did you mean `<%s>`?)" k
+          | _ -> "" in
+        Some (span,
+              Printf.sprintf "Unknown HTML tag `<%s>`%s" tag suggestion,
+              "html/unknown-tag")
+      end)
+      (open_tags_in_sigil ~src s))
+  sigils
 
 (** Return matched (open-name-span, close-name-span) pairs in one ~H sigil.
     Adapts the [scan_html_unclosed] walk: on a successful close-tag match, pop
@@ -2874,6 +3022,17 @@ let analyse ~filename ~src : t =
             ())
         html_issues
     in
+    let html_lint_diags =
+      List.map (fun (span, msg, code) ->
+          Lsp.Types.Diagnostic.create
+            ~range:(Pos.span_to_lsp_range span)
+            ~severity:Lsp.Types.DiagnosticSeverity.Warning
+            ~message:(`String msg)
+            ~source:"march"
+            ~code:(`String code)
+            ())
+        (collect_html_lint ~src h_sigils)
+    in
     let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
     let mi = module_index_of_vars vars_list in
     (* Island component validation.
@@ -2920,6 +3079,7 @@ let analyse ~filename ~src : t =
       @ unused_fn_diags
       @ perf_diags
       @ html_diags
+      @ html_lint_diags
       @ island_diags
     in
     { src; filename; doc; type_map; def_map; use_map;

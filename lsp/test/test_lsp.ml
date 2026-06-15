@@ -4876,6 +4876,44 @@ end|} in
   Alcotest.(check bool) "valid island not flagged" false flagged
 
 (* ------------------------------------------------------------------ *)
+(* ~H unknown HTML tag linting                                         *)
+(* ------------------------------------------------------------------ *)
+
+let test_html_unknown_tag () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<dvi></dvi>"
+  end
+end|} in
+  let a = analyse src in
+  (* Guard: sigil was collected, file parsed OK. *)
+  Alcotest.(check bool) "sigil collected (file parsed)" true (a.An.h_sigils <> []);
+  let d = List.find_opt (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unknown-tag") -> true | _ -> false) a.An.diagnostics in
+  (match d with
+   | Some diag ->
+     let msg = match diag.Lsp.Types.Diagnostic.message with
+               | `String s -> s | `MarkupContent m -> m.Lsp.Types.MarkupContent.value in
+     Alcotest.(check bool) "suggests div" true (contains_sub msg "div")
+   | None -> Alcotest.fail "expected html/unknown-tag for <dvi>")
+
+let test_html_custom_element_not_flagged () =
+  (* Custom elements (name contains '-') must NOT be flagged. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<my-widget></my-widget>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected (file parsed)" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/unknown-tag") -> true | _ -> false)
+    a.An.diagnostics in
+  Alcotest.(check bool) "custom element not flagged" false flagged
+
+(* ------------------------------------------------------------------ *)
 (* Island component name completion                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -5105,6 +5143,10 @@ let () =
     ];
     "island component name completion", [
       "Counter offered after name=' in ~H sigil", `Quick, test_island_name_completion;
+    ];
+    "~H unknown HTML tag lint", [
+      "misspelled tag <dvi> flagged with did-you-mean div", `Quick, test_html_unknown_tag;
+      "custom element my-widget not flagged",                `Quick, test_html_custom_element_not_flagged;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
