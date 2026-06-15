@@ -2474,6 +2474,7 @@ let base_env : env =
              lambda `fn _ -> body` discards. *)
           (try VCon ("Ok", [!apply_hook thunk [VBool true]])
            with
+           | BlockedOnReceive    -> raise BlockedOnReceive
            | Assert_failure msg -> VCon ("Err", [VString msg])
            | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
            | Eval_error msg     -> VCon ("Err", [VString msg])
@@ -2491,6 +2492,7 @@ let base_env : env =
         | [thunk] ->
           (try VCon ("Ok", [!apply_hook thunk [VBool true]])
            with
+           | BlockedOnReceive    -> raise BlockedOnReceive
            | Assert_failure msg -> VCon ("Err", [VString msg])
            | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
            | Eval_error msg     -> VCon ("Err", [VString msg])
@@ -6891,7 +6893,14 @@ let run_scheduler () =
                   (* The handler called receive() but the mailbox was empty at
                      that point.  Put the triggering message back at the front
                      of the mailbox so the handler retries on a later pass.
-                     Do NOT set [changed := true] — no forward progress was made. *)
+                     Do NOT set [changed := true] — no forward progress was made.
+                     LIMITATION: only the FIRST receive() call in a handler is
+                     safe.  If a handler calls receive() twice and the second one
+                     blocks, the first message has already been consumed and is
+                     lost — re-queueing only restores the outer message.  Handlers
+                     that need multiple messages should use a recursive pattern
+                     where each receive() is the first operation in its own
+                     handler body. *)
                   let front_q = Queue.create () in
                   Queue.push msg front_q;
                   Queue.transfer inst.ai_mailbox front_q;

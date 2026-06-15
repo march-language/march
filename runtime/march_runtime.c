@@ -1055,8 +1055,10 @@ static _Atomic int64_t g_next_monitor_ref = 0;
  * the scheduler; the outer loop will pick up newly-queued actors. */
 static _Thread_local int g_in_scheduler = 0;
 
-/* Lazy initialization flag for the green thread scheduler. */
-static int g_sched_initialized = 0;
+/* Lazy initialization flag for the green thread scheduler.
+ * _Atomic so concurrent first-spawns don't double-init via a plain read-write
+ * race on a non-atomic int. */
+static _Atomic int g_sched_initialized = 0;
 
 /* Background scheduler thread — started automatically by march_spawn() so
  * that actor green threads run even when the main thread is blocked in the
@@ -1233,9 +1235,11 @@ void *march_spawn(void *actor) {
     meta->pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
                                                 memory_order_relaxed);
     /* Initialize scheduler lazily. */
-    if (!g_sched_initialized) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &g_sched_initialized, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
-        g_sched_initialized = 1;
     }
     meta->green_thread = march_sched_spawn(actor_green_thread, meta);
     /* Start the scheduler in a background thread so actor green threads run
@@ -1279,6 +1283,13 @@ static void march_thunk_trampoline(void *arg) {
     void *clo = wa->clo;
     int64_t *task = wa->task;
     free(wa);  /* free the small wrapper; clo and task are separately managed */
+    /* Record our own proc handle in task[2] NOW, before executing the closure.
+     * This closes the race where the spawning thread writes task[2] = p only
+     * AFTER march_sched_spawn returns — a work-stealing scheduler can run
+     * (and complete) this proc before the spawner gets CPU back. */
+    if (task) {
+        task[2] = (int64_t)(uintptr_t)march_sched_current();
+    }
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
     void *result = apply(clo, (int64_t)0);
@@ -1301,9 +1312,11 @@ static void march_thunk_trampoline(void *arg) {
  *
  * The caller can pass this to task_await / kill. */
 void *march_task_spawn_thunk(void *clo_ptr) {
-    if (!g_sched_initialized) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &g_sched_initialized, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
-        g_sched_initialized = 1;
     }
     /* Perceus treats task_spawn as a consuming call: the caller transfers its
      * reference to the task.  No IncRC needed here; the closure's existing
@@ -1347,9 +1360,11 @@ void *march_task_await(void *task_obj) {
  * If tok is non-NULL, its cancellation is checked at yield points inside the
  * green thread.  Behaves like march_task_spawn_thunk otherwise. */
 void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
-    if (!g_sched_initialized) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &g_sched_initialized, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
-        g_sched_initialized = 1;
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(32);
@@ -1368,12 +1383,19 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
 
 /* Cancel the task identified by task_obj by marking its green thread DEAD.
  * This is a best-effort cooperative cancellation: if the thread is currently
- * running it will be stopped at the next yield point. */
+ * running it will be stopped at the next yield point.
+ *
+ * We write a cancellation sentinel into task[3] (the result field) BEFORE
+ * setting PROC_DEAD.  Without this, march_task_await sees PROC_DEAD and reads
+ * task[3] = null, boxing it as Ok(null_ptr) instead of signalling cancellation. */
 void march_task_cancel_by_id(void *task_obj) {
     if (!task_obj) return;
     int64_t *task = (int64_t *)task_obj;
     march_proc *p = (march_proc *)(uintptr_t)task[2];
     if (!p) return;
+    /* Store the cancelled sentinel before the status flip so the await side
+     * always sees a valid error result when it observes PROC_DEAD. */
+    task[3] = (int64_t)(uintptr_t)mk_err_cstr("task cancelled");
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
 }
 
@@ -1408,14 +1430,14 @@ void march_run_scheduler(void) {
         /* Background thread is/was running — join it so actors finish. */
         pthread_join(g_sched_bg_thread, NULL);
         atomic_store_explicit(&g_sched_bg_started, 0, memory_order_relaxed);
-        g_sched_initialized = 0;
+        atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
         return;
     }
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
     march_sched_run();
     g_in_scheduler = 0;
-    g_sched_initialized = 0;
+    atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
 }
 
 /* Send a message to an actor.

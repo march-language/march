@@ -2213,9 +2213,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result clo_ptr);
     ("ptr", result)
 
-  (* task_await_unwrap(task_ptr) → unbox field 0 *)
+  (* task_await_unwrap(task_ptr) → await C runtime, then unwrap Ok payload *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
     let (_, task_ptr) = emit_atom ctx a in
+    let res = fresh ctx "tawait_res" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" res task_ptr);
+    (* march_task_await returns Ok(inner); unwrap by loading field 0 of Result. *)
     let inner_ty = match a with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
@@ -2223,7 +2226,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | _ -> "ptr")
       | _ -> "ptr"
     in
-    let r = emit_load_field ctx task_ptr 0 inner_ty in
+    let r = emit_load_field ctx res 0 inner_ty in
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime *)
