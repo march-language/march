@@ -1259,9 +1259,9 @@ end
 let test_exhaustion_quickfix_absent_for_exhaustive_match () =
   let src = {|
 mod M do
-  type Color = Red | Green | Blue
+  type Hue = Red | Green | Blue
 
-  fn describe(c: Color): String do
+  fn describe(c: Hue): String do
     match c do
     Red   -> "red"
     Green -> "green"
@@ -4323,11 +4323,80 @@ end|} in
     (contains_sub edit "</p></div>")
 
 (* ------------------------------------------------------------------ *)
+(* Cross-file project analysis                                         *)
+(* ------------------------------------------------------------------ *)
+
+(* Build a throwaway forge project on disk and return its root. *)
+let mk_forge_project (files : (string * string) list) : string =
+  let base = Filename.temp_file "march_lsp_xf_" "" in
+  Sys.remove base;
+  Sys.mkdir base 0o755;
+  let write rel content =
+    let path = Filename.concat base rel in
+    (try Sys.mkdir (Filename.dirname path) 0o755 with _ -> ());
+    let oc = open_out path in
+    output_string oc content; close_out oc
+  in
+  write "forge.toml" "[package]\nname=\"xf\"\nversion=\"0.1.0\"\ntype=\"app\"\n[deps]\n";
+  List.iter (fun (rel, content) -> write rel content) files;
+  base
+
+let test_cross_file_interface_resolves () =
+  (* The interface is declared in one file and the `impl` is in a sibling. The
+     LSP's per-file analysis must resolve the cross-file interface. Regression:
+     the incremental pre-pass (`check_module_with_env`) silently ignored sibling
+     interfaces, so this reported "Unknown interface" while whole-program
+     `forge build` was clean. *)
+  let model_src =
+    "mod Model do\n\
+    \  type Widget = { n : Int }\n\
+    \  impl Summarize(Widget) do\n\
+    \    fn summarize(w) do int_to_string(w.n) end\n\
+    \  end\n\
+    \  fn use_it() : String do summarize({ n = 5 }) end\n\
+     end\n"
+  in
+  (* Interface in lib/, impl in lib/sub/ — cross-subdir is the realistic layout
+     (and the case that regressed: the per-file pre-pass dropped the interface). *)
+  let root = mk_forge_project [
+    "lib/iface.march",
+    "mod Iface do\n  interface Summarize(a) do\n    fn summarize: a -> String\n  end\nend\n";
+    "lib/sub/model.march", model_src;
+  ] in
+  let a = An.analyse ~filename:(Filename.concat root "lib/sub/model.march") ~src:model_src in
+  let msgs = List.map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with `String s -> s | `MarkupContent m -> m.value) a.An.diagnostics in
+  let has_unknown_iface =
+    List.exists (fun m -> contains_sub m "Unknown interface") msgs in
+  Alcotest.(check bool) "cross-file impl: no 'Unknown interface'" false has_unknown_iface
+
+let test_unknown_interface_still_errors () =
+  (* The fix must not suppress a genuinely-undeclared interface. *)
+  let model_src =
+    "mod Model do\n\
+    \  type Q = { n : Int }\n\
+    \  impl NoSuchIface(Q) do\n\
+    \    fn f(x) do 1 end\n\
+    \  end\n\
+     end\n"
+  in
+  let root = mk_forge_project [ "lib/model.march", model_src ] in
+  let a = An.analyse ~filename:(Filename.concat root "lib/model.march") ~src:model_src in
+  let msgs = List.map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with `String s -> s | `MarkupContent m -> m.value) a.An.diagnostics in
+  Alcotest.(check bool) "unknown interface still flagged" true
+    (List.exists (fun m -> contains_sub m "Unknown interface") msgs)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
 let () =
   Alcotest.run "march-lsp" [
+    "cross-file", [
+      "interface resolves across files", `Quick, test_cross_file_interface_resolves;
+      "unknown interface still errors",  `Quick, test_unknown_interface_still_errors;
+    ];
     "navigation extras", [
       "go to implementation", `Quick, test_implementation;
       "go to type definition", `Quick, test_type_definition;
