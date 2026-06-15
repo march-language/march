@@ -1797,71 +1797,168 @@ let levenshtein (a : string) (b : string) : int =
   done;
   dp.(m).(n)
 
-(* Scan HTML [content] and return the open tags left unclosed, as
-   (tag, offset-of-'<'-in-content), innermost-first. Skips `${…}` interpolation,
-   `<!-- … -->` comments, `<!doctype …>`, void elements and self-closing tags;
-   quoted attribute values are respected so `>` inside them is ignored. *)
-let scan_html_unclosed (content : string) : (string * int) list =
+(* ------------------------------------------------------------------ *)
+(* Shared ~H content tokenizer                                          *)
+(*                                                                      *)
+(* [tokenize_h_content] walks a sigil's content ONCE and emits a flat   *)
+(* list of HTML events.  It is the SINGLE source of truth for the skip  *)
+(* rules that every ~H scanning pass relies on:                         *)
+(*   - `${…}` interpolation with balanced-brace depth (top-level         *)
+(*     interpolations are EMITTED as [HEInterp] so the unsafe-interp     *)
+(*     pass can see them);                                               *)
+(*   - `<!-- … -->` comments and `<!…>` declarations are skipped;         *)
+(*   - open tags `<tag …>` parse a tag name, an attribute list (names    *)
+(*     tokenised exactly as the legacy dup-attr scanner did, skipping    *)
+(*     quoted values AND `${…}` inside the tag), and a self-closing flag *)
+(*     (`/` immediately before `>`);                                     *)
+(*   - close tags `</tag>` parse a tag name.                            *)
+(*                                                                      *)
+(* Edge cases preserved from the three historical bug fixes:            *)
+(*   - a quoted attribute value containing `${…}` whose inner string     *)
+(*     uses the same quote char must NOT prematurely end the value;      *)
+(*   - a `>` inside a quoted attribute value must NOT end the tag;        *)
+(*   - interpolation/string awareness inside the attribute region.       *)
+(* ------------------------------------------------------------------ *)
+
+type html_event =
+  | HEOpenTag  of { tag : string; name_ofs : int; name_len : int;
+                    self_closing : bool;
+                    attrs : (string * int * int) list }
+                    (* attr = (lowercase_name, name_ofs, name_len) *)
+  | HECloseTag of { tag : string; name_ofs : int; name_len : int }
+  | HEInterp   of { brace_ofs : int }  (* offset of the '$' starting a ${…} *)
+
+let tokenize_h_content (content : string) : html_event list =
   let n = String.length content in
+  (* Tag-name / close-name chars. *)
   let is_nc c =
     (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
     || (c >= '0' && c <= '9') || c = '-' || c = '_' in
-  let stack = ref [] in
-  let unclosed = ref [] in   (* tags skipped over by a mismatched close *)
+  (* Attribute-name chars additionally allow ':' (XML namespaces). *)
+  let attr_nc c = is_nc c || c = ':' in
+  let events = ref [] in
+  let emit e = events := e :: !events in
   let i = ref 0 in
   while !i < n do
     let c = content.[!i] in
+    (* ${…} interpolation at top level: emit + skip balanced braces. *)
     if c = '$' && !i + 1 < n && content.[!i + 1] = '{' then begin
+      emit (HEInterp { brace_ofs = !i });
       i := !i + 2; let d = ref 1 in
       while !d > 0 && !i < n do
         (match content.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
       done
     end
-    else if c = '<' && !i + 3 < n && content.[!i+1]='!' && content.[!i+2]='-' && content.[!i+3]='-' then begin
+    (* <!-- … --> comment *)
+    else if c = '<' && !i + 3 < n
+            && content.[!i+1]='!' && content.[!i+2]='-' && content.[!i+3]='-' then begin
       i := !i + 4;
-      while !i + 2 < n && not (content.[!i]='-' && content.[!i+1]='-' && content.[!i+2]='>') do incr i done;
-      if !i + 2 < n then i := !i + 3 else i := n
+      while !i + 2 < n
+            && not (content.[!i]='-' && content.[!i+1]='-' && content.[!i+2]='>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
     end
+    (* <!…> declaration/doctype *)
     else if c = '<' && !i + 1 < n && content.[!i+1] = '!' then begin
       while !i < n && content.[!i] <> '>' do incr i done;
       if !i < n then incr i
     end
+    (* </tag> close tag *)
     else if c = '<' && !i + 1 < n && content.[!i+1] = '/' then begin
-      let j = ref (!i + 2) in let ns = !j in
+      let ns = !i + 2 in let j = ref ns in
       while !j < n && is_nc content.[!j] do incr j done;
-      let tag = String.lowercase_ascii (String.sub content ns (!j - ns)) in
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub content ns name_len) in
       while !j < n && content.[!j] <> '>' do incr j done;
       i := (if !j < n then !j + 1 else n);
+      emit (HECloseTag { tag; name_ofs; name_len })
+    end
+    (* <tag …> open tag *)
+    else if c = '<' && !i + 1 < n
+            && (let d = content.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ns = !i + 1 in let j = ref ns in
+      while !j < n && is_nc content.[!j] do incr j done;
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub content ns name_len) in
+      (* Walk the attribute region until the closing '>', collecting attribute
+         name-like tokens (matching the legacy dup-attr tokenizer exactly) and
+         respecting quoted values + ${…} interpolations.  A ${…} inside a quoted
+         value whose inner string reuses the same quote char must NOT end the
+         value, and a '>' inside a quoted value must NOT end the tag. *)
+      let attrs = ref [] in
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || content.[!j] <> '>') do
+        let d = content.[!j] in
+        if !inq then begin
+          (* ${…} inside a quoted attribute value: skip balanced braces. *)
+          if d = '$' && !j + 1 < n && content.[!j + 1] = '{' then begin
+            j := !j + 2; let depth = ref 1 in
+            while !depth > 0 && !j < n do
+              (match content.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+              incr j
+            done
+          end else begin
+            if d = !q then inq := false;
+            incr j
+          end
+        end
+        (* ${…} in the attribute region (outside quotes): skip balanced braces. *)
+        else if d = '$' && !j + 1 < n && content.[!j + 1] = '{' then begin
+          j := !j + 2; let depth = ref 1 in
+          while !depth > 0 && !j < n do
+            (match content.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
+            incr j
+          done
+        end
+        (* Start of a quoted value. *)
+        else if d = '"' || d = '\'' then begin
+          inq := true; q := d; incr j
+        end
+        (* Attribute name: starts with a letter, '_', or ':'. *)
+        else if (d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')
+                || d = '_' || d = ':' then begin
+          let a_ofs = !j in
+          while !j < n && attr_nc content.[!j] do incr j done;
+          let a_len = !j - a_ofs in
+          let name = String.lowercase_ascii (String.sub content a_ofs a_len) in
+          attrs := (name, a_ofs, a_len) :: !attrs
+        end
+        else incr j
+      done;
+      let self_closing = !j < n && !j > 0 && content.[!j - 1] = '/' in
+      i := (if !j < n then !j + 1 else n);
+      emit (HEOpenTag { tag; name_ofs; name_len; self_closing;
+                        attrs = List.rev !attrs })
+    end
+    else incr i
+  done;
+  List.rev !events
+
+(* Scan HTML [content] and return the open tags left unclosed, as
+   (tag, offset-of-'<'-in-content), innermost-first. Skips `${…}` interpolation,
+   `<!-- … -->` comments, `<!doctype …>`, void elements and self-closing tags;
+   quoted attribute values are respected so `>` inside them is ignored. *)
+let scan_html_unclosed (content : string) : (string * int) list =
+  (* Fold the event stream: push each non-void / non-self-closing open tag
+     (recording the offset of its '<', which is name_ofs - 1); on a close that
+     matches something on the stack, pop down to the match and record every
+     intervening open as unclosed.  Interpolation events are ignored. *)
+  let stack = ref [] in
+  let unclosed = ref [] in   (* tags skipped over by a mismatched close *)
+  List.iter (function
+    | HEInterp _ -> ()
+    | HEOpenTag { tag; name_ofs; self_closing; _ } ->
+      if not self_closing && not (List.mem tag html_void_elements) then
+        stack := (tag, name_ofs - 1) :: !stack
+    | HECloseTag { tag; _ } ->
       if List.exists (fun (t, _) -> t = tag) !stack then begin
-        (* Pop down to the match; any tags above it were never closed. *)
         let rec pop = function
           | (t, o) :: r ->
             if t = tag then r
             else (unclosed := (t, o) :: !unclosed; pop r)
           | [] -> [] in
         stack := pop !stack
-      end
-    end
-    else if c = '<' && !i + 1 < n &&
-            (let d = content.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      let ofs = !i in
-      let j = ref (!i + 1) in let ns = !j in
-      while !j < n && is_nc content.[!j] do incr j done;
-      let tag = String.lowercase_ascii (String.sub content ns (!j - ns)) in
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (!inq || content.[!j] <> '>') do
-        let ch = content.[!j] in
-        (if !inq then (if ch = !q then inq := false)
-         else if ch = '"' || ch = '\'' then (inq := true; q := ch));
-        incr j
-      done;
-      let self = !j < n && !j > 0 && content.[!j - 1] = '/' in
-      i := (if !j < n then !j + 1 else n);
-      if not self && not (List.mem tag html_void_elements) then
-        stack := (tag, ofs) :: !stack
-    end
-    else incr i
-  done;
+      end)
+    (tokenize_h_content content);
   (* Tags still open at end of input, plus any skipped by mismatched closes;
      innermost-first so closers nest correctly. *)
   !stack @ List.rev !unclosed
@@ -1913,68 +2010,16 @@ let pos_to_ofs (src : string) (line1 : int) (col : int) : int =
     available for subsequent lint passes (3.2 dup attrs, 3.3 void misuse,
     3.4 XSS) that need the same tag enumeration. *)
 let open_tags_in_sigil ~(src : string) (s : h_sigil) : (string * Ast.span) list =
-  let c = s.hs_content in
-  let n = String.length c in
-  let is_nc ch =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
   let name_span name_ofs name_len =
     let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
     { Ast.file = ""; start_line = l; start_col = col;
       end_line = l; end_col = col + name_len } in
-  let acc = ref [] and i = ref 0 in
-  while !i < n do
-    let ch = c.[!i] in
-    (* ${…} interpolation: skip balanced braces *)
-    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
-      i := !i + 2; let d = ref 1 in
-      while !d > 0 && !i < n do
-        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
-      done
-    end
-    (* <!-- … --> comment *)
-    else if ch = '<' && !i + 3 < n
-            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
-      i := !i + 4;
-      while !i + 2 < n
-            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
-      i := (if !i + 2 < n then !i + 3 else n)
-    end
-    (* <!…> declaration/doctype *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
-      while !i < n && c.[!i] <> '>' do incr i done;
-      if !i < n then incr i
-    end
-    (* </tag> close tag — skip *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
-      let j = ref (!i + 2) in
-      while !j < n && is_nc c.[!j] do incr j done;
-      while !j < n && c.[!j] <> '>' do incr j done;
-      i := (if !j < n then !j + 1 else n)
-    end
-    (* <tag …> open tag *)
-    else if ch = '<' && !i + 1 < n
-            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      let ns = !i + 1 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_ofs = ns and name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      (* Advance past attributes, respecting quoted values. *)
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (!inq || c.[!j] <> '>') do
-        let d = c.[!j] in
-        (if !inq then (if d = !q then inq := false)
-         else if d = '"' || d = '\'' then (inq := true; q := d));
-        incr j
-      done;
-      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
-      i := (if !j < n then !j + 1 else n);
-      if not self then
-        acc := (tag, name_span name_ofs name_len) :: !acc
-    end
-    else incr i
-  done;
-  List.rev !acc
+  List.filter_map (function
+    | HEOpenTag { tag; name_ofs; name_len; self_closing; _ } ->
+      if self_closing then None
+      else Some (tag, name_span name_ofs name_len)
+    | _ -> None)
+    (tokenize_h_content s.hs_content)
 
 (** Pass 3.2 — duplicate attributes within a single HTML open tag.
     Walks each sigil looking for open tags (same skipping rules as
@@ -1993,116 +2038,25 @@ let open_tags_in_sigil ~(src : string) (s : h_sigil) : (string * Ast.span) list 
     do. *)
 let dup_attrs_in_sigil ~(src : string) (s : h_sigil)
     : (Ast.span * string * string) list =
-  let c = s.hs_content in
-  let n = String.length c in
-  (* A name char for tag names (tag_nc) or attribute names (attr_nc). *)
-  let tag_nc ch =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
-  (* Attribute name chars: additionally allow ':' (XML namespaces). *)
-  let attr_nc ch = tag_nc ch || ch = ':' in
   (* Build a single-line Ast.span for an attribute name token at content-
      relative byte offset [ofs] with length [len]. *)
   let attr_name_span ofs len =
     let (l, col) = ofs_to_pos src (s.hs_base_ofs + ofs) in
     { Ast.file = ""; start_line = l; start_col = col;
       end_line = l; end_col = col + len } in
-  let acc = ref [] in
-  let i = ref 0 in
-  while !i < n do
-    let ch = c.[!i] in
-    (* ${…} interpolation at top level: skip balanced braces. *)
-    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
-      i := !i + 2; let d = ref 1 in
-      while !d > 0 && !i < n do
-        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
-      done
-    end
-    (* <!-- … --> comment *)
-    else if ch = '<' && !i + 3 < n
-            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
-      i := !i + 4;
-      while !i + 2 < n
-            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
-      i := (if !i + 2 < n then !i + 3 else n)
-    end
-    (* <!…> declaration/doctype *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
-      while !i < n && c.[!i] <> '>' do incr i done;
-      if !i < n then incr i
-    end
-    (* </tag> close tag — skip *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
-      let j = ref (!i + 2) in
-      while !j < n && tag_nc c.[!j] do incr j done;
-      while !j < n && c.[!j] <> '>' do incr j done;
-      i := (if !j < n then !j + 1 else n)
-    end
-    (* <tag …> open tag — scan attribute region for duplicates. *)
-    else if ch = '<' && !i + 1 < n
-            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      (* Skip past the tag name. *)
-      let j = ref (!i + 1) in
-      while !j < n && tag_nc c.[!j] do incr j done;
-      (* Now scan the attribute region until we hit the closing '>'. *)
-      (* seen: association list of lowercase attr-name -> unit to detect dupes. *)
+  List.concat_map (function
+    | HEOpenTag { attrs; _ } ->
+      (* Within ONE open tag, flag the 2nd-and-later occurrence of each name. *)
       let seen = Hashtbl.create 4 in
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (!inq || c.[!j] <> '>') do
-        let d = c.[!j] in
-        if !inq then begin
-          (* ${…} inside a quoted attribute value — skip balanced braces so
-             that a string literal inside the interpolation using the SAME
-             quote char does not prematurely close the outer attribute quote. *)
-          if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
-            j := !j + 2; let depth = ref 1 in
-            while !depth > 0 && !j < n do
-              (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
-              incr j
-            done
-          end else begin
-            if d = !q then inq := false;
-            incr j
-          end
-        end
-        (* ${…} interpolation inside attribute region (outside quotes) — skip. *)
-        else if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
-          j := !j + 2; let depth = ref 1 in
-          while !depth > 0 && !j < n do
-            (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
-            incr j
-          done
-        end
-        (* Start of a quoted value (following '='). *)
-        else if d = '"' || d = '\'' then begin
-          inq := true; q := d; incr j
-        end
-        (* Attribute name: starts with a letter, '_', or ':'. *)
-        else if (d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')
-                || d = '_' || d = ':' then begin
-          let name_ofs = !j in
-          while !j < n && attr_nc c.[!j] do incr j done;
-          let name_len = !j - name_ofs in
-          let name = String.lowercase_ascii (String.sub c name_ofs name_len) in
-          if Hashtbl.mem seen name then begin
-            (* Second (or later) occurrence — emit a duplicate-attr entry. *)
-            let span = attr_name_span name_ofs name_len in
-            acc := (span,
-                    Printf.sprintf "Duplicate attribute `%s`" name,
-                    "html/duplicate-attr") :: !acc
-          end else
-            Hashtbl.add seen name ()
-          (* Note: j already advanced past the name; loop continues with
-             whatever comes next (whitespace, '=', '>', etc.). *)
-        end
-        else incr j
-      done;
-      (* Advance past the '>'. *)
-      i := (if !j < n then !j + 1 else n)
-    end
-    else incr i
-  done;
-  List.rev !acc
+      List.filter_map (fun (name, name_ofs, name_len) ->
+          if Hashtbl.mem seen name then
+            Some (attr_name_span name_ofs name_len,
+                  Printf.sprintf "Duplicate attribute `%s`" name,
+                  "html/duplicate-attr")
+          else (Hashtbl.add seen name (); None))
+        attrs
+    | _ -> [])
+    (tokenize_h_content s.hs_content)
 
 (** Pass 3.3 — void element misuse: close tags for void elements and
     self-closing syntax on non-void, non-island elements.
@@ -2117,79 +2071,30 @@ let dup_attrs_in_sigil ~(src : string) (s : h_sigil)
     and quoted attribute values — identical to the other scanners in this file. *)
 let void_misuse_in_sigil ~(src : string) (s : h_sigil)
     : (Ast.span * string * string) list =
-  let c = s.hs_content in
-  let n = String.length c in
-  let is_nc ch =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
   let name_span name_ofs name_len =
     let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
     { Ast.file = ""; start_line = l; start_col = col;
       end_line = l; end_col = col + name_len } in
-  let acc = ref [] and i = ref 0 in
-  while !i < n do
-    let ch = c.[!i] in
-    (* ${…} interpolation: skip balanced braces *)
-    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
-      i := !i + 2; let d = ref 1 in
-      while !d > 0 && !i < n do
-        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
-      done
-    end
-    (* <!-- … --> comment *)
-    else if ch = '<' && !i + 3 < n
-            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
-      i := !i + 4;
-      while !i + 2 < n
-            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
-      i := (if !i + 2 < n then !i + 3 else n)
-    end
-    (* <!…> declaration/doctype *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
-      while !i < n && c.[!i] <> '>' do incr i done;
-      if !i < n then incr i
-    end
-    (* </tag> close tag — check for void element *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
-      let ns = !i + 2 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_ofs = ns and name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      while !j < n && c.[!j] <> '>' do incr j done;
-      i := (if !j < n then !j + 1 else n);
+  List.filter_map (function
+    | HECloseTag { tag; name_ofs; name_len } ->
+      (* Close tag for a void element → it cannot have children. *)
       if name_len > 0 && List.mem tag html_void_elements then
-        acc := (name_span name_ofs name_len,
-                Printf.sprintf "`<%s>` is a void element and cannot have a closing tag." tag,
-                "html/void-with-children") :: !acc
-    end
-    (* <tag …> open tag — check for self-closing on non-void elements *)
-    else if ch = '<' && !i + 1 < n
-            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      let ns = !i + 1 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_ofs = ns and name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      (* Advance past attributes, respecting quoted values. *)
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (!inq || c.[!j] <> '>') do
-        let d = c.[!j] in
-        (if !inq then (if d = !q then inq := false)
-         else if d = '"' || d = '\'' then (inq := true; q := d));
-        incr j
-      done;
-      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
-      i := (if !j < n then !j + 1 else n);
-      if self
+        Some (name_span name_ofs name_len,
+              Printf.sprintf "`<%s>` is a void element and cannot have a closing tag." tag,
+              "html/void-with-children")
+      else None
+    | HEOpenTag { tag; name_ofs; name_len; self_closing; _ } ->
+      (* Self-closing syntax on a non-void, non-island element has no effect. *)
+      if self_closing
          && not (List.mem tag html_void_elements)
          && tag <> "island" then
-        acc := (name_span name_ofs name_len,
-                Printf.sprintf "`<%s/>` self-closing has no effect on non-void element `<%s>`; use `<%s></%s>`."
-                  tag tag tag tag,
-                "html/self-closing-nonvoid") :: !acc
-    end
-    else incr i
-  done;
-  List.rev !acc
+        Some (name_span name_ofs name_len,
+              Printf.sprintf "`<%s/>` self-closing has no effect on non-void element `<%s>`; use `<%s></%s>`."
+                tag tag tag tag,
+              "html/self-closing-nonvoid")
+      else None
+    | HEInterp _ -> None)
+    (tokenize_h_content s.hs_content)
 
 (** Pass 3.4 — XSS risk: [${…}] interpolation inside [<script>] or [<style>]
     elements.  HTML auto-escaping in normal text is safe, but inside these
@@ -2210,99 +2115,31 @@ let void_misuse_in_sigil ~(src : string) (s : h_sigil)
       attribute content for the element body. *)
 let unsafe_interpolation_in_sigil ~(src : string) (s : h_sigil)
     : (Ast.span * string * string) list =
-  let c = s.hs_content in
-  let n = String.length c in
-  let is_nc ch =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
   (* Build a single-line span for the two-character "${" at content-relative
      byte offset [ofs]. *)
   let interp_span ofs =
     let (l, col) = ofs_to_pos src (s.hs_base_ofs + ofs) in
     { Ast.file = ""; start_line = l; start_col = col;
       end_line = l; end_col = col + 2 } in
-  let acc = ref [] in
-  let i = ref 0 in
-  (* Whether we are currently inside a <script> or <style> element body. *)
+  (* Fold tracking whether we are inside a <script>/<style> element body.
+     Each top-level interpolation (HEInterp; attribute-region interps are not
+     emitted by the tokenizer) seen while raw is flagged. *)
   let in_raw = ref false in
-  while !i < n do
-    let ch = c.[!i] in
-    (* ${…} interpolation *)
-    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
-      if !in_raw then begin
-        (* Flag it — interpolation inside a raw JS/CSS context. *)
-        acc := (interp_span !i,
-                "Interpolation inside <script>/<style> is not HTML-escaped \
-                 for this context; ensure the value is safe.",
-                "html/unsafe-interpolation") :: !acc
-      end;
-      (* Skip the balanced braces in either case so we don't confuse
-         brace chars inside the expression with close-tags. *)
-      i := !i + 2; let d = ref 1 in
-      while !d > 0 && !i < n do
-        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
-      done
-    end
-    (* <!-- … --> comment: skip entirely *)
-    else if ch = '<' && !i + 3 < n
-            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
-      i := !i + 4;
-      while !i + 2 < n
-            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
-      i := (if !i + 2 < n then !i + 3 else n)
-    end
-    (* <!…> declaration/doctype: skip to '>' *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
-      while !i < n && c.[!i] <> '>' do incr i done;
-      if !i < n then incr i
-    end
-    (* </tag> close tag *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
-      let ns = !i + 2 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      while !j < n && c.[!j] <> '>' do incr j done;
-      i := (if !j < n then !j + 1 else n);
-      if tag = "script" || tag = "style" then
-        in_raw := false
-    end
-    (* <tag …> open tag *)
-    else if ch = '<' && !i + 1 < n
-            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      let ns = !i + 1 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      (* Skip attribute region (respecting quoted values and ${} interps). *)
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (not (!inq) && c.[!j] <> '>' || !inq) do
-        let d = c.[!j] in
-        if !inq then begin
-          if d = !q then inq := false;
-          incr j
-        end
-        else if d = '$' && !j + 1 < n && c.[!j + 1] = '{' then begin
-          j := !j + 2; let depth = ref 1 in
-          while !depth > 0 && !j < n do
-            (match c.[!j] with '{' -> incr depth | '}' -> decr depth | _ -> ());
-            incr j
-          done
-        end
-        else if d = '"' || d = '\'' then begin
-          inq := true; q := d; incr j
-        end
-        else if d = '>' then
-          () (* loop condition will exit *)
-        else incr j
-      done;
-      i := (if !j < n then !j + 1 else n);
-      if tag = "script" || tag = "style" then
-        in_raw := true
-    end
-    else incr i
-  done;
-  List.rev !acc
+  List.filter_map (function
+    | HEInterp { brace_ofs } ->
+      if !in_raw then
+        Some (interp_span brace_ofs,
+              "Interpolation inside <script>/<style> is not HTML-escaped \
+               for this context; ensure the value is safe.",
+              "html/unsafe-interpolation")
+      else None
+    | HEOpenTag { tag; _ } ->
+      if tag = "script" || tag = "style" then in_raw := true;
+      None
+    | HECloseTag { tag; _ } ->
+      if tag = "script" || tag = "style" then in_raw := false;
+      None)
+    (tokenize_h_content s.hs_content)
 
 (** Collect HTML lint warnings for all ~H sigils.  Returns a list of
     [(span, message, diagnostic-code)] triples.  This is the shared
@@ -2354,49 +2191,22 @@ let collect_html_lint ~(src : string) (sigils : h_sigil list)
     absolute source positions via [ofs_to_pos]).  Void and self-closing tags
     are skipped, as are [${…}] interpolations and [<!-- … -->] comments. *)
 let tag_pairs_in_sigil ~(src : string) (s : h_sigil) : (Ast.span * Ast.span) list =
-  let c = s.hs_content in
-  let n = String.length c in
-  let is_nc ch =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
   (* Build a single-line Ast.span for a tag-name at content-relative byte
      offset [name_ofs] with length [name_len]. *)
   let name_span name_ofs name_len =
     let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
     { Ast.file = ""; start_line = l; start_col = col;
       end_line = l; end_col = col + name_len } in
-  (* Stack entries: (lowercase-tag-name, name-offset-in-content, name-len) *)
-  let stack = ref [] and pairs = ref [] and i = ref 0 in
-  while !i < n do
-    let ch = c.[!i] in
-    (* ${…} interpolation: skip balanced braces *)
-    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
-      i := !i + 2; let d = ref 1 in
-      while !d > 0 && !i < n do
-        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
-      done
-    end
-    (* <!-- … --> comment *)
-    else if ch = '<' && !i + 3 < n
-            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
-      i := !i + 4;
-      while !i + 2 < n
-            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
-      i := (if !i + 2 < n then !i + 3 else n)
-    end
-    (* <!doctype …> or other declarations *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
-      while !i < n && c.[!i] <> '>' do incr i done;
-      if !i < n then incr i
-    end
-    (* </tag> close tag *)
-    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
-      let ns = !i + 2 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let close_name_ofs = ns and close_name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns close_name_len) in
-      while !j < n && c.[!j] <> '>' do incr j done;
-      i := (if !j < n then !j + 1 else n);
+  (* Stack entries: (lowercase-tag-name, name-offset-in-content, name-len). On a
+     matching close, prepend the (open_span, close_span) pair (most-recent first,
+     matching the legacy ordering). *)
+  let stack = ref [] and pairs = ref [] in
+  List.iter (function
+    | HEInterp _ -> ()
+    | HEOpenTag { tag; name_ofs; name_len; self_closing; _ } ->
+      if not self_closing && not (List.mem tag html_void_elements) then
+        stack := (tag, name_ofs, name_len) :: !stack
+    | HECloseTag { tag; name_ofs = close_name_ofs; name_len = close_name_len } ->
       (* Pop down to the matching open; skip any unmatched opens above it. *)
       let rec pop = function
         | (t, o, ln) :: r when t = tag ->
@@ -2405,31 +2215,8 @@ let tag_pairs_in_sigil ~(src : string) (s : h_sigil) : (Ast.span * Ast.span) lis
           r
         | _ :: r -> pop r
         | [] -> [] in
-      stack := pop !stack
-    end
-    (* <tag …> open tag *)
-    else if ch = '<' && !i + 1 < n
-            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
-      let ns = !i + 1 in let j = ref ns in
-      while !j < n && is_nc c.[!j] do incr j done;
-      let name_ofs = ns and name_len = !j - ns in
-      let tag = String.lowercase_ascii (String.sub c ns name_len) in
-      (* Advance past attributes, respecting quoted values so '>' inside a
-         quoted attribute string does not terminate the tag early. *)
-      let inq = ref false and q = ref ' ' in
-      while !j < n && (!inq || c.[!j] <> '>') do
-        let d = c.[!j] in
-        (if !inq then (if d = !q then inq := false)
-         else if d = '"' || d = '\'' then (inq := true; q := d));
-        incr j
-      done;
-      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
-      i := (if !j < n then !j + 1 else n);
-      if not self && not (List.mem tag html_void_elements) then
-        stack := (tag, name_ofs, name_len) :: !stack
-    end
-    else incr i
-  done;
+      stack := pop !stack)
+    (tokenize_h_content s.hs_content);
   !pairs
 
 (** Collect folding ranges for matched HTML element pairs inside ~H sigils.
