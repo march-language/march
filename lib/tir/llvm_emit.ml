@@ -360,7 +360,7 @@ let is_builtin_fn name =
                  "string_length"; "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
                  "println"; "print"; "print_stderr";
                  "int_to_string"; "float_to_string"; "bool_to_string";
-                 "kill"; "is_alive"; "send"; "spawn"; "actor_get_int";
+                 "kill"; "is_alive"; "receive"; "send"; "spawn"; "actor_get_int";
                  "actor_call"; "actor_reply"; "actor_cast";
                  "task_spawn"; "task_await"; "task_await_unwrap";
                  "task_yield"; "task_spawn_steal"; "task_reductions";
@@ -804,6 +804,7 @@ let mangle_extern : string -> string = function
   | "string_join"        -> "march_string_join"
   | "kill"               -> "march_kill"
   | "is_alive"      -> "march_is_alive"
+  | "receive"       -> "march_sched_recv"
   | "send"          -> "march_send"
   | "send_linear"   -> "march_send_linear"
   | "spawn"         -> "march_spawn"
@@ -2235,6 +2236,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
     emit ctx "call void @march_sched_yield()";
     ("i64", "0")
+
+  (* receive() → cooperative blocking mailbox pop via march_sched_recv *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "receive" ->
+    let r = fresh ctx "recv_msg" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_sched_recv()" r);
+    ("ptr", r)
 
   (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)
   | Tir.EApp (f, [_pool; clo_atom]) when f.Tir.v_name = "task_spawn_steal" ->
@@ -4511,6 +4518,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
 declare ptr  @march_cancel_token_new()
 declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)
@@ -4651,6 +4659,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
 declare ptr  @march_cancel_token_new()
 declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)

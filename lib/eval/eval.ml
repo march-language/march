@@ -582,6 +582,11 @@ exception Assert_failure of string
 (** Raised when an actor/task's reduction budget is exhausted. *)
 exception Yield
 
+(** Raised by [receive()] when the actor's mailbox is empty.
+    The scheduler catches this and re-queues the triggering message at the
+    front of the mailbox so the handler can retry when a sub-message arrives. *)
+exception BlockedOnReceive
+
 (* ------------------------------------------------------------------ *)
 (* March call stack for backtraces                                     *)
 (* ------------------------------------------------------------------ *)
@@ -2665,18 +2670,19 @@ let base_env : env =
            | None -> eval_error "self: called outside an actor handler")
         | _ -> eval_error "self: expected 0 arguments"))
   ; ("receive", VBuiltin ("receive", function
-        (* Single-threaded cooperative semantics: receive() pops the NEXT message
-           from this actor's mailbox immediately. If the mailbox is empty, it errors
-           rather than blocking — true blocking receive requires a multi-threaded
-           scheduler (Phase 4 async). Use this only when you know a message is
-           already queued (e.g., you sent the message before calling the handler). *)
+        (* Cooperative blocking receive: pop the NEXT message from this actor's
+           mailbox.  If the mailbox is empty, raise [BlockedOnReceive] so the
+           scheduler can re-queue the triggering message and retry on the next
+           pass once a sub-message has been delivered. *)
         | [] ->
           (match !current_pid with
            | Some pid ->
              (match Hashtbl.find_opt actor_registry pid with
               | Some inst when not (Queue.is_empty inst.ai_mailbox) ->
                 Queue.pop inst.ai_mailbox
-              | _ -> eval_error "receive: mailbox is empty (async receive requires a non-empty mailbox)")
+              | Some _ ->
+                raise BlockedOnReceive
+              | None -> eval_error "receive: actor %d not found" pid)
            | None -> eval_error "receive: called outside an actor handler")
         | _ -> eval_error "receive: expected 0 arguments"))
     (* Utility: convert Int to Pid (needed for supervisor state field access) *)
@@ -6868,7 +6874,6 @@ let run_scheduler () =
                   This is intentional: a mismatch is a programming error, but crashing
                   the actor would mask the original bug. *)
              else begin
-               changed := true;   (* only mark changed when handler actually runs *)
                let prev_pid = !current_pid in
                current_pid := Some pid;
                let param_bindings =
@@ -6880,7 +6885,17 @@ let run_scheduler () =
                in
                (match !eval_expr_hook handler_env handler.ah_body with
                 | new_state ->
-                  inst.ai_state <- new_state
+                  inst.ai_state <- new_state;
+                  changed := true   (* mark progress only on success *)
+                | exception BlockedOnReceive ->
+                  (* The handler called receive() but the mailbox was empty at
+                     that point.  Put the triggering message back at the front
+                     of the mailbox so the handler retries on a later pass.
+                     Do NOT set [changed := true] — no forward progress was made. *)
+                  let front_q = Queue.create () in
+                  Queue.push msg front_q;
+                  Queue.transfer inst.ai_mailbox front_q;
+                  inst.ai_mailbox <- front_q
                 | exception exn ->
                   (* Handler raised an exception: crash the actor.
                      Clear the march stack so leaked frames from this handler

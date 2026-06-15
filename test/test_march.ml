@@ -10829,6 +10829,135 @@ let test_self_send_from_handler () =
   (* stage 1 after Begin(), stage 2 after the queued End() — both must run *)
   Alcotest.(check int) "self-send reaches stage 2" 2 stage
 
+(** BlockedOnReceive: if an actor handler calls receive() when the mailbox is
+    empty, the triggering message is re-queued and the handler retries once a
+    sub-message arrives.  Here Dispatch() triggers a receive(); a Followup(n)
+    message arrives second, so the second scheduler pass unblocks the handler. *)
+let test_receive_blocks_until_message () =
+  let src = {|mod Test do
+    actor Dispatcher do
+      state { got : Int }
+      init { got = 0 }
+      on Dispatch() do
+        let follow = receive()
+        match follow do
+        Followup(n) -> { got = n }
+        end
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Dispatcher)
+      send(pid, Dispatch())
+      send(pid, Followup(42))
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let got =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "got" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "Dispatcher unblocked and got 42 via receive()" 42 got
+
+(** BlockedOnReceive does not deadlock when the mailbox stays empty:
+    the scheduler terminates cleanly and the actor remains alive. *)
+let test_receive_does_not_deadlock_on_empty () =
+  let src = {|mod Test do
+    actor Waiter do
+      state { alive : Bool }
+      init { alive = true }
+      on Start() do
+        let _msg = receive()
+        { alive = true }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Waiter)
+      send(pid, Start())
+      -- No sub-message: Waiter will block.  run_until_idle must terminate.
+      run_until_idle()
+      is_alive(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "blocked actor is still alive (no deadlock)" true
+    (match v with March_eval.Eval.VBool b -> b | _ -> false)
+
+(** BlockedOnReceive preserves FIFO message ordering.
+    Three messages M1, M2, M3 are sent; the actor uses receive() to pick up
+    a sub-message mid-handler.  Accumulated value must be 123 (FIFO). *)
+let test_receive_ordering_fifo () =
+  let src = {|mod Test do
+    actor Accum do
+      state { acc : Int }
+      init { acc = 0 }
+      on Push(n) do
+        { acc = state.acc * 10 + n }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Accum)
+      send(pid, Push(1))
+      send(pid, Push(2))
+      send(pid, Push(3))
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let acc =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "acc" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  (* FIFO: Push(1)→Push(2)→Push(3) ⟹ ((0*10+1)*10+2)*10+3 = 123 *)
+  Alcotest.(check int) "FIFO ordering preserved: acc = 123" 123 acc
+
+(** LLVM IR for receive() must call @march_sched_recv and the preamble
+    must declare it.  This catches the wiring in llvm_emit.ml. *)
+let test_receive_llvm_declaration () =
+  (* The actor must be spawned+used in main() so the handler is not DCE'd. *)
+  let ir = emit_actor_ir {|mod RecvTest do
+    actor Listener do
+      state { last : Int }
+      init { last = 0 }
+      on Wake() do
+        -- receive() a sub-message and discard it (wildcard)
+        let _sub = receive()
+        { last = 42 }
+      end
+    end
+    fn main() : Unit do
+      let pid = spawn(Listener)
+      let _ = send(pid, Wake())
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "preamble declares march_sched_recv" true
+    (ir_contains ir "declare ptr  @march_sched_recv()");
+  Alcotest.(check bool) "body calls march_sched_recv" true
+    (ir_contains ir "call ptr @march_sched_recv()")
+
 let test_eval_reduction_count () =
   let src = {|mod Test do
     fn countdown(n) do
@@ -22884,6 +23013,14 @@ let () =
           (with_reset test_send_to_dead_actor_dropped);
         Alcotest.test_case "self-send from handler"           `Quick
           (with_reset test_self_send_from_handler);
+        Alcotest.test_case "receive blocks until sub-message" `Quick
+          (with_reset test_receive_blocks_until_message);
+        Alcotest.test_case "receive does not deadlock on empty" `Quick
+          (with_reset test_receive_does_not_deadlock_on_empty);
+        Alcotest.test_case "receive preserves FIFO ordering"  `Quick
+          (with_reset test_receive_ordering_fifo);
+        Alcotest.test_case "receive emits march_sched_recv in LLVM" `Quick
+          test_receive_llvm_declaration;
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
