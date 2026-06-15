@@ -132,6 +132,24 @@ let semantic_tokens_data (a : Analysis.t) : int array =
   let tok_variable    = 5 in
   let mod_declaration = 1 in
   let mod_readonly    = 4 in
+  let mod_linear      = 8 in
+  let mod_affine      = 16 in
+
+  (* Ownership modifiers, read off the linear-consumption analysis: a value
+     binding consumed exactly once is `linear`; one consumed zero times is
+     `affine` (used at most once). Bindings used 2+ times carry neither.
+     Keyed by name, matching the rest of the LSP's name-based symbol model. *)
+  let ownership = Hashtbl.create 32 in
+  List.iter (fun (c : Analysis.consumption) ->
+      match List.length c.Analysis.con_uses with
+      | 1 -> Hashtbl.replace ownership c.Analysis.con_name mod_linear
+      | 0 -> if not (Hashtbl.mem ownership c.Analysis.con_name) then
+               Hashtbl.replace ownership c.Analysis.con_name mod_affine
+      | _ -> Hashtbl.remove ownership c.Analysis.con_name
+    ) a.Analysis.consumption;
+  let ownership_mod name =
+    match Hashtbl.find_opt ownership name with Some m -> m | None -> 0
+  in
 
   let tokens = ref [] in
   (* LSP semantic-token start columns and lengths are in UTF-16 code units. *)
@@ -146,7 +164,12 @@ let semantic_tokens_data (a : Analysis.t) : int array =
         else if List.mem_assoc name a.Analysis.ctors then
           tok_enum_member, mod_declaration lor mod_readonly
         else
-          tok_function, mod_declaration
+          (* A tracked value binding (in the consumption analysis) is a
+             variable carrying an ownership modifier; everything else
+             (functions, params) stays a function declaration. *)
+          let own = ownership_mod name in
+          if own <> 0 then tok_variable, mod_declaration lor own
+          else tok_function, mod_declaration
       in
       let len = sp.March_ast.Ast.end_col - sp.March_ast.Ast.start_col in
       if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then begin
@@ -157,13 +180,20 @@ let semantic_tokens_data (a : Analysis.t) : int array =
       end
     ) a.Analysis.def_map;
 
-  Hashtbl.iter (fun sp _name ->
+  Hashtbl.iter (fun sp name ->
+      (* Tag the use site by what the name resolves to — type, constructor,
+         or variable — instead of blindly calling every use a variable. *)
+      let tok, mods =
+        if List.mem_assoc name a.Analysis.types then tok_type, mod_readonly
+        else if List.mem_assoc name a.Analysis.ctors then tok_enum_member, mod_readonly
+        else tok_variable, ownership_mod name
+      in
       let len = sp.March_ast.Ast.end_col - sp.March_ast.Ast.start_col in
       if sp.March_ast.Ast.start_line = sp.March_ast.Ast.end_line && len > 0 then begin
         let line0 = sp.March_ast.Ast.start_line - 1 in
         let u_start = to_u line0 sp.March_ast.Ast.start_col in
         let u_len   = to_u line0 sp.March_ast.Ast.end_col - u_start in
-        tokens := (line0, u_start, u_len, tok_variable, 0) :: !tokens
+        tokens := (line0, u_start, u_len, tok, mods) :: !tokens
       end
     ) a.Analysis.use_map;
 

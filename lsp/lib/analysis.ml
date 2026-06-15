@@ -153,6 +153,9 @@ type t = {
   (** All call sites collected for signature-help queries. *)
   consumption : consumption list;
   (** Linear/affine binding consumption records — used for make-linear actions. *)
+  reuse_hints : Ast.span list;
+  (** Variable-name spans of bindings eligible for FBIP in-place reuse
+      (allocating RHS, consumed exactly once) — rendered as inlay hints. *)
   match_sites : match_site list;
   (** Non-exhaustive match warnings, structured for quickfix consumption. *)
   diagnostics : Lsp.Types.Diagnostic.t list;
@@ -771,6 +774,57 @@ let build_consumption_map (_type_map : (Ast.span, Tc.ty) Hashtbl.t)
   ) decls;
   !result
 
+(** Variable-name spans of bindings eligible for FBIP in-place reuse: a value
+    binding whose right-hand side allocates (constructor / record / tuple) and
+    that is consumed exactly once in its scope. The single last use lets Perceus
+    reuse the cell in place. This is the AST-level heuristic; the precise signal
+    is Perceus's [EReuse] (TIR pass, [tir_fn_insight.tfi_reuse_ops]). *)
+let build_reuse_hints (decls : Ast.decl list) : Ast.span list =
+  let result = ref [] in
+  let is_alloc = function
+    | Ast.ECon (_, _ :: _, _) | Ast.ERecord _
+    | Ast.ETuple _ | Ast.ERecordUpdate _ -> true
+    | _ -> false
+  in
+  let rec scan_expr (e : Ast.expr) =
+    match e with
+    | Ast.ELet (b, _) -> scan_expr b.bind_expr
+    | Ast.EBlock (es, _) ->
+      let rec scan_block = function
+        | [] -> ()
+        | Ast.ELet (b, _) :: rest ->
+          (match b.bind_pat with
+           | Ast.PatVar n when is_alloc b.bind_expr ->
+             let rest_expr = match rest with
+               | [e] -> e
+               | []  -> Ast.ELit (Ast.LitBool false, Ast.dummy_span)
+               | es  -> Ast.EBlock (es, Ast.dummy_span)
+             in
+             if List.length (find_uses n.txt rest_expr []) = 1 then
+               result := n.span :: !result
+           | _ -> ());
+          scan_expr b.bind_expr;
+          scan_block rest
+        | e :: rest -> scan_expr e; scan_block rest
+      in
+      scan_block es
+    | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> scan_expr body
+    | Ast.EMatch (subj, brs, _) ->
+      scan_expr subj;
+      List.iter (fun (br : Ast.branch) -> scan_expr br.branch_body) brs
+    | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
+    | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
+    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> scan_expr x; scan_expr y
+    | _ -> ()
+  in
+  List.iter (function
+    | Ast.DFn (fn, _) ->
+      List.iter (fun (cl : Ast.fn_clause) -> scan_expr cl.fc_body) fn.fn_clauses
+    | Ast.DLet (_, b, _) -> scan_expr b.bind_expr
+    | _ -> ()
+  ) decls;
+  !result
+
 (* ------------------------------------------------------------------ *)
 (* Fold-range and annotation-site collection                          *)
 (* ------------------------------------------------------------------ *)
@@ -1371,6 +1425,7 @@ let analyse ~filename ~src : t =
       sym_scope        = Hashtbl.create 0;
       call_sites       = [];
       consumption      = [];
+      reuse_hints      = [];
       match_sites      = [];
       diagnostics      = [diag];
       ctor_arities     = [];
@@ -2007,6 +2062,7 @@ let analyse ~filename ~src : t =
       sym_scope;
       call_sites;
       consumption;
+      reuse_hints      = build_reuse_hints user_decls;
       match_sites;
       diagnostics      = diags;
       ctor_arities     = Tc.StrMap.fold (fun name cis acc ->
@@ -2470,7 +2526,7 @@ let completions_at (a : t) ~line ~character =
   @ rank "5" iface_items
   @ rank "6" sigil_items
 
-let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
+let inlay_hints_for ?(perf_annotations = true) (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
   let is_user_span (sp : Ast.span) =
     sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
@@ -2481,6 +2537,15 @@ let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
     r.Range.start.line <= range.Range.end_.line
   in
   let hints = ref [] in
+  (* Emit a small annotation [label] at the end of [sp]. *)
+  let annotate sp label =
+    if is_user_span sp && in_range sp then begin
+      let pos = Pos.create
+        ~line:(sp.Ast.end_line - 1) ~character:sp.Ast.end_col in
+      hints := InlayHint.create
+        ~position:pos ~label:(`String label) ~paddingLeft:true () :: !hints
+    end
+  in
   Hashtbl.iter (fun sp ty ->
       if is_user_span sp && in_range sp &&
          sp.Ast.start_line = sp.Ast.end_line &&
@@ -2498,6 +2563,17 @@ let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
         hints := hint :: !hints
       end
     ) a.type_map;
+  (* FBIP ownership annotations — the hint no other LSP can show: which
+     bindings Perceus can reuse in place (♻) vs. which are deep-copied on
+     send (⧉). *)
+  if perf_annotations then begin
+    List.iter (fun sp -> annotate sp "♻ reused") a.reuse_hints;
+    List.iter (fun (pi : perf_insight) ->
+        match pi.pi_kind with
+        | ActorSendCopy _ -> annotate pi.pi_span "⧉ copied"
+        | _ -> ()
+      ) a.perf_insights
+  end;
   !hints
 
 let document_symbols (a : t) =
@@ -2595,58 +2671,56 @@ let name_at (a : t) ~line ~character : string option =
           then Some name else None)
       a.def_map None
 
-let references_at (a : t) ~include_declaration ~line ~character
-    : Lsp.Types.Location.t list =
-  (* Local binder under the cursor: resolve by scope (shadow-correct). *)
+(* Resolve the symbol under the cursor to (definition span option, use spans).
+   Shared by find-references and documentHighlight so the two never diverge.
+   Locals resolve by scope (shadow-correct); everything else by name. *)
+let symbol_spans_at (a : t) ~line ~character
+    : (Ast.span option * Ast.span list) option =
   match local_symbol_at a ~line ~character with
   | Some id ->
     let use_spans = try Hashtbl.find a.sym_id_uses id with Not_found -> [] in
-    let all_spans =
-      if include_declaration then
-        match Hashtbl.find_opt a.sym_defs id with
-        | Some def_sp -> def_sp :: use_spans
-        | None        -> use_spans
-      else use_spans
-    in
-    locations_of_spans a all_spans
+    Some (Hashtbl.find_opt a.sym_defs id, use_spans)
   | None ->
-  (* Otherwise top-level/stdlib: name-based resolution. *)
-  let name_opt =
-    let from_use =
-      Hashtbl.fold (fun sp name found ->
-          match found with
-          | Some _ -> found
-          | None   ->
-            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
-            else None
-        ) a.use_map None
+    let name_opt =
+      let from_use =
+        Hashtbl.fold (fun sp name found ->
+            match found with
+            | Some _ -> found
+            | None   ->
+              if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
+              else None
+          ) a.use_map None
+      in
+      match from_use with
+      | Some _ -> from_use
+      | None ->
+        Hashtbl.fold (fun name sp found ->
+            match found with
+            | Some _ -> found
+            | None   ->
+              if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
+              else None
+          ) a.def_map None
     in
-    match from_use with
-    | Some _ -> from_use
-    | None ->
-      Hashtbl.fold (fun name sp found ->
-          match found with
-          | Some _ -> found
-          | None   ->
-            if span_in_user_file a sp && Pos.span_contains sp ~line ~character then Some name
-            else None
-        ) a.def_map None
-  in
-  match name_opt with
+    match name_opt with
+    | None -> None
+    | Some name ->
+      let use_spans =
+        match Hashtbl.find_opt a.refs_map name with
+        | Some spans -> spans
+        | None       -> []
+      in
+      Some (Hashtbl.find_opt a.def_map name, use_spans)
+
+let references_at (a : t) ~include_declaration ~line ~character
+    : Lsp.Types.Location.t list =
+  match symbol_spans_at a ~line ~character with
   | None -> []
-  | Some name ->
-    let use_spans =
-      match Hashtbl.find_opt a.refs_map name with
-      | Some spans -> spans
-      | None       -> []
-    in
+  | Some (def_opt, use_spans) ->
     let all_spans =
       if include_declaration then
-        match Hashtbl.find_opt a.def_map name with
-        | Some def_sp -> def_sp :: use_spans
-        | None        -> use_spans
-      else
-        use_spans
+        match def_opt with Some d -> d :: use_spans | None -> use_spans
+      else use_spans
     in
     locations_of_spans a all_spans
 
@@ -2685,10 +2759,22 @@ let type_definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
 (* textDocument/documentHighlight: occurrences of the symbol under the cursor
    within the current file (references, rendered as highlights). *)
 let document_highlights_at (a : t) ~line ~character : Lsp.Types.DocumentHighlight.t list =
-  references_at a ~include_declaration:true ~line ~character
-  |> List.map (fun (l : Lsp.Types.Location.t) ->
-         Lsp.Types.DocumentHighlight.create ~range:l.Lsp.Types.Location.range
-           ~kind:Lsp.Types.DocumentHighlightKind.Text ())
+  match symbol_spans_at a ~line ~character with
+  | None -> []
+  | Some (def_opt, use_spans) ->
+    (* The binding site is a Write; every use site is a Read. *)
+    let mk kind (sp : Ast.span) =
+      if sp = Ast.dummy_span then None
+      else Some (Lsp.Types.DocumentHighlight.create
+                   ~range:(Pos.span_to_lsp_range sp) ~kind ())
+    in
+    let writes =
+      match def_opt with
+      | Some sp -> Option.to_list (mk Lsp.Types.DocumentHighlightKind.Write sp)
+      | None    -> []
+    in
+    let reads = List.filter_map (mk Lsp.Types.DocumentHighlightKind.Read) use_spans in
+    writes @ reads
 
 (** Validate a rename request: return the identifier range if the symbol under
     the cursor is renameable (a function-local binding, or a top-level symbol
