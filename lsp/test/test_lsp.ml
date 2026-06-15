@@ -4945,6 +4945,68 @@ end|} in
   Alcotest.(check bool) "distinct attrs not flagged" false flagged
 
 (* ------------------------------------------------------------------ *)
+(* ~H void / self-closing misuse lint                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_html_void_with_children () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<br>text</br>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/void-with-children") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "void close-tag flagged" true has
+
+let test_html_self_closing_nonvoid () =
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div/>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/self-closing-nonvoid") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "self-closing non-void flagged" true has
+
+let test_html_void_self_closing_ok () =
+  (* <br/> is void + self-closing — both checks must remain silent. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<br/>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/void-with-children")
+    | Some (`String "html/self-closing-nonvoid") -> true
+    | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "void self-closing not flagged" false flagged
+
+let test_html_normal_pair_ok () =
+  (* <div></div> is a normal matched pair — neither check fires. *)
+  let src = {|mod M do
+  fn page() : IOList do
+    ~H"<div></div>"
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "sigil collected" true (a.An.h_sigils <> []);
+  let flagged = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.Lsp.Types.Diagnostic.code with
+    | Some (`String "html/void-with-children")
+    | Some (`String "html/self-closing-nonvoid") -> true
+    | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "normal div pair not flagged" false flagged
+
+(* ------------------------------------------------------------------ *)
 (* Island component name completion                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -5182,6 +5244,12 @@ let () =
     "~H duplicate attribute lint", [
       "duplicate type attr flagged",              `Quick, test_html_duplicate_attr;
       "distinct attrs not flagged",               `Quick, test_html_no_duplicate_attr_for_distinct;
+    ];
+    "~H void/self-closing misuse lint", [
+      "void close-tag </br> flagged as html/void-with-children", `Quick, test_html_void_with_children;
+      "self-closing non-void <div/> flagged as html/self-closing-nonvoid", `Quick, test_html_self_closing_nonvoid;
+      "void self-closing <br/> not flagged",  `Quick, test_html_void_self_closing_ok;
+      "normal pair <div></div> not flagged",  `Quick, test_html_normal_pair_ok;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;

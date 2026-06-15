@@ -2093,6 +2093,93 @@ let dup_attrs_in_sigil ~(src : string) (s : h_sigil)
   done;
   List.rev !acc
 
+(** Pass 3.3 — void element misuse: close tags for void elements and
+    self-closing syntax on non-void, non-island elements.
+
+    Two checks per sigil walk:
+    - Close tag [</X>] where [X] is a void element →
+      [(name_span, msg, "html/void-with-children")]
+    - Open tag that ends with [/>] where [X] is NOT void and NOT "island" →
+      [(name_span, msg, "html/self-closing-nonvoid")]
+
+    Skips [\${…}] interpolations, [<!-- … -->] comments, [<!…>] declarations,
+    and quoted attribute values — identical to the other scanners in this file. *)
+let void_misuse_in_sigil ~(src : string) (s : h_sigil)
+    : (Ast.span * string * string) list =
+  let c = s.hs_content in
+  let n = String.length c in
+  let is_nc ch =
+    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+    || (ch >= '0' && ch <= '9') || ch = '-' || ch = '_' in
+  let name_span name_ofs name_len =
+    let (l, col) = ofs_to_pos src (s.hs_base_ofs + name_ofs) in
+    { Ast.file = ""; start_line = l; start_col = col;
+      end_line = l; end_col = col + name_len } in
+  let acc = ref [] and i = ref 0 in
+  while !i < n do
+    let ch = c.[!i] in
+    (* ${…} interpolation: skip balanced braces *)
+    if ch = '$' && !i + 1 < n && c.[!i + 1] = '{' then begin
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match c.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    (* <!-- … --> comment *)
+    else if ch = '<' && !i + 3 < n
+            && c.[!i+1] = '!' && c.[!i+2] = '-' && c.[!i+3] = '-' then begin
+      i := !i + 4;
+      while !i + 2 < n
+            && not (c.[!i] = '-' && c.[!i+1] = '-' && c.[!i+2] = '>') do incr i done;
+      i := (if !i + 2 < n then !i + 3 else n)
+    end
+    (* <!…> declaration/doctype *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '!' then begin
+      while !i < n && c.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    (* </tag> close tag — check for void element *)
+    else if ch = '<' && !i + 1 < n && c.[!i+1] = '/' then begin
+      let ns = !i + 2 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      while !j < n && c.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n);
+      if name_len > 0 && List.mem tag html_void_elements then
+        acc := (name_span name_ofs name_len,
+                Printf.sprintf "`<%s>` is a void element and cannot have a closing tag." tag,
+                "html/void-with-children") :: !acc
+    end
+    (* <tag …> open tag — check for self-closing on non-void elements *)
+    else if ch = '<' && !i + 1 < n
+            && (let d = c.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ns = !i + 1 in let j = ref ns in
+      while !j < n && is_nc c.[!j] do incr j done;
+      let name_ofs = ns and name_len = !j - ns in
+      let tag = String.lowercase_ascii (String.sub c ns name_len) in
+      (* Advance past attributes, respecting quoted values. *)
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || c.[!j] <> '>') do
+        let d = c.[!j] in
+        (if !inq then (if d = !q then inq := false)
+         else if d = '"' || d = '\'' then (inq := true; q := d));
+        incr j
+      done;
+      let self = !j < n && !j > 0 && c.[!j - 1] = '/' in
+      i := (if !j < n then !j + 1 else n);
+      if self
+         && not (List.mem tag html_void_elements)
+         && tag <> "island" then
+        acc := (name_span name_ofs name_len,
+                Printf.sprintf "`<%s/>` self-closing has no effect on non-void element `<%s>`; use `<%s></%s>`."
+                  tag tag tag tag,
+                "html/self-closing-nonvoid") :: !acc
+    end
+    else incr i
+  done;
+  List.rev !acc
+
 (** Collect HTML lint warnings for all ~H sigils.  Returns a list of
     [(span, message, diagnostic-code)] triples.  This is the shared
     accumulator — later lint passes (3.2 dup attrs, 3.3 void misuse,
@@ -2126,7 +2213,12 @@ let collect_html_lint ~(src : string) (sigils : h_sigil list)
   let dup_attr_results =
     List.concat_map (dup_attrs_in_sigil ~src) sigils
   in
-  unknown_tag_results @ dup_attr_results
+  (* Pass 3.3 — void element misuse (close tags on void elements;
+     self-closing syntax on non-void elements). *)
+  let void_misuse_results =
+    List.concat_map (void_misuse_in_sigil ~src) sigils
+  in
+  unknown_tag_results @ dup_attr_results @ void_misuse_results
 
 (** Return matched (open-name-span, close-name-span) pairs in one ~H sigil.
     Adapts the [scan_html_unclosed] walk: on a successful close-tag match, pop
