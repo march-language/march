@@ -1,0 +1,55 @@
+-- Regression: a closure that RETURNS a stored Bool field, when dispatched
+-- through a polymorphic container, must agree on its calling convention with a
+-- closure that returns a COMPUTED Bool.
+--
+-- A dynamic record-field read (`row.active` on a generic row) yields the field
+-- in the tagged generic representation (true=3, false=1).  Inference left such a
+-- lambda's return type polymorphic, so its apply wrapper used the generic ptr
+-- ABI; a `fn r -> r.age > 0` lambda got a concrete i64 ABI.  Stored in one list
+-- and called through a single `(_) -> Bool` predicate, the indirect dispatch
+-- picked `call i64` for both and read the tagged `3`/`1` verbatim — inverting
+-- Bool-field predicates (true rows dropped, false rows kept).
+--
+-- Fix: closure apply wrappers use the generic ptr ABI uniformly; call sites
+-- read the result as ptr and untag.  All three predicate kinds must now agree.
+
+mod ClosureBoolField do
+  type Box = Bx(List(b))
+
+  fn count_keep(rows : List(a), pred, n : Int) : Int do
+    match rows do
+    Nil -> n
+    Cons(h, t) ->
+      if pred(h) == true do count_keep(t, pred, n + 1)
+      else count_keep(t, pred, n)
+      end
+    end
+  end
+
+  fn run(box, rows) do
+    match box do
+    Bx(preds) ->
+      match preds do
+      Cons(p, _) -> count_keep(rows, p, 0)
+      Nil        -> 0 - 1
+      end
+    end
+  end
+
+  fn rows() do
+    Cons({ id = 1, age = 30, active = true },
+    Cons({ id = 2, age = 25, active = false },
+    Cons({ id = 3, age = 35, active = true }, Nil)))
+  end
+
+  fn main() : Unit do
+    -- stored Bool field: 2 active rows
+    println("stored=" ++ int_to_string(run(Bx(Cons(fn r -> r.active, Nil)), rows())))
+    -- computed Bool: age > 28 → 2 rows
+    println("computed=" ++ int_to_string(run(Bx(Cons(fn r -> r.age > 28, Nil)), rows())))
+    -- literal true → 3 rows
+    println("literal=" ++ int_to_string(run(Bx(Cons(fn r -> true, Nil)), rows())))
+    -- negated stored field: 1 inactive row
+    println("negated=" ++ int_to_string(run(Bx(Cons(fn r -> r.active == false, Nil)), rows())))
+  end
+end

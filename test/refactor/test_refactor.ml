@@ -136,6 +136,37 @@ let test_bundle_requires_annotations () =
    | Ok _ -> Alcotest.fail "should have errored on unannotated params"
    | Error _ -> ())
 
+(* A documented target fn must still bundle: the generated record type has to be
+   inserted ABOVE the `doc` comment, not between the `doc` and its `fn` (which
+   would not parse, making the engine silently skip the file). *)
+let index_of s sub =
+  let hl = String.length s and nl = String.length sub in
+  let rec f i = if i + nl > hl then -1
+                else if String.sub s i nl = sub then i else f (i + 1) in
+  f 0
+
+let test_bundle_documented_fn () =
+  let root = mk_project [
+    "a.march",
+    "mod A do\n\n  doc \"Open a connection.\"\n  fn connect(host: String, port: Int) do\n    open(host, port)\n  end\n\n  fn go() do connect(\"localhost\", 8080) end\nend\n";
+  ] in
+  (match R.bundle_fn ~root ~fn_name:"connect" ~dry_run:false () with
+   | Ok o ->
+     Alcotest.(check int) "one file changed" 1 (List.length o.R.changes);
+     Alcotest.(check int) "nothing skipped"  0 (List.length o.R.skipped)
+   | Error e -> Alcotest.failf "bundle failed: %s" e);
+  let a = read root "a.march" in
+  Alcotest.(check bool) "record type generated" true
+    (contains a "type ConnectArgs = { host : String");
+  Alcotest.(check bool) "doc comment preserved" true
+    (contains a "doc \"Open a connection.\"");
+  Alcotest.(check bool) "signature takes record" true
+    (contains a "fn connect(args: ConnectArgs)");
+  Alcotest.(check bool) "type declared above the doc" true
+    (index_of a "type ConnectArgs" < index_of a "doc \"Open a connection.\"");
+  Alcotest.(check bool) "doc still sits above the fn" true
+    (index_of a "doc \"Open a connection.\"" < index_of a "fn connect(args")
+
 let () =
   Alcotest.run "refactor" [
     "rename", [
@@ -156,5 +187,6 @@ let () =
     "bundle", [
       Alcotest.test_case "introduce parameter object" `Quick test_bundle_param_object;
       Alcotest.test_case "requires annotated params"  `Quick test_bundle_requires_annotations;
+      Alcotest.test_case "documented target fn"       `Quick test_bundle_documented_fn;
     ];
   ]

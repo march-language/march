@@ -32,6 +32,45 @@ type tok_with_pos = {
 }
 
 let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.token =
+  (* Contextual test-DSL keywords. `test`/`describe` are keywords only when
+     immediately followed by a STRING (`test "name" do` / `describe "name" do`),
+     and `setup`/`setup_all` only when followed by DO. Everywhere else they are
+     ordinary identifiers, so they can be function names, parameters and calls
+     (March calls always use parens, so a STRING can never follow an identifier
+     here except in the DSL). We demote them before the rest of the filter runs,
+     using a one-token lookahead that preserves lexbuf positions so spans stay
+     correct. *)
+  let base_lexer =
+    let orig = base_lexer in
+    let pending : (Parser.token * Lexing.position * Lexing.position) option ref =
+      ref None in
+    fun lexbuf ->
+      let (tok, sp, cp) =
+        match !pending with
+        | Some saved -> pending := None; saved
+        | None ->
+          let t = orig lexbuf in
+          (t, lexbuf.Lexing.lex_start_p, lexbuf.Lexing.lex_curr_p)
+      in
+      let restore () =
+        lexbuf.Lexing.lex_start_p <- sp;
+        lexbuf.Lexing.lex_curr_p <- cp
+      in
+      let demote ident ~keep_when =
+        let nxt = orig lexbuf in
+        pending := Some (nxt, lexbuf.Lexing.lex_start_p, lexbuf.Lexing.lex_curr_p);
+        restore ();
+        if keep_when nxt then tok else Parser.LOWER_IDENT ident
+      in
+      let after_string = function Parser.STRING _ -> true | _ -> false in
+      let after_do = function Parser.DO -> true | _ -> false in
+      match tok with
+      | Parser.TEST      -> demote "test"      ~keep_when:after_string
+      | Parser.DESCRIBE  -> demote "describe"  ~keep_when:after_string
+      | Parser.SETUP     -> demote "setup"     ~keep_when:after_do
+      | Parser.SETUP_ALL -> demote "setup_all" ~keep_when:after_do
+      | _ -> restore (); tok
+  in
   let stack : context Stack.t = Stack.create () in
   let pending_match_depths : int Stack.t = Stack.create () in
   let paren_depth = ref 0 in

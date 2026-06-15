@@ -4202,7 +4202,24 @@ let register_impl_shape env (idef : Ast.impl_def) =
          let v = fresh_var 1 in
          tvars := M.add n.txt v !tvars;
          v)
-    | Ast.TyCon (n, args)  -> TCon (n.txt, List.map lenient_ty args)
+    | Ast.TyCon (n, args)  ->
+      let args' = List.map lenient_ty args in
+      (* Expand a record type name to its structural form, exactly as
+         [surface_ty] (and so [check_decl]'s DImpl handler) does. Without this,
+         an impl on a record type is registered here under the NOMINAL name
+         (`TCon "T"`) while the dispatch site sees the structural record
+         (`TRecord [...]`); they don't unify, so `impl Iface(Record)` is invisible
+         to a call in a module checked before the impl's own module — which is
+         exactly the cross-module / multi-file case. Variant types are unaffected
+         (they are not in [env.records] and stay nominal). *)
+      (match StrMap.find_opt n.txt env.records with
+       | Some (params, field_decls) when List.length params = List.length args' ->
+         let saved = !tvars in
+         List.iter2 (fun pname arg -> tvars := M.add pname arg !tvars) params args';
+         let flds = List.map (fun (fn, fty) -> (fn, lenient_ty fty)) field_decls in
+         tvars := saved;
+         TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
+       | _ -> TCon (n.txt, args'))
     | Ast.TyArrow (a, b)   -> TArrow (lenient_ty a, lenient_ty b)
     | Ast.TyTuple ts       -> TTuple (List.map lenient_ty ts)
     | Ast.TyRecord fs      ->
@@ -4215,6 +4232,53 @@ let register_impl_shape env (idef : Ast.impl_def) =
     (let key = idef.impl_iface.txt in
      let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
      StrMap.add key (inst_ty :: lst) env.impls) }
+
+(** Pre-register a forward-reference interface declared in [prefix]: its name
+    (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
+    bare) with an interface-constrained scheme, so a sibling module's `impl` /
+    method call resolves even when that module is checked before the interface's
+    own module. Shared by the pre-passes of [check_module_core] and
+    [check_module_with_env] so the two cannot diverge — a divergence here (the
+    incremental pass omitted interfaces entirely) previously hid sibling
+    interfaces from the LSP's per-file analysis ("Unknown interface"). *)
+let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
+  let iface_qname = prefix ^ "." ^ idef.iface_name.txt in
+  let iface_sname = idef.iface_name.txt in
+  let e1 = if StrMap.mem iface_qname e.interfaces then e
+           else { e with interfaces = StrMap.add iface_qname idef e.interfaces } in
+  let e1 = if StrMap.mem iface_sname e1.interfaces then e1
+           else { e1 with interfaces = StrMap.add iface_sname idef e1.interfaces } in
+  if StrMap.mem (prefix ^ "." ^ idef.iface_name.txt ^ "." ^
+                 (match idef.iface_methods with m :: _ -> m.md_name.txt | [] -> ""))
+       e.vars
+  then e1  (* already bound — skip to avoid duplicate work *)
+  else
+  List.fold_left (fun e (m : Ast.method_decl) ->
+    let full_qualified = prefix ^ "." ^ idef.iface_name.txt ^ "." ^ m.md_name.txt in
+    let iface_qualified = idef.iface_name.txt ^ "." ^ m.md_name.txt in
+    if StrMap.mem full_qualified e.vars then e
+    else begin
+      let tmp_errors = Err.create () in
+      let tmp_env = { e with errors = tmp_errors } in
+      let a = fresh_var 1 in
+      let tvars = ref [(idef.iface_param.txt, a)] in
+      let ty = surface_ty tmp_env ~tvars m.md_ty in
+      let a_id = match a with
+        | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+        | _ -> 0
+      in
+      let base_sch = generalize 0 ty in
+      let sch = match base_sch with
+        | Poly (ids, cs, t) -> Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
+        | Mono t -> Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
+      in
+      let e1 = { e with vars = StrMap.add full_qualified sch e.vars } in
+      let e1 = if StrMap.mem iface_qualified e1.vars then e1
+               else { e1 with vars = StrMap.add iface_qualified sch e1.vars } in
+      if StrMap.mem m.md_name.txt e1.vars then e1
+      else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars }
+    end
+  ) e1 idef.iface_methods
 
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
@@ -6228,52 +6292,7 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
-        | Ast.DInterface (idef, _) ->
-          let iface_qname = prefix ^ "." ^ idef.iface_name.txt in
-          let iface_sname = idef.iface_name.txt in
-          let e1 = if StrMap.mem iface_qname e.interfaces then e
-                   else { e with interfaces = StrMap.add iface_qname idef e.interfaces } in
-          (* Also register the short name so that `impl Storage(X)` resolves from
-             any module that imports this one (e.g. `use Conduit`). *)
-          let e1 = if StrMap.mem iface_sname e1.interfaces then e1
-                   else { e1 with interfaces = StrMap.add iface_sname idef e1.interfaces } in
-          (* Pre-bind each interface method with a proper Poly scheme so that
-             cross-module references (e.g. "Conduit.Storage.workflow_load") resolve
-             correctly even when the module containing the interface is processed
-             AFTER the modules that use it in pass 2. We use a temp error context
-             so that unknown type names (e.g. DateTime not yet in scope) don't
-             produce spurious errors — best-effort types are sufficient here. *)
-          if StrMap.mem (prefix ^ "." ^ idef.iface_name.txt ^ "." ^
-                         (match idef.iface_methods with m :: _ -> m.md_name.txt | [] -> ""))
-               e.vars
-          then e1  (* already bound — skip to avoid duplicate work *)
-          else
-          List.fold_left (fun e (m : Ast.method_decl) ->
-            let full_qualified = prefix ^ "." ^ idef.iface_name.txt ^ "." ^ m.md_name.txt in
-            let iface_qualified = idef.iface_name.txt ^ "." ^ m.md_name.txt in
-            if StrMap.mem full_qualified e.vars then e
-            else begin
-              let tmp_errors = Err.create () in
-              let tmp_env = { e with errors = tmp_errors } in
-              let a = fresh_var 1 in
-              let tvars = ref [(idef.iface_param.txt, a)] in
-              let ty = surface_ty tmp_env ~tvars m.md_ty in
-              let a_id = match a with
-                | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
-                | _ -> 0
-              in
-              let base_sch = generalize 0 ty in
-              let sch = match base_sch with
-                | Poly (ids, cs, t) ->
-                  Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
-                | Mono t ->
-                  Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
-              in
-              let e1 = { e with vars = StrMap.add full_qualified sch e.vars } in
-              if StrMap.mem iface_qualified e1.vars then e1
-              else { e1 with vars = StrMap.add iface_qualified sch e1.vars }
-            end
-          ) e1 idef.iface_methods
+        | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
@@ -6451,6 +6470,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
+        | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
@@ -6463,7 +6483,14 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-        prebind_mod_members_inc mname.txt env inner_decls
+        (* Register the sibling module's members, then its interface impls — an
+           impl declared in a sibling must satisfy constraints unit-wide
+           regardless of check order (mirrors check_module_core's pass 1). *)
+        let env = prebind_mod_members_inc mname.txt env inner_decls in
+        List.fold_left (fun e d -> match d with
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | _ -> e
+          ) env inner_decls
       | Ast.DType (_, name, params, typedef, _) ->
         let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with

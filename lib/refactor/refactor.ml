@@ -763,17 +763,47 @@ let bundle_fn ~root ~fn_name ?record_name ~dry_run () : (outcome, string) result
             let rn = match record_name with Some r -> r | None -> pascal_case fn_name ^ "Args" in
             let pvar = "args" in
             let def_edits = ref [] in
-            (* (a) insert the record type before the function *)
+            (* (a) insert the record type before the function. If the function
+               carries a `doc` comment (and/or `@[..]` attributes), the type
+               must go ABOVE that block — a `type` wedged between a `doc` and its
+               `fn` does not parse, which would make the engine skip the file. *)
             let name_sp = fn.Ast.fn_name.Ast.span in
-            let line_start = offset_of_pos def_src (name_sp.Ast.start_line - 1) 0 in
+            let fn_line = name_sp.Ast.start_line - 1 in
+            let line_start = offset_of_pos def_src fn_line 0 in
             let indent =
               let b = Buffer.create 8 in let i = ref line_start in
               while !i < String.length def_src && (def_src.[!i] = ' ' || def_src.[!i] = '\t') do
                 Buffer.add_char b def_src.[!i]; incr i done; Buffer.contents b in
+            let insert_off =
+              match fn.Ast.fn_doc with
+              | None -> line_start
+              | Some _ ->
+                let line_text i =
+                  let s = offset_of_pos def_src i 0 in
+                  let n = String.length def_src and e = ref (offset_of_pos def_src i 0) in
+                  while !e < n && def_src.[!e] <> '\n' do incr e done;
+                  String.sub def_src s (!e - s) in
+                let trimmed_starts t pfx =
+                  let kl = String.length pfx in
+                  String.length t >= kl && String.sub t 0 kl = pfx in
+                (* The opening line of a doc block: the doc keyword followed by
+                   a string literal (single- or triple-quoted). *)
+                let is_doc_start s =
+                  let t = String.trim s in
+                  trimmed_starts t "doc"
+                  && (let j = ref 3 and n = String.length t in
+                      while !j < n && t.[!j] = ' ' do incr j done;
+                      !j < n && t.[!j] = '"') in
+                let i = ref (fn_line - 1) in
+                (* skip attribute lines sitting between the doc and the fn *)
+                while !i >= 0 && trimmed_starts (String.trim (line_text !i)) "@" do decr i done;
+                (* walk up to the first line of the doc block *)
+                while !i >= 0 && not (is_doc_start (line_text !i)) do decr i done;
+                if !i >= 0 then offset_of_pos def_src !i 0 else line_start in
             let fields_decl =
               String.concat ", " (List.map (fun (n, t) -> Printf.sprintf "%s : %s" n (surface_ty t)) params) in
             let type_text = Printf.sprintf "%stype %s = { %s }\n\n" indent rn fields_decl in
-            def_edits := { e_start = line_start; e_stop = line_start; e_repl = type_text } :: !def_edits;
+            def_edits := { e_start = insert_off; e_stop = insert_off; e_repl = type_text } :: !def_edits;
             (* (b) replace the parameter list with `(args: RN)` *)
             let (_, name_end) = span_bounds def_src name_sp in
             let n = String.length def_src in

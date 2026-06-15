@@ -309,4 +309,8 @@ mod Bytes do
     go(chars, Nil)
   end
 
+  impl Eq(Bytes) do
+    fn eq(a, b) do Bytes.to_string(a) == Bytes.to_string(b) end
+  end
+
 end

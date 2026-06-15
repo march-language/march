@@ -357,6 +357,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_scalar_fields.expected native_tuple_scalar_fields.out)))
 
+; ── Regression: closure apply-wrapper ABI must be uniform for Bool returns ──
+; A lambda returning a stored Bool field (dynamic field read → tagged generic
+; value, polymorphic return → ptr ABI) and one returning a computed Bool
+; (concrete return → i64 ABI) were dispatched through a single (_) -> Bool
+; predicate; the call site read both as `call i64`, reinterpreting the tagged
+; 3/1 as a raw scalar and inverting Bool-field predicates.  Compile natively,
+; run, diff stdout.
+(rule
+ (targets native_closure_bool_field native_closure_bool_field.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/closure_bool_field.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_closure_bool_field
+        native/closure_bool_field.march)
+   (with-stdout-to native_closure_bool_field.out
+        (system "./native_closure_bool_field")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_bool_field.expected native_closure_bool_field.out)))
+
 ; ── Regression: `let (a, b) = rhs` must untag scalar tuple fields ───────────
 ; The match-pattern path bound fields at their concrete element type and untagged
 ; them; the let-destructure path bound them at TVar, so a tagged scalar field was

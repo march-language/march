@@ -465,6 +465,84 @@ let test_impl_when_constraint_unsatisfied () =
   end|} in
   Alcotest.(check bool) "impl when Eq(Color) but no Eq(Color) in scope: error" true (has_errors ctx)
 
+let test_interface_cross_module_dispatch () =
+  (* A bare interface-method call from a DIFFERENT module than the one defining
+     the interface+impl must resolve. Sibling [mod] blocks are exactly how the
+     resolver presents a multi-file project to the typechecker. Regression: the
+     cross-module pre-pass bound only the qualified method names ("Show2.show2",
+     "Lib.Show2.show2"), never the bare "show2", so dispatch failed with
+     "I cannot find `show2`". *)
+  let ctx = typecheck {|mod Outer do
+    fn run() : String do
+      let w = Lib.wrap(7)
+      show2(w)
+    end
+
+    mod Lib do
+      type Widget = Widget(Int)
+      fn wrap(n : Int) : Widget do Widget(n) end
+      interface Show2(a) do
+        fn show2: a -> String
+      end
+      impl Show2(Widget) do
+        fn show2(x) do "widget" end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cross-module interface dispatch: no errors" false (has_errors ctx)
+
+let test_interface_cross_module_dispatch_record () =
+  (* Same as above but the impl is on a RECORD type. The forward-reference
+     pre-pass (`register_impl_shape`) registered the impl under the nominal type
+     name (`TCon "T"`) instead of the record's structural form (`TRecord [...]`,
+     which `surface_ty`/`check_decl DImpl` produce), so a dispatch from a module
+     checked before the impl's own module failed with "T does not implement".
+     The sibling modules are placed BEFORE the dispatch to match the order the
+     resolver produces for a multi-file project (`extra_decls @ entry_decls`). *)
+  let ctx = typecheck {|mod App do
+    mod Board do
+      interface Summarize(a) do
+        fn summarize: a -> String
+      end
+    end
+
+    mod Widget do
+      type T = { n : Int }
+      fn mk(x : Int) : T do { n = x } end
+      impl Summarize(T) do
+        fn summarize(w) do int_to_string(w.n) end
+      end
+    end
+
+    fn run() : String do summarize(Widget.mk(7)) end
+  end|} in
+  Alcotest.(check bool) "cross-module record-impl dispatch: no errors" false (has_errors ctx)
+
+let test_test_keywords_as_identifiers () =
+  (* `test`, `describe`, `setup`, `setup_all` are test-DSL keywords ONLY in the
+     `kw "name" do` / `kw do` position. Everywhere else they must lex as ordinary
+     identifiers so they can be function names, parameters, and calls. *)
+  let ctx = typecheck {|mod Test do
+    fn describe(x : Int) : Int do x + 1 end
+    fn setup(n : Int) : Int do n end
+    fn setup_all(n : Int) : Int do n end
+    fn test(b : Bool) : Bool do b end
+    fn run() : Int do describe(setup(setup_all(41))) end
+  end|} in
+  Alcotest.(check bool) "test keywords usable as identifiers: no errors" false (has_errors ctx)
+
+let test_test_dsl_still_parses () =
+  (* Regression guard: the contextual-keyword change must not break the test DSL
+     in its real position. *)
+  let ctx = typecheck {|mod Test do
+    describe "math" do
+      test "adds" do
+        assert 1 + 1 == 2
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "test DSL still parses: no errors" false (has_errors ctx)
+
 (* ── Standard interfaces: Eq, Ord, Show, Hash ───────────────────────────── *)
 
 let test_eq_builtin_int () =
@@ -9344,8 +9422,15 @@ let test_int_tag_coerce_ir () =
 let test_int_tag_wrapper_ir () =
   (* inc_fn is a top-level function returning i64; passing it as a value to
      list_apply forces the codegen to emit a closure wrapper around inc_fn.
-     The wrapper must use concrete types (i64 param/return) matching ECallPtr's
-     call-site type annotation — no tagging. *)
+     Closure fn-pointers are type-erased and dispatched uniformly, so every
+     wrapper ($clo_wrap and $lam$apply) shares ONE calling convention: the
+     generic ptr ABI.  The wrapper takes concrete params but returns its result
+     in the ptr slot — an i64 result is tagged (n<<1)|1 so the dispatch's
+     conditional untag recovers it, and so an Int >= 4096 is never mistaken for a
+     heap pointer by march_incrc.  (A prior "concrete i64 return" variant avoided
+     tagging but could not carry a *polymorphic* return, e.g. a lambda whose body
+     is a dynamic record-field read — the dispatch read the tagged generic value
+     as a raw scalar.  Uniform ptr ABI fixes both.) *)
   let src = {|mod Test do
     fn inc_fn(x : Int) : Int do x + 1 end
     fn list_apply(f : Int -> Int, xs : List(Int)) : List(Int) do
@@ -9363,11 +9448,11 @@ let test_int_tag_wrapper_ir () =
     try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
     with Not_found -> false
   in
-  (* The closure wrapper must use concrete types — i64 param and i64 return —
-     and pass the value through without tagging. *)
-  Alcotest.(check bool) "wrapper: define i64 return"  true (ir_has "define i64 @inc_fn$clo_wrap");
-  Alcotest.(check bool) "wrapper: i64 param"          true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: no tagging (no shl)" false (ir_has "shl i64 %r, 1")
+  (* The wrapper returns ptr (generic ABI), keeps a concrete i64 param, and tags
+     its scalar result so the ECallPtr dispatch can untag it on read. *)
+  Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
+  Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
@@ -21836,6 +21921,10 @@ let () =
           Alcotest.test_case "iface constraint missing impl" `Quick test_interface_constraint_missing_impl;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
+          Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;
+          Alcotest.test_case "cross-module record dispatch" `Quick test_interface_cross_module_dispatch_record;
+          Alcotest.test_case "test keywords as idents"      `Quick test_test_keywords_as_identifiers;
+          Alcotest.test_case "test DSL still parses"        `Quick test_test_dsl_still_parses;
           (* Standard interfaces: Eq, Ord, Show, Hash *)
           Alcotest.test_case "Eq builtin Int"               `Quick test_eq_builtin_int;
           Alcotest.test_case "Eq builtin String"            `Quick test_eq_builtin_string;

@@ -152,4 +152,14 @@ mod Option do
     end
   end
 
+  impl Eq(Option(a)) when Eq(a) do
+    fn eq(x, y) do
+      match (x, y) do
+      (None, None)       -> true
+      (Some(a), Some(b)) -> a == b
+      _                  -> false
+      end
+    end
+  end
+
 end

@@ -693,4 +693,14 @@ mod List do
     end
   end
 
+  impl Eq(List(a)) when Eq(a) do
+    fn eq(xs, ys) do
+      match (xs, ys) do
+      (Nil, Nil)                  -> true
+      (Cons(x, xr), Cons(y, yr)) -> x == y && eq(xr, yr)
+      _                           -> false
+      end
+    end
+  end
+
 end
