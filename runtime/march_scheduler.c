@@ -753,9 +753,9 @@ void march_cancel_token_cancel(march_cancel_token *tok) {
     atomic_store_explicit(&tok->cancelled, 1, memory_order_release);
 }
 
-int march_cancel_token_is_cancelled(march_cancel_token *tok) {
+int64_t march_cancel_token_is_cancelled(march_cancel_token *tok) {
     if (!tok) return 0;
-    return atomic_load_explicit(&tok->cancelled, memory_order_acquire);
+    return (int64_t)atomic_load_explicit(&tok->cancelled, memory_order_acquire);
 }
 
 void march_cancel_token_ref(march_cancel_token *tok) {

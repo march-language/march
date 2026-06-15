@@ -1333,8 +1333,12 @@ void *march_task_await(void *task_obj) {
     int64_t *task = (int64_t *)task_obj;
     march_proc *p = (march_proc *)(uintptr_t)task[2];
     if (!p) return mk_err_cstr("task_await: null proc");
-    while (atomic_load_explicit(&p->status, memory_order_acquire) != PROC_DEAD)
+    while (atomic_load_explicit(&p->status, memory_order_acquire) != PROC_DEAD) {
         march_sched_yield();
+        /* Yield the OS timeslice so we don't busy-wait when called from outside
+         * a green-thread context (march_sched_yield is a no-op in that case). */
+        sched_yield();
+    }
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -1458,9 +1462,6 @@ void *march_send(void *actor, void *msg) {
 #define MARCH_FIELD(obj, i) (((int64_t *)(obj))[2 + (i)])
 #define MARCH_FIELD_PTR(obj, i) ((void *)MARCH_FIELD(obj, i))
 #define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
-
-static void *mk_ok(void *value);
-static void *mk_err_cstr(const char *msg);
 
 /* ── Actor.call / Actor.reply (synchronous messaging) ────────────────── */
 /*

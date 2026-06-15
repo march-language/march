@@ -213,7 +213,7 @@ march_cancel_token *march_cancel_token_new(void);
 void march_cancel_token_cancel(march_cancel_token *tok);
 
 /* Return 1 if the token has been cancelled, 0 otherwise. */
-int  march_cancel_token_is_cancelled(march_cancel_token *tok);
+int64_t march_cancel_token_is_cancelled(march_cancel_token *tok);
 
 /* Increment reference count (for task spawn that copies the token pointer). */
 void march_cancel_token_ref(march_cancel_token *tok);
