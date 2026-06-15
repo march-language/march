@@ -65,6 +65,14 @@ type annotation_site = {
   as_kind      : annotation_kind;  (** What kind of annotation to insert *)
 }
 
+(** An unclosed HTML tag inside a ~H sigil. *)
+type html_issue = {
+  hi_open_span   : Ast.span;  (** the `<tag` open — diagnostic range *)
+  hi_tag         : string;    (** tag name (lower-cased) *)
+  hi_insert_span : Ast.span;  (** zero-width position of the sigil's closing quote *)
+  hi_closer      : string;    (** all closing tags for this sigil, innermost-first *)
+}
+
 (** Where a linear/affine value is consumed. *)
 type consumption = {
   con_name : string;
@@ -201,6 +209,8 @@ type t = {
   (** Unannotated let bindings eligible for "Add type annotation" code action. *)
   unused_fns : string list;
   (** Private function names that are never reachable from any public root. *)
+  html_issues : html_issue list;
+  (** Unclosed HTML tags found inside ~H sigils (detection + close quickfix). *)
   type_matches : (string * match_site list) list;
   (** All match sites grouped by matched type name (for bulk file-scope fixes). *)
   naming_violations : naming_violation list;
@@ -1642,6 +1652,181 @@ let collect_impl_sites (decls : Ast.decl list) : (string, Ast.span list) Hashtbl
   tbl
 
 (* ------------------------------------------------------------------ *)
+(* ~H HTML sigil tag-balance checking                                  *)
+(* ------------------------------------------------------------------ *)
+
+let html_void_elements =
+  [ "area"; "base"; "br"; "col"; "embed"; "hr"; "img"; "input"; "link";
+    "meta"; "param"; "source"; "track"; "wbr" ]
+
+(* Scan HTML [content] and return the open tags left unclosed, as
+   (tag, offset-of-'<'-in-content), innermost-first. Skips `${…}` interpolation,
+   `<!-- … -->` comments, `<!doctype …>`, void elements and self-closing tags;
+   quoted attribute values are respected so `>` inside them is ignored. *)
+let scan_html_unclosed (content : string) : (string * int) list =
+  let n = String.length content in
+  let is_nc c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    || (c >= '0' && c <= '9') || c = '-' || c = '_' in
+  let stack = ref [] in
+  let unclosed = ref [] in   (* tags skipped over by a mismatched close *)
+  let i = ref 0 in
+  while !i < n do
+    let c = content.[!i] in
+    if c = '$' && !i + 1 < n && content.[!i + 1] = '{' then begin
+      i := !i + 2; let d = ref 1 in
+      while !d > 0 && !i < n do
+        (match content.[!i] with '{' -> incr d | '}' -> decr d | _ -> ()); incr i
+      done
+    end
+    else if c = '<' && !i + 3 < n && content.[!i+1]='!' && content.[!i+2]='-' && content.[!i+3]='-' then begin
+      i := !i + 4;
+      while !i + 2 < n && not (content.[!i]='-' && content.[!i+1]='-' && content.[!i+2]='>') do incr i done;
+      if !i + 2 < n then i := !i + 3 else i := n
+    end
+    else if c = '<' && !i + 1 < n && content.[!i+1] = '!' then begin
+      while !i < n && content.[!i] <> '>' do incr i done;
+      if !i < n then incr i
+    end
+    else if c = '<' && !i + 1 < n && content.[!i+1] = '/' then begin
+      let j = ref (!i + 2) in let ns = !j in
+      while !j < n && is_nc content.[!j] do incr j done;
+      let tag = String.lowercase_ascii (String.sub content ns (!j - ns)) in
+      while !j < n && content.[!j] <> '>' do incr j done;
+      i := (if !j < n then !j + 1 else n);
+      if List.exists (fun (t, _) -> t = tag) !stack then begin
+        (* Pop down to the match; any tags above it were never closed. *)
+        let rec pop = function
+          | (t, o) :: r ->
+            if t = tag then r
+            else (unclosed := (t, o) :: !unclosed; pop r)
+          | [] -> [] in
+        stack := pop !stack
+      end
+    end
+    else if c = '<' && !i + 1 < n &&
+            (let d = content.[!i+1] in (d>='a'&&d<='z')||(d>='A'&&d<='Z')) then begin
+      let ofs = !i in
+      let j = ref (!i + 1) in let ns = !j in
+      while !j < n && is_nc content.[!j] do incr j done;
+      let tag = String.lowercase_ascii (String.sub content ns (!j - ns)) in
+      let inq = ref false and q = ref ' ' in
+      while !j < n && (!inq || content.[!j] <> '>') do
+        let ch = content.[!j] in
+        (if !inq then (if ch = !q then inq := false)
+         else if ch = '"' || ch = '\'' then (inq := true; q := ch));
+        incr j
+      done;
+      let self = !j < n && !j > 0 && content.[!j - 1] = '/' in
+      i := (if !j < n then !j + 1 else n);
+      if not self && not (List.mem tag html_void_elements) then
+        stack := (tag, ofs) :: !stack
+    end
+    else incr i
+  done;
+  (* Tags still open at end of input, plus any skipped by mismatched closes;
+     innermost-first so closers nest correctly. *)
+  !stack @ List.rev !unclosed
+
+(* Extract a ~H sigil's content from [src] given the byte offset of its `~`.
+   Returns (content, content_base_offset, closing_quote_offset). Handles both
+   `"…"` and `"""…"""`. *)
+let extract_h_content (src : string) (start_ofs : int) (name_len : int)
+    : (string * int * int) option =
+  let len = String.length src in
+  let k = start_ofs + 1 + name_len in   (* skip `~` + sigil name *)
+  if k >= len then None
+  else if k + 2 < len && src.[k]='"' && src.[k+1]='"' && src.[k+2]='"' then begin
+    let cb = k + 3 in
+    let j = ref cb in
+    while !j + 2 < len && not (src.[!j]='"' && src.[!j+1]='"' && src.[!j+2]='"') do incr j done;
+    if !j + 2 < len then Some (String.sub src cb (!j - cb), cb, !j) else None
+  end
+  else if src.[k] = '"' then begin
+    let cb = k + 1 in
+    let j = ref cb in
+    while !j < len && src.[!j] <> '"' do (if src.[!j] = '\\' then incr j); incr j done;
+    if !j < len then Some (String.sub src cb (!j - cb), cb, !j) else None
+  end
+  else None
+
+(* Byte offset → (1-indexed line, 0-indexed col), matching Ast.span convention. *)
+let ofs_to_pos (src : string) (ofs : int) : int * int =
+  let line = ref 1 and col = ref 0 in
+  let stop = min ofs (String.length src) in
+  for k = 0 to stop - 1 do
+    if src.[k] = '\n' then (incr line; col := 0) else incr col
+  done;
+  (!line, !col)
+
+(* (1-indexed line, 0-indexed col) → byte offset. *)
+let pos_to_ofs (src : string) (line1 : int) (col : int) : int =
+  let n = String.length src in
+  let cur = ref 1 and i = ref 0 in
+  while !cur < line1 && !i < n do (if src.[!i] = '\n' then incr cur); incr i done;
+  min (!i + col) n
+
+(* Collect unclosed-tag issues across all ~H sigils in [decls]. *)
+let collect_html_issues ~(src : string) (decls : Ast.decl list) : html_issue list =
+  let issues = ref [] in
+  let consider name (sp : Ast.span) =
+    if String.uppercase_ascii name = "H" then begin
+      let start_ofs = pos_to_ofs src sp.Ast.start_line sp.Ast.start_col in
+      match extract_h_content src start_ofs (String.length name) with
+      | None -> ()
+      | Some (content, cbase, close_ofs) ->
+        let unclosed = scan_html_unclosed content in
+        if unclosed <> [] then begin
+          let (cl, cc) = ofs_to_pos src close_ofs in
+          let insert_span =
+            { Ast.file = ""; start_line = cl; start_col = cc; end_line = cl; end_col = cc } in
+          let closer =
+            String.concat "" (List.map (fun (t, _) -> "</" ^ t ^ ">") unclosed) in
+          List.iter (fun (tag, ofs) ->
+              let (ol, oc) = ofs_to_pos src (cbase + ofs) in
+              let open_span =
+                { Ast.file = ""; start_line = ol; start_col = oc;
+                  end_line = ol; end_col = oc + 1 + String.length tag } in
+              issues := { hi_open_span = open_span; hi_tag = tag;
+                          hi_insert_span = insert_span; hi_closer = closer } :: !issues)
+            unclosed
+        end
+    end
+  in
+  let rec ex (e : Ast.expr) =
+    (match e with Ast.ESigil (name, _, sp) -> consider name sp | _ -> ());
+    match e with
+    | Ast.EApp (f, args, _) -> ex f; List.iter ex args
+    | Ast.ECon (_, es, _) | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) -> List.iter ex es
+    | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> ex b
+    | Ast.EBlock (es, _) -> List.iter ex es
+    | Ast.ELet (b, _) -> ex b.Ast.bind_expr
+    | Ast.EMatch (s, brs, _) ->
+      ex s; List.iter (fun (br : Ast.branch) -> ex br.Ast.branch_body) brs
+    | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
+    | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.EPipe (a2, b2, _) | Ast.ESend (a2, b2, _) -> ex a2; ex b2
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
+    | Ast.ERecordUpdate (e2, fs, _) -> ex e2; List.iter (fun (_, e) -> ex e) fs
+    | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _) | Ast.ESpawn (e2, _)
+    | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _) | Ast.EDbg (Some e2, _) -> ex e2
+    | _ -> ()
+  in
+  let rec dl (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, _) -> List.iter (fun (cl : Ast.fn_clause) -> ex cl.Ast.fc_body) fn.Ast.fn_clauses
+    | Ast.DLet (_, b, _) -> ex b.Ast.bind_expr
+    | Ast.DActor (_, _, ad, _) ->
+      ex ad.Ast.actor_init;
+      List.iter (fun (h : Ast.actor_handler) -> ex h.Ast.ah_body) ad.Ast.actor_handlers
+    | Ast.DTest (t, _) -> ex t.Ast.test_body
+    | Ast.DDescribe (_, ds, _) | Ast.DMod (_, _, ds, _) -> List.iter dl ds
+    | _ -> ()
+  in
+  List.iter dl decls;
+  !issues
+
+(* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -1694,6 +1879,7 @@ let analyse ~filename ~src : t =
       fold_ranges      = [];
       annotation_sites = [];
       unused_fns        = [];
+      html_issues       = [];
       type_matches      = [];
       naming_violations = [];
       demorgan_sites    = [];
@@ -2304,11 +2490,24 @@ let analyse ~filename ~src : t =
     let demorgan_sites = !demorgan_acc in
     let perf_insights = collect_perf_insights type_map user_decls in
     let perf_diags = List.map perf_insight_to_diag perf_insights in
+    let html_issues = collect_html_issues ~src user_decls in
+    let html_diags =
+      List.map (fun (hi : html_issue) ->
+          Lsp.Types.Diagnostic.create
+            ~range:(Pos.span_to_lsp_range hi.hi_open_span)
+            ~severity:Lsp.Types.DiagnosticSeverity.Warning
+            ~message:(`String (Printf.sprintf "Unclosed HTML tag `<%s>` in ~H template" hi.hi_tag))
+            ~source:"march"
+            ~code:(`String "html/unclosed-tag")
+            ())
+        html_issues
+    in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
       @ !dead_code_diags
       @ unused_fn_diags
       @ perf_diags
+      @ html_diags
     in
     let vars_list = Tc.StrMap.bindings final_env.Tc.vars in
     { src; filename; doc; type_map; def_map; use_map;
@@ -2346,6 +2545,7 @@ let analyse ~filename ~src : t =
       fold_ranges      = collect_fold_ranges raw_ast;
       annotation_sites = collect_annotation_sites raw_ast;
       unused_fns;
+      html_issues;
       type_matches;
       naming_violations;
       demorgan_sites;
@@ -4952,8 +5152,10 @@ let code_actions_at (a : t) ~line ~character
             | Some do_ofs ->
               let pos   = ofs_to_lsp_pos do_ofs in
               let range = Range.create ~start:pos ~end_:pos in
+              (* March return type syntax is `: T` before `do` — NOT `-> T`
+                 (`fn f() -> Int do` is a parse error). *)
               let edit  = TextEdit.create ~range
-                            ~newText:("-> " ^ ret_str ^ " ") in
+                            ~newText:(": " ^ ret_str ^ " ") in
               let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
               Some (CodeAction.create ~title:"Add return type annotation"
                       ~kind:CodeActionKind.RefactorRewrite ~edit:we ())))
@@ -5500,6 +5702,34 @@ let code_actions_at (a : t) ~line ~character
          ~kind:CodeActionKind.SourceFixAll
          ~edit:(WorkspaceEdit.create ~changes:[(uri, prefix_edits)] ()) ()]
   in
+  (* ---- Close unclosed HTML tags in a ~H sigil ---- *)
+  (* One action per sigil that has unclosed tags, offered when the cursor is on
+     any of its unclosed-tag spans; inserts all closers (innermost-first) at the
+     sigil's closing quote. *)
+  let html_close_actions =
+    let uri = DocumentUri.of_path a.filename in
+    let groups = Hashtbl.create 4 in   (* insert_span → (closer, count, cursor_hit) *)
+    List.iter (fun (hi : html_issue) ->
+        let (closer, cnt, hit) =
+          try Hashtbl.find groups hi.hi_insert_span
+          with Not_found -> (hi.hi_closer, 0, false) in
+        let hit = hit || Pos.span_contains hi.hi_open_span ~line ~character in
+        Hashtbl.replace groups hi.hi_insert_span (closer, cnt + 1, hit))
+      a.html_issues;
+    Hashtbl.fold (fun (insert_span : Ast.span) (closer, cnt, hit) acc ->
+        if not hit then acc
+        else begin
+          let pos = Position.create
+              ~line:(insert_span.Ast.start_line - 1) ~character:insert_span.Ast.start_col in
+          let edit = TextEdit.create ~range:(Range.create ~start:pos ~end_:pos) ~newText:closer in
+          let title =
+            if cnt = 1 then Printf.sprintf "Close unclosed tag (`%s`)" closer
+            else Printf.sprintf "Close %d unclosed tags (`%s`)" cnt closer in
+          CodeAction.create ~title ~kind:CodeActionKind.QuickFix
+            ~edit:(WorkspaceEdit.create ~changes:[(uri, [edit])] ()) () :: acc
+        end)
+      groups []
+  in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
   @ wrap_inspect_actions @ remove_inspect_actions
@@ -5507,6 +5737,7 @@ let code_actions_at (a : t) ~line ~character
   @ batch_fix_all_actions
   @ ast_code_actions a ~line ~character
   @ registry_actions
+  @ html_close_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

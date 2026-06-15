@@ -2095,8 +2095,9 @@ end
   in
   Alcotest.(check bool) "return type annotation action offered" true has_ret_annot
 
-(** Return type annotation edit inserts "-> T" before "do". *)
-let test_fn_return_annotation_edit_inserts_arrow () =
+(** Return type annotation edit inserts ": T" before "do" (March return syntax
+    is `: T`, not `-> T` which is a parse error). *)
+let test_fn_return_annotation_edit_inserts_colon () =
   let src = {|
 mod M do
   fn double(x: Int) do
@@ -2104,41 +2105,31 @@ mod M do
   end
 end
 |} in
+  let has s sub =
+    let ls = String.length s and lsub = String.length sub in
+    let rec go i = i + lsub <= ls && (String.sub s i lsub = sub || go (i + 1)) in
+    go 0 in
   let a = analyse src in
   let (line, col) = pos_of src "double" in
   let acts = An.code_actions_at a ~line ~character:col () in
   let ret_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
-      let t = String.lowercase_ascii ca.title in
-      let n = String.length t and sn = 6 in
-      let found = ref false in
-      for i = 0 to n - sn do
-        if String.sub t i sn = "return" then found := true
-      done;
-      !found
-    ) acts in
+      has (String.lowercase_ascii ca.title) "return") acts in
   match ret_act with
   | None -> Alcotest.fail "expected return type annotation action"
   | Some ca ->
     (match ca.edit with
      | None -> Alcotest.fail "expected edit"
      | Some edit ->
-       let has_arrow =
+       let texts =
          match edit.changes with
-         | None -> false
-         | Some m ->
-           List.exists (fun (_, edits) ->
-               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
-                   let t = e.newText in
-                   let n = String.length t and sn = 2 in
-                   let found = ref false in
-                   for i = 0 to n - sn do
-                     if String.sub t i sn = "->" then found := true
-                   done;
-                   !found
-                 ) edits
-             ) m
+         | None -> []
+         | Some m -> List.concat_map (fun (_, es) ->
+             List.map (fun (e : Lsp.Types.TextEdit.t) -> e.newText) es) m
        in
-       Alcotest.(check bool) "edit contains '->'" true has_arrow)
+       let joined = String.concat "|" texts in
+       Alcotest.(check bool) "edit uses `: T` colon form" true (has joined ": Int");
+       Alcotest.(check bool) "edit does NOT use the invalid `->` form" false
+         (has joined "->"))
 
 (* ------------------------------------------------------------------ *)
 (* 25. P1.7 — Function parameter type annotation                      *)
@@ -4033,15 +4024,16 @@ end|} in
     (has_title acts "Add return type annotation")
 
 let test_annotation_offered_for_scalar_return () =
-  (* Sanity: a normal Int-returning fn still gets `-> Int`. *)
+  (* Sanity: a normal Int-returning fn gets `: Int` (March return syntax). *)
   let src = {|mod M do
   fn compute(x : Int) do x + 1 end
 end|} in
   let acts = actions_at src "compute" in
   Alcotest.(check bool) "return annotation offered for Int" true
     (has_title acts "Add return type annotation");
-  Alcotest.(check bool) "suggests -> Int" true
-    (contains_sub (all_edit_texts acts "return type") "Int")
+  let edit = all_edit_texts acts "return type" in
+  Alcotest.(check bool) "suggests `: Int` (colon form)" true (contains_sub edit ": Int");
+  Alcotest.(check bool) "does not use invalid `->`" false (contains_sub edit "->")
 
 (* ------------------------------------------------------------------ *)
 (* Introduce parameter object (data clump → record) detection          *)
@@ -4088,6 +4080,67 @@ let test_project_diagnostics () =
   Alcotest.(check bool) "broken file reports a diagnostic" true (diags_of "b.march" <> [])
 
 (* ------------------------------------------------------------------ *)
+(* ~H sigil: unclosed HTML tag detection + close quickfix              *)
+(* ------------------------------------------------------------------ *)
+
+let html_unclosed_diags src =
+  let a = analyse src in
+  List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.code with Some (`String "html/unclosed-tag") -> true | _ -> false)
+    a.An.diagnostics
+
+let test_html_unclosed_detected () =
+  let src = {|mod M do
+  fn page() do
+    ~H"<div><p>hi"
+  end
+end|} in
+  Alcotest.(check int) "two unclosed tags (div, p)" 2
+    (List.length (html_unclosed_diags src))
+
+let test_html_balanced_no_issue () =
+  let src = {|mod M do
+  fn page() do
+    ~H"<div><p>hi</p></div>"
+  end
+end|} in
+  Alcotest.(check int) "balanced html has no unclosed diagnostics" 0
+    (List.length (html_unclosed_diags src))
+
+let test_html_void_no_issue () =
+  let src = {|mod M do
+  fn page() do
+    ~H"<br><hr>line"
+  end
+end|} in
+  Alcotest.(check int) "void elements are not unclosed" 0
+    (List.length (html_unclosed_diags src))
+
+let test_html_self_closing_no_issue () =
+  let src = {|mod M do
+  fn page() do
+    ~H"<div/>x"
+  end
+end|} in
+  Alcotest.(check int) "self-closing tag is not unclosed" 0
+    (List.length (html_unclosed_diags src))
+
+let test_html_close_quickfix () =
+  let src = {|mod M do
+  fn page() do
+    ~H"<div><p>hi"
+  end
+end|} in
+  let a = analyse src in
+  let (l, c) = pos_of src "<div" in
+  let acts = An.code_actions_at a ~line:l ~character:c ~diagnostics:a.An.diagnostics () in
+  Alcotest.(check bool) "offers a Close action" true
+    (List.exists (fun (ca : Lsp.Types.CodeAction.t) -> contains_sub ca.title "Close") acts);
+  let edit = all_edit_texts acts "Close" in
+  Alcotest.(check bool) "inserts </p></div> (innermost first)" true
+    (contains_sub edit "</p></div>")
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -4113,6 +4166,13 @@ let () =
       "add missing case has no leading pipe", `Quick, test_add_missing_case_no_leading_pipe;
       "no annotation for record return", `Quick, test_no_annotation_for_record_return;
       "annotation offered for scalar return", `Quick, test_annotation_offered_for_scalar_return;
+    ];
+    "~H unclosed tags", [
+      "unclosed div/p detected", `Quick, test_html_unclosed_detected;
+      "balanced html ok", `Quick, test_html_balanced_no_issue;
+      "void elements ok", `Quick, test_html_void_no_issue;
+      "self-closing ok", `Quick, test_html_self_closing_no_issue;
+      "close quickfix inserts closers", `Quick, test_html_close_quickfix;
     ];
     "introduce parameter object", [
       "fn with 2+ annotated params bundleable", `Quick, test_bundleable_fn_detected;
@@ -4352,7 +4412,7 @@ let () =
     "p1.7: fn return type annotation", [
       "AnnFnReturn site created",       `Quick, test_fn_return_annotation_site_created;
       "action offered on fn name",      `Quick, test_fn_return_annotation_action_offered;
-      "edit inserts '->'",              `Quick, test_fn_return_annotation_edit_inserts_arrow;
+      "edit inserts ': T' colon form",  `Quick, test_fn_return_annotation_edit_inserts_colon;
     ];
     "p1.7: fn param type annotation", [
       "AnnFnParam site created",        `Quick, test_fn_param_annotation_site_created;
