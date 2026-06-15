@@ -884,6 +884,75 @@ void *__try_call(void *thunk) {
     return result;
 }
 
+/* ── __try_call_val ──────────────────────────────────────────────────────── */
+/*
+ * __try_call_val : (Bool -> a) -> Result(a, String)
+ *
+ * Value-carrying sibling of __try_call.  The thunk's March return type is the
+ * type variable `a`, so the compiled thunk returns its result in the *uniform*
+ * representation (heap pointers raw, immediates low-bit-tagged).  We therefore
+ * store ok_result into the Ok field VERBATIM — no `<<1 | 1` retag — exactly as
+ * the Err path below stores the heap march_string raw.  This lets a heap result
+ * (e.g. a nested Result(v, String)) round-trip without the pointer corruption
+ * that the Bool-only __try_call guards against.
+ *
+ * Ownership: the thunk transfers ownership of its result to us (Perceus return
+ * convention); storing it raw into the Ok field forwards that ownership to the
+ * returned Result, which the caller then owns.  No extra incrc/decrc is needed.
+ * On the panic path the thunk did not return, so there is no value to manage
+ * (any heap captured before the panic may leak — acceptable, as for __try_call).
+ *
+ * RC contract, closure layout, and Result layout are identical to __try_call.
+ */
+void *__try_call_val(void *thunk) {
+    typedef int64_t (*apply_fn_t)(void *, int64_t);
+    apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
+
+    jmp_buf saved_jmp;
+    char    saved_fail[sizeof(march_test_fail_buf)];
+    int     saved_in_test = march_test_in_test;
+    memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
+    memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
+
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test     = 1;
+
+    int64_t ok_result = 0;
+    int     panicked  = 0;
+
+    if (setjmp(march_test_jmp_buf) == 0) {
+        ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
+    } else {
+        panicked = 1;
+    }
+
+    void *err_str = NULL;
+    if (panicked) {
+        const char *msg = march_test_fail_buf[0]
+            ? march_test_fail_buf : "call panicked";
+        err_str = march_string_lit(msg, (int64_t)strlen(msg));
+    }
+
+    memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
+    memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
+    march_test_in_test = saved_in_test;
+
+    march_decrc(thunk);
+
+    char      *result = (char *)march_alloc(24);
+    march_hdr *hdr    = (march_hdr *)result;
+    void     **field  = (void **)(result + 16);
+    if (!panicked) {
+        hdr->tag = 0;                              /* Ok */
+        /* Uniform-repr value stored verbatim — see header comment. */
+        *field   = (void *)ok_result;
+    } else {
+        hdr->tag = 1;                              /* Err */
+        *field   = err_str;
+    }
+    return result;
+}
+
 /* ── Actor runtime — green thread based ──────────────────────────────────── */
 /*
  * Design overview
