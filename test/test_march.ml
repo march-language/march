@@ -5562,7 +5562,7 @@ let test_actor_tir_msg_variant_ctors () =
   | _ -> Alcotest.fail "Calc_Msg is not TDVariant"
 
 let test_actor_tir_actor_struct_has_dispatch_field () =
-  (* Actor struct has $dispatch and $alive fields plus state fields *)
+  (* Actor struct has $d_dispatch and $e_alive fields plus state fields *)
   let m = lower_module_typed {|mod Test do
     actor Box do
       state { value : Int }
@@ -5579,9 +5579,9 @@ let test_actor_tir_actor_struct_has_dispatch_field () =
   match actor_type with
   | Some (March_tir.Tir.TDRecord (_, fields)) ->
     let field_names = List.map fst fields in
-    Alcotest.(check bool) "$dispatch field present" true (List.mem "$dispatch" field_names);
-    Alcotest.(check bool) "$alive field present"    true (List.mem "$alive"    field_names);
-    Alcotest.(check bool) "value field present"     true (List.mem "value"     field_names)
+    Alcotest.(check bool) "$d_dispatch field present" true (List.mem "$d_dispatch" field_names);
+    Alcotest.(check bool) "$e_alive field present"    true (List.mem "$e_alive"    field_names);
+    Alcotest.(check bool) "value field present"       true (List.mem "value"       field_names)
   | _ -> Alcotest.fail "Box_Actor is not TDRecord"
 
 let test_actor_tir_full_pipeline_no_crash () =

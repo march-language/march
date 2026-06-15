@@ -2885,13 +2885,32 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
 }
 
 /* send_checked: send a message to an actor with capability check.
- * Validates liveness, epoch match, and revocation before enqueuing. */
+ * Validates liveness, epoch match, and revocation before enqueuing.
+ *
+ * Cap object layout (compiled VCap heap object):
+ *   word[0] = rc (int64)
+ *   word[1] = tag/pad (int64)
+ *   word[2] = actor ptr (stored as int64, reinterpret as void*)
+ *   word[3] = pid_index (int64)
+ *   word[4] = epoch (int64)
+ *
+ * If cap is not a heap pointer (e.g. None/null), silently drop the message.
+ */
 void march_send_checked(void *cap, void *msg) {
-    (void)cap; (void)msg;
-    /* TODO(Phase 3 compiled): extract pid_index and epoch from cap object,
-     * call march_is_cap_valid, then march_send on success.
-     * The interpreter path (eval.ml) fully implements this; the compiled
-     * path is pending TIR lowering of VCap values. */
+    if (!cap || !IS_HEAP_PTR(cap)) {
+        if (msg) march_decrc(msg);
+        return;
+    }
+    int64_t *cap_words = (int64_t *)cap;
+    void    *actor     = (void *)(uintptr_t)cap_words[2];
+    int64_t  pidx      = cap_words[3];
+    int64_t  epoch     = cap_words[4];
+    march_actor_meta *meta = find_meta(actor);
+    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
+        if (msg) march_decrc(msg);
+        return;
+    }
+    march_send(actor, msg);
 }
 
 /* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */

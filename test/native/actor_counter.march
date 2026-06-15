@@ -1,0 +1,19 @@
+mod ActorCounter do
+  actor Counter do
+    state { value : Int }
+    init { value = 0 }
+    on Increment(n : Int) do
+      { state with value = state.value + n }
+    end
+    on Probe() do
+      println("value=" ++ int_to_string(state.value))
+      state
+    end
+  end
+
+  fn main() : Unit do
+    let c = spawn(Counter)
+    let _r1 = send(c, Increment(5))
+    send(c, Probe())
+  end
+end

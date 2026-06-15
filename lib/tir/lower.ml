@@ -1370,9 +1370,11 @@ let () = _ensure_module_lowered := (fun mod_name ->
 
     Types:
       TDVariant("Name_Msg", [(H1, param_tys_1); ...])    -- in handler decl order
-      TDRecord ("Name_Actor", [("$dispatch",TPtr TUnit);
-                               ("$alive",TBool); f1:T1; ...fn:Tn])
-                                                          -- $dispatch first, $alive second,
+      TDRecord ("Name_Actor", [("$d_dispatch",TPtr TUnit);
+                               ("$e_alive",TBool); f1:T1; ...fn:Tn])
+                                                          -- $d_dispatch first, $e_alive second
+                                                          -- (prefixed so alphabetical sort matches
+                                                          --  alloc/reuse order & C runtime layout)
                                                           -- then state fields alphabetically
 
     Functions:
@@ -1402,9 +1404,12 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
 
   (* ── 2. Actor struct type ────────────────────────────────── *)
   let actor_type_name = name ^ "_Actor" in
-  (* Layout order: $dispatch (field 0), $alive (field 1), state fields (fields 2+) *)
+  (* Layout order: $d_dispatch (field 0), $e_alive (field 1), state fields (fields 2+)
+     Names are prefixed so alphabetical sort ($d < $e) in llvm_emit.ml's
+     get_record_fields matches the alloc/reuse arg order and the C runtime's
+     hardcoded word indices (a[2]=dispatch, a[3]=alive). *)
   let actor_struct_fields : (string * Tir.ty) list =
-    [("$dispatch", Tir.TPtr Tir.TUnit); ("$alive", Tir.TBool)]
+    [("$d_dispatch", Tir.TPtr Tir.TUnit); ("$e_alive", Tir.TBool)]
     @ state_fields_sorted
   in
   let actor_record = Tir.TDRecord (actor_type_name, actor_struct_fields) in
@@ -1418,7 +1423,7 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
          let $result = <body>
          let $nf1 = EField($result, "sf1")  -- extract new state fields
          ...
-         ESeq(EReuse(actor, Name_Actor, [$dispatch, $alive, $nf1, ...]), EAtom(unit))
+         ESeq(EReuse(actor, Name_Actor, [$d_dispatch, $e_alive, $nf1, ...]), EAtom(unit))
   *)
   let actor_var (n : string) (ty : Tir.ty) : Tir.var =
     { Tir.v_name = n; v_ty = ty; v_lin = Tir.Unr }
@@ -1427,7 +1432,9 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
      the actor pointer resolve field indices correctly via field_map lookups.
      All TCon → ptr in llvm_ty, so the LLVM function signatures are unaffected. *)
   (* Mark actor param as Lin so Perceus won't add incrc for field loads.
-     The actor is uniquely owned — FBIP can safely mutate it in-place. *)
+     The actor is uniquely owned — FBIP can safely mutate it in-place.
+     Fields $d_dispatch (index 0) and $e_alive (index 1) must stay first in
+     alphabetical sort order so that GEP indices match the C runtime layout. *)
   let actor_param = { Tir.v_name = "$actor";
                       v_ty = Tir.TCon (actor_type_name, []);
                       v_lin = Tir.Lin } in
@@ -1464,9 +1471,9 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
         ) state_fields_sorted
     in
 
-    (* Step 4: build EReuse args: $dispatch, $alive, then new state fields *)
-    let dispatch_var = actor_var "$dispatch_v" (Tir.TPtr Tir.TUnit) in
-    let alive_var    = actor_var "$alive_v" Tir.TBool in
+    (* Step 4: build EReuse args: $d_dispatch, $e_alive, then new state fields *)
+    let dispatch_var = actor_var "$d_dispatch_v" (Tir.TPtr Tir.TUnit) in
+    let alive_var    = actor_var "$e_alive_v" Tir.TBool in
 
     (* Build the innermost expression: ESeq(EReuse(...), unit) *)
     let reuse_args : Tir.atom list =
@@ -1513,14 +1520,14 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
         ) state_field_vars inner_with_state
     in
 
-    (* Wrap: let $alive_v = EField(actor, "$alive") *)
+    (* Wrap: let $e_alive_v = EField(actor, "$e_alive") *)
     let inner_with_alive =
-      Tir.ELet (alive_var, Tir.EField (actor_atom, "$alive"), inner_with_state_loads)
+      Tir.ELet (alive_var, Tir.EField (actor_atom, "$e_alive"), inner_with_state_loads)
     in
 
-    (* Wrap: let $dispatch_v = EField(actor, "$dispatch") *)
+    (* Wrap: let $d_dispatch_v = EField(actor, "$d_dispatch") *)
     let full_body =
-      Tir.ELet (dispatch_var, Tir.EField (actor_atom, "$dispatch"), inner_with_alive)
+      Tir.ELet (dispatch_var, Tir.EField (actor_atom, "$d_dispatch"), inner_with_alive)
     in
 
     { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body }
