@@ -86,14 +86,22 @@ let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="
 let project_env proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
-  let dep_lib_paths = List.filter_map (fun (_, dep) ->
+  let dep_lib_paths = List.concat_map (fun (dep_name, dep) ->
       match dep with
       | Project.PathDep rel_path ->
         let abs = if Filename.is_relative rel_path
           then Filename.concat proj.Project.root rel_path else rel_path in
         let d = Filename.concat abs "lib" in
-        if Sys.file_exists d then Some d else None
-      | _ -> None
+        (* Expand the dep's lib/ into its subfolders too, so a reorganised
+           dependency (lib/api, lib/wire, …) resolves in consumers' tests. *)
+        if Sys.file_exists d then Cmd_build.collect_lib_dirs d
+        else if Sys.file_exists abs then Cmd_build.collect_lib_dirs abs
+        else []
+      | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+        (match Project.git_dep_lib_path dep_name with
+         | Some p -> Cmd_build.collect_lib_dirs p
+         | None  -> [])
+      | _ -> []
     ) proj.Project.deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =

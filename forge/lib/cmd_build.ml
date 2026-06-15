@@ -162,7 +162,13 @@ let build_islands ~lib_path_env ~islands_dir ~release lib_dir =
 let lib_path_env proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
-  let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
+  (* A dependency's lib/ may group modules into subfolders exactly like the
+     primary package (e.g. lib/api, lib/wire).  The module resolver searches
+     each lib path flatly, so expand every dep lib root into the root plus all
+     of its descendant directories — mirroring [collect_lib_dirs lib_dir] for
+     the primary package below.  Without this, a reorganised dependency's
+     internal cross-module imports fail with "Module not found" in consumers. *)
+  let dep_lib_paths = List.concat_map (fun (dep_name, dep) ->
       match dep with
       | Project.PathDep rel_path ->
         let abs_path = if Filename.is_relative rel_path
@@ -170,12 +176,14 @@ let lib_path_env proj =
           else rel_path
         in
         let d = Filename.concat abs_path "lib" in
-        if Sys.file_exists d then Some d
-        else if Sys.file_exists abs_path then Some abs_path
-        else None
+        if Sys.file_exists d then collect_lib_dirs d
+        else if Sys.file_exists abs_path then collect_lib_dirs abs_path
+        else []
       | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-        Project.git_dep_lib_path dep_name
-      | _ -> None
+        (match Project.git_dep_lib_path dep_name with
+         | Some p -> collect_lib_dirs p
+         | None  -> [])
+      | _ -> []
     ) proj.Project.deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
