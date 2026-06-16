@@ -5526,6 +5526,38 @@ end|} in
     Alcotest.(check (list string)) "columns" ["name"; "age"] cols
   | other -> Alcotest.failf "expected exactly one schema, got %d" (List.length other)
 
+let test_query_schema_resolution () =
+  (* Use from_table (simpler resolution path) *)
+  let src = {|mod M do
+  fn s() do
+    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+  end
+  fn q() do
+    Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18")
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "age in users schema" true
+    (Depot.schema_has_column a.An.depot_schemas ~table:"users" ~col:"age");
+  Alcotest.(check bool) "col_occ for 'age' present (pipe + from_table)" true
+    (List.exists (fun (o : Depot.col_occ) -> o.Depot.co_col = "age" && o.Depot.co_table = "users")
+       a.An.depot_col_occs)
+
+let test_query_schema_resolution_from_fn () =
+  (* Use from(schema_fn()) path - resolves schema by fn name *)
+  let src = {|mod M do
+  fn user_schema() do
+    Depot.Schema.define("users", { fields = { email = "String", age = ("Int", { default = 0 }) } })
+  end
+  fn q() do
+    Depot.Query.from(user_schema()) |> Depot.Query.where_eq("email", "x")
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "col_occ for 'email' via from(fn())" true
+    (List.exists (fun (o : Depot.col_occ) -> o.Depot.co_col = "email" && o.Depot.co_table = "users")
+       a.An.depot_col_occs)
+
 let test_depot_schemas_field () =
   let src = {|mod M do
   fn user_schema() do
@@ -6011,6 +6043,8 @@ let () =
     "depot: phase A foundation", [
       "schema extraction from Schema.define",      `Quick, test_depot_schema_extract;
       "depot_schemas field populated",             `Quick, test_depot_schemas_field;
+      "query->schema resolution + col_occ",        `Quick, test_query_schema_resolution;
+      "query->schema via from(schema_fn())",        `Quick, test_query_schema_resolution_from_fn;
       "depot_source_decls retained in analysis",   `Quick, test_imported_decls_retained;
     ];
   ]

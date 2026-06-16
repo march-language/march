@@ -250,6 +250,9 @@ type t = {
       for the Depot pass. Empty when not a forge project / no imports. *)
   depot_schemas : Depot.schema list;
   (** All [Depot.Schema.define] schemas visible from this file. *)
+  depot_col_occs : Depot.col_occ list;
+  (** Every column-name string literal in a Query.where_*/order_* call,
+      resolved to its schema table. *)
   protocols        : (string * Ast.protocol_def) list;
   (** Session-type protocol definitions: name → def (for scaffolding). *)
   param_name_map   : (string, string list) Hashtbl.t;
@@ -2574,6 +2577,7 @@ let analyse ~filename ~src : t =
       decls             = [];
       depot_source_decls = [];
       depot_schemas     = [];
+      depot_col_occs    = [];
       protocols         = [];
       param_name_map    = build_param_name_map [] }
   in
@@ -2670,6 +2674,7 @@ let analyse ~filename ~src : t =
     in
     let depot_source_decls = user_decls @ extra_decls in
     let depot_schemas = Depot.schemas_in depot_source_decls in
+    let depot_col_occs = Depot.column_occurrences depot_schemas depot_source_decls in
     (* Populate doc_map with stdlib function docs first so that user-defined
        functions with the same name take precedence (user docs overwrite). *)
     collect_docs ~doc_map stdlib_decls;
@@ -3303,6 +3308,7 @@ let analyse ~filename ~src : t =
       decls            = user_decls;
       depot_source_decls;
       depot_schemas;
+      depot_col_occs;
       protocols        =
         List.filter_map (function
             | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)
