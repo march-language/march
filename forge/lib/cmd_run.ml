@@ -14,7 +14,6 @@ let run ?(dump_phases=false) ?(compiled=false) () =
   | Ok proj ->
     begin
       let lib_dir    = Filename.concat proj.Project.root "lib" in
-      let config_dir = Filename.concat proj.Project.root "config" in
       (* Entry point: use forge.toml [package] entrypoint if set, else lib/<name>.march *)
       let entry = match proj.Project.entrypoint with
         | Some ep -> Filename.concat proj.Project.root ep
@@ -28,40 +27,16 @@ let run ?(dump_phases=false) ?(compiled=false) () =
       match Toolchain.ensure_installed () with
       | Error e -> Error e
       | Ok () ->
-      match Toolchain.path_prefix () with
-      | Error e -> Error e
-      | Ok toolchain_pfx ->
-      begin
-        (* Build MARCH_LIB_PATH: dep lib dirs + lib/ + config/ (if present) *)
-        let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
-            match dep with
-            | Project.PathDep rel_path ->
-              let abs_path = if Filename.is_relative rel_path
-                then Filename.concat proj.Project.root rel_path
-                else rel_path
-              in
-              let d = Filename.concat abs_path "lib" in
-              if Sys.file_exists d then Some d
-              else if Sys.file_exists abs_path then Some abs_path
-              else None
-            | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-              Project.git_dep_lib_path dep_name
-            | _ -> None
-          ) proj.Project.deps in
-        let extra_dirs =
-          dep_lib_paths @ [lib_dir]
-          @ (if Sys.file_exists config_dir then [config_dir] else [])
-        in
-        let lib_path_env =
-          (* Quote each path: a shell metachar in a project/dep path must not inject. *)
-          let quoted = String.concat ":" (List.map Filename.quote extra_dirs) in
-          Printf.sprintf "%sMARCH_LIB_PATH=%s" toolchain_pfx quoted
-        in
+        (* Reuse the shared MARCH_LIB_PATH builder so a dependency's lib
+           subfolders (e.g. lib/api, lib/wire) are resolved exactly as for
+           check/build: Cmd_build.lib_path_env expands every lib root — the
+           project's AND its deps' — into all descendant directories, and
+           prepends the resolved toolchain to PATH. *)
+        let lib_path_env = Cmd_build.lib_path_env proj in
         let dump_flag = if dump_phases then " --dump-phases" else "" in
-        let cmd = Printf.sprintf "%s march%s %s"
+        let cmd = Printf.sprintf "%smarch%s %s"
           lib_path_env dump_flag (Filename.quote entry) in
         let rc = Sys.command cmd in
         if rc = 0 then Ok ()
         else Error (Printf.sprintf "program exited with code %d" rc)
-      end
     end
