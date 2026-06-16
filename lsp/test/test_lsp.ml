@@ -3452,6 +3452,23 @@ let test_hover_after_unicode () =
       "n resolves to Int (not the enclosing tuple) — UTF-16 column converted"
       true (has_sub s "Int" && not (has_sub s "String"))
 
+let test_hover_in_h_interp () =
+  let src = {|mod M do
+  fn greet(name : String) : IOList do
+    ~H"<p>${name}</p>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  let (l, c) = pos_of src "name}" in
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected a type for the interpolation expr 'name'"
+   | Some s -> Alcotest.(check bool) "interp 'name' resolves to String" true (has_sub s "String"));
+  Alcotest.(check bool) "DEF inside interp resolves"
+    true (An.query_definition_at a ~line:l ~utf16_char:c <> None);
+  let comps = An.query_completions_at a ~line:l ~utf16_char:c in
+  let labels = List.map (fun (it : Lsp.Types.CompletionItem.t) -> it.Lsp.Types.CompletionItem.label) comps in
+  Alcotest.(check bool) "COMPLETION inside interp includes 'name'" true (List.mem "name" labels)
+
 (* ------------------------------------------------------------------ *)
 (* Top-level resolution vs stdlib (Phase 5 fix)                        *)
 (* ------------------------------------------------------------------ *)
@@ -5724,6 +5741,9 @@ let () =
       "HOF indirect-call insight",              `Quick, test_tir_indirect_call_insight;
       "tir_fn_insights field populated",        `Quick, test_tir_fn_insights_field_populated;
       "code lens consistent with TIR insights", `Quick, test_code_lens_consistent_with_tir_insights;
+    ];
+    "tier4: ~H interpolation intelligence", [
+      "type/def/completion inside ${...}", `Quick, test_hover_in_h_interp;
     ];
     "runnable code lenses", [
       "test block yields run+debug lenses",   `Quick, test_action_lens_for_test_block;
