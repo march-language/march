@@ -513,6 +513,37 @@ let schema_drift_diagnostics (schemas : schema list) (ops : mig_op list)
   List.rev !diags
 
 (* ------------------------------------------------------------------ *)
+(* FK column diagnostics (C4)                                          *)
+(* ------------------------------------------------------------------ *)
+
+let fk_column_diagnostics (schemas : schema list) (ops : mig_op list)
+    : (Ast.span * string * string) list =
+  if schemas = [] then []
+  else
+    List.filter_map (function
+      | References { table; column; span } when column <> "" ->
+        (match List.find_opt (fun s -> s.ds_table = table) schemas with
+         | None -> None
+         | Some schema ->
+           if List.exists (fun f -> f.df_name = column) schema.ds_fields then None
+           else
+             let suggestion =
+               let (best_d, best_n) = List.fold_left (fun (bd, bn) f ->
+                 let d = levenshtein column f.df_name in
+                 if d < bd then (d, f.df_name) else (bd, bn))
+                 (max_int, "") schema.ds_fields
+               in
+               if best_d <= 2 && best_n <> "" then
+                 Printf.sprintf " (did you mean `%s`?)" best_n
+               else ""
+             in
+             Some (span,
+               Printf.sprintf "Unknown FK column `%s` on table `%s`%s" column table suggestion,
+               "depot/unknown-fk-column"))
+      | _ -> None)
+    ops
+
+(* ------------------------------------------------------------------ *)
 (* SQL injection warning (D1)                                          *)
 (* ------------------------------------------------------------------ *)
 

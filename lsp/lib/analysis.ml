@@ -253,6 +253,8 @@ type t = {
   depot_col_occs : Depot.col_occ list;
   (** Every column-name string literal in a Query.where_*/order_* call,
       resolved to its schema table. *)
+  depot_table_occs : Depot.table_occ list;
+  (** Every table-name string literal in a Query.from_table/Migration.* call. *)
   protocols        : (string * Ast.protocol_def) list;
   (** Session-type protocol definitions: name → def (for scaffolding). *)
   param_name_map   : (string, string list) Hashtbl.t;
@@ -2578,6 +2580,7 @@ let analyse ~filename ~src : t =
       depot_source_decls = [];
       depot_schemas     = [];
       depot_col_occs    = [];
+      depot_table_occs  = [];
       protocols         = [];
       param_name_map    = build_param_name_map [] }
   in
@@ -2675,6 +2678,7 @@ let analyse ~filename ~src : t =
     let depot_source_decls = user_decls @ extra_decls in
     let depot_schemas = Depot.schemas_in depot_source_decls in
     let depot_col_occs = Depot.column_occurrences depot_schemas depot_source_decls in
+    let depot_table_occs = Depot.table_occurrences depot_source_decls in
     (* Populate doc_map with stdlib function docs first so that user-defined
        functions with the same name take precedence (user docs overwrite). *)
     collect_docs ~doc_map stdlib_decls;
@@ -3266,6 +3270,9 @@ let analyse ~filename ~src : t =
       @ List.map make_diag (Depot.table_diagnostics depot_schemas
           (Depot.table_occurrences depot_source_decls))
       @ List.map make_diag (Depot.sql_injection_diagnostics depot_source_decls)
+      @ (let ops = Depot.migration_ops depot_source_decls in
+         List.map make_diag (Depot.schema_drift_diagnostics depot_schemas ops depot_col_occs)
+         @ List.map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
     in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
@@ -3325,6 +3332,7 @@ let analyse ~filename ~src : t =
       depot_source_decls;
       depot_schemas;
       depot_col_occs;
+      depot_table_occs;
       protocols        =
         List.filter_map (function
             | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)
@@ -3554,8 +3562,30 @@ let ty_at (a : t) ~line ~character : Tc.ty option =
     in
     Some ty
 
+(* Find the Depot schema field under the cursor, if any.
+   co_span.start_col is the closing-quote column; opening = start_col - len - 1. *)
+let depot_field_at (a : t) ~line ~character
+    : (Depot.col_occ * Depot.depot_field) option =
+  List.find_map (fun (occ : Depot.col_occ) ->
+    let sp = occ.co_span in
+    let sl = sp.start_line - 1 in
+    let closing_col = sp.start_col in
+    let str_start = closing_col - String.length occ.co_col - 1 in
+    if line = sl && character >= str_start && character <= closing_col then
+      match List.find_opt (fun (s : Depot.schema) -> s.ds_table = occ.co_table)
+              a.depot_schemas with
+      | Some schema ->
+        List.find_opt (fun (f : Depot.depot_field) -> f.df_name = occ.co_col)
+          schema.ds_fields
+        |> Option.map (fun f -> (occ, f))
+      | None -> None
+    else None)
+  a.depot_col_occs
+
 let type_at (a : t) ~line ~character : string option =
-  Option.map Tc.pp_ty (ty_at a ~line ~character)
+  match depot_field_at a ~line ~character with
+  | Some (_, f) -> Some f.df_type
+  | None -> Option.map Tc.pp_ty (ty_at a ~line ~character)
 
 (* Smallest local-binder use/def span containing the cursor -> its symbol id.
    [None] means the cursor is not on a function-local binding (top-level/stdlib,
@@ -3580,6 +3610,18 @@ let span_in_user_file (a : t) (sp : Ast.span) : bool =
   sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
 
 let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
+  (* Depot column string: jump to the field name in the schema definition. *)
+  (match depot_field_at a ~line ~character with
+   | Some (_, f) ->
+     let sp = f.df_name_span in
+     let path =
+       if sp.Ast.file = "" || sp.Ast.file = "<unknown>" then a.filename
+       else sp.Ast.file
+     in
+     Some (Lsp.Types.Location.create
+             ~uri:(Lsp.Types.DocumentUri.of_path path)
+             ~range:(Pos.span_to_lsp_range sp))
+   | None ->
   (* Island component name: cursor inside <island name='X' /> in a ~H sigil.
      Try X.create, then X.render, then X (the module name) in def_map. *)
   let island_result =
@@ -3668,6 +3710,7 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
        in
        let range = Pos.span_to_lsp_range def_span in
        Some (Lsp.Types.Location.create ~uri ~range))
+  ) (* end depot_field_at match *)
 
 let keywords = [
   "mod"; "end"; "do"; "fn"; "let"; "match"; "if"; "then"; "else";
@@ -3909,6 +3952,56 @@ let completions_at (a : t) ~line ~character =
   | Some items -> items   (* in `receiver.`: only the receiver's members *)
   | None ->
   (* ------------------------------------------------------------------ *)
+  (* Depot column-name context: cursor inside a column-arg string        *)
+  (* ------------------------------------------------------------------ *)
+  let depot_col_items =
+    let open Lsp.Types in
+    List.find_map (fun (occ : Depot.col_occ) ->
+      let sp = occ.co_span in
+      (* Span start_col points at the closing quote; opening = start_col - len - 1 *)
+      let sl = sp.start_line - 1 in
+      let closing_col = sp.start_col in
+      let str_start = closing_col - String.length occ.co_col - 1 in
+      if line = sl && character >= str_start && character <= closing_col then
+        match List.find_opt (fun (s : Depot.schema) -> s.ds_table = occ.co_table)
+                a.depot_schemas with
+        | Some schema ->
+          Some (List.map (fun (f : Depot.depot_field) ->
+            CompletionItem.create
+              ~label:f.df_name
+              ~kind:CompletionItemKind.Field
+              ~detail:f.df_type
+              ()) schema.ds_fields)
+        | None -> None
+      else None)
+    a.depot_col_occs
+  in
+  (* ------------------------------------------------------------------ *)
+  (* Depot table-name context: cursor inside a from_table/Migration arg  *)
+  (* ------------------------------------------------------------------ *)
+  let depot_table_items =
+    let open Lsp.Types in
+    List.find_map (fun (occ : Depot.table_occ) ->
+      let sp = occ.to_span in
+      let sl = sp.start_line - 1 in
+      let closing_col = sp.start_col in
+      let str_start = closing_col - String.length occ.to_table - 1 in
+      if line = sl && character >= str_start && character <= closing_col then
+        Some (List.map (fun (s : Depot.schema) ->
+          CompletionItem.create
+            ~label:s.ds_table
+            ~kind:CompletionItemKind.Value
+            ()) a.depot_schemas)
+      else None)
+    a.depot_table_occs
+  in
+  (match depot_col_items with
+  | Some items -> items
+  | None ->
+  (match depot_table_items with
+  | Some items -> items
+  | None ->
+  (* ------------------------------------------------------------------ *)
   (* Island-name context: cursor just after <island name=' or name=''    *)
   (* ------------------------------------------------------------------ *)
   (* pos_to_ofs takes 1-indexed line; line here is 0-indexed *)
@@ -4032,6 +4125,8 @@ let completions_at (a : t) ~line ~character =
   @ rank "6" sigil_items
   @ auto_items
   ) (* end match island_items *)
+  ) (* end match depot_table_items *)
+  ) (* end match depot_col_items *)
 
 (* ------------------------------------------------------------------ *)
 (* Parameter-name inlay hints at call sites                            *)

@@ -5567,6 +5567,40 @@ end|} in
   let a = analyse src in
   Alcotest.(check int) "one schema on the analysis record" 1 (List.length a.An.depot_schemas)
 
+let test_depot_column_completion () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } }) end
+  fn q() do
+    Depot.Query.from_table("users") |> Depot.Query.where_eq("ag", "18")
+  end
+end|} in
+  let a = analyse src in
+  (* verify col_occs and schemas first *)
+  Alcotest.(check bool) "depot_col_occs non-empty" true (a.An.depot_col_occs <> []);
+  Alcotest.(check bool) "depot_schemas non-empty" true (a.An.depot_schemas <> []);
+  (* find cursor inside "ag" — position of the 'a' in "ag" *)
+  let (line, col) = pos_of src "\"ag\"" in
+  let items = An.completions_at a ~line ~character:(col + 1) in
+  let labels = List.map (fun (i : Lsp.Types.CompletionItem.t) -> i.label) items in
+  Alcotest.(check bool) "age in column completions" true (List.mem "age" labels);
+  Alcotest.(check bool) "name in column completions" true (List.mem "name" labels)
+
+let test_depot_column_completion_no_dilution () =
+  (* When inside a column-arg string, ONLY column names should be returned *)
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { email = "String" } }) end
+  fn q() do
+    Depot.Query.from_table("users") |> Depot.Query.where_eq("em", "x")
+  end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "\"em\"" in
+  let items = An.completions_at a ~line ~character:(col + 1) in
+  let labels = List.map (fun (i : Lsp.Types.CompletionItem.t) -> i.label) items in
+  Alcotest.(check bool) "email in column completions" true (List.mem "email" labels);
+  (* Generic keywords should NOT appear when inside column string *)
+  Alcotest.(check bool) "no 'fn' keyword when inside column string" false (List.mem "fn" labels)
+
 let test_depot_unknown_column () =
   let src = {|mod M do
   fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
@@ -5612,6 +5646,132 @@ end|} in
   let a = analyse src in
   Alcotest.(check bool) "analysis exposes decls for the Depot pass" true
     (List.length a.An.depot_source_decls > 0)
+
+let test_depot_table_completion () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { name = "String" } }) end
+  fn q() do Depot.Query.from_table("us") end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src {|"us"|} in
+  let items = An.completions_at a ~line ~character:(col + 1) in
+  let labels = List.map (fun (i : Lsp.Types.CompletionItem.t) -> i.label) items in
+  Alcotest.(check bool) "users in table completions" true (List.mem "users" labels)
+
+let test_depot_unknown_table () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { name = "String" } }) end
+  fn q() do Depot.Query.from_table("bogus") end
+end|} in
+  let a = analyse src in
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-table") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "unknown table flagged" true has
+
+let test_depot_migration_ops () =
+  let src = {|mod M do
+  fn m1() do
+    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+  end
+  fn m2() do
+    Depot.Migration.alter_table("users", { add = { score = "Float" }, remove = ["old_col"] })
+  end
+end|} in
+  let a = analyse src in
+  let ops = Depot.migration_ops a.An.depot_source_decls in
+  Alcotest.(check bool) "at least one CreateTable" true
+    (List.exists (function Depot.CreateTable { table; _ } -> table = "users" | _ -> false) ops);
+  Alcotest.(check bool) "at least one AlterTable" true
+    (List.exists (function Depot.AlterTable { table; _ } -> table = "users" | _ -> false) ops)
+
+let test_depot_schema_drift () =
+  let src = {|mod M do
+  fn s() do
+    Depot.Schema.define("users", { fields = { name = "String" } })
+  end
+  fn mig() do
+    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+  end
+  fn q() do
+    Depot.Query.from_table("users") |> Depot.Query.where_eq("name", "Alice")
+  end
+end|} in
+  let a = analyse src in
+  let has_drift = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/schema-drift") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "age in migration but not in schema => depot/schema-drift" true has_drift
+
+let test_depot_no_drift_when_aligned () =
+  let src = {|mod M do
+  fn s() do
+    Depot.Schema.define("users", { fields = { name = "String", age = "Int" } })
+  end
+  fn mig() do
+    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+  end
+  fn q() do
+    Depot.Query.from_table("users") |> Depot.Query.where_eq("name", "Alice")
+  end
+end|} in
+  let a = analyse src in
+  let has_drift = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/schema-drift")
+    | Some (`String "depot/missing-migration") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "aligned schema+migration not flagged" false has_drift
+
+let test_depot_fk_column_valid () =
+  let src = {|mod M do
+  fn s() do
+    Depot.Schema.define("posts", { fields = { post_id = "Int", title = "String" } })
+  end
+  fn mig() do
+    Depot.Migration.references("posts", { column = "post_id" })
+  end
+end|} in
+  let a = analyse src in
+  let has_fk_err = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-fk-column") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "valid FK column not flagged" false has_fk_err
+
+let test_depot_fk_column_invalid () =
+  let src = {|mod M do
+  fn s() do
+    Depot.Schema.define("posts", { fields = { post_id = "Int" } })
+  end
+  fn mig() do
+    Depot.Migration.references("posts", { column = "bogus_id" })
+  end
+end|} in
+  let a = analyse src in
+  let has_fk_err = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-fk-column") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "invalid FK column flagged" true has_fk_err
+
+let test_depot_col_hover () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "\"age\"" in
+  let ty = An.type_at a ~line ~character:(col + 1) in
+  Alcotest.(check (option string)) "hover on column string shows Depot field type"
+    (Some "Int") ty
+
+let test_depot_col_def () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "\"age\"" in
+  let loc = An.definition_at a ~line ~character:(col + 1) in
+  Alcotest.(check bool) "def on column string finds schema field" true (loc <> None)
 
 (* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
@@ -6074,9 +6234,22 @@ let () =
       "lowercase ~h sigil not collected as HTML sigil", `Quick, test_lowercase_h_sigil_not_collected;
     ];
     "depot: phase B column intelligence", [
+      "column completion in where_eq string arg",     `Quick, test_depot_column_completion;
+      "column completion: no dilution with keywords", `Quick, test_depot_column_completion_no_dilution;
       "typo'd column emits depot/unknown-column",    `Quick, test_depot_unknown_column;
       "known column not flagged",                    `Quick, test_depot_known_column_not_flagged;
       "unresolvable table not flagged (conservative)",`Quick, test_depot_unresolved_schema_not_flagged;
+      "hover on column string shows field type",      `Quick, test_depot_col_hover;
+      "go-to-def on column string finds schema field",`Quick, test_depot_col_def;
+      "table name completion in from_table arg",      `Quick, test_depot_table_completion;
+      "unknown table flagged",                        `Quick, test_depot_unknown_table;
+    ];
+    "depot: phase C migration intelligence", [
+      "migration_ops extracts CreateTable + AlterTable",  `Quick, test_depot_migration_ops;
+      "schema-drift flagged when mig has extra column",   `Quick, test_depot_schema_drift;
+      "no drift when schema and migration align",          `Quick, test_depot_no_drift_when_aligned;
+      "valid FK column not flagged",                      `Quick, test_depot_fk_column_valid;
+      "invalid FK column flagged",                        `Quick, test_depot_fk_column_invalid;
     ];
     "depot: phase A foundation", [
       "schema extraction from Schema.define",      `Quick, test_depot_schema_extract;
