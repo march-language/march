@@ -42,22 +42,28 @@ let find_test_dir () =
     [entry] is the single test entrypoint file (the one with test blocks).
     [lib_path_env] is the MARCH_LIB_PATH prefix (same as forge build).
     [seed] forwards to property tests via MARCH_PROP_SEED env var. *)
-let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=false) ~lib_path_env ~output test_entry =
+let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=false) ?(release=false) ~lib_path_env ~output test_entry =
   let verbose_flag = if verbose then " --verbose" else "" in
   let filter_flag  = if filter = "" then ""
                      else Printf.sprintf " --filter=%s" (Filename.quote filter) in
   let seed_env = if seed = "" then ""
                  else Printf.sprintf "MARCH_PROP_SEED=%s " (Filename.quote seed) in
   let skip_env = if skip_properties then "MARCH_SKIP_PROPERTIES=1 " else "" in
+  (* Tests use -O0 by default for fast compilation; --release enables -O2.
+     The CAS cache stores separate artifacts for each opt level. *)
+  let opt_flag = if release then "--opt 2" else "--opt 0" in
   (* Build: compile test entry with --compile --test *)
   let build_cmd =
-    Printf.sprintf "%smarch --compile --test -o %s %s"
-      lib_path_env (Filename.quote output) (Filename.quote test_entry)
+    Printf.sprintf "%smarch --compile --test %s -o %s %s"
+      lib_path_env opt_flag (Filename.quote output) (Filename.quote test_entry)
   in
   let build_rc = Sys.command build_cmd in
   if build_rc <> 0 then
     Error (Printf.sprintf "test compilation failed (exit %d)" build_rc)
   else begin
+    (* On macOS, ad-hoc-sign the freshly-linked binary so that Gatekeeper
+       doesn't block exec() while the scanning daemon catches up. *)
+    let _ = Sys.command (Printf.sprintf "codesign --sign - --force %s 2>/dev/null" (Filename.quote output)) in
     (* Run the compiled test binary *)
     let run_cmd = Printf.sprintf "%s%s%s%s%s" skip_env seed_env (Filename.quote output) verbose_flag filter_flag in
     let run_rc = Sys.command run_cmd in
@@ -82,31 +88,17 @@ let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "test run failed (exit %d)" rc)
 
-(** Build the MARCH_LIB_PATH prefix string and test output path for a project. *)
+(** Build the MARCH_LIB_PATH prefix string and test output path for a project.
+    Test scope: [deps] + [dev-deps] + [test-deps] (not [dev-only-deps]). *)
 let project_env proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
-  let dep_lib_paths = List.concat_map (fun (dep_name, dep) ->
-      match dep with
-      | Project.PathDep rel_path ->
-        let abs = if Filename.is_relative rel_path
-          then Filename.concat proj.Project.root rel_path else rel_path in
-        let d = Filename.concat abs "lib" in
-        (* Expand the dep's lib/ into its subfolders too, so a reorganised
-           dependency (lib/api, lib/wire, …) resolves in consumers' tests. *)
-        if Sys.file_exists d then Cmd_build.collect_lib_dirs d
-        else if Sys.file_exists abs then Cmd_build.collect_lib_dirs abs
-        else []
-      | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-        (match Project.git_dep_lib_path dep_name with
-         | Some p -> Cmd_build.collect_lib_dirs p
-         | None  -> [])
-      | _ -> []
-    ) proj.Project.deps in
+  let test_scope_deps =
+    proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps in
+  let dep_lib_paths = List.concat_map
+    (Cmd_build.dep_to_lib_paths ~root:proj.Project.root) test_scope_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
-    (* Expand lib/ into all of its subdirectories so modules grouped into
-       subfolders resolve (same as Cmd_build.lib_path_env). *)
     dep_lib_paths @ Cmd_build.collect_lib_dirs lib_dir
     @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
@@ -123,7 +115,7 @@ let project_env proj =
   (lib_path_env, output, all_lib_paths)
 
 (** Run forge test for a given list of test files (after directory expansion). *)
-let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) test_files =
+let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) test_files =
   (* coverage is only supported on the interpreter path *)
   let use_interp = coverage || Sys.getenv_opt "MARCH_TEST_INTERPRETER" = Some "1" in
   match Project.load () with
@@ -164,17 +156,17 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       in
       (* Use first test file as entry; MARCH_LIB_PATH provides the rest. *)
       let entry = List.hd test_files in
-      invoke_compiled ~verbose ~filter ~seed ~skip_properties ~lib_path_env:lib_path_with_test ~output entry
+      invoke_compiled ~verbose ~filter ~seed ~skip_properties ~release ~lib_path_env:lib_path_with_test ~output entry
     end
 
-let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(files=[]) () =
+let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(files=[]) () =
   if files <> [] then begin
     let expanded = expand_paths files in
     if expanded = [] then begin
       Printf.printf "no test files found\n%!";
       Ok ()
     end else
-      run_files ~verbose ~filter ~coverage ~seed ~skip_properties expanded
+      run_files ~verbose ~filter ~coverage ~seed ~skip_properties ~release expanded
   end else
     match find_test_dir () with
     | None ->
@@ -188,5 +180,5 @@ let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_proper
           Printf.printf "no test files found under %s\n%!" test_dir;
           Ok ()
         end else
-          run_files ~verbose ~filter ~coverage ~seed test_files
+          run_files ~verbose ~filter ~coverage ~seed ~release test_files
       end

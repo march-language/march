@@ -221,25 +221,29 @@ let test_cmd =
   let skip_props =
     Arg.(value & flag & info ["skip-properties"] ~doc:"Skip property-based tests (Check.all)")
   in
+  let release =
+    Arg.(value & flag & info ["release"]
+           ~doc:"Compile test binary with -O2 instead of the default -O0 (slower build, faster test runtime)")
+  in
   let files =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f s sp fs pkg =
+  let run v c f s sp r fs pkg =
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
     | Some root when root = cwd ->
       let members = Workspace.members_from_root root in
       if members <> [] then
         handle (Workspace.run_for_members ~root ~members ~package:pkg
-                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ()))
+                  (fun () -> Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ()))
       else
-        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ())
+        handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
     | _ ->
-      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ())
+      handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
   in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ files $ workspace_package_flag)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag)
 
 (* ------------------------------------------------------------------ forge lint *)
 
@@ -405,16 +409,23 @@ let add_cmd =
          info ["path"] ~docv:"PATH" ~doc:"Local filesystem path")
   in
   let dev =
-    Arg.(value & flag & info ["dev"] ~doc:"Add as a dev dependency")
+    Arg.(value & flag & info ["dev"] ~doc:"Add to [dev-deps] (dev + test)")
+  in
+  let dev_only =
+    Arg.(value & flag & info ["dev-only"] ~doc:"Add to [dev-only-deps] (dev only, not test)")
+  in
+  let test_dep =
+    Arg.(value & flag & info ["test"] ~doc:"Add to [test-deps] (test only, not dev)")
   in
   let force =
     Arg.(value & flag & info ["force"] ~doc:"Overwrite if dependency already exists")
   in
-  let run n g t b r p d f =
-    handle (Cmd_add.run ~name:n ~git:g ~tag:t ~branch:b ~rev:r ~path:p ~dev:d ~force:f ())
+  let run n g t b r p d do_ td f =
+    handle (Cmd_add.run ~name:n ~git:g ~tag:t ~branch:b ~rev:r ~path:p
+              ~dev:d ~dev_only:do_ ~test_dep:td ~force:f ())
   in
   Cmd.v (Cmd.info "add" ~doc:"Add a dependency to forge.toml")
-    Term.(const run $ name $ git $ tag $ branch $ rev $ path $ dev $ force)
+    Term.(const run $ name $ git $ tag $ branch $ rev $ path $ dev $ dev_only $ test_dep $ force)
 
 (* ------------------------------------------------------------------ forge help *)
 

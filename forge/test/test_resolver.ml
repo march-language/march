@@ -301,6 +301,88 @@ vault   = { path = "../vault" }
             Alcotest.(check string) "vault path" "../vault" p
           | _ -> Alcotest.fail "vault should be PathDep"))
 
+let test_project_dev_only_deps () =
+  let toml_text = {|
+[package]
+name = "webapp"
+version = "1.0.0"
+type = "app"
+
+[deps]
+json = { path = "../json" }
+
+[dev-deps]
+devtools = { path = "../devtools" }
+
+[dev-only-deps]
+hot_reload = { path = "../hot_reload" }
+
+[test-deps]
+march_test = { path = "../march_test" }
+|} in
+  let tmpdir = Filename.temp_dir "test_resolver_scoped_" "" in
+  let toml_path = Filename.concat tmpdir "forge.toml" in
+  let oc = open_out toml_path in
+  output_string oc toml_text;
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  Unix.chdir tmpdir;
+  Fun.protect ~finally:(fun () ->
+      Unix.chdir old_cwd;
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       match Project.load () with
+       | Error msg -> Alcotest.fail msg
+       | Ok proj ->
+         Alcotest.(check int) "1 prod dep"       1 (List.length proj.Project.deps);
+         Alcotest.(check int) "1 dev-dep"        1 (List.length proj.Project.dev_deps);
+         Alcotest.(check int) "1 dev-only-dep"   1 (List.length proj.Project.dev_only_deps);
+         Alcotest.(check int) "1 test-dep"       1 (List.length proj.Project.test_deps);
+         Alcotest.(check bool) "json in deps"
+           true (List.mem_assoc "json" proj.Project.deps);
+         Alcotest.(check bool) "devtools in dev_deps"
+           true (List.mem_assoc "devtools" proj.Project.dev_deps);
+         Alcotest.(check bool) "hot_reload in dev_only_deps"
+           true (List.mem_assoc "hot_reload" proj.Project.dev_only_deps);
+         Alcotest.(check bool) "march_test in test_deps"
+           true (List.mem_assoc "march_test" proj.Project.test_deps))
+
+let test_project_section_form_deps () =
+  let toml_text = {|
+[package]
+name = "webapp"
+version = "1.0.0"
+type = "app"
+
+[dev-only-deps.live_reload]
+path = "../live_reload"
+
+[test-deps.propcheck]
+path = "../propcheck"
+|} in
+  let tmpdir = Filename.temp_dir "test_resolver_section_" "" in
+  let toml_path = Filename.concat tmpdir "forge.toml" in
+  let oc = open_out toml_path in
+  output_string oc toml_text;
+  close_out oc;
+  let old_cwd = Sys.getcwd () in
+  Unix.chdir tmpdir;
+  Fun.protect ~finally:(fun () ->
+      Unix.chdir old_cwd;
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in ())
+    (fun () ->
+       match Project.load () with
+       | Error msg -> Alcotest.fail msg
+       | Ok proj ->
+         Alcotest.(check int) "1 dev-only via section form"
+           1 (List.length proj.Project.dev_only_deps);
+         Alcotest.(check int) "1 test-dep via section form"
+           1 (List.length proj.Project.test_deps);
+         Alcotest.(check bool) "live_reload in dev_only_deps"
+           true (List.mem_assoc "live_reload" proj.Project.dev_only_deps);
+         Alcotest.(check bool) "propcheck in test_deps"
+           true (List.mem_assoc "propcheck" proj.Project.test_deps))
+
 (* ===================================================================== *)
 (*  Lockfile read/write                                                   *)
 (* ===================================================================== *)
@@ -422,6 +504,8 @@ let () =
       Alcotest.test_case "git tag dep toml keys"      `Quick test_project_git_tag_dep;
       Alcotest.test_case "git branch dep toml keys"   `Quick test_project_git_branch_dep;
       Alcotest.test_case "all dep types load"         `Quick test_project_loads_all_dep_types;
+      Alcotest.test_case "dev-only-deps + test-deps inline" `Quick test_project_dev_only_deps;
+      Alcotest.test_case "dev-only-deps + test-deps section form" `Quick test_project_section_form_deps;
     ];
     "lockfile", [
       Alcotest.test_case "write and read back"        `Quick test_lockfile_write_and_read_back;

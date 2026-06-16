@@ -67,10 +67,15 @@ let insert_dep_line text ~section ~name ~dep =
 (*  Main command                                                       *)
 (* ------------------------------------------------------------------ *)
 
-let run ~name ~git ~tag ~branch ~rev ~path ~dev ~force () =
+let run ~name ~git ~tag ~branch ~rev ~path ~dev ~dev_only ~test_dep ~force () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
+    (* Validate: at most one scope flag *)
+    let scope_flags = List.length (List.filter Fun.id [dev; dev_only; test_dep]) in
+    if scope_flags > 1 then
+      Error "only one of --dev, --dev-only, --test may be specified"
+    else
     (* Build the dep value from flags *)
     let dep_result = match git, path with
       | Some url, _ ->
@@ -87,8 +92,12 @@ let run ~name ~git ~tag ~branch ~rev ~path ~dev ~force () =
     match dep_result with
     | Error msg -> Error msg
     | Ok dep ->
-      let section = if dev then "dev-deps" else "deps" in
-      let existing = if dev then proj.Project.dev_deps else proj.Project.deps in
+      let section, existing =
+        if dev_only  then "dev-only-deps", proj.Project.dev_only_deps
+        else if test_dep then "test-deps",     proj.Project.test_deps
+        else if dev      then "dev-deps",      proj.Project.dev_deps
+        else                  "deps",          proj.Project.deps
+      in
       (* Check for duplicates *)
       if List.mem_assoc name existing && not force then
         Error (Printf.sprintf

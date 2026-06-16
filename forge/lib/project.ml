@@ -2,7 +2,7 @@
 
 type project_type = App | Lib | Tool
 
-(** A project dependency.  Every dep form that can appear in [deps] or [dev-deps]. *)
+(** A project dependency.  Every dep form that can appear in any dep section. *)
 type dep =
   | RegistryDep  of { version : string }
     (** { registry = "forge", version = "~> 1.0" }
@@ -45,7 +45,9 @@ type project = {
   repository    : string option;  (** source repository URL *)
   homepage      : string option;  (** project homepage URL *)
   deps          : (string * dep) list;
-  dev_deps      : (string * dep) list;
+  dev_deps      : (string * dep) list;  (** dev + test — don't ship *)
+  dev_only_deps : (string * dep) list;  (** dev only — not available in test *)
+  test_deps     : (string * dep) list;  (** test only — not available in dev *)
   patches       : patch list;
   archive_tasks : archive_task list;
   archive_deps  : (string * dep) list;
@@ -196,10 +198,18 @@ let load_from root =
   let inline_deps   = parse_deps_section (Toml.get_section doc "deps") in
   let section_deps  = parse_section_deps "deps" doc in
   let deps = inline_deps @ section_deps in
-  (* [dev-deps] inline + section forms *)
+  (* [dev-deps] inline + section forms — available in dev + test, don't ship *)
   let inline_devdeps  = parse_deps_section (Toml.get_section doc "dev-deps") in
   let section_devdeps = parse_section_deps "dev-deps" doc in
   let dev_deps = inline_devdeps @ section_devdeps in
+  (* [dev-only-deps] inline + section forms — dev only, not available in test *)
+  let inline_devonly  = parse_deps_section (Toml.get_section doc "dev-only-deps") in
+  let section_devonly = parse_section_deps "dev-only-deps" doc in
+  let dev_only_deps = inline_devonly @ section_devonly in
+  (* [test-deps] inline + section forms — test only, not available in dev *)
+  let inline_testdeps  = parse_deps_section (Toml.get_section doc "test-deps") in
+  let section_testdeps = parse_section_deps "test-deps" doc in
+  let test_deps = inline_testdeps @ section_testdeps in
   (* [patch.NAME] sections *)
   let patches = parse_patches doc in
   (* [archive.task.NAME] sections *)
@@ -218,7 +228,8 @@ let load_from root =
   in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
-    deps; dev_deps; patches; archive_tasks; archive_deps; preprocessors }
+    deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
+    preprocessors }
 
 let load_from_dir dir =
   try Ok (load_from dir)

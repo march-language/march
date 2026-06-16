@@ -156,35 +156,47 @@ let build_islands ~lib_path_env ~islands_dir ~release lib_dir =
     (!built, total)
   end
 
+(** Expand a single dep entry into the lib paths it contributes to MARCH_LIB_PATH.
+    PathDeps are resolved relative to [root]; git deps use the CAS install path. *)
+let dep_to_lib_paths ~root (dep_name, dep) =
+  match dep with
+  | Project.PathDep rel_path ->
+    let abs_path = if Filename.is_relative rel_path
+      then Filename.concat root rel_path
+      else rel_path
+    in
+    let d = Filename.concat abs_path "lib" in
+    if Sys.file_exists d then collect_lib_dirs d
+    else if Sys.file_exists abs_path then collect_lib_dirs abs_path
+    else []
+  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+    (match Project.git_dep_lib_path dep_name with
+     | Some p -> collect_lib_dirs p
+     | None  -> [])
+  | _ -> []
+
 (** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
-    of the [march] compiler.  Contains the project's own lib/, any path-dep
-    or git-dep lib roots, and config/ when present. *)
-let lib_path_env proj =
+    of the [march] compiler.  Contains the project's own lib/, any dep lib
+    roots (scoped by environment), and config/ when present.
+
+    [release=true]  → only prod [deps] are on the path (ships to users).
+    [release=false] → [deps] + [dev-deps] + [dev-only-deps] are included. *)
+let lib_path_env ?(release=false) proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
+  (* Collect deps for the current build scope. *)
+  let scoped_deps =
+    if release then proj.Project.deps
+    else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
+  in
   (* A dependency's lib/ may group modules into subfolders exactly like the
      primary package (e.g. lib/api, lib/wire).  The module resolver searches
      each lib path flatly, so expand every dep lib root into the root plus all
      of its descendant directories — mirroring [collect_lib_dirs lib_dir] for
      the primary package below.  Without this, a reorganised dependency's
      internal cross-module imports fail with "Module not found" in consumers. *)
-  let dep_lib_paths = List.concat_map (fun (dep_name, dep) ->
-      match dep with
-      | Project.PathDep rel_path ->
-        let abs_path = if Filename.is_relative rel_path
-          then Filename.concat proj.Project.root rel_path
-          else rel_path
-        in
-        let d = Filename.concat abs_path "lib" in
-        if Sys.file_exists d then collect_lib_dirs d
-        else if Sys.file_exists abs_path then collect_lib_dirs abs_path
-        else []
-      | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-        (match Project.git_dep_lib_path dep_name with
-         | Some p -> collect_lib_dirs p
-         | None  -> [])
-      | _ -> []
-    ) proj.Project.deps in
+  let dep_lib_paths = List.concat_map
+    (dep_to_lib_paths ~root:proj.Project.root) scoped_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ collect_lib_dirs lib_dir
@@ -350,7 +362,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) () =
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
-      let lib_path_env = lib_path_env proj in
+      let lib_path_env = lib_path_env ~release proj in
       let entry_path = match proj.Project.entrypoint with
         | Some ep -> Filename.concat proj.Project.root ep
         | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")

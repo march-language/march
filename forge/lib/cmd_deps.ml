@@ -237,7 +237,11 @@ let run () =
         if List.mem_assoc p.Project.patch_name effective_deps then None
         else Some (p.Project.patch_name, p.Project.patch_source)
       ) proj.Project.patches in
-    let all_deps = effective_deps @ extra_patches in
+    (* Non-prod deps: dev-deps, dev-only-deps, test-deps.  Patches don't apply
+       to these — they're local/dev tooling, not solver-managed prod deps. *)
+    let non_prod_deps =
+      proj.Project.dev_deps @ proj.Project.dev_only_deps @ proj.Project.test_deps in
+    let all_deps = effective_deps @ extra_patches @ non_prod_deps in
     ignore patch_names;
     (* Install all deps *)
     if all_deps = [] then begin
