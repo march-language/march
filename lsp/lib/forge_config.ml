@@ -197,6 +197,24 @@ let find_forge_root start_dir =
 (* Dep resolution — mirrors cmd_build.ml's MARCH_LIB_PATH logic       *)
 (* ------------------------------------------------------------------ *)
 
+(** Collect [dir] plus every nested subdirectory under it, so that lib/
+    modules grouped into subfolders are each on the search path.  Mirrors
+    [collect_lib_dirs] in [forge/lib/cmd_build.ml]. *)
+let collect_lib_dirs dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else begin
+      let acc = d :: acc in
+      let entries = Sys.readdir d in
+      Array.sort compare entries;
+      Array.fold_left (fun acc name ->
+          let path = Filename.concat d name in
+          if Sys.is_directory path then walk acc path else acc)
+        acc entries
+    end
+  in
+  List.rev (walk [] dir)
+
 (** Return the CAS directory where [forge deps] clones git dependencies:
     [~/.march/cas/deps]. *)
 let cas_deps_dir () =
@@ -231,50 +249,52 @@ let dep_lib_paths root =
       then Filename.concat root p
       else p
     in
-    (* Helper: pick lib/ subdir if it exists, else the root itself *)
-    let best_lib_dir abs_path =
+    (* Helper: pick lib/ subdir if it exists, else the root itself.
+       Returns all subdirectories recursively (mirroring collect_lib_dirs so
+       that dep packages with nested lib/api/, lib/sql/, etc. are fully visible). *)
+    let best_lib_dirs abs_path =
       let lib = Filename.concat abs_path "lib" in
-      if Sys.file_exists lib then Some lib
-      else if Sys.file_exists abs_path then Some abs_path
-      else None
+      if Sys.file_exists lib then collect_lib_dirs lib
+      else if Sys.file_exists abs_path then collect_lib_dirs abs_path
+      else []
     in
     (* Helper: resolve a git dep by name via the CAS *)
-    let git_dep_path dep_name =
+    let git_dep_dirs dep_name =
       match cas_deps_dir () with
-      | None -> None
+      | None -> []
       | Some cas ->
         let dep_dir = Filename.concat cas dep_name in
-        best_lib_dir dep_dir
+        best_lib_dirs dep_dir
     in
     (* 1. Inline deps: [deps] section with dep = {path = "..."} or dep = {git = "..."} *)
     let dep_section = get_section doc "deps" in
-    let inline_paths = List.filter_map (fun (dep_name, v) ->
+    let inline_paths = List.concat_map (fun (dep_name, v) ->
         match v with
         | InlineTable tbl ->
           (match get_string tbl "path" with
-           | Some p -> best_lib_dir (resolve_path p)
+           | Some p -> best_lib_dirs (resolve_path p)
            | None ->
              (match get_string tbl "git" with
-              | Some _ -> git_dep_path dep_name
-              | None   -> None))
-        | Str _ -> None
+              | Some _ -> git_dep_dirs dep_name
+              | None   -> []))
+        | Str _ -> []
       ) dep_section
     in
     (* 2. Section deps: [deps.foo] path = "..." or git = "..." *)
     let prefix = "deps." in
     let plen = String.length prefix in
-    let section_paths = List.filter_map (fun (sec_name, pairs) ->
+    let section_paths = List.concat_map (fun (sec_name, pairs) ->
         if String.length sec_name > plen &&
            String.sub sec_name 0 plen = prefix
         then
           let dep_name = String.sub sec_name plen (String.length sec_name - plen) in
           (match get_string pairs "path" with
-           | Some p -> best_lib_dir (resolve_path p)
+           | Some p -> best_lib_dirs (resolve_path p)
            | None ->
              (match get_string pairs "git" with
-              | Some _ -> git_dep_path dep_name
-              | None   -> None))
-        else None
+              | Some _ -> git_dep_dirs dep_name
+              | None   -> []))
+        else []
       ) doc.sections
     in
     (* Deduplicate while preserving order *)
@@ -283,24 +303,6 @@ let dep_lib_paths root =
         if Hashtbl.mem seen d then false
         else (Hashtbl.add seen d (); true)
       ) (inline_paths @ section_paths)
-
-(** Collect [dir] plus every nested subdirectory under it, so that lib/
-    modules grouped into subfolders are each on the search path.  Mirrors
-    [collect_lib_dirs] in [forge/lib/cmd_build.ml]. *)
-let collect_lib_dirs dir =
-  let rec walk acc d =
-    if not (Sys.file_exists d && Sys.is_directory d) then acc
-    else begin
-      let acc = d :: acc in
-      let entries = Sys.readdir d in
-      Array.sort compare entries;
-      Array.fold_left (fun acc name ->
-          let path = Filename.concat d name in
-          if Sys.is_directory path then walk acc path else acc)
-        acc entries
-    end
-  in
-  List.rev (walk [] dir)
 
 (** All lib paths for a project root: dependency paths PLUS the project's own
     [lib/] (and its subdirectories), [.forge/generated/], and [config/] —

@@ -267,16 +267,20 @@ type t = {
 (* ------------------------------------------------------------------ *)
 
 let find_stdlib_dir () =
-  let exe_dir = Filename.dirname Sys.executable_name in
-  let candidates = [
-    "stdlib";
-    Filename.concat exe_dir "../stdlib";
-    Filename.concat exe_dir "../../stdlib";
-    Filename.concat exe_dir "../../../stdlib";
-    Filename.concat exe_dir "../share/march/stdlib";
-    Filename.concat exe_dir "../share/march";
-  ] in
-  List.find_opt Sys.file_exists candidates
+  match Sys.getenv_opt "MARCH_STDLIB" with
+  | Some dir when Sys.file_exists dir -> Some dir
+  | _ ->
+    let exe_dir = Filename.dirname Sys.executable_name in
+    let candidates = [
+      "stdlib";
+      Filename.concat exe_dir "../stdlib";
+      Filename.concat exe_dir "../../stdlib";
+      Filename.concat exe_dir "../../../stdlib";
+      Filename.concat exe_dir "../../../../stdlib";
+      Filename.concat exe_dir "../share/march/stdlib";
+      Filename.concat exe_dir "../share/march";
+    ] in
+    List.find_opt Sys.file_exists candidates
 
 let load_stdlib_file path =
   let src =
@@ -3257,22 +3261,26 @@ let analyse ~filename ~src : t =
         h_sigils
     in
     let depot_diags =
+      let is_current_file (sp : Ast.span) =
+        sp.Ast.file = filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+      in
       let make_diag (span, msg, code) =
-        Lsp.Types.Diagnostic.create
+        if not (is_current_file span) then None
+        else Some (Lsp.Types.Diagnostic.create
           ~range:(Pos.span_to_lsp_range span)
           ~severity:Lsp.Types.DiagnosticSeverity.Warning
           ~message:(`String msg)
           ~source:"march"
           ~code:(`String code)
-          ()
+          ())
       in
-      List.map make_diag (Depot.column_diagnostics depot_schemas depot_col_occs)
-      @ List.map make_diag (Depot.table_diagnostics depot_schemas
+      List.filter_map make_diag (Depot.column_diagnostics depot_schemas depot_col_occs)
+      @ List.filter_map make_diag (Depot.table_diagnostics depot_schemas
           (Depot.table_occurrences depot_source_decls))
-      @ List.map make_diag (Depot.sql_injection_diagnostics depot_source_decls)
+      @ List.filter_map make_diag (Depot.sql_injection_diagnostics depot_source_decls)
       @ (let ops = Depot.migration_ops depot_source_decls in
-         List.map make_diag (Depot.schema_drift_diagnostics depot_schemas ops depot_col_occs)
-         @ List.map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
+         List.filter_map make_diag (Depot.schema_drift_diagnostics depot_schemas ops depot_col_occs)
+         @ List.filter_map make_diag (Depot.fk_column_diagnostics depot_schemas ops))
     in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))

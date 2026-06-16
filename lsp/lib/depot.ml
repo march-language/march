@@ -374,8 +374,8 @@ let table_diagnostics (schemas : schema list) (occs : table_occ list)
 (* ------------------------------------------------------------------ *)
 
 type mig_op =
-  | CreateTable of { table : string; cols : (string * string) list; span : Ast.span }
-  | AlterTable  of { table : string; adds : (string * string) list;
+  | CreateTable of { table : string; cols : (string * string * Ast.span) list; span : Ast.span }
+  | AlterTable  of { table : string; adds : (string * string * Ast.span) list;
                      removes : string list; span : Ast.span }
   | CreateIndex of { table : string; cols : string list; span : Ast.span }
   | References  of { table : string; column : string; span : Ast.span }
@@ -391,7 +391,7 @@ let migration_ops (decls : Ast.decl list) : mig_op list =
           | Ast.ETuple (Ast.ELit (Ast.LitString t, _) :: _, _) -> t
           | _ -> "?"
         in
-        Some (k.Ast.txt, ty)) entries
+        Some (k.Ast.txt, ty, k.Ast.span)) entries
     | _ -> []
   in
   let visit (e : Ast.expr) =
@@ -487,9 +487,9 @@ let schema_drift_diagnostics (schemas : schema list) (ops : mig_op list)
         if occ.co_table = s.ds_table then
           let created_by_mig = List.exists (function
             | CreateTable { table; cols; _ } when table = s.ds_table ->
-              List.exists (fun (c, _) -> c = occ.co_col) cols
+              List.exists (fun (c, _, _) -> c = occ.co_col) cols
             | AlterTable { table; adds; _ } when table = s.ds_table ->
-              List.exists (fun (c, _) -> c = occ.co_col) adds
+              List.exists (fun (c, _, _) -> c = occ.co_col) adds
             | _ -> false) ops
           in
           if not created_by_mig then
@@ -500,10 +500,10 @@ let schema_drift_diagnostics (schemas : schema list) (ops : mig_op list)
         occs;
       (* Column in a CreateTable migration but not in the schema *)
       List.iter (function
-        | CreateTable { table; cols; span } when table = s.ds_table ->
-          List.iter (fun (col, _) ->
+        | CreateTable { table; cols; _ } when table = s.ds_table ->
+          List.iter (fun (col, _, col_span) ->
             if not (List.exists (fun f -> f.df_name = col) s.ds_fields) then
-              diags := (span,
+              diags := (col_span,
                 Printf.sprintf "Migration column `%s` on `%s` not found in schema"
                   col table,
                 "depot/schema-drift") :: !diags) cols
