@@ -3470,6 +3470,193 @@ end|} in
   Alcotest.(check bool) "COMPLETION inside interp includes 'name'" true (List.mem "name" labels)
 
 (* ------------------------------------------------------------------ *)
+(* Tier 4 (a): attribute-value interpolation                           *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_attr_value () =
+  (* url : String used as an attribute value expression — hover resolves to String *)
+  let src = {|mod M do
+  fn link(url : String) : IOList do
+    ~H"<a href=${url}>click</a>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  let (l, c) = pos_of src "url}>" in
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected String for url in attr-value interpolation"
+   | Some s -> Alcotest.(check bool) "url resolves to String in attr-value interp"
+       true (has_sub s "String"));
+  Alcotest.(check bool) "DEF: url in attr-value interp resolves"
+    true (An.query_definition_at a ~line:l ~utf16_char:c <> None)
+
+(* ------------------------------------------------------------------ *)
+(* Tier 4 (b): field access inside interpolation                       *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_field_access () =
+  (* u.name inside ${u.name} — type at the field name resolves to String;
+     def on 'u' (the object) finds the param.
+     Use distinct substrings to avoid ambiguity with the record-type definition. *)
+  let src = {|mod M do
+  type User = { uname : String }
+  fn show(u : User) : IOList do
+    ~H"<p>${u.uname}</p>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  (* "uname}" only appears in the interpolation — positions cursor at field name *)
+  let (l, c) = pos_of src "uname}" in
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected String for u.uname field-access in interp"
+   | Some s -> Alcotest.(check bool) "u.uname resolves to String"
+       true (has_sub s "String"));
+  (* position at 'u' to check the object variable def resolves to its param *)
+  let (lu, cu) = pos_of src "u.uname}" in
+  Alcotest.(check bool) "DEF: u inside field-access interp resolves to param"
+    true (An.query_definition_at a ~line:lu ~utf16_char:cu <> None)
+
+(* ------------------------------------------------------------------ *)
+(* Tier 4 (c): let-bound local used in interpolation                   *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_let_binding () =
+  (* let msg = "hi"; msg used in ~H — def should jump back to the let *)
+  let src = {|mod M do
+  fn page() : IOList do
+    let msg = "hi"
+    ~H"<p>${msg}</p>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  let (l, c) = pos_of src "msg}" in
+  (* type should be String (string literal assigned to msg) *)
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected String for let-bound 'msg' in interp"
+   | Some s -> Alcotest.(check bool) "msg resolves to String"
+       true (has_sub s "String"));
+  (* def should resolve — the binding site of let msg *)
+  let def_opt = An.query_definition_at a ~line:l ~utf16_char:c in
+  Alcotest.(check bool) "DEF: msg in interp resolves to let binding"
+    true (def_opt <> None);
+  (* Verify it jumps to the let line — "let msg" is on a different line than ~H *)
+  (match def_opt with
+   | None -> ()
+   | Some loc ->
+     let def_line = loc.Lsp.Types.Location.range.Lsp.Types.Range.start.Lsp.Types.Position.line in
+     let (let_line, _) = pos_of src "let msg" in
+     Alcotest.(check int) "def of msg points to let-binding line" let_line def_line)
+
+(* ------------------------------------------------------------------ *)
+(* Tier 4 (d): multiple interpolations on one line                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_multiple_on_one_line () =
+  (* ~H"<p>${a}-${b}</p>" — a:Int, b:String; each resolves to its own type *)
+  let src = {|mod M do
+  fn page(a : Int, b : String) : IOList do
+    ~H"<p>${a}-${b}</p>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  let (la, ca) = pos_of src "a}-" in
+  let (lb, cb) = pos_of src "b}<" in
+  (match An.query_type_at a ~line:la ~utf16_char:ca with
+   | None -> Alcotest.fail "TYPE: expected Int for 'a' in first interpolation"
+   | Some s -> Alcotest.(check bool) "first interp 'a' resolves to Int"
+       true (has_sub s "Int" && not (has_sub s "String")));
+  (match An.query_type_at a ~line:lb ~utf16_char:cb with
+   | None -> Alcotest.fail "TYPE: expected String for 'b' in second interpolation"
+   | Some s -> Alcotest.(check bool) "second interp 'b' resolves to String"
+       true (has_sub s "String"))
+
+(* ------------------------------------------------------------------ *)
+(* Tier 4 (e): triple-quoted ~H sigil                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_triple_quoted () =
+  (* ~H"""<p>${name}</p>""" — triple-quoted form; hover resolves the same way *)
+  let src = {|mod M do
+  fn greet(name : String) : IOList do
+    ~H"""<p>${name}</p>"""
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  let (l, c) = pos_of src "name}<" in
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected String for 'name' in triple-quoted sigil"
+   | Some s -> Alcotest.(check bool) "triple-quoted interp 'name' resolves to String"
+       true (has_sub s "String"));
+  Alcotest.(check bool) "DEF: triple-quoted interp 'name' def resolves"
+    true (An.query_definition_at a ~line:l ~utf16_char:c <> None)
+
+(* ------------------------------------------------------------------ *)
+(* Task 2: diagnostic positions inside ${…}                            *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_interp_diagnostic_position () =
+  (* A type error inside ${1 + "x"} must produce a diagnostic whose range
+     start line matches the interpolation expression's line, not column 0
+     and not a collapsed sigil-start position. *)
+  let src = {|mod M do
+  fn bad() : IOList do
+    ~H"<p>${1 + "x"}</p>"
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  (* There must be at least one error diagnostic *)
+  let errs = List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+      d.severity = Some Lsp.Types.DiagnosticSeverity.Error) a.diagnostics in
+  Alcotest.(check bool) "type error inside ${} produces a diagnostic"
+    true (errs <> []);
+  (* The interpolation expression is on the same line as ~H (line 2, 0-indexed).
+     Find the ~H sigil line. *)
+  let (sigil_line, _) = pos_of src {|~H"<p>|} in
+  (* At least one error diagnostic must have its range start on the sigil line
+     (the line that contains the interpolation expression). *)
+  let on_interp_line = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+      d.range.Lsp.Types.Range.start.Lsp.Types.Position.line = sigil_line) errs in
+  Alcotest.(check bool)
+    "error diagnostic range-start is on the interpolation line (not collapsed to line 0)"
+    true on_interp_line
+
+(* ------------------------------------------------------------------ *)
+(* Task 3: island props=${e} — hover/def work on the props expression  *)
+(* ------------------------------------------------------------------ *)
+
+let test_h_island_props_interp () =
+  (* <island name='Counter' props=${someVar} /> — hover/def on someVar *)
+  let src = {|mod M do
+  mod Counter do
+    fn create(n : Int) : Int do n end
+    fn render(s : Int) : Int do s end
+  end
+  fn page(someVar : Int) : IOList do
+    ~H"<island name='Counter' props=${someVar} />"
+    0
+  end
+end|} in
+  let a = An.analyse ~filename:"t.march" ~src in
+  Alcotest.(check bool) "analysis non-empty (sanity)" true
+    (Hashtbl.length a.An.type_map > 0);
+  let (l, c) = pos_of src "someVar} " in
+  (match An.query_type_at a ~line:l ~utf16_char:c with
+   | None -> Alcotest.fail "TYPE: expected Int for someVar in island props interpolation"
+   | Some s -> Alcotest.(check bool) "someVar in props=${} resolves to Int"
+       true (has_sub s "Int"));
+  Alcotest.(check bool) "DEF: someVar in props=${} resolves"
+    true (An.query_definition_at a ~line:l ~utf16_char:c <> None)
+
+(* ------------------------------------------------------------------ *)
 (* Top-level resolution vs stdlib (Phase 5 fix)                        *)
 (* ------------------------------------------------------------------ *)
 
@@ -5743,7 +5930,14 @@ let () =
       "code lens consistent with TIR insights", `Quick, test_code_lens_consistent_with_tir_insights;
     ];
     "tier4: ~H interpolation intelligence", [
-      "type/def/completion inside ${...}", `Quick, test_hover_in_h_interp;
+      "type/def/completion inside ${...}",                   `Quick, test_hover_in_h_interp;
+      "(a) attr-value: url:String in href=${url}",           `Quick, test_h_interp_attr_value;
+      "(b) field access: u.name resolves to String",         `Quick, test_h_interp_field_access;
+      "(c) let-bound local: def jumps to let binding",       `Quick, test_h_interp_let_binding;
+      "(d) multiple interps on one line: Int vs String",     `Quick, test_h_interp_multiple_on_one_line;
+      "(e) triple-quoted ~H: hover resolves same way",       `Quick, test_h_interp_triple_quoted;
+      "task2: type-error diag range on interpolation line",  `Quick, test_h_interp_diagnostic_position;
+      "task3: island props=${e} hover/def resolves",         `Quick, test_h_island_props_interp;
     ];
     "runnable code lenses", [
       "test block yields run+debug lenses",   `Quick, test_action_lens_for_test_block;
