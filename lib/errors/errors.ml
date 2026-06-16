@@ -7,7 +7,7 @@ exception ParseError of string * string option * Lexing.position
     to produce clear, non-cascading diagnostics with
     expected-vs-found framing. *)
 
-type severity = Error | Warning | Hint [@@deriving show]
+type severity = Error | Warning | Hint
 
 type diagnostic = {
   severity : severity;
@@ -17,13 +17,11 @@ type diagnostic = {
   notes : string list;      (** Extra context / suggestions *)
   code : string option;    (** Machine-readable error/warning code, e.g. "unused_binding" *)
 }
-[@@deriving show]
 
 and label = {
   lbl_span : March_ast.Ast.span;
   lbl_message : string;
 }
-[@@deriving show]
 
 (** Accumulator for diagnostics — allows error recovery. *)
 type ctx = { mutable diagnostics : diagnostic list }

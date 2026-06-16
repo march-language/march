@@ -11,25 +11,22 @@ type span = {
   end_line : int;
   end_col : int;
 }
-[@@deriving show]
 
 let dummy_span =
   { file = "<none>"; start_line = 0; start_col = 0; end_line = 0; end_col = 0 }
 
-type name = { txt : string; span : span } [@@deriving show]
+type name = { txt : string; span : span }
 
 (** Linearity qualifiers for the linear/affine type system. *)
 type linearity =
   | Unrestricted  (** Normal value, can be used any number of times *)
   | Linear        (** Must be used exactly once *)
   | Affine        (** Must be used at most once *)
-[@@deriving show]
 
 (** Visibility qualifiers for module system. *)
 type visibility =
   | Private       (** Only visible within the defining module (default) *)
   | Public        (** Exported from the module *)
-[@@deriving show]
 
 (** Type expressions as written by the user (surface syntax). *)
 type ty =
@@ -42,13 +39,11 @@ type ty =
   | TyNat of int                     (** Type-level natural literal: 3 *)
   | TyNatOp of nat_op * ty * ty      (** Type-level arithmetic: n + m, n * m *)
   | TyChan of name * name            (** Session-typed channel endpoint: Chan(Role, Protocol) *)
-[@@deriving show]
 
 (** Type-level natural number operations. *)
 and nat_op =
   | NatAdd  (** + *)
   | NatMul  (** * *)
-[@@deriving show]
 
 (** Literals. *)
 type literal =
@@ -57,7 +52,6 @@ type literal =
   | LitString of string
   | LitBool of bool
   | LitAtom of string                (** Atom literal: :ok, :error *)
-[@@deriving show]
 
 (** Patterns for match expressions and let bindings. *)
 type pattern =
@@ -69,7 +63,6 @@ type pattern =
   | PatLit of literal * span          (** Literal pattern *)
   | PatRecord of (name * pattern) list * span (** Record pattern: { x, y = p } *)
   | PatAs of pattern * name * span    (** As pattern: pat as name *)
-[@@deriving show]
 
 (** Expressions — the heart of the language. *)
 type expr =
@@ -109,14 +102,12 @@ type expr =
           The string is the sigil name (e.g. "H", "xml", "toml").
           The expr is the string content (may include interpolation).
           Desugared to Sigil.x(content) call by the desugar pass. *)
-[@@deriving show]
 
 and param = {
   param_name : name;
   param_ty : ty option;
   param_lin : linearity;
 }
-[@@deriving show]
 
 and binding = {
   bind_pat : pattern;
@@ -124,14 +115,12 @@ and binding = {
   bind_lin : linearity;
   bind_expr : expr;
 }
-[@@deriving show]
 
 and branch = {
   branch_pat : pattern;
   branch_guard : expr option;
   branch_body : expr;
 }
-[@@deriving show]
 
 (** Top-level declarations. *)
 type decl =
@@ -159,13 +148,11 @@ type decl =
   | DDescribe of string * decl list * span (** describe "name" do tests end *)
   | DSetup of expr * span              (** Per-test setup: setup do ... end *)
   | DSetupAll of expr * span           (** One-time setup: setup_all do ... end *)
-[@@deriving show]
 
 and test_def = {
   test_name : string;    (** Test name string — used for display and filtering *)
   test_body : expr;      (** Test body (block expression, should produce Unit) *)
 }
-[@@deriving show]
 
 and app_def = {
   app_name     : name;
@@ -173,26 +160,22 @@ and app_def = {
   app_on_start : expr option;        (** Runs after tree is up *)
   app_on_stop  : expr option;        (** Runs after tree is down *)
 }
-[@@deriving show]
 
 and use_decl = {
   use_path : name list;        (** Module path, e.g. [Collections] *)
   use_sel  : use_selector;
 }
-[@@deriving show]
 
 and alias_decl = {
   alias_path : name list;      (** Original module path, e.g. [Collections; HashMap] *)
   alias_name : name;           (** Short name (defaults to last path segment) *)
 }
-[@@deriving show]
 
 and use_selector =
   | UseAll                     (** .* — import all public names *)
   | UseNames of name list      (** .{f, g} — import named items *)
   | UseSingle                  (** no selector — import the module itself *)
   | UseExcept of name list     (** except: [f, g] — import all except listed *)
-[@@deriving show]
 
 (** A function is one or more clauses with the same name.
     Each clause has its own argument patterns and body.
@@ -206,7 +189,6 @@ and fn_def = {
   fn_ret_ty : ty option;        (** Return type (need only appear on one clause) *)
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
 }
-[@@deriving show]
 
 and fn_clause = {
   fc_params : fn_param list;    (** Patterns for this clause's arguments *)
@@ -214,35 +196,30 @@ and fn_clause = {
   fc_body : expr;
   fc_span : span;
 }
-[@@deriving show]
 
 (** Function parameters can be patterns (for head matching) or named params. *)
 and fn_param =
   | FPPat of pattern              (** Pattern parameter: fn fib(0) *)
   | FPNamed of param              (** Named parameter: fn greet(name : String) *)
   | FPDefault of param * expr     (** Default value: fn greet(name, greeting \\ "Hello") *)
-[@@deriving show]
 
 and type_def =
   | TDAlias of ty                              (** Type alias *)
   | TDVariant of variant list                  (** Sum type / ADT *)
   | TDRecord of field list                     (** Record type *)
-[@@deriving show]
 
-and variant = { var_name : name; var_args : ty list; var_vis : visibility } [@@deriving show]
-and field = { fld_name : name; fld_ty : ty; fld_lin : linearity } [@@deriving show]
+and variant = { var_name : name; var_args : ty list; var_vis : visibility }
+and field = { fld_name : name; fld_ty : ty; fld_lin : linearity }
 
 and restart_strategy =
   | OneForOne    (** Only restart the crashed child *)
   | OneForAll    (** Kill and restart all children *)
   | RestForOne   (** Kill and restart children after the crashed one in order *)
-[@@deriving show]
 
 and supervise_field = {
   sf_name : name;
   sf_ty   : ty;
 }
-[@@deriving show]
 
 and supervise_config = {
   sc_fields       : supervise_field list;
@@ -251,7 +228,6 @@ and supervise_config = {
   sc_window_secs  : int;
   sc_order        : name list;   (** declared field order for rest_for_one *)
 }
-[@@deriving show]
 
 and actor_def = {
   actor_state    : field list;
@@ -259,25 +235,21 @@ and actor_def = {
   actor_handlers : actor_handler list;
   actor_supervise : supervise_config option;   (** Some = supervisor actor *)
 }
-[@@deriving show]
 
 and actor_handler = {
   ah_msg    : name;
   ah_params : param list;
   ah_body   : expr;
 }
-[@@deriving show]
 
 and protocol_def = {
   proto_steps : protocol_step list;
 }
-[@@deriving show]
 
 and protocol_step =
   | ProtoMsg of name * name * ty                          (** Sender -> Receiver : MsgType *)
   | ProtoLoop of protocol_step list                       (** loop do ... end *)
   | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
-[@@deriving show]
 
 (** Interface (typeclass) definition:
     interface Eq(a) do ... end *)
@@ -288,20 +260,17 @@ and interface_def = {
   iface_assoc_types : assoc_type_decl list;    (** Associated type declarations *)
   iface_methods : method_decl list;
 }
-[@@deriving show]
 
 and assoc_type_decl = {
   at_name : name;
   at_constraints : ty list;              (** Constraints on the associated type *)
 }
-[@@deriving show]
 
 and method_decl = {
   md_name : name;
   md_ty : ty;                            (** Method type signature *)
   md_default : expr option;              (** Optional default implementation *)
 }
-[@@deriving show]
 
 (** Interface implementation:
     impl Eq(Int) do ... end
@@ -313,7 +282,6 @@ and impl_def = {
   impl_assoc_types : (name * ty) list;       (** Associated type assignments *)
   impl_methods : (name * fn_def) list;       (** Method implementations *)
 }
-[@@deriving show]
 
 (** Module signature:
     sig Name do ... end *)
@@ -321,7 +289,6 @@ and sig_def = {
   sig_types : (name * name list) list;   (** Opaque type declarations: type Tree(a) *)
   sig_fns : (name * ty) list;            (** Function signatures: fn insert : ... *)
 }
-[@@deriving show]
 
 (** FFI extern block:
     extern "libc" : Cap(LibC) do ... end *)
@@ -330,21 +297,80 @@ and extern_def = {
   ext_cap_ty : ty;                       (** Capability type for this library *)
   ext_fns : extern_fn list;              (** Foreign function declarations *)
 }
-[@@deriving show]
 
 and extern_fn = {
   ef_name : name;
   ef_params : (name * ty) list;          (** Parameter names and types *)
   ef_ret_ty : ty;                        (** Return type *)
 }
-[@@deriving show]
 
 (** A module is a list of declarations. *)
-type module_ = { mod_name : name; mod_decls : decl list } [@@deriving show]
+type module_ = { mod_name : name; mod_decls : decl list }
 
 (** Input to the REPL: a declaration, a bare expression, or EOF. *)
 type repl_input =
   | ReplDecl of decl
   | ReplExpr of expr
   | ReplEOF
-[@@deriving show]
+
+(** Literal formatter matching ppx_deriving.show output — used by tir.ml's [@@deriving show]. *)
+let pp_literal fmt = function
+  | LitInt n    -> Format.fprintf fmt "(@[<hov2>Ast.LitInt@ %d@])" n
+  | LitFloat f  -> Format.fprintf fmt "(@[<hov2>Ast.LitFloat@ %g@])" f
+  | LitString s -> Format.fprintf fmt "(@[<hov2>Ast.LitString@ %S@])" s
+  | LitBool b   -> Format.fprintf fmt "(@[<hov2>Ast.LitBool@ %b@])" b
+  | LitAtom a   -> Format.fprintf fmt "(@[<hov2>Ast.LitAtom@ %S@])" a
+
+let show_literal x = Format.asprintf "%a" pp_literal x
+
+(** Surface type expression renderer — used in LSP hover and error messages. *)
+let rec show_ty = function
+  | TyCon (n, []) -> n.txt
+  | TyCon (n, args) ->
+    Printf.sprintf "%s(%s)" n.txt (String.concat ", " (List.map show_ty args))
+  | TyVar n -> n.txt
+  | TyArrow (a, b) -> Printf.sprintf "%s -> %s" (show_ty a) (show_ty b)
+  | TyTuple ts -> Printf.sprintf "(%s)" (String.concat ", " (List.map show_ty ts))
+  | TyRecord flds ->
+    let fs = List.map (fun (n, t) -> Printf.sprintf "%s : %s" n.txt (show_ty t)) flds in
+    Printf.sprintf "{ %s }" (String.concat ", " fs)
+  | TyLinear (Linear, t) -> "linear " ^ show_ty t
+  | TyLinear (Affine, t) -> "affine " ^ show_ty t
+  | TyLinear (Unrestricted, t) -> show_ty t
+  | TyNat n -> string_of_int n
+  | TyNatOp (NatAdd, a, b) -> Printf.sprintf "%s + %s" (show_ty a) (show_ty b)
+  | TyNatOp (NatMul, a, b) -> Printf.sprintf "%s * %s" (show_ty a) (show_ty b)
+  | TyChan (role, proto) -> Printf.sprintf "Chan(%s, %s)" role.txt proto.txt
+
+(** Compact expression summary — used in test failure messages. *)
+let show_expr = function
+  | ELit (LitInt n, _) -> string_of_int n
+  | ELit (LitFloat f, _) -> string_of_float f
+  | ELit (LitString s, _) -> Printf.sprintf "%S" s
+  | ELit (LitBool b, _) -> if b then "true" else "false"
+  | ELit (LitAtom a, _) -> ":" ^ a
+  | EVar n -> "EVar(" ^ n.txt ^ ")"
+  | EApp _ -> "EApp(...)"
+  | ECon (n, args, _) ->
+    Printf.sprintf "ECon(%s, [%d args])" n.txt (List.length args)
+  | ELam _ -> "ELam(...)"
+  | EBlock _ -> "EBlock(...)"
+  | ELet _ -> "ELet(...)"
+  | EMatch _ -> "EMatch(...)"
+  | ETuple _ -> "ETuple(...)"
+  | ERecord _ -> "ERecord(...)"
+  | ERecordUpdate _ -> "ERecordUpdate(...)"
+  | EField (_, n, _) -> Printf.sprintf "EField(_, %s, _)" n.txt
+  | EIf _ -> "EIf(...)"
+  | ECond _ -> "ECond(...)"
+  | EPipe _ -> "EPipe(...)"
+  | EAnnot _ -> "EAnnot(...)"
+  | EHole _ -> "EHole(...)"
+  | EAtom (a, _, _) -> "EAtom(:" ^ a ^ ")"
+  | ESend _ -> "ESend(...)"
+  | ESpawn _ -> "ESpawn(...)"
+  | EResultRef _ -> "EResultRef(...)"
+  | EDbg _ -> "EDbg(...)"
+  | ELetFn _ -> "ELetFn(...)"
+  | EAssert _ -> "EAssert(...)"
+  | ESigil _ -> "ESigil(...)"
