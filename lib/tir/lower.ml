@@ -2101,6 +2101,18 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    imports of top-level non-prefixed modules. *)
                 register_aliases ctx_prefix;
                 register_aliases import_prefix
+              | Ast.DActor (_, name, actor_def, _) ->
+                (* Actors defined inside a module block need the same spawn/handler
+                   glue as top-level actors.  The spawn symbol uses the actor's
+                   short name (e.g. "Pool_spawn"), not the module-qualified name,
+                   because spawn(Pool) at the call site emits _Pool_spawn.
+                   Handler bodies reference the module's private helpers by short
+                   name; rename_tir_vars rewrites them to their qualified names so
+                   the linker can resolve them (e.g. close_all → Pool.close_all). *)
+                let (new_types, new_fns) = lower_actor name.txt actor_def in
+                let renamed_fns = List.map (rename_tir_vars prefix direct_fn_names) new_fns in
+                types := List.rev_append new_types !types;
+                fns   := List.rev_append renamed_fns !fns
               | _ -> ()
             ) decls)
         in
