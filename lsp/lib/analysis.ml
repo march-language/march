@@ -245,6 +245,9 @@ type t = {
   (** Raw (pre-desugar) user declarations — retained for AST-driven code
       actions (pipe, extract/inline variable, capture, typed holes, actor
       and protocol scaffolding). *)
+  depot_source_decls : Ast.decl list;
+  (** [decls] plus resolved imported decls — the schema-extraction surface
+      for the Depot pass. Empty when not a forge project / no imports. *)
   protocols        : (string * Ast.protocol_def) list;
   (** Session-type protocol definitions: name → def (for scaffolding). *)
   param_name_map   : (string, string list) Hashtbl.t;
@@ -2567,6 +2570,7 @@ let analyse ~filename ~src : t =
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
+      depot_source_decls = [];
       protocols         = [];
       param_name_map    = build_param_name_map [] }
   in
@@ -2661,6 +2665,7 @@ let analyse ~filename ~src : t =
           is_user_file sp
         ) raw_ast.Ast.mod_decls
     in
+    let depot_source_decls = user_decls @ extra_decls in
     (* Populate doc_map with stdlib function docs first so that user-defined
        functions with the same name take precedence (user docs overwrite). *)
     collect_docs ~doc_map stdlib_decls;
@@ -3292,6 +3297,7 @@ let analyse ~filename ~src : t =
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
+      depot_source_decls;
       protocols        =
         List.filter_map (function
             | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)

@@ -5507,6 +5507,23 @@ end|} in
     (List.length a.An.h_sigils)
 
 (* ------------------------------------------------------------------ *)
+(* Depot-aware LSP: Phase A — foundation                              *)
+(* ------------------------------------------------------------------ *)
+
+let test_imported_decls_retained () =
+  let src = {|mod App do
+  fn user_schema() do
+    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+  end
+  fn list_users() do
+    Depot.Query.from(user_schema())
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "analysis exposes decls for the Depot pass" true
+    (List.length a.An.depot_source_decls > 0)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -5965,5 +5982,8 @@ let () =
     ];
     "~H sigil exact-case match", [
       "lowercase ~h sigil not collected as HTML sigil", `Quick, test_lowercase_h_sigil_not_collected;
+    ];
+    "depot: phase A foundation", [
+      "depot_source_decls retained in analysis",  `Quick, test_imported_decls_retained;
     ];
   ]
