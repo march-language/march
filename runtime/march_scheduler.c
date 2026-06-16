@@ -590,6 +590,12 @@ march_proc *march_sched_current(void) {
     return tl_sched ? tl_sched->current : NULL;
 }
 
+/* self() builtin — returns the current green thread's proc pointer (the PID
+ * value used as first arg to send/receive in the compiled binary). */
+void *march_self(void) {
+    return (void *)march_sched_current();
+}
+
 int64_t march_sched_total_spawned(void) {
     return atomic_load_explicit(&g_next_pid, memory_order_relaxed);
 }
