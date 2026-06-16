@@ -5510,6 +5510,22 @@ end|} in
 (* Depot-aware LSP: Phase A — foundation                              *)
 (* ------------------------------------------------------------------ *)
 
+module Depot = March_lsp_lib.Depot
+
+let test_depot_schema_extract () =
+  let src = {|mod M do
+  fn user_schema() do
+    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+  end
+end|} in
+  let a = analyse src in
+  match Depot.schemas_in a.An.depot_source_decls with
+  | [s] ->
+    Alcotest.(check string) "table" "users" s.Depot.ds_table;
+    let cols = List.map (fun (f : Depot.depot_field) -> f.Depot.df_name) s.Depot.ds_fields in
+    Alcotest.(check (list string)) "columns" ["name"; "age"] cols
+  | other -> Alcotest.failf "expected exactly one schema, got %d" (List.length other)
+
 let test_imported_decls_retained () =
   let src = {|mod App do
   fn user_schema() do
@@ -5984,6 +6000,7 @@ let () =
       "lowercase ~h sigil not collected as HTML sigil", `Quick, test_lowercase_h_sigil_not_collected;
     ];
     "depot: phase A foundation", [
-      "depot_source_decls retained in analysis",  `Quick, test_imported_decls_retained;
+      "schema extraction from Schema.define",      `Quick, test_depot_schema_extract;
+      "depot_source_decls retained in analysis",   `Quick, test_imported_decls_retained;
     ];
   ]
