@@ -6,7 +6,9 @@ nav_order: 9
 
 # Actors
 
-March's concurrency model is built on actors: isolated processes that communicate exclusively through message passing. Actors share no mutable state — isolation is enforced by the type system.
+March's concurrency model is built on **actors** and **tasks**. Actors are isolated processes that communicate exclusively through message passing — no shared mutable state. Tasks are lightweight one-off computations that run concurrently and return a value.
+
+In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (multiple OS threads, each running many lightweight green threads). Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
 ---
 
@@ -17,7 +19,7 @@ An actor declaration has three parts:
 - `init { ... }` — the initial state value
 - `on Msg(...) do ... end` — message handlers, each returning the new state
 
-```elixir
+```march
 actor Counter do
   state { value : Int }
   init  { value = 0 }
@@ -44,7 +46,7 @@ Inside a handler, `state` refers to the current state record. Each handler must 
 
 `spawn` creates a new actor and returns its process identifier (`Pid`):
 
-```elixir
+```march
 fn main() do
   let counter = spawn(Counter)
   -- counter : Pid
@@ -57,7 +59,7 @@ end
 
 `send` delivers a message to an actor asynchronously:
 
-```elixir
+```march
 send(counter, Increment(10))
 send(counter, Increment(5))
 send(counter, Reset())
@@ -65,9 +67,9 @@ send(counter, Reset())
 
 The message is the constructor applied to its arguments. The actor handles it according to its `on` clause.
 
-`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead (has been killed or crashed):
+`send` returns `Some(())` if the actor is alive, or `None` if the actor is dead:
 
-```elixir
+```march
 match send(counter, Increment(1)) do
   Some(_) -> println("message delivered")
   None    -> println("actor is dead")
@@ -76,9 +78,41 @@ end
 
 ---
 
+## Receiving Messages Inside a Handler
+
+`receive()` blocks until the next message arrives in the actor's mailbox. Use it when a handler needs to wait for a sub-message before continuing:
+
+```march
+actor Dispatcher do
+  state { got : Int }
+  init  { got = 0 }
+
+  on Dispatch() do
+    -- wait for the follow-up message
+    let follow = receive()
+    match follow do
+      Followup(n) -> { got = n }
+    end
+  end
+end
+
+fn main() do
+  let pid = spawn(Dispatcher)
+  send(pid, Dispatch())
+  send(pid, Followup(99))
+  run_until_idle()
+end
+```
+
+**Blocking semantics:** If the mailbox is empty when `receive()` is called, the actor parks (interpreter: re-queues the triggering message; compiled: green thread parks). It resumes automatically once a message is delivered. `run_until_idle()` returns as soon as all actors are either idle or waiting — no deadlock.
+
+Messages are always delivered in FIFO order, so `receive()` pops the oldest queued message.
+
+---
+
 ## Checking if an Actor is Alive
 
-```elixir
+```march
 let alive = is_alive(counter)
 println("alive: " ++ bool_to_string(alive))
 ```
@@ -87,7 +121,7 @@ println("alive: " ++ bool_to_string(alive))
 
 ## Stopping an Actor
 
-```elixir
+```march
 kill(counter)
 ```
 
@@ -95,11 +129,67 @@ After `kill`, `is_alive(counter)` returns `false` and further `send`s return `No
 
 ---
 
+## Capability-Based Messaging
+
+For supervision-safe message delivery, use capabilities (`Cap`). A capability encodes the actor's identity and current *epoch* — it becomes stale (and is rejected) if the actor restarts:
+
+```march
+-- Obtain a capability for a live actor
+match get_cap(pid) do
+  None      -> println("actor is dead")
+  Some(cap) ->
+    -- send_checked validates the epoch before delivering
+    match send_checked(cap, Increment(1)) do
+      :ok    -> println("delivered")
+      :error -> println("actor dead or cap stale")
+    end
+end
+```
+
+Use capabilities when you hold a reference across an actor restart boundary and need to know whether the message was delivered to the *current* incarnation of the actor. Under a supervisor, a restarted actor gets a fresh epoch, invalidating caps from before the restart.
+
+---
+
+## Synchronous Request-Reply via `Actor.call`
+
+The `Actor` module provides a synchronous call pattern:
+
+```march
+actor Store do
+  state { count : Int }
+  init  { count = 0 }
+
+  on Inc() do
+    { count = state.count + 1 }
+  end
+
+  on Call(ref, Get()) do
+    Actor.reply(ref, state.count)
+    state
+  end
+end
+
+fn main() do
+  let pid = spawn(Store)
+  send(pid, Inc())
+  send(pid, Inc())
+  run_until_idle()
+  match Actor.call(pid, Get(), 5000) do
+    Ok(n)  -> println("count = " ++ int_to_string(n))
+    Err(e) -> println("error: " ++ e)
+  end
+end
+```
+
+`Actor.call(pid, msg, timeout_ms)` sends `Call(ref, msg)` to the actor and waits for `Actor.reply(ref, result)`. Returns `Ok(result)` or `Err(reason)`.
+
+`Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
+
+---
+
 ## A Complete Actor Example
 
-This is adapted from [examples/actors.march](../examples/actors.march):
-
-```elixir
+```march
 mod ActorDemo do
 
   actor Counter do
@@ -137,89 +227,18 @@ mod ActorDemo do
     send(counter, Increment(5))
     send(counter, Ping("main"))
 
-    -- Kill the logger
     kill(logger)
     println("logger alive: " ++ bool_to_string(is_alive(logger)))
 
-    -- Messages to dead actors return None
     match send(logger, Log("dropped")) do
       None    -> println("message dropped — actor is dead")
       Some(_) -> ()
     end
 
-    -- Counter is unaffected
     send(counter, Ping("after kill"))
+    run_until_idle()
   end
 
-end
-```
-
----
-
-## Handlers with Side Effects
-
-Handlers can perform I/O before returning the new state:
-
-```elixir
-actor Database do
-  state { entries : List(String) }
-  init  { entries = [] }
-
-  on Insert(key : String) do
-    println("[DB] inserting: " ++ key)
-    let new_entries = Cons(key, state.entries)
-    { state with entries = new_entries }
-  end
-
-  on Count() do
-    let n = List.length(state.entries)
-    println("[DB] count: " ++ int_to_string(n))
-    state    -- return state unchanged when side-effect only
-  end
-end
-```
-
----
-
-## Request-Reply Pattern
-
-Actors don't have built-in synchronous calls. The standard pattern for request-reply is to pass a reply-to `Pid` in the message:
-
-```elixir
-actor Store do
-  state { data : Map(String, Int) }
-  init  { data = Map.new() }
-
-  on Put(key : String, val : Int) do
-    { state with data = Map.put(state.data, key, val) }
-  end
-
-  on Get(key : String, reply_to : Pid) do
-    let result = Map.get(state.data, key)
-    send(reply_to, result)
-    state
-  end
-end
-
-actor Client do
-  state { self_pid : Int }
-  init  { self_pid = 0 }
-
-  on Start(store : Pid) do
-    send(store, Put("count", 42))
-    send(store, Get("count", self()))
-    state
-  end
-
-  on Some(v : Int) do
-    println("got value: " ++ int_to_string(v))
-    state
-  end
-
-  on None() do
-    println("key not found")
-    state
-  end
 end
 ```
 
@@ -229,7 +248,7 @@ end
 
 Complex state uses record types. Functional update with `{ state with field = new_value }` is the canonical way to update state:
 
-```elixir
+```march
 actor WebServer do
   state {
     request_count : Int,
@@ -261,67 +280,60 @@ end
 
 ---
 
+## Tasks: Lightweight Concurrent Computations
+
+Tasks are a simpler alternative to actors when you just need to run a function concurrently and collect its result. Use the `Task` module:
+
+```march
+-- Spawn a task and await its result
+let t = Task.async(fn () -> expensive_computation())
+let result = Task.await(t)   -- Ok(value) or Err(reason)
+
+-- Parallel map
+let results = Task.async_stream([1, 2, 3], fn n -> n * n)
+-- [Ok(1), Ok(4), Ok(9)]
+
+-- Await multiple tasks
+let t1 = Task.async(fn () -> fetch_user(1))
+let t2 = Task.async(fn () -> fetch_user(2))
+let [r1, r2] = Task.await_many([t1, t2])
+
+-- Unwrap directly (panics on error)
+let value = Task.await!(t)
+```
+
+Tasks run on the same M:N green-thread pool as actors. Spawning 250,000+ tasks is routine; the scheduler distributes them across OS threads automatically.
+
+See the [Task module docs](stdlib/Task.html) for the full API including `Task.race`, `Task.any`, `Task.scope`, and `Task.all_settled`.
+
+---
+
 ## Running Until Idle
 
-In programs with actors, `run_until_idle()` processes all pending messages before continuing. Useful in scripts and tests:
+In scripts and tests, `run_until_idle()` processes all pending actor messages before continuing:
 
-```elixir
+```march
 fn main() do
   let counter = spawn(Counter)
   send(counter, Increment(1))
   send(counter, Increment(2))
   send(counter, Increment(3))
   run_until_idle()
-  -- All messages have been processed here
+  -- All three messages are processed here
   send(counter, Ping("done"))
   run_until_idle()
 end
 ```
 
----
-
-## Multiple Actors Communicating
-
-Actors can hold references to other actors as part of their state:
-
-```elixir
-actor Worker do
-  state { boss : Pid, id : Int }
-  init  { boss = pid_of_int(0), id = 0 }
-
-  on SetUp(boss_pid : Pid, worker_id : Int) do
-    { state with boss = boss_pid, id = worker_id }
-  end
-
-  on DoWork(task : String) do
-    let result = process(task)
-    send(state.boss, Done(state.id, result))
-    state
-  end
-end
-
-actor Boss do
-  state { workers : List(Pid), done_count : Int }
-  init  { workers = [], done_count = 0 }
-
-  on AddWorker(w : Pid) do
-    { state with workers = Cons(w, state.workers) }
-  end
-
-  on Done(worker_id : Int, result : String) do
-    println("worker " ++ int_to_string(worker_id) ++ " done: " ++ result)
-    { state with done_count = state.done_count + 1 }
-  end
-end
-```
+In long-running applications, the scheduler runs automatically — you do not call `run_until_idle()`.
 
 ---
 
-## Actor Identity: self()
+## Actor Identity: `self()`
 
 Inside a handler, `self()` returns the current actor's `Pid`. Useful for passing yourself as a reply address:
 
-```elixir
+```march
 on Request(question : String, caller : Pid) do
   let answer = compute_answer(question)
   send(caller, Answer(answer, self()))
@@ -335,7 +347,7 @@ end
 
 For long-running applications, use `app` instead of (or alongside) `main`:
 
-```elixir
+```march
 mod MyService do
   actor Worker do
     state { count : Int }
@@ -357,13 +369,18 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 
 | Builtin | Signature | Description |
 |---------|-----------|-------------|
-| `spawn(Actor)` | `-> Pid` | Start a new actor |
-| `send(pid, msg)` | `-> Option(())` | Send a message (None if actor is dead) |
-| `kill(pid)` | `-> ()` | Stop an actor |
-| `is_alive(pid)` | `-> Bool` | Check if actor is running |
-| `self()` | `-> Pid` | Current actor's Pid |
-| `run_until_idle()` | `-> ()` | Process all pending messages |
-| `pid_of_int(n)` | `-> Pid` | Convert Int to Pid |
+| `spawn(Actor)` | `→ Pid` | Start a new actor |
+| `send(pid, msg)` | `→ Option(())` | Send a message (None if actor is dead) |
+| `receive()` | `→ Msg` | Block until the next mailbox message arrives |
+| `kill(pid)` | `→ ()` | Stop an actor |
+| `is_alive(pid)` | `→ Bool` | Check if actor is running |
+| `self()` | `→ Pid` | Current actor's Pid |
+| `run_until_idle()` | `→ ()` | Process all pending messages (interpreter / tests) |
+| `get_cap(pid)` | `→ Option(Cap(Msg))` | Obtain an epoch-tagged capability for an actor |
+| `send_checked(cap, msg)` | `→ :ok \| :error` | Epoch-validated send; fails if actor restarted |
+| `pid_of_int(n)` | `→ Pid` | Convert Int to Pid |
+| `task_spawn(fn)` | `→ Task(a)` | Spawn a green-thread task (use `Task.async` instead) |
+| `task_await(t)` | `→ Result(a, String)` | Await a task (use `Task.await` instead) |
 
 ---
 
@@ -371,3 +388,4 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 
 - [Supervision](supervision.md) — fault-tolerant hierarchies with automatic restart
 - [Linear Types](linear-types.md) — how linear types interact with message passing
+- [Task stdlib](stdlib/Task.html) — full Task API reference
