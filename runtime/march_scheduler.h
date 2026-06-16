@@ -115,6 +115,11 @@ void         march_sched_init(void);
  * and runs scheduler 0 on the calling thread. */
 void         march_sched_run(void);
 
+/* Signal all scheduler workers to exit once the run-queue drains.
+ * Must be called before march_sched_run() (inline path) or before
+ * joining the background scheduler thread (background path). */
+void         march_sched_request_shutdown(void);
+
 /* Spawn a new green thread.  Returns the new process, or NULL on failure.
  * Safe to call from within a running process (nested spawn). */
 march_proc  *march_sched_spawn(void (*fn)(void *), void *arg);

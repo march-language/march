@@ -2213,7 +2213,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result clo_ptr);
     ("ptr", result)
 
-  (* task_await_unwrap(task_ptr) → await C runtime, then unwrap Ok payload *)
+  (* task_await_unwrap(task_ptr) → spin-wait then untag result directly *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
     let (_, task_ptr) = emit_atom ctx a in
     let res = fresh ctx "tawait_res" in
@@ -2226,7 +2226,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | _ -> "ptr")
       | _ -> "ptr"
     in
-    let r = emit_load_field ctx res 0 inner_ty in
+    (* Spin-wait and return tagged raw result from task[3]; no Ok wrapper. *)
+    let tv = fresh ctx "tv" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_await_value(ptr %s)" tv task_ptr);
+    (* Untag: conditional ashr-1 recovers original scalar or heap-ptr value. *)
+    let r_i64 = coerce ctx "ptr" tv "i64" in
+    let r = if inner_ty = "ptr" then begin
+      let p = fresh ctx "r" in
+      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
+      p
+    end else r_i64 in
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime *)
@@ -4521,6 +4530,7 @@ declare void @march_actor_reply(ptr %ref, ptr %result)
 declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_sched_recv()
 declare ptr  @march_cancel_token_new()
@@ -4662,6 +4672,7 @@ declare void @march_yield_from_compiled()
 declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_sched_recv()
 declare ptr  @march_cancel_token_new()

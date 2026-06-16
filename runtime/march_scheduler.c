@@ -65,8 +65,14 @@
 static march_scheduler  g_scheds[MARCH_NUM_SCHEDULERS + 1];
 static int              g_num_scheds = 0;
 static _Atomic int64_t  g_next_pid   = 0;
-static _Atomic int      g_all_done   = 0;
-static _Atomic int64_t  g_live_procs = 0;
+static _Atomic int      g_all_done       = 0;
+static _Atomic int64_t  g_live_procs     = 0;
+static _Atomic int      g_sched_shutdown = 0;
+
+/* Lock-free stack of procs spawned from outside any scheduler thread.
+ * Workers drain this into their local deques each idle cycle.
+ * Using march_proc::next as the intrusive link. */
+static _Atomic(march_proc *) g_ext_spawn_head = NULL;
 
 static _Thread_local march_scheduler *tl_sched = NULL;
 
@@ -312,8 +318,10 @@ void march_sched_init(void) {
         g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
 
     atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_live_procs, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_all_done,       0, memory_order_relaxed);
+    atomic_store_explicit(&g_live_procs,     0, memory_order_relaxed);
+    atomic_store_explicit(&g_sched_shutdown, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_ext_spawn_head, (march_proc *)NULL, memory_order_relaxed);
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
 
@@ -378,15 +386,20 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
 
-    /* Push to the local deque if called from a scheduler thread, otherwise
-     * round-robin across schedulers by PID. */
+    /* Push to the local deque if called from a scheduler thread.
+     * From non-scheduler threads (e.g. main thread), push to a lock-free
+     * external stack instead — pushing to a Chase-Lev deque from a thread
+     * that is not the deque's owner races with the owner's pop. */
     if (tl_sched) {
         march_deque_push(&tl_sched->local_queue, p);
-    } else if (g_num_scheds > 0) {
-        int target = (int)(p->pid % g_num_scheds);
-        march_deque_push(&g_scheds[target].local_queue, p);
     } else {
-        march_deque_push(&g_scheds[0].local_queue, p);
+        march_proc *old_head;
+        do {
+            old_head = atomic_load_explicit(&g_ext_spawn_head, memory_order_relaxed);
+            p->next  = old_head;
+        } while (!atomic_compare_exchange_weak_explicit(
+                     &g_ext_spawn_head, &old_head, p,
+                     memory_order_release, memory_order_relaxed));
     }
 
     return p;
@@ -403,16 +416,36 @@ static void sched_loop(march_scheduler *sched) {
     tl_sched = sched;
     sched->running = 1;
     unsigned int steal_seed = (unsigned int)sched->id;
+    /* When the previous task cooperatively yielded (PROC_READY after running),
+     * try to steal work from another scheduler before re-running the yielded
+     * task.  Without this, all workers can deadlock in a LIFO spin where each
+     * pops its own yielded spin-waiter instead of running the leaf tasks that
+     * would unblock them. */
+    int last_yielded = 0;
 
     while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
         /* Single-scheduler: use steal (FIFO) for fairness and compatibility.
-         * Multi-scheduler: use pop (LIFO) for cache locality; steal from others. */
+         * Multi-scheduler: use pop (LIFO) for cache locality; steal from others.
+         * Exception: if the previous task yielded, try to steal first to avoid
+         * the LIFO livelock described above. */
         march_proc *p;
         if (g_num_scheds <= 1) {
             p = (march_proc *)march_deque_steal(&sched->local_queue);
+        } else if (last_yielded) {
+            /* Yielded task goes back; steal from others to make progress. */
+            p = NULL;
+            for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
+                steal_seed = steal_seed * 1103515245 + 12345;
+                int victim = (int)((steal_seed >> 16) % g_num_scheds);
+                if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
+                p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
+                if (p) break;
+            }
+            if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
         } else {
             p = (march_proc *)march_deque_pop(&sched->local_queue);
         }
+        last_yielded = 0;
 
         /* Try to steal from another scheduler if local deque is empty. */
         if (!p && g_num_scheds > 1) {
@@ -426,7 +459,25 @@ static void sched_loop(march_scheduler *sched) {
         }
 
         if (!p) {
-            if (atomic_load_explicit(&g_live_procs, memory_order_acquire) <= 0) {
+            /* Check the external-spawn stack before yielding.  Tasks spawned
+             * from non-scheduler threads (e.g. the main thread) land here to
+             * avoid the Chase-Lev deque's single-owner constraint. */
+            march_proc *ext = atomic_load_explicit(&g_ext_spawn_head, memory_order_acquire);
+            while (ext) {
+                march_proc *nxt = ext->next;
+                if (atomic_compare_exchange_weak_explicit(
+                        &g_ext_spawn_head, &ext, nxt,
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    p = ext;  /* claimed — fall through to run it */
+                    break;
+                }
+                /* CAS failed; ext refreshed by failed CAS — retry. */
+            }
+        }
+
+        if (!p) {
+            if (atomic_load_explicit(&g_live_procs, memory_order_acquire) <= 0
+                    && atomic_load_explicit(&g_sched_shutdown, memory_order_acquire)) {
                 atomic_store_explicit(&g_all_done, 1, memory_order_release);
                 break;
             }
@@ -446,6 +497,7 @@ static void sched_loop(march_scheduler *sched) {
         march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
         if (st == PROC_READY) {
             march_deque_push(&sched->local_queue, p);
+            last_yielded = 1;
         } else if (st == PROC_PARKED) {
             /* The process called march_sched_recv's slow path: it stored
              * PROC_PARKED then immediately called swapcontext.  Now that
@@ -472,6 +524,10 @@ static void *sched_thread_entry(void *arg) {
     march_scheduler *sched = (march_scheduler *)arg;
     sched_loop(sched);
     return NULL;
+}
+
+void march_sched_request_shutdown(void) {
+    atomic_store_explicit(&g_sched_shutdown, 1, memory_order_release);
 }
 
 void march_sched_run(void) {
