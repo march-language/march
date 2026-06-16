@@ -5526,6 +5526,15 @@ end|} in
     Alcotest.(check (list string)) "columns" ["name"; "age"] cols
   | other -> Alcotest.failf "expected exactly one schema, got %d" (List.length other)
 
+let test_depot_schemas_field () =
+  let src = {|mod M do
+  fn user_schema() do
+    Depot.Schema.define("users", { fields = { name = "String" } })
+  end
+end|} in
+  let a = analyse src in
+  Alcotest.(check int) "one schema on the analysis record" 1 (List.length a.An.depot_schemas)
+
 let test_imported_decls_retained () =
   let src = {|mod App do
   fn user_schema() do
@@ -6001,6 +6010,7 @@ let () =
     ];
     "depot: phase A foundation", [
       "schema extraction from Schema.define",      `Quick, test_depot_schema_extract;
+      "depot_schemas field populated",             `Quick, test_depot_schemas_field;
       "depot_source_decls retained in analysis",   `Quick, test_imported_decls_retained;
     ];
   ]
