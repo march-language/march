@@ -5567,6 +5567,39 @@ end|} in
   let a = analyse src in
   Alcotest.(check int) "one schema on the analysis record" 1 (List.length a.An.depot_schemas)
 
+let test_depot_unknown_column () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("ag", "18") end
+end|} in
+  let a = analyse src in
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-column") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "typo'd column flagged" true has
+
+let test_depot_known_column_not_flagged () =
+  let src = {|mod M do
+  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
+end|} in
+  let a = analyse src in
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-column") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "known column not flagged" false has
+
+let test_depot_unresolved_schema_not_flagged () =
+  (* No schema in scope: conservative — do not flag *)
+  let src = {|mod M do
+  fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("bogus", "x") end
+end|} in
+  let a = analyse src in
+  let has = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+    match d.code with
+    | Some (`String "depot/unknown-column") -> true | _ -> false) a.An.diagnostics in
+  Alcotest.(check bool) "unresolvable table not flagged" false has
+
 let test_imported_decls_retained () =
   let src = {|mod App do
   fn user_schema() do
@@ -6039,6 +6072,11 @@ let () =
     ];
     "~H sigil exact-case match", [
       "lowercase ~h sigil not collected as HTML sigil", `Quick, test_lowercase_h_sigil_not_collected;
+    ];
+    "depot: phase B column intelligence", [
+      "typo'd column emits depot/unknown-column",    `Quick, test_depot_unknown_column;
+      "known column not flagged",                    `Quick, test_depot_known_column_not_flagged;
+      "unresolvable table not flagged (conservative)",`Quick, test_depot_unresolved_schema_not_flagged;
     ];
     "depot: phase A foundation", [
       "schema extraction from Schema.define",      `Quick, test_depot_schema_extract;

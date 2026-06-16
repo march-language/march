@@ -3252,6 +3252,21 @@ let analyse ~filename ~src : t =
           (islands_in_sigil ~src s))
         h_sigils
     in
+    let depot_diags =
+      let make_diag (span, msg, code) =
+        Lsp.Types.Diagnostic.create
+          ~range:(Pos.span_to_lsp_range span)
+          ~severity:Lsp.Types.DiagnosticSeverity.Warning
+          ~message:(`String msg)
+          ~source:"march"
+          ~code:(`String code)
+          ()
+      in
+      List.map make_diag (Depot.column_diagnostics depot_schemas depot_col_occs)
+      @ List.map make_diag (Depot.table_diagnostics depot_schemas
+          (Depot.table_occurrences depot_source_decls))
+      @ List.map make_diag (Depot.sql_injection_diagnostics depot_source_decls)
+    in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
       @ !dead_code_diags
@@ -3260,6 +3275,7 @@ let analyse ~filename ~src : t =
       @ html_diags
       @ html_lint_diags
       @ island_diags
+      @ depot_diags
     in
     { src; filename; doc; type_map; def_map; use_map;
       vars       = vars_list;
