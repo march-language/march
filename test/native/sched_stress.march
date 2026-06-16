@@ -1,0 +1,43 @@
+mod SchedStress do
+  -- Each worker does a small fib to give the scheduler real work to interleave.
+  pfn fib(n : Int) : Int do
+    if n <= 1 do
+      n
+    else
+      fib(n - 1) + fib(n - 2)
+    end
+  end
+
+  -- Spawn `count` worker tasks starting at index `start`.
+  -- Uses recursion; depth = count (max 1000 per batch call).
+  pfn spawn_workers(start : Int, count : Int) : Unit do
+    if count <= 0 do
+      ()
+    else
+      let _ = task_spawn(fn _ -> fib(start % 12 + 8))
+      spawn_workers(start + 1, count - 1)
+    end
+  end
+
+  -- Spawn `n_batches` batch tasks, each of which spawns `batch_size` workers.
+  pfn spawn_batches(batch : Int, n_batches : Int, batch_size : Int) : Unit do
+    if batch >= n_batches do
+      ()
+    else
+      let start = batch * batch_size
+      let _ = task_spawn(fn _ -> spawn_workers(start, batch_size))
+      spawn_batches(batch + 1, n_batches, batch_size)
+    end
+  end
+
+  fn main() : Unit do
+    let n_batches = 250
+    let batch_size = 1000
+    let total = n_batches * batch_size
+    println("Spawning " ++ int_to_string(total) ++ " tasks across "
+            ++ int_to_string(n_batches) ++ " batches of "
+            ++ int_to_string(batch_size) ++ "...")
+    spawn_batches(0, n_batches, batch_size)
+    println("All batches dispatched — scheduler draining " ++ int_to_string(total) ++ " tasks")
+  end
+end

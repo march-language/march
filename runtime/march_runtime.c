@@ -1311,6 +1311,11 @@ static void march_thunk_trampoline(void *arg) {
         /* Release-store: ensures task[3] is visible before the done flag. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_release);
+        /* Drop the trampoline's RC hold taken at spawn time (see incrc in
+         * march_task_spawn_thunk).  If the caller already dropped their handle
+         * (fire-and-forget), this is the last reference and frees the object.
+         * If the caller still holds the handle, this drops RC from 2 → 1. */
+        march_decrc(task);
     }
     march_decrc(clo);   /* release the reference taken at spawn time */
     march_sched_exit();
@@ -1340,6 +1345,10 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     march_ensure_sched_started();   /* start background scheduler if needed */
     /* Allocate Task at 40 bytes (header + proc ptr + result ptr + done flag). */
     int64_t *task = (int64_t *)march_alloc(40);
+    /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
+     * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
+     * free the object before the trampoline writes the result. */
+    if (task) march_incrc(task);
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
@@ -1399,6 +1408,7 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     }
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(40);
+    if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
