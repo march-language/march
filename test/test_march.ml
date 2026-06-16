@@ -8438,7 +8438,8 @@ let test_fold_int_add () =
   let m = mk_module [mk_fn "f" (app "+" [ilit 2; ilit 3])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "2+3=5" "(Tir.EAtom (Tir.ALit (Ast.LitInt 5)))"
+  Alcotest.(check string) "2+3=5"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 5)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_int_mul () =
@@ -8446,7 +8447,8 @@ let test_fold_int_mul () =
   let m = mk_module [mk_fn "f" (app "*" [ilit 6; ilit 7])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "6*7=42" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+  Alcotest.(check string) "6*7=42"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 42)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_int_div_by_zero () =
@@ -8460,7 +8462,8 @@ let test_fold_float_add () =
   let m = mk_module [mk_fn "f" (fapp "+." [flit 1.5; flit 2.5])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "1.5+.2.5=4.0" "(Tir.EAtom (Tir.ALit (Ast.LitFloat 4.)))"
+  Alcotest.(check string) "1.5+.2.5=4.0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (flit 4.0)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_bool_not () =
@@ -8470,7 +8473,8 @@ let test_fold_bool_not () =
   let m = mk_module [mk_fn "f" (bapp "not" [blit true])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "not true = false" "(Tir.EAtom (Tir.ALit (Ast.LitBool false)))"
+  Alcotest.(check string) "not true = false"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit false)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_and_shortcircuit_pure () =
@@ -8480,7 +8484,8 @@ let test_fold_and_shortcircuit_pure () =
   let m = mk_module [mk_fn "f" (bapp "&&" [blit false; blit true])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "false && true = false" "(Tir.EAtom (Tir.ALit (Ast.LitBool false)))"
+  Alcotest.(check string) "false && true = false"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit false)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_and_shortcircuit_impure () =
@@ -8506,7 +8511,8 @@ let test_fold_if_true () =
   let m = mk_module [mk_fn "f" body] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "if true → then" "(Tir.EAtom (Tir.ALit (Ast.LitInt 1)))"
+  Alcotest.(check string) "if true → then"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 1)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_if_false () =
@@ -8519,7 +8525,8 @@ let test_fold_if_false () =
   let m = mk_module [mk_fn "f" body] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "if false → else" "(Tir.EAtom (Tir.ALit (Ast.LitInt 2)))"
+  Alcotest.(check string) "if false → else"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 2)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_and_pure_var () =
@@ -8965,7 +8972,7 @@ let test_struct_fusion_field_override () =
      Alcotest.(check int) "deduplicated: only one x field" 1 (List.length fields);
      let (_, v) = List.find (fun (k, _) -> k = "x") fields in
      Alcotest.(check string) "second value wins"
-       "(Tir.ALit (Ast.LitInt 99))"
+       (March_tir.Tir.show_atom (ilit 99))
        (March_tir.Tir.show_atom v)
    | other ->
      Alcotest.failf "expected merged EUpdate, got: %s"
@@ -9001,7 +9008,8 @@ let test_dce_dead_pure_let () =
   let m = mk_module [mk_fn "f" body] in
   let m' = March_tir.Dce.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "dead let removed" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+  Alcotest.(check string) "dead let removed"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 42)))
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_dce_impure_let_kept () =
@@ -9068,7 +9076,8 @@ let test_opt_no_infinite_loop () =
   (* A stable expression should not loop forever *)
   let m = mk_module [mk_fn "main" (March_tir.Tir.EAtom (ilit 42))] in
   let m' = March_tir.Opt.run m in
-  Alcotest.(check string) "stable" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+  Alcotest.(check string) "stable"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 42)))
     (March_tir.Tir.show_expr (first_body m'))
 
 (* ── fast-math IR attribute ──────────────────────────────────────── *)
@@ -11253,6 +11262,78 @@ let test_cap_eval_path_ok () =
   let ctx = typecheck src in
   Alcotest.(check bool) "eval path: clean module with needs evaluates without error" false
     (has_errors ctx)
+
+(* ── Phase 2a: Proof capability tests ──────────────────────────────────── *)
+
+let test_proof_cap_declaration_ok () =
+  (* A module can declare a proof cap and use it in function signatures *)
+  let src = {|mod Db do
+    proof cap Migrated
+    needs Db.Migrated
+    fn run_migrations() : Cap(Db.Migrated) do () end
+    fn start_app(cap : Cap(Db.Migrated)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap declaration: no errors" false (has_errors ctx)
+
+let test_proof_cap_parse_ok () =
+  (* proof cap syntax parses without errors *)
+  let src = {|mod Auth do
+    proof cap Authenticated
+    needs Auth.Authenticated
+    fn authenticate() : Cap(Auth.Authenticated) do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap parse: no errors" false (has_errors ctx)
+
+let test_proof_cap_forge_error () =
+  (* A function outside the declaring module cannot return a proof cap
+     without receiving it as a parameter *)
+  let src = {|mod Db do
+    proof cap Migrated
+  end
+  mod App do
+    needs Db.Migrated
+    fn bad_forge() : Cap(Db.Migrated) do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap forge: error when producing from non-declaring module" true
+    (has_errors ctx)
+
+let test_proof_cap_passthrough_ok () =
+  (* A function outside the declaring module CAN receive and return a proof cap *)
+  let src = {|mod Db do
+    proof cap Migrated
+  end
+  mod App do
+    needs Db.Migrated
+    fn relay(cap : Cap(Db.Migrated)) : Cap(Db.Migrated) do cap end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap passthrough: no errors when cap is a parameter" false
+    (has_errors ctx)
+
+let test_proof_cap_missing_needs_error () =
+  (* Using a proof cap without declaring needs shows a proof-cap-specific error *)
+  let src = {|mod Db do
+    proof cap Migrated
+  end
+  mod App do
+    fn use_migrated(cap : Cap(Db.Migrated)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap missing needs: error" true (has_errors ctx)
+
+let test_proof_cap_in_declaring_module_ok () =
+  (* The declaring module can produce the proof cap freely *)
+  let src = {|mod Db do
+    proof cap Migrated
+    needs Db.Migrated
+    pfn mk_migrated_cap() : Cap(Db.Migrated) do () end
+    fn run_migrations() : Cap(Db.Migrated) do mk_migrated_cap() end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap declaring module: no errors" false (has_errors ctx)
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
@@ -22871,6 +22952,12 @@ let () =
           Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
           Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;
           Alcotest.test_case "eval path ok with needs"    `Quick test_cap_eval_path_ok;
+          Alcotest.test_case "proof cap declaration ok"   `Quick test_proof_cap_declaration_ok;
+          Alcotest.test_case "proof cap parse ok"         `Quick test_proof_cap_parse_ok;
+          Alcotest.test_case "proof cap forge error"      `Quick test_proof_cap_forge_error;
+          Alcotest.test_case "proof cap passthrough ok"   `Quick test_proof_cap_passthrough_ok;
+          Alcotest.test_case "proof cap missing needs"    `Quick test_proof_cap_missing_needs_error;
+          Alcotest.test_case "proof cap declaring ok"     `Quick test_proof_cap_in_declaring_module_ok;
         ] );
       ("sort stdlib", [
         Alcotest.test_case "sort_small empty"       `Quick test_sort_small_empty;

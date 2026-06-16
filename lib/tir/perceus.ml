@@ -991,12 +991,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     in
     (e', lb)
 
-(** Insert RC ops into a function definition.
-    [borrowed] names are treated as still-live at the function's exit,
-    preventing Perceus from treating their last use as an ownership transfer.
-    Used for REPL globals that persist across compilation units.
-    Pre-computes the actor-sent variable set so that values sent across actor
-    thread boundaries use atomic RC operations. *)
+(* Insert RC ops into a function definition.
+   [borrowed] names are treated as still-live at the function's exit,
+   preventing Perceus from treating their last use as an ownership transfer.
+   Used for REPL globals that persist across compilation units.
+   Pre-computes the actor-sent variable set so that values sent across actor
+   thread boundaries use atomic RC operations. *)
 (** Rename ELet/ECase-bound variables whose names collide with [borrowed]
     parameters.  When [let s = f(s, …)] appears in a function whose parameter
     [s] is borrowed, Perceus's backward liveness analysis removes "s" from

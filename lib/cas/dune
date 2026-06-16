@@ -14,4 +14,4 @@
  (foreign_stubs (language c) (names blake3_stubs)
   (flags (:standard (:include blake3_cflags.sexp))))
  (c_library_flags (:include blake3_libs.sexp))
- (preprocess (pps ppx_deriving.show)))
+)

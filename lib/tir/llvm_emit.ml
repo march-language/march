@@ -5168,9 +5168,9 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
 
-(** Emit a REPL let-binding as a .ll fragment.
-    Creates a global [@repl_<name>] and an init function [@repl_<n>_init]
-    that computes the value and stores it in the global. *)
+(* Emit a REPL let-binding as a .ll fragment.
+   Creates a global [@repl_<name>] and an init function [@repl_<n>_init]
+   that computes the value and stores it in the global. *)
 (** Emit a REPL let-binding as a .ll fragment.
     Creates an init function [@repl_<n>_init] that computes the value and
     stores it in slot [dest_slot] via @march_repl_set.  No LLVM global is

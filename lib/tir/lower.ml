@@ -137,13 +137,13 @@ let ty_of_expr (e : Ast.expr) : Tir.ty =
     Built from [DUse] declarations. E.g. [map] → [List.map]. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
-(** Resolve a variable name through use-import aliases.
-    A name that is currently bound as a local (function parameter or
-    let-binding tracked in [_fn_param_types]) is NOT resolved through
-    aliases — local bindings shadow imports.  Without this guard, a
-    parameter named e.g. [status] would be rewritten to [HttpServer.status]
-    whenever [import HttpServer] is in scope, replacing every use of the
-    local parameter with a global function reference. *)
+(* Resolve a variable name through use-import aliases.
+   A name that is currently bound as a local (function parameter or
+   let-binding tracked in [_fn_param_types]) is NOT resolved through
+   aliases — local bindings shadow imports.  Without this guard, a
+   parameter named e.g. [status] would be rewritten to [HttpServer.status]
+   whenever [import HttpServer] is in scope, replacing every use of the
+   local parameter with a global function reference. *)
 (** Bare function names DEFINED by the module currently being lowered.  A
     same-module top-level fn shadows any import alias — including one another
     module's import added to the (program-global) [_use_aliases] table.
@@ -908,13 +908,13 @@ and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   | Ast.PatAtom (a, subs, _) -> Some (a, subs)
   | _ -> None
 
-(** Compile a pattern matrix to a TIR expression (decision tree).
+(* Compile a pattern matrix to a TIR expression (decision tree).
 
-    [scruts]   — list of TIR atoms currently under scrutiny (one per column).
-    [rows]     — list of (pattern list, body): each pattern list has exactly
-                 one element per scrutinee.  Rows are tried top-to-bottom; the
-                 first matching row wins.
-    [fallback] — optional expression used when no row matches (non-exhaustive). *)
+   [scruts]   — list of TIR atoms currently under scrutiny (one per column).
+   [rows]     — list of (pattern list, body): each pattern list has exactly
+                one element per scrutinee.  Rows are tried top-to-bottom; the
+                first matching row wins.
+   [fallback] — optional expression used when no row matches (non-exhaustive). *)
 (** True if a fallback expression is "small enough" that inlining it
     multiple times in the decision tree is cheap.  Currently: only [EAtom]
     qualifies (a single variable or literal reference).  Everything else
@@ -2129,7 +2129,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           ) edef.ext_fns
       | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
       | Ast.DProtocol _ | Ast.DSig _
-      | Ast.DNeeds _ | Ast.DApp _ | Ast.DDeriving _
+      | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DApp _ | Ast.DDeriving _
       | Ast.DTest _ | Ast.DSetup _ | Ast.DSetupAll _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.

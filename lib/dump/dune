@@ -1,5 +1,4 @@
 (library
  (name march_dump)
  (modules dump)
- (libraries march_ast march_tir march_typecheck unix)
- (preprocess (pps ppx_deriving.show)))
+ (libraries march_ast march_tir march_typecheck unix))

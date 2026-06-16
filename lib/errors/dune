@@ -1,4 +1,3 @@
 (library
  (name march_errors)
- (libraries march_ast)
- (preprocess (pps ppx_deriving.show)))
+ (libraries march_ast))
