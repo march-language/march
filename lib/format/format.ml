@@ -629,7 +629,7 @@ and emit_pipe_chain ctx expr =
 
 (** Extract the span from any declaration (for comment flushing). *)
 let get_span = function
-  | DFn (_, s) | DLet (_, _, s) | DType (_, _, _, _, s)
+  | DFn (_, s) | DLet (_, _, s) | DType (_, _, _, _, s) | DAlwaysLinearType (_, _, _, _, s)
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
@@ -658,6 +658,31 @@ and emit_decl ctx = function
       indented ctx (fun () -> emit_stmt ctx b.bind_expr)
     end else
       line ctx (Printf.sprintf "%s = %s" lhs (expr_inline b.bind_expr))
+
+  | DAlwaysLinearType (_, name, params, tdef, _) ->
+    (* Format as `always_linear type Name(params) = ...` — always public *)
+    let tkw = "always_linear type" in
+    let ps = match params with
+      | []  -> ""
+      | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
+    in
+    (match tdef with
+     | TDAlias ty ->
+       line ctx (Printf.sprintf "%s %s%s = %s" tkw name.txt ps (fmt_ty ty))
+     | TDVariant variants ->
+       let var_str { var_name; var_args; var_vis = _ } =
+         match var_args with
+         | []  -> var_name.txt
+         | tys -> Printf.sprintf "%s(%s)" var_name.txt (fmt_tys tys)
+       in
+       line ctx (Printf.sprintf "%s %s%s = %s" tkw name.txt ps
+         (String.concat " | " (List.map var_str variants)))
+     | TDRecord fields ->
+       let fstrs = List.map (fun f ->
+           Printf.sprintf "%s%s : %s" (fmt_lin f.fld_lin) f.fld_name.txt (fmt_ty f.fld_ty)
+         ) fields in
+       line ctx (Printf.sprintf "%s %s%s = { %s }" tkw name.txt ps (String.concat ", " fstrs))
+    )
 
   | DType (vis, name, params, tdef, _) ->
     let tkw = match vis with Public -> "type" | Private -> "ptype" in

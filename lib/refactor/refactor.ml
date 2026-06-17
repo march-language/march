@@ -374,6 +374,7 @@ let fix_project ~root ~dry_run : outcome =
 let decl_span (d : Ast.decl) : Ast.span =
   match d with
   | Ast.DFn (_, sp) | Ast.DLet (_, _, sp) | Ast.DType (_, _, _, _, sp)
+  | Ast.DAlwaysLinearType (_, _, _, _, sp)
   | Ast.DActor (_, _, _, sp) | Ast.DProtocol (_, _, sp) | Ast.DMod (_, _, _, sp)
   | Ast.DSig (_, _, sp) | Ast.DInterface (_, sp) | Ast.DImpl (_, sp)
   | Ast.DExtern (_, sp) | Ast.DUse (_, sp) | Ast.DAlias (_, sp)

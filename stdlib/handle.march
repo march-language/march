@@ -1,0 +1,9 @@
+mod Handle do
+
+  -- A typestate handle: R is the resource tag (phantom), S is the state tag (phantom).
+  -- The constructor wraps a real runtime value (an Int token or pointer).
+  -- Declaring always_linear means every binding of Handle(r, s) is automatically
+  -- tracked as linear by the compiler -- no per-site `linear` annotation needed.
+  always_linear type Handle(r, s) = Handle(Int)
+
+end

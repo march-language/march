@@ -79,6 +79,8 @@ let () =
       ("assert",    ASSERT);
       ("setup",     SETUP);
       ("setup_all", SETUP_ALL);
+      ("always_linear", ALWAYSLINEAR);
+      ("tag",           TAG);
     ]
 }
 

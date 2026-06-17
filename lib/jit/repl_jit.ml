@@ -455,7 +455,8 @@ let register_type_defs ctx (types : March_tir.Tir.type_def list) =
     and sends only DFn/DLet/ReplExpr through run_decl/run_expr. *)
 let register_user_type_decl ctx (d : March_ast.Ast.decl) =
   match d with
-  | March_ast.Ast.DType (_, name, params, td, _) ->
+  | March_ast.Ast.DType (_, name, params, td, _)
+  | March_ast.Ast.DAlwaysLinearType (_, name, params, td, _) ->
     (match March_tir.Lower.lower_type_def name params td with
      | Some td' -> register_type_defs ctx [td']
      | None -> ())

@@ -97,7 +97,8 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
     List.fold_left (fun env d ->
       match d with
       | DMod (_, _, inner, _) -> add_from env inner
-      | DType (_, name, params, TDVariant variants, _) ->
+      | DType (_, name, params, TDVariant variants, _)
+      | DAlwaysLinearType (_, name, params, TDVariant variants, _) ->
         let arity      = List.length params in
         let param_names = List.map (fun (p : name) -> p.txt) params in
         let env1 = { env with types = StrMap.add name.txt arity env.types } in
@@ -106,7 +107,8 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
                      ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
           { e with ctors = March_typecheck.Typecheck.add_ctor v.var_name.txt ci e.ctors }
         ) env1 variants
-      | DType (_, name, params, _, _) ->
+      | DType (_, name, params, _, _)
+      | DAlwaysLinearType (_, name, params, _, _) ->
         let arity = List.length params in
         { env with types = StrMap.add name.txt arity env.types }
       | _ -> env
@@ -855,7 +857,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         (* Notify the JIT about any user-declared types so
                            subsequent run_expr can pretty-print user ADTs. *)
                         (match jit_ctx, d' with
-                         | Some jit, March_ast.Ast.DType _ ->
+                         | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _) ->
                            March_jit.Repl_jit.register_user_type_decl jit d'
                          | _ -> ());
                         if not scroll_mode then
@@ -1361,7 +1363,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
               | March_ast.Ast.DActor _ -> actors_declared := true
               | _ -> ());
              (match jit_ctx, d' with
-              | Some jit, March_ast.Ast.DType _ ->
+              | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _) ->
                 March_jit.Repl_jit.register_user_type_decl jit d'
               | _ -> ());
              let out = match d' with

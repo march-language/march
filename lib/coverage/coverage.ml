@@ -174,7 +174,7 @@ let rec walk_decl ~file acc_e acc_b (d : decl) : unit =
     ) impl.impl_methods
   | DDescribe (_, decls, _) ->
     List.iter (walk_decl ~file acc_e acc_b) decls
-  | DType _ | DActor _ | DInterface _ | DExtern _ | DNeeds _ | DProofCap _
+  | DType _ | DAlwaysLinearType _ | DActor _ | DInterface _ | DExtern _ | DNeeds _ | DProofCap _
   | DProtocol _ | DSig _ | DUse _ | DAlias _ | DApp _ | DDeriving _ -> ()
 
 (** Count the total expressions and branches in [m], restricted to

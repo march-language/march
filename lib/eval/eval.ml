@@ -7651,6 +7651,20 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DSig _ | DInterface _ | DNeeds _ | DProofCap _ -> env
 
+  | DAlwaysLinearType (_, name, _, td, _) ->
+    (* Treat like DType at runtime — register constructors/records for dispatch. *)
+    (match td with
+     | TDVariant variants ->
+       List.iter (fun (v : variant) ->
+           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+         ) variants
+     | TDRecord fields ->
+       let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
+       let key = String.concat "," (List.sort String.compare field_names) in
+       Hashtbl.replace record_type_tbl key name.txt
+     | _ -> ());
+    env
+
   | DExtern (edef, _sp) ->
     (* Bind each extern function name to a VForeign stub. *)
     List.fold_left (fun env' (ef : extern_fn) ->

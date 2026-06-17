@@ -402,7 +402,8 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
     collect_pat_defs ~def_map ~use_map b.bind_pat;
     collect_expr ~def_map ~use_map ~calls b.bind_expr
 
-  | Ast.DType (_, name, _, typedef, _) ->
+  | Ast.DType (_, name, _, typedef, _)
+  | Ast.DAlwaysLinearType (_, name, _, typedef, _) ->
     add_def name.txt name.span;
     (match typedef with
      | Ast.TDVariant vs ->

@@ -190,6 +190,44 @@ Private type (type and constructors both private):
 ptype Internal = Foo | Bar(Int)
 ```
 
+Phantom label type (`tag` — zero-arg type used as a state or resource marker):
+
+```march
+tag ConnTag    -- equivalent to: type ConnTag = ConnTag
+tag Open       -- equivalent to: type Open = Open
+tag Closed     -- equivalent to: type Closed = Closed
+```
+
+Always-linear type (every binding is automatically tracked as linear — no per-site annotation needed):
+
+```march
+always_linear type Handle(r, s) = Handle(Int)
+-- Binding a Handle without consuming it is a compile-time error.
+-- Double-use is also an error.
+```
+
+Combining `tag` + `always_linear type` for typestate handles:
+
+```march
+mod Connection do
+  tag ConnTag
+  tag Open
+  tag Closed
+
+  always_linear type Conn(r, s) = Conn(Int)
+
+  fn connect(_host : String) : Conn(ConnTag, Closed) do Conn(0) end
+  fn open(h : Conn(ConnTag, Closed)) : Conn(ConnTag, Open) do
+    match h do Conn(raw) -> Conn(raw) end
+  end
+  fn close(h : Conn(ConnTag, Open)) : Unit do
+    match h do Conn(_) -> () end
+  end
+end
+-- Wrong-state calls are caught at compile time.
+-- Dropped handles are caught at compile time.
+```
+
 Opaque type (type name public, constructors private):
 
 ```march

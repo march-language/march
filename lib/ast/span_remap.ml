@@ -184,6 +184,8 @@ let rec remap_decl tbl = function
     Ast.DNeeds (paths, remap_span tbl sp)
   | Ast.DProofCap (name, sp) ->
     Ast.DProofCap (name, remap_span tbl sp)
+  | Ast.DAlwaysLinearType (vis, name, params, td, sp) ->
+    Ast.DAlwaysLinearType (vis, remap_name tbl name, List.map (remap_name tbl) params, td, remap_span tbl sp)
   | Ast.DApp (app, sp) ->
     Ast.DApp ({
       app_name = remap_name tbl app.app_name;

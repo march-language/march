@@ -105,7 +105,8 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
         | _ -> "_"
       in
       [{ ex_name = name; ex_kind = ExValue; ex_public = vis = Public }]
-    | DType (vis, tname, tparams, tdef, _) ->
+    | DType (vis, tname, tparams, tdef, _)
+    | DAlwaysLinearType (vis, tname, tparams, tdef, _) ->
       let arity = List.length tparams in
       let type_entry = { ex_name = tname.txt; ex_kind = ExType arity;
                          ex_public = vis = Public } in

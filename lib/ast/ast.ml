@@ -142,6 +142,10 @@ type decl =
   | DProofCap of name * span
   (** Proof capability declaration: [proof cap Migrated]
       Registers an unforgeable capability that can only be minted inside the declaring module. *)
+  | DAlwaysLinearType of visibility * name * name list * type_def * span
+  (** Always-linear type definition: [always_linear type Handle(r, s) = Handle(r)]
+      Identical to DType at the value level, but every binding of this type is
+      automatically tracked as linear by the typechecker — no per-site [linear] annotation needed. *)
   | DApp of app_def * span             (** Application entry point: app Name do ... end *)
   | DDeriving of name * name list * span
   (** Derive declaration: [derive Eq, Show for Color]

@@ -212,7 +212,8 @@ let check_naming ~config ~file ~acc decls =
               name (to_snake_case name))
        | _ -> ())
 
-    | Ast.DType (_, tname, _, td, _) ->
+    | Ast.DType (_, tname, _, td, _)
+    | Ast.DAlwaysLinearType (_, tname, _, td, _) ->
       (match effective_severity config r_ty with
        | Some sev when not (is_pascal_case tname.Ast.txt) ->
          emit acc file tname.Ast.span r_ty sev
@@ -607,7 +608,7 @@ let has_message_type_decl decls actor_idx =
   let result = ref false in
   for i = lo to min (actor_idx - 1) (n - 1) do
     (match arr.(i) with
-     | Ast.DType _ -> result := true
+     | Ast.DType _ | Ast.DAlwaysLinearType _ -> result := true
      | _ -> ())
   done;
   !result

@@ -461,6 +461,10 @@ type env = {
   proof_caps : (string * string) list;
   (** Proof cap registry: full cap path → declaring module name.
       Populated by [DProofCap] during check_decl; checked by check_module_needs. *)
+  always_linear_types : string list;
+  (** Set of type constructor names declared with [always_linear type].
+      Any binding whose inferred type is [TCon(name, _)] with [name] in this list
+      is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
 }
@@ -475,6 +479,7 @@ let make_env errors type_map = {
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   proof_caps = [];
+  always_linear_types = [];
   current_module = "";
 }
 
@@ -3780,20 +3785,42 @@ and infer_block env exprs =
     (* Propagate linearity: if bind_lin is Linear/Affine (written as
        `linear let x = ...` or `affine let x = ...`), override the
        normal binding and register the variable as linear/affine.
+       If bind_lin is Unrestricted but the RHS type is an always-linear type
+       constructor, auto-promote the binding to Linear.
        Otherwise, propagate linearity from the RHS expression type. *)
-    let env' = match b.bind_lin with
+    let auto_lin =
+      match b.bind_lin with
+      | Ast.Unrestricted ->
+        let rty = repr rhs_ty in
+        (match rty with
+         | TCon (name, _) ->
+           if List.mem name env.always_linear_types then Ast.Linear else Ast.Unrestricted
+         | _ -> Ast.Unrestricted)
+      | lin -> lin
+    in
+    let env' = match auto_lin with
       | Ast.Unrestricted ->
         bind_pattern_bindings b.bind_expr bindings' env
       | lin ->
-        (* Explicit linearity annotation on the binding: register each
-           pattern variable as linear/affine. *)
-        List.fold_left (fun acc_env (name, sch) ->
-            match sch with
-            | Mono t -> bind_linear name lin t acc_env
-            | _      -> bind_var name sch acc_env
+        (* For linear/affine bindings, extract the underlying type from Poly schemes
+           too — phantom type params cause gen_binding to generalize, but the binding
+           is still a single concrete value that must be consumed exactly once. *)
+        List.fold_left (fun acc_env (bname, sch) ->
+            let t = match sch with
+              | Mono t | Poly (_, _, t) -> t
+            in
+            bind_linear bname lin t acc_env
           ) env bindings'
     in
-    infer_block env' rest
+    let result_ty = infer_block env' rest in
+    (* After the rest of the block has run, verify that any linear let
+       bindings introduced here were consumed (used exactly once). *)
+    (match auto_lin with
+     | Ast.Unrestricted -> ()
+     | _lin ->
+       let linear_names = List.map fst bindings' in
+       check_linear_all_consumed env' ~scope_span:sp linear_names);
+    result_ty
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
     (* Introduce a fresh type for the function, check recursively *)
@@ -3845,7 +3872,14 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
-  match p.param_lin with
+  let effective_lin = match p.param_lin with
+    | Ast.Unrestricted ->
+      (match repr t with
+       | TCon (name, _) when List.mem name env.always_linear_types -> Ast.Linear
+       | _ -> Ast.Unrestricted)
+    | lin -> lin
+  in
+  match effective_lin with
   | Ast.Unrestricted ->
     let env1 = bind_var p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
@@ -4012,7 +4046,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
-              let env' = match p.param_lin with
+              let effective_lin = match p.param_lin with
+                | Ast.Unrestricted ->
+                  (match repr t with
+                   | TCon (tname, _) when List.mem tname env'.always_linear_types -> Ast.Linear
+                   | _ -> Ast.Unrestricted)
+                | lin -> lin
+              in
+              let env' = match effective_lin with
                 | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
                 | lin              -> bind_linear p.param_name.txt lin t env
               in
@@ -4400,7 +4441,7 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
      flagged as an incomplete island. *)
   let has_type n =
     List.exists (function
-      | Ast.DType (_, tn, _, _, _) -> tn.Ast.txt = n
+      | Ast.DType (_, tn, _, _, _) | Ast.DAlwaysLinearType (_, tn, _, _, _) -> tn.Ast.txt = n
       | _ -> false) decls
   in
   let has_fn n =
@@ -4939,7 +4980,8 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
           (match c.Ast.fc_guard with Some g -> ex g | None -> ());
           ex c.Ast.fc_body) def.Ast.fn_clauses
     | Ast.DLet (_, b, _) -> ex b.Ast.bind_expr
-    | Ast.DType (_, _, _, td, _) ->
+    | Ast.DType (_, _, _, td, _)
+    | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
        | Ast.TDAlias t -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
@@ -5040,7 +5082,8 @@ let unqualified_module_deps
           (match c.Ast.fc_guard with Some g -> ex g | None -> ());
           ex c.Ast.fc_body) def.Ast.fn_clauses
     | Ast.DLet (_, b, _) -> pat b.Ast.bind_pat; ex b.Ast.bind_expr
-    | Ast.DType (_, _, _, td, _) ->
+    | Ast.DType (_, _, _, td, _)
+    | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
        | Ast.TDAlias t -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
@@ -5085,7 +5128,8 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
     let ctor_owner : (string, string) Hashtbl.t = Hashtbl.create 64 in
     List.iter (fun (modname, (decls, _)) ->
         List.iter (function
-          | Ast.DType (Ast.Public, tname, _, td, _) ->
+          | Ast.DType (Ast.Public, tname, _, td, _)
+          | Ast.DAlwaysLinearType (Ast.Public, tname, _, td, _) ->
             if not (Hashtbl.mem type_owner tname.Ast.txt) then
               Hashtbl.replace type_owner tname.Ast.txt modname;
             (match td with
@@ -5337,6 +5381,8 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DLet _ -> None
         | Ast.DType (Ast.Public, n, _, _, _) -> Some n.txt
         | Ast.DType _ -> None
+        | Ast.DAlwaysLinearType (Ast.Public, n, _, _, _) -> Some n.txt
+        | Ast.DAlwaysLinearType _ -> None
         | Ast.DActor (Ast.Public, n, _, _) -> Some n.txt
         | Ast.DActor _ -> None
         | Ast.DMod (n, Ast.Public, _, _) -> Some n.txt
@@ -5464,7 +5510,8 @@ let rec check_decl env (d : Ast.decl) : env =
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
-      proof_caps = inner_env.proof_caps }
+      proof_caps = inner_env.proof_caps;
+      always_linear_types = inner_env.always_linear_types }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
@@ -5870,6 +5917,22 @@ let rec check_decl env (d : Ast.decl) : env =
     { env with
       proof_caps = (full_path, env.current_module) :: env.proof_caps;
       types = StrMap.add full_path 0 env.types }
+
+  | Ast.DAlwaysLinearType (vis, name, params, typedef, sp) ->
+    (* Process the type definition exactly like DType (registers constructors, records, etc.),
+       then register both the bare name and the qualified name in always_linear_types.
+       TCon internals use the bare name (e.g. "Handle"), while type annotations after module
+       export may use the qualified name (e.g. "Handle.Handle") — store both so List.mem
+       matches regardless of which form repr produces at a given call site. *)
+    let bare_name = name.txt in
+    let qual_name =
+      if env.current_module = "" then name.txt
+      else env.current_module ^ "." ^ name.txt
+    in
+    let env1 = check_decl env (Ast.DType (vis, name, params, typedef, sp)) in
+    let names = if bare_name = qual_name then [bare_name]
+                else [bare_name; qual_name] in
+    { env1 with always_linear_types = names @ env1.always_linear_types }
 
   | Ast.DApp _ ->
     (* DApp is desugared to DFn(__app_init__) before typecheck; reaching here is a bug. *)
@@ -6346,7 +6409,8 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if StrMap.mem qname e.vars then e
           else bind_var qname (Mono (fresh_var 1)) e
-        | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
+        | Ast.DType (vis, name, params, typedef, _)
+        | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
           let e1 = if StrMap.mem qname e.types then e
             else { e with types = StrMap.add qname (List.length params) e.types } in
@@ -6411,7 +6475,8 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
           ) env inner_decls
-      | Ast.DType (_, name, params, typedef, _) ->
+      | Ast.DType (_, name, params, typedef, _)
+      | Ast.DAlwaysLinearType (_, name, params, typedef, _) ->
         let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
@@ -6528,7 +6593,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if StrMap.mem qname e.vars then e
           else bind_var qname (Mono (fresh_var 0)) e
-        | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
+        | Ast.DType (vis, name, params, typedef, _)
+        | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
           let e1 = if StrMap.mem qname e.types then e
             else { e with types = StrMap.add qname (List.length params) e.types } in
@@ -6584,7 +6650,8 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
           ) env inner_decls
-      | Ast.DType (_, name, params, typedef, _) ->
+      | Ast.DType (_, name, params, typedef, _)
+      | Ast.DAlwaysLinearType (_, name, params, typedef, _) ->
         let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->

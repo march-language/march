@@ -1313,7 +1313,8 @@ let rec lower_stdlib_mod_decls prefix decls =
         let fn = lower_fn_def def in
         let fn = rename_tir_vars prefix direct_fn_names fn in
         !_fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!_fns_ref)
-      | Ast.DType (_, tname, params, td, _) ->
+      | Ast.DType (_, tname, params, td, _)
+      | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
         let qtname = { tname with txt = prefix ^ tname.txt } in
         (match lower_type_def qtname params td with
          | Some td' -> !_types_ref := td' :: !(!_types_ref)
@@ -1991,7 +1992,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           let fn = lower_fn_def def in   (* evaluate before reading !fns *)
           fns := fn :: !fns
         end
-      | Ast.DType (_, name, params, td, _) ->
+      | Ast.DType (_, name, params, td, _)
+      | Ast.DAlwaysLinearType (_, name, params, td, _) ->
         (match lower_type_def name params td with
          | Some td' -> types := td' :: !types
          | None -> ())
@@ -2034,7 +2036,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let fn = lower_fn_def def in
                 let fn = rename_tir_vars prefix direct_fn_names fn in
                 fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
-              | Ast.DType (_, tname, params, td, _) ->
+              | Ast.DType (_, tname, params, td, _)
+              | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
                 let qtname = { tname with txt = prefix ^ tname.txt } in
                 (match lower_type_def qtname params td with
                  | Some td' -> types := td' :: !types
