@@ -11335,6 +11335,37 @@ let test_proof_cap_in_declaring_module_ok () =
   let ctx = typecheck src in
   Alcotest.(check bool) "proof cap: declaring module can return it freely" false (has_errors ctx)
 
+let test_proof_cap_implicit_needs () =
+  (* The declaring module does NOT need to write `needs Db.Migrated` —
+     `proof cap Migrated` implicitly satisfies it for functions that use Cap(Db.Migrated) *)
+  let src = {|mod Db do
+    proof cap Migrated
+    fn use_cap(m : Cap(Db.Migrated)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap: declaring module needs implicit" false (has_errors ctx)
+
+let test_proof_cap_pfn_forge_error () =
+  (* A pfn inside the declaring module cannot mint a proof cap from nothing —
+     Check 6 fires even though the module is the declaring module.
+     Use cap_narrow(root_cap()) so the body typechecks; the error is Check 6 specifically. *)
+  let src = {|mod Db do
+    proof cap Migrated
+    pfn bad_private_forge() : Cap(Db.Migrated) do cap_narrow(root_cap()) end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap pfn forge: error for private function in declaring module" true (has_errors ctx)
+
+let test_proof_cap_pfn_passthrough_ok () =
+  (* A pfn inside the declaring module CAN pass a proof cap through —
+     it just cannot produce one from nothing *)
+  let src = {|mod Db do
+    proof cap Migrated
+    pfn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap pfn passthrough: private relay is allowed" false (has_errors ctx)
+
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
 let sort_decl = lazy (load_stdlib_file_for_test "sort.march")
@@ -22052,9 +22083,8 @@ let test_resolver_skips_dangling_symlink () =
   Alcotest.(check bool) "dangling symlink not collected"
     false (List.exists (fun p -> Filename.basename p = "broken") files)
 
-let () =
-  Alcotest.run "march"
-    [
+let compiler_suites =
+  [
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
@@ -22326,6 +22356,10 @@ let () =
           Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
         ] );
+  ]
+
+let eval_suites =
+  [
       ( "eval",
         [
           Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);
@@ -22610,6 +22644,10 @@ let () =
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
         ] );
+  ]
+
+let codegen_suites =
+  [
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
@@ -22958,7 +22996,14 @@ let () =
           Alcotest.test_case "proof cap: passthrough ok"      `Quick test_proof_cap_passthrough_ok;
           Alcotest.test_case "proof cap: missing needs"       `Quick test_proof_cap_missing_needs_error;
           Alcotest.test_case "proof cap: declaring mod ok"    `Quick test_proof_cap_in_declaring_module_ok;
+          Alcotest.test_case "proof cap: implicit needs"      `Quick test_proof_cap_implicit_needs;
+          Alcotest.test_case "proof cap: pfn forge error"     `Quick test_proof_cap_pfn_forge_error;
+          Alcotest.test_case "proof cap: pfn passthrough ok"  `Quick test_proof_cap_pfn_passthrough_ok;
         ] );
+  ]
+
+let stdlib_suites =
+  [
       ("sort stdlib", [
         Alcotest.test_case "sort_small empty"       `Quick test_sort_small_empty;
         Alcotest.test_case "sort_small n=1"         `Quick test_sort_small_n1;

@@ -4472,10 +4472,16 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     | _ -> []
   ) decls in
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
-  (* Check 1: every Cap(X) must be covered by a declared need *)
+  (* Check 1: every Cap(X) must be covered by a declared need.
+     Exception: the declaring module of a proof cap implicitly satisfies its own needs —
+     `proof cap X` in mod M auto-covers `needs M.X` so the module needn't repeat itself. *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
-    if not covered then begin
+    let self_declared = match List.assoc_opt cap_path env.proof_caps with
+      | Some dm -> dm = mod_name.txt
+      | None -> false
+    in
+    if not covered && not self_declared then begin
       match List.assoc_opt cap_path env.proof_caps with
       | Some declaring_mod ->
         Err.error env.errors ~span:sp
@@ -4484,7 +4490,7 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
             MPCode declaring_mod; MPText ".";
             MPBreak; MPText "Add "; MPCode ("needs " ^ cap_path);
             MPText " to module "; MPCode mod_name.txt; MPText " to acknowledge this dependency.";
-            MPBreak; MPText "Only "; MPCode declaring_mod;
+            MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
             MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
       | None ->
         Err.error env.errors ~span:sp
@@ -4570,8 +4576,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     | _ -> ()
   ) decls;
   (* Check 6: proof cap production enforcement.
-     A function outside the declaring module cannot return a proof cap type
-     unless it receives that cap as a parameter (pass-through is allowed). *)
+     A function cannot return a proof cap unless it received it as a parameter, EXCEPT
+     for public (`fn`) functions in the declaring module — those are the minting surface.
+     Private (`pfn`) functions in the declaring module face the same restriction as external
+     modules: they may pass a cap through but cannot produce one from nothing. *)
   List.iter (function
     | Ast.DFn (def, sp) ->
       let param_caps : string list =
@@ -4588,19 +4596,31 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         List.iter (fun cap_path ->
           match List.assoc_opt cap_path env.proof_caps with
           | Some declaring_mod
-            when declaring_mod <> mod_name.txt
+            when (declaring_mod <> mod_name.txt
+                  || def.fn_vis = Ast.Private)
               && not (List.mem cap_path param_caps) ->
-            Err.error env.errors ~span:sp
-              (render_parts [
-                MPText "function "; MPCode def.fn_name.txt;
-                MPText " returns "; cap cap_path;
-                MPText " but "; cap cap_path; MPText " is a proof capability declared in ";
-                MPCode declaring_mod; MPText ".";
-                MPBreak; MPText "Only "; MPCode declaring_mod;
-                MPText " can construct "; cap cap_path; MPText ".";
-                MPBreak; MPText "hint: accept "; cap cap_path;
-                MPText " as a parameter and pass it through, or call a factory in ";
-                MPCode declaring_mod; MPText "." ])
+            if declaring_mod = mod_name.txt then
+              Err.error env.errors ~span:sp
+                (render_parts [
+                  MPText "private function "; MPCode def.fn_name.txt;
+                  MPText " in "; MPCode declaring_mod;
+                  MPText " cannot mint "; cap cap_path; MPText ".";
+                  MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
+                  MPText " can construct "; cap cap_path; MPText ".";
+                  MPBreak; MPText "hint: make this function public, or accept ";
+                  cap cap_path; MPText " as a parameter and pass it through." ])
+            else
+              Err.error env.errors ~span:sp
+                (render_parts [
+                  MPText "function "; MPCode def.fn_name.txt;
+                  MPText " returns "; cap cap_path;
+                  MPText " but "; cap cap_path; MPText " is a proof capability declared in ";
+                  MPCode declaring_mod; MPText ".";
+                  MPBreak; MPText "Only public functions of "; MPCode declaring_mod;
+                  MPText " can construct "; cap cap_path; MPText ".";
+                  MPBreak; MPText "hint: accept "; cap cap_path;
+                  MPText " as a parameter and pass it through, or call a factory in ";
+                  MPCode declaring_mod; MPText "." ])
           | _ -> ()
         ) (cap_paths_in_surface_ty ret_ty)
       ) ret_tys

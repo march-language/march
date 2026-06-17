@@ -49,27 +49,33 @@ For **data-bound proofs** (this string is sanitized, this input is parsed), a pr
 
 ### Proof cap design
 
-A proof cap is declared with the `proof cap` syntax and can only be constructed within the declaring module. There is no language-level constructor; the module boundary is the enforcement wall.
+A proof cap is declared with the `proof cap` syntax. **Only public (`fn`) functions in the declaring module can mint a proof cap.** Private (`pfn`) functions face the same forgery restriction as external modules — they may pass a cap through, but cannot produce one from nothing. This makes the module's public API the complete, auditable minting surface.
+
+The declaring module implicitly satisfies its own `needs` for any proof cap it declares — no explicit `needs Db.Migrated` is required inside `mod Db`.
 
 ```march
 mod Db do
-  -- Proof cap: only constructible within this module
+  -- Proof cap: only public functions in this module can mint Cap(Db.Migrated)
   proof cap Migrated
 
-  -- Exported factory — the only way callers can obtain Cap(Migrated)
+  -- Public factory — the only way callers can obtain Cap(Db.Migrated)
   fn run_migrations(cap : Cap(Db.Raw)) : Cap(Db.Migrated) do
     execute_pending_migrations(cap)
-    mk_migrated_cap()           -- module-internal; not exported
+    ()   -- Cap is runtime-erased; the type is what enforces the invariant
   end
 
   fn start_app(cap : Cap(Db.Migrated)) : () do
     -- Cannot be called without migration proof
     ...
   end
+
+  -- Private pass-through is fine; private minting is not
+  pfn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end   -- OK
+  -- pfn forge() : Cap(Db.Migrated) do () end                   -- ERROR
 end
 ```
 
-`Cap(Db.Migrated)` cannot be forged: `cap_narrow` cannot produce it, `root_cap` cannot produce it, and the constructor `mk_migrated_cap` is not exported. The only route to `Cap(Db.Migrated)` is through `run_migrations`.
+`Cap(Db.Migrated)` cannot be forged: `cap_narrow` cannot produce it, `root_cap` cannot produce it, no `pfn` in `mod Db` can produce it from nothing, and no external module can produce it. The only route is through a public function of `mod Db`.
 
 ```march
 mod Auth do
@@ -77,7 +83,7 @@ mod Auth do
 
   fn authenticate(session : Session) : Option((Cap(Auth.Authenticated), UserId)) do
     match verify_session(session) do
-      Ok(uid) -> Some((mk_authenticated_cap(), uid))
+      Ok(uid) -> Some(((), uid))   -- () is the runtime rep; type system enforces soundness
       Err(_)  -> None
     end
   end
@@ -87,6 +93,10 @@ mod Auth do
   end
 end
 ```
+
+**Design rationale.** Since proof cap values are always `()` at runtime (fully erased), any private "factory" function is always just `pfn mk() : Cap(X) do () end` — there is no real computation to encapsulate. Inlining `()` in each public minting function costs nothing and keeps the minting surface explicit. The restriction on `pfn` is therefore zero-cost in practice while providing the auditability property.
+
+**Principle carried forward.** This same rule applies to Phase 2b `Handle(R, S)`: only public functions of the declaring module produce the initial handle state. The declaring module's public API is the exclusive entry point for any capability or handle creation across all of Phase 2.
 
 ### Data-bound proofs: use refined types, not caps
 
@@ -116,11 +126,13 @@ fn render_html(content : Sanitize.Sanitized) : Html do ... end
 ### Implementation notes
 
 - `proof cap Name` is a new declaration form (`lexer.mll`, `parser.mly`, `ast.ml`)
-- The type checker populates a **producer registry** (new — map from proof cap name → declaring module + factory function) during `check_decl`
+- The type checker populates a **producer registry** (`env.proof_caps : (string * string) list`, proof cap full path → declaring module) during `check_decl`
 - Proof caps cannot be constructed by `cap_narrow` or `root_cap` — enforced in `typecheck.ml`
-- Error messages consult the registry to show the factory function when a proof cap is missing (§6)
+- **Check 1 (needs gate):** any module using `Cap(X)` where X is a proof cap must declare `needs X`; the declaring module is implicitly exempt (the `proof cap` declaration satisfies its own needs)
+- **Check 6 (forgery ban):** applies to *all* functions whose current module is not the declaring module, AND to `pfn` functions inside the declaring module; only public `fn` in the declaring module can mint freely
+- Error messages consult the registry to name the declaring module when a proof cap is missing or forged (§6)
 
-**Estimated scope:** 200–400 lines across `lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`. No eval, TIR, codegen, or runtime changes.
+**Estimated scope:** ~300 lines across `lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`. No eval, TIR, codegen, or runtime changes.
 
 ---
 
@@ -530,13 +542,17 @@ Useful for security audits, compliance reviews, and blast-radius analysis.
 
 ### Phase 2a — Proof tokens (low cost)
 
-- `proof cap Name` declaration form (lexer/parser/AST)
-- Producer registry in `typecheck.ml` (proof cap → factory function)
-- Enforcement: proof caps cannot be produced by `cap_narrow` or `root_cap`
-- Error message: show factory function when proof cap is missing
+- `proof cap Name` declaration form (lexer/parser/AST) ✅
+- Producer registry in `typecheck.ml` (`env.proof_caps`) ✅
+- Enforcement: proof caps cannot be produced by `cap_narrow` or `root_cap` ✅
+- Check 1 (needs gate): must declare `needs X` to use `Cap(X)` where X is a proof cap ✅
+- Check 6 (forgery ban): external modules and `pfn` within declaring module cannot mint ✅ (external); **`pfn`-in-declaring-module restriction** — in progress
+- Implicit `needs` for declaring module: `proof cap X` in `mod M` auto-satisfies `needs M.X` — in progress
+- Error message: name the declaring module in forgery/missing-needs errors ✅
 - **Scope:** ambient-fact caps only; data-bound proofs use opaque refined types (existing module opacity)
+- 6 tests (capabilities 19–24) ✅
 
-Estimated: 200–400 lines across `lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`. No runtime changes.
+Estimated: ~300 lines across `lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`. No runtime changes.
 
 ### Phase 2b — Typestate via `Handle(R, S)` (medium cost)
 

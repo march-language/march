@@ -73,19 +73,28 @@ Proof caps enforce **sequencing** — that a specific initialization step has ru
 
 ### Declaring a proof cap
 
+Only **public (`fn`) functions** in the declaring module can mint a proof cap. Private (`pfn`) functions face the same forgery restriction as external modules — they may pass a cap through, but cannot produce one from nothing. This makes the module's public API the complete minting surface.
+
+The declaring module implicitly satisfies its own `needs` for any cap it declares — no explicit `needs Db.Migrated` is needed inside `mod Db`.
+
 ```march
 mod Db do
   proof cap Migrated
 
+  -- Public factory — the only way to obtain Cap(Db.Migrated)
   fn run_migrations(raw : Cap(Db.Raw)) : Cap(Db.Migrated) do
     execute_pending_migrations(raw)
-    mk_migrated_cap()   -- private factory, not exported
+    ()   -- Cap is runtime-erased; () is the actual runtime value
   end
 
   fn start_app(m : Cap(Db.Migrated)) : () do
     -- cannot be called without migration proof
     ...
   end
+
+  -- Private pass-through OK; private minting is not
+  pfn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end   -- fine
+  -- pfn forge() : Cap(Db.Migrated) do () end                   -- ERROR
 end
 ```
 
@@ -93,20 +102,21 @@ end
 
 - `cap_narrow` cannot produce it (it's not in the IO hierarchy)
 - `root_cap` cannot produce it
-- The only factory (`mk_migrated_cap`) is private to `mod Db`
+- No `pfn` inside `mod Db` can produce it from nothing
 - External code that receives `Cap(Db.Migrated)` can pass it through, but cannot create one
+- The minting surface is exactly the public API of `mod Db` — auditable at a glance
 
 ### Enforcement rules
 
-**Check 1 — must declare `needs`:** Any module that accepts or returns `Cap(Db.Migrated)` must declare `needs Db.Migrated`. The error names the declaring module:
+**Check 1 — must declare `needs`:** Any module that accepts or returns `Cap(Db.Migrated)` must declare `needs Db.Migrated` (the declaring module is automatically exempt). The error names the declaring module:
 
 ```
 Cap(Db.Migrated) is a proof capability declared in module Db.
 Add `needs Db.Migrated` to module App to acknowledge this dependency.
-Only Db can mint Cap(Db.Migrated) — callers must receive it as a parameter.
+Only public functions of Db can mint Cap(Db.Migrated) — callers must receive it as a parameter.
 ```
 
-**Check 6 — no forgery:** A function outside `Db` cannot have `Cap(Db.Migrated)` in its return type unless it received that cap as a parameter:
+**Check 6 — no forgery:** A function outside `Db`, or a `pfn` inside `Db`, cannot have `Cap(Db.Migrated)` in its return type unless it received that cap as a parameter:
 
 ```march
 mod App do
