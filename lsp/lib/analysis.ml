@@ -257,6 +257,10 @@ type t = {
   (** Every table-name string literal in a Query.from_table/Migration.* call. *)
   protocols        : (string * Ast.protocol_def) list;
   (** Session-type protocol definitions: name → def (for scaffolding). *)
+  transitions_index : (string * Ast.transition list) list;
+  (** Always-linear handle name → declared transition arms (from [DTransitions]). *)
+  always_linear_names : string list;
+  (** Names declared with [always_linear type] (for hover enrichment). *)
   param_name_map   : (string, string list) Hashtbl.t;
   (** Precomputed function-name → ordered param-names table, built once from
       [decls] and reused on every inlay-hint request for parameter-name hints. *)
@@ -2592,6 +2596,8 @@ let analyse ~filename ~src : t =
       depot_col_occs    = [];
       depot_table_occs  = [];
       protocols         = [];
+      transitions_index = [];
+      always_linear_names = [];
       param_name_map    = build_param_name_map [] }
   in
   let make_parse_diag pos msg =
@@ -3351,6 +3357,14 @@ let analyse ~filename ~src : t =
         List.filter_map (function
             | Ast.DProtocol (n, pd, _) -> Some (n.Ast.txt, pd)
             | _ -> None) user_decls;
+      transitions_index =
+        List.filter_map (function
+            | Ast.DTransitions (n, arms, _) -> Some (n.Ast.txt, arms)
+            | _ -> None) user_decls;
+      always_linear_names =
+        List.filter_map (function
+            | Ast.DAlwaysLinearType (_, n, _, _, _) -> Some n.Ast.txt
+            | _ -> None) user_decls;
       param_name_map   = build_param_name_map user_decls }
 
 (* ------------------------------------------------------------------ *)
@@ -3961,9 +3975,117 @@ let is_island_name_context (prefix : string) : bool =
       rest_len >= 7 && String.sub prefix !i 7 = "<island"
   end
 
+(** Check whether the cursor is on a transition arm [via] position.
+    Returns completions filtered to functions that are plausible transition
+    functions for the handle type named in the enclosing [transitions] block. *)
+let via_completions (a : t) ~line ~character : Lsp.Types.CompletionItem.t list option =
+  (* Extract the current line up to the cursor *)
+  let lines = String.split_on_char '\n' a.src in
+  let line_text = if line < List.length lines then List.nth lines line else "" in
+  let char_capped = min character (String.length line_text) in
+  let prefix = String.sub line_text 0 char_capped in
+  (* Check the pattern: contains "->" and ends with "via" + optional word chars *)
+  let has_arrow = String.contains prefix '>' &&
+    (let idx = String.rindex prefix '>' in idx > 0 && prefix.[idx-1] = '-') in
+  if not has_arrow then None
+  else begin
+    (* Does the prefix contain " via" after the last "->"? *)
+    let after_arrow =
+      match String.rindex_opt prefix '>' with
+      | None -> prefix
+      | Some i -> String.sub prefix i (String.length prefix - i)
+    in
+    let trimmed = String.trim after_arrow in
+    let via_pos = (* find " via" in after_arrow *)
+      let len = String.length after_arrow in
+      let rec find i =
+        if i > len - 4 then None
+        else if String.sub after_arrow i 4 = " via" then Some i
+        else find (i + 1)
+      in find 0
+    in
+    let _ = trimmed in
+    match via_pos with
+    | None -> None
+    | Some _ ->
+      (* Scan backwards in source for "transitions <name> do" *)
+      let cur_ofs = pos_to_ofs a.src (line + 1) character in
+      let src = a.src in
+      let src_len = String.length src in
+      (* Search backwards from cur_ofs for the token "transitions" *)
+      let handle_name =
+        let keyword = "transitions" in
+        let klen = String.length keyword in
+        let rec search i =
+          if i < 0 then None
+          else if i + klen <= src_len && String.sub src i klen = keyword then begin
+            (* Skip whitespace after keyword *)
+            let j = ref (i + klen) in
+            while !j < src_len && (src.[!j] = ' ' || src.[!j] = '\t') do incr j done;
+            (* Read the name token *)
+            let start = !j in
+            while !j < src_len && (let c = src.[!j] in
+              (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c = '_') do incr j done;
+            if !j > start then Some (String.sub src start (!j - start))
+            else None
+          end else search (i - 1)
+        in
+        search (min (cur_ofs - 1) (src_len - 1))
+      in
+      (match handle_name with
+       | None -> None
+       | Some h_name ->
+         (* Filter vars to functions whose type has h_name as head of first arg
+            and last result — i.e., transition-shaped: h_name(...) -> h_name(...) *)
+         let open Lsp.Types in
+         let open Tc in
+         let rec repr = function TVar {contents = Link t; _} -> repr t | t -> t in
+         let rec result_ty = function
+           | TArrow (_, r) -> result_ty (repr r)
+           | t -> t
+         in
+         let is_transition_fn scheme =
+           let ty = match scheme with Mono t -> t | Poly (_, _, t) -> t in
+           match repr ty with
+           | TArrow (arg, _) ->
+             (match repr arg with
+              | TCon (name, _) ->
+                let bare = match String.rindex_opt name '.' with
+                  | Some i -> String.sub name (i+1) (String.length name - i - 1)
+                  | None -> name in
+                (bare = h_name || name = h_name) &&
+                (match repr (result_ty ty) with
+                 | TCon (rn, _) ->
+                   let rb = match String.rindex_opt rn '.' with
+                     | Some i -> String.sub rn (i+1) (String.length rn - i - 1)
+                     | None -> rn in
+                   rb = h_name || rn = h_name
+                 | _ -> false)
+              | _ -> false)
+           | _ -> false
+         in
+         let items = List.filter_map (fun (name, scheme) ->
+             if String.length name > 0 && name.[0] <> '_' && is_transition_fn scheme
+             then begin
+               let ty = match scheme with Mono t -> t | Poly (_, _, t) -> t in
+               let detail = pp_ty ty in
+               Some (CompletionItem.create ~label:name
+                       ~kind:CompletionItemKind.Function ~detail ())
+             end else None
+           ) a.vars in
+         if items = [] then None else Some items)
+  end
+
 let completions_at (a : t) ~line ~character =
   match dot_completions a ~line ~character with
   | Some items -> items   (* in `receiver.`: only the receiver's members *)
+  | None ->
+  (* ------------------------------------------------------------------ *)
+  (* Via-position in transitions block: complete with transition fns     *)
+  (* ------------------------------------------------------------------ *)
+  match via_completions a ~line ~character with
+  | Some items -> items
   | None ->
   (* ------------------------------------------------------------------ *)
   (* Depot column-name context: cursor inside a column-arg string        *)
@@ -7037,6 +7159,56 @@ let actor_info_at (a : t) ~line ~character : string option =
     Buffer.add_string buf "```";
     Some (Buffer.contents buf)
 
+let typestate_hover_at (a : t) ~line ~character : string option =
+  match ty_at a ~line ~character with
+  | None -> None
+  | Some ty ->
+    let open Tc in
+    let rec repr = function TVar {contents = Link t; _} -> repr t | t -> t in
+    (match repr ty with
+     | TCon (handle_name, _args) when a.transitions_index <> [] ->
+       let bare = match String.rindex_opt handle_name '.' with
+         | Some i -> String.sub handle_name (i+1) (String.length handle_name - i - 1)
+         | None   -> handle_name
+       in
+       (match List.find_opt (fun (k, _) -> k = handle_name || k = bare)
+                a.transitions_index with
+        | None -> None
+        | Some (_, all_arms) ->
+          (* Determine current state from last type argument *)
+          let state_s = match repr ty with
+            | TCon (_, args) when args <> [] ->
+              pp_ty (repr (List.nth args (List.length args - 1)))
+            | _ -> "?"
+          in
+          let resource_s = match repr ty with
+            | TCon (_, arg0 :: _) -> pp_ty (repr arg0)
+            | _ -> bare
+          in
+          let from_arms = List.filter (fun (arm : Ast.transition) ->
+              arm.tr_from.txt = state_s
+            ) all_arms in
+          let is_linear = List.mem bare a.always_linear_names ||
+                          List.mem handle_name a.always_linear_names in
+          let buf = Buffer.create 64 in
+          if is_linear then
+            Buffer.add_string buf "**always-linear** — must be consumed, not dropped\n\n";
+          Buffer.add_string buf
+            (Printf.sprintf "Typestate: resource `%s`, state **`%s`**" resource_s state_s);
+          if from_arms <> [] then begin
+            Buffer.add_string buf
+              (Printf.sprintf "\n\nTransitions from `%s`:\n" state_s);
+            List.iter (fun (arm : Ast.transition) ->
+              Buffer.add_string buf
+                (Printf.sprintf "- `%s` → `%s`  via `%s`\n"
+                   arm.tr_from.txt arm.tr_to.txt arm.tr_via.txt)
+            ) from_arms
+          end else if all_arms <> [] then
+            Buffer.add_string buf
+              (Printf.sprintf "\n\nNo declared transitions from `%s`" state_s);
+          Some (Buffer.contents buf))
+     | _ -> None)
+
 (** Return the performance insight message for the smallest span that
     contains the cursor, or [None] if no insight applies. *)
 let perf_insight_at (a : t) ~line ~character : string option =
@@ -7080,6 +7252,9 @@ let query_perf_insight_at (a : t) ~line ~utf16_char =
 
 let query_actor_info_at (a : t) ~line ~utf16_char =
   actor_info_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
+
+let query_typestate_hover_at (a : t) ~line ~utf16_char =
+  typestate_hover_at a ~line ~character:(byte_col_of a ~line ~utf16_char)
 
 let query_signature_help_at (a : t) ~line ~utf16_char =
   signature_help_at a ~line ~character:(byte_col_of a ~line ~utf16_char)

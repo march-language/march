@@ -12,7 +12,7 @@ let known_builtin_names =
     "interactive"; "i"; "clean"; "deps"; "add"; "publish";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
-    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "help";
+    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "help";
     "completions" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
@@ -812,6 +812,28 @@ let phases_cmd =
            ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
     Term.(const run $ port)
 
+(* --------------------------------------------------------------- forge cap *)
+
+let cap_query_cmd =
+  let dir =
+    Arg.(value & opt (some string) None &
+         info ["dir"] ~docv:"DIR"
+           ~doc:"Root directory to scan (defaults to project root).")
+  in
+  let run d =
+    match Cmd_cap.query ~dir:d () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "query"
+           ~doc:"Print a capability and typestate summary for all .march files")
+    Term.(const run $ dir)
+
+let cap_cmd =
+  Cmd.group (Cmd.info "cap"
+               ~doc:"Capability and typestate inspection")
+    [cap_query_cmd]
+
 (* --------------------------------------------------------- forge completions *)
 
 let completions_cmd =
@@ -859,7 +881,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      completions_cmd; help_cmd ]
+      cap_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
