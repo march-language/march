@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-17, Phase 2b always-linear types + tag phantom labels)
+
+- **`always_linear type T(params) = ...` — unconditional linearity declaration.** Every binding of an always-linear type is automatically tracked as linear by the typechecker — no `linear` annotation at each call site. Drop-without-use and double-use are compile-time errors. Auto-promotion fires at all three binding sites: `let`-bindings (infer_block, with Poly-scheme fix for phantom type params), named `fn` parameters (check_fn FPNamed path), and lambda parameters (bind_lam_param). Both bare (`"Handle"`) and qualified (`"Handle.Handle"`) names registered in `env.always_linear_types` so TCon matching works regardless of call site. `DAlwaysLinearType` AST node propagated through all 17 pattern-match sites (span_remap, coverage, desugar, dump, eval, format, jit, lint, modules, refactor, repl, search, tir/lower, lsp/analysis). `check_linear_all_consumed` called after each linear let-block completes.
+- **`tag Foo` — zero-arg phantom label type.** Parser-level sugar: `tag Open` desugars to `type Open = Open`. Used to declare typestate labels without boilerplate. No new AST node; two files changed (lexer + parser).
+- **`stdlib/handle.march` — `Handle(r, s)` typestate handle.** `always_linear type Handle(r, s) = Handle(Int)` — phantom params `r` (resource) and `s` (state) enforced at call sites via the type system. Thread-through idiom validated: `connect → open → query → close` compiles and runs; wrong-state calls and leaked handles produce clear type errors.
+- **Test count: 319** (all passing).
+
 ## Current State (as of 2026-06-16, Phase 2a proof capability tokens)
 
 - **`proof cap Name` — unforgeable ambient-fact capability tokens.** A module declares `proof cap Migrated` and the compiler enforces that only that module can mint `Cap(Db.Migrated)`; external code must receive it as a parameter (pass-through is allowed). New surface syntax (`proof cap` compound token in lexer), `DProofCap` AST node, producer registry in `env.proof_caps`, two new typecheck checks: enhanced Check 1 names the declaring module when a proof cap is used without `needs`, and new Check 6 rejects return-type forgery outside the declaring module. No runtime changes — proof caps are runtime-erased like all `Cap(X)` types.
