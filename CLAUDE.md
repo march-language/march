@@ -19,9 +19,32 @@ The opam switch is `march`. `opam` and `dune` are available directly in PATH —
 
 ```
 dune build          # build everything
-dune runtest        # run all 50 tests
+dune runtest        # run all tests
 dune exec march -- file.march   # run the compiler
 ```
+
+### Parallel-agent / reliable test invocation
+
+`dune runtest` uses a per-project RPC daemon. Stale zombie dune processes from prior sessions block new runs and prevent log files from updating. Use one of:
+
+```bash
+# 1. Agent-safe script — shuts down stale daemon, builds, runs binaries directly
+scripts/run-tests.sh                   # all four suites
+scripts/run-tests.sh compiler eval     # subset by name
+
+# 2. Direct binary invocation (no dune RPC at execution time)
+dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe
+./_build/default/test/run_compiler.exe -e
+./_build/default/test/run_eval.exe -e
+./_build/default/test/run_codegen.exe -e
+./_build/default/test/run_stdlib.exe -e
+
+# 3. Standard dune flags for one-off runs
+dune runtest --no-buffer   # real-time output (lines appear as they're written)
+dune runtest --force       # re-run even if inputs are cached (avoids silent no-output)
+```
+
+To unstick a stale daemon: `dune shutdown` (dune 3.x).
 
 After implementing or completing a feature, update `specs/todos.md` (move item to Done) and `specs/progress.md` (add to feature list) to keep them current.
 
