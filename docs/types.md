@@ -2,6 +2,7 @@
 layout: docs
 title: Type System
 nav_order: 5
+permalink: /docs/types/
 ---
 
 # Type System

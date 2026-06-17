@@ -2,6 +2,7 @@
 layout: landing
 title: March Lang
 nav_order: 1
+permalink: /
 ---
 
 <div style="text-align: center; margin: 2rem 0 1.5rem;">

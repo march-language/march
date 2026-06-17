@@ -2,6 +2,7 @@
 layout: docs
 title: Pattern Matching
 nav_order: 7
+permalink: /docs/pattern-matching/
 ---
 
 # Pattern Matching

@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Try It Out
 nav_order: 2
+permalink: /docs/playground/
 description: "Interactive March REPL — try March expressions in your browser, no install needed."
 ---
 
@@ -63,4 +64,4 @@ The browser playground runs the March **interpreter** (tree-walking eval), not t
 - Actor `spawn` runs synchronously (no scheduler)
 - Standard library modules loaded: prelude, option, result, list, map, set, array, math, string, sort, seq, enum, random, json, and a few others
 
-For the full language including actors, supervision trees, session types, and native compilation, see [Installation]({{ site.baseurl }}/installation).
+For the full language including actors, supervision trees, session types, and native compilation, see [Installation]({{ site.baseurl }}/docs/installation/).

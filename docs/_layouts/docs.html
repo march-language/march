@@ -258,9 +258,7 @@
       <p class="d-sidebar-section">Start Here</p>
       {% for p in nav_pages %}
         {% if p.nav_order == 2 or p.nav_order == 3 %}
-          {% unless p.layout == 'playground' or p.url contains 'playground' %}
       <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
-          {% endunless %}
         {% endif %}
       {% endfor %}
 

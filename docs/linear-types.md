@@ -2,6 +2,7 @@
 layout: docs
 title: Linear Types
 nav_order: 6
+permalink: /docs/linear-types/
 ---
 
 # Linear and Affine Types

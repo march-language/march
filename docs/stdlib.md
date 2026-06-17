@@ -2,6 +2,7 @@
 layout: docs
 title: Standard Library
 nav_order: 12
+permalink: /docs/stdlib/
 ---
 
 # Standard Library

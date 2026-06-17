@@ -2,6 +2,7 @@
 layout: docs
 title: Examples
 nav_order: 17
+permalink: /docs/examples/
 ---
 
 # Examples
