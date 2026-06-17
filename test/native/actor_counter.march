@@ -1,19 +1,33 @@
 mod ActorCounter do
+  -- A 0-arg sentinel used as the Actor.call "inner_msg".
+  -- march_actor_call reads its tag (0) to build the call message,
+  -- which dispatches to the GetValue handler at tag position 0.
+  type CallGet = CallGet
+
   actor Counter do
     state { value : Int }
     init { value = 0 }
+    -- FIRST handler (tag 0): receives the actor_call message.
+    -- The runtime builds { tag=0, field[0]=caller_proc } and the
+    -- handler binds field[0] as `ref`.
+    on GetValue(ref) do
+      Actor.reply(ref, state.value)
+      state
+    end
+    -- SECOND handler (tag 1): normal fire-and-forget increment.
     on Increment(n : Int) do
       { state with value = state.value + n }
-    end
-    on Probe() do
-      println("value=" ++ int_to_string(state.value))
-      state
     end
   end
 
   fn main() : Unit do
     let c = spawn(Counter)
-    let _r1 = send(c, Increment(5))
-    send(c, Probe())
+    let _ = send(c, Increment(5))
+    let result = Actor.call(c, CallGet, 5000)
+    match result do
+      Ok(v) -> println("value=" ++ int_to_string(v))
+      Err(_) -> println("timeout")
+    end
+    kill(c)
   end
 end

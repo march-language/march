@@ -140,6 +140,10 @@ void         march_sched_exit(void);
 /* Return the currently running process (NULL if in scheduler context). */
 march_proc  *march_sched_current(void);
 
+/* Return 1 if the calling OS thread is running inside the scheduler loop, 0 otherwise.
+ * Used to avoid launching a redundant background scheduler thread. */
+int          march_sched_in_scheduler(void);
+
 /* Return the total number of processes ever spawned since last init. */
 int64_t      march_sched_total_spawned(void);
 

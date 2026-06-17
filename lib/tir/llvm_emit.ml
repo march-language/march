@@ -2618,6 +2618,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       "call ptr @march_vault_push_capped(ptr %s, ptr %s, ptr %s, i64 %s)" vt vk vv vmax);
     ("i64", "0")
 
+  (* ── actor_reply: coerce result to tagged ptr so integers survive the
+     void* round-trip through march_actor_reply / march_sched_send / recv ── *)
+  (* actor_reply is declared as (ptr, ptr) → void.  The general EApp path emits
+     each arg with its natural LLVM type, so an Int result arrives as a raw i64
+     (e.g. 5) instead of the tagged form ((5<<1)|1 = 11) that the caller's
+     Result-unboxing code expects.  Coerce result to ptr here so integers are
+     tagged before being enqueued, matching the ptr→i64 conditional-untag on the
+     receive side. *)
+  | Tir.EApp (f, [ref_atom; result_atom])
+    when f.Tir.v_name = "actor_reply" ->
+    let vref = emit_atom_as ctx "ptr" ref_atom in
+    let vres = emit_atom_as ctx "ptr" result_atom in
+    emit ctx (Printf.sprintf "call void @march_actor_reply(ptr %s, ptr %s)" vref vres);
+    ("i64", "0")
+
   (* ── EApp of a locally-bound closure variable ────────────────────── *)
   (* If f has a var_slot alloca AND is not a top-level function, it is a
      local closure — redirect to ECallPtr dispatch.
@@ -4695,9 +4710,10 @@ declare void @march_task_cancel_by_id(ptr %task)
 let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
     "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv)\n\
+     declare void @march_spawn_main(ptr %fn)\n\
      define i32 @main(i32 %argc, ptr %argv) {\nentry:\n\
        call void @march_process_argv_init(i32 %argc, ptr %argv)\n\
-       call void @march_main()\n\
+       call void @march_spawn_main(ptr @march_main)\n\
        call void @march_run_scheduler()\n\
        ret i32 0\n}\n"
 
@@ -4993,9 +5009,10 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
           let mangled = llvm_name (mangle_extern name) in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+             declare void @march_spawn_main(ptr %%fn)\n\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-               call void @%s()\n\
+               call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\
                ret i32 0\n}\n" mangled)
         | None ->

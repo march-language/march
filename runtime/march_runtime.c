@@ -1077,8 +1077,11 @@ static void *sched_bg_entry(void *arg) {
 }
 
 /* Start the scheduler in a background OS thread if not already running.
- * Idempotent: the CAS ensures at most one background thread is created. */
+ * Idempotent: the CAS ensures at most one background thread is created.
+ * No-op when called from within the scheduler (tl_sched != NULL) — the
+ * inline scheduler loop is already handling all green threads. */
 static void march_ensure_sched_started(void) {
+    if (march_sched_in_scheduler()) return;  /* already inside the scheduler — no background thread needed */
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &g_sched_bg_started, &expected, 1,
@@ -1088,6 +1091,27 @@ static void march_ensure_sched_started(void) {
         /* Fall back: reset flag so march_run_scheduler() runs inline. */
         atomic_store_explicit(&g_sched_bg_started, 0, memory_order_relaxed);
     }
+}
+
+/* Green-thread trampoline for the main() entrypoint.
+ * arg is a no-arg void function pointer cast to void *. */
+static void main_fn_green_thread(void *arg) {
+    typedef void (*main_fn_t)(void);
+    main_fn_t fn = (main_fn_t)(uintptr_t)arg;
+    fn();
+}
+
+/* Spawn the March main() function as a green thread so it runs inside the
+ * scheduler and can use actor_call / task_await without blocking the OS thread.
+ * Call this before march_run_scheduler(); the scheduler loop picks it up. */
+void march_spawn_main(void (*fn)(void)) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &g_sched_initialized, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        march_sched_init();
+    }
+    march_sched_spawn(main_fn_green_thread, (void *)(uintptr_t)fn);
 }
 
 /* Forward declarations */

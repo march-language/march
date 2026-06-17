@@ -590,6 +590,13 @@ march_proc *march_sched_current(void) {
     return tl_sched ? tl_sched->current : NULL;
 }
 
+/* Returns 1 if the calling OS thread is currently running inside the scheduler
+ * loop (tl_sched is set), 0 otherwise.  Used by march_ensure_sched_started to
+ * avoid launching a redundant background thread. */
+int march_sched_in_scheduler(void) {
+    return tl_sched != NULL;
+}
+
 /* self() builtin — returns the current green thread's proc pointer (the PID
  * value used as first arg to send/receive in the compiled binary). */
 void *march_self(void) {
