@@ -1,0 +1,22 @@
+title: March Lang
+description: A statically-typed functional language in the ML/Elixir tradition, compiled to native code via LLVM.
+baseurl: "/march"
+url: "https://march-language.github.io"
+
+# Code highlighting
+highlighter: rouge
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: "highlight"
+
+# Exclude from build
+exclude:
+  - "*.ml"
+  - "*.mly"
+  - "*.mll"
+  - Makefile
+  - Gemfile
+  - Gemfile.lock
+  - node_modules/
+  - _build/
