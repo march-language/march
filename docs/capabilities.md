@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Capabilities
 nav_order: 18
+permalink: /docs/capabilities/
 ---
 
 # Capabilities

@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Supervision Trees
 nav_order: 10
+permalink: /docs/supervision/
 ---
 
 # Supervision Trees

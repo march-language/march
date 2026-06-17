@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: LSP & Editors
 nav_order: 16
+permalink: /docs/lsp/
 ---
 
 # Language Server (LSP)

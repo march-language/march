@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Property Testing
 nav_order: 13
+permalink: /docs/property-testing/
 ---
 
 # Property Testing

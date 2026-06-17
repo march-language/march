@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Actors
 nav_order: 9
+permalink: /docs/actors/
 ---
 
 # Actors

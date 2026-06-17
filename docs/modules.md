@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Module System
 nav_order: 8
+permalink: /docs/modules/
 ---
 
 # Module System

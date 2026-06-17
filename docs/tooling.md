@@ -1,7 +1,8 @@
 ---
-layout: page
+layout: docs
 title: Tooling
 nav_order: 15
+permalink: /docs/tooling/
 ---
 
 # Tooling
