@@ -127,7 +127,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
@@ -330,6 +330,14 @@ type_decl:
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
+  | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    variants = separated_nonempty_list(PIPE, variant)
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      DAlwaysLinearType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
+  | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; fields = separated_list(COMMA, field); RBRACE
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      DAlwaysLinearType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; _n = upper_name; error
     { error_raise
         "I was expecting `=` after the type name here:"

@@ -130,7 +130,8 @@ let rec collect_entries ~module_name ~file acc (decl : Ast.decl) =
     } in
     entry :: acc
 
-  | Ast.DType (_, name, _, typedef, span) ->
+  | Ast.DType (_, name, _, typedef, span)
+  | Ast.DAlwaysLinearType (_, name, _, typedef, span) ->
     let prefix = if module_name = "" then "" else module_name ^ "." in
     let type_entry = {
       name        = name.txt;

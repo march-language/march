@@ -175,6 +175,7 @@ let stdlib_file_list = [
   "task.march";
   "uri.march";
   "forge_nb.march";
+  "handle.march";
 ]
 
 (** Read all stdlib source files and compute a hash of their contents.
