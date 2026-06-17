@@ -2134,6 +2134,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DProtocol _ | Ast.DSig _
       | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DApp _ | Ast.DDeriving _
       | Ast.DTest _ | Ast.DSetup _ | Ast.DSetupAll _ -> ()
+      | Ast.DTransitions _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.
            The qualified fn_defs are already in [fns] from DMod processing above. *)

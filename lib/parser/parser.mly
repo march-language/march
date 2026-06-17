@@ -127,7 +127,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
@@ -232,8 +232,9 @@ decl:
   | d = alias_decl_rule { d }
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
-  | d = proof_cap_decl { d }
-  | d = app_decl       { d }
+  | d = proof_cap_decl    { d }
+  | d = transitions_decl  { d }
+  | d = app_decl          { d }
   | d = derive_decl    { d }
   | d = test_decl      { d }
   | d = describe_decl  { d }
@@ -598,6 +599,20 @@ cap_path:
 proof_cap_decl:
   | PROOFCAP; name = upper_name
     { DProofCap (name, mk_span ($loc)) }
+
+(** Compiler-enforced state-machine transitions:
+    transitions Handle do
+      ConnTag: Closed -> Open   via open_conn
+      ConnTag: Open -> Closed   via close
+    end *)
+transitions_decl:
+  | TRANSITIONS; handle_ty = upper_name; DO; arms = list(transition_arm); END
+    { DTransitions (handle_ty, arms, mk_span ($loc)) }
+
+transition_arm:
+  | resource = upper_name; COLON; from_st = upper_name; ARROW; to_st = upper_name; VIA; fn_name = lower_name
+    { { tr_resource = resource; tr_from = from_st; tr_to = to_st;
+        tr_via = fn_name; tr_span = mk_span ($loc) } }
 
 (** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end
     Optional requires clause: interface Ord(a) requires Eq(a) do ... end *)

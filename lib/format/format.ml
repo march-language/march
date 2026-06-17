@@ -633,7 +633,8 @@ let get_span = function
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
-  | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s) -> s
+  | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
+  | DTransitions (_, _, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
@@ -917,6 +918,15 @@ and emit_decl ctx = function
   | DDescribe (name, decls, _) ->
     line ctx (Printf.sprintf "describe %S do" name);
     indented ctx (fun () -> List.iter (emit_decl ctx) decls);
+    line ctx "end"
+
+  | DTransitions (handle_ty, arms, _) ->
+    line ctx (Printf.sprintf "transitions %s do" handle_ty.txt);
+    indented ctx (fun () ->
+      List.iter (fun (a : transition) ->
+        line ctx (Printf.sprintf "%s: %s -> %s via %s"
+          a.tr_resource.txt a.tr_from.txt a.tr_to.txt a.tr_via.txt)
+      ) arms);
     line ctx "end"
 
 and emit_fn ctx fn =

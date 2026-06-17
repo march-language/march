@@ -2702,6 +2702,103 @@ let test_resolver_skips_dangling_symlink () =
   Alcotest.(check bool) "dangling symlink not collected"
     false (List.exists (fun p -> Filename.basename p = "broken") files)
 
+(* ── `tag` keyword tests ───────────────────────────────────────────────── *)
+
+let test_tag_parses () =
+  let src = {|mod Test do
+    tag Open
+    tag Closed
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "tag declarations: no errors" false (has_errors ctx)
+
+let test_tag_usable_as_ctor () =
+  let src = {|mod Test do
+    tag Open
+    fn go() : Open do Open end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "tag ctor usable as value: no errors" false (has_errors ctx)
+
+(* ── `always_linear type` tests ─────────────────────────────────────────── *)
+
+let test_always_linear_type_ok () =
+  let src = {|mod Test do
+    always_linear type Handle(s) = Handle(Int)
+    fn use_it(h : Handle(Open)) : Handle(Open) do h end
+    tag Open
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "always_linear type: no errors when consumed" false (has_errors ctx)
+
+let test_always_linear_type_drop_error () =
+  let src = {|mod Test do
+    always_linear type Handle(s) = Handle(Int)
+    tag Open
+    fn bad() do
+      let h = Handle(42)
+      42
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "always_linear type: drop is error" true (has_errors ctx)
+
+(* ── `transitions` tests ────────────────────────────────────────────────── *)
+
+let test_transitions_parses () =
+  let src = {|mod Conn do
+    type Handle(s) = Handle(Int)
+    tag Open
+    tag Closed
+
+    fn open_conn(h : Handle(Closed)) : Handle(Open) do Handle(1) end
+
+    transitions Handle do
+      ConnTag: Closed -> Open via open_conn
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "transitions block: no errors" false (has_errors ctx)
+
+let test_transitions_via_not_found_error () =
+  let src = {|mod Conn do
+    type Handle(s) = Handle(Int)
+    tag Open
+    tag Closed
+
+    transitions Handle do
+      ConnTag: Closed -> Open via nonexistent_fn
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "transitions via missing fn: error" true (has_errors ctx)
+
+let test_transitions_warn_undeclared () =
+  let src = {|mod Conn do
+    type Handle(s) = Handle(Int)
+    tag Open
+    tag Closed
+
+    fn open_conn(h : Handle(Closed)) : Handle(Open) do Handle(1) end
+
+    transitions Handle do
+    end
+  end|} in
+  let ctx = typecheck src in
+  let contains_sub s sub =
+    let n = String.length s and len = String.length sub in
+    let found = ref false in
+    for i = 0 to n - len do
+      if String.sub s i len = sub then found := true
+    done;
+    !found
+  in
+  let has_transition_warning = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+    d.severity = March_errors.Errors.Warning &&
+    contains_sub (String.lowercase_ascii d.message) "transition"
+  ) ctx.diagnostics in
+  Alcotest.(check bool) "undeclared transition fn: warning emitted" true has_transition_warning
+
 let compiler_suites =
   [
       ( "resolver",
@@ -2938,6 +3035,15 @@ let compiler_suites =
           (* Regression: let-generalization hole for forward-referenced pfn helpers *)
           Alcotest.test_case "forward-ref pfn poly two call sites"      `Quick test_tc_forward_ref_poly_helper_two_call_sites;
           Alcotest.test_case "normal-order pfn poly two call sites"     `Quick test_tc_forward_ref_poly_reverse_order;
+        ] );
+      ( "tag_and_typestate", [
+          Alcotest.test_case "tag keyword parses"                        `Quick test_tag_parses;
+          Alcotest.test_case "tag ctor usable as value"                  `Quick test_tag_usable_as_ctor;
+          Alcotest.test_case "always_linear type: consumed ok"           `Quick test_always_linear_type_ok;
+          Alcotest.test_case "always_linear type: drop is error"         `Quick test_always_linear_type_drop_error;
+          Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
+          Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
+          Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
         ] );
       ( "mpst",
         [
