@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-16, Phase 2a proof capability tokens)
+
+- **`proof cap Name` — unforgeable ambient-fact capability tokens.** A module declares `proof cap Migrated` and the compiler enforces that only that module can mint `Cap(Db.Migrated)`; external code must receive it as a parameter (pass-through is allowed). New surface syntax (`proof cap` compound token in lexer), `DProofCap` AST node, producer registry in `env.proof_caps`, two new typecheck checks: enhanced Check 1 names the declaring module when a proof cap is used without `needs`, and new Check 6 rejects return-type forgery outside the declaring module. No runtime changes — proof caps are runtime-erased like all `Cap(X)` types.
+- **6 new tests** (capabilities 19–24), all passing. Test count: **~1460**.
+
 ## Current State (as of 2026-06-16, LSP Depot-aware intelligence)
 
 - **LSP now understands the [Depot](https://github.com/march-language/depot) query-builder / schema / migration library** (`lsp/lib/depot.ml` new; `lsp/lib/analysis.ml` extended). The Depot pass is gated to files that call `Depot.*` (zero cost otherwise) and reuses the existing cross-file import resolver to see schemas defined in imported files.

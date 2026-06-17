@@ -228,6 +228,7 @@ finding, and convention drift.  Listed in the recommended order.
 
 ### Compiler: Type System
 
+- ✅ **Phase 2a proof capability tokens** — `proof cap Name` declaration syntax (`PROOFCAP` compound token, `DProofCap` AST node). Producer registry (`env.proof_caps : (string * string) list`) tracks full cap path → declaring module. Two new typecheck enforcements: Check 1 enhanced with declaring-module hint when a proof cap is used without `needs`; Check 6 rejects functions outside the declaring module that return a proof cap without receiving it as a parameter (pass-through allowed). No runtime changes — proof caps are erased like all `Cap(X)`. 6 new tests (capabilities 19–24). Spec: `specs/capability-system-design.md §1`.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` builtin, global `revocation_table`, `is_cap_valid(cap)`, and VCap handling in ESend. C runtime: `march_revoke_cap` / `march_is_cap_valid`. 5 new tests in supervision phase3 group.
 - ✅ **Supervisor restart policies: `rest_for_one`/`one_for_all`** — Both policies fully implemented in `eval.ml` and tested (tests pass).
 - ✅ **Improve error messages for complex types** — Added `pp_ty_pretty` (line-wrapping at 60 chars with indented args), `find_arg_mismatch` (identifies which arg differs), and enhanced `report_mismatch` with multi-line format for long types and contextual notes identifying the mismatching arg/field.

@@ -200,6 +200,7 @@ end
 | [Language Tour](tour.md) | Variables, functions, types, pipes — the essentials |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |
 | [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers |
+| [Capabilities](capabilities.md) | IO permission caps, proof tokens, `needs` enforcement |
 | [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, nested patterns |
 | [Module System](modules.md) | `mod`, `use`, `import`, `alias`, visibility |
 | [Actors](actors.md) | Spawn, send, receive, linking, monitoring |
