@@ -6,8 +6,13 @@
 # runner with `timeout` so a single hung test can't block the whole suite.
 #
 # Usage:
-#   scripts/run-tests.sh                 # run all four suites
+#   scripts/run-tests.sh                 # full suite (~17s)
+#   scripts/run-tests.sh -q              # quick only — skip Slow tests (~2s)
 #   scripts/run-tests.sh compiler eval   # run a subset by name
+#   scripts/run-tests.sh -q stdlib       # quick subset
+#
+# Slow tests skipped by -q: repl_compiler_parity (JIT parity, ~5s),
+#   compiled adversarial regressions (~5s), pbkdf2 key derivation (~3s).
 #
 # Environment:
 #   MARCH_TEST_TIMEOUT  seconds per suite process  (default: 300)
@@ -27,16 +32,18 @@ else
   TIMEOUT_CMD=""  # no timeout available; runs unbounded
 fi
 ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib)
+QUICK_FLAG=""
 
-# Allow caller to specify a subset: scripts/run-tests.sh compiler stdlib
-if [[ $# -gt 0 ]]; then
-  RUNNERS=()
-  for arg in "$@"; do
+# Parse flags and suite names
+RUNNERS=()
+for arg in "$@"; do
+  if [[ "$arg" == "-q" ]]; then
+    QUICK_FLAG="-q"
+  else
     RUNNERS+=("run_${arg}")
-  done
-else
-  RUNNERS=("${ALL_RUNNERS[@]}")
-fi
+  fi
+done
+[[ ${#RUNNERS[@]} -eq 0 ]] && RUNNERS=("${ALL_RUNNERS[@]}")
 
 # Optionally clear stale daemon before starting (useful after a crashed session)
 if [[ -n "${MARCH_DUNE_SHUTDOWN:-}" ]]; then
@@ -57,7 +64,7 @@ FAILED=0
 for runner in "${RUNNERS[@]}"; do
   echo ""
   echo "==> ${runner}"
-  if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e; then
+  if ! $TIMEOUT_CMD ./_build/default/test/${runner}.exe -e $QUICK_FLAG; then
     FAILED=1
   fi
 done

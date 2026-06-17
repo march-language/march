@@ -10551,12 +10551,12 @@ let stdlib_suites =
         ] );
       ( "repl_compiler_parity",
         [
-          Alcotest.test_case "basic arithmetic"  `Quick test_parity_basic_arith;
-          Alcotest.test_case "bool ops"          `Quick test_parity_bool_ops;
-          Alcotest.test_case "string interp"     `Quick test_parity_string_interp;
-          Alcotest.test_case "closures"          `Quick test_parity_closures;
-          Alcotest.test_case "if/else"           `Quick test_parity_if_else;
-          Alcotest.test_case "bitwise builtins"  `Quick test_parity_bitwise_builtins;
+          Alcotest.test_case "basic arithmetic"  `Slow test_parity_basic_arith;
+          Alcotest.test_case "bool ops"          `Slow test_parity_bool_ops;
+          Alcotest.test_case "string interp"     `Slow test_parity_string_interp;
+          Alcotest.test_case "closures"          `Slow test_parity_closures;
+          Alcotest.test_case "if/else"           `Slow test_parity_if_else;
+          Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;
         ] );
       ( "tail_recursion",
         [
@@ -10733,8 +10733,8 @@ let stdlib_suites =
         Alcotest.test_case "hmac_sha256 typecheck"    `Quick test_crypto_hmac_sha256_typecheck;
         Alcotest.test_case "hmac_sha256_bytes typecheck" `Quick test_crypto_hmac_sha256_bytes_typecheck;
         Alcotest.test_case "hmac_sha256_bytes known"  `Quick test_crypto_hmac_sha256_bytes;
-        Alcotest.test_case "pbkdf2_sha256 length"     `Quick test_crypto_pbkdf2_sha256_length;
-        Alcotest.test_case "pbkdf2_sha256 known"      `Quick test_crypto_pbkdf2_sha256_known;
+        Alcotest.test_case "pbkdf2_sha256 length"     `Slow test_crypto_pbkdf2_sha256_length;
+        Alcotest.test_case "pbkdf2_sha256 known"      `Slow test_crypto_pbkdf2_sha256_known;
         Alcotest.test_case "base64_encode"            `Quick test_crypto_base64_encode;
         Alcotest.test_case "base64_encode empty"      `Quick test_crypto_base64_encode_empty;
         Alcotest.test_case "base64_decode"            `Quick test_crypto_base64_decode;
@@ -11012,15 +11012,15 @@ let stdlib_suites =
           test_collect_tests_no_double_collection;
         Alcotest.test_case "DMod test body qualifies sibling helper refs (no dangling @helper)" `Quick
           test_dmod_test_body_qualifies_helper_refs;
-        Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Quick
+        Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Slow
           test_compiled_check_property_passes;
-        Alcotest.test_case "__try_call_val: heap Ok payload round-trips + panic caught (compiled)" `Quick
+        Alcotest.test_case "__try_call_val: heap Ok payload round-trips + panic caught (compiled)" `Slow
           test_compiled_try_call_val_heap_roundtrip;
-        Alcotest.test_case "recursive nested closure with captured loop bound returns correct value" `Quick
+        Alcotest.test_case "recursive nested closure with captured loop bound returns correct value" `Slow
           test_compiled_recursive_closure_capture;
-        Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Quick
+        Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Slow
           test_compiled_vault_scalar_roundtrip;
-        Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Quick
+        Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
       ]);
     ]

@@ -29,8 +29,10 @@ dune exec march -- file.march   # run the compiler
 
 ```bash
 # 1. Agent-safe script — shuts down stale daemon, builds, runs binaries directly
-scripts/run-tests.sh                   # all four suites
+scripts/run-tests.sh                   # full suite (~17s)
+scripts/run-tests.sh -q                # quick only, skips Slow tests (~2s)
 scripts/run-tests.sh compiler eval     # subset by name
+scripts/run-tests.sh -q stdlib         # quick subset
 
 # 2. Direct binary invocation (no dune RPC at execution time)
 dune build test/run_compiler.exe test/run_eval.exe test/run_codegen.exe test/run_stdlib.exe
@@ -45,6 +47,10 @@ dune runtest --force       # re-run even if inputs are cached (avoids silent no-
 ```
 
 To unstick a stale daemon: `dune shutdown` (dune 3.x).
+
+13 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
+parity tests (~5s), 5 compiled adversarial regression tests (~5s), and 2 pbkdf2
+key-derivation tests (~3s). Run the full suite before merging to main.
 
 After implementing or completing a feature, update `specs/todos.md` (move item to Done) and `specs/progress.md` (add to feature list) to keep them current.
 
