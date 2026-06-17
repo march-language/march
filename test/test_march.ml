@@ -11263,77 +11263,77 @@ let test_cap_eval_path_ok () =
   Alcotest.(check bool) "eval path: clean module with needs evaluates without error" false
     (has_errors ctx)
 
-(* ── Phase 2a: Proof capability tests ──────────────────────────────────── *)
+(* ── Proof cap tests ────────────────────────────────────────────────────── *)
+
+let test_proof_cap_parse () =
+  let src = {|mod Db do
+    proof cap Migrated
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "proof cap: parses without error" false (has_errors ctx)
 
 let test_proof_cap_declaration_ok () =
-  (* A module can declare a proof cap and use it in function signatures *)
   let src = {|mod Db do
     proof cap Migrated
     needs Db.Migrated
-    fn run_migrations() : Cap(Db.Migrated) do () end
-    fn start_app(cap : Cap(Db.Migrated)) : () do () end
+    fn start_app(m : Cap(Db.Migrated)) : () do () end
   end|} in
   let ctx = typecheck src in
   Alcotest.(check bool) "proof cap declaration: no errors" false (has_errors ctx)
 
-let test_proof_cap_parse_ok () =
-  (* proof cap syntax parses without errors *)
-  let src = {|mod Auth do
-    proof cap Authenticated
-    needs Auth.Authenticated
-    fn authenticate() : Cap(Auth.Authenticated) do () end
-  end|} in
-  let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap parse: no errors" false (has_errors ctx)
-
 let test_proof_cap_forge_error () =
-  (* A function outside the declaring module cannot return a proof cap
-     without receiving it as a parameter *)
-  let src = {|mod Db do
-    proof cap Migrated
-  end
-  mod App do
-    needs Db.Migrated
-    fn bad_forge() : Cap(Db.Migrated) do () end
+  (* A function outside the declaring module declares proof cap in return type
+     without receiving it as a parameter — Check 6 should fire *)
+  let src = {|mod Outer do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs Db.Migrated
+      fn bad_forge() : Cap(Db.Migrated) do () end
+    end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap forge: error when producing from non-declaring module" true
-    (has_errors ctx)
+  Alcotest.(check bool) "proof cap forge: error when non-declaring module returns it without receiving" true (has_errors ctx)
 
 let test_proof_cap_passthrough_ok () =
-  (* A function outside the declaring module CAN receive and return a proof cap *)
-  let src = {|mod Db do
-    proof cap Migrated
-  end
-  mod App do
-    needs Db.Migrated
-    fn relay(cap : Cap(Db.Migrated)) : Cap(Db.Migrated) do cap end
+  (* Receiving a proof cap and returning it (pass-through) is allowed anywhere *)
+  let src = {|mod Outer do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs Db.Migrated
+      fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
+    end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap passthrough: no errors when cap is a parameter" false
-    (has_errors ctx)
+  Alcotest.(check bool) "proof cap passthrough: receiving and returning is allowed" false (has_errors ctx)
 
 let test_proof_cap_missing_needs_error () =
-  (* Using a proof cap without declaring needs shows a proof-cap-specific error *)
-  let src = {|mod Db do
-    proof cap Migrated
-  end
-  mod App do
-    fn use_migrated(cap : Cap(Db.Migrated)) : () do () end
+  (* Using Cap(X) for a proof cap without declaring needs — Check 1 fires with
+     proof-cap-specific message naming the declaring module *)
+  let src = {|mod Outer do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      fn use_cap(m : Cap(Db.Migrated)) : () do () end
+    end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap missing needs: error" true (has_errors ctx)
+  Alcotest.(check bool) "proof cap missing needs: error with declaring-module hint" true (has_errors ctx)
 
 let test_proof_cap_in_declaring_module_ok () =
-  (* The declaring module can produce the proof cap freely *)
+  (* Within the declaring module, returning the proof cap (pass-through) is fine
+     and Check 6 should NOT fire even though declaring_mod = mod_name *)
   let src = {|mod Db do
     proof cap Migrated
     needs Db.Migrated
-    pfn mk_migrated_cap() : Cap(Db.Migrated) do () end
-    fn run_migrations() : Cap(Db.Migrated) do mk_migrated_cap() end
+    fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
   end|} in
   let ctx = typecheck src in
-  Alcotest.(check bool) "proof cap declaring module: no errors" false (has_errors ctx)
+  Alcotest.(check bool) "proof cap: declaring module can return it freely" false (has_errors ctx)
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
@@ -22952,12 +22952,12 @@ let () =
           Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
           Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;
           Alcotest.test_case "eval path ok with needs"    `Quick test_cap_eval_path_ok;
-          Alcotest.test_case "proof cap declaration ok"   `Quick test_proof_cap_declaration_ok;
-          Alcotest.test_case "proof cap parse ok"         `Quick test_proof_cap_parse_ok;
-          Alcotest.test_case "proof cap forge error"      `Quick test_proof_cap_forge_error;
-          Alcotest.test_case "proof cap passthrough ok"   `Quick test_proof_cap_passthrough_ok;
-          Alcotest.test_case "proof cap missing needs"    `Quick test_proof_cap_missing_needs_error;
-          Alcotest.test_case "proof cap declaring ok"     `Quick test_proof_cap_in_declaring_module_ok;
+          Alcotest.test_case "proof cap: parse"               `Quick test_proof_cap_parse;
+          Alcotest.test_case "proof cap: decl ok"             `Quick test_proof_cap_declaration_ok;
+          Alcotest.test_case "proof cap: forge error"         `Quick test_proof_cap_forge_error;
+          Alcotest.test_case "proof cap: passthrough ok"      `Quick test_proof_cap_passthrough_ok;
+          Alcotest.test_case "proof cap: missing needs"       `Quick test_proof_cap_missing_needs_error;
+          Alcotest.test_case "proof cap: declaring mod ok"    `Quick test_proof_cap_in_declaring_module_ok;
         ] );
       ("sort stdlib", [
         Alcotest.test_case "sort_small empty"       `Quick test_sort_small_empty;

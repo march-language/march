@@ -127,7 +127,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
@@ -232,6 +232,7 @@ decl:
   | d = alias_decl_rule { d }
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
+  | d = proof_cap_decl { d }
   | d = app_decl       { d }
   | d = derive_decl    { d }
   | d = test_decl      { d }
@@ -580,6 +581,10 @@ needs_decl:
 cap_path:
   | id = upper_name { [id] }
   | id = upper_name; DOT; rest = cap_path { id :: rest }
+
+proof_cap_decl:
+  | PROOFCAP; name = upper_name
+    { DProofCap (name, mk_span ($loc)) }
 
 (** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end
     Optional requires clause: interface Ord(a) requires Eq(a) do ... end *)

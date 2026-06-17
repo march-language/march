@@ -632,7 +632,7 @@ let get_span = function
   | DFn (_, s) | DLet (_, _, s) | DType (_, _, _, _, s)
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
-  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DApp (_, s)
+  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
   | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
@@ -799,6 +799,9 @@ and emit_decl ctx = function
     let cs = List.map
       (fun cap -> String.concat "." (List.map (fun n -> n.txt) cap)) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
+
+  | DProofCap (name, _) ->
+    line ctx (Printf.sprintf "proof cap %s" name.txt)
 
   | DProtocol (name, proto, _) ->
     line ctx (Printf.sprintf "protocol %s do" name.txt);

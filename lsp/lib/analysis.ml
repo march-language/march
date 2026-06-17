@@ -453,7 +453,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
   | Ast.DSetup (body, _) | Ast.DSetupAll (body, _) ->
     collect_expr ~def_map ~use_map ~calls body
 
-  | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _
+  | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _
   | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _
   | Ast.DDeriving _ | Ast.DDescribe _ -> ()
 

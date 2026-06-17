@@ -7649,7 +7649,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     Hashtbl.replace protocol_roles_tbl name.txt roles;
     env
 
-  | DSig _ | DInterface _ | DNeeds _ -> env
+  | DSig _ | DInterface _ | DNeeds _ | DProofCap _ -> env
 
   | DExtern (edef, _sp) ->
     (* Bind each extern function name to a VForeign stub. *)

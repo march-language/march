@@ -139,6 +139,9 @@ type decl =
   | DNeeds of name list list * span
   (** Capability manifest: [needs IO.Network, IO.Clock]
       Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
+  | DProofCap of name * span
+  (** Proof capability declaration: [proof cap Migrated]
+      Registers an unforgeable capability that can only be minted inside the declaring module. *)
   | DApp of app_def * span             (** Application entry point: app Name do ... end *)
   | DDeriving of name * name list * span
   (** Derive declaration: [derive Eq, Show for Color]

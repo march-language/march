@@ -458,6 +458,11 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  proof_caps : (string * string) list;
+  (** Proof cap registry: full cap path → declaring module name.
+      Populated by [DProofCap] during check_decl; checked by check_module_needs. *)
+  current_module : string;
+  (** Name of the module currently being typechecked, empty string at top level. *)
 }
 
 let make_env errors type_map = {
@@ -469,6 +474,8 @@ let make_env errors type_map = {
   import_tracker = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  proof_caps = [];
+  current_module = "";
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -4468,14 +4475,26 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
   (* Check 1: every Cap(X) must be covered by a declared need *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
-    if not covered then
-      Err.error env.errors ~span:sp
-        (render_parts [
-          cap cap_path; MPText " used in module "; MPCode mod_name.txt;
-          MPText " but "; MPCode cap_path; MPText " is not declared in ";
-          MPCode "needs"; MPText ".";
-          MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
-          MPText " to the module body." ])
+    if not covered then begin
+      match List.assoc_opt cap_path env.proof_caps with
+      | Some declaring_mod ->
+        Err.error env.errors ~span:sp
+          (render_parts [
+            cap cap_path; MPText " is a proof capability declared in module ";
+            MPCode declaring_mod; MPText ".";
+            MPBreak; MPText "Add "; MPCode ("needs " ^ cap_path);
+            MPText " to module "; MPCode mod_name.txt; MPText " to acknowledge this dependency.";
+            MPBreak; MPText "Only "; MPCode declaring_mod;
+            MPText " can mint "; cap cap_path; MPText " — callers must receive it as a parameter." ])
+      | None ->
+        Err.error env.errors ~span:sp
+          (render_parts [
+            cap cap_path; MPText " used in module "; MPCode mod_name.txt;
+            MPText " but "; MPCode cap_path; MPText " is not declared in ";
+            MPCode "needs"; MPText ".";
+            MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+            MPText " to the module body." ])
+    end
   ) used_caps;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
@@ -4548,6 +4567,43 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
               MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
               MPText " to the module body." ])
       ) cap_paths
+    | _ -> ()
+  ) decls;
+  (* Check 6: proof cap production enforcement.
+     A function outside the declaring module cannot return a proof cap type
+     unless it receives that cap as a parameter (pass-through is allowed). *)
+  List.iter (function
+    | Ast.DFn (def, sp) ->
+      let param_caps : string list =
+        List.concat_map (fun c ->
+          List.concat_map (fun p ->
+            match p with
+            | Ast.FPNamed { param_ty = Some t; _ } -> cap_paths_in_surface_ty t
+            | _ -> []
+          ) c.Ast.fc_params
+        ) def.fn_clauses
+      in
+      let ret_tys = Option.to_list def.fn_ret_ty in
+      List.iter (fun ret_ty ->
+        List.iter (fun cap_path ->
+          match List.assoc_opt cap_path env.proof_caps with
+          | Some declaring_mod
+            when declaring_mod <> mod_name.txt
+              && not (List.mem cap_path param_caps) ->
+            Err.error env.errors ~span:sp
+              (render_parts [
+                MPText "function "; MPCode def.fn_name.txt;
+                MPText " returns "; cap cap_path;
+                MPText " but "; cap cap_path; MPText " is a proof capability declared in ";
+                MPCode declaring_mod; MPText ".";
+                MPBreak; MPText "Only "; MPCode declaring_mod;
+                MPText " can construct "; cap cap_path; MPText ".";
+                MPBreak; MPText "hint: accept "; cap cap_path;
+                MPText " as a parameter and pass it through, or call a factory in ";
+                MPCode declaring_mod; MPText "." ])
+          | _ -> ()
+        ) (cap_paths_in_surface_ty ret_ty)
+      ) ret_tys
     | _ -> ()
   ) decls
 
@@ -5249,7 +5305,7 @@ let rec check_decl env (d : Ast.decl) : env =
                            fn_arities = StrMap.add def.fn_name.txt arity e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
-      ) { env with local_fns = StrMap.empty } decls in
+      ) { env with local_fns = StrMap.empty; current_module = name.txt } decls in
     let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
@@ -5340,7 +5396,10 @@ let rec check_decl env (d : Ast.decl) : env =
        bare name throughout user code, not prefixed.
        Opaque types listed in the sig have their constructors hidden: only the
        type name is exported, not the constructors (encapsulation). *)
-    let new_types = StrMap.filter (fun k _ -> List.mem k pub_set) inner_env.types in
+    let proof_cap_type_keys = List.map fst inner_env.proof_caps in
+    let new_types = StrMap.filter (fun k _ ->
+        List.mem k pub_set || List.mem k proof_cap_type_keys
+      ) inner_env.types in
     let new_ctors = StrMap.filter_map (fun _k cis ->
         let filtered = List.filter (fun ci ->
           (* Hide constructors for opaque types declared in the sig *)
@@ -5384,7 +5443,8 @@ let rec check_decl env (d : Ast.decl) : env =
                       else ci :: acc) new_cis old_cis in
                     Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
-      module_caps = (name.txt, inner_needs) :: env'.module_caps }
+      module_caps = (name.txt, inner_needs) :: env'.module_caps;
+      proof_caps = inner_env.proof_caps }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
@@ -5778,6 +5838,18 @@ let rec check_decl env (d : Ast.decl) : env =
         String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
       ) caps in
     { env with mod_needs = paths @ env.mod_needs }
+
+  | Ast.DProofCap (name, _sp) ->
+    (* Register proof cap: full qualified path → declaring module name.
+       Also register the cap name as a 0-arity type so Cap(Mod.Name) is
+       valid in type annotations (just like Cap(IO.Network)). *)
+    let full_path =
+      if env.current_module = "" then name.txt
+      else env.current_module ^ "." ^ name.txt
+    in
+    { env with
+      proof_caps = (full_path, env.current_module) :: env.proof_caps;
+      types = StrMap.add full_path 0 env.types }
 
   | Ast.DApp _ ->
     (* DApp is desugared to DFn(__app_init__) before typecheck; reaching here is a bug. *)
@@ -6399,6 +6471,7 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
     prebind_mod_members m.Ast.mod_name.txt pre_env top_level
   in
   (* Pass 2: full checking *)
+  let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;

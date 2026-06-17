@@ -182,6 +182,8 @@ let rec remap_decl tbl = function
     Ast.DAlias (a, remap_span tbl sp)
   | Ast.DNeeds (paths, sp) ->
     Ast.DNeeds (paths, remap_span tbl sp)
+  | Ast.DProofCap (name, sp) ->
+    Ast.DProofCap (name, remap_span tbl sp)
   | Ast.DApp (app, sp) ->
     Ast.DApp ({
       app_name = remap_name tbl app.app_name;

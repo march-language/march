@@ -153,6 +153,7 @@ rule token = parse
   | '?'           { QUESTION }
   | '~' (['A'-'Z'] as c) { SIGIL_PREFIX (String.make 1 c) }
   | '~' (['a'-'z'] ['a'-'z' '0'-'9' '_']* as name) { SIGIL_PREFIX name }
+  | "proof" [' ' '\t']+ "cap" { PROOFCAP }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

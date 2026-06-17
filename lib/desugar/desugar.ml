@@ -679,7 +679,7 @@ let rec desugar_decl (d : decl) : decl =
       ) idef.impl_methods in
     DImpl ({ idef with impl_methods = methods' }, sp)
 
-  | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ ->
+  | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ | DProofCap _ ->
     d
 
   | DDeriving _ ->
