@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Language Tour
 nav_order: 4
 ---

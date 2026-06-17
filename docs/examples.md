@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Examples
 nav_order: 17
 ---

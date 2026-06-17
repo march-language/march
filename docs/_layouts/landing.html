@@ -1,0 +1,797 @@
+---
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>March — Functional Native Language</title>
+  <meta name="description" content="A statically-typed functional language. Actors from the BEAM, algebraic data types from ML, compiled to native binaries via LLVM.">
+  <link rel="icon" href="{{ site.baseurl }}/assets/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07101a;
+      --bg-code: #0c1928;
+      --bg-nav: rgba(7,16,26,0.92);
+      --border: #0f2438;
+      --text: #cce5f5;
+      --text-muted: #4a7898;
+      --text-faint: #1e4060;
+      --accent: oklch(63% 0.12 207);
+      --accent-border: oklch(26% 0.09 215);
+      --accent-text: #020c18;
+    }
+    :root.light {
+      --bg: #f0f6fc;
+      --bg-code: #ddeaf5;
+      --bg-nav: rgba(240,246,252,0.92);
+      --border: #b5cce0;
+      --text: #071828;
+      --text-muted: #2e5c7c;
+      --text-faint: #6a96b5;
+      --accent: oklch(37% 0.11 210);
+      --accent-border: oklch(70% 0.09 207);
+      --accent-text: #ffffff;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* NAV */
+    .m-nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-nav);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .m-nav-inner {
+      max-width: 1200px; margin: 0 auto; padding: 0 32px; height: 60px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .m-nav-logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); }
+    .m-nav-logo img { width: 26px; height: 26px; object-fit: contain; }
+    .m-nav-logo span { font-family: 'Lora', Georgia, serif; font-weight: 600; font-size: 19px; letter-spacing: -0.02em; }
+    .m-nav-links { display: flex; align-items: center; gap: 28px; }
+    .m-nav-link { font-size: 14px; color: var(--text-muted); text-decoration: none; letter-spacing: 0.01em; }
+    .m-nav-link:hover { color: var(--text); }
+    .m-theme-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      cursor: pointer; padding: 5px 12px; border-radius: 5px; font-size: 12px;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em;
+    }
+    .m-theme-btn:hover { border-color: var(--text-faint); color: var(--text); }
+
+    /* HERO */
+    .m-hero { min-height: 100vh; display: flex; align-items: center; padding: 100px 32px 80px; }
+    .m-hero-inner {
+      max-width: 1200px; margin: 0 auto; width: 100%;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center;
+    }
+    .m-hero-text { animation: fadeUp 0.55s ease both; }
+    .m-hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+      color: var(--accent); border: 1px solid var(--accent-border);
+      padding: 4px 14px; border-radius: 100px; margin-bottom: 36px; letter-spacing: 0.04em;
+    }
+    .m-hero-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+    .m-hero-h1 {
+      font-family: 'Lora', Georgia, serif; font-size: 56px; line-height: 1.08;
+      font-style: italic; letter-spacing: -0.025em; color: var(--text); margin-bottom: 24px;
+    }
+    .m-hero-p { font-size: 17px; line-height: 1.78; color: var(--text-muted); max-width: 490px; margin-bottom: 40px; }
+    .m-ctas { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .m-btn-primary {
+      display: inline-block; background: var(--accent); color: var(--accent-text);
+      text-decoration: none; padding: 13px 26px; border-radius: 6px; font-size: 15px; font-weight: 500;
+    }
+    .m-btn-secondary {
+      display: inline-block; color: var(--text-muted); text-decoration: none;
+      font-size: 15px; border: 1px solid var(--border); padding: 13px 26px; border-radius: 6px;
+    }
+    .m-btn-secondary:hover { border-color: var(--text-faint); color: var(--text); }
+
+    /* CODE PANE */
+    .m-code-pane {
+      animation: fadeUp 0.55s 0.12s ease both; border-radius: 10px; overflow: hidden;
+      border: 1px solid var(--border); background: var(--bg-code);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.22);
+    }
+    .m-code-header {
+      display: flex; align-items: center; padding: 10px 14px;
+      border-bottom: 1px solid var(--border); gap: 6px; overflow-x: auto;
+    }
+    .m-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .m-code-tabs { margin-left: 8px; display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+    .m-tab {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      padding: 3px 10px; border-radius: 100px; border: 1px solid var(--border);
+      background: transparent; color: var(--text-faint); cursor: pointer;
+      letter-spacing: 0.02em; white-space: nowrap; flex-shrink: 0;
+    }
+    .m-tab.active { background: var(--accent-border); color: var(--accent); border-color: var(--accent-border); }
+    .m-hero-pre {
+      padding: 22px 24px; margin: 0; overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.72; tab-size: 2;
+      color: var(--text);
+    }
+
+    /* FEATURES */
+    .m-features { padding: 80px 32px; border-top: 1px solid var(--border); }
+    .m-features-inner { max-width: 1200px; margin: 0 auto; }
+    .m-section-label {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent);
+      letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 12px;
+    }
+    .m-section-h2 {
+      font-family: 'Lora', Georgia, serif; font-size: 40px; font-weight: 600;
+      letter-spacing: -0.02em; color: var(--text); margin-bottom: 56px; line-height: 1.15;
+    }
+    .m-feature-grid {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 1px; background: var(--border); border: 1px solid var(--border);
+      border-radius: 8px; overflow: hidden;
+    }
+    .m-feature-card { background: var(--bg); padding: 40px; }
+    .m-feature-label {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent);
+      letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 14px;
+    }
+    .m-feature-h3 {
+      font-family: 'Lora', Georgia, serif; font-size: 24px; font-weight: 600;
+      margin-bottom: 12px; color: var(--text); letter-spacing: -0.01em; line-height: 1.2;
+    }
+    .m-feature-p { font-size: 14.5px; line-height: 1.72; color: var(--text-muted); margin-bottom: 20px; }
+    .m-feature-pre {
+      background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px;
+      padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px;
+      line-height: 1.65; overflow-x: auto; margin: 0;
+    }
+    .m-feature-hint {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      color: var(--text-faint); margin-top: 16px; letter-spacing: 0.03em;
+    }
+
+    /* PERF FLIP CARD */
+    .m-perf-card { background: var(--bg); min-height: 520px; cursor: pointer; position: relative; }
+    .m-perf-inner {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      transform-style: preserve-3d; transition: transform 0.5s ease;
+    }
+    .m-perf-inner.flipped { transform: rotateY(180deg); }
+    .m-perf-face {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      backface-visibility: hidden; -webkit-backface-visibility: hidden;
+      padding: 40px; display: flex; flex-direction: column; background: var(--bg);
+    }
+    .m-perf-back { transform: rotateY(180deg); }
+    .m-bench-table { width: 100%; border-collapse: collapse; font-size: 13px; flex: 1; }
+    .m-bench-table th {
+      text-align: left; padding: 6px 0; color: var(--text-faint); font-weight: 500;
+      font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+    }
+    .m-bench-table th:not(:first-child) { text-align: right; }
+    .m-bench-table td {
+      padding: 9px 0; border-bottom: 1px solid var(--border);
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted);
+    }
+    .m-bench-table td:not(:first-child) { text-align: right; }
+    .m-bench-table .march td { color: var(--accent); background: var(--bg-code); font-weight: 500; }
+    .m-bench-table .march td:first-child { padding-left: 8px; }
+    .m-bench-table .march td:last-child { padding-right: 8px; }
+
+    /* PLAYGROUND */
+    .m-playground { padding: 80px 32px; border-top: 1px solid var(--border); }
+    .m-playground-inner { max-width: 1200px; margin: 0 auto; }
+    .m-playground-header {
+      display: flex; justify-content: space-between; align-items: flex-end;
+      margin-bottom: 40px; flex-wrap: wrap; gap: 16px;
+    }
+    .m-playground-link {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent);
+      text-decoration: none; letter-spacing: 0.03em; flex-shrink: 0;
+    }
+    .m-repl { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-code); }
+    .m-repl-header {
+      display: flex; align-items: center; padding: 11px 16px;
+      border-bottom: 1px solid var(--border); gap: 6px;
+    }
+    .m-repl-title { margin-left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
+    .m-repl-body { display: grid; grid-template-columns: 160px 1fr; }
+    .m-repl-tabs {
+      border-right: 1px solid var(--border); padding: 12px 8px;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .m-repl-tab {
+      padding: 7px 12px; border-radius: 5px; font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; cursor: pointer; background: transparent; color: var(--text-faint);
+      letter-spacing: 0.02em; user-select: none; border: none; text-align: left; width: 100%;
+    }
+    .m-repl-tab.active { background: rgba(18,145,167,0.15); color: var(--accent); }
+    .m-repl-main { display: flex; flex-direction: column; min-height: 320px; }
+    .m-repl-pre {
+      padding: 24px; margin: 0; flex: 1; overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.72; tab-size: 2;
+    }
+    .m-repl-footer {
+      border-top: 1px solid var(--border); padding: 14px 24px;
+      display: flex; align-items: center; gap: 14px; min-height: 52px;
+    }
+    .m-repl-run {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent);
+      background: rgba(18,145,167,0.1); border: 1px solid rgba(18,145,167,0.3);
+      border-radius: 5px; padding: 7px 16px; cursor: pointer; letter-spacing: 0.03em;
+    }
+    .m-repl-hint { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
+    .m-repl-prompt { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent); }
+    .m-repl-output { font-family: 'JetBrains Mono', monospace; font-size: 13.5px; }
+
+    /* INSTALL */
+    .m-install { padding: 100px 32px; }
+    .m-install-inner { max-width: 620px; margin: 0 auto; text-align: center; }
+    .m-install-h2 {
+      font-family: 'Lora', Georgia, serif; font-size: 42px; font-weight: 600;
+      letter-spacing: -0.02em; margin-bottom: 14px; color: var(--text); line-height: 1.15;
+    }
+    .m-install-p { font-size: 16px; color: var(--text-muted); margin-bottom: 40px; line-height: 1.75; }
+    .m-install-block { text-align: left; margin-bottom: 16px; }
+    .m-install-block-head {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+    }
+    .m-install-step { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); letter-spacing: 0.04em; }
+    .m-copy-btn {
+      background: none; border: 1px solid var(--border); color: var(--accent);
+      cursor: pointer; padding: 4px 12px; border-radius: 4px; font-size: 11px;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em;
+    }
+    .m-install-pre {
+      background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+      padding: 18px 24px; overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.72;
+    }
+    .m-install-ctas { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 40px; }
+
+    /* FOOTER */
+    .m-footer { border-top: 1px solid var(--border); padding: 36px 32px; }
+    .m-footer-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;
+    }
+    .m-footer-brand { display: flex; align-items: center; gap: 10px; }
+    .m-footer-brand img { width: 18px; height: 18px; object-fit: contain; opacity: 0.55; }
+    .m-footer-name { font-family: 'Lora', Georgia, serif; font-size: 15px; font-weight: 500; color: var(--text-muted); }
+    .m-footer-mit { color: var(--text-faint); font-size: 14px; }
+    .m-footer-links { display: flex; gap: 24px; align-items: center; }
+    .m-footer-link { font-size: 13px; color: var(--text-faint); text-decoration: none; }
+    .m-footer-link:hover { color: var(--text-muted); }
+
+    /* RESPONSIVE */
+    @media (max-width: 900px) {
+      .m-hero-inner { grid-template-columns: 1fr; }
+      .m-hero-h1 { font-size: 40px; }
+      .m-code-pane { display: none; }
+    }
+    @media (max-width: 768px) {
+      .m-feature-grid { grid-template-columns: 1fr; }
+      .m-section-h2 { font-size: 32px; }
+      .m-repl-body { grid-template-columns: 1fr; }
+      .m-repl-tabs { flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid var(--border); }
+      .m-hero { padding: 80px 20px 60px; }
+      .m-features, .m-playground, .m-install { padding-left: 20px; padding-right: 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="m-nav">
+  <div class="m-nav-inner">
+    <a href="{{ site.baseurl }}/" class="m-nav-logo">
+      <img src="{{ site.baseurl }}/assets/logo.png" alt="March">
+      <span>March</span>
+    </a>
+    <div class="m-nav-links">
+      <a href="{{ site.baseurl }}/getting-started/" class="m-nav-link">Docs</a>
+      <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-nav-link">GitHub</a>
+      <button class="m-theme-btn" id="theme-btn">☀ Light</button>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="m-hero">
+  <div class="m-hero-inner">
+    <div class="m-hero-text">
+      <div class="m-hero-badge">
+        <span class="m-hero-badge-dot"></span>
+        Early Access · v0.1
+      </div>
+      <h1 class="m-hero-h1">ML types.<br>Actor concurrency.<br>No GC Pauses.</h1>
+      <p class="m-hero-p">
+        March is a statically-typed functional language: actors and message passing from the BEAM,
+        algebraic data types from ML, compiled to native binaries through LLVM. Perceus reference
+        counting with in-place reuse means no garbage collector and no pauses, at Rust-like performance.
+      </p>
+      <div class="m-ctas">
+        <a href="{{ site.baseurl }}/getting-started/" class="m-btn-primary">Read the Docs</a>
+        <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-btn-secondary">GitHub →</a>
+      </div>
+    </div>
+
+    <div class="m-code-pane">
+      <div class="m-code-header">
+        <span class="m-dot" style="background:#ff5f57;"></span>
+        <span class="m-dot" style="background:#febc2e;"></span>
+        <span class="m-dot" style="background:#28c840;"></span>
+        <div class="m-code-tabs" id="hero-tabs"></div>
+      </div>
+      <pre class="m-hero-pre"><code id="hero-code"></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="m-features">
+  <div class="m-features-inner">
+    <p class="m-section-label">What makes March different</p>
+    <h2 class="m-section-h2">The right ideas, done right.</h2>
+
+    <div class="m-feature-grid">
+
+      <!-- PERFORMANCE — flip card -->
+      <div class="m-perf-card" id="perf-card">
+        <div class="m-perf-inner" id="perf-inner">
+          <div class="m-perf-face">
+            <p class="m-feature-label">Performance</p>
+            <h3 class="m-feature-h3">Zero-allocation recursive transforms</h3>
+            <p class="m-feature-p">FBIP rewrites uniquely-owned data in place, so transforms like this allocate nothing on the reuse path. The functional-style rewrite is automatic; no unsafe code required.</p>
+            <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
+            <p class="m-feature-hint" style="text-align:right;">See benchmarks →</p>
+          </div>
+          <div class="m-perf-face m-perf-back">
+            <p class="m-feature-label">Benchmark</p>
+            <h3 class="m-feature-h3" style="font-size:20px; margin-bottom:8px;">tree-transform(depth=20, 100 passes)</h3>
+            <p class="m-feature-p" style="font-size:13px; margin-bottom:20px;">After pass 1, March allocates nothing — every node rewritten in-place. 7.5× faster than OCaml. 19× faster than Rust. Apple M-series, <code style="font-family:'JetBrains Mono',monospace;font-size:11px;">--opt 2</code>.</p>
+            <table class="m-bench-table">
+              <thead><tr>
+                <th>Language</th><th>Median</th><th>Allocs/pass</th>
+              </tr></thead>
+              <tbody>
+                <tr><td>Elixir (BEAM)</td><td>2580 ms</td><td>2M</td></tr>
+                <tr><td>OCaml (ocamlopt)</td><td>3825 ms</td><td>2M</td></tr>
+                <tr><td>Rust (rustc -O)</td><td>9977 ms</td><td>2M</td></tr>
+                <tr class="march"><td>March (FBIP)</td><td>513 ms</td><td>0 ✓</td></tr>
+              </tbody>
+            </table>
+            <p class="m-feature-hint">← Back</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONCURRENCY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Concurrency</p>
+        <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
+        <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
+        <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+      </div>
+
+      <!-- TYPE SYSTEM -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Type System</p>
+        <h3 class="m-feature-h3">Hindley-Milner inference, ADTs, exhaustive patterns</h3>
+        <p class="m-feature-p">Types flow without annotation boilerplate. The compiler enforces exhaustive pattern matching — a missing case is a compile error. Generics are monomorphized, no boxing overhead.</p>
+        <pre class="m-feature-pre"><code id="type-code"></code></pre>
+      </div>
+
+      <!-- MEMORY -->
+      <div class="m-feature-card">
+        <p class="m-feature-label">Memory</p>
+        <h3 class="m-feature-h3">Deterministic memory, no collector.</h3>
+        <p class="m-feature-p">Perceus reference counting reclaims memory the instant it's no longer used, at a point the compiler picks. Predictable latency, no collector, no pauses. Linear types guarantee file handles, sockets, and connections can't leak or double-free.</p>
+        <pre class="m-feature-pre"><code id="linear-code"></code></pre>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- PLAYGROUND MOCK -->
+<section class="m-playground">
+  <div class="m-playground-inner">
+    <p class="m-section-label">Try March</p>
+    <div class="m-playground-header">
+      <h2 class="m-section-h2" style="margin-bottom:0;">See how March feels to write.</h2>
+      <a href="{{ site.baseurl }}/playground.html" class="m-playground-link">Full playground — no install needed ↗</a>
+    </div>
+    <div class="m-repl">
+      <div class="m-repl-header">
+        <span class="m-dot" style="background:#ff5f57;"></span>
+        <span class="m-dot" style="background:#febc2e;"></span>
+        <span class="m-dot" style="background:#28c840;"></span>
+        <span class="m-repl-title">march — interactive</span>
+      </div>
+      <div class="m-repl-body">
+        <div class="m-repl-tabs" id="repl-tabs"></div>
+        <div class="m-repl-main">
+          <pre class="m-repl-pre"><code id="repl-code"></code></pre>
+          <div class="m-repl-footer" id="repl-footer"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section class="m-install">
+  <div class="m-install-inner">
+    <p class="m-section-label">Quick Start</p>
+    <h2 class="m-install-h2">Get started in minutes</h2>
+    <p class="m-install-p">One command installs on macOS and Linux.</p>
+
+    <div class="m-install-block">
+      <div class="m-install-block-head">
+        <span class="m-install-step">1 — Install</span>
+        <button class="m-copy-btn" id="copy-btn">Copy</button>
+      </div>
+      <pre class="m-install-pre"><code id="install-code"></code></pre>
+    </div>
+
+    <div class="m-install-block">
+      <span class="m-install-step" style="display:block; margin-bottom:8px;">2 — Open the interpreter</span>
+      <pre class="m-install-pre"><code id="forge-code"></code></pre>
+    </div>
+
+    <div class="m-install-ctas">
+      <a href="{{ site.baseurl }}/getting-started/" class="m-btn-primary">Full Documentation</a>
+      <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-btn-secondary">GitHub →</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="m-footer">
+  <div class="m-footer-inner">
+    <div class="m-footer-brand">
+      <img src="{{ site.baseurl }}/assets/logo.png" alt="">
+      <span class="m-footer-name">March Programming Language</span>
+      <span class="m-footer-mit">· MIT</span>
+    </div>
+    <div class="m-footer-links">
+      <a href="{{ site.baseurl }}/getting-started/" class="m-footer-link">Docs</a>
+      <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-footer-link">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// ─── Syntax Highlighter ───────────────────────────────────────────────────────
+function syntaxHL(code, dark) {
+  const kws = new Set(['fn','mod','type','let','match','with','end','do','if','then','else',
+    'actor','state','init','on','spawn','send','reply','linear','session','supervisor',
+    'strategy','children','when','not','and','or','in','use','import','as','pub',
+    'impl','interface','derive','forge','needs','property']);
+  const D = {
+    kw:'oklch(74% 0.11 200)', tp:'oklch(82% 0.12 70)', st:'oklch(82% 0.11 200)',
+    nm:'oklch(78% 0.09 265)', cm:'oklch(42% 0.07 215)', op:'oklch(57% 0.09 205)'
+  };
+  const L = {
+    kw:'oklch(32% 0.11 215)', tp:'oklch(42% 0.12 55)', st:'oklch(28% 0.11 215)',
+    nm:'oklch(36% 0.09 265)', cm:'oklch(62% 0.06 215)', op:'oklch(38% 0.07 215)'
+  };
+  const syn = dark ? D : L;
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const sp = (col, t) => `<span style="color:${col}">${esc(t)}</span>`;
+  let res = '', i = 0, s = code;
+  while (i < s.length) {
+    if (s[i] === '-' && s[i+1] === '-') {
+      let end = s.indexOf('\n', i); if (end < 0) end = s.length;
+      res += sp(syn.cm, s.slice(i, end)); i = end; continue;
+    }
+    if (s[i] === '{' && s[i+1] === '-') {
+      let end = s.indexOf('-}', i+2); if (end < 0) end = s.length - 2;
+      res += sp(syn.cm, s.slice(i, end+2)); i = end+2; continue;
+    }
+    if (s[i] === '~' && s[i+1] === 'H') { res += sp(syn.kw, '~H'); i += 2; continue; }
+    if (s[i] === '"' && s[i+1] === '"' && s[i+2] === '"') {
+      let j = i+3;
+      while (j+2 <= s.length) { if (s[j]==='"'&&s[j+1]==='"'&&s[j+2]==='"') { j+=3; break; } j++; }
+      res += sp(syn.st, s.slice(i, j)); i = j; continue;
+    }
+    if (s[i] === '"') {
+      let j = i+1;
+      while (j < s.length && s[j] !== '"') { if (s[j]==='\\') j++; j++; }
+      res += sp(syn.st, s.slice(i, j+1)); i = j+1; continue;
+    }
+    if (s[i]==='-'&&s[i+1]==='>') { res += sp(syn.op,'->'); i+=2; continue; }
+    if (s[i]==='|'&&s[i+1]==='>') { res += sp(syn.op,'|>'); i+=2; continue; }
+    if (s[i]==='+'&&s[i+1]==='+') { res += sp(syn.op,'++'); i+=2; continue; }
+    if (/[a-zA-Z_]/.test(s[i])) {
+      let j = i;
+      while (j < s.length && /[a-zA-Z0-9_]/.test(s[j])) j++;
+      const w = s.slice(i,j);
+      if (kws.has(w)) res += sp(syn.kw, w);
+      else if (/^[A-Z]/.test(w)) res += sp(syn.tp, w);
+      else res += esc(w);
+      i = j; continue;
+    }
+    if (/[0-9]/.test(s[i])) {
+      let j = i; while (j < s.length && /[0-9.]/.test(s[j])) j++;
+      res += sp(syn.nm, s.slice(i,j)); i = j; continue;
+    }
+    if ('|+-*=<>/.!@#$%^&?:~\\'.includes(s[i])) { res += sp(syn.op, s[i]); i++; continue; }
+    res += esc(s[i]); i++;
+  }
+  return res;
+}
+
+// ─── Code content ─────────────────────────────────────────────────────────────
+const HERO_EXAMPLES = [
+  { label: 'Actors', code: `actor Counter do
+  state { count : Int }
+  init  { count = 0 }
+
+  on Increment(n : Int) do
+    { state with count = state.count + n }
+  end
+
+  on Get() -> reply state.count
+end
+
+fn main() : Unit do
+  let c = spawn(Counter)
+  send(c, Increment(10))
+  send(c, Increment(5))
+  send(c, Get())      -- prints 15
+end` },
+  { label: 'Linear Types', code: `linear type DbConn = DbConn(Int)
+
+fn query_users(conn : DbConn)
+    : (List(String), DbConn) do
+  Db.exec(conn, "SELECT name FROM users")
+end
+
+fn with_db(path : String) : List(String) do
+  let conn = Db.open(path)       -- acquired
+  let (rows, conn2) = query_users(conn)
+  Db.close(conn2)                -- consumed
+  rows
+end` },
+  { label: 'Capabilities', code: `-- Capabilities are proof tokens tracked by the type system
+fn read_config(path : String) : String
+  needs [IO, FileSystem]
+do
+  File.read(path)
+end
+
+-- No capabilities needed: always safe, even in pure tests
+fn transform(s : String) : String do
+  s |> String.trim |> String.to_upper
+end
+
+fn main() : Unit needs [IO, FileSystem] do
+  read_config("/etc/march/config.toml")
+  |> transform |> println
+end` },
+  { label: 'Property Tests', code: `-- Checked with 100s of randomly generated inputs
+property reverse_involutive(lst : List(Int)) do
+  List.reverse(List.reverse(lst)) == lst
+end
+
+property sort_idempotent(lst : List(Int)) do
+  let s = List.sort(lst)
+  List.sort(s) == s
+end
+
+property map_preserves_length(
+  lst : List(Int), f : Int -> Int
+) do
+  List.length(List.map(f, lst))
+    == List.length(lst)
+end` },
+  { label: '~H Sigil', code: `-- ~H validates and compiles HTML templates at compile time
+fn dashboard(user : User, msgs : List(Msg)) : Html do
+  ~H"""
+  <div class="dashboard">
+    <header>
+      <h1>Hello, {user.name}</h1>
+      <span class="badge">{List.length(msgs)}</span>
+    </header>
+    <ul>
+      {for msg <- msgs}
+        <li>{msg.body}</li>
+      {/for}
+    </ul>
+  </div>
+  """
+end` },
+];
+
+const FBIP = `-- FBIP: 0 allocs after pass 1
+fn inc_leaves(t : Tree) : Tree do
+  match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l),
+                        inc_leaves(r))
+  end
+end`;
+
+const ACTOR = `supervisor AppSup do
+  strategy OneForOne
+  children [Counter, Logger]
+end
+
+-- Typed two-party protocol
+session Search do
+  client -> server : Query(String)
+  server -> client : Results(List(String))
+end`;
+
+const TYPES = `type Shape =
+  | Circle(Float)
+  | Rect(Float, Float)
+
+fn area(s : Shape) : Float do
+  match s do
+    Circle(r)  -> 3.14159 *. r *. r
+    Rect(w, h) -> w *. h
+  end
+end`;
+
+const LINEAR = `linear type FileHandle = FileHandle(Int)
+
+fn write_and_close(
+  f : FileHandle, s : String
+) : Unit do
+  File.write(f, s)  -- f consumed here
+  -- compile error if f used again
+end`;
+
+const REPL_EXAMPLES = [
+  { label: 'Hello World',
+    code: `fn main() : Unit do\n  println("Hello, world!")\nend`,
+    output: 'Hello, world!', kind: 'stdout' },
+  { label: 'Pattern Match',
+    code: `type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\nlet area = fn s ->\n  match s do\n    Circle(r)  -> 3.14159 *. r *. r\n    Rect(w, h) -> w *. h\n  end\n\narea(Circle(5.0))`,
+    output: '78.53975 : Float', kind: 'value' },
+  { label: 'List Pipeline',
+    code: `List.range(1, 10)\n|> List.filter(fn x -> x % 2 == 0)\n|> List.map(fn x -> x * x)\n|> List.sum`,
+    output: '120 : Int', kind: 'value' },
+  { label: 'Fibonacci',
+    code: `fn fib(n : Int) : Int do\n  match n do\n    0 -> 0\n    1 -> 1\n    _ -> fib(n - 1) + fib(n - 2)\n  end\nend\n\nfib(10)`,
+    output: '55 : Int', kind: 'value' },
+  { label: 'Actors',
+    code: `actor Counter do\n  state { count : Int }\n  init  { count = 0 }\n  on Increment(n : Int) do\n    { state with count = state.count + n }\n  end\n  on Get() -> reply state.count\nend\n\nlet c = spawn(Counter)\nsend(c, Increment(10))\nsend(c, Increment(5))\nsend(c, Get())`,
+    output: '15 : Int', kind: 'value' },
+];
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let dark = true, heroTab = 0, replEx = 0, replRun = false;
+
+// ─── Theme ────────────────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('march-theme');
+  dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme();
+}
+function applyTheme() {
+  document.documentElement.classList.toggle('light', !dark);
+  document.getElementById('theme-btn').textContent = dark ? '☀ Light' : '☾ Dark';
+}
+
+// ─── Rendering ───────────────────────────────────────────────────────────────
+function hl(code) { return syntaxHL(code, dark); }
+
+function renderAll() {
+  renderFeatures();
+  renderHeroTabs();
+  renderHeroCode();
+  renderReplTabs();
+  renderReplCode();
+  renderInstall();
+}
+
+function renderFeatures() {
+  document.getElementById('fbip-code').innerHTML = hl(FBIP);
+  document.getElementById('actor-code').innerHTML = hl(ACTOR);
+  document.getElementById('type-code').innerHTML = hl(TYPES);
+  document.getElementById('linear-code').innerHTML = hl(LINEAR);
+}
+
+function renderHeroTabs() {
+  const el = document.getElementById('hero-tabs');
+  el.innerHTML = HERO_EXAMPLES.map((ex, i) =>
+    `<button class="m-tab${i===heroTab?' active':''}" data-i="${i}">${ex.label}</button>`
+  ).join('');
+  el.querySelectorAll('.m-tab').forEach(btn =>
+    btn.addEventListener('click', () => {
+      heroTab = +btn.dataset.i; replRun = false;
+      renderHeroCode(); renderHeroTabs();
+    })
+  );
+}
+
+function renderHeroCode() {
+  document.getElementById('hero-code').innerHTML = hl(HERO_EXAMPLES[heroTab].code);
+}
+
+function renderReplTabs() {
+  const el = document.getElementById('repl-tabs');
+  el.innerHTML = REPL_EXAMPLES.map((ex, i) =>
+    `<button class="m-repl-tab${i===replEx?' active':''}" data-i="${i}">${ex.label}</button>`
+  ).join('');
+  el.querySelectorAll('.m-repl-tab').forEach(btn =>
+    btn.addEventListener('click', () => {
+      replEx = +btn.dataset.i; replRun = false;
+      renderReplCode(); renderReplTabs();
+    })
+  );
+}
+
+function renderReplCode() {
+  const ex = REPL_EXAMPLES[replEx];
+  document.getElementById('repl-code').innerHTML = hl(ex.code);
+  const footer = document.getElementById('repl-footer');
+  if (replRun) {
+    const valColor = ex.kind === 'value'
+      ? (dark ? 'oklch(74% 0.11 200)' : 'oklch(32% 0.11 215)')
+      : 'var(--text)';
+    footer.innerHTML =
+      `<span class="m-repl-prompt">march&gt;</span>` +
+      `<span class="m-repl-output" style="color:${valColor};">${ex.output}</span>`;
+  } else {
+    footer.innerHTML =
+      `<button class="m-repl-run" id="repl-run">▶ Run</button>` +
+      `<span class="m-repl-hint">Select an example, then run</span>`;
+    document.getElementById('repl-run').addEventListener('click', () => {
+      replRun = true; renderReplCode();
+    });
+  }
+}
+
+function renderInstall() {
+  const pc = dark ? '#3a5040' : '#8a9e8c';
+  const cc = dark ? 'oklch(70% 0.13 148)' : 'oklch(36% 0.15 148)';
+  const ac = dark ? '#dce8dc' : '#181e18';
+  document.getElementById('install-code').innerHTML =
+    `<span style="color:${pc}">$</span> ` +
+    `<span style="color:${cc}">curl</span> ` +
+    `<span style="color:${ac}">-fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh</span>`;
+  document.getElementById('forge-code').innerHTML =
+    `<span style="color:${pc}">$</span> ` +
+    `<span style="color:${cc}">forge</span> ` +
+    `<span style="color:${ac}">i</span>`;
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+document.getElementById('theme-btn').addEventListener('click', () => {
+  dark = !dark;
+  localStorage.setItem('march-theme', dark ? 'dark' : 'light');
+  applyTheme();
+  renderAll();
+});
+
+document.getElementById('perf-card').addEventListener('click', () => {
+  document.getElementById('perf-inner').classList.toggle('flipped');
+});
+
+document.getElementById('copy-btn').addEventListener('click', () => {
+  const btn = document.getElementById('copy-btn');
+  navigator.clipboard.writeText(
+    'curl -fsSL https://raw.githubusercontent.com/march-language/march/main/install.sh | sh'
+  ).then(() => {
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  }).catch(() => { btn.textContent = 'Copy'; });
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+initTheme();
+renderAll();
+</script>
+</body>
+</html>

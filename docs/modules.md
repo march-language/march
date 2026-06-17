@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Module System
 nav_order: 8
 ---

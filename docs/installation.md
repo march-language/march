@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Installation
 nav_order: 2
 ---

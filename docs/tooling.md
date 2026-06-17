@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Tooling
 nav_order: 15
 ---

@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Linear Types
 nav_order: 6
 ---

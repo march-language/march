@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Type System
 nav_order: 5
 ---

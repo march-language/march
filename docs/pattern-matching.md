@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Pattern Matching
 nav_order: 7
 ---

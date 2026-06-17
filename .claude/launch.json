@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "march-site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4850", "--directory", "/tmp/march-site-preview-fe1ba9"],
+      "port": 4850
+    }
+  ]
+}

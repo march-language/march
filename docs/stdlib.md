@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Standard Library
 nav_order: 12
 ---

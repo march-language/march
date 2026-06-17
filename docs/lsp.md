@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: LSP & Editors
 nav_order: 16
 ---

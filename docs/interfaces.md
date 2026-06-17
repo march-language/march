@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Interfaces
 nav_order: 11
 ---

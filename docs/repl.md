@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: REPL
 nav_order: 14
 ---

@@ -1,5 +1,5 @@
 ---
-layout: home
+layout: landing
 title: March Lang
 nav_order: 1
 ---

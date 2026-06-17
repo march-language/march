@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: docs
 title: Supervision Trees
 nav_order: 10
 ---
