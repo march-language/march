@@ -20,3 +20,4 @@ exclude:
   - Gemfile.lock
   - node_modules/
   - _build/
+  - vendor/
