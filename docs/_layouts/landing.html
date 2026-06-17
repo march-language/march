@@ -590,7 +590,7 @@ end
 property map_preserves_length(
   lst : List(Int), f : Int -> Int
 ) do
-  List.length(List.map(f, lst))
+  List.length(List.map(lst, f))
     == List.length(lst)
 end` },
   { label: '~H Sigil', code: `-- ~H validates and compiles HTML templates at compile time
@@ -656,8 +656,8 @@ const REPL_EXAMPLES = [
     code: `fn main() : Unit do\n  println("Hello, world!")\nend`,
     output: 'Hello, world!', kind: 'stdout' },
   { label: 'Pattern Match',
-    code: `type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\nlet area = fn s ->\n  match s do\n    Circle(r)  -> 3.14159 *. r *. r\n    Rect(w, h) -> w *. h\n  end\n\narea(Circle(5.0))`,
-    output: '78.53975 : Float', kind: 'value' },
+    code: `type Shape = Circle(Float) | Rect(Float, Float)\n\nlet area = fn s ->\n  match s do\n    Circle(r)  -> 3.14159 *. r *. r\n    Rect(w, h) -> w *. h\n  end\n\narea(Circle(5.0))`,
+    output: '78.5397 : Float', kind: 'value' },
   { label: 'List Pipeline',
     code: `List.range(1, 10)\n|> List.filter(fn x -> x % 2 == 0)\n|> List.map(fn x -> x * x)\n|> List.sum`,
     output: '120 : Int', kind: 'value' },
