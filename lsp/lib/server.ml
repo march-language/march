@@ -547,10 +547,12 @@ class march_server =
           let ty_str   = Analysis.query_type_at a ~line ~utf16_char in
           let doc_str  = Analysis.query_doc_name_at a ~line ~utf16_char in
           let perf_str = Analysis.query_perf_insight_at a ~line ~utf16_char in
+          let ts_str   = Analysis.query_typestate_hover_at a ~line ~utf16_char in
           let parts   = List.filter_map Fun.id [
             Option.map (fun ty -> Printf.sprintf "```march\n%s\n```" ty) ty_str;
             Option.map (fun d  -> "---\n" ^ d) doc_str;
             Option.map (fun p  -> "---\n" ^ p) perf_str;
+            Option.map (fun ts -> "---\n" ^ ts) ts_str;
           ] in
           if parts <> [] then
             let md = MarkupContent.create

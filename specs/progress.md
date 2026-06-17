@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-17, Phase 2f tooling — transitions hover, via completions, forge cap query)
+
+- **LSP transitions hover**: `Analysis.t` gains `transitions_index` (handle name → `Ast.transition list`) and `always_linear_names` fields, both populated from `user_decls` in `analyse`. New `typestate_hover_at` finds the `Handle(R, S)` type at the cursor, matches against `transitions_index`, and emits a markdown card showing "always-linear" badge, current state, and all declared transitions from that state. Wired via `query_typestate_hover_at` into `server.ml`'s hover assembler alongside the existing perf/doc/actor hover sections.
+- **LSP `via` completions**: `via_completions` in `completions_at` detects the `via <cursor>` position in a `transitions` arm (line contains `->` + ` via`), scans backwards in source for the enclosing handle name, and filters `a.vars` to type-compatible transition functions (`handle_name(...) -> handle_name(...)`) — surfaced before the generic var/type/ctor fallback.
+- **`forge cap query`** (`forge/lib/cmd_cap.ml`): walks all `.march` files under the project root (or `--dir`), parses each with `March_parser`, recursively extracts `DNeeds` / `DAlwaysLinearType` / `DTransitions` / `DProofCap` declarations (through `DMod`), and prints a grouped file-by-file summary. Exposed as `forge cap query [--dir DIR]`. `forge/lib/dune` gains `march_ast march_lexer march_parser` deps.
+- **Test count: 1470** (unchanged; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-17, Phase 2c compiler-enforced transitions blocks)
 
 - **`transitions Handle do R: S1 -> S2 via fn_name end` — compiler-enforced typestate transition declarations.** Verifies that each `via` function exists and has the correct transition-shaped type (`Handle(..., S1) -> Handle(..., S2)`). Mismatched from/to-state types and missing functions are reported as errors. The typechecker also scans local functions for transition-shaped types not listed in the block and emits a warning with the suggested `R: from -> to via fn` declaration text. `DTransitions` AST node propagated through all pass-through sites (span_remap, dump, eval/repl, format, tir/lower, jit). Format.ml emits syntactically valid `transitions ... do ... end` blocks. LSP `collect_decl` registers each `via fn_name` span in `use_map` enabling go-to-def on via names.
