@@ -280,12 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-06-17, Phase 2b always-linear types + tag phantom labels)
+## Current State (as of 2026-06-17, Phase 2c compiler-enforced transitions blocks)
 
+- **`transitions Handle do R: S1 -> S2 via fn_name end` — compiler-enforced typestate transition declarations.** Verifies that each `via` function exists and has the correct transition-shaped type (`Handle(..., S1) -> Handle(..., S2)`). Mismatched from/to-state types and missing functions are reported as errors. The typechecker also scans local functions for transition-shaped types not listed in the block and emits a warning with the suggested `R: from -> to via fn` declaration text. `DTransitions` AST node propagated through all pass-through sites (span_remap, dump, eval/repl, format, tir/lower, jit). Format.ml emits syntactically valid `transitions ... do ... end` blocks. LSP `collect_decl` registers each `via fn_name` span in `use_map` enabling go-to-def on via names.
 - **`always_linear type T(params) = ...` — unconditional linearity declaration.** Every binding of an always-linear type is automatically tracked as linear by the typechecker — no `linear` annotation at each call site. Drop-without-use and double-use are compile-time errors. Auto-promotion fires at all three binding sites: `let`-bindings (infer_block, with Poly-scheme fix for phantom type params), named `fn` parameters (check_fn FPNamed path), and lambda parameters (bind_lam_param). Both bare (`"Handle"`) and qualified (`"Handle.Handle"`) names registered in `env.always_linear_types` so TCon matching works regardless of call site. `DAlwaysLinearType` AST node propagated through all 17 pattern-match sites (span_remap, coverage, desugar, dump, eval, format, jit, lint, modules, refactor, repl, search, tir/lower, lsp/analysis). `check_linear_all_consumed` called after each linear let-block completes.
 - **`tag Foo` — zero-arg phantom label type.** Parser-level sugar: `tag Open` desugars to `type Open = Open`. Used to declare typestate labels without boilerplate. No new AST node; two files changed (lexer + parser).
 - **`stdlib/handle.march` — `Handle(r, s)` typestate handle.** `always_linear type Handle(r, s) = Handle(Int)` — phantom params `r` (resource) and `s` (state) enforced at call sites via the type system. Thread-through idiom validated: `connect → open → query → close` compiles and runs; wrong-state calls and leaked handles produce clear type errors.
-- **Test count: 319** (all passing).
+- **Test count: 1470** (209 compiler + 214 eval + 267 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
 
 ## Current State (as of 2026-06-16, Phase 2a proof capability tokens)
 
