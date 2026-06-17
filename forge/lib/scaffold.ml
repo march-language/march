@@ -45,7 +45,7 @@ let editorconfig =
    indent_style = space\n\
    indent_size = 2\n"
 
-let gitignore = "/.march/\n"
+let gitignore = "/.march/\n/march-phases/\n*.ll\n"
 
 let march_lint_toml =
   "# .march-lint.toml\n\
@@ -88,6 +88,13 @@ let march_lint_toml =
 let readme name =
   Printf.sprintf "# %s\n" (String.capitalize_ascii name)
 
+let find_syntax_reference () =
+  match Archive_store.find_stdlib_dir () with
+  | Some stdlib_dir ->
+    let path = Filename.concat (Filename.dirname stdlib_dir) "syntax_reference.md" in
+    if Sys.file_exists path then Some path else None
+  | None -> None
+
 let scaffold name project_type =
   if Sys.file_exists name then
     Error (Printf.sprintf "directory '%s' already exists" name)
@@ -106,6 +113,13 @@ let scaffold name project_type =
       write_file (Filename.concat name ".gitignore") gitignore;
       write_file (Filename.concat name ".march-lint.toml") march_lint_toml;
       write_file (Filename.concat name "README.md") (readme name);
+      (match find_syntax_reference () with
+       | Some src ->
+         let ic = open_in src in
+         let content = In_channel.input_all ic in
+         close_in ic;
+         write_file (Filename.concat name "syntax_reference.md") content
+       | None -> ());
       let _ = Sys.command
           (Printf.sprintf "git init %s > /dev/null 2>&1" (Filename.quote name)) in
       Ok ()
