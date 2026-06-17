@@ -1,30 +1,63 @@
-; ── March test library (shared helpers + suite lists) ────────────────────
+; ── Shared test helpers (parse_module, with_reset, shared test fns) ──────
 (library
- (name march_test_lib)
+ (name march_test_helpers)
  (wrapped false)
- (modules test_march)
+ (modules test_helpers)
+ (ocamlopt_flags (:standard -w -32-26-27))
+ (ocamlc_flags   (:standard -w -32-26-27))
  (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
+; ── Per-suite test libraries ──────────────────────────────────────────────
+(library
+ (name march_test_compiler)
+ (wrapped false)
+ (modules test_compiler)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+
+(library
+ (name march_test_eval)
+ (wrapped false)
+ (modules test_eval)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+
+(library
+ (name march_test_codegen)
+ (wrapped false)
+ (modules test_codegen)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+
+(library
+ (name march_test_stdlib_suite)
+ (wrapped false)
+ (modules test_stdlib_suite)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
+; -e: show test-case error details inline (no digging through log files).
+; Run binaries directly for agent-safe, RPC-free execution: see scripts/run-tests.sh.
 (test
  (name run_compiler)
  (modules run_compiler)
- (libraries march_test_lib alcotest))
+ (libraries march_test_compiler alcotest)
+ (action (run %{test} -e)))
 
 (test
  (name run_eval)
  (modules run_eval)
- (libraries march_test_lib alcotest))
+ (libraries march_test_eval alcotest)
+ (action (run %{test} -e)))
 
 (test
  (name run_codegen)
  (modules run_codegen)
- (libraries march_test_lib alcotest))
+ (libraries march_test_codegen alcotest)
+ (action (run %{test} -e)))
 
 (test
  (name run_stdlib)
  (modules run_stdlib)
- (libraries march_test_lib alcotest))
+ (libraries march_test_stdlib_suite alcotest)
+ (action (run %{test} -e)))
 
 ; ── C scheduler tests ────────────────────────────────────────────────────
 ; Compile test_scheduler.c together with the C runtime scheduler and run it

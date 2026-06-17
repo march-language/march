@@ -97,6 +97,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
     List.fold_left (fun env d ->
       match d with
       | DMod (_, _, inner, _) -> add_from env inner
+      | DTransitions _ -> env
       | DType (_, name, params, TDVariant variants, _)
       | DAlwaysLinearType (_, name, params, TDVariant variants, _) ->
         let arity      = List.length params in
@@ -857,7 +858,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         (* Notify the JIT about any user-declared types so
                            subsequent run_expr can pretty-print user ADTs. *)
                         (match jit_ctx, d' with
-                         | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _) ->
+                         | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _
+                                     | March_ast.Ast.DTransitions _) ->
                            March_jit.Repl_jit.register_user_type_decl jit d'
                          | _ -> ());
                         if not scroll_mode then
@@ -1363,7 +1365,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
               | March_ast.Ast.DActor _ -> actors_declared := true
               | _ -> ());
              (match jit_ctx, d' with
-              | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _) ->
+              | Some jit, (March_ast.Ast.DType _ | March_ast.Ast.DAlwaysLinearType _
+                          | March_ast.Ast.DTransitions _) ->
                 March_jit.Repl_jit.register_user_type_decl jit d'
               | _ -> ());
              let out = match d' with

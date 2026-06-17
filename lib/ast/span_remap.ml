@@ -186,6 +186,14 @@ let rec remap_decl tbl = function
     Ast.DProofCap (name, remap_span tbl sp)
   | Ast.DAlwaysLinearType (vis, name, params, td, sp) ->
     Ast.DAlwaysLinearType (vis, remap_name tbl name, List.map (remap_name tbl) params, td, remap_span tbl sp)
+  | Ast.DTransitions (handle_ty, arms, sp) ->
+    let remap_arm a = Ast.{
+        tr_resource = remap_name tbl a.tr_resource;
+        tr_from     = remap_name tbl a.tr_from;
+        tr_to       = remap_name tbl a.tr_to;
+        tr_via      = remap_name tbl a.tr_via;
+        tr_span     = remap_span tbl a.tr_span } in
+    Ast.DTransitions (remap_name tbl handle_ty, List.map remap_arm arms, remap_span tbl sp)
   | Ast.DApp (app, sp) ->
     Ast.DApp ({
       app_name = remap_name tbl app.app_name;

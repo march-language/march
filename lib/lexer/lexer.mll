@@ -81,6 +81,8 @@ let () =
       ("setup_all", SETUP_ALL);
       ("always_linear", ALWAYSLINEAR);
       ("tag",           TAG);
+      ("transitions",   TRANSITIONS);
+      ("via",           VIA);
     ]
 }
 

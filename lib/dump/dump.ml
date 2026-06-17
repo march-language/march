@@ -218,6 +218,7 @@ let ast_phase (m : module_) phase_name =
           :: !edges
       ) (List.sort_uniq String.compare body_calls)
 
+    | DTransitions _ -> ()
     | DType (vis, name, _tvars, tdef, _)
     | DAlwaysLinearType (vis, name, _tvars, tdef, _) ->
       let id = "type_" ^ name.txt in

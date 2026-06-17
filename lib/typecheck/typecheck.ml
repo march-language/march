@@ -5964,6 +5964,99 @@ let rec check_decl env (d : Ast.decl) : env =
     Hashtbl.replace env.type_map sp t_unit;
     env
 
+  | Ast.DTransitions (handle_ty, arms, sp) ->
+    let handle_name = handle_ty.txt in
+    (* Extract the last (state) type argument from Handle(args).
+       Handles both single-param Handle(s) and two-param Handle(r,s). *)
+    let last_arg = function
+      | [] -> None
+      | args -> Some (repr (List.nth args (List.length args - 1)))
+    in
+    (* Validate each declared transition arm's via function. *)
+    let declared_vias = List.filter_map (fun (a : Ast.transition) ->
+        let via_name = a.tr_via.txt in
+        let sch_opt =
+          match lookup_var via_name env with
+          | Some s -> Some s
+          | None ->
+            let qname = if env.current_module = "" then via_name
+                        else env.current_module ^ "." ^ via_name in
+            lookup_var qname env
+        in
+        match sch_opt with
+        | None ->
+          Err.error env.errors ~span:a.tr_via.span
+            (Printf.sprintf
+               "Via function `%s` is not defined in this module. \
+                Expected: fn %s(h : %s(%s)) : %s(%s) do ... end"
+               via_name via_name handle_name a.tr_from.txt
+               handle_name a.tr_to.txt);
+          None
+        | Some sch ->
+          let ty = repr (instantiate env.level env sch) in
+          (match ty with
+           | TArrow (TCon (hn, param_args), ret_t) when hn = handle_name ->
+             (match last_arg param_args with
+              | Some (TCon (s, []) as from_t) when s <> a.tr_from.txt ->
+                Err.error env.errors ~span:a.tr_span
+                  (Printf.sprintf
+                     "Via function `%s` takes state `%s` but transition declares from-state `%s`."
+                     via_name (pp_ty from_t) a.tr_from.txt)
+              | _ -> ());
+             (match repr ret_t with
+              | TCon (hn2, ret_args) when hn2 = handle_name ->
+                (match last_arg ret_args with
+                 | Some (TCon (s, []) as to_t) when s <> a.tr_to.txt ->
+                   Err.error env.errors ~span:a.tr_span
+                     (Printf.sprintf
+                        "Via function `%s` returns state `%s` but transition declares to-state `%s`."
+                        via_name (pp_ty to_t) a.tr_to.txt)
+                 | _ -> ())
+              | _ ->
+                Err.error env.errors ~span:a.tr_span
+                  (Printf.sprintf
+                     "Via function `%s` has return type `%s`, expected `%s(_, %s)`."
+                     via_name (pp_ty ret_t) handle_name a.tr_to.txt))
+           | TArrow (param_t, _) ->
+             Err.error env.errors ~span:a.tr_via.span
+               (Printf.sprintf
+                  "Via function `%s` takes `%s`, expected `%s(..., %s)`."
+                  via_name (pp_ty param_t) handle_name a.tr_from.txt)
+           | _ ->
+             Err.error env.errors ~span:a.tr_via.span
+               (Printf.sprintf
+                  "Via function `%s` has type `%s`, expected `%s(..., %s) -> %s(..., %s)`."
+                  via_name (pp_ty ty) handle_name a.tr_from.txt handle_name a.tr_to.txt));
+          Some via_name
+      ) arms in
+    (* Warn about local functions whose type looks like a transition but are
+       not declared in this transitions block — suggest adding them. *)
+    StrMap.iter (fun fn_name sch ->
+        if not (StrMap.mem fn_name env.local_fns) then ()
+        else if List.mem fn_name declared_vias then ()
+        else begin
+          let ty = repr (instantiate env.level env sch) in
+          match ty with
+          | TArrow (TCon (hn, param_args), TCon (hn2, ret_args))
+            when hn = handle_name && hn2 = handle_name ->
+            (match last_arg param_args, last_arg ret_args with
+             | Some from_t, Some to_t ->
+               let from_s = pp_ty from_t in
+               let to_s   = pp_ty to_t in
+               if from_s <> to_s then
+                 Err.warning env.errors ~span:sp
+                   (Printf.sprintf
+                      "`%s` looks like a transition function (`%s` -> `%s`) \
+                       but is not declared in `transitions %s`. \
+                       Consider adding:\n    %s: %s -> %s via %s"
+                      fn_name from_s to_s handle_name
+                      (String.capitalize_ascii from_s) from_s to_s fn_name)
+             | _ -> ())
+          | _ -> ()
+        end
+      ) env.vars;
+    env
+
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
   List.iter (fun ie ->

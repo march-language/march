@@ -122,6 +122,15 @@ and branch = {
   branch_body : expr;
 }
 
+(** One arm of a [transitions] block: [ResourceTag: FromState -> ToState via fn_name] *)
+type transition = {
+  tr_resource : name;   (** The phantom resource tag, e.g. [ConnTag] *)
+  tr_from     : name;   (** Source state, e.g. [Closed] *)
+  tr_to       : name;   (** Target state, e.g. [Open] *)
+  tr_via      : name;   (** The function that performs this transition *)
+  tr_span     : span;   (** Span of the whole transition line *)
+}
+
 (** Top-level declarations. *)
 type decl =
   | DFn of fn_def * span                                        (** fn name(args) do ... end *)
@@ -146,6 +155,11 @@ type decl =
   (** Always-linear type definition: [always_linear type Handle(r, s) = Handle(r)]
       Identical to DType at the value level, but every binding of this type is
       automatically tracked as linear by the typechecker — no per-site [linear] annotation needed. *)
+  | DTransitions of name * transition list * span
+  (** Compiler-enforced state-machine transitions for an always-linear handle type.
+      [transitions Handle do R: S1 -> S2 via fn_name ... end]
+      The compiler verifies each [via] function has the expected type, and warns
+      about functions in the same module that perform undeclared transitions. *)
   | DApp of app_def * span             (** Application entry point: app Name do ... end *)
   | DDeriving of name * name list * span
   (** Derive declaration: [derive Eq, Show for Color]
