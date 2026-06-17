@@ -127,7 +127,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
@@ -338,6 +338,11 @@ type_decl:
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DAlwaysLinearType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
+  | TAG; name = upper_name
+    (* Sugar: `tag Foo` ≡ `type Foo = Foo`  — a zero-arg phantom label type. *)
+    { let sp = mk_span ($loc) in
+      let ctor = { var_name = name; var_args = []; var_vis = Public } in
+      DType (Public, name, [], TDVariant [ctor], sp) }
   | TYPE; _n = upper_name; error
     { error_raise
         "I was expecting `=` after the type name here:"
