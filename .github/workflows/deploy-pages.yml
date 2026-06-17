@@ -1,4 +1,4 @@
-name: Deploy Decision Graph to Pages
+name: Deploy Site to GitHub Pages
 
 on:
   push:
@@ -16,10 +16,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to gh-pages branch
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: docs
+
+      - name: Build Jekyll site
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec jekyll build --baseurl "" --destination ../_site
+
+      - name: Deploy built site to march-language.github.io
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs
-          publish_branch: gh-pages
+          personal_token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
+          external_repository: march-language/march-language.github.io
+          publish_branch: main
+          publish_dir: ./_site
           force_orphan: true
