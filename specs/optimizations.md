@@ -339,8 +339,10 @@ end
 
 **Effort:** High | **Impact:** Very high
 **Dependencies:** Must run before Inline and Fold (to expose shared structure)
-**Stage:** TIR pass, before Opt coordinator
-**Status:** Planned — `lib/tir/join_points.ml`
+**Stage:** TIR pass — `lib/tir/join_points.ml`; first pass in `lib/tir/opt.ml` fixed-point loop
+**Status:** Done (basic version — common leading let extraction)
+
+**Implementation:** `lib/tir/join_points.ml` detects and hoists `let` bindings that appear identically at the start of EVERY case branch (including the default). Safety conditions: same variable name, structurally equal RHS (via `expr_eq`), RHS does not mention any pattern-bound variable from any branch, variable name is not pattern-bound in any branch. Runs in the `opt.ml` fixed-point loop as the first pass (before `known-call`, `inline`, `cprop`, etc.) so floated lets are immediately available to downstream passes in the same iteration. `expr_eq` checks deep structural equality of atoms and all expression forms. 4 new tests in `join_points` group.
 
 ---
 

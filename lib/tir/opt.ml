@@ -3,13 +3,15 @@
     Terminates when no pass makes a change.
 
     Pass order matters:
-    - Known_call first: converts ECallPtr → EApp for statically-known closures,
+    - Join_points first: hoists common leading lets above ECase, exposing
+      shared structure to all downstream passes in the same iteration
+    - Known_call second: converts ECallPtr → EApp for statically-known closures,
       enabling Inline to see and inline the lifted apply functions
-    - Inline second: exposes literal arguments at inlined call sites
-    - CProp third: propagates those literals through let chains
-    - Fold fourth: evaluates now-literal arithmetic
-    - Simplify fifth: identity laws / strength reduction on folded results
-    - Fusion.run_struct sixth: collapses chains of record-update operations
+    - Inline third: exposes literal arguments at inlined call sites
+    - CProp fourth: propagates those literals through let chains
+    - Fold fifth: evaluates now-literal arithmetic
+    - Simplify sixth: identity laws / strength reduction on folded results
+    - Fusion.run_struct seventh: collapses chains of record-update operations
     - DCE last: removes let bindings made dead by folding/simplification
 
     The optional [~snap] callback is invoked after each individual pass with
@@ -17,6 +19,7 @@
     When [~snap] is omitted (or is a no-op) behaviour is identical to before. *)
 
 let named_passes = [
+  "join-points", Join_points.run;
   "known-call",  Known_call.run;
   "inline",      Inline.run;
   "cprop",       Cprop.run;
