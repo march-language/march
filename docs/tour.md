@@ -81,6 +81,40 @@ mod Config do
 end
 ```
 
+### Result propagation with `let?`
+
+`let? p = e` binds the `Ok` payload of a `Result` and automatically propagates `Err` upward — the function returns the error immediately without touching the rest of the block:
+
+```elixir
+fn parse_and_add(a : String, b : String) : Result(Int, String) do
+  let? x = parse_int(a)   -- returns Err(msg) if parse_int fails
+  let? y = parse_int(b)   -- only reached when x succeeded
+  Ok(x + y)
+end
+```
+
+The equivalent without `let?` is:
+
+```elixir
+fn parse_and_add(a : String, b : String) : Result(Int, String) do
+  match parse_int(a) do
+    Err(e) -> Err(e)
+    Ok(x)  ->
+      match parse_int(b) do
+        Err(e) -> Err(e)
+        Ok(y)  -> Ok(x + y)
+      end
+  end
+end
+```
+
+Rules:
+- The right-hand side must be `Result(T, E)`.
+- All `let?` bindings in a block must share the same error type `E`.
+- `let?` cannot be the last expression in a block — something must follow it.
+
+`let?` works anywhere a `let` binding is valid: function bodies, match arms, and lambda bodies.
+
 ---
 
 ## Primitive Types
@@ -329,6 +363,18 @@ end
 ```
 
 Each `pat <- expr`: if `expr` matches `pat`, continue; otherwise fall through to `else` (or propagate the non-matching value).
+
+`let?` is a lighter-weight alternative when every binding propagates the same `Err` type and you don't need a custom `else` handler:
+
+```elixir
+fn load(id : Int) : Result(String, DbError) do
+  let? user = fetch_user(id)
+  let? data = fetch_data(user.token)
+  Ok(process(user, data))
+end
+```
+
+Use `with` when you need `else` handlers or mixed `Option`/`Result` patterns. Use `let?` when you only need uniform `Err` propagation.
 
 ---
 

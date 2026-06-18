@@ -209,7 +209,17 @@ fn parse_int(s : String) : Result(Int, String) do
 end
 ```
 
-Chain with `with`:
+Chain multiple fallible operations with `let?` (propagates `Err` automatically):
+
+```elixir
+fn run(input : String) : Result(String, String) do
+  let? n    = parse_int(input)
+  let? user = fetch_user(n)
+  Ok(display(user))
+end
+```
+
+Use `with` when you need custom `else` handling or mixed `Option`/`Result` chains:
 
 ```elixir
 with Ok(n)    <- parse_int(input),

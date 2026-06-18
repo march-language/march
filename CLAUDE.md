@@ -125,6 +125,7 @@ See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
 - Conditionals: `if cond do ... end` — use `do...end`, `else` is optional, NO `then` keyword
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
+- Result propagation: `let? p = e` binds the `Ok` payload and returns `Err(e)` immediately; RHS must be `Result`; cannot be the last expr in a block
 - No `;` — use newlines to separate block expressions
 - Match arms use `block_body` — multi-expression arms with `let` bindings are supported:
   ```march

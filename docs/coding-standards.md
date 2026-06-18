@@ -390,7 +390,7 @@ end
 **Auto-fix:** no
 
 A call that returns `Result` must not have its return value discarded. Either bind it
-with `let`, propagate it with `?`, or explicitly handle both arms.
+with `let`, propagate it with `?` or `let?`, or explicitly handle both arms.
 
 **Why:** Silently discarding a `Result` hides errors. Every `Result`-returning call is
 a potential failure path that must be acknowledged.
@@ -399,9 +399,13 @@ a potential failure path that must be acknowledged.
 -- Bad
 write_file("out.txt", data)   -- return value dropped
 
--- Good
-let _ = write_file("out.txt", data)?          -- propagate
--- or
+-- Good: propagate with let?  (preferred in Result-returning functions)
+let? _ = write_file("out.txt", data)
+
+-- Good: propagate with ?
+let _ = write_file("out.txt", data)?
+
+-- Good: handle explicitly
 match write_file("out.txt", data) do
   Ok(_)  -> ()
   Err(e) -> log_error(e)

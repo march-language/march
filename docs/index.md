@@ -172,6 +172,7 @@ end
 - **Pipe operator** — `list |> map(f) |> filter(g) |> sum`
 - **Multi-head functions** — Elixir-style clause dispatch
 - **`with` expressions** — monadic chaining for `Result`/`Option`
+- **`let?` propagation** — `let? x = e` binds `Ok(x)` and returns `Err` immediately
 - **Linear and affine types** — ownership tracking for resource safety
 - **String interpolation** — `"Hello, ${name}!"`
 - **List comprehensions** — `[x * 2 for x in nums, x > 0]`

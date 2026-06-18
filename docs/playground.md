@@ -44,6 +44,27 @@ let area = fn s ->
 area(Circle(5.0))
 ```
 
+**Result propagation with `let?`**
+
+```march
+fn safe_div(a : Int, b : Int) : Result(Int, String) do
+  if b == 0 do
+    Err("division by zero")
+  else
+    Ok(a / b)
+  end
+end
+
+fn compute(a : Int, b : Int, c : Int) : Result(Int, String) do
+  let? x = safe_div(a, b)
+  let? y = safe_div(x, c)
+  Ok(y + 1)
+end
+
+compute(100, 5, 4)    -- Ok(6)
+compute(100, 0, 4)    -- Err("division by zero")  (short-circuits at first let?)
+```
+
 **Standard library**
 
 ```march

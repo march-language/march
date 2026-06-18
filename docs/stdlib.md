@@ -239,6 +239,20 @@ Result.to_option(Ok(42))              -- Some(42)
 Result.to_option(Err("e"))            -- None
 ```
 
+For lightweight error propagation in chains, use the `let?` binding instead of `Result.and_then`:
+
+```elixir
+-- with Result.and_then
+Result.and_then(parse_int(s), fn n -> Result.and_then(fetch(n), fn v -> Ok(v + 1)))
+
+-- with let?
+fn run(s : String) : Result(Int, String) do
+  let? n = parse_int(s)
+  let? v = fetch(n)
+  Ok(v + 1)
+end
+```
+
 ---
 
 ## IO
