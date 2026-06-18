@@ -703,18 +703,7 @@ end
 
 inc_leaves(Node(Node(Leaf(1), Leaf(2)), Leaf(3)))`;
 
-const ACTOR = `supervisor AppSup do
-  strategy OneForOne
-  children [Counter, Logger]
-end
-
--- Typed two-party protocol
-session Search do
-  client -> server : Query(String)
-  server -> client : Results(List(String))
-end`;
-
-const ACTOR_TRY = `actor Counter do
+const ACTOR = `actor Counter do
   state { value : Int }
   init { value = 0 }
   on Inc(n : Int) do
@@ -727,7 +716,9 @@ const ACTOR_TRY = `actor Counter do
   on Reset() do
     { value = 0 }
   end
-end
+end`;
+
+const ACTOR_TRY = ACTOR + `
 
 let pid = spawn(Counter)
 send(pid, Inc(5))
