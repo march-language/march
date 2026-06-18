@@ -5,7 +5,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% if page.title %}{{ page.title }} — March{% else %}March Documentation{% endif %}</title>
+  <title>{% if page.title %}{{ page.title }} — March{% else %}March Cookbook{% endif %}</title>
   <meta name="description" content="{{ page.description | default: site.description | escape }}">
   <link rel="icon" href="{{ site.baseurl }}/assets/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -22,9 +22,9 @@
       --text-muted: #4a7898;
       --text-faint: #1e4060;
       --accent: oklch(63% 0.12 207);
+      --accent-dim: oklch(26% 0.09 215);
       --active-bg: rgba(18,145,167,0.15);
       --active-color: oklch(63% 0.12 207);
-      /* syntax */
       --syn-kw: oklch(74% 0.11 200);
       --syn-tp: oklch(82% 0.12 70);
       --syn-st: oklch(82% 0.11 200);
@@ -32,6 +32,7 @@
       --syn-cm: oklch(42% 0.07 215);
       --syn-op: oklch(57% 0.09 205);
       --syn-id: oklch(95% 0.02 207);
+      --ck-panel-w: 360px;
     }
     :root.light {
       --bg: #f0f6fc;
@@ -43,9 +44,9 @@
       --text-muted: #2e5c7c;
       --text-faint: #6a96b5;
       --accent: oklch(37% 0.11 210);
+      --accent-dim: oklch(70% 0.09 207);
       --active-bg: rgba(14,91,130,0.1);
       --active-color: oklch(37% 0.11 210);
-      /* syntax */
       --syn-kw: oklch(32% 0.11 215);
       --syn-tp: oklch(42% 0.12 55);
       --syn-st: oklch(28% 0.11 215);
@@ -91,7 +92,11 @@
     }
 
     /* ── LAYOUT ──────────────────────────────────────────────────────────── */
-    .d-layout { display: flex; padding-top: 60px; min-height: 100vh; }
+    .d-layout {
+      display: flex; padding-top: 60px; min-height: 100vh;
+      transition: padding-right 0.25s ease;
+    }
+    .d-layout.repl-open { padding-right: var(--ck-panel-w); }
 
     /* ── SIDEBAR ─────────────────────────────────────────────────────────── */
     .d-sidebar {
@@ -147,18 +152,16 @@
       margin: 20px 0; font-size: 15px; line-height: 1.75; color: var(--text-muted);
     }
     .d-content blockquote p { margin: 0; font-size: 15px; }
-
-    /* inline code */
     .d-content :not(pre) > code {
       font-family: 'JetBrains Mono', monospace; font-size: 0.875em;
       color: var(--accent); background: var(--bg-code);
       padding: 2px 7px; border-radius: 4px;
     }
-    /* fenced code blocks (kramdown wraps in .highlight) */
     .d-content .highlight,
     .d-content pre {
       background: var(--bg-code); border: 1px solid var(--border);
       border-radius: 6px; margin: 20px 0; overflow-x: auto;
+      position: relative;
     }
     .d-content .highlight pre,
     .d-content pre {
@@ -167,8 +170,6 @@
       line-height: 1.72; tab-size: 2; background: transparent;
     }
     .d-content pre code { background: none; color: var(--text); padding: 0; font-size: inherit; }
-
-    /* Rouge syntax tokens */
     .d-content .highlight .c,  .d-content .highlight .c1,
     .d-content .highlight .cm, .d-content .highlight .cp,
     .d-content .highlight .cs  { color: var(--syn-cm); font-style: italic; }
@@ -190,8 +191,6 @@
     .d-content .highlight .gd  { color: #f87272; }
     .d-content .highlight .gi  { color: oklch(74% 0.18 145); }
     .d-content .highlight .err { color: #f87272; background: none; }
-
-    /* tables */
     .d-content table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; display: block; overflow-x: auto; }
     .d-content th {
       text-align: left; padding: 9px 14px; background: var(--bg-code);
@@ -200,6 +199,98 @@
     }
     .d-content td { padding: 9px 14px; color: var(--text-muted); border-top: 1px solid var(--border); vertical-align: top; line-height: 1.6; }
     .d-content td code { font-family: 'JetBrains Mono', monospace; font-size: 0.88em; color: var(--accent); }
+
+    /* ── CODE BLOCK BUTTONS ──────────────────────────────────────────────── */
+    .ck-code-btns {
+      position: absolute; top: 8px; right: 10px;
+      display: flex; gap: 4px; opacity: 0;
+      transition: opacity 0.15s; pointer-events: none;
+    }
+    .d-content .highlight:hover .ck-code-btns,
+    .d-content pre:hover .ck-code-btns { opacity: 1; pointer-events: auto; }
+    .ck-btn {
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+      padding: 3px 9px; border-radius: 4px; cursor: pointer;
+      background: var(--bg); color: var(--text-faint);
+      border: 1px solid var(--border); letter-spacing: 0.03em;
+      transition: color 0.1s, border-color 0.1s;
+    }
+    .ck-btn:hover { color: var(--text-muted); border-color: var(--text-faint); }
+    .ck-btn-run { color: var(--accent); border-color: var(--accent-dim); }
+    .ck-btn-run:hover { background: rgba(18,145,167,0.08); }
+    .ck-btn-copied { color: oklch(74% 0.18 145) !important; border-color: oklch(74% 0.18 145) !important; }
+
+    /* ── RIGHT REPL PANEL ────────────────────────────────────────────────── */
+    .ck-repl-panel {
+      position: fixed; top: 60px; right: 0;
+      width: var(--ck-panel-w); height: calc(100vh - 60px);
+      background: var(--bg-code); border-left: 1px solid var(--border);
+      display: flex; flex-direction: column; z-index: 90;
+      transform: translateX(100%);
+      transition: transform 0.25s ease;
+    }
+    .ck-repl-panel.open { transform: translateX(0); }
+
+    .ck-repl-header {
+      display: flex; align-items: center; padding: 11px 16px;
+      border-bottom: 1px solid var(--border); gap: 6px; flex-shrink: 0;
+    }
+    .ck-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .ck-repl-title {
+      margin-left: 10px; font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--text-faint); flex: 1; letter-spacing: 0.04em;
+    }
+    .ck-repl-close {
+      background: none; border: 1px solid var(--border); color: var(--text-faint);
+      border-radius: 4px; padding: 2px 10px; font-size: 11px; cursor: pointer;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em;
+    }
+    .ck-repl-close:hover { border-color: var(--text-faint); color: var(--text-muted); }
+
+    .ck-repl-history {
+      flex: 1; padding: 14px 20px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+    }
+    .ck-repl-entry { margin-bottom: 2px; }
+    .ck-repl-iline {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px;
+      line-height: 1.65; color: var(--text); white-space: pre-wrap;
+    }
+    .ck-repl-iline::before { content: "march> "; color: var(--text-faint); }
+    .ck-repl-oline {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px;
+      line-height: 1.65; color: var(--accent); white-space: pre-wrap;
+    }
+    .ck-repl-eline {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px;
+      line-height: 1.65; color: #f87171; white-space: pre-wrap;
+    }
+    .ck-repl-info {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      line-height: 1.65; color: var(--text-muted); font-style: italic;
+    }
+
+    .ck-repl-input-row {
+      display: flex; align-items: flex-start; padding: 10px 16px 12px;
+      border-top: 1px solid var(--border); gap: 8px; flex-shrink: 0;
+    }
+    .ck-repl-prompt {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px;
+      color: var(--text-faint); user-select: none; padding-top: 1px; white-space: nowrap;
+    }
+    .ck-repl-textarea {
+      flex: 1; background: none; border: none; outline: none;
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65;
+      color: var(--text); resize: none; overflow: hidden; min-height: 1.65em;
+      caret-color: var(--accent);
+    }
+    .ck-repl-textarea::placeholder { color: var(--text-faint); }
+    .ck-repl-submit {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent);
+      background: transparent; border: 1px solid var(--accent-dim);
+      border-radius: 5px; padding: 6px 14px; cursor: pointer; letter-spacing: 0.03em; flex-shrink: 0;
+    }
+    .ck-repl-submit:hover { background: rgba(18,145,167,0.1); }
 
     /* ── MOBILE ──────────────────────────────────────────────────────────── */
     .d-overlay {
@@ -217,6 +308,8 @@
       .d-sidebar.open { transform: translateX(0); }
       .d-hamburger { display: block; }
       .d-main { padding: 32px 24px; max-width: 100%; }
+      .ck-repl-panel { width: min(var(--ck-panel-w), 100vw); }
+      .d-layout.repl-open { padding-right: 0; }
     }
     @media (max-width: 600px) {
       .d-nav-inner { padding: 0 16px; }
@@ -226,16 +319,15 @@
 </head>
 <body>
 
-<!-- NAV -->
 <nav class="d-nav">
   <div class="d-nav-inner">
     <a href="{{ site.baseurl }}/" class="d-nav-logo">
       <img src="{{ site.baseurl }}/assets/logo.png" alt="March">
       <span class="logo-name">March</span>
-      <span class="logo-slug">/ docs</span>
+      <span class="logo-slug">/ cookbook</span>
     </a>
     <div class="d-nav-right">
-      <a href="{{ site.baseurl }}/" class="d-nav-link">Home</a>
+      <a href="{{ site.baseurl }}/docs/" class="d-nav-link">Docs</a>
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="d-nav-link">GitHub</a>
       <button class="d-theme-btn" id="d-theme-btn">☀ Light</button>
       <button class="d-hamburger" id="d-hamburger" aria-label="Toggle menu">
@@ -249,50 +341,30 @@
 
 <div class="d-overlay" id="d-overlay"></div>
 
-<!-- LAYOUT -->
-<div class="d-layout">
+<div class="d-layout" id="d-layout">
 
-  <!-- SIDEBAR -->
   <aside class="d-sidebar" id="d-sidebar">
     <div class="d-sidebar-inner">
-      {% assign nav_pages = site.pages | sort: 'nav_order' %}
+      <p class="d-sidebar-section">Orientation</p>
+      <a href="{{ site.baseurl }}/docs/coming-from-python/" class="d-sidebar-link{% if page.url contains 'coming-from-python' %} active{% endif %}">Coming from Python/TS</a>
+      <a href="{{ site.baseurl }}/docs/coming-from-fp/" class="d-sidebar-link{% if page.url contains 'coming-from-fp' %} active{% endif %}">Coming from FP</a>
 
-      <p class="d-sidebar-section">Start Here</p>
-      {% for p in nav_pages %}
-        {% if p.nav_order == 2 or p.nav_order == 3 %}
-      <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
-        {% endif %}
-      {% endfor %}
+      <p class="d-sidebar-section">Cookbook</p>
+      <a href="{{ site.baseurl }}/docs/cookbook/" class="d-sidebar-link{% if page.url == '/docs/cookbook/' %} active{% endif %}">Overview</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/basics/" class="d-sidebar-link{% if page.url contains 'cookbook/basics' %} active{% endif %}">Basics</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/strings/" class="d-sidebar-link{% if page.url contains 'cookbook/strings' %} active{% endif %}">Strings</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/http/" class="d-sidebar-link{% if page.url contains 'cookbook/http' %} active{% endif %}">HTTP</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/concurrency/" class="d-sidebar-link{% if page.url contains 'cookbook/concurrency' %} active{% endif %}">Concurrency</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/capabilities/" class="d-sidebar-link{% if page.url contains 'cookbook/capabilities' %} active{% endif %}">Capabilities</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/linear-types/" class="d-sidebar-link{% if page.url contains 'cookbook/linear-types' %} active{% endif %}">Linear Types</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/vault/" class="d-sidebar-link{% if page.url contains 'cookbook/vault' %} active{% endif %}">Vault</a>
+      <a href="{{ site.baseurl }}/docs/cookbook/html/" class="d-sidebar-link{% if page.url contains 'cookbook/html' %} active{% endif %}">HTML</a>
 
-      <p class="d-sidebar-section">Language</p>
-      {% for p in nav_pages %}
-        {% if p.nav_order >= 4 and p.nav_order <= 8 %}
-      <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
-        {% endif %}
-      {% endfor %}
-
-      <p class="d-sidebar-section">Concurrency</p>
-      {% for p in nav_pages %}
-        {% if p.nav_order >= 9 and p.nav_order <= 11 %}
-      <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
-        {% endif %}
-      {% endfor %}
-
-      <p class="d-sidebar-section">Reference</p>
-      {% for p in nav_pages %}
-        {% if p.nav_order >= 12 %}
-      <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
-        {% endif %}
-      {% endfor %}
-
-      <p class="d-sidebar-section">Learn</p>
-      <a href="{{ site.baseurl }}/docs/coming-from-python/" class="d-sidebar-link">From Python/TS</a>
-      <a href="{{ site.baseurl }}/docs/coming-from-fp/" class="d-sidebar-link">From FP</a>
-      <a href="{{ site.baseurl }}/docs/cookbook/" class="d-sidebar-link">Cookbook</a>
+      <p class="d-sidebar-section">All Docs</p>
+      <a href="{{ site.baseurl }}/docs/" class="d-sidebar-link">← Back to Docs</a>
     </div>
   </aside>
 
-  <!-- MAIN CONTENT -->
   <main class="d-main">
     <div class="d-content">
       {{ content }}
@@ -301,6 +373,34 @@
 
 </div>
 
+<!-- RIGHT REPL PANEL -->
+<div class="ck-repl-panel" id="ck-repl-panel"
+     data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
+  <div class="ck-repl-header">
+    <span class="ck-dot" style="background:#ff5f57"></span>
+    <span class="ck-dot" style="background:#febc2e"></span>
+    <span class="ck-dot" style="background:#28c840"></span>
+    <span class="ck-repl-title">march — interactive</span>
+    <button class="ck-repl-close" id="ck-repl-close">close</button>
+  </div>
+  <div class="ck-repl-history" id="ck-repl-history">
+    <div class="ck-repl-entry">
+      <span class="ck-repl-info" id="ck-repl-loading"></span>
+    </div>
+    <div class="ck-repl-entry">
+      <span class="ck-repl-info">Click <strong style="color:var(--accent);font-style:normal">run</strong> on any snippet to try it here.</span>
+    </div>
+  </div>
+  <div class="ck-repl-input-row">
+    <span class="ck-repl-prompt">march&gt;</span>
+    <textarea class="ck-repl-textarea" id="ck-repl-input" rows="1"
+      placeholder="try something…" autocomplete="off" spellcheck="false"></textarea>
+    <button class="ck-repl-submit" id="ck-repl-submit">run</button>
+  </div>
+</div>
+
+<script src="{{ site.baseurl }}/assets/march-repl.js?v={{ site.time | date: '%s' }}"></script>
+<script src="{{ site.baseurl }}/assets/cookbook.js?v={{ site.time | date: '%s' }}"></script>
 <script>
 let dark = true;
 
@@ -322,8 +422,8 @@ document.getElementById('d-theme-btn').addEventListener('click', () => {
   applyTheme();
 });
 
-const sidebar  = document.getElementById('d-sidebar');
-const overlay  = document.getElementById('d-overlay');
+const sidebar   = document.getElementById('d-sidebar');
+const overlay   = document.getElementById('d-overlay');
 const hamburger = document.getElementById('d-hamburger');
 
 function openSidebar()  { sidebar.classList.add('open');    overlay.classList.add('show'); }
@@ -332,7 +432,9 @@ function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.re
 hamburger.addEventListener('click', () =>
   sidebar.classList.contains('open') ? closeSidebar() : openSidebar()
 );
-overlay.addEventListener('click', closeSidebar);
+overlay.addEventListener('click', () => {
+  closeSidebar();
+});
 
 initTheme();
 </script>
