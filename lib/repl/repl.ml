@@ -225,6 +225,7 @@ let wrap_expr_as_module
     fn_attrs = [];
     fn_ret_ty = None;
     fn_clauses = [main_clause];
+    fn_bounds = [];
   } in
   let main_decl = March_ast.Ast.DFn (main_def, s) in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };

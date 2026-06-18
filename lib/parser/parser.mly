@@ -71,7 +71,7 @@
           | rest' -> (ret_acc, clauses_acc, rest')
         in
         let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses }, span) :: acc) rest'
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     go [] decls
@@ -258,6 +258,9 @@ decl:
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
+fn_bound_param:
+  | name = lower_name; COLON; t = ty { (name, t) }
+
 fn_decl:
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -269,7 +272,23 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }] },
+                             fc_span = mk_span ($loc) }];
+             fn_bounds = [] },
+           mk_span ($loc)) }
+  | FN; name = lower_name;
+    LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
+    LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    { DFn ({ fn_name = name;
+             fn_vis = Public;
+             fn_doc = None;
+             fn_attrs = [];
+             fn_ret_ty = ret;
+             fn_clauses = [{ fc_params = params;
+                             fc_guard = guard;
+                             fc_body = body;
+                             fc_span = mk_span ($loc) }];
+             fn_bounds = bounds },
            mk_span ($loc)) }
   | PFN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
@@ -281,7 +300,23 @@ fn_decl:
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
                              fc_body = body;
-                             fc_span = mk_span ($loc) }] },
+                             fc_span = mk_span ($loc) }];
+             fn_bounds = [] },
+           mk_span ($loc)) }
+  | PFN; name = lower_name;
+    LBRACKET; bounds = separated_nonempty_list(COMMA, fn_bound_param); RBRACKET;
+    LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    { DFn ({ fn_name = name;
+             fn_vis = Private;
+             fn_doc = None;
+             fn_attrs = [];
+             fn_ret_ty = ret;
+             fn_clauses = [{ fc_params = params;
+                             fc_guard = guard;
+                             fc_body = body;
+                             fc_span = mk_span ($loc) }];
+             fn_bounds = bounds },
            mk_span ($loc)) }
   | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
