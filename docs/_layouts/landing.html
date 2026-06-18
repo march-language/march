@@ -200,35 +200,50 @@
       display: flex; align-items: center; padding: 11px 16px;
       border-bottom: 1px solid var(--border); gap: 6px;
     }
-    .m-repl-title { margin-left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
-    .m-repl-body { display: grid; grid-template-columns: 160px 1fr; }
-    .m-repl-tabs {
-      border-right: 1px solid var(--border); padding: 12px 8px;
-      display: flex; flex-direction: column; gap: 2px;
+    .m-repl-title { margin-left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); flex: 1; }
+    .m-repl-reset-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-faint);
+      border-radius: 4px; padding: 2px 10px; font-size: 11px; cursor: pointer;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em;
     }
-    .m-repl-tab {
-      padding: 7px 12px; border-radius: 5px; font-family: 'JetBrains Mono', monospace;
-      font-size: 11px; cursor: pointer; background: transparent; color: var(--text-faint);
-      letter-spacing: 0.02em; user-select: none; border: none; text-align: left; width: 100%;
+    .m-repl-reset-btn:hover { border-color: var(--text-faint); color: var(--text-muted); }
+    .m-repl-history {
+      padding: 14px 20px; min-height: 220px; max-height: 320px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: var(--border) transparent;
     }
-    .m-repl-tab.active { background: rgba(18,145,167,0.15); color: var(--accent); }
-    .m-repl-main { display: flex; flex-direction: column; min-height: 320px; }
-    .m-repl-pre {
-      padding: 24px; margin: 0; flex: 1; overflow-x: auto;
-      font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.72; tab-size: 2;
+    .m-repl-entry { margin-bottom: 2px; }
+    .m-repl-iline { font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65; color: var(--text); }
+    .m-repl-iline::before { content: "march> "; color: var(--text-faint); }
+    .m-repl-oline { font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65; color: var(--accent); white-space: pre-wrap; }
+    .m-repl-eline { font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65; color: #f87171; white-space: pre-wrap; }
+    .m-repl-nfo   { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65; color: var(--text-muted); font-style: italic; }
+    .m-repl-input-row {
+      display: flex; align-items: flex-start; padding: 10px 16px 12px;
+      border-top: 1px solid var(--border); gap: 8px;
     }
-    .m-repl-footer {
-      border-top: 1px solid var(--border); padding: 14px 24px;
-      display: flex; align-items: center; gap: 14px; min-height: 52px;
+    .m-repl-prompt-lbl {
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text-faint);
+      user-select: none; padding-top: 1px; white-space: nowrap;
     }
-    .m-repl-run {
+    .m-repl-textarea {
+      flex: 1; background: none; border: none; outline: none;
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.65;
+      color: var(--text); resize: none; overflow: hidden; min-height: 1.65em; caret-color: var(--accent);
+    }
+    .m-repl-textarea::placeholder { color: var(--text-faint); }
+    .m-repl-submit-btn {
       font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent);
-      background: rgba(18,145,167,0.1); border: 1px solid rgba(18,145,167,0.3);
-      border-radius: 5px; padding: 7px 16px; cursor: pointer; letter-spacing: 0.03em;
+      background: transparent; border: 1px solid var(--accent-border);
+      border-radius: 5px; padding: 6px 14px; cursor: pointer; letter-spacing: 0.03em; flex-shrink: 0;
     }
-    .m-repl-hint { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
-    .m-repl-prompt { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent); }
-    .m-repl-output { font-family: 'JetBrains Mono', monospace; font-size: 13.5px; }
+    .m-repl-submit-btn:hover { background: rgba(18,145,167,0.1); }
+    .m-repl-chips { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .m-repl-chip {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      padding: 4px 12px; border-radius: 100px; border: 1px solid var(--border);
+      background: transparent; color: var(--text-muted); cursor: pointer; letter-spacing: 0.02em;
+    }
+    .m-repl-chip:hover { border-color: var(--accent-border); color: var(--accent); }
 
     /* INSTALL */
     .m-install { padding: 100px 32px; }
@@ -278,8 +293,6 @@
     @media (max-width: 768px) {
       .m-feature-grid { grid-template-columns: 1fr; }
       .m-section-h2 { font-size: 32px; }
-      .m-repl-body { grid-template-columns: 1fr; }
-      .m-repl-tabs { flex-direction: row; flex-wrap: wrap; border-right: none; border-bottom: 1px solid var(--border); }
       .m-hero { padding: 80px 20px 60px; }
       .m-features, .m-playground, .m-install { padding-left: 20px; padding-right: 20px; }
     }
@@ -400,7 +413,7 @@
   </div>
 </section>
 
-<!-- PLAYGROUND MOCK -->
+<!-- REPL -->
 <section class="m-playground">
   <div class="m-playground-inner">
     <p class="m-section-label">Try March</p>
@@ -408,20 +421,31 @@
       <h2 class="m-section-h2" style="margin-bottom:0;">See how March feels to write.</h2>
       <a href="{{ site.baseurl }}/docs/playground/" class="m-playground-link">Full playground — no install needed ↗</a>
     </div>
-    <div class="m-repl">
+    <div class="m-repl" id="m-repl-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
       <div class="m-repl-header">
         <span class="m-dot" style="background:#ff5f57;"></span>
         <span class="m-dot" style="background:#febc2e;"></span>
         <span class="m-dot" style="background:#28c840;"></span>
         <span class="m-repl-title">march — interactive</span>
+        <button class="m-repl-reset-btn" id="m-repl-reset">reset</button>
       </div>
-      <div class="m-repl-body">
-        <div class="m-repl-tabs" id="repl-tabs"></div>
-        <div class="m-repl-main">
-          <pre class="m-repl-pre"><code id="repl-code"></code></pre>
-          <div class="m-repl-footer" id="repl-footer"></div>
-        </div>
+      <div class="m-repl-history" id="m-repl-history">
+        <div class="m-repl-entry"><span class="m-repl-nfo">March REPL — type an expression and press Enter.</span></div>
+        <div class="m-repl-entry"><span class="m-repl-nfo" id="m-repl-loading"></span></div>
       </div>
+      <div class="m-repl-input-row">
+        <span class="m-repl-prompt-lbl">march&gt;</span>
+        <textarea class="m-repl-textarea" id="m-repl-input" rows="1" placeholder="1 + 1"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <button class="m-repl-submit-btn" id="m-repl-submit">&#9654; Run</button>
+      </div>
+    </div>
+    <div class="m-repl-chips">
+      <button class="m-repl-chip" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
+      <button class="m-repl-chip" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
+      <button class="m-repl-chip" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
+      <button class="m-repl-chip" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet mean = List.fold_left(data, 0.0, fn (a, x) -> a +. x) /. n\nlet var  = List.fold_left(data, 0.0, fn (a, x) -> a +. (x -. mean) *. (x -. mean)) /. n\n(mean, Math.sqrt(var))')">std dev</button>
+      <button class="m-repl-chip" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
     </div>
   </div>
 </section>
@@ -651,26 +675,9 @@ fn write_and_close(
   -- compile error if f used again
 end`;
 
-const REPL_EXAMPLES = [
-  { label: 'Hello World',
-    code: `fn main() : Unit do\n  println("Hello, world!")\nend`,
-    output: 'Hello, world!', kind: 'stdout' },
-  { label: 'Pattern Match',
-    code: `type Shape = Circle(Float) | Rect(Float, Float)\n\nlet area = fn s ->\n  match s do\n    Circle(r)  -> 3.14159 *. r *. r\n    Rect(w, h) -> w *. h\n  end\n\narea(Circle(5.0))`,
-    output: '78.5397 : Float', kind: 'value' },
-  { label: 'List Pipeline',
-    code: `List.range(1, 10)\n|> List.filter(fn x -> x % 2 == 0)\n|> List.map(fn x -> x * x)\n|> List.sum`,
-    output: '120 : Int', kind: 'value' },
-  { label: 'Fibonacci',
-    code: `fn fib(n : Int) : Int do\n  match n do\n    0 -> 0\n    1 -> 1\n    _ -> fib(n - 1) + fib(n - 2)\n  end\nend\n\nfib(10)`,
-    output: '55 : Int', kind: 'value' },
-  { label: 'Actors',
-    code: `actor Counter do\n  state { count : Int }\n  init  { count = 0 }\n  on Increment(n : Int) do\n    { state with count = state.count + n }\n  end\n  on Get() -> reply state.count\nend\n\nlet c = spawn(Counter)\nsend(c, Increment(10))\nsend(c, Increment(5))\nsend(c, Get())`,
-    output: '15 : Int', kind: 'value' },
-];
 
 // ─── State ────────────────────────────────────────────────────────────────────
-let dark = true, heroTab = 0, replEx = 0, replRun = false;
+let dark = true, heroTab = 0;
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 function initTheme() {
@@ -690,8 +697,6 @@ function renderAll() {
   renderFeatures();
   renderHeroTabs();
   renderHeroCode();
-  renderReplTabs();
-  renderReplCode();
   renderInstall();
 }
 
@@ -709,7 +714,7 @@ function renderHeroTabs() {
   ).join('');
   el.querySelectorAll('.m-tab').forEach(btn =>
     btn.addEventListener('click', () => {
-      heroTab = +btn.dataset.i; replRun = false;
+      heroTab = +btn.dataset.i;
       renderHeroCode(); renderHeroTabs();
     })
   );
@@ -717,40 +722,6 @@ function renderHeroTabs() {
 
 function renderHeroCode() {
   document.getElementById('hero-code').innerHTML = hl(HERO_EXAMPLES[heroTab].code);
-}
-
-function renderReplTabs() {
-  const el = document.getElementById('repl-tabs');
-  el.innerHTML = REPL_EXAMPLES.map((ex, i) =>
-    `<button class="m-repl-tab${i===replEx?' active':''}" data-i="${i}">${ex.label}</button>`
-  ).join('');
-  el.querySelectorAll('.m-repl-tab').forEach(btn =>
-    btn.addEventListener('click', () => {
-      replEx = +btn.dataset.i; replRun = false;
-      renderReplCode(); renderReplTabs();
-    })
-  );
-}
-
-function renderReplCode() {
-  const ex = REPL_EXAMPLES[replEx];
-  document.getElementById('repl-code').innerHTML = hl(ex.code);
-  const footer = document.getElementById('repl-footer');
-  if (replRun) {
-    const valColor = ex.kind === 'value'
-      ? (dark ? 'oklch(74% 0.11 200)' : 'oklch(32% 0.11 215)')
-      : 'var(--text)';
-    footer.innerHTML =
-      `<span class="m-repl-prompt">march&gt;</span>` +
-      `<span class="m-repl-output" style="color:${valColor};">${ex.output}</span>`;
-  } else {
-    footer.innerHTML =
-      `<button class="m-repl-run" id="repl-run">▶ Run</button>` +
-      `<span class="m-repl-hint">Select an example, then run</span>`;
-    document.getElementById('repl-run').addEventListener('click', () => {
-      replRun = true; renderReplCode();
-    });
-  }
 }
 
 function renderInstall() {
@@ -766,6 +737,134 @@ function renderInstall() {
     `<span style="color:${cc}">forge</span> ` +
     `<span style="color:${ac}">i</span>`;
 }
+
+// ─── Landing REPL ────────────────────────────────────────────────────────────
+(function () {
+  const wrap   = document.getElementById('m-repl-wrap');
+  const base   = (wrap && wrap.dataset.base) || '';
+  const ver    = (wrap && wrap.dataset.ver)  || '0';
+  const histEl = document.getElementById('m-repl-history');
+  const inputEl= document.getElementById('m-repl-input');
+  const loadEl = document.getElementById('m-repl-loading');
+
+  let loaded = false, loading = false, pending = null;
+  let cmdHist = [], histIdx = -1;
+
+  function loadScript(src, ok, err) {
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = err;
+    document.head.appendChild(s);
+  }
+
+  function loadBundle(cb) {
+    if (loaded) { cb(); return; }
+    if (loading) { pending = cb; return; }
+    loading = true;
+    loadEl.textContent = 'Loading interpreter…';
+    loadScript(base + '/assets/march_stdlib.js?v=' + ver, () => {
+      loadScript(base + '/assets/march.js?v=' + ver, () => {
+        loaded = true; loading = false;
+        loadEl.textContent = 'Ready.';
+        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
+        cb();
+        if (pending) { const f = pending; pending = null; f(); }
+      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
+    }, () => {
+      loadScript(base + '/assets/march.js?v=' + ver, () => {
+        loaded = true; loading = false;
+        loadEl.textContent = 'Ready.';
+        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
+        cb();
+        if (pending) { const f = pending; pending = null; f(); }
+      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
+    });
+  }
+
+  function addEntry(cls, text) {
+    text.split('\n').forEach(line => {
+      const div = document.createElement('div');
+      div.className = 'm-repl-entry';
+      const sp = document.createElement('span');
+      sp.className = cls; sp.textContent = line;
+      div.appendChild(sp); histEl.appendChild(div);
+    });
+    histEl.scrollTop = histEl.scrollHeight;
+  }
+
+  function addInputLine(code) {
+    code.split('\n').forEach((line, i) => {
+      const div = document.createElement('div');
+      div.className = 'm-repl-entry';
+      const sp = document.createElement('span');
+      if (i === 0) {
+        sp.className = 'm-repl-iline';
+      } else {
+        sp.style.cssText = 'font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.65;color:var(--text-faint)';
+        line = '       ' + line;
+      }
+      sp.textContent = line;
+      div.appendChild(sp); histEl.appendChild(div);
+    });
+    histEl.scrollTop = histEl.scrollHeight;
+  }
+
+  function autoResize() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = inputEl.scrollHeight + 'px';
+  }
+
+  function submit(code) {
+    if (!code.trim()) return;
+    if (cmdHist[0] !== code) cmdHist.unshift(code);
+    if (cmdHist.length > 50) cmdHist.pop();
+    histIdx = -1;
+    addInputLine(code);
+    inputEl.value = ''; autoResize();
+
+    if (code.trim() === ':reset') {
+      if (loaded && window.marchResetSession) window.marchResetSession();
+      while (histEl.firstChild) histEl.removeChild(histEl.firstChild);
+      addEntry('m-repl-nfo', 'Session reset.');
+      return;
+    }
+
+    loadBundle(() => {
+      if (!window.marchEvalLine) { addEntry('m-repl-eline', 'Interpreter not available.'); return; }
+      const result = window.marchEvalLine(code);
+      if (result.output && result.output.trim()) addEntry('m-repl-oline', result.output.trimEnd());
+      if (result.error !== null) addEntry('m-repl-eline', result.error);
+    });
+  }
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault(); submit(inputEl.value);
+    } else if (e.key === 'ArrowUp' && !e.shiftKey && cmdHist.length) {
+      e.preventDefault();
+      histIdx = Math.min(histIdx + 1, cmdHist.length - 1);
+      inputEl.value = cmdHist[histIdx]; autoResize();
+      setTimeout(() => { inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length; }, 0);
+    } else if (e.key === 'ArrowDown' && !e.shiftKey) {
+      e.preventDefault();
+      histIdx > 0 ? (histIdx--, inputEl.value = cmdHist[histIdx]) : (histIdx = -1, inputEl.value = '');
+      autoResize();
+    } else if (!loaded && !loading) {
+      loadBundle(() => {});
+    }
+  });
+  inputEl.addEventListener('input', autoResize);
+  document.getElementById('m-repl-submit').addEventListener('click', () => submit(inputEl.value));
+  document.getElementById('m-repl-reset').addEventListener('click', () => submit(':reset'));
+
+  window.mReplLoad = code => {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = code; inputEl.value = ta.value;
+    autoResize(); inputEl.focus();
+    if (!loaded && !loading) loadBundle(() => {});
+  };
+
+  window.addEventListener('load', () => loadBundle(() => {}));
+})();
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 document.getElementById('theme-btn').addEventListener('click', () => {
