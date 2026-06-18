@@ -164,6 +164,19 @@
       padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px;
       line-height: 1.65; overflow-x: auto; margin: 0;
     }
+    .m-code-wrap { position: relative; }
+    .m-try-btn {
+      position: absolute; top: 7px; right: 7px;
+      background: var(--bg-code); border: 1px solid var(--border);
+      border-radius: 4px; color: var(--text-faint);
+      cursor: pointer; padding: 3px 8px;
+      font-size: 10px; font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.04em; line-height: 1.5;
+      opacity: 0; transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+      z-index: 5; display: flex; align-items: center; gap: 4px;
+    }
+    .m-code-wrap:hover .m-try-btn { opacity: 1; }
+    .m-try-btn:hover { color: var(--accent); border-color: var(--accent); }
     .m-feature-hint {
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
       color: var(--text-faint); margin-top: 16px; letter-spacing: 0.03em;
@@ -386,7 +399,10 @@
             <p class="m-feature-label">Performance</p>
             <h3 class="m-feature-h3">Zero-allocation recursive transforms</h3>
             <p class="m-feature-p">FBIP rewrites uniquely-owned data in place, so transforms like this allocate nothing on the reuse path. The functional-style rewrite is automatic; no unsafe code required.</p>
-            <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
+            <div class="m-code-wrap">
+              <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
+              <button class="m-try-btn" onclick="event.stopPropagation();tryFBIP()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+            </div>
             <p class="m-feature-hint" style="text-align:right;">See benchmarks →</p>
           </div>
           <div class="m-perf-face m-perf-back">
@@ -414,7 +430,10 @@
         <p class="m-feature-label">Concurrency</p>
         <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
         <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
-        <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
       </div>
 
       <!-- TYPE SYSTEM -->
@@ -422,7 +441,10 @@
         <p class="m-feature-label">Type System</p>
         <h3 class="m-feature-h3">Hindley-Milner inference, ADTs, exhaustive patterns</h3>
         <p class="m-feature-p">Types flow without annotation boilerplate. The compiler enforces exhaustive pattern matching — a missing case is a compile error. Generics are monomorphized, no boxing overhead.</p>
-        <pre class="m-feature-pre"><code id="type-code"></code></pre>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="type-code"></code></pre>
+          <button class="m-try-btn" onclick="tryTYPES()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
       </div>
 
       <!-- MEMORY -->
@@ -783,6 +805,15 @@ function renderInstall() {
   window.mReplLoad     = function (code)        { repl.load(code); };
   window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };
 })();
+
+// ─── Try-in-REPL ─────────────────────────────────────────────────────────────
+function tryInRepl(code) {
+  mReplLoad(code);
+  document.getElementById('m-repl-wrap').scrollIntoView({ behavior: 'smooth' });
+}
+function tryFBIP()  { tryInRepl(FBIP);  }
+function tryACTOR() { tryInRepl(ACTOR); }
+function tryTYPES() { tryInRepl(TYPES); }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 document.getElementById('theme-btn').addEventListener('click', () => {
