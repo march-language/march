@@ -79,8 +79,10 @@ end
 
 mod Main do
   fn main() do
-    let cap = Plugin.grant()
-    match Plugin.run(cap, "1 + 1") do
+    let _cap = Plugin.grant()
+    -- _cap satisfies the `needs Cap(PluginCap)` requirement for run() below;
+    -- caps are ambient — not passed as arguments
+    match Plugin.run("1 + 1") do
       Ok(v)  -> println("result: " ++ v)
       Err(e) -> println("error: " ++ e)
     end

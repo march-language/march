@@ -70,7 +70,7 @@ let count : Int = 0
 
 ```march
 type Shape =
-  | Circle(Float)
+  Circle(Float)
   | Rect(Float, Float)
   | Point
 ```
@@ -175,7 +175,7 @@ end
 ```march
 mod Calc do
   type Expr =
-    | Num(Float)
+    Num(Float)
     | Add(Expr, Expr)
     | Mul(Expr, Expr)
     | Div(Expr, Expr)

@@ -71,19 +71,38 @@ send(pid, Get())
 
 ---
 
-## Channels
+## Fan-out and collect
 
-Channels are typed conduits between tasks:
+A common pattern: fan out N tasks, collect when all complete. `Task.async_stream` maps a list to concurrent tasks and returns results as they finish:
 
 ```march
-let ch = Channel.new("work-queue")
+let urls = ["https://api.example.com/a", "https://api.example.com/b"]
 
-Task.async(fn () -> do
-  Channel.push(ch, "hello")
-  Channel.push(ch, "world")
-end)
+let results = Task.async_stream(urls, fn url ->
+  HttpClient.get(url)
+)
+```
 
-let msg = Channel.receive(ch)
+For structured coordination, use an actor as a mailbox — tasks send to it, it accumulates results:
+
+```march
+actor Collector do
+  state { items : List(String), done : Int, total : Int }
+  init { items = Nil, done = 0, total = 0 }
+
+  on Start(n : Int) do
+    { state with total = n }
+  end
+
+  on Item(s : String) do
+    { state with items = Cons(s, state.items), done = state.done + 1 }
+  end
+
+  on Results() do
+    println(int_to_string(state.done) ++ " items collected")
+    state
+  end
+end
 ```
 
 ---

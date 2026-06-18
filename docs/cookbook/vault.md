@@ -26,7 +26,7 @@ Vault.get(v, "name")    -- None
 
 ## Atomic update
 
-`Vault.update` applies a function atomically — no race between get and set:
+`Vault.update` applies a function to the current value atomically — no race between get and set. The callback receives the unwrapped value and is only called when the key exists:
 
 ```march
 let counter = Vault.new("counters")
@@ -35,17 +35,16 @@ Vault.set(counter, "hits", 0)
 Vault.update(counter, "hits", fn n -> n + 1)
 ```
 
-Multiple actors can call `update` concurrently without conflict.
+Multiple actors can call `update` concurrently without conflict. If the key doesn't exist, the update is a no-op.
 
 ---
 
 ## TTL (time-to-live)
 
-Set a key to expire automatically after N milliseconds:
+`Vault.set_ttl` sets a key with an expiry. It takes `(store, key, value, ttl_secs)` — TTL is in **seconds**:
 
 ```march
-Vault.set(v, "token", "abc123")
-Vault.set_ttl(v, "token", 60000)   -- expires in 60 seconds
+Vault.set_ttl(v, "token", "abc123", 60)   -- expires after 60 seconds
 ```
 
 ---
@@ -89,14 +88,12 @@ mod RateLimit do
     if count >= limit do
       false
     else
-      Vault.update(store, key, fn n ->
-        match n do
-          None    -> 1
-          Some(c) -> c + 1
-        end
-      )
       if count == 0 do
-        Vault.set_ttl(store, key, 60000)
+        -- First hit: set with TTL to auto-expire the window after 60s
+        Vault.set_ttl(store, key, 1, 60)
+      else
+        -- Subsequent hits: increment (key already exists)
+        Vault.update(store, key, fn n -> n + 1)
       end
       true
     end

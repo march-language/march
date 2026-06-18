@@ -108,7 +108,9 @@ mod EchoServer do
 
   fn main() do
     println("Listening on :8080")
-    HttpServer.run_pipeline([handle], 8080)
+    HttpServer.new(8080)
+    |> HttpServer.plug(handle)
+    |> HttpServer.listen()
   end
 end
 ```

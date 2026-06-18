@@ -105,13 +105,13 @@ mod Net do
   end
 
   fn echo_once(addr : String) : Result((), String) do
-    let? sock  = connect(addr)
-    let? msg   = recv_bytes(sock)
-    let? sock2 = send_bytes(sock, msg)
-    disconnect(sock2)
+    let? sock         = connect(addr)
+    let? (msg, sock2) = recv_bytes(sock)
+    let? sock3        = send_bytes(sock2, msg)
+    disconnect(sock3)
     Ok(())
   end
 end
 ```
 
-`sock` is consumed by `recv_bytes`, which returns a new `Socket(Connected)` as `sock2`. Forgetting to call `disconnect` at the end would be caught at compile time — the linear value would be dropped unsafely.
+`recv_bytes` consumes `sock` and returns `(data, Socket(Connected))` — a fresh handle. Using the original `sock` after that would be a compile error (linear value used twice). Forgetting to call `disconnect` at the end would also be a compile error — `sock3` would be dropped without being consumed.
