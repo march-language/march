@@ -239,6 +239,8 @@ finding, and convention drift.  Listed in the recommended order.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` builtin, global `revocation_table`, `is_cap_valid(cap)`, and VCap handling in ESend. C runtime: `march_revoke_cap` / `march_is_cap_valid`. 5 new tests in supervision phase3 group.
 - ✅ **Supervisor restart policies: `rest_for_one`/`one_for_all`** — Both policies fully implemented in `eval.ml` and tested (tests pass).
 - ✅ **Improve error messages for complex types** — Added `pp_ty_pretty` (line-wrapping at 60 chars with indented args), `find_arg_mismatch` (identifies which arg differs), and enhanced `report_mismatch` with multi-line format for long types and contextual notes identifying the mismatching arg/field.
+- [ ] **Capability body enforcement — Phase 1: stdlib `needs` annotation** — Add `needs IO.FileRead`, `needs IO.FileWrite`, `needs IO.Process`, `needs IO.Console`, `needs IO.Clock`, `needs IO.Random` (new cap) to the ~8 stdlib IO modules (`io.march`, `file.march`, `system.march`, `csv.march`, `uuid.march`, `random.march`, `crypto.march`). Prerequisite for Phase 2. ~0.5 days. Spec: `specs/capability-body-enforcement.md`.
+- [ ] **Capability body enforcement — Phase 2: body-scanning pass** — Extend `check_module_needs` to walk `fc_body` of all function clauses (and `DLet` RHS) for calls to builtins in a `builtin_cap_table` (50-entry table mapping builtins to required caps). Calls without a matching `needs` declaration are errors. Add `IO.Random` to `io_cap_hierarchy`. ~1.5 days, ~15 tests. Ships as a warning first, then promoted to error. Spec: `specs/capability-body-enforcement.md`.
 
 ---
 
@@ -267,7 +269,8 @@ finding, and convention drift.  Listed in the recommended order.
 
 - [ ] **Query-based/demand-driven compiler architecture** — Current pipeline is linear (parse → desugar → typecheck → eval/TIR). Design goal is a query-based architecture (like `rustc`'s `salsa`) for fine-grained incremental recompilation. Deferred post-v1.
 - ✅ **Constraint solver for type-level naturals (v1)** — `normalize_tnat` reduces concrete arithmetic (`2+3 → 5`, `(1+2)*3 → 9`) and applies identity/annihilation laws (`n+0 → n`, `n*1 → n`, `n*0 → 0`). `solve_nat_eq` in `unify` solves linear equations (`a+2=5 → a=3`). Parser extended: `INT` as `TyNat`, `+`/`*` in type position via `ty_nat_add`/`ty_nat_mul` levels. 9 new tests in `type_level_nat` group.
-- [ ] **Row polymorphism** — Record operations on types with unknown record shapes. Would enable `e.field` when `e : TVar` to constrain the record shape rather than return a fresh var.
+- [ ] **Record field auto-satisfy (Feature 2)** — Zero-declaration rule: when discharging `CInterface(Iface, TRecord[...])`, auto-satisfy single-method accessor-shaped interfaces (`a -> T`) when the record has a matching field. Applies only to anonymous `TRecord` types (not named aliases), single-method interfaces, and exact field name+type match. Replaces row polymorphism as the solution to the "field access on polymorphic type" ergonomics gap. ~0.5–1 day. ~9 tests. Spec: `specs/structural-interface-satisfaction.md`.
+- [ ] **`satisfy` declaration (Feature 1)** — New `satisfy Iface for T` keyword that generates an `impl` block from matching functions already in scope. Eliminates boilerplate `impl` delegation for accessor wrappers and newtype patterns. New `SATISFY` token + `DSatisfy` AST node + desugar expansion. Orphan rules identical to explicit `impl`. ~1.5–2 days. ~11 tests. Spec: `specs/structural-interface-satisfaction.md`.
 
 ### Compiler Optimizations (Planned)
 
