@@ -2799,6 +2799,57 @@ let test_transitions_warn_undeclared () =
   ) ctx.diagnostics in
   Alcotest.(check bool) "undeclared transition fn: warning emitted" true has_transition_warning
 
+(* ── `Tagged(X, T)` specialization tag tests ────────────────────────────── *)
+
+let test_tagged_type_parses () =
+  let src = {|mod Test do
+    type DSP = DSP
+    type Realtime = Realtime
+    fn process(cap : Tagged(DSP, Realtime)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Tagged(X, T): valid type, no errors" false (has_errors ctx)
+
+let test_tagged_realtime_excludes_io_error () =
+  let src = {|mod Test do
+    needs IO
+    type DSP = DSP
+    type Realtime = Realtime
+    fn process(cap : Tagged(DSP, Realtime), io : Cap(IO)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Tagged(_, Realtime) + Cap(IO): error" true (has_errors ctx)
+
+let test_tagged_realtime_excludes_alloc_error () =
+  let src = {|mod Test do
+    needs Alloc
+    type DSP = DSP
+    type Realtime = Realtime
+    fn process(cap : Tagged(DSP, Realtime), alloc : Cap(Alloc)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Tagged(_, Realtime) + Cap(Alloc): error" true (has_errors ctx)
+
+let test_tagged_realtime_excludes_panic_error () =
+  let src = {|mod Test do
+    needs Panic
+    type DSP = DSP
+    type Realtime = Realtime
+    fn process(cap : Tagged(DSP, Realtime), p : Cap(Panic)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Tagged(_, Realtime) + Cap(Panic): error" true (has_errors ctx)
+
+let test_tagged_standard_no_exclusion () =
+  let src = {|mod Test do
+    needs IO
+    type DSP = DSP
+    type Standard = Standard
+    fn process(cap : Tagged(DSP, Standard), io : Cap(IO)) : () do () end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Tagged(_, Standard) + Cap(IO): no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3044,6 +3095,11 @@ let compiler_suites =
           Alcotest.test_case "transitions block: no errors"              `Quick test_transitions_parses;
           Alcotest.test_case "transitions via missing fn: error"         `Quick test_transitions_via_not_found_error;
           Alcotest.test_case "undeclared transition fn: warning emitted" `Quick test_transitions_warn_undeclared;
+          Alcotest.test_case "Tagged(X,T): valid type annotation"        `Quick test_tagged_type_parses;
+          Alcotest.test_case "Tagged(_, Realtime) + Cap(IO): error"      `Quick test_tagged_realtime_excludes_io_error;
+          Alcotest.test_case "Tagged(_, Realtime) + Cap(Alloc): error"   `Quick test_tagged_realtime_excludes_alloc_error;
+          Alcotest.test_case "Tagged(_, Realtime) + Cap(Panic): error"   `Quick test_tagged_realtime_excludes_panic_error;
+          Alcotest.test_case "Tagged(_, Standard): no exclusion"         `Quick test_tagged_standard_no_exclusion;
         ] );
       ( "mpst",
         [

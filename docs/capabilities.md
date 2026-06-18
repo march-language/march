@@ -280,3 +280,145 @@ shows the current state and all declared transitions from it (see
 
 `forge cap query` prints a project-wide capability and typestate summary (see
 [Tooling]({{ site.baseurl }}/docs/tooling/#forge-cap--capability-and-typestate-inspection)).
+
+---
+
+## Phase 2c: Specialization tags (`Tagged(X, T)`)
+{: #specialization-tags}
+
+`Tagged(X, T)` is a two-argument phantom type constructor that annotates a
+capability with a specialization policy. The tag `T` drives compile-time
+behaviour without carrying any runtime value.
+
+### Syntax
+
+```march
+fn dsp_callback(cap : Tagged(DSP, Realtime), buf : Buffer(Float32, 256)) : Buffer(Float32, 256)
+```
+
+`DSP` is the *tag kind* (a phantom type you declare) and `Realtime` is the
+*policy value* (another phantom type).
+
+### Realtime exclusion
+
+The key narrowing rule: a function that takes `Tagged(_, Realtime)` is in a
+**realtime context** and cannot also hold `Cap(Alloc)`, `Cap(IO)`, or
+`Cap(Panic)`. The compiler rejects mixed signatures at compile time:
+
+```march
+type DSP = DSP
+type Realtime = Realtime
+
+-- ERROR: realtime functions cannot take Cap(IO)
+fn bad(cap : Tagged(DSP, Realtime), io : Cap(IO)) : () do () end
+```
+
+```
+Error: function `bad` takes Tagged(_, Realtime) but also takes Cap(IO).
+Realtime functions cannot hold Cap(IO) — allocation, IO, and panic are excluded
+from realtime contexts.
+```
+
+A correct realtime function signature takes only the `Tagged(DSP, Realtime)` cap:
+
+```march
+fn process(cap : Tagged(DSP, Realtime), buf : Buffer(Float32, 256)) : Buffer(Float32, 256) do
+  -- statically proven: no allocation, no IO, no panic
+  ...
+end
+```
+
+Functions tagged with a non-`Realtime` policy (e.g. `Tagged(DSP, Standard)`) are
+not restricted and may hold other capabilities alongside the tag.
+
+### Type-indexed specialization
+
+`Tagged` also covers type-indexed specialization (SIMD width, buffer sizes). In
+this case the tag is a real `TNat` or type parameter that monomorphization already
+handles for free — no new mechanism is needed:
+
+```march
+fn fft(cap : Tagged(SIMD, N), buf : Buffer(Float32, N)) : Buffer(Complex32, N)
+-- monomorphization produces fft_256, fft_1024, etc. for each call site
+```
+
+---
+
+## Phase 2d: Capability-parameterized environment records
+{: #environment-records}
+
+Instead of threading individual `Cap(X)` parameters through every function,
+bundle related capabilities into a record. Narrowing to a restricted set is
+**ordinary record construction** — the type system enforces what the callee can
+do, not by policy, but by type.
+
+### Bundling capabilities
+
+```march
+type RuntimeEnv = {
+  io    : Cap(IO),
+  clock : Cap(IO.Clock),
+  net   : Cap(IO.Network)
+}
+
+fn run(env : RuntimeEnv, data : Input) : Output do
+  -- pass env.io, env.clock, env.net to callees as needed
+  ...
+end
+```
+
+### Narrowing via record construction
+
+Give a plugin only what it needs by constructing a smaller record:
+
+```march
+type PluginEnv = {
+  clock : Cap(IO.Clock)
+}
+
+fn run_plugin(env : RuntimeEnv, plugin : Plugin) do
+  let restricted = { clock = env.clock }
+  plugin.run(restricted)   -- plugin's type lacks io and net fields
+end
+```
+
+The plugin structurally cannot use IO or network — not by policy, but because
+`PluginEnv` has no `io` or `net` field.
+
+### Naming convention
+
+Each env type's module should provide named narrowing functions:
+
+```march
+mod RuntimeEnv do
+  fn narrow_for_plugin(env : RuntimeEnv) : PluginEnv do
+    { clock = env.clock }
+  end
+end
+```
+
+### Testing with function fields
+
+Since `Cap(X)` values are runtime-erased, you cannot swap them out in tests.
+Instead, pair the cap with a function field that provides swappable runtime
+behaviour:
+
+```march
+type LogEnv = {
+  log_cap : Cap(IO.Console),   -- erased permission gate — compile-time only
+  write   : (String) -> ()     -- runtime behaviour — swappable in tests
+}
+
+fn test_process() do
+  let captured = Ref.new([])
+  let env : LogEnv = {
+    log_cap = test_logger_cap(),
+    write   = fn line -> Ref.update(captured, fn xs -> Cons(line, xs))
+  }
+  let result = process(env, test_input)
+  assert_contains(Ref.get(captured), "expected message")
+end
+```
+
+The cap gates permission at compile time; the function field provides swappable
+behaviour at runtime. No new mechanism required — ordinary first-class functions.
