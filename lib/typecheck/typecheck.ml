@@ -915,6 +915,8 @@ let rec cap_paths_in_surface_ty (ty : Ast.ty) : string list =
     (match arg with
      | Ast.TyCon (name, []) -> [name.txt]
      | _ -> [])
+  (* Tagged(X, T) is not a Cap — skip its args to avoid false capability extraction *)
+  | Ast.TyCon (con, _) when con.txt = "Tagged" -> []
   | Ast.TyCon (_, args) -> List.concat_map cap_paths_in_surface_ty args
   | Ast.TyArrow (a, b) ->
     cap_paths_in_surface_ty a @ cap_paths_in_surface_ty b
@@ -1575,6 +1577,10 @@ let builtin_types : (string * int) list =
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
     ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
+    (* Tagged(X, T) — specialization tag constructor: phantom policy/width tags *)
+    ("Tagged", 2);
+    (* Alloc and Panic — future capability roots excluded from realtime contexts *)
+    ("Alloc", 0); ("Panic", 0);
     (* Capability token types — used as arguments to Cap(X) *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
@@ -4665,6 +4671,49 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
           | _ -> ()
         ) (cap_paths_in_surface_ty ret_ty)
       ) ret_tys
+    | _ -> ()
+  ) decls;
+  (* Check 7 — realtime exclusion.
+     A function with `Tagged(_, Realtime)` cannot also take `Cap(Alloc)`,
+     `Cap(IO)`, or `Cap(Panic)` as parameters — those capabilities are excluded
+     from realtime contexts by the narrowing rule in §3/§5. *)
+  let is_realtime_tagged = function
+    | Ast.TyCon ({txt="Tagged";_}, [_; Ast.TyCon ({txt="Realtime";_}, [])]) -> true
+    | _ -> false
+  in
+  let is_excluded_cap = function
+    | Ast.TyCon ({txt="Cap";_}, [Ast.TyCon ({txt=("Alloc"|"IO"|"Panic");_}, [])]) -> true
+    | _ -> false
+  in
+  List.iter (function
+    | Ast.DFn (def, sp) ->
+      let all_param_tys = List.concat_map (fun c ->
+        List.filter_map (fun p ->
+          match p with
+          | Ast.FPNamed { param_ty = Some t; _ } -> Some t
+          | _ -> None
+        ) c.Ast.fc_params
+      ) def.fn_clauses in
+      let has_realtime = List.exists is_realtime_tagged all_param_tys in
+      if has_realtime then
+        List.iter (fun t ->
+          if is_excluded_cap t then begin
+            let cap_name = match t with
+              | Ast.TyCon (_, [Ast.TyCon ({txt;_}, [])]) -> txt
+              | _ -> "?" in
+            Err.error env.errors ~span:sp
+              (render_parts [
+                MPText "function "; MPCode def.fn_name.txt;
+                MPText " takes "; MPCode "Tagged(_, Realtime)";
+                MPText " but also takes "; MPCode ("Cap(" ^ cap_name ^ ")");
+                MPText ".";
+                MPBreak; MPText "Realtime functions cannot hold ";
+                MPCode ("Cap(" ^ cap_name ^ ")");
+                MPText " — allocation, IO, and panic are excluded from realtime contexts.";
+                MPBreak; MPText "hint: remove "; MPCode ("Cap(" ^ cap_name ^ ")")
+              ])
+          end
+        ) all_param_tys
     | _ -> ()
   ) decls
 

@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-17, Phase 2c/2d — Tagged(X,T) specialization tags + env records)
+
+- **`Tagged(X, T)` type constructor** added to `builtin_types` with arity 2. `Tagged(DSP, Realtime)` and similar phantom specialization tags are now valid type annotations. `cap_paths_in_surface_ty` explicitly skips `Tagged` args so the capability-checking pass does not extract spurious cap paths from inside a `Tagged` type.
+- **Realtime exclusion (Check 7)** added to `check_module_needs`: a function with `Tagged(_, Realtime)` in its parameter list cannot also take `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)`. The compiler emits a clear error with the forbidden capability name and a hint to remove it. Functions tagged with non-`Realtime` policies (e.g. `Tagged(DSP, Standard)`) are unrestricted.
+- **Phase 2d — environment records**: library convention documented. Bundle capabilities into a record type; narrow by constructing a smaller record at the call site; test with function fields alongside cap fields (swap behavior, keep the cap as the compile-time permission gate). No new compiler work — ordinary March record syntax already expresses the pattern. Documented in `docs/capabilities.md §Phase 2d`.
+- **5 new tests** in the `tag_and_typestate` suite: `Tagged(X,T) valid annotation`, `Tagged+Cap(IO) error`, `Tagged+Cap(Alloc) error`, `Tagged+Cap(Panic) error`, `Tagged(Standard) no exclusion`.
+
 ## Current State (as of 2026-06-17, Phase 2f tooling — transitions hover, via completions, forge cap query)
 
 - **LSP transitions hover**: `Analysis.t` gains `transitions_index` (handle name → `Ast.transition list`) and `always_linear_names` fields, both populated from `user_decls` in `analyse`. New `typestate_hover_at` finds the `Handle(R, S)` type at the cursor, matches against `transitions_index`, and emits a markdown card showing "always-linear" badge, current state, and all declared transitions from that state. Wired via `query_typestate_hover_at` into `server.ml`'s hover assembler alongside the existing perf/doc/actor hover sections.
