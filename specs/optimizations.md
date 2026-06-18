@@ -754,8 +754,8 @@ Fires after inlining record-returning functions, constructor accessors, and `EUp
 
 **Effort:** Medium (~60 lines) | **Impact:** Medium
 **Dependencies:** CProp (same env extension pattern); struct fusion (orthogonal)
-**Tests:** Add `field_fold` group — `{x=a, y=b}.x → a`, chained update
-**Status:** Planned
+**Tests:** `cprop` group — `field_fold_record`, `field_fold_alias`, `field_fold_update`
+**Status:** Done (commit 471bb42 + review fixes)
 
 ---
 
@@ -790,8 +790,8 @@ These patterns arise from desugaring guards (`when x == x`), from inlining boole
 
 **Effort:** Low (~40 lines) | **Impact:** Low-Medium
 **Dependencies:** None (standalone peepholes)
-**Tests:** Extend `simplify` group
-**Status:** Planned
+**Tests:** `simplify` group — `if_then_true_else_false`, `if_then_false_else_true`, `eq_self`, `ne_self`, `eq_self_float_no_reduce`, `eq_self_tuple_float_no_reduce`
+**Status:** Done (commit 471bb42 + review fixes; `not (not x)` deferred — not yet needed)
 
 ---
 

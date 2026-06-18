@@ -3,6 +3,21 @@
     All results remain in ANF; new operations are bound to fresh lets.
     Sets [~changed] on any rewrite. *)
 
+(** True when [ty] is guaranteed to contain no float values.
+    Conservative: [TCon] and [TVar] return false because the type definition
+    may include float fields that are not visible at this point in the pipeline.
+    Used to guard [x == x → true] / [x != x → false]: IEEE 754 mandates
+    [NaN ≠ NaN], so those rewrites are unsound for any type containing a float. *)
+let rec is_float_free = function
+  | Tir.TInt | Tir.TBool | Tir.TString | Tir.TUnit -> true
+  | Tir.TFloat                                       -> false
+  | Tir.TTuple ts   -> List.for_all is_float_free ts
+  | Tir.TRecord fds -> List.for_all (fun (_, t) -> is_float_free t) fds
+  | Tir.TPtr _      -> true
+  | Tir.TFn _       -> true   (* functions are never compared with == *)
+  | Tir.TCon _      -> false  (* conservative: definition may contain float fields *)
+  | Tir.TVar _      -> false  (* conservative: unknown *)
+
 let gensym =
   let ctr = ref 0 in
   fun prefix ->
@@ -110,18 +125,18 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
     changed := true;
     Tir.EApp (mk_var "not" (Tir.TFn ([Tir.TBool], Tir.TBool)), [a])
 
-  (* x == x → true  (non-float: NaN != NaN, so this only holds for non-float types) *)
+  (* x == x → true  (only for float-free types; IEEE 754 NaN ≠ NaN) *)
   | Tir.EApp (f, [Tir.AVar v1; Tir.AVar v2])
     when f.Tir.v_name = "=="
       && v1.Tir.v_name = v2.Tir.v_name
-      && v1.Tir.v_ty <> Tir.TFloat ->
+      && is_float_free v1.Tir.v_ty ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))
 
-  (* x != x → false  (non-float) *)
+  (* x != x → false  (only for float-free types) *)
   | Tir.EApp (f, [Tir.AVar v1; Tir.AVar v2])
     when f.Tir.v_name = "!="
       && v1.Tir.v_name = v2.Tir.v_name
-      && v1.Tir.v_ty <> Tir.TFloat ->
+      && is_float_free v1.Tir.v_ty ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))
 
   (* Recurse *)

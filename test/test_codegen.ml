@@ -2053,6 +2053,16 @@ let test_simplify_eq_self_float_no_reduce () =
   let _ = March_tir.Simplify.run ~changed m in
   Alcotest.(check bool) "not changed for float ==" false !changed
 
+let test_simplify_eq_self_tuple_float_no_reduce () =
+  (* x == x must NOT reduce for TTuple containing Float — NaN inside a tuple
+     means (NaN,1) == (NaN,1) is false at runtime but the rule would return true *)
+  let changed = ref false in
+  let ty = March_tir.Tir.TTuple [March_tir.Tir.TFloat; March_tir.Tir.TInt] in
+  let x = mk_var "x" ty in
+  let m = mk_module [mk_fn "f" (app "==" [March_tir.Tir.AVar x; March_tir.Tir.AVar x])] in
+  let _ = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "not changed for tuple-float ==" false !changed
+
 (* ── Function inlining ───────────────────────────────────────────── *)
 
 let test_inline_pure_small () =
@@ -2605,6 +2615,25 @@ let test_cprop_field_fold_record () =
   (match first_body m' with
    | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3))) -> ()
    | e -> Alcotest.failf "expected r.x=3, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_alias () =
+  (* let r  = { x = 3 }
+     let r2 = r          -- alias: should copy r's fenv entry to r2
+     r2.x                -- folds to 3 via alias propagation *)
+  let ty_r = March_tir.Tir.TRecord [("x", March_tir.Tir.TInt)] in
+  let r  = mk_var "r"  ty_r in
+  let r2 = mk_var "r2" ty_r in
+  let body =
+    March_tir.Tir.ELet (r, March_tir.Tir.ERecord [("x", ilit 3)],
+      March_tir.Tir.ELet (r2, March_tir.Tir.EAtom (March_tir.Tir.AVar r),
+        March_tir.Tir.EField (March_tir.Tir.AVar r2, "x"))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
+   | e -> Alcotest.failf "expected r2.x=3 via alias, got: %s" (March_tir.Tir.show_expr e))
 
 let test_cprop_field_fold_update () =
   (* let r  = { x = 3, y = 4 }
@@ -4349,6 +4378,7 @@ let codegen_suites =
         Alcotest.test_case "eq_self"                  `Quick test_simplify_eq_self;
         Alcotest.test_case "ne_self"                  `Quick test_simplify_ne_self;
         Alcotest.test_case "eq_self_float_no_reduce"  `Quick test_simplify_eq_self_float_no_reduce;
+        Alcotest.test_case "eq_self_tuple_float_no_reduce" `Quick test_simplify_eq_self_tuple_float_no_reduce;
       ]);
       ("inline", [
         Alcotest.test_case "pure_small"            `Quick test_inline_pure_small;
@@ -4389,6 +4419,7 @@ let codegen_suites =
         Alcotest.test_case "no_propagate_into_incrc" `Quick test_cprop_no_propagate_into_incrc;
         Alcotest.test_case "no_propagate_into_free"  `Quick test_cprop_no_propagate_into_free;
         Alcotest.test_case "field_fold_record"       `Quick test_cprop_field_fold_record;
+        Alcotest.test_case "field_fold_alias"        `Quick test_cprop_field_fold_alias;
         Alcotest.test_case "field_fold_update"       `Quick test_cprop_field_fold_update;
       ]);
       ("fast_math", [

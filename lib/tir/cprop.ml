@@ -25,8 +25,11 @@
 
     P13 — EField of known record:
         let r = { x = a, y = b } in r.x  →  a
-    The [r] binding is retained (its EDecRC/EFree from Perceus still fires),
-    but the field load is eliminated, enabling downstream folding.
+    The [r] binding is retained. For heap-typed fields, Perceus inserts an
+    EIncRC dup via [dup_field_results] — the dup fires through the [v_name]
+    alias and RC semantics are preserved. Note: for [TRecord]-typed variables,
+    [needs_rc(TRecord) = false] so Perceus places no EDecRC/EFree for [r]
+    itself; only the individual heap-typed *fields* are RC-managed.
     [EUpdate] is also tracked: merged fields from the base record are inherited
     so that [let r2 = { r with x = c } in r2.y] folds to [b].
     Record aliases ([let r2 = r]) also propagate the field list.
@@ -91,10 +94,9 @@ let rec cprop_expr ~changed (env : env) (fenv : field_env) : Tir.expr -> Tir.exp
     (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
     let fenv' = match rhs' with
       | Tir.ERecord fields ->
-        (* Store fields with literal substitution already applied so downstream
-           EField folds immediately see the folded value. *)
-        let fields' = subst_fields ~changed:{ contents = false } env' fields in
-        fenv_add v.Tir.v_name fields' fenv
+        (* [rhs'] is already fully substituted by the ERecord arm below, so
+           [fields] here is post-substitution — store directly. *)
+        fenv_add v.Tir.v_name fields fenv
       | Tir.EAtom (Tir.AVar base) ->
         (* Record alias: let r2 = r. If r has a known field list, copy it. *)
         (match fenv_find base.Tir.v_name fenv with
