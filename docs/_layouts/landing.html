@@ -66,7 +66,7 @@
       display: flex; align-items: center; justify-content: space-between;
     }
     .m-nav-logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); }
-    .m-nav-logo img { width: 26px; height: 26px; object-fit: contain; }
+    .m-nav-logo img { width: 36px; height: 36px; object-fit: contain; }
     .m-nav-logo span { font-family: 'Lora', Georgia, serif; font-weight: 600; font-size: 19px; letter-spacing: -0.02em; }
     .m-nav-links { display: flex; align-items: center; gap: 28px; }
     .m-nav-link { font-size: 14px; color: var(--text-muted); text-decoration: none; letter-spacing: 0.01em; }
@@ -702,9 +702,7 @@ session Search do
   server -> client : Results(List(String))
 end`;
 
-const TYPES = `type Shape =
-  | Circle(Float)
-  | Rect(Float, Float)
+const TYPES = `type Shape = Circle(Float) | Rect(Float, Float)
 
 fn area(s : Shape) : Float do
   match s do
