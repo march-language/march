@@ -1,32 +1,41 @@
 ---
 layout: cookbook
-title: "Coming from Python / TypeScript"
+title: "Coming from Python"
 permalink: /docs/coming-from-python/
 ---
 
-# Coming from Python / TypeScript
+# Coming from Python
 
-March is statically typed and functional, but it borrows the clarity and pragmatism you already know. This page maps familiar patterns to their March equivalents.
+You know Python: dynamic types, exceptions, `for` loops, classes. March keeps the readability but moves the safety checks to compile time instead of runtime.
 
 ---
 
 ## Functions
 
-Python/TS functions map almost directly:
+```march
+-- Python: def add(x, y): return x + y
+fn add(x, y) do x + y end
+```
 
-| Python / TypeScript | March |
-|---------------------|-------|
-| `def add(x, y): return x + y` | `fn add(x, y) do x + y end` |
-| `const add = (x, y) => x + y` | `fn add(x, y) do x + y end` |
-| `def greet(name="World"):` | `fn greet(name \\ "World") do` |
-| No explicit `return` | Last expression is the return value |
-| `_helper()` (private by convention) | `pfn helper()` (enforced by compiler) |
+No `return` keyword — the last expression is the result. No colon. No indentation rules — `do...end` delimits the body.
+
+Type annotations are optional (the compiler infers them) but good for documentation:
+
+```march
+fn add(x : Int, y : Int) : Int do x + y end
+```
+
+Private functions use `pfn` — enforced by the compiler, not just a `_` naming convention:
+
+```march
+pfn helper(s : String) : String do String.to_uppercase(s) end
+```
 
 ---
 
-## No `null` — use `Option`
+## No `None` — use `Option`
 
-March has no `null` or `undefined`. A value that might be absent is `Option(a)`:
+There's no `None` that silently infects your program. A value that might be absent has type `Option(a)`:
 
 ```march
 fn find_user(id : Int) : Option(User) do
@@ -39,7 +48,13 @@ match find_user(42) do
 end
 ```
 
-`Option.unwrap_or(None, default)` is the safe equivalent of `x or default` in Python.
+The compiler forces you to handle both cases. No `AttributeError: 'NoneType' object has no attribute 'name'` surprises.
+
+`Option.unwrap_or` is the safe equivalent of `x or default`:
+
+```march
+Option.unwrap_or(find_user(42), default_user)
+```
 
 ---
 
@@ -49,11 +64,11 @@ Instead of `try/except`, functions that can fail return `Result(ok, err)`:
 
 ```march
 fn parse_int(s : String) : Result(Int, String) do
-  -- Ok(n) or Err("not a valid integer")
+  String.to_int(s)
 end
 ```
 
-Chain fallible operations with `let?` — it short-circuits on `Err` the same way Python's `try` block does, but it's in the type:
+Chain fallible operations with `let?` — it propagates the error up and returns early, like a `try` block that's in the type:
 
 ```march
 fn run(input : String) : Result(Int, String) do
@@ -63,9 +78,11 @@ fn run(input : String) : Result(Int, String) do
 end
 ```
 
+If `parse_int` returns `Err("not a valid integer")`, `run` immediately returns that error — `fetch_user` never runs. No exception handler needed.
+
 ---
 
-## No classes — modules + types
+## No classes — modules + record types
 
 ```python
 # Python
@@ -75,15 +92,17 @@ class Counter:
     def get(self): return self.count
 ```
 
+March keeps data and functions separate. Records hold data; functions in the same module operate on them:
+
 ```march
 type Counter = { count : Int }
 
-fn new_counter() : Counter do { count = 0 } end
+fn new() : Counter do { count = 0 } end
 fn increment(c : Counter) : Counter do { c with count = c.count + 1 } end
 fn get(c : Counter) : Int do c.count end
 ```
 
-Data and functions are separate. For mutable shared state, use an `actor` or `Vault`.
+`{ c with count = ... }` creates a new record with one field changed — values are immutable by default. For mutable shared state, use `actor` or `Vault`.
 
 ---
 
@@ -92,37 +111,21 @@ Data and functions are separate. For mutable shared state, use an `actor` or `Va
 ```python
 # Python
 doubled = [x * 2 for x in nums if x > 0]
-total   = sum(x for x in nums)
+total   = sum(nums)
+first   = next((x for x in nums if x > 10), None)
 ```
 
 ```march
-let doubled =
-  nums
-  |> List.filter(fn x -> x > 0)
-  |> List.map(fn x -> x * 2)
-
-let total = List.fold_left(nums, 0, fn (acc, x) -> acc + x)
+let doubled = nums |> List.filter(fn x -> x > 0) |> List.map(fn x -> x * 2)
+let total   = List.fold_left(nums, 0, fn (acc, x) -> acc + x)
+let first   = List.find(nums, fn x -> x > 10)
 ```
+
+`|>` is the pipe operator — it passes the left side as the first argument to the right side.
 
 ---
 
-## Types are inferred — annotate at boundaries
-
-TypeScript-style annotations are optional in March. The compiler infers everything:
-
-```march
-fn double(n) do n * 2 end   -- inferred: Int -> Int
-```
-
-Annotate at public function boundaries for documentation and error clarity:
-
-```march
-fn fetch(id : Int) : Result(User, String) do ... end
-```
-
----
-
-## Pattern matching replaces `isinstance` chains
+## Pattern matching replaces `isinstance` and `if/elif`
 
 ```python
 # Python
@@ -130,24 +133,55 @@ if isinstance(shape, Circle):
     return 3.14 * shape.r ** 2
 elif isinstance(shape, Rect):
     return shape.w * shape.h
+else:
+    return 0
 ```
 
 ```march
 match shape do
   Circle(r)  -> 3.14159 *. r *. r
   Rect(w, h) -> w *. h
+  Point      -> 0.0
 end
 ```
 
-The compiler checks exhaustiveness — missing a case is a compile error, not a silent bug.
+The compiler checks exhaustiveness — if you add a new constructor to `Shape` later, every `match` that doesn't cover it becomes a compile error.
+
+`match do` without a subject replaces `if/elif/else` chains:
+
+```march
+match do
+  score >= 90 -> "A"
+  score >= 80 -> "B"
+  _           -> "C"
+end
+```
+
+---
+
+## Static typing without the ceremony
+
+You're used to Python being dynamic. March is fully static but the type checker is mostly invisible:
+
+```march
+fn double(n) do n * 2 end       -- inferred: Int -> Int
+let xs = [1, 2, 3]              -- inferred: List(Int)
+let pair = ("hello", 42)        -- inferred: (String, Int)
+```
+
+Annotate at module boundaries for documentation and better error messages:
+
+```march
+fn fetch(id : Int) : Result(User, String) do ... end
+```
 
 ---
 
 ## What's the same
 
-- String concatenation: `"hello " ++ name` (vs `f"hello {name}"`)
+- `println(...)` for output
 - List literals: `[1, 2, 3]`
 - Tuple literals: `(1, "hello")`
-- Boolean operators: `&&`, `||`, `!`
-- Arithmetic: `+`, `-`, `*`, `/` for ints; `+.`, `-.`, `*.`, `/.` for floats
-- `println(...)` for output
+- Boolean: `true`, `false`, `&&`, `||`, `!`
+- String concatenation: `"hello " ++ name` (instead of f-strings)
+- Integer arithmetic: `+`, `-`, `*`, `/`; float arithmetic adds `.`: `+.`, `-.`, `*.`, `/.`

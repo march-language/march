@@ -29,7 +29,8 @@ Practical recipes for getting things done in March. Each chapter covers one topi
 
 Start with one of these orientation guides:
 
-- [Coming from Python or TypeScript](../coming-from-python/) — maps familiar concepts to March idioms
+- [Coming from Python](../coming-from-python/) — dynamic to static typing, no exceptions, no classes
+- [Coming from TypeScript](../coming-from-typescript/) — sum types, `Result` vs `try/catch`, modules instead of classes
 - [Coming from Haskell, Elixir, or OCaml](../coming-from-fp/) — syntax cheatsheet and key differences
 
 ---
