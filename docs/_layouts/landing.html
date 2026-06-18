@@ -714,6 +714,23 @@ session Search do
   server -> client : Results(List(String))
 end`;
 
+const ACTOR_TRY = `actor Counter do
+  state { n : Int }
+  init  { n = 0 }
+  on Inc()   do { n = state.n + 1 } end
+  on Print() do
+    println(state.n)
+    state
+  end
+end
+
+let c = spawn(Counter)
+send(c, Inc())
+send(c, Inc())
+send(c, Inc())
+send(c, Print())
+run_until_idle()`;
+
 const TYPES = `type Shape = Circle(Float) | Rect(Float, Float)
 
 fn area(s : Shape) : Float do
@@ -722,6 +739,17 @@ fn area(s : Shape) : Float do
     Rect(w, h) -> w *. h
   end
 end`;
+
+const TYPES_TRY = `type Shape = Circle(Float) | Rect(Float, Float)
+
+fn area(s : Shape) : Float do
+  match s do
+    Circle(r)  -> 3.14159 *. r *. r
+    Rect(w, h) -> w *. h
+  end
+end
+
+(area(Circle(5.0)), area(Rect(3.0, 4.0)))`;
 
 const LINEAR = `linear type FileHandle = FileHandle(Int)
 
@@ -822,8 +850,8 @@ function tryInRepl(code) {
   document.getElementById('m-repl-wrap').scrollIntoView({ behavior: 'smooth' });
 }
 function tryFBIP()  { tryInRepl(FBIP_TRY);  }
-function tryACTOR() { tryInRepl(ACTOR); }
-function tryTYPES() { tryInRepl(TYPES); }
+function tryACTOR() { tryInRepl(ACTOR_TRY); }
+function tryTYPES() { tryInRepl(TYPES_TRY); }
 // ─── Events ───────────────────────────────────────────────────────────────────
 document.getElementById('theme-btn').addEventListener('click', () => {
   dark = !dark;
