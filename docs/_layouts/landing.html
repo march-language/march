@@ -441,11 +441,11 @@
       </div>
     </div>
     <div class="m-repl-chips">
+      <button class="m-repl-chip" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
+      <button class="m-repl-chip" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
+      <button class="m-repl-chip" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
+      <button class="m-repl-chip" onclick="mReplLoad('let words = [&quot;functional&quot;, &quot;fast&quot;, &quot;native&quot;, &quot;ml&quot;]\nList.sort_by(words, String.length)')">sort_by</button>
       <button class="m-repl-chip" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
-      <button class="m-repl-chip" onclick="mReplLoad('type Shape = Circle(Float) | Rect(Float, Float)\n\nlet area = fn s ->\n  match s do\n    Circle(r)  -> 3.14159 *. r *. r\n    Rect(w, h) -> w *. h\n  end\n\narea(Circle(5.0))')">Pattern Match</button>
-      <button class="m-repl-chip" onclick="mReplLoad('List.map([1, 2, 3, 4, 5], fn x -> x * x)')">List.map</button>
-      <button class="m-repl-chip" onclick="mReplLoad('fn fib(n : Int) : Int do\n  match n do\n    0 -> 0\n    1 -> 1\n    _ -> fib(n - 1) + fib(n - 2)\n  end\nend\n\nfib(10)')">Fibonacci</button>
-      <button class="m-repl-chip" onclick="mReplLoad('List.filter(List.range(1, 20), fn x -> x % 2 == 0)')">List.filter</button>
     </div>
   </div>
 </section>
