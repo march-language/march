@@ -10,22 +10,22 @@ mod ActorDemo do
 
 actor Counter do
   state { value : Int }
-  init { value = 0 }
+  init { value: 0 }
 
   on Increment(n : Int) do
-    { state with value = state.value + n }
+    { state with value: state.value + n }
   end
 
   on Decrement(n : Int) do
-    { state with value = state.value - n }
+    { state with value: state.value - n }
   end
 
   on Reset() do
-    { state with value = 0 }
+    { state with value: 0 }
   end
 
   on Probe(label : String) do
-    println("[Counter] probe from " ++ label ++ ", value = " ++ int_to_string(state.value))
+    println("[Counter] probe from " ++ label ++ ", value: " ++ int_to_string(state.value))
     state
   end
 end
@@ -35,12 +35,12 @@ end
 
 actor Logger do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
 
   on Log(msg : String) do
     let n = state.count + 1
     println("[LOG #" ++ int_to_string(n) ++ "] " ++ msg)
-    { state with count = n }
+    { state with count: n }
   end
 
   on Stats() do

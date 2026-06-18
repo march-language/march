@@ -70,7 +70,7 @@ pfn format_row(row) do
   let score = second(row)
   let upper_name = String.to_uppercase(name)
   let name_bytes = to_string(String.byte_size(name))
-  upper_name ++ " (bytes=" ++ name_bytes ++ ", score=" ++ score ++ ")"
+  upper_name ++ " (bytes=" ++ name_bytes ++ ", score:" ++ score ++ ")"
 end
 
 pfn build_names_section(rows) do

@@ -15,14 +15,14 @@ mod TestIslandBridges do
   derive Json for Msg
 
   fn create(initial : Int) : State do
-    { count = initial }
+    { count: initial }
   end
 
   fn update(st : State, msg : Msg) : State do
     match msg do
-    Increment -> { count = st.count + 1 }
-    Decrement -> { count = st.count - 1 }
-    Reset     -> { count = 0 }
+    Increment -> { count: st.count + 1 }
+    Decrement -> { count: st.count - 1 }
+    Reset     -> { count: 0 }
     end
   end
 

@@ -20,14 +20,14 @@ mod CounterServer do
 
 actor Counter do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
 
   on Increment(n : Int) do
-    { state with count = state.count + n }
+    { state with count: state.count + n }
   end
 
   on Decrement(n : Int) do
-    { state with count = state.count - n }
+    { state with count: state.count - n }
   end
 end
 

@@ -2602,8 +2602,8 @@ let test_compiled_main_calls_march_run_scheduler () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
     fn main() do
       let pid = spawn(Counter)
@@ -3474,10 +3474,10 @@ let test_eval_task_sends_to_actor () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
+      init { count: 0 }
 
       on Increment(n) do
-        { count = state.count + n }
+        { count: state.count + n }
       end
     end
 

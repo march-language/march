@@ -57,20 +57,20 @@ mod Plot do
 
   pfn palette_color(idx : Int) : Color do
     let colors = Cons(
-      { r = 31,  g = 119, b = 180 }, Cons(
-      { r = 255, g = 127, b = 14  }, Cons(
-      { r = 44,  g = 160, b = 44  }, Cons(
-      { r = 214, g = 39,  b = 40  }, Cons(
-      { r = 148, g = 103, b = 189 }, Cons(
-      { r = 140, g = 86,  b = 75  }, Cons(
-      { r = 227, g = 119, b = 194 }, Cons(
-      { r = 127, g = 127, b = 127 }, Cons(
-      { r = 188, g = 189, b = 34  }, Cons(
-      { r = 23,  g = 190, b = 207 },
+      { r: 31,  g: 119, b: 180 }, Cons(
+      { r: 255, g: 127, b: 14  }, Cons(
+      { r: 44,  g: 160, b: 44  }, Cons(
+      { r: 214, g: 39,  b: 40  }, Cons(
+      { r: 148, g: 103, b: 189 }, Cons(
+      { r: 140, g: 86,  b: 75  }, Cons(
+      { r: 227, g: 119, b: 194 }, Cons(
+      { r: 127, g: 127, b: 127 }, Cons(
+      { r: 188, g: 189, b: 34  }, Cons(
+      { r: 23,  g: 190, b: 207 },
       Nil))))))))))
     fn nth(lst : List(Color), n : Int) : Color do
       match lst do
-      Nil        -> { r = 70, g = 130, b = 180 }
+      Nil        -> { r: 70, g: 130, b: 180 }
       Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end
       end
     end
@@ -80,59 +80,59 @@ mod Plot do
   pfn default_style(idx : Int) : Style do
     let c = palette_color(idx)
     {
-      line_color   = c,
-      fill_color   = c,
-      line_width   = 2.0,
-      point_radius = 4.0,
-      font_size    = 12.0,
-      opacity      = 1.0
+      line_color: c,
+      fill_color: c,
+      line_width: 2.0,
+      point_radius: 4.0,
+      font_size: 12.0,
+      opacity: 1.0
     }
   end
 
   pfn default_axis() : Axis do
-    { label = None, data_min = None, data_max = None, tick_count = 5 }
+    { label: None, data_min: None, data_max: None, tick_count: 5 }
   end
 
   -- ---- Construction ----
 
   fn new() : Plot do
     {
-      title       = None,
-      series      = Nil,
-      x_axis      = default_axis(),
-      y_axis      = default_axis(),
-      width       = 640,
-      height      = 480,
-      margin      = 60,
-      show_legend = false,
-      show_grid   = false
+      title: None,
+      series: Nil,
+      x_axis: default_axis(),
+      y_axis: default_axis(),
+      width: 640,
+      height: 480,
+      margin: 60,
+      show_legend: false,
+      show_grid: false
     }
   end
 
   fn new_sized(w : Int, h : Int) : Plot do
     let p = new()
-    { p with width = w, height = h }
+    { p with width: w, height: h }
   end
 
   -- ---- Series factories ----
 
   fn line_series(xs : List(Float), ys : List(Float)) : Series do
     {
-      kind  = Line,
-      xs    = xs,
-      ys    = ys,
-      label = None,
-      style = default_style(0)
+      kind: Line,
+      xs: xs,
+      ys: ys,
+      label: None,
+      style: default_style(0)
     }
   end
 
   fn scatter_series(xs : List(Float), ys : List(Float)) : Series do
     {
-      kind  = Scatter,
-      xs    = xs,
-      ys    = ys,
-      label = None,
-      style = default_style(0)
+      kind: Scatter,
+      xs: xs,
+      ys: ys,
+      label: None,
+      style: default_style(0)
     }
   end
 
@@ -143,11 +143,11 @@ mod Plot do
       else make_indices(i - 1, Cons(int_to_float(i), acc)) end
     end
     {
-      kind  = Bar,
-      xs    = make_indices(n - 1, Nil),
-      ys    = values,
-      label = None,
-      style = default_style(0)
+      kind: Bar,
+      xs: make_indices(n - 1, Nil),
+      ys: values,
+      label: None,
+      style: default_style(0)
     }
   end
 
@@ -170,10 +170,10 @@ mod Plot do
     let hi_opt = list_last_val(sorted)
     match lo_opt do
     None ->
-      { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
+      { kind: Bar, xs: Nil, ys: Nil, label: None, style: default_style(0) }
     Some(lo_v) -> match hi_opt do
       None ->
-        { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
+        { kind: Bar, xs: Nil, ys: Nil, label: None, style: default_style(0) }
       Some(hi_v) -> do
       let range = hi_v -. lo_v
       let bin_w = if range == 0.0 do 1.0 else range /. int_to_float(bins) end
@@ -204,11 +204,11 @@ mod Plot do
       end
       let counts = count_bins(sorted, make_zeros(bins, Nil))
       {
-        kind  = Bar,
-        xs    = make_xs(bins - 1, Nil),
-        ys    = List.map(counts, fn c -> int_to_float(c)),
-        label = None,
-        style = default_style(0)
+        kind: Bar,
+        xs: make_xs(bins - 1, Nil),
+        ys: List.map(counts, fn c -> int_to_float(c)),
+        label: None,
+        style: default_style(0)
       }
     end
     end
@@ -222,55 +222,55 @@ mod Plot do
   end
 
   pfn color_series(s : Series, idx : Int) : Series do
-    { s with style = default_style(idx) }
+    { s with style: default_style(idx) }
   end
 
   fn add_series(p : Plot, s : Series) : Plot do
     let idx = series_count(p)
     let colored = color_series(s, idx)
-    { p with series = List.append(p.series, Cons(colored, Nil)) }
+    { p with series: List.append(p.series, Cons(colored, Nil)) }
   end
 
   fn add_labeled_series(p : Plot, s : Series, lbl : String) : Plot do
     let idx = series_count(p)
-    let colored = color_series({ s with label = Some(lbl) }, idx)
-    { p with series = List.append(p.series, Cons(colored, Nil)) }
+    let colored = color_series({ s with label: Some(lbl) }, idx)
+    { p with series: List.append(p.series, Cons(colored, Nil)) }
   end
 
   fn set_title(p : Plot, t : String) : Plot do
-    { p with title = Some(t) }
+    { p with title: Some(t) }
   end
 
   fn set_xlabel(p : Plot, l : String) : Plot do
     let ax = p.x_axis
-    { p with x_axis = { ax with label = Some(l) } }
+    { p with x_axis: { ax with label: Some(l) } }
   end
 
   fn set_ylabel(p : Plot, l : String) : Plot do
     let ay = p.y_axis
-    { p with y_axis = { ay with label = Some(l) } }
+    { p with y_axis: { ay with label: Some(l) } }
   end
 
   fn set_x_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ax = p.x_axis
-    { p with x_axis = { ax with data_min = Some(lo), data_max = Some(hi) } }
+    { p with x_axis: { ax with data_min: Some(lo), data_max: Some(hi) } }
   end
 
   fn set_y_range(p : Plot, lo : Float, hi : Float) : Plot do
     let ay = p.y_axis
-    { p with y_axis = { ay with data_min = Some(lo), data_max = Some(hi) } }
+    { p with y_axis: { ay with data_min: Some(lo), data_max: Some(hi) } }
   end
 
   fn set_size(p : Plot, w : Int, h : Int) : Plot do
-    { p with width = w, height = h }
+    { p with width: w, height: h }
   end
 
   fn with_grid(p : Plot) : Plot do
-    { p with show_grid = true }
+    { p with show_grid: true }
   end
 
   fn with_legend(p : Plot) : Plot do
-    { p with show_legend = true }
+    { p with show_legend: true }
   end
 
   -- ---- SVG primitive builders ----

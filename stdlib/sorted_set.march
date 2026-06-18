@@ -8,7 +8,7 @@
 
 mod SortedSet do
 
-  -- Internal AVL tree (same as OrderedMap, keyed by element, value = unit)
+  -- Internal AVL tree (same as OrderedMap, keyed by element, value: unit)
   type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
 
   -- ---- Internal helpers ----
@@ -182,73 +182,73 @@ mod SortedSet do
   -- ---- Public API ----
 
   doc "Creates a new empty sorted set with the given comparator."
-  fn new(cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-    %{cmp: cmp, tree: Leaf}
+  fn new(cmp : (a, a) -> Int) : {cmp: (a, a) -> Int, tree: Tree(a)} do
+    {cmp: cmp, tree: Leaf}
   end
 
   doc "Adds element v to the set. No-op if already present."
-  fn add(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-    %{cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
+  fn add(s : {cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : {cmp: (a, a) -> Int, tree: Tree(a)} do
+    {cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
   end
 
   doc "Removes element v from the set. No-op if not present."
-  fn remove(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-    %{cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
+  fn remove(s : {cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : {cmp: (a, a) -> Int, tree: Tree(a)} do
+    {cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
   end
 
   doc "Returns true if v is in the set."
-  fn member(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : Bool do
+  fn member(s : {cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : Bool do
     tree_member(s.tree, s.cmp, v)
   end
 
   doc "Returns all elements in sorted order."
-  fn to_list(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : List(a) do
+  fn to_list(s : {cmp: (a, a) -> Int, tree: Tree(a)}) : List(a) do
     tree_to_list(s.tree, Nil)
   end
 
   doc "Builds a set from a list of elements."
-  fn from_list(items : List(a), cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
+  fn from_list(items : List(a), cmp : (a, a) -> Int) : {cmp: (a, a) -> Int, tree: Tree(a)} do
     List.fold_left(new(cmp), items, fn s -> fn v -> add(s, v))
   end
 
   doc "Returns the number of elements in the set."
-  fn size(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Int do
+  fn size(s : {cmp: (a, a) -> Int, tree: Tree(a)}) : Int do
     tree_size(s.tree)
   end
 
   doc "Returns the smallest element, or None if empty."
-  fn min(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
+  fn min(s : {cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
     tree_min(s.tree)
   end
 
   doc "Returns the largest element, or None if empty."
-  fn max(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
+  fn max(s : {cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
     tree_max(s.tree)
   end
 
   doc "Returns a set containing all elements in either a or b."
-  fn union(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+  fn union(a : {cmp: (k, k) -> Int, tree: Tree(k)}, b : {cmp: (k, k) -> Int, tree: Tree(k)}) : {cmp: (k, k) -> Int, tree: Tree(k)} do
     List.fold_left(a, to_list(b), fn s -> fn v -> add(s, v))
   end
 
   doc "Returns a set containing only elements in both a and b."
-  fn intersect(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+  fn intersect(a : {cmp: (k, k) -> Int, tree: Tree(k)}, b : {cmp: (k, k) -> Int, tree: Tree(k)}) : {cmp: (k, k) -> Int, tree: Tree(k)} do
     List.fold_left(new(a.cmp), to_list(a), fn s -> fn v ->
       if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
   end
 
   doc "Returns a set of elements in a that are not in b."
-  fn difference(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+  fn difference(a : {cmp: (k, k) -> Int, tree: Tree(k)}, b : {cmp: (k, k) -> Int, tree: Tree(k)}) : {cmp: (k, k) -> Int, tree: Tree(k)} do
     List.fold_left(a, to_list(b), fn s -> fn v -> remove(s, v))
   end
 
   doc "Folds over the set in sorted order: f(acc, element) -> acc."
-  fn fold(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, acc : b, f : (b, a) -> b) : b do
+  fn fold(s : {cmp: (a, a) -> Int, tree: Tree(a)}, acc : b, f : (b, a) -> b) : b do
     tree_fold(s.tree, acc, f)
   end
 
   doc "Returns true if the set is empty."
-  fn is_empty(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Bool do
+  fn is_empty(s : {cmp: (a, a) -> Int, tree: Tree(a)}) : Bool do
     match s.tree do
     Leaf -> true
     _ -> false
@@ -256,7 +256,7 @@ mod SortedSet do
   end
 
   doc "Returns true if a is a subset of b (every element of a is in b)."
-  fn subset(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : Bool do
+  fn subset(a : {cmp: (k, k) -> Int, tree: Tree(k)}, b : {cmp: (k, k) -> Int, tree: Tree(k)}) : Bool do
     List.all(to_list(a), fn v -> tree_member(b.tree, b.cmp, v))
   end
 

@@ -15,7 +15,7 @@ mod TestMultiJson do
 
   fn main() do
     -- All three should work in the same module
-    let p = { x = 42, y = 99 }
+    let p = { x: 42, y: 99 }
     let pj = to_json(p)
     println("Point: " ++ Json.to_string(pj))
 

@@ -5,8 +5,8 @@ let test_async_send_queues_not_dispatches () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -28,8 +28,8 @@ let test_scheduler_drains_mailbox () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -51,8 +51,8 @@ let test_scheduler_updates_actor_state () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -83,8 +83,8 @@ let test_scheduler_round_robin () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -123,10 +123,10 @@ let test_self_inside_handler () =
   let src = {|mod Test do
     actor Echo do
       state { alive : Bool }
-      init { alive = true }
+      init { alive: true }
       on Ping() do
         let me = self()
-        { alive = true }
+        { alive: true }
       end
     end
 
@@ -147,11 +147,11 @@ let test_receive_inside_handler () =
   let src = {|mod Test do
     actor Dispatcher do
       state { got : Int }
-      init { got = 0 }
+      init { got: 0 }
       on Dispatch() do
         let follow = receive()
         match follow do
-        Followup(n) -> { got = n }
+        Followup(n) -> { got: n }
         end
       end
     end
@@ -185,9 +185,9 @@ let test_message_fifo_ordering () =
   let src = {|mod Test do
     actor Accumulator do
       state { acc : Int }
-      init { acc = 0 }
+      init { acc: 0 }
       on Append(n) do
-        { acc = state.acc * 10 + n }
+        { acc: state.acc * 10 + n }
       end
     end
 
@@ -223,16 +223,16 @@ let test_handler_sends_to_another_actor () =
   let src = {|mod Test do
     actor Target do
       state { pinged : Bool }
-      init { pinged = false }
-      on Ping() do { pinged = true } end
+      init { pinged: false }
+      on Ping() do { pinged: true } end
     end
 
     actor Relay do
       state { relayed : Bool }
-      init { relayed = false }
+      init { relayed: false }
       on Forward(target) do
         let _ = send(target, Ping())
-        { relayed = true }
+        { relayed: true }
       end
     end
 
@@ -266,8 +266,8 @@ let test_run_module_auto_drains () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -304,8 +304,8 @@ let test_send_to_dead_actor_dropped () =
   let src = {|mod Test do
     actor Worker do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -329,13 +329,13 @@ let test_self_send_from_handler () =
   let src = {|mod Test do
     actor SelfSender do
       state { stage : Int }
-      init { stage = 0 }
+      init { stage: 0 }
       on Begin() do
         let _ = send(self(), End())
-        { stage = 1 }
+        { stage: 1 }
       end
       on End() do
-        { stage = 2 }
+        { stage: 2 }
       end
     end
 
@@ -370,11 +370,11 @@ let test_receive_blocks_until_message () =
   let src = {|mod Test do
     actor Dispatcher do
       state { got : Int }
-      init { got = 0 }
+      init { got: 0 }
       on Dispatch() do
         let follow = receive()
         match follow do
-        Followup(n) -> { got = n }
+        Followup(n) -> { got: n }
         end
       end
     end
@@ -408,10 +408,10 @@ let test_receive_does_not_deadlock_on_empty () =
   let src = {|mod Test do
     actor Waiter do
       state { alive : Bool }
-      init { alive = true }
+      init { alive: true }
       on Start() do
         let _msg = receive()
-        { alive = true }
+        { alive: true }
       end
     end
 
@@ -435,9 +435,9 @@ let test_receive_ordering_fifo () =
   let src = {|mod Test do
     actor Accum do
       state { acc : Int }
-      init { acc = 0 }
+      init { acc: 0 }
       on Push(n) do
-        { acc = state.acc * 10 + n }
+        { acc: state.acc * 10 + n }
       end
     end
 
@@ -473,11 +473,11 @@ let test_receive_llvm_declaration () =
   let ir = emit_actor_ir {|mod RecvTest do
     actor Listener do
       state { last : Int }
-      init { last = 0 }
+      init { last: 0 }
       on Wake() do
         -- receive() a sub-message and discard it (wildcard)
         let _sub = receive()
-        { last = 42 }
+        { last: 42 }
       end
     end
     fn main() : Unit do
@@ -912,14 +912,14 @@ let test_eval_monitor_builtin () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = state.x } end
+      init { x: 0 }
+      on Noop() do { x: state.x } end
     end
 
     actor B do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = state.x } end
+      init { x: 0 }
+      on Noop() do { x: state.x } end
     end
 
     fn main() do
@@ -939,14 +939,14 @@ let test_eval_link_builtin () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = state.x } end
+      init { x: 0 }
+      on Noop() do { x: state.x } end
     end
 
     actor B do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = state.x } end
+      init { x: 0 }
+      on Noop() do { x: state.x } end
     end
 
     fn main() do
@@ -968,13 +968,13 @@ let test_supervision_one_for_one_restart () =
   let _env = eval_module {|mod Test do
     actor Worker do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     actor Supervisor do
       state { worker : Int }
-      init { worker = 0 }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
@@ -1006,13 +1006,13 @@ let test_supervision_max_restarts_escalation () =
   let _env = eval_module {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Supervisor do
       state { worker : Int }
-      init { worker = 0 }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 2 within 60
@@ -1044,19 +1044,19 @@ let test_supervision_one_for_all () =
   let _env = eval_module {|mod Test do
     actor WorkerA do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor WorkerB do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Supervisor do
       state { wa : Int, wb : Int }
-      init { wa = 0, wb = 0 }
+      init { wa: 0, wb: 0 }
       supervise do
         strategy one_for_all
         max_restarts 3 within 60
@@ -1092,25 +1092,25 @@ let test_supervision_rest_for_one () =
   let _env = eval_module {|mod Test do
     actor First do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Second do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Third do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Supervisor do
       state { first : Int, second : Int, third : Int }
-      init { first = 0, second = 0, third = 0 }
+      init { first: 0, second: 0, third: 0 }
       supervise do
         strategy rest_for_one
         max_restarts 3 within 60
@@ -1144,13 +1144,13 @@ let test_supervision_state_replacement () =
   let _env = eval_module {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     actor Supervisor do
       state { counter : Int }
-      init { counter = 0 }
+      init { counter: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 60
@@ -1199,8 +1199,8 @@ let test_supervision_get_cap () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1220,8 +1220,8 @@ let test_supervision_send_checked_ok () =
   let env = eval_module {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
       on Get() do state.count end
     end
 
@@ -1247,8 +1247,8 @@ let test_supervision_send_checked_dead_actor () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1287,13 +1287,13 @@ let test_supervision_stale_epoch () =
   let _env = eval_module {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     actor Supervisor do
       state { worker : Int }
-      init { worker = 0 }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 60
@@ -1332,8 +1332,8 @@ let test_supervision_revoke_cap_blocks_send () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1358,8 +1358,8 @@ let test_supervision_revoke_cap_idempotent () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1383,8 +1383,8 @@ let test_supervision_is_cap_valid () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1411,8 +1411,8 @@ let test_supervision_send_revoked_cap_errors () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1447,8 +1447,8 @@ let test_supervision_revoke_without_kill () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
 
     fn main() do
@@ -1478,8 +1478,8 @@ let test_supervision_task_spawn_link_completes () =
   let env = eval_module {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Compute() do { x = 42 } end
+      init { x: 0 }
+      on Compute() do { x: 42 } end
       on GetX() do state.x end
     end
 
@@ -1499,8 +1499,8 @@ let test_supervision_task_spawn_link_crash_propagates () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -1652,8 +1652,8 @@ let test_own_drop_full_march_source () =
 
     actor Worker do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -2666,9 +2666,9 @@ let test_actor_spawn_and_send () =
   let src = {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
+      init { value: 0 }
       on Inc() do
-        { value = state.value + 1 }
+        { value: state.value + 1 }
       end
     end
     fn main() do
@@ -3627,7 +3627,7 @@ let test_eval_custom_show_dispatch () =
         "(" ++ int_to_string(p.x) ++ "," ++ int_to_string(p.y) ++ ")"
       end
     end
-    fn result() : String do show({ x = 3, y = 4 }) end
+    fn result() : String do show({ x: 3, y: 4 }) end
   end|} in
   Alcotest.(check string) "custom show for Point" "(3,4)"
     (vstr (call_fn env "result" []))
@@ -3666,8 +3666,8 @@ let test_derive_record_eq () =
     type Point = { x: Int, y: Int }
     derive Eq for Point
     fn result() : Bool do
-      let p1 = { x = 1, y = 2 }
-      let p2 = { x = 1, y = 2 }
+      let p1 = { x: 1, y: 2 }
+      let p2 = { x: 1, y: 2 }
       p1 == p2
     end
   end|} in
@@ -4357,7 +4357,7 @@ let test_eq_prop_record_reflexivity () =
     type Point = { x: Int, y: Int }
     derive Eq for Point
     fn result() : Bool do
-      let p = { x = 5, y = 10 }
+      let p = { x: 5, y: 10 }
       p == p
     end
   end|} in
@@ -4381,8 +4381,8 @@ let test_eq_prop_symmetry_records () =
     type Point = { x: Int, y: Int }
     derive Eq for Point
     fn result() : Bool do
-      let p1 = { x = 1, y = 2 }
-      let p2 = { x = 3, y = 4 }
+      let p1 = { x: 1, y: 2 }
+      let p2 = { x: 3, y: 4 }
       let ab = p1 == p2
       let ba = p2 == p1
       ab == ba
@@ -4494,7 +4494,7 @@ let test_show_prop_record_runs () =
         "(" ++ int_to_string(p.x) ++ "," ++ int_to_string(p.y) ++ ")"
       end
     end
-    fn result() : String do show({ x = 1, y = 2 }) end
+    fn result() : String do show({ x: 1, y: 2 }) end
   end|} in
   let s = vstr (call_fn env "result" []) in
   Alcotest.(check bool) "Show for record: non-empty" true (String.length s > 0)
@@ -4553,10 +4553,10 @@ let test_actor_multi_handler_typechecks () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
-      on Inc() do { value = state.value + 1 } end
-      on Dec() do { value = state.value - 1 } end
-      on Reset() do { value = 0 } end
+      init { value: 0 }
+      on Inc() do { value: state.value + 1 } end
+      on Dec() do { value: state.value - 1 } end
+      on Reset() do { value: 0 } end
     end
     fn main() do
       let pid = spawn(Counter)
@@ -4573,8 +4573,8 @@ let test_actor_state_update_eval () =
   let src = {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
-      on Inc() do { value = state.value + 1 } end
+      init { value: 0 }
+      on Inc() do { value: state.value + 1 } end
     end
     fn main() do
       let pid = spawn(Counter)
@@ -4594,8 +4594,8 @@ let test_actor_multiple_actors_spawn () =
   let env = eval_module {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     fn main() do
       let pa = spawn(Worker)
@@ -4611,8 +4611,8 @@ let test_actor_send_does_not_crash () =
   let env = eval_module {|mod Test do
     actor Accumulator do
       state { total : Int }
-      init { total = 0 }
-      on Add(n : Int) do { total = state.total + n } end
+      init { total: 0 }
+      on Add(n : Int) do { total: state.total + n } end
     end
     fn main() do
       let pid = spawn(Accumulator)
@@ -4629,8 +4629,8 @@ let test_actor_is_alive_after_spawn () =
   let env = eval_module {|mod Test do
     actor Idle do
       state { dummy : Int }
-      init { dummy = 0 }
-      on Ping() do { dummy = 0 } end
+      init { dummy: 0 }
+      on Ping() do { dummy: 0 } end
     end
     fn main() : Bool do
       let pid = spawn(Idle)
@@ -4644,8 +4644,8 @@ let test_actor_kill_marks_dead () =
   let env = eval_module {|mod Test do
     actor Idle do
       state { dummy : Int }
-      init { dummy = 0 }
-      on Ping() do { dummy = 0 } end
+      init { dummy: 0 }
+      on Ping() do { dummy: 0 } end
     end
     fn main() : Bool do
       let pid = spawn(Idle)
@@ -4660,13 +4660,13 @@ let test_actor_link_propagates_death () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     actor B do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     fn main() : Bool do
       let pa = spawn(A)
@@ -4683,13 +4683,13 @@ let test_actor_monitor_delivers_down () =
   let env = eval_module {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     actor B do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     fn main() : Int do
       let pa = spawn(A)
@@ -4707,12 +4707,12 @@ let test_actor_supervisor_max_restarts_eval () =
   let src = {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 1 within 60
@@ -4840,7 +4840,7 @@ let test_parse_nested_record_literal () =
     type Inner = { v : Int }
     type Outer = { inner : Inner }
     fn make() : Outer do
-      { inner = { v = 99 } }
+      { inner: { v: 99 } }
     end
   end|} in
   let m = parse_module src in
@@ -5856,9 +5856,9 @@ let test_actor_cast_basic () =
     let env = eval_with_stdlib [decl] {|mod Test do
       actor Counter do
         state { count : Int }
-        init { count = 0 }
+        init { count: 0 }
         on Inc() do
-          { count = state.count + 1 }
+          { count: state.count + 1 }
         end
       end
       fn f() do
@@ -5879,9 +5879,9 @@ let test_actor_call_get () =
     let env = eval_with_stdlib [decl] {|mod Test do
       actor Counter do
         state { count : Int }
-        init { count = 0 }
+        init { count: 0 }
         on Inc() do
-          { count = state.count + 1 }
+          { count: state.count + 1 }
         end
         on Call(ref, msg) do
           Actor.reply(ref, state.count)
@@ -9491,7 +9491,7 @@ actor Counter do
   state { count: Int }
   init do initial_count() end
   on Inc do
-    { count = count + 1 }
+    { count: count + 1 }
   end
 end
 end|} in
@@ -9600,7 +9600,7 @@ let test_adv_trecord_sort_invariant () =
      Unification must succeed because both sides are sorted before comparison. *)
   let errors = typecheck {|mod T do
     type Point = { z: Int, a: Int, b: Int }
-    fn mk() : Point do { z = 3, a = 1, b = 2 } end
+    fn mk() : Point do { z: 3, a: 1, b: 2 } end
     fn get_a(p: Point) : Int do p.a end
     fn f() : Int do
       let p = mk()

@@ -6,7 +6,7 @@
 --   cmp(a, b) > 0  means a > b
 --
 -- The map itself is a record holding the comparator and the tree root.
--- Type: %{cmp: (k,k)->Int, tree: Tree(k,v)}
+-- Type: {cmp: (k,k)->Int, tree: Tree(k,v)}
 
 mod OrderedMap do
 
@@ -209,27 +209,27 @@ mod OrderedMap do
   -- ---- Public API ----
 
   doc "Creates a new empty ordered map with the given comparator."
-  fn new(cmp : (k, k) -> Int) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
-    %{cmp: cmp, tree: Leaf}
+  fn new(cmp : (k, k) -> Int) : {cmp: (k, k) -> Int, tree: Tree(k, v)} do
+    {cmp: cmp, tree: Leaf}
   end
 
   doc "Inserts or updates key k with value v in map m."
-  fn put(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, v : v) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
-    %{cmp: m.cmp, tree: tree_insert(m.tree, m.cmp, k, v)}
+  fn put(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, v : v) : {cmp: (k, k) -> Int, tree: Tree(k, v)} do
+    {cmp: m.cmp, tree: tree_insert(m.tree, m.cmp, k, v)}
   end
 
   doc "Looks up key k in map m. Returns Some(v) or None."
-  fn get(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Option(v) do
+  fn get(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Option(v) do
     tree_get(m.tree, m.cmp, k)
   end
 
   doc "Deletes key k from map m. No-op if key not present."
-  fn delete(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
-    %{cmp: m.cmp, tree: tree_delete(m.tree, m.cmp, k)}
+  fn delete(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : {cmp: (k, k) -> Int, tree: Tree(k, v)} do
+    {cmp: m.cmp, tree: tree_delete(m.tree, m.cmp, k)}
   end
 
   doc "Returns true if key k is present in map m."
-  fn member(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Bool do
+  fn member(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Bool do
     match tree_get(m.tree, m.cmp, k) do
     Some(_) -> true
     None -> false
@@ -237,32 +237,32 @@ mod OrderedMap do
   end
 
   doc "Returns an in-order list of all keys."
-  fn keys(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(k) do
+  fn keys(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(k) do
     List.map(tree_to_list(m.tree, Nil), fn (k, _) -> k)
   end
 
   doc "Returns an in-order list of all values."
-  fn values(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(v) do
+  fn values(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(v) do
     List.map(tree_to_list(m.tree, Nil), fn (_, v) -> v)
   end
 
   doc "Returns an in-order list of (key, value) pairs."
-  fn to_list(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List((k, v)) do
+  fn to_list(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : List((k, v)) do
     tree_to_list(m.tree, Nil)
   end
 
   doc "Builds a map from a list of (key, value) pairs."
-  fn from_list(pairs : List((k, v)), cmp : (k, k) -> Int) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  fn from_list(pairs : List((k, v)), cmp : (k, k) -> Int) : {cmp: (k, k) -> Int, tree: Tree(k, v)} do
     List.fold_left(new(cmp), pairs, fn m -> fn (k, v) -> put(m, k, v))
   end
 
   doc "Returns the number of entries in the map."
-  fn size(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Int do
+  fn size(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : Int do
     tree_size(m.tree)
   end
 
   doc "Returns the smallest key, or None if empty."
-  fn min_key(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
+  fn min_key(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
     match tree_min(m.tree) do
     Some((k, _)) -> Some(k)
     None -> None
@@ -270,7 +270,7 @@ mod OrderedMap do
   end
 
   doc "Returns the largest key, or None if empty."
-  fn max_key(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
+  fn max_key(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
     match tree_max(m.tree) do
     Some((k, _)) -> Some(k)
     None -> None
@@ -278,22 +278,22 @@ mod OrderedMap do
   end
 
   doc "Folds over the map in key order: f(acc, key, value) -> acc."
-  fn fold(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, acc : b, f : (b, k, v) -> b) : b do
+  fn fold(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, acc : b, f : (b, k, v) -> b) : b do
     tree_fold(m.tree, acc, f)
   end
 
   doc "Maps f over all values, preserving keys and order."
-  fn map(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> w) : %{cmp: (k, k) -> Int, tree: Tree(k, w)} do
-    %{cmp: m.cmp, tree: tree_map(m.tree, f)}
+  fn map(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> w) : {cmp: (k, k) -> Int, tree: Tree(k, w)} do
+    {cmp: m.cmp, tree: tree_map(m.tree, f)}
   end
 
   doc "Returns a new map containing only entries where f(k, v) is true."
-  fn filter(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> Bool) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
-    %{cmp: m.cmp, tree: tree_filter(m.tree, m.cmp, f)}
+  fn filter(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> Bool) : {cmp: (k, k) -> Int, tree: Tree(k, v)} do
+    {cmp: m.cmp, tree: tree_filter(m.tree, m.cmp, f)}
   end
 
   doc "Returns true if the map is empty."
-  fn is_empty(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Bool do
+  fn is_empty(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}) : Bool do
     match m.tree do
     Leaf -> true
     _ -> false
@@ -301,7 +301,7 @@ mod OrderedMap do
   end
 
   doc "Returns the value for key k, or default if not present."
-  fn get_or(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, default : v) : v do
+  fn get_or(m : {cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, default : v) : v do
     match tree_get(m.tree, m.cmp, k) do
     Some(v) -> v
     None -> default

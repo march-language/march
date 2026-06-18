@@ -240,10 +240,10 @@ end
 
 -- ---- quantile (Hyndman & Fan 1996 methods) ----
 --
--- Reference values cross-checked against R's quantile(x, probs, type=k)
--- and numpy's quantile(x, q, method=...) where applicable.
+-- Reference values cross-checked against R's quantile(x, probs, type:k)
+-- and numpy's quantile(x, q, method:...) where applicable.
 
-test "quantile Linear (Type 7) matches R quantile(1:5, 0.5, type=7) == 3" do
+test "quantile Linear (Type 7) matches R quantile(1:5, 0.5, type:7) == 3" do
   let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
   assert approx_eq(Stats.quantile(xs, 0.5, Linear), 3.0)
 end

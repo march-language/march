@@ -3,7 +3,7 @@
 -- closure that returns a COMPUTED Bool.
 --
 -- A dynamic record-field read (`row.active` on a generic row) yields the field
--- in the tagged generic representation (true=3, false=1).  Inference left such a
+-- in the tagged generic representation (true=3, false:1).  Inference left such a
 -- lambda's return type polymorphic, so its apply wrapper used the generic ptr
 -- ABI; a `fn r -> r.age > 0` lambda got a concrete i64 ABI.  Stored in one list
 -- and called through a single `(_) -> Bool` predicate, the indirect dispatch
@@ -37,9 +37,9 @@ mod ClosureBoolField do
   end
 
   fn rows() do
-    Cons({ id = 1, age = 30, active = true },
-    Cons({ id = 2, age = 25, active = false },
-    Cons({ id = 3, age = 35, active = true }, Nil)))
+    Cons({ id: 1, age: 30, active: true },
+    Cons({ id: 2, age: 25, active: false },
+    Cons({ id: 3, age: 35, active: true }, Nil)))
   end
 
   fn main() : Unit do

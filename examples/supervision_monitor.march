@@ -17,12 +17,12 @@ mod MonitorDemo do
   -- A simple actor that does some counting work.
   actor Worker do
     state { count : Int }
-    init { count = 0 }
+    init { count: 0 }
 
     on Work() do
       let n = state.count + 1
       println("[Worker] processed work #" ++ int_to_string(n))
-      { count = n }
+      { count: n }
     end
   end
 
@@ -30,7 +30,7 @@ mod MonitorDemo do
   -- It has a handler so we can also ask it to report its down count.
   actor Watcher do
     state { down_count : Int }
-    init { down_count = 0 }
+    init { down_count: 0 }
 
     -- Calling this causes the watcher to check its mailbox and print.
     -- (In real use, a receive loop would drain the mailbox automatically.)
@@ -52,7 +52,7 @@ mod MonitorDemo do
 
     -- Establish a monitor: watcher will receive Down when worker crashes
     let ref1 = monitor(watcher, worker)
-    println("monitor established, ref = " ++ int_to_string(ref1))
+    println("monitor established, ref: " ++ int_to_string(ref1))
     println("watcher mailbox size (before kill): " ++ int_to_string(mailbox_size(watcher)))
     println("")
 
@@ -81,7 +81,7 @@ mod MonitorDemo do
     println("--- Monitoring a dead actor ---")
     let ref2 = monitor(watcher, worker)
     let mbox2 = mailbox_size(watcher)
-    println("monitor dead actor, ref = " ++ int_to_string(ref2))
+    println("monitor dead actor, ref: " ++ int_to_string(ref2))
     println("watcher mailbox size: " ++ int_to_string(mbox2))
     println("  (expect 2 — second Down arrives immediately for dead actor)")
     demonitor(ref2)

@@ -46,7 +46,7 @@ mod Random do
     let s3 = mix(n + 3)
     -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
     let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
-    { s0 = s0, s1 = s1, s2 = s2, s3 = s3 }
+    { s0: s0, s1: s1, s2: s2, s3: s3 }
   end
 
   -- ---- Core xoshiro256** step (63-bit variant) ----
@@ -61,7 +61,7 @@ mod Random do
     let s0 = int_xor(rng.s0, s3)
     let s2 = int_xor(s2, t)
     let s3 = rotl(s3, 45)
-    (result, { s0 = s0, s1 = s1, s2 = s2, s3 = s3 })
+    (result, { s0: s0, s1: s1, s2: s2, s3: s3 })
   end
 
   -- ---- Public generators ----
@@ -149,7 +149,7 @@ mod Random do
   --
   -- All distribution samplers are pure: they consume a Rng and return
   -- (value, new_rng).  Convenience entry points take only the rng and
-  -- use sensible defaults (mu=0, sigma=1, lambda=1.0).
+  -- use sensible defaults (mu=0, sigma:1, lambda:1.0).
 
   -- Uniform on the open interval (0, 1).  next_float is [0, 1), so we
   -- re-draw if we hit exactly 0.  Used where log/divide would blow up on 0.

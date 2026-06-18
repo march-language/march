@@ -37,7 +37,7 @@ mod Check do
   seed picked from env or clock.
   """
   fn default_config() : CheckConfig do
-    { num_runs = 100, seed = None, max_shrink_steps = 1000, max_size = 100 }
+    { num_runs: 100, seed: None, max_shrink_steps: 1000, max_size: 100 }
   end
 
   -- ---- Skip check ----
@@ -177,7 +177,7 @@ mod Check do
   Run a property with explicit config.  Use to override run count, seed,
   or shrink budget.  Example:
 
-      Check.all_with(gen, prop, { Check.default_config() with seed = Some(42) })
+      Check.all_with(gen, prop, { Check.default_config() with seed: Some(42) })
   """
   fn all_with(g, prop, config : CheckConfig) do
     if is_skipped() do ()

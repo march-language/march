@@ -165,12 +165,12 @@ end
 -- ---------------------------------------------------------------------------
 
 fn main() do
-  let me = { name = "Alice", role = "admin" }
+  let me = { name: "Alice", role: "admin" }
 
   let posts = [
-    { title = "Hello, March!", excerpt = "Getting started with the March language.", slug = "hello-march" },
-    { title = "Bastion Routing", excerpt = "How to define routes in <Bastion>.", slug = "bastion-routing" },
-    { title = "Islands & WASM", excerpt = "Embedding interactive islands in SSR pages.", slug = "islands-wasm" }
+    { title: "Hello, March!", excerpt: "Getting started with the March language.", slug: "hello-march" },
+    { title: "Bastion Routing", excerpt: "How to define routes in <Bastion>.", slug: "bastion-routing" },
+    { title: "Islands & WASM", excerpt: "Embedding interactive islands in SSR pages.", slug: "islands-wasm" }
   ]
 
   let page = render_blog_index(me, posts)

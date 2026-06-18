@@ -291,12 +291,12 @@ mod TestMsgpack do
 
   describe "Bin" do
 
-    test "empty bin encodes as bin8 (196, len=0)" do
+    test "empty bin encodes as bin8 (196, len:0)" do
       assert_bytes(Msgpack.Bin(Nil), Cons(196, Cons(0, Nil)))
       assert_encode_len(Msgpack.Bin(Nil), 2)
     end
 
-    test "single byte bin encodes as bin8 (196, len=1, byte)" do
+    test "single byte bin encodes as bin8 (196, len:1, byte)" do
       assert_bytes(Msgpack.Bin(Cons(42, Nil)),
                    Cons(196, Cons(1, Cons(42, Nil))))
     end
@@ -324,7 +324,7 @@ mod TestMsgpack do
       assert_encode_len(Msgpack.Array(Nil), 1)
     end
 
-    test "fixarray of 1 null: header=145, body=192" do
+    test "fixarray of 1 null: header=145, body:192" do
       assert_bytes(Msgpack.Array(Cons(Msgpack.Null, Nil)),
                    Cons(145, Cons(192, Nil)))
     end
@@ -488,7 +488,7 @@ mod TestMsgpack do
     end
 
     test "truncated str8 body is an error" do
-      -- 217 = str8, length=5 but only 2 bytes follow
+      -- 217 = str8, length:5 but only 2 bytes follow
       assert_decode_err(Cons(217, Cons(5, Cons(65, Cons(66, Nil)))))
     end
 
