@@ -1,11 +1,83 @@
 [
   {
-    "hash": "a254769d990c01fc18528607b8eb1ee7a11b44cf",
-    "short_hash": "a254769",
+    "hash": "bea8e9934492aa39727fcbcb0197bc951e5b1282",
+    "short_hash": "bea8e99",
     "author": "Matthew Gilliam",
-    "date": "2026-06-15T12:54:01-04:00",
-    "message": "docs(lsp): record ~H unclosed-tag detection + arrow→colon fix in todos",
+    "date": "2026-06-17T22:52:58-04:00",
+    "message": "Merge branch 'claude/silly-mcclintock-b9f701'\n\nPhase 2c/2d: Tagged(X,T) specialization tags + environment records",
+    "files_changed": 0
+  },
+  {
+    "hash": "639cdb6a157225857a8e5634957ac7a071a49103",
+    "short_hash": "639cdb6",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T22:50:28-04:00",
+    "message": "feat(typecheck): Phase 2c/2d — Tagged(X,T) specialization tags + env records\n\nAdd `Tagged(X, T)` as a builtin two-arg type constructor for phantom\nspecialization policies (realtime, SIMD width, platform targeting).\n\nCompiler changes (lib/typecheck/typecheck.ml):\n- `(\"Tagged\", 2)` added to builtin_types — `Tagged(DSP, Realtime)` etc.\n  are now valid type annotations everywhere\n- `(\"Alloc\", 0)` and `(\"Panic\", 0)` added as future capability roots\n- `cap_paths_in_surface_ty` skips `Tagged` args — prevents the capability\n  needs-checker from treating the inner tag types as capability requirements\n- Check 7 in `check_module_needs`: a function with `Tagged(_, Realtime)` in\n  its parameter list cannot also take `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)`.\n  This is the realtime exclusion narrowing rule from §3/§5 of the capability\n  spec — realtime functions are statically proven not to allocate, do IO, or abort.\n\nTests (test/test_compiler.ml):\n- `Tagged(X,T): valid type annotation` — parses and typechecks cleanly\n- `Tagged(_, Realtime) + Cap(IO): error` — Check 7 fires\n- `Tagged(_, Realtime) + Cap(Alloc): error` — Check 7 fires\n- `Tagged(_, Realtime) + Cap(Panic): error` — Check 7 fires\n- `Tagged(_, Standard): no exclusion` — non-realtime tags are unrestricted\n\nPhase 2d (environment records) has no compiler work — records of caps are\nalready expressible. Documented in docs/capabilities.md as the pattern for\nbundling caps into records, narrowing via record construction, and testing\nwith function fields alongside cap fields.\n\n214 compiler tests pass, 2 pre-existing parser-gaps failures unchanged.",
+    "files_changed": 5
+  },
+  {
+    "hash": "c1ced981e8a90cb6edb12e2d8759d0843372a504",
+    "short_hash": "c1ced98",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T22:02:52-04:00",
+    "message": "Merge branch 'claude/adoring-bassi-4c43d1'",
+    "files_changed": 0
+  },
+  {
+    "hash": "7a29c1fe3268dc2c203e98042b8e6afd07e4ca2e",
+    "short_hash": "7a29c1f",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T21:20:19-04:00",
+    "message": "feat(docs): update landing REPL chips with value-prop examples",
     "files_changed": 1
+  },
+  {
+    "hash": "0ee0ab553554cc6b53af52330c81d84445b5f835",
+    "short_hash": "0ee0ab5",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T18:32:49-04:00",
+    "message": "feat(tooling): Phase 2f — transitions hover, via completions, forge cap query\n\nThree tooling items from specs/capability-system-design.md §9:\n\n1. LSP transitions hover: Analysis.t gains transitions_index and\n   always_linear_names fields. typestate_hover_at shows state + transitions\n   when hovering a Handle(R, S) expression. Wired into server.ml hover.\n\n2. LSP via completions: via_completions detects cursor in a transitions\n   arm via-position and filters vars to type-compatible transition fns.\n\n3. forge cap query (forge/lib/cmd_cap.ml): parses all .march files,\n   extracts DNeeds/DAlwaysLinearType/DTransitions/DProofCap declarations\n   and prints a grouped capability/typestate summary.",
+    "files_changed": 7
+  },
+  {
+    "hash": "dede313875fd084ec82fee4a85baf3013aea5472",
+    "short_hash": "dede313",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T13:30:12-04:00",
+    "message": "perf(test): mark 13 slow stdlib tests as Slow; add -q fast mode\n\nThree groups of tests in run_stdlib that are slow but test isolated,\nrarely-changed code are now marked `Slow` (skipped with -q):\n\n  6  repl_compiler_parity   JIT vs interpreter parity  ~5s\n  5  compiled adversarial   native --compile regressions  ~5s\n  2  crypto pbkdf2          intentionally-slow KDF  ~3s\n\nrun_stdlib -q: 17s → 4.3s (766/780 tests)\n\nscripts/run-tests.sh now accepts -q flag to pass --quick-tests to all\nrunners.  CLAUDE.md documents the Slow test split and -q usage.",
+    "files_changed": 3
+  },
+  {
+    "hash": "b57873238287dc838c57ca69b65773829eccdd44",
+    "short_hash": "b578732",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T12:24:13-04:00",
+    "message": "chore(test): reliable parallel-agent test execution\n\nFour improvements:\n\n1. test/dune: add `-e` (show-errors) to all 4 runner stanzas so failure\n   details appear inline rather than requiring log-file archaeology.\n\n2. scripts/run-tests.sh: new wrapper that separates build (dune RPC) from\n   execution (direct binary). Agents run this to avoid RPC contention:\n   `dune build` serialises safely; `_build/.../run_*.exe -e` runs without\n   any dune daemon involvement.  Optional MARCH_DUNE_SHUTDOWN=1 calls\n   `dune shutdown` first to clear a stale daemon.  Per-suite timeout via\n   `timeout(1)` / `gtimeout` when available.\n\n3. CLAUDE.md: document --no-buffer, --force, direct binary invocation, and\n   `dune shutdown` under a \"Parallel-agent / reliable test invocation\" heading.\n\nItem 5 (stdlib TCenv warmup): measured — the race does not exist. Test\nrunners call check_module/base_env directly; the repl.ml tcenv cache is\nREPL-only and never written during dune runtest. No implementation needed.",
+    "files_changed": 3
+  },
+  {
+    "hash": "ec291440b47aaff40268b703a29b347eff3db778",
+    "short_hash": "ec29144",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-17T12:03:34-04:00",
+    "message": "refactor(test): split test_march.ml into per-suite modules\n\nReplaces the 24k-line monolithic test_march.ml with five focused modules:\n  test_helpers.ml       — shared infrastructure (parse, eval, builtins)\n  test_compiler.ml      — lexer/parser/typecheck/session/app suites\n  test_eval.ml          — eval/runtime suites\n  test_codegen.ml       — TIR/JIT/LLVM suites\n  test_stdlib_suite.ml  — stdlib suites\n\nEach module becomes its own dune library (march_test_compiler, etc.),\nso editing one suite no longer triggers recompilation of the others.\nAll 4 runners (202 + 214 + 267 + 780 = 1463 tests) pass.",
+    "files_changed": 11
+  },
+  {
+    "hash": "fcd41ec3622a40080efefa04305cbdfdc789ac69",
+    "short_hash": "fcd41ec",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-16T19:10:05-04:00",
+    "message": "perf(build): remove ppx_deriving.show from tir/dump/errors/cas\n\n- lib/tir/tir.ml: drop 11 [@@deriving show] annotations; add\n  hand-written show_ty/show_atom/show_expr/show_fn_def used by dump.ml\n  for body fingerprinting\n- lib/dump/dune: remove ppx preprocess stanza (now uses hand-written fn)\n- lib/errors/dune, lib/cas/dune: remove ppx stanzas (zero usage)\n- Fix 4 spurious warning-50 (unexpected-docstring) (**→(*) in\n  tir/perceus.ml, lower.ml (×2), llvm_emit.ml\n- test/dune: comment out native_actor_counter (deadlock under investigation)\n- test/test_march.ml: update 10 fold/dce/opt assertions to use\n  show_expr(expected) vs show_expr(actual) — format-agnostic comparisons",
+    "files_changed": 10
+  },
+  {
+    "hash": "3ae170ba0aa53ffa96dcd343fa9a04554192a76f",
+    "short_hash": "3ae170b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-16T12:04:34-04:00",
+    "message": "feat(forge): dep scoping — [dev-only-deps] and [test-deps]\n\nIntroduce two new dependency sections alongside the existing [dev-deps]:\n\n  [deps]          ships to prod; available in all environments\n  [dev-deps]      dev + test (shared non-prod tooling) — NOW WIRED\n  [dev-only-deps] dev only (hot reload, dashboards, dev proxies)\n  [test-deps]     test only (test frameworks, fuzz libs, mocking)\n\nPreviously, [dev-deps] was parsed but never placed on MARCH_LIB_PATH\nfor either forge build or forge test. This commit wires all four\nbuckets correctly:\n\n  forge build (dev)     → deps + dev-deps + dev-only-deps\n  forge build --release → deps only\n  forge test            → deps + dev-deps + test-deps\n\nAlso:\n- Extracts dep_to_lib_paths helper in cmd_build.ml (eliminates\n  duplication between cmd_build and cmd_test path expansion)\n- forge deps now fetches all four buckets\n- forge add --dev-only / --test write to the new sections\n- 2 new tests in test_resolver.ml (inline + section form parsing)\n- Spec: specs/plans/2026-06-16-compilation-environments.md",
+    "files_changed": 8
   },
   {
     "hash": "1457216f72faef5aab2b36699d738001fa39e2b1",
@@ -2096,16 +2168,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2152,14 +2224,6 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:06:51-04:00",
-    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
-    "files_changed": 5
-  },
-  {
     "hash": "331665a13c16dfef67c251366ec617b269e8f646",
     "short_hash": "331665a",
     "author": "Matthew Gilliam",
@@ -2168,16 +2232,24 @@
     "files_changed": 5
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:06:51-04:00",
+    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
+    "files_changed": 5
+  },
+  {
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
@@ -2200,16 +2272,16 @@
     "files_changed": 3
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
     "files_changed": 7
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",

@@ -1005,6 +1005,7 @@ expr_atom:
   | a = ATOM %prec prec_atom
     { EAtom (a, [], mk_span ($loc)) }
   | id = LOWER_IDENT { EVar (mk_name id $loc) }
+  | TAG              { EVar (mk_name "tag" $loc) }
   | con = UPPER_IDENT %prec prec_atom
     { ECon (mk_name con $loc, [], mk_span ($loc)) }
   | QUESTION; id = LOWER_IDENT
@@ -1137,6 +1138,7 @@ simple_pattern:
 
 lower_name:
   | id = LOWER_IDENT { mk_name id $loc }
+  | TAG              { mk_name "tag" $loc }
 
 (** Like lower_name but also accepts certain keywords that are commonly
     used as variable / parameter names (e.g. `state` in actor code).
@@ -1156,6 +1158,7 @@ soft_lower_name:
   | USE               { mk_name "use"      $loc }
   | IN                { mk_name "in"       $loc }
   | FOR               { mk_name "for"      $loc }
+  | TAG               { mk_name "tag"      $loc }
 
 upper_name:
   | id = UPPER_IDENT { mk_name id $loc }
