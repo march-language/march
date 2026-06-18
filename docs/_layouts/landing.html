@@ -23,6 +23,13 @@
       --accent: oklch(63% 0.12 207);
       --accent-border: oklch(26% 0.09 215);
       --accent-text: #020c18;
+      --syn-kw: oklch(74% 0.11 200);
+      --syn-tp: oklch(82% 0.12 70);
+      --syn-st: oklch(82% 0.11 200);
+      --syn-nm: oklch(78% 0.09 265);
+      --syn-cm: oklch(42% 0.07 215);
+      --syn-op: oklch(57% 0.09 205);
+      --syn-id: oklch(95% 0.02 207);
     }
     :root.light {
       --bg: #f0f6fc;
@@ -35,6 +42,13 @@
       --accent: oklch(37% 0.11 210);
       --accent-border: oklch(70% 0.09 207);
       --accent-text: #ffffff;
+      --syn-kw: oklch(32% 0.11 215);
+      --syn-tp: oklch(42% 0.12 55);
+      --syn-st: oklch(28% 0.11 215);
+      --syn-nm: oklch(36% 0.09 265);
+      --syn-cm: oklch(62% 0.06 215);
+      --syn-op: oklch(38% 0.07 215);
+      --syn-id: oklch(18% 0.04 215);
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; }
@@ -150,6 +164,19 @@
       padding: 15px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px;
       line-height: 1.65; overflow-x: auto; margin: 0;
     }
+    .m-code-wrap { position: relative; }
+    .m-try-btn {
+      position: absolute; top: 7px; right: 7px;
+      background: var(--bg-code); border: 1px solid var(--border);
+      border-radius: 4px; color: var(--text-faint);
+      cursor: pointer; padding: 3px 8px;
+      font-size: 10px; font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.04em; line-height: 1.5;
+      opacity: 0; transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+      z-index: 5; display: flex; align-items: center; gap: 4px;
+    }
+    .m-code-wrap:hover .m-try-btn { opacity: 1; }
+    .m-try-btn:hover { color: var(--accent); border-color: var(--accent); }
     .m-feature-hint {
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
       color: var(--text-faint); margin-top: 16px; letter-spacing: 0.03em;
@@ -242,8 +269,18 @@
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
       padding: 4px 12px; border-radius: 100px; border: 1px solid var(--border);
       background: transparent; color: var(--text-muted); cursor: pointer; letter-spacing: 0.02em;
+      position: relative;
     }
     .m-repl-chip:hover { border-color: var(--accent-border); color: var(--accent); }
+    .m-repl-chip[data-tip]::after {
+      content: attr(data-tip);
+      position: absolute; top: calc(100% + 6px); left: 0;
+      background: var(--bg-nav, var(--bg-code)); border: 1px solid var(--border);
+      color: var(--text-muted); font-size: 10px; white-space: nowrap;
+      padding: 3px 8px; border-radius: 4px; pointer-events: none;
+      opacity: 0; transition: opacity 0.15s 0.3s; z-index: 20;
+    }
+    .m-repl-chip[data-tip]:hover::after { opacity: 1; }
 
     /* INSTALL */
     .m-install { padding: 100px 32px; }
@@ -362,7 +399,10 @@
             <p class="m-feature-label">Performance</p>
             <h3 class="m-feature-h3">Zero-allocation recursive transforms</h3>
             <p class="m-feature-p">FBIP rewrites uniquely-owned data in place, so transforms like this allocate nothing on the reuse path. The functional-style rewrite is automatic; no unsafe code required.</p>
-            <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
+            <div class="m-code-wrap">
+              <pre class="m-feature-pre"><code id="fbip-code"></code></pre>
+              <button class="m-try-btn" onclick="event.stopPropagation();tryFBIP()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+            </div>
             <p class="m-feature-hint" style="text-align:right;">See benchmarks →</p>
           </div>
           <div class="m-perf-face m-perf-back">
@@ -390,7 +430,10 @@
         <p class="m-feature-label">Concurrency</p>
         <h3 class="m-feature-h3">Actor model, typed and isolated</h3>
         <p class="m-feature-p">Share-nothing message-passing actors with supervision trees. Accidental shared mutable state is a compile error, not a runtime bug.</p>
-        <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="actor-code"></code></pre>
+          <button class="m-try-btn" onclick="tryACTOR()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
       </div>
 
       <!-- TYPE SYSTEM -->
@@ -398,7 +441,10 @@
         <p class="m-feature-label">Type System</p>
         <h3 class="m-feature-h3">Hindley-Milner inference, ADTs, exhaustive patterns</h3>
         <p class="m-feature-p">Types flow without annotation boilerplate. The compiler enforces exhaustive pattern matching — a missing case is a compile error. Generics are monomorphized, no boxing overhead.</p>
-        <pre class="m-feature-pre"><code id="type-code"></code></pre>
+        <div class="m-code-wrap">
+          <pre class="m-feature-pre"><code id="type-code"></code></pre>
+          <button class="m-try-btn" onclick="tryTYPES()" title="Try in REPL"><svg width="13" height="11" viewBox="0 0 13 11" fill="none" aria-hidden="true"><polyline points="1,1.5 4.5,5.5 1,9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="6.5" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>try</button>
+        </div>
       </div>
 
       <!-- MEMORY -->
@@ -441,11 +487,11 @@
       </div>
     </div>
     <div class="m-repl-chips">
-      <button class="m-repl-chip" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
-      <button class="m-repl-chip" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
-      <button class="m-repl-chip" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
-      <button class="m-repl-chip" onclick="mReplLoad('let words = [&quot;functional&quot;, &quot;fast&quot;, &quot;native&quot;, &quot;ml&quot;]\nList.sort_by(words, String.length)')">sort_by</button>
-      <button class="m-repl-chip" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
+      <button class="m-repl-chip" data-tip="actors + message passing from the BEAM" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
+      <button class="m-repl-chip" data-tip="ADTs + recursive pattern matching" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
+      <button class="m-repl-chip" data-tip="typed error handling without exceptions" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
+      <button class="m-repl-chip" data-tip="mean &amp; std dev via List.fold_left + Math" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet mean = List.fold_left(data, 0.0, fn (a, x) -> a +. x) /. n\nlet var  = List.fold_left(data, 0.0, fn (a, x) -> a +. (x -. mean) *. (x -. mean)) /. n\n(mean, Math.sqrt(var))')">std dev</button>
+      <button class="m-repl-chip" data-tip="print to stdout" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
     </div>
   </div>
 </section>
@@ -492,6 +538,7 @@
   </div>
 </footer>
 
+<script src="{{ site.baseurl }}/assets/march-repl.js?v={{ site.time | date: '%s' }}"></script>
 <script>
 // ─── Syntax Highlighter ───────────────────────────────────────────────────────
 function syntaxHL(code, dark) {
@@ -740,132 +787,33 @@ function renderInstall() {
 
 // ─── Landing REPL ────────────────────────────────────────────────────────────
 (function () {
-  const wrap   = document.getElementById('m-repl-wrap');
-  const base   = (wrap && wrap.dataset.base) || '';
-  const ver    = (wrap && wrap.dataset.ver)  || '0';
-  const histEl = document.getElementById('m-repl-history');
-  const inputEl= document.getElementById('m-repl-input');
-  const loadEl = document.getElementById('m-repl-loading');
-
-  let loaded = false, loading = false, pending = null;
-  let cmdHist = [], histIdx = -1;
-
-  function loadScript(src, ok, err) {
-    const s = document.createElement('script');
-    s.src = src; s.onload = ok; s.onerror = err;
-    document.head.appendChild(s);
-  }
-
-  function loadBundle(cb) {
-    if (loaded) { cb(); return; }
-    if (loading) { pending = cb; return; }
-    loading = true;
-    loadEl.textContent = 'Loading interpreter…';
-    loadScript(base + '/assets/march_stdlib.js?v=' + ver, () => {
-      loadScript(base + '/assets/march.js?v=' + ver, () => {
-        loaded = true; loading = false;
-        loadEl.textContent = 'Ready.';
-        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
-        cb();
-        if (pending) { const f = pending; pending = null; f(); }
-      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
-    }, () => {
-      loadScript(base + '/assets/march.js?v=' + ver, () => {
-        loaded = true; loading = false;
-        loadEl.textContent = 'Ready.';
-        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
-        cb();
-        if (pending) { const f = pending; pending = null; f(); }
-      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
-    });
-  }
-
-  function addEntry(cls, text) {
-    text.split('\n').forEach(line => {
-      const div = document.createElement('div');
-      div.className = 'm-repl-entry';
-      const sp = document.createElement('span');
-      sp.className = cls; sp.textContent = line;
-      div.appendChild(sp); histEl.appendChild(div);
-    });
-    histEl.scrollTop = histEl.scrollHeight;
-  }
-
-  function addInputLine(code) {
-    code.split('\n').forEach((line, i) => {
-      const div = document.createElement('div');
-      div.className = 'm-repl-entry';
-      const sp = document.createElement('span');
-      if (i === 0) {
-        sp.className = 'm-repl-iline';
-      } else {
-        sp.style.cssText = 'font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.65;color:var(--text-faint)';
-        line = '       ' + line;
-      }
-      sp.textContent = line;
-      div.appendChild(sp); histEl.appendChild(div);
-    });
-    histEl.scrollTop = histEl.scrollHeight;
-  }
-
-  function autoResize() {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = inputEl.scrollHeight + 'px';
-  }
-
-  function submit(code) {
-    if (!code.trim()) return;
-    if (cmdHist[0] !== code) cmdHist.unshift(code);
-    if (cmdHist.length > 50) cmdHist.pop();
-    histIdx = -1;
-    addInputLine(code);
-    inputEl.value = ''; autoResize();
-
-    if (code.trim() === ':reset') {
-      if (loaded && window.marchResetSession) window.marchResetSession();
-      while (histEl.firstChild) histEl.removeChild(histEl.firstChild);
-      addEntry('m-repl-nfo', 'Session reset.');
-      return;
-    }
-
-    loadBundle(() => {
-      if (!window.marchEvalLine) { addEntry('m-repl-eline', 'Interpreter not available.'); return; }
-      const result = window.marchEvalLine(code);
-      if (result.output && result.output.trim()) addEntry('m-repl-oline', result.output.trimEnd());
-      if (result.error !== null) addEntry('m-repl-eline', result.error);
-    });
-  }
-
-  inputEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault(); submit(inputEl.value);
-    } else if (e.key === 'ArrowUp' && !e.shiftKey && cmdHist.length) {
-      e.preventDefault();
-      histIdx = Math.min(histIdx + 1, cmdHist.length - 1);
-      inputEl.value = cmdHist[histIdx]; autoResize();
-      setTimeout(() => { inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length; }, 0);
-    } else if (e.key === 'ArrowDown' && !e.shiftKey) {
-      e.preventDefault();
-      histIdx > 0 ? (histIdx--, inputEl.value = cmdHist[histIdx]) : (histIdx = -1, inputEl.value = '');
-      autoResize();
-    } else if (!loaded && !loading) {
-      loadBundle(() => {});
+  var repl = new MarchRepl({
+    wrapId:    'm-repl-wrap',
+    historyId: 'm-repl-history',
+    inputId:   'm-repl-input',
+    loadingId: 'm-repl-loading',
+    cls: {
+      entry:     'm-repl-entry',
+      inputLine: 'm-repl-iline',
+      output:    'm-repl-oline',
+      error:     'm-repl-eline',
+      info:      'm-repl-nfo'
     }
   });
-  inputEl.addEventListener('input', autoResize);
-  document.getElementById('m-repl-submit').addEventListener('click', () => submit(inputEl.value));
-  document.getElementById('m-repl-reset').addEventListener('click', () => submit(':reset'));
-
-  window.mReplLoad = code => {
-    const ta = document.createElement('textarea');
-    ta.innerHTML = code; inputEl.value = ta.value;
-    autoResize(); inputEl.focus();
-    if (!loaded && !loading) loadBundle(() => {});
-  };
-
-  window.addEventListener('load', () => loadBundle(() => {}));
+  document.getElementById('m-repl-submit').addEventListener('click', function () { repl.submit(); });
+  document.getElementById('m-repl-reset').addEventListener('click', function () { repl.reset(); });
+  window.mReplLoad     = function (code)        { repl.load(code); };
+  window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };
 })();
 
+// ─── Try-in-REPL ─────────────────────────────────────────────────────────────
+function tryInRepl(code) {
+  mReplLoad(code);
+  document.getElementById('m-repl-wrap').scrollIntoView({ behavior: 'smooth' });
+}
+function tryFBIP()  { tryInRepl(FBIP);  }
+function tryACTOR() { tryInRepl(ACTOR); }
+function tryTYPES() { tryInRepl(TYPES); }
 // ─── Events ───────────────────────────────────────────────────────────────────
 document.getElementById('theme-btn').addEventListener('click', () => {
   dark = !dark;
