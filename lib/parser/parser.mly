@@ -829,6 +829,8 @@ expr:
   | e = expr_pipe { e }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
+  | FN; ARROW; body = lambda_body
+    { ELam ([], body, mk_span ($loc)) }
   | FN; ps = lambda_params; ARROW; body = lambda_body
     { ELam (ps, body, mk_span ($loc)) }
   | FN; ps = lambda_params; error

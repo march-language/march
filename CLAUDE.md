@@ -148,7 +148,8 @@ final expression — identical to match arm block bodies:
 fn x -> x + 1                     -- single param, single expr
 fn _ -> 42                        -- wildcard param
 fn (a, b) -> a + b                -- multiple params (parenthesized)
-fn () -> some_function()          -- ZERO-ARG: must use fn () -> ...
+fn () -> some_function()          -- zero-arg (explicit form)
+fn -> some_function()             -- zero-arg (short form, identical)
 
 -- Multi-expression bodies with let bindings:
 fn x ->
@@ -156,15 +157,14 @@ fn x ->
   let z = y * 2
   z
 
-fn () ->
+fn ->
   let result = compute()
   result + 1
 ```
 
 **Common mistakes:**
-- `fn -> expr` — PARSE ERROR. Zero-arg lambdas MUST use `fn () -> expr`
 - `fn _ -> expr` when you want zero-arg — WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
-- `task_spawn(fn () -> f())` — WRONG if `task_spawn` passes 1 arg to the callback. Use `fn _ -> f()` (1-arg discard).
+- `task_spawn(fn -> f())` — WRONG if `task_spawn` passes 1 arg to the callback. Use `fn _ -> f()` (1-arg discard).
 
 ### Visibility
 

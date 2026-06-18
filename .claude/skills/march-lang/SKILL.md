@@ -42,19 +42,20 @@ let f = fn x -> x + 1
 List.map(xs, fn x -> x * 2)
 ```
 
-### Zero-arg lambdas: must use `fn () ->`
+### Zero-arg lambdas: `fn ->` or `fn () ->`
 
 ```march
--- WRONG: `fn -> expr` is a parse error
+-- RIGHT: short form
 let f = fn -> 42
+f()   -- OK
+
+-- RIGHT: explicit form (identical)
+let f = fn () -> 42
+f()   -- OK
 
 -- WRONG: `fn _ ->` is a 1-arg lambda (calling with 0 args = "arity mismatch: expected 1, got 0")
 let f = fn _ -> 42
 f()   -- ERROR
-
--- RIGHT
-let f = fn () -> 42
-f()   -- OK
 ```
 
 ### Multi-line lambda bodies: use let chains after `->`
@@ -181,7 +182,8 @@ fn fact(n) do n * fact(n - 1) end
 ```march
 fn x -> x + 1                  -- single param
 fn (a, b) -> a + b             -- multiple params
-fn () -> 42                    -- zero args (MUST use `()`)
+fn -> 42                       -- zero args (short form)
+fn () -> 42                    -- zero args (explicit form, identical)
 fn _ -> 42                     -- one-arg wildcard (ignores arg)
 fn (x, _) -> x                 -- tuple destructure
 ```
