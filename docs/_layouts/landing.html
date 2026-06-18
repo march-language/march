@@ -715,20 +715,27 @@ session Search do
 end`;
 
 const ACTOR_TRY = `actor Counter do
-  state { n : Int }
-  init  { n = 0 }
-  on Inc()   do { n = state.n + 1 } end
-  on Print() do
-    println(state.n)
+  state { value : Int }
+  init { value = 0 }
+  on Inc(n : Int) do
+    { value = state.value + n }
+  end
+  on Get() do
+    println("count: " ++ int_to_string(state.value))
     state
+  end
+  on Reset() do
+    { value = 0 }
   end
 end
 
-let c = spawn(Counter)
-send(c, Inc())
-send(c, Inc())
-send(c, Inc())
-send(c, Print())
+let pid = spawn(Counter)
+send(pid, Inc(5))
+send(pid, Inc(3))
+send(pid, Get())
+send(pid, Reset())
+send(pid, Inc(1))
+send(pid, Get())
 run_until_idle()`;
 
 const TYPES = `type Shape = Circle(Float) | Rect(Float, Float)
