@@ -92,7 +92,7 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat 1.0)]) when f.Tir.v_name = "/." ->
     changed := true; Tir.EAtom x
 
-  (* Boolean identities *)
+  (* Boolean identities — x is always an atom (ANF), so no side effects dropped *)
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitBool true)]) when f.Tir.v_name = "&&" ->
     changed := true; Tir.EAtom x
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); x]) when f.Tir.v_name = "&&" ->
@@ -101,6 +101,22 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
     changed := true; Tir.EAtom x
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); x]) when f.Tir.v_name = "||" ->
     changed := true; Tir.EAtom x
+
+  (* P15 — Boolean short-circuit absorber laws:
+     x && false = false, false && x = false (x already bound, no side effects in ANF)
+     x || true  = true,  true  || x = true  *)
+  | Tir.EApp (f, [_x; Tir.ALit (March_ast.Ast.LitBool false)]) when f.Tir.v_name = "&&" ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); _x]) when f.Tir.v_name = "&&" ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))
+  | Tir.EApp (f, [_x; Tir.ALit (March_ast.Ast.LitBool true)]) when f.Tir.v_name = "||" ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); _x]) when f.Tir.v_name = "||" ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))
+
+  (* P15 — not with known argument: not true = false, not false = true *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool (not b)))
 
   (* String identities: x ++ "" → x, "" ++ x → x *)
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitString "")])

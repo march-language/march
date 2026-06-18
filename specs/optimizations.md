@@ -794,8 +794,8 @@ These patterns arise from desugaring guards (`when x == x`), from inlining boole
 
 **Effort:** Low (~40 lines) | **Impact:** Low-Medium
 **Dependencies:** None (standalone peepholes)
-**Tests:** `simplify` group — `if_then_true_else_false`, `if_then_false_else_true`, `eq_self`, `ne_self`, `eq_self_float_no_reduce`, `eq_self_tuple_float_no_reduce`
-**Status:** Done (commit 471bb42 + review fixes; `not (not x)` deferred — not yet needed)
+**Tests:** `simplify` group — `if_then_true_else_false`, `if_then_false_else_true`, `eq_self`, `ne_self`, `eq_self_float_no_reduce`, `eq_self_tuple_float_no_reduce`, `and_false_rhs`, `and_false_lhs`, `or_true_rhs`, `not_true`, `not_false`
+**Status:** Done (P15 additions: `x && false = false`, `false && x = false`, `x || true = true`, `true || x = true`, `not true = false`, `not false = true`; P14 original: `if x then true else false`, `if x then false else true`, `x==x`, `x!=x`; `not (not x)` deferred — not yet needed)
 
 ---
 

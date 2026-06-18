@@ -2063,6 +2063,59 @@ let test_simplify_eq_self_tuple_float_no_reduce () =
   let _ = March_tir.Simplify.run ~changed m in
   Alcotest.(check bool) "not changed for tuple-float ==" false !changed
 
+(* ── P15: boolean short-circuit absorber peepholes ──────────────────────── *)
+
+let test_simplify_and_false_rhs () =
+  let x = mk_var "x" March_tir.Tir.TBool in
+  let m = mk_module [mk_fn "f" (app "&&" [March_tir.Tir.AVar x;
+                                           March_tir.Tir.ALit (March_ast.Ast.LitBool false)])] in
+  let changed = ref false in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  Alcotest.(check bool) "result is EAtom false"
+    (body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool false))) true
+
+let test_simplify_and_false_lhs () =
+  let x = mk_var "x" March_tir.Tir.TBool in
+  let m = mk_module [mk_fn "f" (app "&&" [March_tir.Tir.ALit (March_ast.Ast.LitBool false);
+                                           March_tir.Tir.AVar x])] in
+  let changed = ref false in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  Alcotest.(check bool) "result is EAtom false"
+    (body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool false))) true
+
+let test_simplify_or_true_rhs () =
+  let x = mk_var "x" March_tir.Tir.TBool in
+  let m = mk_module [mk_fn "f" (app "||" [March_tir.Tir.AVar x;
+                                           March_tir.Tir.ALit (March_ast.Ast.LitBool true)])] in
+  let changed = ref false in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  Alcotest.(check bool) "result is EAtom true"
+    (body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool true))) true
+
+let test_simplify_not_true () =
+  let m = mk_module [mk_fn "f" (app "not" [March_tir.Tir.ALit (March_ast.Ast.LitBool true)])] in
+  let changed = ref false in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  Alcotest.(check bool) "result is EAtom false"
+    (body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool false))) true
+
+let test_simplify_not_false () =
+  let m = mk_module [mk_fn "f" (app "not" [March_tir.Tir.ALit (March_ast.Ast.LitBool false)])] in
+  let changed = ref false in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  Alcotest.(check bool) "result is EAtom true"
+    (body = March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool true))) true
+
 (* ── Function inlining ───────────────────────────────────────────── *)
 
 let test_inline_pure_small () =
@@ -4692,6 +4745,11 @@ let codegen_suites =
         Alcotest.test_case "ne_self"                  `Quick test_simplify_ne_self;
         Alcotest.test_case "eq_self_float_no_reduce"  `Quick test_simplify_eq_self_float_no_reduce;
         Alcotest.test_case "eq_self_tuple_float_no_reduce" `Quick test_simplify_eq_self_tuple_float_no_reduce;
+        Alcotest.test_case "and_false_rhs"            `Quick test_simplify_and_false_rhs;
+        Alcotest.test_case "and_false_lhs"            `Quick test_simplify_and_false_lhs;
+        Alcotest.test_case "or_true_rhs"              `Quick test_simplify_or_true_rhs;
+        Alcotest.test_case "not_true"                 `Quick test_simplify_not_true;
+        Alcotest.test_case "not_false"                `Quick test_simplify_not_false;
       ]);
       ("inline", [
         Alcotest.test_case "pure_small"            `Quick test_inline_pure_small;
