@@ -162,6 +162,36 @@ let pi = 3.14159
 
 ---
 
+## Result Propagation (`let?`)
+
+`let? p = e` binds the `Ok` payload of a `Result` expression and short-circuits on `Err`:
+
+```march
+fn parse_and_add(a: String, b: String): Result(Int, String) do
+  let? x = int_from_string(a)   -- propagates Err(msg) immediately
+  let? y = int_from_string(b)   -- only reached if previous succeeded
+  Ok(x + y)
+end
+```
+
+Rules:
+- The right-hand side must be `Result(T, E)`.
+- The pattern binds the `T` (Ok payload).
+- The code after the `let?` must also produce `Result(R, E)` — the error type `E` must match across all `let?` bindings in the block.
+- `let?` cannot be the last expression in a block (there must be something after it).
+
+Works in function bodies, match arms, and lambda bodies:
+
+```march
+fn process(items: List(String)): Result(List(Int), String) do
+  List.map(items, fn s ->
+    let? n = parse(s)
+    Ok(n * 2))
+end
+```
+
+---
+
 ## Types
 
 Variant (ADT) — no leading `|`:

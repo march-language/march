@@ -411,6 +411,8 @@ let rec expr_inline = function
     let ty = match ret with None -> "" | Some t -> Printf.sprintf " : %s" (fmt_ty t) in
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
+  | ELetQ (p, r, _, _)          ->
+    Printf.sprintf "let? %s = %s; ..." (fmt_pat p) (expr_inline r)
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
   | ESigil (name, content, _)     ->
     let inner = expr_inline content in
@@ -431,7 +433,7 @@ let sigil_is_multiline content =
     | None -> false
 
 let is_multiline = function
-  | EMatch _ | ELetFn _ -> true
+  | EMatch _ | ELetFn _ | ELetQ _ -> true
   | EBlock (_ :: _ :: _, _) -> true
   | ESigil (_, content, _) -> sigil_is_multiline content
   | _ -> false
@@ -479,6 +481,14 @@ let rec emit_stmt ctx e =
       name.txt (String.concat ", " (List.map fmt_param ps)) ty);
     indented ctx (fun () -> emit_body ctx body);
     line ctx "end"
+
+  | ELetQ (p, r, cont, _) ->
+    if should_break (ctx.indent + 1) r then begin
+      line ctx (Printf.sprintf "let? %s =" (fmt_pat p));
+      indented ctx (fun () -> emit_stmt ctx r)
+    end else
+      line ctx (Printf.sprintf "let? %s = %s" (fmt_pat p) (expr_inline r));
+    emit_stmt ctx cont
 
   | ESigil (name, content, _) when sigil_is_multiline content ->
     emit_sigil_multiline ctx name content

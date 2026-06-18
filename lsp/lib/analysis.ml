@@ -568,6 +568,11 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
 
+  | Ast.ELetQ (p, r, c, _) ->
+    collect_pat_defs ~def_map ~use_map p;
+    collect_expr ~def_map ~use_map ~calls r;
+    collect_expr ~def_map ~use_map ~calls c
+
   | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _)
   | Ast.EResultRef _ -> ()
 
@@ -714,6 +719,10 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
     | Ast.ESigil (_, content, _) -> walk scope content
+    | Ast.ELetQ (p, r, c, _) ->
+      walk scope r;
+      let bs = pat_binders p in
+      walk (bs :: scope) c
     | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _) | Ast.EResultRef _ -> ()
   in
   let walk_clause (cl : Ast.fn_clause) =
@@ -1026,6 +1035,7 @@ let span_of_expr = function
   | Ast.EIf (_, _, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
+  | Ast.ELetQ (_, _, _, sp)
   | Ast.EAssert (_, sp) -> sp
   | Ast.ESigil (_, _, sp) -> sp
   | Ast.EVar name -> name.Ast.span
@@ -1243,6 +1253,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
   | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _)
   | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.ELetQ (_, r, c, _) -> iter_expr f r; iter_expr f c
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _) -> ()
 
@@ -5866,6 +5877,10 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
           | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> fv bound a; fv bound b
           | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> fv bound e) fs
           | Ast.ERecordUpdate (e, fs, _) -> fv bound e; List.iter (fun (_, e) -> fv bound e) fs
+          | Ast.ELetQ (p, r, c, _) ->
+            fv bound r;
+            let b = pat_names p @ bound in
+            fv b c
           | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
           | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.EDbg (Some e, _) -> fv bound e
         in

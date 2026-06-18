@@ -73,6 +73,7 @@ let span_of_expr (e : expr) : span =
   | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
+  | ELetQ (_, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | EVar n -> n.span
@@ -122,6 +123,9 @@ let rec walk_expr ~file acc_e acc_b (e : expr) : unit =
     walk_expr ~file acc_e acc_b b.bind_expr
   | ELetFn (_, _, _, body, _) ->
     walk_expr ~file acc_e acc_b body
+  | ELetQ (_, r, c, _) ->
+    walk_expr ~file acc_e acc_b r;
+    walk_expr ~file acc_e acc_b c
   | ETuple (es, _) ->
     List.iter (walk_expr ~file acc_e acc_b) es
   | ERecord (fields, _) ->

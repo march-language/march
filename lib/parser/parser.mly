@@ -104,6 +104,22 @@
     in
     EApp (mk_var "List.map", [source; map_lam], sp)
 
+  (** Right-fold a flat block list into nested [ELetQ] continuations.
+      [let? p = e; rest...] becomes [ELetQ(p, e, fold_letq rest sp, sp)].
+      Non-let? expressions are collected into [EBlock] as before.
+      An [ELetQ] as the very last expression produces [ELetQ(p, e, EBlock([], sp), sp)];
+      the typechecker flags the empty continuation with a clear error. *)
+  let rec fold_letq es sp =
+    match es with
+    | [] -> EBlock ([], sp)
+    | [ e ] -> e
+    | ELetQ (p, result, _, lsp) :: rest ->
+        ELetQ (p, result, fold_letq rest sp, lsp)
+    | e :: rest ->
+        (match fold_letq rest sp with
+         | EBlock (inner, bsp) -> EBlock (e :: inner, bsp)
+         | other               -> EBlock ([e; other], sp))
+
   (** Build nested EMatch for a `with` expression.
       with Ok(a) <- e1, Ok(b) <- e2 do body else Err(x) -> h end
       → match e1 do Ok(a) -> match e2 do Ok(b) -> body | Err(x) -> h end | Err(x) -> h end *)
@@ -789,7 +805,7 @@ param:
 
 block_body:
   | es = nonempty_list(block_expr)
-    { match es with [e] -> e | _ -> EBlock (es, mk_span ($loc)) }
+    { fold_letq es (mk_span ($loc)) }
 
 block_expr:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
@@ -798,6 +814,13 @@ block_expr:
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = e },
             mk_span ($loc)) }
+  | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
+    { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | LET; QUESTION; _p = simple_pattern; error
+    { error_raise
+        "I was expecting `=` in the let? binding here:"
+        (Some "let? name = result_expr")
+        $startpos($4) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
     { error_raise
         "I was expecting `=` in the let binding here:"
@@ -899,9 +922,7 @@ lambda_params:
     first non-[let] token starts the final expression. *)
 lambda_body:
   | stmts = lambda_stmts; e = expr
-    { match stmts with
-      | [] -> e
-      | _  -> EBlock (stmts @ [e], mk_span ($loc)) }
+    { fold_letq (stmts @ [e]) (mk_span ($loc)) }
 
 lambda_stmts:
   | (* empty *) { [] }
@@ -911,6 +932,8 @@ lambda_stmts:
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = ev },
             mk_span ($loc)) :: rest }
+  | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
+    { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
 
 expr_pipe:
   | l = expr_pipe; PIPE_ARROW; r = expr_or

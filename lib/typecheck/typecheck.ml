@@ -2383,6 +2383,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EResultRef _            -> Ast.dummy_span
   | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
+  | Ast.ELetQ  (_, _, _, sp)   -> sp
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
 
@@ -3617,6 +3618,42 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
       unify env ~span:sp ~reason:None fn_ty arrow_ty;
       arrow_ty
+
+    | Ast.ELetQ (p, result_expr, body, sp) ->
+      (* let? p = result_expr; body
+         - result_expr  : Result(t_ok, t_err)
+         - p            : t_ok  (binds on Ok branch)
+         - body         : Result(t_r, t_err)  (continuation)
+         Returns Result(t_r, t_err), propagating Err upward automatically. *)
+      (match body with
+       | Ast.EBlock ([], _) ->
+         Err.error env.errors ~span:sp
+           "`let?` cannot be the last expression in a block.\n\
+            Add a Result-producing expression after it — for example:\n\
+            \n\
+            \    let? x = might_fail()\n\
+            \    Ok(x + 1)";
+         TError
+       | _ ->
+         let result_ty = infer_expr env result_expr in
+         let t_ok  = fresh_var env.level in
+         let t_err = fresh_var env.level in
+         unify env ~span:sp
+           ~reason:(Some (RBuiltin
+             "The right-hand side of `let?` must be a Result value."))
+           result_ty (t_result t_ok t_err);
+         let bindings, pat_ty = infer_pattern env p in
+         unify env ~span:sp
+           ~reason:(Some (RLetBind sp))
+           t_ok pat_ty;
+         let env' = bind_pattern_bindings result_expr bindings env in
+         let body_ty = infer_expr env' body in
+         let t_r = fresh_var env.level in
+         unify env ~span:sp
+           ~reason:(Some (RBuiltin
+             "The code after `let?` must produce a Result with the same error type."))
+           body_ty (t_result t_r t_err);
+         body_ty)
   in
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
@@ -3945,6 +3982,10 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   | Ast.ELetFn (name, params, _, body, _) ->
     let inner_bound = name.txt :: List.map (fun p -> p.Ast.param_name.txt) params @ bound in
     free_vars_expr inner_bound body
+  | Ast.ELetQ (p, result, cont, _) ->
+    let pat_bound = free_vars_pattern p in
+    free_vars_expr bound result @
+    free_vars_expr (pat_bound @ bound) cont
   | Ast.EPipe (l, r, _) ->
     free_vars_expr bound l @ free_vars_expr bound r
   | Ast.EAssert (e, _) -> free_vars_expr bound e
@@ -5013,6 +5054,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
+    | Ast.ELetQ (_, r, c, _) -> ex r; ex c
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
@@ -5121,6 +5163,7 @@ let unqualified_module_deps
     | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
+    | Ast.ELetQ (_, r, c, _) -> ex r; ex c
     | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
@@ -6189,6 +6232,9 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
                     (collect_direct_fn_calls fn_names b)
   | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
   | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
+  | Ast.ELetQ (_, r, c, _) ->
+    StringSet.union (collect_direct_fn_calls fn_names r)
+                    (collect_direct_fn_calls fn_names c)
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
@@ -6460,6 +6506,9 @@ let rec check_tail_position
       chk false smaller "message in `send`" msg
     | Ast.ESpawn (ex, _)      -> chk false smaller "argument to `spawn`" ex
     | Ast.EDbg (Some ex, _)   -> chk false smaller "argument to `dbg`" ex
+    | Ast.ELetQ (_, r, cont, _) ->
+      chk false smaller "right-hand side of `let?`" r;
+      chk in_tail smaller ctx cont
     | Ast.EAssert (ex, _)     -> chk false smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false smaller "sigil content" content
     (* ── leaves ── *)

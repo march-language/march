@@ -151,6 +151,7 @@ let rec calls_in_expr acc = function
   | ECond (arms, _)       ->
     List.fold_left (fun a (c, b) -> calls_in_expr (calls_in_expr a c) b) acc arms
   | ESend (a, b, _)       -> calls_in_expr (calls_in_expr acc a) b
+  | ELetQ (_, r, c, _)    -> calls_in_expr (calls_in_expr acc r) c
   | ESigil (_, e, _)      -> calls_in_expr acc e
   | _                     -> acc
 

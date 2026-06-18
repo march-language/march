@@ -99,6 +99,7 @@ let uses_of_decls ~filename (decls : Ast.decl list) : ws_use list =
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> we a; we b
     | Ast.EAssert (e, _) -> we e
     | Ast.ESigil (_, c, _) -> we c
+    | Ast.ELetQ (_, r, c, _) -> we r; we c
     | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _) | Ast.EResultRef _ -> ()
   and wp (p : Ast.pattern) =
     match p with

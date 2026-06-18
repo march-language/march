@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, `let?` result-propagation binding)
+
+- **`let? p = e` syntax** — binds the `Ok` payload of a `Result` expression and propagates `Err` upward automatically. Requires `Result` on the RHS; the continuation (everything after the `let?`) must also produce a `Result` with a compatible error type. Empty continuation (i.e. `let?` as the last expression in a block) is a clear compile-time error.
+- **`fold_letq`** in the parser right-folds a flat list of block statements into nested `ELetQ` continuations at parse time, so the typechecker sees the full chain as a single expression.
+- **TIR lowering** desugars `ELetQ` to `match Ok(p) -> cont | Err($letq_err) -> Err($letq_err)`, keeping the interpreter path separate for precise diagnostics.
+- **9 new tests** (4 eval + 5 compiler). Test count: **1485** (219 compiler + 219 eval + 267 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-17, Phase 2c/2d — Tagged(X,T) specialization tags + env records)
 
 - **`Tagged(X, T)` type constructor** added to `builtin_types` with arity 2. `Tagged(DSP, Realtime)` and similar phantom specialization tags are now valid type annotations. `cap_paths_in_surface_ty` explicitly skips `Tagged` args so the capability-checking pass does not extract spurious cap paths from inside a `Tagged` type.

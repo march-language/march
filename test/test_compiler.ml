@@ -2282,6 +2282,59 @@ let test_tc_forward_ref_poly_reverse_order () =
   Alcotest.(check bool)
     "normal-order pfn called at two element types: no errors" false (has_errors ctx)
 
+(* ── let? typecheck tests ────────────────────────────────────────────── *)
+
+let test_letq_typechecks_ok () =
+  let ctx = typecheck {|mod Test do
+    fn run() do
+      let? x = Ok(42)
+      Ok(x + 1)
+    end
+  end|} in
+  Alcotest.(check bool) "let? with Ok: no type errors" false (has_errors ctx)
+
+let test_letq_rhs_not_result_error () =
+  let ctx = typecheck {|mod Test do
+    fn run() do
+      let? x = 42
+      Ok(x)
+    end
+  end|} in
+  Alcotest.(check bool) "let? rhs must be Result: type error" true (has_errors ctx)
+
+let test_letq_mismatched_error_types () =
+  (* f returns Result(Int, String) and g returns Result(Int, Int).
+     Using both in a let? chain forces their error types to unify:
+     String vs Int → type error. *)
+  let ctx = typecheck {|mod Test do
+    fn f() : Result(Int, String) do Ok(1) end
+    fn g() : Result(Int, Int) do Ok(2) end
+    fn run() do
+      let? _a = f()
+      let? _b = g()
+      Ok(42)
+    end
+  end|} in
+  Alcotest.(check bool) "let? mixed error types: type error" true (has_errors ctx)
+
+let test_letq_last_in_block_error () =
+  let ctx = typecheck {|mod Test do
+    fn run() do
+      let? _x = Ok(42)
+    end
+  end|} in
+  Alcotest.(check bool) "let? last in block: type error" true (has_errors ctx)
+
+let test_letq_chain_typechecks () =
+  let ctx = typecheck {|mod Test do
+    fn run() do
+      let? x = Ok(1)
+      let? y = Ok(2)
+      Ok(x + y)
+    end
+  end|} in
+  Alcotest.(check bool) "let? chain: no type errors" false (has_errors ctx)
+
 (* ── Perceus RC tests ────────────────────────────────────────────────── *)
 
 (** Parse, desugar, typecheck, lower, mono, defun, then run perceus. *)
@@ -3086,6 +3139,14 @@ let compiler_suites =
           (* Regression: let-generalization hole for forward-referenced pfn helpers *)
           Alcotest.test_case "forward-ref pfn poly two call sites"      `Quick test_tc_forward_ref_poly_helper_two_call_sites;
           Alcotest.test_case "normal-order pfn poly two call sites"     `Quick test_tc_forward_ref_poly_reverse_order;
+        ] );
+      ( "let?",
+        [
+          Alcotest.test_case "let? typechecks ok"            `Quick test_letq_typechecks_ok;
+          Alcotest.test_case "let? rhs not Result: error"    `Quick test_letq_rhs_not_result_error;
+          Alcotest.test_case "let? last in block: error"     `Quick test_letq_last_in_block_error;
+          Alcotest.test_case "let? chain typechecks"         `Quick test_letq_chain_typechecks;
+          Alcotest.test_case "let? mixed error types: error" `Quick test_letq_mismatched_error_types;
         ] );
       ( "tag_and_typestate", [
           Alcotest.test_case "tag keyword parses"                        `Quick test_tag_parses;

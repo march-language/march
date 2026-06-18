@@ -93,6 +93,10 @@ type expr =
           dbg(val_expr) logs the value and returns it. *)
   | ELetFn of name * param list * ty option * expr * span
       (** Local named recursive function: fn go(params) : ret_ty do body end *)
+  | ELetQ of pattern * expr * expr * span
+      (** Result-propagating binding: [let? p = e1; e2].
+          The third field is the continuation (everything after the binding);
+          [fold_letq] in the parser nests continuations at parse time. *)
   | EAssert of expr * span
       (** Test assertion: assert expr.
           When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
@@ -393,5 +397,6 @@ let show_expr = function
   | EResultRef _ -> "EResultRef(...)"
   | EDbg _ -> "EDbg(...)"
   | ELetFn _ -> "ELetFn(...)"
+  | ELetQ _ -> "ELetQ(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"

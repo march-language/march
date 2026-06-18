@@ -96,6 +96,74 @@ let test_eval_closure () =
   Alcotest.(check int) "make_adder(10)(5) = 15" 15
     (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
 
+(* ── let? tests ─────────────────────────────────────────────────────────── *)
+
+let test_letq_ok_propagates () =
+  let env = eval_module {|mod Test do
+    fn safe_div(a, b) do
+      if b == 0 do
+        Err("division by zero")
+      else
+        Ok(a / b)
+      end
+    end
+    fn run() do
+      let? x = safe_div(10, 2)
+      let? y = safe_div(x, 1)
+      Ok(y + 1)
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  (match v with
+   | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt 6]) -> ()
+   | _ -> Alcotest.fail (Printf.sprintf "expected Ok(6), got: %s" (March_eval.Eval.value_to_string v)))
+
+let test_letq_err_short_circuits () =
+  let env = eval_module {|mod Test do
+    fn safe_div(a, b) do
+      if b == 0 do
+        Err("division by zero")
+      else
+        Ok(a / b)
+      end
+    end
+    fn run() do
+      let? x = safe_div(10, 0)
+      Ok(x + 1)
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  (match v with
+   | March_eval.Eval.VCon ("Err", [March_eval.Eval.VString "division by zero"]) -> ()
+   | _ -> Alcotest.fail (Printf.sprintf "expected Err(\"division by zero\"), got: %s" (March_eval.Eval.value_to_string v)))
+
+let test_letq_chain_first_err () =
+  let env = eval_module {|mod Test do
+    fn run() do
+      let? _a = Err("first")
+      let? _b = Err("second")
+      Ok(42)
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  (match v with
+   | March_eval.Eval.VCon ("Err", [March_eval.Eval.VString "first"]) -> ()
+   | _ -> Alcotest.fail (Printf.sprintf "expected Err(\"first\"), got: %s" (March_eval.Eval.value_to_string v)))
+
+let test_letq_in_lambda () =
+  let env = eval_module {|mod Test do
+    fn run() do
+      let f = fn x ->
+        let? v = if x > 0 do Ok(x * 2) else Err("negative") end
+        Ok(v + 1)
+      f(5)
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  (match v with
+   | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt 11]) -> ()
+   | _ -> Alcotest.fail (Printf.sprintf "expected Ok(11), got: %s" (March_eval.Eval.value_to_string v)))
+
 (* ── Parser gap tests ───────────────────────────────────────────────────── *)
 
 let test_parse_unary_minus () =
@@ -3851,6 +3919,10 @@ let eval_suites =
           Alcotest.test_case "match ADT"           `Quick test_eval_match_adt;
           Alcotest.test_case "tuple"               `Quick test_eval_tuple;
           Alcotest.test_case "let binding"         `Quick test_eval_let_binding;
+          Alcotest.test_case "let? ok propagates"  `Quick test_letq_ok_propagates;
+          Alcotest.test_case "let? err short-circuits" `Quick test_letq_err_short_circuits;
+          Alcotest.test_case "let? chain first err" `Quick test_letq_chain_first_err;
+          Alcotest.test_case "let? in lambda"      `Quick test_letq_in_lambda;
           Alcotest.test_case "closure"             `Quick test_eval_closure;
           Alcotest.test_case "unary minus"         `Quick test_eval_unary_minus;
           Alcotest.test_case "list literal"        `Quick test_eval_list_literal;

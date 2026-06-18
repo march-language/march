@@ -525,6 +525,9 @@ let rec desugar_expr (e : expr) : expr =
   | ELetFn (name, params, ret_ty, body, sp) ->
     ELetFn (name, params, ret_ty, desugar_expr body, sp)
 
+  | ELetQ (p, result, cont, sp) ->
+    ELetQ (p, desugar_expr result, desugar_expr cont, sp)
+
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
 

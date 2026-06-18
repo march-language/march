@@ -836,6 +836,22 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     } in
     Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var))
 
+  (* --- let? p = e; cont  →  match e do Ok(p) -> cont | Err($e) -> Err($e) end --- *)
+  | Ast.ELetQ (p, result_expr, cont, _) ->
+    let dsp = Ast.dummy_span in
+    let err_var : Ast.name = { txt = "$letq_err"; span = dsp } in
+    let ok_branch : Ast.branch = {
+      branch_pat   = Ast.PatCon ({ txt = "Ok";  span = dsp }, [p]);
+      branch_guard = None;
+      branch_body  = cont;
+    } in
+    let err_branch : Ast.branch = {
+      branch_pat   = Ast.PatCon ({ txt = "Err"; span = dsp }, [Ast.PatVar err_var]);
+      branch_guard = None;
+      branch_body  = Ast.ECon ({ txt = "Err"; span = dsp }, [Ast.EVar err_var], dsp);
+    } in
+    lower_expr (Ast.EMatch (result_expr, [ok_branch; err_branch], dsp))
+
   (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
   | Ast.EAssert (inner, _) ->
     (* Lower assert to: if inner then () else panic("assertion failed")

@@ -6266,6 +6266,7 @@ let span_of_expr (e : expr) : span =
   | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
+  | ELetQ (_, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | EVar n -> n.span
@@ -6665,6 +6666,18 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     rec_v
+
+  | ELetQ (p, result_expr, cont, _) ->
+    (match eval_expr env result_expr with
+     | VCon ("Ok", [v]) ->
+       let env' = match match_pattern v p with
+         | Some bs -> bs @ env
+         | None -> eval_error "let? pattern match failed (unreachable after typecheck)"
+       in
+       eval_expr env' cont
+     | (VCon ("Err", _)) as err -> err
+     | other ->
+       eval_error "let? expected a Result value, got %s" (value_to_string other))
 
   | EAssert (inner, sp) ->
     (* Compiler-assisted assertion rewriting:
