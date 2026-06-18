@@ -101,6 +101,73 @@
   };
 
   /* ------------------------------------------------------------------ */
+  /* Syntax highlighter — minimal, regex-free, single-pass              */
+  /* ------------------------------------------------------------------ */
+
+  var _KWS = ['fn','pfn','let','type','mod','do','end','match','if','else',
+              'actor','state','init','on','reply','spawn','send','run_until_idle',
+              'true','false','in','import'];
+
+  function _esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function _col(v, s) {
+    return '<span style="color:var(' + v + ')">' + _esc(s) + '</span>';
+  }
+
+  function _hlLine(line) {
+    var out = "", i = 0, n = line.length;
+    while (i < n) {
+      var c = line[i];
+      // comment
+      if (c === "-" && line[i+1] === "-") { out += _col("--syn-cm", line.slice(i)); break; }
+      // string
+      if (c === '"') {
+        var j = i + 1;
+        while (j < n && line[j] !== '"') { if (line[j] === "\\") j++; j++; }
+        out += _col("--syn-st", line.slice(i, j + 1));
+        i = j + 1; continue;
+      }
+      // number
+      if (c >= "0" && c <= "9") {
+        var j = i;
+        while (j < n && ((line[j] >= "0" && line[j] <= "9") || line[j] === ".")) j++;
+        out += _col("--syn-nm", line.slice(i, j));
+        i = j; continue;
+      }
+      // word
+      var lo = c >= "a" && c <= "z", hi = c >= "A" && c <= "Z";
+      if (lo || hi || c === "_") {
+        var j = i;
+        while (j < n) {
+          var d = line[j];
+          if (!((d >= "a" && d <= "z") || (d >= "A" && d <= "Z") ||
+                (d >= "0" && d <= "9") || d === "_")) break;
+          j++;
+        }
+        var w = line.slice(i, j);
+        out += (_KWS.indexOf(w) >= 0) ? _col("--syn-kw", w) :
+               hi                      ? _col("--syn-tp", w) :
+               _esc(w);
+        i = j; continue;
+      }
+      // two-char operators
+      var tw = c + (line[i+1] || "");
+      if (tw === "->" || tw === "<-" || tw === "|>" || tw === "++" ||
+          tw === "+." || tw === "-." || tw === "*." || tw === "/." ||
+          tw === "==" || tw === "!=" || tw === "<=" || tw === ">=" || tw === "..") {
+        out += _col("--syn-op", tw); i += 2; continue;
+      }
+      // single-char operators
+      if ("|=:+-*/<>!".indexOf(c) >= 0) { out += _col("--syn-op", c); i++; continue; }
+      // everything else
+      out += _esc(c);
+      i++;
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Output helpers                                                      */
   /* ------------------------------------------------------------------ */
 
@@ -124,13 +191,14 @@
       var div = document.createElement("div");
       div.className = self._cls.entry;
       var sp = document.createElement("span");
+      sp.style.whiteSpace = "pre";
       if (i === 0) {
         sp.className = self._cls.inputLine;
+        sp.innerHTML = _hlLine(line);
       } else {
         sp.style.color = "var(--text-faint)";
-        line = "       " + line;
+        sp.innerHTML = _hlLine("       " + line);
       }
-      sp.textContent = line;
       div.appendChild(sp);
       self._hist.appendChild(div);
     });
