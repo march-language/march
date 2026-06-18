@@ -492,6 +492,7 @@
   </div>
 </footer>
 
+<script src="{{ site.baseurl }}/assets/march-repl.js?v={{ site.time | date: '%s' }}"></script>
 <script>
 // ─── Syntax Highlighter ───────────────────────────────────────────────────────
 function syntaxHL(code, dark) {
@@ -740,161 +741,23 @@ function renderInstall() {
 
 // ─── Landing REPL ────────────────────────────────────────────────────────────
 (function () {
-  const wrap   = document.getElementById('m-repl-wrap');
-  const base   = (wrap && wrap.dataset.base) || '';
-  const ver    = (wrap && wrap.dataset.ver)  || '0';
-  const histEl = document.getElementById('m-repl-history');
-  const inputEl= document.getElementById('m-repl-input');
-  const loadEl = document.getElementById('m-repl-loading');
-
-  let loaded = false, loading = false, pending = null;
-  let cmdHist = [], histIdx = -1;
-
-  function loadScript(src, ok, err) {
-    const s = document.createElement('script');
-    s.src = src; s.onload = ok; s.onerror = err;
-    document.head.appendChild(s);
-  }
-
-  function loadBundle(cb) {
-    if (loaded) { cb(); return; }
-    if (loading) { pending = cb; return; }
-    loading = true;
-    loadEl.textContent = 'Loading interpreter…';
-    loadScript(base + '/assets/march_stdlib.js?v=' + ver, () => {
-      loadScript(base + '/assets/march.js?v=' + ver, () => {
-        loaded = true; loading = false;
-        loadEl.textContent = 'Ready.';
-        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
-        cb();
-        if (pending) { const f = pending; pending = null; f(); }
-      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
-    }, () => {
-      loadScript(base + '/assets/march.js?v=' + ver, () => {
-        loaded = true; loading = false;
-        loadEl.textContent = 'Ready.';
-        setTimeout(() => { if (loadEl.textContent === 'Ready.') loadEl.textContent = ''; }, 1500);
-        cb();
-        if (pending) { const f = pending; pending = null; f(); }
-      }, () => { loading = false; loadEl.textContent = 'Failed to load interpreter.'; });
-    });
-  }
-
-  function addEntry(cls, text) {
-    text.split('\n').forEach(line => {
-      const div = document.createElement('div');
-      div.className = 'm-repl-entry';
-      const sp = document.createElement('span');
-      sp.className = cls; sp.textContent = line;
-      div.appendChild(sp); histEl.appendChild(div);
-    });
-    histEl.scrollTop = histEl.scrollHeight;
-  }
-
-  function addInputLine(code) {
-    code.split('\n').forEach((line, i) => {
-      const div = document.createElement('div');
-      div.className = 'm-repl-entry';
-      const sp = document.createElement('span');
-      if (i === 0) {
-        sp.className = 'm-repl-iline';
-      } else {
-        sp.style.cssText = 'font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.65;color:var(--text-faint)';
-        line = '       ' + line;
-      }
-      sp.textContent = line;
-      div.appendChild(sp); histEl.appendChild(div);
-    });
-    histEl.scrollTop = histEl.scrollHeight;
-  }
-
-  function autoResize() {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = inputEl.scrollHeight + 'px';
-  }
-
-  function submit(code) {
-    if (!code.trim()) return;
-    if (cmdHist[0] !== code) cmdHist.unshift(code);
-    if (cmdHist.length > 50) cmdHist.pop();
-    histIdx = -1;
-    addInputLine(code);
-    inputEl.value = ''; autoResize();
-
-    if (code.trim() === ':reset') {
-      if (loaded && window.marchResetSession) window.marchResetSession();
-      while (histEl.firstChild) histEl.removeChild(histEl.firstChild);
-      addEntry('m-repl-nfo', 'Session reset.');
-      return;
-    }
-
-    loadBundle(() => {
-      if (!window.marchEvalLine) { addEntry('m-repl-eline', 'Interpreter not available.'); return; }
-
-      const hMatch = code.trim().match(/^h\((\w+)\)$/);
-      if (hMatch) {
-        const fnName = hMatch[1];
-        const stdlib = window.marchStdlib || {};
-        const re = new RegExp('^\\s*fn\\s+' + fnName + '\\s*\\(');
-        const hits = [];
-        Object.keys(stdlib).forEach(f => {
-          const mod = f.replace(/\.march$/, '');
-          const modName = mod.charAt(0).toUpperCase() + mod.slice(1);
-          stdlib[f].split('\n').forEach((line, i, lines) => {
-            if (re.test(line)) {
-              const prev = (i > 0 ? lines[i-1].trim() : '');
-              const m = prev.match(/^doc\s+"(.+)"$/);
-              const doc = m ? m[1] : '';
-              const sig = line.trim().replace(/\s+do\s*$/, '');
-              hits.push({ modName, sig, doc });
-            }
-          });
-        });
-        if (hits.length === 0) {
-          addEntry('m-repl-eline', "No stdlib docs found for '" + fnName + "'.");
-        } else {
-          hits.forEach(({ modName, sig, doc }) => {
-            addEntry('m-repl-nfo', modName + '.' + fnName + (doc ? ' — ' + doc : ''));
-            addEntry('m-repl-oline', '  ' + sig);
-          });
-        }
-        return;
-      }
-
-      const result = window.marchEvalLine(code);
-      if (result.output && result.output.trim()) addEntry('m-repl-oline', result.output.trimEnd());
-      if (result.error !== null) addEntry('m-repl-eline', result.error);
-    });
-  }
-
-  inputEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault(); submit(inputEl.value);
-    } else if (e.key === 'ArrowUp' && !e.shiftKey && cmdHist.length) {
-      e.preventDefault();
-      histIdx = Math.min(histIdx + 1, cmdHist.length - 1);
-      inputEl.value = cmdHist[histIdx]; autoResize();
-      setTimeout(() => { inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length; }, 0);
-    } else if (e.key === 'ArrowDown' && !e.shiftKey) {
-      e.preventDefault();
-      histIdx > 0 ? (histIdx--, inputEl.value = cmdHist[histIdx]) : (histIdx = -1, inputEl.value = '');
-      autoResize();
-    } else if (!loaded && !loading) {
-      loadBundle(() => {});
+  var repl = new MarchRepl({
+    wrapId:    'm-repl-wrap',
+    historyId: 'm-repl-history',
+    inputId:   'm-repl-input',
+    loadingId: 'm-repl-loading',
+    cls: {
+      entry:     'm-repl-entry',
+      inputLine: 'm-repl-iline',
+      output:    'm-repl-oline',
+      error:     'm-repl-eline',
+      info:      'm-repl-nfo'
     }
   });
-  inputEl.addEventListener('input', autoResize);
-  document.getElementById('m-repl-submit').addEventListener('click', () => submit(inputEl.value));
-  document.getElementById('m-repl-reset').addEventListener('click', () => submit(':reset'));
-
-  window.mReplLoad = code => {
-    const ta = document.createElement('textarea');
-    ta.innerHTML = code; inputEl.value = ta.value;
-    autoResize(); inputEl.focus();
-    if (!loaded && !loading) loadBundle(() => {});
-  };
-
-  window.addEventListener('load', () => loadBundle(() => {}));
+  document.getElementById('m-repl-submit').addEventListener('click', function () { repl.submit(); });
+  document.getElementById('m-repl-reset').addEventListener('click', function () { repl.reset(); });
+  window.mReplLoad     = function (code)        { repl.load(code); };
+  window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };
 })();
 
 // ─── Events ───────────────────────────────────────────────────────────────────
