@@ -741,7 +741,7 @@ No runtime changes. No changes to `parser.mly`, `ast.ml`, or `typecheck.ml`.
 
 ## 3. No-Panic Modules (`opts no_panic`)
 
-### Motivation
+### 3.1 Motivation
 
 The full `Cap(Panic)` retrofit (§4) requires making `Cap(Panic)` explicit at every arithmetic operation site — that is a language-wide migration. The cost is very high. A practical intermediate step: let a module declare that **none of its functions can panic**, enforced by the compiler. This is useful for:
 
@@ -749,15 +749,19 @@ The full `Cap(Panic)` retrofit (§4) requires making `Cap(Panic)` explicit at ev
 - Security-critical parsing modules
 - Any library that wants to guarantee to its callers "we will never abort"
 
-### Syntax
+Unlike Phase 3b's TIR-level audit (which operates after source information is gone), Phase 3c enforces the invariant **at typecheck time**, giving errors with precise source spans that point to the exact call site.
 
-A module-level `no_panic` directive. The exact surface syntax is a design decision — `"opts"` does not currently exist as a keyword in `lib/lexer/lexer.mll`, so one of three approaches is needed:
+---
 
-- **Option A:** Add `"no_panic"` as a standalone module-level keyword (most visible, easiest to parse, name is self-documenting)
-- **Option B:** Add `"opts"` as a new keyword taking an atom-like word argument (`opts no_panic`, `opts no_alloc` for future directives) — more general but requires a two-token production
-- **Option C:** Reuse the existing `@[attr]` attribute syntax on modules (`@[no_panic] mod SafeMath do`)
+### 3.2 Syntax Decision
 
-Option B is shown in examples here as the most extensible. Choose at implementation time based on how many module-level directives are expected to accumulate.
+**Choose Option B: `opts` keyword + directive-name identifier.**
+
+Rationale: `PROOFCAP` and `ALWAYSLINEAR` are precedents for single-token compound keywords, but they name unique constructs. `opts` is a meta-level keyword for *module options* — a namespace that can grow (`opts no_alloc`, `opts no_io`) without adding more compound keywords. Option A (`no_panic` alone) is not extensible. Option C (`@[no_panic]` attribute on `mod`) reuses the function-attribute mechanism which carries different semantics and requires AST changes to the module node rather than a new declaration variant.
+
+**Verified:** `opts` does not appear in `lib/lexer/lexer.mll`'s keyword table (line 75–86). `no_panic` is not a keyword; it will parse as `LOWER_IDENT "no_panic"`.
+
+**Surface syntax:**
 
 ```march
 mod SafeMath do
@@ -767,81 +771,730 @@ mod SafeMath do
     if b == 0 do
       Err("division by zero")
     else
-      Ok(a / b)
+      Ok(a / b)   -- ERROR: / can panic when b = 0
     end
   end
 
-  -- ERROR: array indexing can panic
-  fn first(xs : List(Int)) : Int do
-    List.nth(xs, 0)   -- List.nth panics on out-of-bounds
+  fn first(xs : List(Int)) : Option(Int) do
+    List.nth_opt(xs, 0)   -- OK: nth_opt returns None, not panic
+  end
+
+  fn bad_first(xs : List(Int)) : Int do
+    List.nth(xs, 0)   -- ERROR: nth panics on out-of-bounds
   end
 end
 ```
 
+`opts no_panic` must appear inside a `mod ... do ... end` body, as a declaration alongside `fn`, `type`, `needs`, etc. It applies to all `fn` and `pfn` declarations in the **same** `mod` body; nested `mod` blocks are checked independently and must opt in separately.
+
+Multiple opts on the same module are not supported in Phase 3c (only `no_panic` exists); the `string list` in `DOpts` is forward-looking for when `opts no_alloc` etc. are added.
+
+---
+
+### 3.3 What Is a "Panic Site"
+
+There are two categories:
+
+**Category 1 — Direct builtin calls.** These are bare names that appear as `EVar name` in the AST. After desugar, operators like `/` and `%` appear as `EApp(EVar "/", [a; b])`.
+
+| Name in AST | Panic condition |
+|-------------|----------------|
+| `/` | integer divisor is zero |
+| `%` | integer divisor is zero |
+| `int_div` | divisor is zero |
+| `int_mod` | divisor is zero |
+| `int_div_euclid` | divisor is zero |
+| `int_mod_euclid` | divisor is zero |
+| `panic` | always (explicit abort) |
+| `panic_` | always (internal panic builtin) |
+| `todo_` | always (todo! marker) |
+| `unreachable_` | always (unreachable! marker) |
+
+Note: `assert` is desugared to `if not cond do panic_ "..." end` by `desugar.ml` before typecheck — it does not appear as an `EApp` node. It is caught through `panic_` in the desugared body.
+
+**Category 2 — Stdlib function calls.** These appear as `EApp(EField(EVar "Module", "fn"), args)` in the AST (March represents qualified calls as field access on the module name). They are stdlib functions whose bodies call `panic_` or `int_div`/etc.
+
+| Qualified name | Panic condition |
+|----------------|----------------|
+| `List.nth` | index out of bounds |
+| `List.hd` | called on `Nil` |
+| `List.tl` | called on `Nil` |
+| `List.head` | called on `Nil` |
+| `List.last` | called on `Nil` |
+| `List.min_elt` | called on empty |
+| `List.max_elt` | called on empty |
+| `Option.unwrap` | called on `None` |
+| `Option.expect` | called on `None` |
+| `Result.unwrap` | called on `Err` |
+| `Result.expect` | called on `Err` |
+| `Result.unwrap_err` | called on `Ok` |
+| `Array.get` | index out of bounds |
+| `Array.set` | index out of bounds |
+| `String.slice_bytes` | range out of bounds |
+| `String.nth` | index out of bounds |
+| `NativeArray.get` | index out of bounds |
+| `NativeArray.set` | index out of bounds |
+
+**Prelude-exported names** (`unwrap`, `expect`, `head`, `tail`) are auto-imported into every module's namespace and appear as bare `EVar` names — **not** qualified. They must be in the direct-builtin table:
+
+| Name in AST | Panic condition |
+|-------------|----------------|
+| `unwrap` | called on `None` |
+| `expect` | called on `None` |
+| `head` | called on `Nil` |
+| `tail` | called on `Nil` |
+| `last` | called on `Nil` |
+
+**Note on transitive stdlib calls.** This list is **authoritative and static** — it covers stdlib functions known to panic. We do not walk stdlib bodies at typecheck time (they are compiled modules). If a stdlib function is missing from this list and panics, the static check will not catch it. The list should be kept in sync with stdlib evolution.
+
+---
+
+### 3.4 Detection Strategy (AST-Level Walk)
+
+Because Phase 3c runs at typecheck time (not TIR), we have access to source spans in `EApp` nodes. The body of each function clause is `fc_body : Ast.expr`. The relevant AST forms:
+
+```ocaml
+type expr =
+  | EApp   of expr * expr list * span    (* f(x, y) — span covers the call site *)
+  | EVar   of name                        (* bare name — name.span is the id's position *)
+  | EField of expr * name * span          (* expr.field *)
+  | EBlock of expr list * span
+  | ELet   of binding * span              (* let x = e; binding.bind_expr is the rhs *)
+  | EMatch of expr * branch list * span   (* branch.branch_body is each arm's body *)
+  | EIf    of expr * expr * expr * span   (* cond, then_, else_ *)
+  | EPipe  of expr * expr * span          (* desugared before typecheck — rarely present *)
+  | ELetFn of name * param list * ty option * expr * span
+  | ELetQ  of pattern * expr * expr * span  (* let? p = rhs; body *)
+  ...
 ```
-Error [no_panic]: `first` in `mod SafeMath` (declared `opts no_panic`) calls
-`List.nth`, which can panic on out-of-bounds access.
 
-Use `List.nth_opt` to return `None` instead, or add a bounds check:
+**Two call patterns to detect:**
 
-  fn first(xs : List(Int)) : Option(Int) do
-    List.nth_opt(xs, 0)
+**Pattern 1: Direct builtin** — `EApp(EVar {txt = name; span = fn_span}, args, _)` where `name ∈ panic_surface_direct`. The error span is `fn_span` (the function name's position).
+
+**Pattern 2: Qualified stdlib** — `EApp(EField(EVar {txt = mod_name}, {txt = fn_name; span = fn_span}), args, _)` where `mod_name ^ "." ^ fn_name ∈ panic_surface_stdlib`. The error span is `fn_span` (the field name's position).
+
+**Pattern 3: Local function (transitive)** — `EApp(EVar {txt = name; span = fn_span}, args, _)` where `name ∈ locally_panicky_set`. See §3.6.4 for the fixpoint that builds this set.
+
+**Recursive walk of all expr forms.** For the walk itself, the standard recursive pattern:
+
+```ocaml
+let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
+    : (string * Ast.span) list =
+  match e with
+  | Ast.EApp (Ast.EVar fn_name, args, _) ->
+    let acc = (fn_name.txt, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
+    let qname = mod_name.txt ^ "." ^ fn_name.txt in
+    let acc = (qname, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (f, args, _) ->
+    List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.EBlock (es, _) ->
+    List.fold_left calls_in_expr acc es
+  | Ast.ELet (b, _) ->
+    calls_in_expr acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = calls_in_expr acc scrut in
+    List.fold_left (fun a arm ->
+      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
+      calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.EIf (cond, then_, else_, _) ->
+    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
+  | Ast.EField (e, _, _) -> calls_in_expr acc e
+  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.ELit _ | Ast.EVar _ -> acc
+  | _ -> acc
+```
+
+This collects **all** `(called_name, span)` pairs in the expression tree. The caller then filters by the panic-surface sets.
+
+---
+
+### 3.5 Intra-Module Transitive Analysis
+
+Within a `no_panic` module, if function `g` calls `h` and `h` directly calls `int_div`, then `g` is also a panic site. The fixpoint algorithm:
+
+1. **Seed**: for each `fn_def` in the module, check whether any name in its collected call list (`calls_in_expr`) is in `panic_surface_direct ∪ panic_surface_prelude ∪ panic_surface_stdlib`. If yes, it's a **direct violator**.
+2. **Expand**: for each `fn_def` not yet in the panicky set, check whether any name in its call list is the name of a function already in the panicky set. If yes, add it.
+3. **Repeat** until the set no longer grows. Terminates because the module has finitely many functions.
+
+This is the same fixpoint shape as `Policy_dce.panicky_fns_of_module` in Phase 3b, but operating on the AST rather than TIR.
+
+**For error reporting**, we want the specific call site span. The walk returns `(string * Ast.span) list`, so for a direct violator we find the first entry whose name is in the panic surface and use its span. For transitive violators, we use the span of the call to the (transitively panicky) callee.
+
+---
+
+### 3.6 Cross-Module Treatment
+
+Phase 3c uses a **conservative but practical** cross-module policy:
+
+1. **Stdlib functions** — handled by the explicit panic-surface tables (§3.3). Functions not in the table are assumed safe. This is complete for the curated stdlib; new panicking stdlib functions must be added to the table manually.
+
+2. **Functions from other `no_panic` modules** — treated as **safe**. If module `SafeLib` declares `opts no_panic`, its exported functions passed the same check and are guaranteed panic-free. The typecheck env for the current module accumulates `no_panic_modules : StringSet.t` from previously-checked modules (via `env.module_caps` analogy; see §3.6.3).
+
+3. **Functions from non-`no_panic` user modules** — treated as **potentially panicking** and reported as a violation. This is conservative: a helper in a non-`no_panic` module *might* be panic-free, but we cannot prove it statically. The error message explicitly says "function from non-`no_panic` module — mark that module `opts no_panic` or use a different API."
+
+4. **FFI extern functions** — treated as **potentially panicking**. C code can call `abort()` or signal handlers. If a `no_panic` module uses an extern, it gets the same cross-module conservative error. (See §3.8 for the escape hatch.)
+
+---
+
+### 3.7 Implementation
+
+#### 3.7.1 Lexer changes (`lib/lexer/lexer.mll`)
+
+Add `"opts"` to the keyword table (at lines 75–86, after `"via"`):
+
+```ocaml
+("opts", OPTS);
+```
+
+Add the `OPTS` token declaration in `parser.mly`'s `%token` list.
+
+No changes to the main `token` rule — the keyword table lookup handles it.
+
+**~1 line changed.**
+
+---
+
+#### 3.7.2 Parser changes (`lib/parser/parser.mly`)
+
+Add to the `%token` list:
+
+```
+%token OPTS
+```
+
+Add a new nonterminal after `proof_cap_decl`:
+
+```
+opts_decl:
+  | OPTS; name = lower_name
+    { DOpts ([name.txt], mk_span ($loc)) }
+```
+
+Add to the `decl` alternatives (alongside `d = proof_cap_decl`):
+
+```
+| d = opts_decl { d }
+```
+
+**Parser conflict analysis:** After `OPTS`, the only valid next token is `LOWER_IDENT` (a directive name). `OPTS` does not appear anywhere else in the grammar. No LALR(1) conflict is introduced — `OPTS` is a fresh keyword that the shift/reduce automaton has not seen before, so it creates a new unambiguous production.
+
+**~8 lines changed.**
+
+---
+
+#### 3.7.3 AST changes (`lib/ast/ast.ml`)
+
+Add to the `decl` type (after `DProofCap`, around line 155):
+
+```ocaml
+| DOpts of string list * span
+  (** Module-level directives: [`"no_panic"`] from `opts no_panic`.
+      The list allows multiple future directives; Phase 3c only uses `"no_panic"`. *)
+```
+
+**~3 lines changed.**
+
+---
+
+#### 3.7.4 Typecheck env changes (`lib/typecheck/typecheck.ml`)
+
+Add two fields to `type env`:
+
+```ocaml
+type env = {
+  (* ... all existing fields ... *)
+  no_panic_mod : bool;
+  (** True when the module currently being checked has `opts no_panic`.
+      Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
+  no_panic_modules : string list;
+  (** Names of modules (siblings/imports) that have been verified as [opts no_panic].
+      Functions from these modules are treated as safe in [check_no_panic_module]. *)
+}
+```
+
+Initialize to `false` / `[]` in `make_env`:
+
+```ocaml
+let make_env errors type_map = {
+  (* ... existing fields ... *)
+  no_panic_mod = false;
+  no_panic_modules = [];
+}
+```
+
+**~6 lines changed.**
+
+---
+
+#### 3.7.5 Panic-surface tables (new, in `typecheck.ml`)
+
+Define just before `check_no_panic_module` (around line 6625):
+
+```ocaml
+module StringSet = Set.Make(String)
+
+(** Direct builtin/operator names that constitute a panic site.
+    These appear as [EVar name] in the AST (operators are desugared to EApp+EVar by parser). *)
+let panic_surface_direct : StringSet.t = StringSet.of_list [
+  "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "panic"; "panic_"; "todo_"; "unreachable_";
+]
+
+(** Prelude-exported names that can panic — imported bare (no qualification). *)
+let panic_surface_prelude : StringSet.t = StringSet.of_list [
+  "unwrap"; "expect"; "head"; "tail"; "last";
+]
+
+(** Qualified stdlib names (Module.fn) that can panic.
+    These appear as [EApp(EField(EVar mod, fn), _)] in the AST.
+    Keep this in sync with stdlib evolution. *)
+let panic_surface_stdlib : StringSet.t = StringSet.of_list [
+  "List.nth"; "List.hd"; "List.tl"; "List.head"; "List.last";
+  "List.min_elt"; "List.max_elt";
+  "Option.unwrap"; "Option.expect";
+  "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
+  "Array.get"; "Array.set";
+  "String.slice_bytes"; "String.nth";
+  "NativeArray.get"; "NativeArray.set";
+]
+
+let panic_surface_all_direct : StringSet.t =
+  StringSet.union panic_surface_direct panic_surface_prelude
+```
+
+**~28 lines added.**
+
+---
+
+#### 3.7.6 `calls_in_expr` utility
+
+```ocaml
+(** Collect all (called_name, span) pairs from an expression tree.
+    Returns every function name that appears as the callee of an EApp,
+    whether direct (EVar) or qualified (EField). *)
+let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
+    : (string * Ast.span) list =
+  match e with
+  | Ast.EApp (Ast.EVar fn_name, args, _) ->
+    let acc = (fn_name.txt, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
+    let qname = mod_name.txt ^ "." ^ fn_name.txt in
+    let acc = (qname, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (f, args, _) ->
+    List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.EBlock (es, _) ->
+    List.fold_left calls_in_expr acc es
+  | Ast.ELet (b, _) ->
+    calls_in_expr acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = calls_in_expr acc scrut in
+    List.fold_left (fun a arm ->
+      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
+      calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.EIf (cond, then_, else_, _) ->
+    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
+  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
+  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.ELit _ | Ast.EVar _ -> acc
+  | _ -> acc
+```
+
+**~32 lines added.**
+
+---
+
+#### 3.7.7 `check_decl` handler for `DOpts`
+
+In `check_decl` (around line 6093, after `DProofCap` handler):
+
+```ocaml
+| Ast.DOpts (opts, _sp) ->
+  (* Phase 3c: no_panic module directive *)
+  if List.mem "no_panic" opts then
+    { env with no_panic_mod = true }
+  else begin
+    (* Unknown opts names are silently ignored for forward compatibility.
+       Future directives (no_alloc, no_io) will be handled here. *)
+    env
   end
 ```
 
-### What is a "panic site"
+**~8 lines added.**
 
-The compiler maintains a **panic-surface set** per function: the set of operations that can abort the process at runtime. These are:
+---
 
-| Operation | Panic condition |
-|-----------|----------------|
-| `a / b`, `a % b` | `b = 0` (integer division by zero) |
-| `List.nth(xs, i)` | `i >= length(xs)` |
-| `String.slice_bytes(s, lo, hi)` | out-of-bounds |
-| `unwrap(None)` / `expect(None, ...)` | value is `None` |
-| `assert(false)` | explicit |
-| `panic(msg)` | explicit |
-| any function that calls a panic site transitively | transitive |
+#### 3.7.8 `check_no_panic_module` — the main analysis function
 
-The stdlib ships with a panic-surface annotation for all builtins (a new metadata field on the builtin table). User functions are analyzed transitively.
+This function runs after Pass 2. It:
 
-### Module opts design
+1. Collects all function clauses from top-level `DFn` declarations (not nested mods)
+2. Builds a `fn_calls` map: function name → (string * span) list of all callees
+3. Seeds the `panicky` set from direct panic-surface hits
+4. Runs fixpoint expansion to find transitive panicky functions within the module
+5. Reports one error per violating function, pointing to the first panic site
 
-`opts no_panic` at the top of a `mod` body applies to all `fn` and `pfn` declarations within. It does not apply to nested modules (which must opt in separately).
+```ocaml
+(** [check_no_panic_module errors env decls] validates that none of the
+    top-level [fn]/[pfn] declarations in [decls] call a panic-surface operation,
+    directly or transitively within this module.
+    
+    Called only when [env.no_panic_mod = true], after Pass 2 of [check_module_core]. *)
+let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
+  (* Step 1: collect function names and their call lists *)
+  let fn_entries : (string * (string * Ast.span) list * Ast.span) list =
+    List.filter_map (fun d ->
+      match d with
+      | Ast.DFn (def, fn_span) ->
+        let all_calls =
+          List.fold_left (fun acc clause ->
+            calls_in_expr acc clause.Ast.fc_body
+          ) [] def.Ast.fn_clauses
+        in
+        Some (def.Ast.fn_name.txt, all_calls, fn_span)
+      | _ -> None
+    ) decls
+  in
+  (* Helper: the set of locally-defined function names *)
+  let local_fns =
+    List.fold_left (fun s (name, _, _) -> StringSet.add name s)
+      StringSet.empty fn_entries
+  in
+  (* Step 2: decide if a called name is a panic site
+     - in panic_surface_direct/prelude: definitely panicky
+     - in panic_surface_stdlib: definitely panicky
+     - a local fn name (transitive — resolved during fixpoint below): skip here
+     - a name from a known no_panic module: safe
+     - anything else (external user fn / extern): conservatively panicky *)
+  let no_panic_mod_names = StringSet.of_list env.no_panic_modules in
+  let is_direct_panic_site name =
+    StringSet.mem name panic_surface_all_direct
+    || StringSet.mem name panic_surface_stdlib
+  in
+  let is_external_unknown name =
+    (* Not local, not in panic surface, not a no_panic module export *)
+    not (StringSet.mem name local_fns)
+    && not (is_direct_panic_site name)
+    && not (StringSet.exists (fun mod_name ->
+              let prefix = mod_name ^ "." in
+              String.length name >= String.length prefix
+              && String.sub name 0 (String.length prefix) = prefix
+            ) no_panic_mod_names)
+    (* Bare (unqualified) names that are NOT in the panic surface or local_fns
+       are usually stdlib safe functions (List.map, String.concat, etc. imported
+       as bare names). For now, treat unknown bare names as safe. *)
+    && String.contains name '.'  (* only flag qualified unknown names *)
+  in
+  (* Step 3: seed panicky set from direct violations *)
+  let seed =
+    List.fold_left (fun (panicky, site_map) (fn_name, calls, _span) ->
+      match List.find_opt (fun (n, _sp) ->
+        is_direct_panic_site n || is_external_unknown n
+      ) calls with
+      | Some (site_name, site_span) ->
+        (StringSet.add fn_name panicky,
+         StrMap.add fn_name (site_name, site_span, `Direct) site_map)
+      | None ->
+        (panicky, site_map)
+    ) (StringSet.empty, StrMap.empty) fn_entries
+  in
+  let seed_panicky, seed_site_map = seed in
+  (* Step 4: fixpoint expansion — find transitively panicky local functions *)
+  let rec fixpoint panicky site_map =
+    let (panicky', site_map') =
+      List.fold_left (fun (p, sm) (fn_name, calls, _span) ->
+        if StringSet.mem fn_name p then (p, sm)
+        else
+          match List.find_opt (fun (n, _sp) ->
+            StringSet.mem n p && StringSet.mem n local_fns
+          ) calls with
+          | Some (callee_name, callee_span) ->
+            (StringSet.add fn_name p,
+             StrMap.add fn_name (callee_name, callee_span, `Transitive) sm)
+          | None -> (p, sm)
+      ) (panicky, site_map) fn_entries
+    in
+    if StringSet.cardinal panicky' = StringSet.cardinal panicky then
+      (panicky', site_map')
+    else
+      fixpoint panicky' site_map'
+  in
+  let (all_panicky, site_map) = fixpoint seed_panicky seed_site_map in
+  (* Step 5: report one error per violating function *)
+  List.iter (fun (fn_name, _calls, fn_span) ->
+    if StringSet.mem fn_name all_panicky then begin
+      match StrMap.find_opt fn_name site_map with
+      | None -> ()
+      | Some (site_name, site_span, kind) ->
+        let mod_name = env.current_module in
+        let msg = match kind with
+          | `Direct ->
+            let suggestion = panic_surface_suggestion site_name in
+            Printf.sprintf
+              "`%s` in `mod %s` (declared `opts no_panic`) calls `%s`, which can panic.%s"
+              fn_name mod_name site_name suggestion
+          | `Transitive ->
+            Printf.sprintf
+              "`%s` in `mod %s` (declared `opts no_panic`) transitively calls `%s`, \
+               which can panic."
+              fn_name mod_name site_name
+        in
+        Err.error errors ~span:site_span msg
+    end
+  ) fn_entries
+```
 
-The directive is:
-- **Checked at call sites within the module:** any function call that can transitively panic is rejected
-- **Propagated to callers:** a function exported from a `no_panic` module is annotated as non-panicking in the module's type signature; callers in `no_panic` modules may call it freely
+**~80 lines added.**
 
-### Relationship to `Cap(Panic)` (§4)
+---
 
-`opts no_panic` is a **module-scoped binary gate** — the whole module either panics or doesn't. `Cap(Panic)` (§4) is a **function-level, granular capability** — individual functions declare what panicking operations they perform.
+#### 3.7.9 Suggestion table for error messages
 
-Both are useful. `opts no_panic` is the simpler, lower-cost stepping stone. The two are compatible: a `no_panic` module is exactly one that contains no functions requiring `Cap(Panic)`.
+A small table mapping each panic site to its non-panicking alternative:
 
-### Standard library changes
+```ocaml
+let panic_surface_suggestion : string -> string = function
+  | "/" | "%" | "int_div" | "int_mod" | "int_div_euclid" | "int_mod_euclid" ->
+    "\n\nUse `Math.checked_div` or `Math.checked_mod` to return `None` instead of panicking."
+  | "List.nth" ->
+    "\n\nUse `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds."
+  | "List.hd" | "List.head" | "head" ->
+    "\n\nUse `List.head_opt` (or match on `Cons`/`Nil` directly) to avoid panicking on empty."
+  | "List.tl" | "List.tail" | "tail" ->
+    "\n\nUse `List.tail_opt` or match on `Nil` to avoid panicking on empty."
+  | "unwrap" | "Option.unwrap" ->
+    "\n\nUse `unwrap_or(opt, default)` or `match opt do Some(x) -> ... | None -> ... end`."
+  | "expect" | "Option.expect" ->
+    "\n\nUse `unwrap_or` or an explicit match to handle the `None` case."
+  | "Result.unwrap" | "Result.expect" ->
+    "\n\nUse `Result.unwrap_or` or match on `Ok`/`Err` to handle the error case."
+  | "Array.get" | "Array.set" | "NativeArray.get" | "NativeArray.set" ->
+    "\n\nBounds-check the index before access, or use a bounds-checked variant."
+  | "String.slice_bytes" | "String.nth" ->
+    "\n\nBounds-check the index/range before access."
+  | "panic" | "panic_" ->
+    "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
+  | "todo_" ->
+    "\n\nImplement the body instead of using `todo!`, or remove the `opts no_panic` directive."
+  | "unreachable_" ->
+    "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
+  | _ -> ""
+```
 
-A handful of stdlib functions need non-panicking variants for use in `no_panic` modules. Most already exist (e.g., `List.nth_opt` vs `List.nth`). The ones that don't are:
+**~28 lines added.**
 
-| Panicking | Non-panicking alternative |
-|-----------|--------------------------|
-| `unwrap(opt)` | `unwrap_or(opt, default)` / `opt?` (future) |
-| `a / b` | `checked_div(a, b) : Option(Int)` (new) |
-| `a % b` | `checked_mod(a, b) : Option(Int)` (new) |
-| `String.nth(s, i)` | already `String.nth_opt` exists |
+---
 
-`checked_div` and `checked_mod` are new stdlib functions (`stdlib/math.march` or stdlib prelude) that return `None` on `b = 0`.
+#### 3.7.10 Integration in `check_module_core`
 
-### Implementation notes
+In `check_module_core`, after the `check_module_needs` call (line 6845):
 
-- **New keyword(s).** `"opts"` does not exist in `lib/lexer/lexer.mll`. Whichever surface syntax is chosen (see §Syntax above), the lexer and parser need updating. Option A (`no_panic` keyword) requires one new token; Option B (`opts` + identifier) requires one new token + a two-token production; Option C (`@[no_panic]` attribute) reuses existing attribute machinery if it already exists on modules.
-- **AST.** Add `mod_no_panic : bool` flag to the module AST node (or store it via the attribute list if option C is chosen).
-- **Type environment.** Propagate the flag into `env` as `in_no_panic_module : bool` during `check_module`, set when processing a module with the directive.
-- **Panic-surface table.** New `panic_surface : string list` — a set of builtin function names known to panic (e.g., `"int_div"`, `"list_nth"`, `"unwrap"`, `"assert_"`, `"panic_"`). These map to the internal names used in the eval/codegen builtins (`lib/typecheck/typecheck.ml` builtin table). The table is defined inline in `typecheck.ml` alongside the builtin signatures.
-- **Transitive analysis.** During `check_module`, for each fn in a `no_panic` module, walk the function body's `EApp` calls. Any call to a name in `panic_surface` is a violation. Calls to user-defined functions in the same module are checked recursively (they were already validated during their own `check_decl`). Calls to functions from other modules: check whether that module also carries the `no_panic` attribute and whether the function's `panic_surface` was recorded.
-- **Error message:** names the specific panic site and suggests the non-panicking alternative (using a suggestion table parallel to `panic_surface`).
+```ocaml
+let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+(* Validate capability declarations for the top-level module *)
+check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+(* NEW: validate no_panic invariant if declared *)
+if final_env.no_panic_mod then
+  check_no_panic_module errors final_env m.Ast.mod_decls;
+(* Warn about any unused imports or aliases *)
+warn_unused_imports final_env;
+```
 
-**Estimated scope:** ~400 lines (`lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`). No TIR/runtime changes. New stdlib functions: `checked_div`, `checked_mod`.
+**~3 lines added.**
+
+---
+
+#### 3.7.11 Propagating `no_panic_modules` to sibling modules
+
+When a `DMod` block is fully checked and its `final_env.no_panic_mod = true`, record the module name so sibling modules can call it safely. This is analogous to how `module_caps` propagates IO requirements:
+
+In `check_decl` for `DMod` (around the point where the inner module's env is merged back):
+
+```ocaml
+(* After inner check_module_core returns final_inner_env: *)
+let env =
+  if final_inner_env.no_panic_mod then
+    { env with no_panic_modules = mname.txt :: env.no_panic_modules }
+  else env
+in
+```
+
+This is a localized addition to the existing `DMod` handling. **~5 lines added.**
+
+---
+
+### 3.8 Error Message Format
+
+**Direct violation (call to panic-surface builtin/stdlib):**
+
+```
+Error: `divide` in `mod SafeMath` (declared `opts no_panic`) calls `/`, which can panic.
+
+Use `Math.checked_div` or `Math.checked_mod` to return `None` instead of panicking.
+```
+
+The span points to the `/` token inside the function body — the operator's position in source.
+
+**Direct violation (stdlib function):**
+
+```
+Error: `first` in `mod SafeMath` (declared `opts no_panic`) calls `List.nth`, which can panic.
+
+Use `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds.
+```
+
+The span points to `nth` in `List.nth(xs, 0)`.
+
+**Transitive violation:**
+
+```
+Error: `process_list` in `mod SafeMath` (declared `opts no_panic`) transitively calls
+`find_elem`, which can panic.
+```
+
+The span points to the `find_elem` call site inside `process_list`. The user then reads `find_elem` to find the direct violation there.
+
+**Conservative cross-module violation:**
+
+```
+Error: `run` in `mod SafeMath` (declared `opts no_panic`) calls `Parser.parse`,
+which is in a non-`no_panic` module and may panic.
+
+Mark `mod Parser` with `opts no_panic` to verify it is panic-free, or use a
+panic-free alternative.
+```
+
+---
+
+### 3.9 Stdlib Additions
+
+Add to `stdlib/math.march` (or the prelude if broadly useful):
+
+```march
+doc "Divide `a` by `b`, returning `None` if `b` is zero."
+fn checked_div(a : Int, b : Int) : Option(Int) do
+  if b == 0 do None else Some(a / b) end
+end
+
+doc "Compute `a % b`, returning `None` if `b` is zero."
+fn checked_mod(a : Int, b : Int) : Option(Int) do
+  if b == 0 do None else Some(a % b) end
+end
+```
+
+Note: `checked_div` and `checked_mod` are defined in the `Math` module which is **not** `opts no_panic` (it uses `/` and `%` internally in the safe branch). Callers from a `no_panic` module call `Math.checked_div(a, b)` — the qualified name is not in `panic_surface_stdlib`, so no violation is reported.
+
+**~10 lines added to `stdlib/math.march`.**
+
+---
+
+### 3.10 FFI Escape Hatch
+
+A `no_panic` module may need to call a C extern that provably cannot panic (e.g., a pure math function). Phase 3c flags all extern calls conservatively. The workaround: define a thin wrapper module:
+
+```march
+-- In a NON-no_panic wrapper module:
+mod UnsafeMathFFI do
+  extern fn c_sqrt(x : Float) : Float
+  fn safe_sqrt(x : Float) : Float do c_sqrt(x) end
+end
+
+-- In the no_panic module:
+mod SafeCalc do
+  opts no_panic
+  -- UnsafeMathFFI is not no_panic, so calls to it would be flagged.
+  -- To fix: mark UnsafeMathFFI as no_panic too.
+end
+```
+
+Full FFI safety in `no_panic` modules requires the user to also mark the wrapper module `opts no_panic`. If the wrapper calls an extern, the extern itself is the final boundary — the user accepts responsibility. Phase 3c cannot verify C code; it only verifies that the March wrapper is panic-free at the March level.
+
+---
+
+### 3.11 Relationship to Phase 3b (Policy-Tag DCE)
+
+Phase 3b catches policy violations on **TIR-specialized functions** (after monomorphization), with no source spans. Phase 3c catches panic sites on **`no_panic` module functions** at **typecheck time**, with precise source spans.
+
+They are **complementary and non-redundant**:
+
+| Dimension | Phase 3b | Phase 3c |
+|-----------|----------|----------|
+| Granularity | Per-function via `Tagged(_, NoPanic)` | Per-module via `opts no_panic` |
+| Analysis level | TIR (after lower + mono) | AST (typecheck time) |
+| Source spans | No — TIR has no spans | Yes — AST retains spans |
+| Transitive analysis | Via `panicky_fns_of_module` fixpoint over stdlib bodies | Static table + intra-module fixpoint |
+| Stdlib coverage | Picks up `unwrap` transitively via TIR bodies | Static `panic_surface_stdlib` table |
+| Use case | Library APIs with policy-parameterized functions | Entire module guarantees |
+
+A module can use both: mark it `opts no_panic` AND have some functions take `Tagged(_, NoPanic)` parameters. The two checks are independent.
+
+---
+
+### 3.12 Estimated Implementation Scope
+
+| File | Change | ~Lines |
+|------|--------|--------|
+| `lib/lexer/lexer.mll` | Add `"opts"` to keyword table | +1 |
+| `lib/parser/parser.mly` | `%token OPTS`, `opts_decl` production, add to `decl` list | +8 |
+| `lib/ast/ast.ml` | Add `DOpts of string list * span` to `decl` type | +3 |
+| `lib/typecheck/typecheck.ml` | `panic_surface_*` tables, `calls_in_expr`, `panic_surface_suggestion`, `check_no_panic_module`, `check_decl DOpts` handler, env fields (`no_panic_mod`, `no_panic_modules`), integration in `check_module_core` and `DMod` handler | +175 |
+| `stdlib/math.march` | `checked_div`, `checked_mod` | +10 |
+| `test/test_compiler.ml` | ~12 new tests in `no_panic` suite | +120 |
+| **Total** | | **~317 lines** |
+
+No eval, TIR, codegen, JIT, or runtime changes. The analysis is entirely in `typecheck.ml` and fires before lowering.
+
+The four big blocks in `typecheck.ml`:
+- Panic-surface tables + `calls_in_expr`: ~65 lines
+- `panic_surface_suggestion`: ~28 lines
+- `check_no_panic_module`: ~80 lines
+- Env fields + `check_decl` handler + integration hooks: ~15 lines
+
+---
+
+### 3.13 Test Cases (~12 new tests, new `no_panic` suite in `test/test_compiler.ml`)
+
+| # | Description | Expected |
+|---|-------------|---------|
+| 1 | `opts no_panic` parses correctly (no other decls) | no error |
+| 2 | Non-`no_panic` module with `a / b` | no error |
+| 3 | `no_panic` module with `a / b` | error at `/` site |
+| 4 | `no_panic` module with `a % b` | error at `%` site |
+| 5 | `no_panic` module with explicit `panic("msg")` | error at `panic` site |
+| 6 | `no_panic` module calling `List.nth` | error at `nth` site |
+| 7 | `no_panic` module calling `List.nth_opt` | no error |
+| 8 | `no_panic` module calling `Math.checked_div` | no error |
+| 9 | `no_panic` module with `unwrap(None)` pattern | error at `unwrap` site |
+| 10 | `no_panic` module: helper `h` calls `int_div`, `g` calls `h` | error on both (transitive) |
+| 11 | Two sibling `no_panic` modules calling each other | no error |
+| 12 | `no_panic` module calling non-`no_panic` user module | error (conservative) |
+
+Tests 1–9 use the AST-direct testing helper pattern (build a synthetic `module_` and call `check_module_core`). Tests 10–12 require multi-function modules and are written as string-based round-trip tests that run the full compiler pipeline on a `.march` snippet.
+
+---
+
+### 3.14 Known Limitations and Future Work
+
+**1. Conservative cross-module check.** Functions from user modules without `opts no_panic` are treated as potentially panicking. This means a `no_panic` module cannot call any external helper unless that helper's module also declares `opts no_panic`. In practice, users structure `no_panic` code in cohesive modules and mark all dependencies accordingly.
+
+**2. Static stdlib table.** The `panic_surface_stdlib` table is manually maintained. If a new stdlib function panics and isn't added to the table, Phase 3c will not catch it. Mitigation: add a linter CI check that runs Phase 3b's TIR-level analysis over stdlib (which DOES pick up transitive panics) and cross-references the static table.
+
+**3. Value-range insensitivity.** If the programmer knows `b != 0` statically (e.g., from a match arm), `a / b` is still flagged. Phase 3c is purely syntactic. Callers must use `checked_div` and pattern-match the result, even when the non-zero invariant is locally obvious.
+
+**4. `todo_` in stub functions.** Using `todo_` (or `panic`) in a stub function body that will never be called generates a false positive. The escape: remove `opts no_panic` from modules under active development and add it back when the module is complete.
+
+**5. Nested mod scoping.** `opts no_panic` on an outer `mod` does NOT apply to inner `mod` blocks. Each must declare independently. This is intentional — nested modules may have different purity requirements — but can surprise users who expect the outer directive to propagate.
 
 ---
 
@@ -988,14 +1641,19 @@ These are incremental LSP additions, each ~100–200 lines in `lsp/`.
 
 ### Phase 3c — No-panic modules (medium cost)
 
-- `opts no_panic` module directive
-- Panic-surface metadata on builtins
-- Transitive panic analysis in `check_module`
-- Error messages with non-panicking alternatives
-- New stdlib: `checked_div`, `checked_mod`
-- Tests: ~10 new capability tests
+**Spec complete** — see §3 above for full implementation details.
 
-**Estimated scope:** ~400 lines + 2 stdlib functions.
+- `opts no_panic` module directive (Option B: `OPTS` keyword + `LOWER_IDENT` directive name)
+- `DOpts of string list * span` added to `Ast.decl`
+- `no_panic_mod : bool` + `no_panic_modules : string list` added to typecheck `env`
+- `panic_surface_direct`, `panic_surface_prelude`, `panic_surface_stdlib` tables in `typecheck.ml`
+- `calls_in_expr` AST walk + `check_no_panic_module` with seed+fixpoint transitive analysis
+- Error messages at call-site span with non-panicking alternatives (`panic_surface_suggestion`)
+- Conservative cross-module check: non-`no_panic` user modules flagged; `no_panic` siblings safe
+- New stdlib: `Math.checked_div`, `Math.checked_mod`
+- Tests: ~12 new tests in `no_panic` suite
+
+**Estimated scope:** ~317 lines. No TIR/JIT/runtime changes.
 
 ### Phase 3d — Full `Cap(Panic)` hierarchy (high cost, deferred)
 
