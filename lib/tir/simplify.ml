@@ -95,6 +95,35 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
     changed := true; Tir.EAtom x
 
+  (* Boolean conditional identities arising from guard desugaring / inlining *)
+
+  (* if x then true else false → x *)
+  | Tir.ECase (a,
+      [{ Tir.br_tag = "True"; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true)) }],
+      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)))) ->
+    changed := true; Tir.EAtom a
+
+  (* if x then false else true → not x *)
+  | Tir.ECase (a,
+      [{ Tir.br_tag = "True"; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)) }],
+      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true)))) ->
+    changed := true;
+    Tir.EApp (mk_var "not" (Tir.TFn ([Tir.TBool], Tir.TBool)), [a])
+
+  (* x == x → true  (non-float: NaN != NaN, so this only holds for non-float types) *)
+  | Tir.EApp (f, [Tir.AVar v1; Tir.AVar v2])
+    when f.Tir.v_name = "=="
+      && v1.Tir.v_name = v2.Tir.v_name
+      && v1.Tir.v_ty <> Tir.TFloat ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))
+
+  (* x != x → false  (non-float) *)
+  | Tir.EApp (f, [Tir.AVar v1; Tir.AVar v2])
+    when f.Tir.v_name = "!="
+      && v1.Tir.v_name = v2.Tir.v_name
+      && v1.Tir.v_ty <> Tir.TFloat ->
+    changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))
+
   (* Recurse *)
   | Tir.ELet (v, rhs, body) ->
     Tir.ELet (v, simplify_expr ~changed rhs, simplify_expr ~changed body)

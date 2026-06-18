@@ -659,6 +659,142 @@ Once Phase 2 is done, rewrite the hot paths in `stdlib/dataframe.march` to use
 
 ---
 
+### P11 — Case-of-Known-Constructor (Beta-ADT Reduction)
+
+**Location (planned):** `lib/tir/cprop.ml` or new `lib/tir/beta_adt.ml`
+**Stage:** TIR (Opt coordinator — after CProp, before Fold)
+
+When code constructs an ADT value and immediately pattern-matches it in the same expression, the allocation and case dispatch can be eliminated entirely:
+
+```
+-- Before
+let r = Ok(x) in
+match r do
+  Ok(v) -> body       -- reduce to: body[v := x]
+  Err(e) -> fallback
+end
+
+-- After
+body[v := x]          -- no heap allocation, no dispatch
+```
+
+This is the single most impactful optimization absent from the current pipeline. GHC calls it "case-of-known-constructor" and documented it as their highest-payoff single pass. For March it fires after inlining any function that returns `Option` or `Result`:
+
+```march
+-- List.head inlined:
+let r = Option.map(fn x -> x + 1)(Some(5)) in ...
+-- After inline of Option.map: let r = match Some(5) do Some(v) -> Some(v+1) None -> None end
+-- After beta-ADT: let r = Some(6)
+-- After outer match on r: no allocation at all if immediately destructured
+```
+
+The pattern occurs constantly in `let?` chains, `Option.and_then`, `Result.map_err`, and any function returning a sum type.
+
+**Implementation:**
+Track `let v = EAlloc(ctor_tag, args)` in a second CProp env. When an `ECase(AVar v, branches, default)` is reached and `v` is in this env, find `branches` with matching `br_tag`, substitute `br_vars` → `args` in `br_body`, and emit the reduced body. The dead `let v = EAlloc(...)` binding is then removed by DCE; orphaned `EIncRC`/`EDecRC` on `v` are cleaned up by Perceus / the existing DCE-for-impure pass.
+
+Edge cases:
+- Multi-use: if `v` is used more than once (EIncRC present), don't reduce (would need to copy args into multiple contexts)
+- Reuse token: if `v` has an `EReuse` associated, keep the binding
+- Scrutinee in escaped position: if `v` escapes (stored, returned), don't reduce
+
+**Effort:** Medium (~100 lines) | **Impact:** Very high
+**Dependencies:** CProp (same env-tracking pattern); DCE (cleans up residuals)
+**Tests:** Add `beta_adt` group — test `Ok/Err`, `Some/None`, custom ADTs, nested reduces
+**Status:** Planned
+
+---
+
+### P12 — Variable Copy Propagation
+
+**Location (planned):** `lib/tir/cprop.ml` (extend existing pass)
+**Stage:** TIR (Opt coordinator — CProp)
+
+The current CProp only propagates `let x = <literal>` into use sites. It leaves `let x = y` (variable aliasing) intact. These alias chains appear everywhere after inlining, because `subst_args` in `inline.ml` creates:
+
+```
+let param_i1 = arg_a in   -- EAtom (AVar arg_a), not a literal → not propagated today
+let param_i2 = 3 in       -- literal → propagated
+param_i1 + param_i2       -- remains as: param_i1 + 3
+```
+
+With copy propagation:
+```
+let param_i1 = arg_a in
+arg_a + 3               -- substitute param_i1 → arg_a
+```
+DCE then drops the dead `let param_i1`. This also enables Fold to make further progress in cascaded inline → fold chains.
+
+**Implementation:** ~30 additional lines in `cprop.ml`. Extend the env to carry `(string * March_ast.Ast.literal) list` OR `(string * Tir.atom) list` (atom-level). When RHS is `EAtom (AVar y)`, add `x → AVar y` to env. `subst_atom` for a var looks up the env for either a literal OR an atom alias.
+
+RC-safety: same rule as existing CProp — skip EFree/EIncRC/EDecRC argument positions (their argument must remain the original binding for RC semantics).
+
+**Effort:** Low (~30 lines) | **Impact:** Medium — fires after every inline call
+**Dependencies:** Inline (creates alias chains); feeds Fold
+**Tests:** Extend `cprop` group — `let x = y in x + 1 → y + 1`
+**Status:** Planned
+
+---
+
+### P13 — EField of Known Record/Update
+
+**Location (planned):** `lib/tir/cprop.ml` or new `lib/tir/field_fold.ml`
+**Stage:** TIR (Opt coordinator — after CProp/Fold)
+
+When a record is constructed and a field accessed immediately, the allocation and field load can be eliminated:
+
+```
+let r = { x = a, y = b } in r.x   →   a
+let r2 = { r with x = new_val } in r2.x  →  new_val
+```
+
+Fires after inlining record-returning functions, constructor accessors, and `EUpdate` chains (of which struct fusion already handles the update→update case, but not update→field).
+
+**Implementation:** Track `let v = ERecord(fields)` in a third CProp env entry type. On `EField(AVar v, k)`, look up the env and substitute with `fields[k]`. For `EUpdate(AVar base, new_fields)`: field is in `new_fields` → use `new_fields[k]`; else delegate to base record's env entry.
+
+**Effort:** Medium (~60 lines) | **Impact:** Medium
+**Dependencies:** CProp (same env extension pattern); struct fusion (orthogonal)
+**Tests:** Add `field_fold` group — `{x=a, y=b}.x → a`, chained update
+**Status:** Planned
+
+---
+
+### P14 — Extended Simplify Peepholes
+
+**Location (planned):** `lib/tir/simplify.ml`
+**Stage:** TIR (Opt coordinator — Simplify)
+
+Additional algebraic rules missing from the current `simplify.ml`:
+
+```
+-- Boolean / conditional
+if x then true else false     →  x
+if x then false else true     →  not x
+not (not x)                   →  x
+
+-- Comparison
+x == x   →  true    (only for non-float atoms; name equality implies value equality after mono)
+x != x   →  false
+
+-- String  
+String.is_empty("") →  true    (complementary to existing string_is_empty fold)
+
+-- Arithmetic (extends existing rules)
+x mod 1  →  0
+0 mod x  →  0   (when x is a known non-zero literal — same guard as existing 0/x rule)
+```
+
+These patterns arise from desugaring guards (`when x == x`), from inlining boolean helper functions, and from partial evaluation of comparison expressions where `x` is the same ANF variable.
+
+**Implementation:** ~40 lines in `simplify_expr`. The `x == x` rule requires checking that both atoms are `AVar v` with the same `v_name`; safe for scalars and heap pointers (same variable = same address after monomorphization).
+
+**Effort:** Low (~40 lines) | **Impact:** Low-Medium
+**Dependencies:** None (standalone peepholes)
+**Tests:** Extend `simplify` group
+**Status:** Planned
+
+---
+
 ## Optimization Interactions
 
 The Opt coordinator (`lib/tir/opt.ml`) runs `[Inline; CProp; Fold; Simplify; DCE]` in a fixed-point loop (up to 5 iterations). The interaction order matters:
