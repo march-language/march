@@ -2410,19 +2410,31 @@ let base_env : env =
         | [VInt _; VInt 0]             -> eval_error "modulo by zero"
         | _ -> eval_error "builtin %%: expected two integers"))
     (* Float arithmetic *)
-  ; ("+.", VBuiltin ("+.", function
+  ; ("+.", VBuiltin ("+.", fun args -> match args with
         | [VFloat a; VFloat b] -> VFloat (a +. b)
-        | _ -> eval_error "builtin +.: expected two floats"))
-  ; ("-.", VBuiltin ("-.", function
+        | [VInt _; _] | [_; VInt _] ->
+          eval_error "+.: arguments must be Float, not Int — use `+` for Int or `int_to_float` to convert"
+        | _ -> eval_error "+.: expected two Floats, got %s"
+            (String.concat " and " (List.map value_to_string args))))
+  ; ("-.", VBuiltin ("-.", fun args -> match args with
         | [VFloat a; VFloat b] -> VFloat (a -. b)
-        | _ -> eval_error "builtin -.: expected two floats"))
-  ; ("*.", VBuiltin ("*.", function
+        | [VInt _; _] | [_; VInt _] ->
+          eval_error "-.: arguments must be Float, not Int — use `-` for Int or `int_to_float` to convert"
+        | _ -> eval_error "-.: expected two Floats, got %s"
+            (String.concat " and " (List.map value_to_string args))))
+  ; ("*.", VBuiltin ("*.", fun args -> match args with
         | [VFloat a; VFloat b] -> VFloat (a *. b)
-        | _ -> eval_error "builtin *.: expected two floats"))
-  ; ("/.", VBuiltin ("/.", function
+        | [VInt _; _] | [_; VInt _] ->
+          eval_error "*.: arguments must be Float, not Int — use `*` for Int or `int_to_float` to convert"
+        | _ -> eval_error "*.: expected two Floats, got %s"
+            (String.concat " and " (List.map value_to_string args))))
+  ; ("/.", VBuiltin ("/.", fun args -> match args with
         | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
         | [VFloat _; VFloat 0.0]             -> eval_error "division by zero"
-        | _ -> eval_error "builtin /.: expected two floats"))
+        | [VInt _; _] | [_; VInt _] ->
+          eval_error "/.: arguments must be Float, not Int — use `/` for Int or `int_to_float` to convert"
+        | _ -> eval_error "/.: expected two Floats, got %s"
+            (String.concat " and " (List.map value_to_string args))))
     (* Comparisons *)
   ; ("==", cmp_op ( = )  ( = )  ( = )  ( = )  "==")
   ; ("!=", cmp_op ( <> ) ( <> ) ( <> ) ( <> ) "!=")

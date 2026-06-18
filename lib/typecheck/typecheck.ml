@@ -1638,18 +1638,21 @@ let format_ty_for_error t =
 
 (** Report a type mismatch with a conversational Elm-style message. *)
 let report_mismatch env ~span ~reason expected found =
-  (* Build headline, using pretty-printing for long types *)
+  (* Build headline, using pretty-printing for long types.
+     Convention: `expected` = inferred type of the expression (what was provided);
+                 `found`    = required type from context (what was needed).
+     Headline uses standard compiler phrasing: "expected <required> but got <provided>". *)
   let exp_str = format_ty_for_error expected in
   let fnd_str = format_ty_for_error found in
   let headline =
     if String.length (pp_ty expected) > 50 || String.length (pp_ty found) > 50 then
-      Printf.sprintf "I expected:\n    %s\nbut found:\n    %s"
-        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 expected)))
+      Printf.sprintf "expected:\n    %s\nbut got:\n    %s"
         (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 found)))
+        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 expected)))
     else
       render_parts
-        [ MPText "I expected "; MPText exp_str;
-          MPText " but found "; MPText fnd_str; MPText "." ]
+        [ MPText "expected "; MPText fnd_str;
+          MPText " but got "; MPText exp_str; MPText "." ]
   in
   let why_note =
     match reason with
@@ -1667,7 +1670,7 @@ let report_mismatch env ~span ~reason expected found =
          let ordinal = match i with 1 -> "1st" | 2 -> "2nd" | 3 -> "3rd"
            | n -> string_of_int n ^ "th" in
          [ Printf.sprintf "The %s argument of `%s` mismatches: expected `%s` but got `%s`."
-             ordinal cname (pp_ty exp_arg) (pp_ty fnd_arg) ]
+             ordinal cname (pp_ty fnd_arg) (pp_ty exp_arg) ]
        | None -> [])
     | TRecord flds1, TRecord flds2 ->
       (* Find first field that differs *)
@@ -1675,7 +1678,7 @@ let report_mismatch env ~span ~reason expected found =
         match List.assoc_opt name flds2 with
         | Some t2 when pp_ty t1 <> pp_ty t2 ->
           Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
-            name (pp_ty t1) (pp_ty t2))
+            name (pp_ty t2) (pp_ty t1))
         | None ->
           Some (Printf.sprintf "Field `%s` is present in the expected type but missing in the found type." name)
         | _ -> None) flds1
@@ -1684,17 +1687,17 @@ let report_mismatch env ~span ~reason expected found =
     | _ -> []
   in
   (* Common-case hints for frequently-confused types.
-     NOTE: `expected` here = the inferred type of the expression;
-           `found`    here = the required type from context.
-     So "I expected X but found Y" means the expression was X but Y was required. *)
+     NOTE: `expected` here = the inferred type of the expression (what was provided);
+           `found`    here = the required type from context (what was needed).
+     Matches are on (provided, required) order. *)
   let common_hint =
     match repr expected, repr found with
     | TCon ("Int", []), TCon ("Float", []) ->
-      (* Expression produced Int but Float was required *)
+      (* User provided Int, Float was required *)
       [ "Int and Float are distinct types in March.\n\
          Use `int_to_float(x)` to convert, or write a Float literal like `1.0`." ]
     | TCon ("Float", []), TCon ("Int", []) ->
-      (* Expression produced Float but Int was required *)
+      (* User provided Float, Int was required *)
       [ "Float and Int are distinct types in March.\n\
          Use `float_to_int(x)` to truncate, or write an Int literal like `1`." ]
     | TCon ("Int", []), TCon ("Bool", []) ->
