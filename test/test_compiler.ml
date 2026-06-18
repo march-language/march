@@ -2903,6 +2903,121 @@ let test_tagged_standard_no_exclusion () =
   let ctx = typecheck src in
   Alcotest.(check bool) "Tagged(_, Standard) + Cap(IO): no error" false (has_errors ctx)
 
+(* ── Phase 3a: Explicit bounded type parameters ─────────────────────────── *)
+
+let test_bound_param_parses () =
+  let src = {|mod T do
+    type ConnState = Open | Closed
+    type Handle(s) = Handle(Int)
+    fn transmit[s : ConnState](h : Handle(s), data : Int) : Int do data end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "fn[s : ADT] parses and typechecks" false (has_errors ctx)
+
+let test_bound_param_valid_call () =
+  let src = {|mod T do
+    type ConnState = Open | Closed
+    type Handle(s) = Handle(Int)
+    fn unwrap[s : ConnState](b : Handle(s)) : Int do
+      match b do Handle(x) -> x end
+    end
+    fn go() : Int do
+      let h : Handle(Open) = Handle(42)
+      unwrap(h)
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "bound ADT: valid constructor — no error" false (has_errors ctx)
+
+let test_bound_param_invalid_call () =
+  (* Force the phantom type to Int via a typed helper — Int is a valid type name
+     but not a constructor of ConnState, so discharge_constraints will reject it. *)
+  let src = {|mod T do
+    type ConnState = Open | Closed
+    type Handle(s) = Handle(Int)
+    fn unwrap[s : ConnState](b : Handle(s)) : Int do
+      match b do Handle(x) -> x end
+    end
+    pfn coerce_int(h : Handle(Int)) : Handle(Int) do h end
+    fn go() : Int do
+      let h = Handle(42)
+      let h2 = coerce_int(h)
+      unwrap(h2)
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "bound ADT: wrong constructor — error" true (has_errors ctx)
+
+let test_bound_interface_equiv () =
+  let src = {|mod T do
+    fn eq_test[a : Eq](x : a, y : a) : Bool do x == y end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "bound interface (Eq): no error" false (has_errors ctx)
+
+let test_bound_multiple_params () =
+  (* Box(A)/Box(B) annotations are invalid (constructors aren't type names).
+     Use untyped let bindings — phantom types stay polymorphic, constraints skip. *)
+  let src = {|mod T do
+    type State = A | B
+    type Box(s) = Box(Int)
+    fn swap[s : State, t : State](a : Box(s), b : Box(t)) : Box(t) do b end
+    fn go() : Int do
+      let a = Box(1)
+      let b = Box(2)
+      let _ = swap(a, b)
+      0
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "multiple bounds: valid call — no error" false (has_errors ctx)
+
+let test_bound_unknown_adt () =
+  let src = {|mod T do
+    fn f[s : NonExistentType](x : Int) : Int do x end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "bound unknown type — error" true (has_errors ctx)
+
+let test_bound_in_return_type () =
+  (* Box(A) annotation is invalid (A is a constructor, not a type name).
+     Call identity with an untyped binding — s stays polymorphic, no error. *)
+  let src = {|mod T do
+    type State = A | B
+    type Box(s) = Box(Int)
+    fn identity[s : State](b : Box(s)) : Box(s) do b end
+    fn go() : Int do
+      let b = Box(1)
+      let _ = identity(b)
+      0
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "bound in return type: no error" false (has_errors ctx)
+
+let test_bound_nat_valid () =
+  let src = {|mod T do
+    fn check_nat[n : Nat](x : Int) : Int do x end
+    fn go() : Int do check_nat(1) end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "Nat bound: polymorphic call — no error" false (has_errors ctx)
+
+let test_bound_tag_as_adt () =
+  let src = {|mod T do
+    type ConnTag = Open | Closed
+    type Handle(s) = Handle(Int)
+    fn read[s : ConnTag](h : Handle(s)) : Int do
+      match h do Handle(x) -> x end
+    end
+    fn go() : Int do
+      let h : Handle(Open) = Handle(7)
+      read(h)
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "ADT bound with tag-style type: valid" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3161,6 +3276,16 @@ let compiler_suites =
           Alcotest.test_case "Tagged(_, Realtime) + Cap(Alloc): error"   `Quick test_tagged_realtime_excludes_alloc_error;
           Alcotest.test_case "Tagged(_, Realtime) + Cap(Panic): error"   `Quick test_tagged_realtime_excludes_panic_error;
           Alcotest.test_case "Tagged(_, Standard): no exclusion"         `Quick test_tagged_standard_no_exclusion;
+          (* Phase 3a: explicit bounded type parameters *)
+          Alcotest.test_case "fn[s:ADT] parses and typechecks"           `Quick test_bound_param_parses;
+          Alcotest.test_case "bound ADT: valid constructor — no error"   `Quick test_bound_param_valid_call;
+          Alcotest.test_case "bound ADT: wrong constructor — error"      `Quick test_bound_param_invalid_call;
+          Alcotest.test_case "bound interface equiv to when-clause"      `Quick test_bound_interface_equiv;
+          Alcotest.test_case "multiple bounds: valid call"               `Quick test_bound_multiple_params;
+          Alcotest.test_case "bound unknown type — error"                `Quick test_bound_unknown_adt;
+          Alcotest.test_case "bound in return type: no error"            `Quick test_bound_in_return_type;
+          Alcotest.test_case "Nat bound: polymorphic call — no error"    `Quick test_bound_nat_valid;
+          Alcotest.test_case "ADT bound with tag-style type: valid"      `Quick test_bound_tag_as_adt;
         ] );
       ( "mpst",
         [

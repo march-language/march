@@ -117,11 +117,15 @@ and tvar =
 (** Lightweight type-class constraints.
     [CNum t] asserts t must be Int or Float (arithmetic).
     [COrd t] asserts t must be Int, Float, or String (ordered).
-    [CInterface (name, t)] asserts t must implement interface [name]. *)
+    [CInterface (name, t)] asserts t must implement interface [name].
+    [CADTBound (adt, t)] asserts t must be a constructor of ADT named [adt].
+    [CTNatBound t] asserts t must be a type-level natural number (TNat). *)
 type constraint_ =
   | CNum of ty
   | COrd of ty
   | CInterface of string * ty
+  | CADTBound of string * ty
+  | CTNatBound of ty
 
 (** A type scheme encodes Hindley-Milner polymorphism.
     [Poly(ids, cs, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
@@ -840,7 +844,9 @@ let instantiate level env = function
     let inst_cs = List.map (function
         | CNum t -> CNum (inst t)
         | COrd t -> COrd (inst t)
-        | CInterface (n, t) -> CInterface (n, inst t)) cs
+        | CInterface (n, t) -> CInterface (n, inst t)
+        | CADTBound (n, t) -> CADTBound (n, inst t)
+        | CTNatBound t -> CTNatBound (inst t)) cs
     in
     env.pending_constraints := inst_cs @ !(env.pending_constraints);
     inst ty
@@ -4087,6 +4093,46 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          unification variable everywhere. *)
       let fn_tvars = ref [] in
 
+      (* Pre-register explicit bound type variables from fn_bounds and build
+         bound constraints.  Bounds like [s : ConnState] pre-register `s` in
+         fn_tvars so that param annotations referencing `s` (e.g.
+         Handle(Conn, s)) share the same unification variable. *)
+      let bound_constraints =
+        List.filter_map (fun ((var_name : Ast.name), bound_surface) ->
+            let tv = match List.assoc_opt var_name.txt !fn_tvars with
+              | Some t -> t
+              | None ->
+                let fv = fresh_var env'.level in
+                fn_tvars := (var_name.txt, fv) :: !fn_tvars;
+                fv
+            in
+            match bound_surface with
+            | Ast.TyNat _ -> Some (CTNatBound tv)
+            | Ast.TyCon (n, []) ->
+              if n.txt = "Nat" then Some (CTNatBound tv)
+              else if StrMap.mem n.txt env.interfaces
+              then Some (CInterface (n.txt, tv))
+              else begin
+                (* Validate that the ADT exists in scope *)
+                match lookup_type n.txt env with
+                | None ->
+                  Err.error env.errors ~span:n.span
+                    (Printf.sprintf
+                       "Bound `%s` is not a known ADT or interface name."
+                       n.txt);
+                  None
+                | Some _ -> Some (CADTBound (n.txt, tv))
+              end
+            | _ ->
+              Err.error env.errors ~span:var_name.span
+                (Printf.sprintf
+                   "Bound `%s` on type variable `%s` must be an ADT name, \
+                    interface name, or `Nat`."
+                   (Ast.show_ty bound_surface) var_name.txt);
+              None
+          ) def.fn_bounds
+      in
+
       (* Bind parameters *)
       let param_tys, body_env =
         List.fold_right (fun fp (tys, env) ->
@@ -4205,25 +4251,31 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
 
-      (* Generalize; attach any class constraints from the when-clause *)
+      (* Generalize; attach bound constraints and any when-clause class constraints *)
+      let all_constraints = bound_constraints @ class_constraints in
       let base_sch = generalize env.level fn_ty in
-      (match class_constraints with
+      (match all_constraints with
        | [] -> base_sch
        | cs  ->
          match base_sch with
          | Poly (ids, existing_cs, t) -> Poly (ids, cs @ existing_cs, t)
          | Mono t ->
-           (* Collect the ids of all quantified vars referenced in constraints *)
+           (* Collect ids of quantified vars referenced in constraints so they
+              are properly generalized even when not referenced in the type *)
+           let constraint_tv = function
+             | CInterface (_, tv) | CADTBound (_, tv) | CTNatBound tv -> Some tv
+             | CNum tv | COrd tv -> Some tv
+           in
            let extra_ids = List.filter_map (fun c ->
-               match c with
-               | CInterface (_, tv) ->
+               match constraint_tv c with
+               | None -> None
+               | Some tv ->
                  (match repr tv with
                   | TVar r ->
                     (match !r with
                      | Unbound (id, l) when l > env.level -> Some id
                      | _ -> None)
                   | _ -> None)
-               | _ -> None
              ) cs in
            Poly (extra_ids, cs, t))
 
@@ -4435,6 +4487,43 @@ let discharge_constraints env span =
                   "`%s` does not implement interface `%s`.\n\
                    Add `impl %s(%s) do ... end` to provide an implementation."
                   (pp_ty ty) iface_name iface_name (pp_ty ty)))
+      | CADTBound (adt_name, t) ->
+        let ty = repr t in
+        (match ty with
+         | TVar _ -> ()  (* still polymorphic — cannot check yet *)
+         | TCon (ctor_name, []) ->
+           (* Check ctor_name is a constructor whose parent type matches adt_name.
+              ci_type may be module-qualified (e.g. "Conn.ConnState"), so we accept
+              an exact match OR a ".<adt_name>" suffix match. *)
+           let matches_adt ci_type =
+             ci_type = adt_name ||
+             let n = String.length adt_name in
+             let len = String.length ci_type in
+             len > n && ci_type.[len - n - 1] = '.' &&
+             String.sub ci_type (len - n) n = adt_name
+           in
+           let found = match StrMap.find_opt ctor_name env.ctors with
+             | None -> false
+             | Some cis -> List.exists (fun ci -> matches_adt ci.ci_type) cis
+           in
+           if not found then
+             Err.error env.errors ~span
+               (Printf.sprintf "`%s` is not a variant of `%s`."
+                  ctor_name adt_name)
+         | _ ->
+           Err.error env.errors ~span
+             (Printf.sprintf "Expected a variant of `%s`, got `%s`."
+                adt_name (pp_ty ty)))
+      | CTNatBound t ->
+        let ty = repr t in
+        (match ty with
+         | TVar _            -> ()  (* still polymorphic *)
+         | TNat _            -> ()  (* exact TNat — OK *)
+         | TNatOp _          -> ()  (* type-level nat arithmetic — OK *)
+         | _ ->
+           Err.error env.errors ~span
+             (Printf.sprintf "Expected a type-level natural number (Nat), got `%s`."
+                (pp_ty ty)))
     ) !(env.pending_constraints);
   env.pending_constraints := []
 
