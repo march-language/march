@@ -140,6 +140,14 @@ let test_parse_list_literal () =
   | March_ast.Ast.ECon (n, [_; _], _) when n.txt = "Cons" -> ()
   | _ -> Alcotest.fail "expected Cons(1, Cons(...))"
 
+let test_parse_zero_arg_lambda_sugar () =
+  (* `fn -> expr` should parse identically to `fn () -> expr` *)
+  let lexbuf = Lexing.from_string "fn -> 42" in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([], March_ast.Ast.ELit (March_ast.Ast.LitInt 42, _), _) -> ()
+  | _ -> Alcotest.fail "expected ELam([], ELit(42))"
+
 let test_lexer_percent () =
   let lexbuf = Lexing.from_string "%" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -3856,6 +3864,7 @@ let eval_suites =
           Alcotest.test_case "unary minus"         `Quick test_parse_unary_minus;
           Alcotest.test_case "negative lit pattern"`Quick test_parse_negative_lit_pattern;
           Alcotest.test_case "list literal"        `Quick test_parse_list_literal;
+          Alcotest.test_case "zero-arg lambda sugar" `Quick test_parse_zero_arg_lambda_sugar;
           Alcotest.test_case "percent token"       `Quick test_lexer_percent;
           Alcotest.test_case "modulo operator"     `Quick test_eval_modulo;
           Alcotest.test_case "multi-stmt match arm"`Quick test_eval_multi_stmt_match_arm;

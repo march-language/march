@@ -100,7 +100,8 @@ end
 fn x -> x + 1                 -- single param
 fn _ -> 42                    -- wildcard (1-arg, NOT zero-arg)
 fn (a, b) -> a + b            -- multiple params
-fn () -> compute()            -- ZERO-ARG: must use fn () -> ...
+fn -> compute()               -- zero-arg short form
+fn () -> compute()            -- zero-arg explicit form (identical)
 ```
 
 Multi-statement lambda bodies are supported with leading `let` bindings followed by
@@ -125,7 +126,7 @@ fn () ->
 The body is: zero or more `let`/`linear let` bindings, then a final expression.
 Single-expression lambdas are unchanged — no `let` bindings means no `EBlock` wrapper.
 
-**`fn -> expr` is a PARSE ERROR.** Zero-arg lambdas require `fn () -> expr`.
+Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas — they are identical.
 
 ---
 

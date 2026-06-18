@@ -217,7 +217,8 @@ Lambdas use arrow syntax: `fn params -> body`.
 ```elixir
 fn x -> x + 1                -- single param
 fn (a, b) -> a + b           -- multiple params (parenthesized)
-fn () -> 42                  -- ZERO-ARG: must use fn () -> ...
+fn -> 42                     -- zero-arg (short form)
+fn () -> 42                  -- zero-arg (explicit form, identical)
 fn _ -> "ignored"            -- wildcard (1-arg, discards the value)
 ```
 
@@ -230,7 +231,7 @@ fn x ->
   z
 ```
 
-**Common mistake:** `fn -> expr` is a parse error. Zero-arg lambdas require `fn () -> expr`.
+**Note:** `fn _` is a *one-argument* lambda that discards its argument — not zero-arg. Calling `fn _ -> 42` with no arguments is an arity error.
 
 ---
 
