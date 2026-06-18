@@ -159,6 +159,41 @@ The search index is cached at `.march/search-index.json` and rebuilt when source
 
 ---
 
+## forge cap — Capability and typestate inspection
+
+`forge cap query` prints a capability and typestate summary across all `.march` files in your project. It parses (but does not typecheck) each file and reports every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration.
+
+```sh
+forge cap query              # scan the whole project
+forge cap query --dir lib/   # scan a specific directory
+```
+
+Example output for a project with a typestate database handle:
+
+```
+./lib/db.march
+  needs:
+    IO.Network
+  always_linear:
+    Handle
+  transitions:
+    Handle:
+      ConnTag: Closed -> Open  via connect
+      ConnTag: Open -> Open    via query
+      ConnTag: Open -> Closed  via close
+  proof_caps:
+    Migrated
+
+./lib/auth.march
+  needs:
+    IO.Network
+    Db.Migrated
+```
+
+This gives you a top-level map of what your codebase touches and what resource lifecycles it manages — useful during code review, security audits, or onboarding a new contributor.
+
+---
+
 ## Dependency Management
 
 ### Adding Dependencies

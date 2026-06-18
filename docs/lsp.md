@@ -137,6 +137,47 @@ across files — including resolving an `interface` declared in one file from an
 
 ---
 
+## Typestate and capability intelligence
+
+When your code uses the [typestate system]({{ site.baseurl }}/docs/capabilities/#typestate-handles) — `always_linear type` handles with `transitions` blocks — the LSP provides extra guidance directly in the editor.
+
+### Typestate hover
+
+Hovering any expression whose type is a typestate handle shows:
+
+- An **always-linear** badge if the handle was declared with `always_linear type` (the compiler requires it to be consumed, never dropped)
+- The **current state** the handle is in at this point in the code
+- Every **declared transition** from that state, showing which `via` function moves it to which next state
+
+```
+always-linear — must be consumed, not dropped
+
+Typestate: resource `ConnTag`, state **`Closed`**
+
+Transitions from `Closed`:
+- `Closed` → `Open`  via `connect`
+```
+
+This pairs naturally with the existing type hover — the hover card first shows
+the inferred type (`Handle(ConnTag, Closed)`), then the typestate block below the
+separator.
+
+### `via` completions
+
+Inside a `transitions` block, after typing `via `, the completion menu filters to
+functions in scope whose type matches the transition shape:
+
+```march
+transitions Handle do
+  ConnTag: Closed -> Open  via con<cursor>
+                            --  ↑ only `connect`, `reconnect`, etc. offered
+end
+```
+
+Only functions with the right type are shown — `Handle(R, S1) -> Handle(R, S2)` where `R` and the handle name match the enclosing `transitions` declaration. This prevents accidentally wiring a transition to an unrelated function.
+
+---
+
 ## Code actions
 
 The lightbulb / quick-fix menu offers a large set of refactors and fixes,
