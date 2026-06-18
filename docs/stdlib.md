@@ -78,9 +78,9 @@ List.append([1, 2], [3, 4])         -- [1, 2, 3, 4]
 List.concat([[1, 2], [3], [4, 5]])   -- [1, 2, 3, 4, 5]
 
 -- Folds
-List.fold_left(0, [1, 2, 3], fn acc x -> acc + x)   -- 6
-List.fold_right([1, 2, 3], 0, fn x acc -> x + acc)  -- 6
-List.scan_left(0, [1, 2, 3], fn acc x -> acc + x)   -- [0, 1, 3, 6]
+List.fold_left([1, 2, 3], 0, fn (acc, x) -> acc + x)   -- 6
+List.fold_right([1, 2, 3], 0, fn (x, acc) -> x + acc)  -- 6
+List.scan_left([1, 2, 3], 0, fn (acc, x) -> acc + x)   -- [0, 1, 3, 6]
 
 -- Search
 List.find([1, 2, 3], fn x -> x > 1)      -- Some(2)
@@ -90,7 +90,7 @@ List.find_index([10, 20, 30], fn x -> x == 20)  -- Some(1)
 List.iter([1, 2, 3], fn x -> println(int_to_string(x)))
 
 -- Sorting
-List.sort_by([3, 1, 2], fn a b -> a < b)   -- [1, 2, 3]
+List.sort_by([3, 1, 2], fn (a, b) -> a < b)   -- [1, 2, 3]
 
 -- Zipping
 List.zip([1, 2, 3], ["a", "b", "c"])  -- [(1, "a"), (2, "b"), (3, "c")]
@@ -99,11 +99,11 @@ List.with_index([10, 20, 30])          -- [(0, 10), (1, 20), (2, 30)]
 
 -- Grouping
 List.intersperse([1, 2, 3], 0)         -- [1, 0, 2, 0, 3]
-List.take(3, [1, 2, 3, 4, 5])         -- [1, 2, 3]
-List.drop(2, [1, 2, 3, 4])            -- [3, 4]
+List.take([1, 2, 3, 4, 5], 3)         -- [1, 2, 3]
+List.drop([1, 2, 3, 4], 2)            -- [3, 4]
 List.take_while([1, 2, 3, 4], fn x -> x < 3)   -- [1, 2]
 List.drop_while([1, 2, 3, 4], fn x -> x < 3)   -- [3, 4]
-List.chunk_by([1, 1, 2, 2, 3], fn a b -> a == b)  -- [[1, 1], [2, 2], [3]]
+Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
 ```
 
 ---
@@ -138,36 +138,41 @@ String.chars("hi")                  -- ["h", "i"]
 
 ## Map
 
-`map.march` — HAMT-backed persistent hash map. O(1) amortized operations.
+`map.march` — HAMT-backed persistent map. O(log n) amortized operations.
+
+Map operations that need key identity take an explicit comparator:
+`cmp : k -> k -> Bool` where `cmp(a)(b) = true` means `a < b`.
 
 ```elixir
+let cmp = fn a -> fn b -> a < b   -- comparator for String keys
+
 -- Construction
 let m = Map.empty()
 let m2 = Map.singleton("key", 42)
-let m3 = Map.from_list([("a", 1), ("b", 2), ("c", 3)])
+let m3 = Map.from_list([("a", 1), ("b", 2), ("c", 3)], cmp)
 
 -- Access
-Map.get(m3, "a")         -- Some(1)
-Map.get_or(m3, "z", 0)  -- 0
-Map.contains_key(m3, "b")  -- true
-Map.size(m3)             -- 3
-Map.is_empty(m)          -- true
+Map.get(m3, "a", cmp)          -- Some(1)
+Map.get_or(m3, "z", 0, cmp)   -- 0
+Map.contains_key(m3, "b", cmp) -- true
+Map.size(m3)                   -- 3
+Map.is_empty(m)                -- true
 
 -- Modification (returns new map)
-let m4 = Map.insert(m3, "d", 4)
-let m5 = Map.remove(m4, "a")
+let m4 = Map.insert(m3, "d", 4, cmp)
+let m5 = Map.remove(m4, "a", cmp)
 
 -- Traversal
-Map.keys(m3)             -- ["a", "b", "c"] (in some order)
-Map.values(m3)           -- [1, 2, 3]
-Map.entries(m3)          -- [("a", 1), ("b", 2), ("c", 3)]
-Map.fold(0, m3, fn acc k v -> acc + v)   -- 6
+Map.keys(m3)     -- ["a", "b", "c"] (hash order)
+Map.values(m3)   -- [1, 2, 3]
+Map.entries(m3)  -- [("a", 1), ("b", 2), ("c", 3)]
+Map.fold(m3, 0, fn (acc, _k, v) -> acc + v)   -- 6
 
 -- Transformation
-Map.map_values(m3, fn v -> v * 10)   -- {"a": 10, "b": 20, "c": 30}
-Map.filter(m3, fn k v -> v > 1)      -- {"b": 2, "c": 3}
-Map.merge(m3, m4)                    -- right takes precedence on conflict
-Map.merge_with(m3, m4, fn a b -> a + b)  -- custom merge function
+Map.map_values(m3, fn v -> v * 10)            -- {"a": 10, "b": 20, "c": 30}
+Map.filter(m3, fn _k -> fn v -> v > 1, cmp)  -- {"b": 2, "c": 3}
+Map.merge(m3, m4, cmp)                        -- right takes precedence on conflict
+Map.merge_with(m3, m4, fn a -> fn b -> a + b, cmp)  -- custom merge
 
 -- Converting
 Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]

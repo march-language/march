@@ -159,7 +159,7 @@ Functions can have multiple expressions in the body; the last one is the return 
 ```elixir
 fn summarize(xs : List(Int)) : String do
   let n   = List.length(xs)
-  let sum = List.fold(xs, 0, fn acc x -> acc + x)
+  let sum = List.fold_left(xs, 0, fn (acc, x) -> acc + x)
   "count=" ++ int_to_string(n) ++ " sum=" ++ int_to_string(sum)
 end
 ```
@@ -339,17 +339,17 @@ Each `pat <- expr`: if `expr` matches `pat`, continue; otherwise fall through to
 [1, 2, 3, 4, 5]
 |> List.filter(fn x -> x % 2 == 0)
 |> List.map(fn x -> x * x)
-|> List.fold(0, fn acc x -> acc + x)
+|> List.fold_left(0, fn (acc, x) -> acc + x)
 ```
 
 Equivalent to:
 ```elixir
-List.fold(
+List.fold_left(
   List.map(
     List.filter([1, 2, 3, 4, 5], fn x -> x % 2 == 0),
     fn x -> x * x),
   0,
-  fn acc x -> acc + x)
+  fn (acc, x) -> acc + x)
 ```
 
 The pipe version reads left-to-right and matches the mental model.
@@ -428,7 +428,7 @@ A `?` anywhere in an expression is a typed hole. The compiler reports what type 
 
 ```elixir
 fn mystery(xs : List(Int)) : Int do
-  List.fold(xs, ?, fn acc x -> acc + x)
+  List.fold_left(xs, ?, fn (acc, x) -> acc + x)
   -- error: hole of type Int
 end
 ```
