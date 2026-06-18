@@ -32,20 +32,44 @@ All of Phase 3 is purely additive. No runtime changes.
 
 ### Motivation
 
-Phase 2's `Handle(R, S)` and `Tagged(X, T)` rely on implicit type variable inference for state and policy parameters. This works — but library authors cannot express constraints directly in signatures:
+Phase 2's `Handle(R, S)` and `Tagged(X, T)` rely on implicit type variable inference for state and policy parameters. This works — but library authors cannot express constraints directly in function signatures:
 
 ```march
--- Today: S is implicit, constraint communicated only by which transition functions exist
+-- Today: S is implicit. What states can S be? Unknown without reading the transitions block.
 fn with_conn(h : Handle(Conn, S), f : (Handle(Conn, Open)) -> (a, Handle(Conn, Open))) : (a, Handle(Conn, S))
 ```
 
-A reader cannot tell from this signature what states `S` may take, whether `S = Open` is required, or what the allowed transitions are. Phase 3 adds explicit syntax:
+A reader cannot tell what `S` may be. Nothing stops a caller from instantiating `S = Int` — the type checker only catches it if an incompatible operation actually fires, not at the boundary where the intent was stated. For combinator functions that thread handles through without inspecting state, the failure can be silent until deep inside the body.
+
+Phase 3a adds explicit syntax:
 
 ```march
 fn with_conn[S : ConnState](h : Handle(Conn, S), f : (Handle(Conn, Open)) -> (a, Handle(Conn, Open))) : (a, Handle(Conn, S))
 ```
 
-Now `S : ConnState` tells the reader (and compiler) that `S` must be one of the variants of `ConnState`.
+`S : ConnState` tells the reader (and compiler) that `S` must be one of the variants of `ConnState`, caught at the call site rather than wherever the mismatch eventually surfaces.
+
+The combinator pattern is the primary motivation. Simple concrete-state functions like `fn open_conn(h : Handle(Conn, Closed)) : Handle(Conn, Open)` do not need bounds — their state parameters are already concrete. Bounds matter when writing *generic over state*:
+
+```march
+-- Generic combinator: transitions from S to T, runs f, transitions back
+fn bracket[S : ConnState, T : ConnState](
+  h    : Handle(Conn, S),
+  pre  : (Handle(Conn, S)) -> Handle(Conn, T),
+  f    : (Handle(Conn, T)) -> (a, Handle(Conn, T)),
+  post : (Handle(Conn, T)) -> Handle(Conn, S)
+) : (a, Handle(Conn, S))
+
+-- Read-only inspection: works in any state, returns state name
+fn state_label[S : ConnState](h : Handle(Conn, S)) : String
+
+-- Policy-generic processing
+fn process[P : AllocPolicy](cap : Tagged(Alloc, P), buf : Buffer(Byte)) : Buffer(Byte)
+```
+
+Without explicit bounds, `bracket`'s four type variables are anonymous. With them, a reader knows exactly what domain `S` and `T` inhabit before reading the body.
+
+---
 
 ### Syntax
 
@@ -59,33 +83,190 @@ fn process[P : AllocPolicy](cap : Tagged(Alloc, P), buf : Buffer(Byte)) : Buffer
 fn fft[N : TNat](cap : Tagged(SIMD, N), buf : Buffer(Float32, N)) : Buffer(Complex32, N)
 ```
 
-Bounds appear only on `fn` and `pfn` declarations (not lambdas — lambdas use implicit inference as today).
+Multiple bounds, comma-separated:
 
-### What a bound means
+```march
+fn bridge[S : ConnState, P : AllocPolicy](h : Handle(Conn, S), cap : Tagged(Alloc, P)) : ()
+```
 
-`[S : ConnState]` means: `S` must unify with one of the constructors of `ConnState`. At call sites:
-- If `S` is inferred to a concrete constructor (`Open`, `Closed`), the compiler checks it is a constructor of `ConnState`. Error if not.
-- If `S` remains polymorphic across the function body, the compiler tracks the bound and reports a violation if any operation on `S` is not valid for all constructors of `ConnState`.
+The same type variable may appear in only one bound. Bounds appear only on named `fn` and `pfn` declarations — lambdas continue to use implicit inference.
 
-The bound is **checked at use sites, not definition sites** — a bound is a constraint on the caller's instantiation, not a restriction on what the body can do. (This parallels OCaml/Haskell typeclass constraints.)
+A function without bounds is unchanged from today. Bounds are purely additive.
 
-### Relationship to interfaces
+---
 
-`[S : ConnState]` where `ConnState` is an ADT bounds `S` to the constructors of that ADT. This is *not* an interface bound — it does not require `S` to implement any typeclass. It is purely a domain constraint for documentation and error messages.
+### Valid bound kinds
 
-If the bound is an interface name (`[a : Ord]`), it becomes a standard typeclass constraint — existing mechanism, same syntax. The bracket syntax unifies both cases.
+Three kinds of bound are legal. The bound type must be one of these; any other type is rejected at the declaration site.
+
+**1. ADT bound** — `BoundType` is a sum type. `[S : ConnState]` means `S` must instantiate to one of `ConnState`'s constructors (`Closed`, `Open`, `Errored`). This is the main use case for Handle state parameters.
+
+```march
+type ConnState = Closed | Open | Errored
+
+fn transition[S : ConnState](h : Handle(Conn, S), ...) : Handle(Conn, Open)
+```
+
+The check at instantiation: given `S = X`, verify that `X` is a constructor of `ConnState` (i.e., `X ∈ { Closed, Open, Errored }`). If `X` is itself a type variable (polymorphic caller), the bound propagates — see §Propagation below.
+
+**2. Interface bound** — `BoundType` is an `interface` name. `[a : Ord]` means `a` must have an `impl Ord(a)` in scope. This is the existing typeclass-constraint mechanism; the bracket syntax unifies both cases.
+
+```march
+fn sort[a : Ord](xs : List(a)) : List(a)
+```
+
+Internally, interface bounds and ADT bounds are stored differently in `env.tv_bounds` (see §Implementation), but the surface syntax is identical.
+
+**3. TNat bound** — `BoundType` is `TNat`. `[N : TNat]` means `N` must be a type-level natural number literal or expression. `TNat` is a kind, not a regular ADT; the bound check verifies that the instantiated type is a `TNat` node rather than an arbitrary type.
+
+```march
+fn fft[N : TNat](cap : Tagged(SIMD, N), buf : Buffer(Float32, N)) : Buffer(Complex32, N)
+fn zeros[M : TNat, N : TNat]() : Matrix(M, N, Float)
+```
+
+**Rejected at declaration time:** if `BoundType` is a concrete non-ADT type (`Int`, `String`, `Bool`, a record type, a function type), it is rejected with:
+
+```
+Error: bound type `Int` is not a valid type-variable bound.
+Bounds must be a sum type (ADT), an interface, or `TNat`.
+```
+
+---
+
+### Semantics: checked at monomorphization, not inference
+
+March monomorphizes everything — every polymorphic function is specialized to the concrete types at each call site. Bounds are **checked at monomorphization**, not during bidirectional type inference:
+
+1. **Inference runs first, unconstrainted by bounds.** The type variable `S` is unified normally against the call site's argument types. Bounds do not participate in unification and do not drive inference.
+
+2. **Bounds are checked after inference resolves `S`.** Once `S` is determined (either to a concrete type, or to another type variable), the compiler verifies that the resolved type satisfies the bound.
+
+This means bounds cannot rescue inference — they cannot help the compiler choose between two types that would both unify. They are purely a gate on the resolved result.
+
+**Consequence for error locality:** The error appears at the call site where the type variable was instantiated to an illegal value, not inside the function body where the mismatch would otherwise eventually surface. This is the primary benefit.
+
+---
+
+### Propagation to polymorphic callers
+
+If a caller `g` calls `f[S : ConnState]` but leaves `S` unresolved (because `g` is itself generic over `S`), `g` must also declare `[S : ConnState]` — or the compiler reports an error at `g`'s definition:
+
+```march
+-- OK: g propagates the bound
+fn g[S : ConnState](h : Handle(Conn, S)) : String do
+  state_label(h)   -- state_label[S : ConnState] — S is still bound
+end
+
+-- ERROR: g uses state_label but doesn't constrain S
+fn bad_g(h : Handle(Conn, S)) : String do
+  state_label(h)   -- S is free, no bound declared
+end
+```
+
+```
+Error: `state_label` requires `S : ConnState` but `S` is unconstrained here.
+Add `[S : ConnState]` to `bad_g`'s type parameter list:
+
+  fn bad_g[S : ConnState](h : Handle(Conn, S)) : String do
+```
+
+Because March monomorphizes fully, propagation terminates: every chain of generic-over-state calls must eventually reach a concrete instantiation site.
+
+---
+
+### Error messages
+
+**Wrong type at call site:**
+
+```
+Error: type variable `S` was instantiated to `Int` but must be a
+       constructor of `ConnState`.
+
+  transition(my_int_value, ...)
+  ^^^^^^^^^^
+  
+  `Int` is not a variant of `ConnState`. Valid variants:
+    Closed | Open | Errored
+```
+
+**Missing bound propagation:**
+
+```
+Error: `state_label` requires `S : ConnState` but `S` is unconstrained in `g`.
+
+  fn g(h : Handle(Conn, S)) : String do
+    state_label(h)   ← S used here without bound
+    
+  Add `[S : ConnState]` to `g`:
+  
+    fn g[S : ConnState](h : Handle(Conn, S)) : String do
+```
+
+**Invalid bound type at declaration:**
+
+```
+Error: `String` is not a valid type-variable bound.
+Bounds must be a sum type (ADT), an interface, or `TNat`.
+
+  fn bad[S : String](...)
+         ^^^^^^^^^^
+```
+
+---
+
+### What bounds are NOT
+
+- **Not variance annotations.** `[S : ConnState]` says nothing about covariance or contravariance of `S` in the type. March does not have variance annotations.
+- **Not coercion.** The bound does not cause implicit conversion. If `S = Closed` and `Open` is needed, that is still a type error — the bound only gates the *domain* of `S`.
+- **Not a recursive/self-referential constraint.** `[S : Container(S)]`-style F-bounded polymorphism is not supported in Phase 3. Deferred.
+- **Not an exhaustiveness constraint.** The compiler does not require the function body to handle all constructors of the bound type. The body must only typecheck against the declared signature.
+
+---
+
+### Parser conflict analysis
+
+The `[bound_list]` appears after the function name and before `(`. In March's grammar today:
+- After `fn name`, the only valid next token is `(` (start of parameter list)
+- `[` does not appear in any existing declaration-position rule
+
+The LALR(1) parser resolves this by adding a single alternative to the `fn_decl` production:
+
+```
+fn_decl:
+  | FN lower_name LPAREN params RPAREN ...          (* no bounds — today *)
+  | FN lower_name LBRACKET bounds RBRACKET LPAREN params RPAREN ...  (* Phase 3a *)
+```
+
+`LBRACKET` after a function name is unambiguous — it can only be bounds syntax, not list/array syntax, because lists and arrays do not appear at declaration level. No new conflicts are introduced.
+
+---
 
 ### Implementation notes
 
-- New parser rule: optional `[bound_params]` between function name and `(`:  
-  `fn name [bound_params] (params) : ret do body end`
-- `bound_params` = comma-separated `LOWER_IDENT COLON type_expr`
-- AST: new `fn_bounds : (name * ty) list` field on `DFn` / `DPFn`
-- Typecheck: during `infer_fn_def`, add bounds to the constraint environment before checking the body; at each call site unification, verify that inferred arguments satisfy their bounds
-- Error messages: "type variable `S` was inferred to be `Foo`, which is not a constructor of `ConnState`"
-- The `[...]` syntax only appears on named declarations; the parser must not confuse it with array or list syntax (which does not appear in declaration position)
+**Type environment extension.** Add `tv_bounds : (string * tv_bound) list` to `env` in `typecheck.ml`:
 
-**Estimated scope:** ~250 lines (`parser.mly`, `ast.ml`, `typecheck.ml`). No eval, TIR, codegen, or runtime changes.
+```ocaml
+type tv_bound =
+  | BoundADT of string          (* S must be a constructor of this ADT name *)
+  | BoundInterface of string    (* S must implement this interface *)
+  | BoundTNat                   (* S must be a type-level natural *)
+
+(* Added to typecheck_env *)
+tv_bounds : (string * tv_bound) list
+```
+
+**At function definition.** `infer_fn_def` parses `fn_bounds` from the AST, resolves each bound type to a `tv_bound`, and adds entries to `env.tv_bounds` before checking the body.
+
+**At call sites / monomorphization.** When unification resolves a type variable `s` to a concrete type `T`, look up `s` in `env.tv_bounds`:
+- `BoundADT name`: verify `T` is a constructor of the ADT named `name`. Requires looking up `name` in the type environment's ADT table and checking `T ∈ constructors(name)`.
+- `BoundInterface name`: verify `impl name(T)` exists in scope (existing interface-check mechanism).
+- `BoundTNat`: verify `T` is a `TNat` node.
+
+If `T` is itself a type variable `s'`, propagate: add the same bound for `s'` and continue.
+
+**Eval, TIR, codegen, runtime:** no changes. Bounds are fully erased after typechecking — they do not appear in TIR or LLVM IR.
+
+**Estimated scope:** ~350 lines (`parser.mly` ~50, `ast.ml` ~20, `typecheck.ml` ~280). No eval, TIR, codegen, or runtime changes. ~10 new capability tests.
 
 ---
 
