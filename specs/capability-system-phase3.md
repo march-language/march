@@ -133,17 +133,19 @@ Bounds must be a sum type (ADT), an interface, or `TNat`.
 
 ---
 
-### Semantics: checked at monomorphization, not inference
+### Semantics: checked during typechecking at call sites
 
-March monomorphizes everything — every polymorphic function is specialized to the concrete types at each call site. Bounds are **checked at monomorphization**, not during bidirectional type inference:
+Bounds are discharged during **type-checking** at each call site — not during bidirectional inference, and not in the TIR monomorphization pass. The existing `pending_constraints` mechanism (`lib/typecheck/typecheck.ml`) already works this way for `CNum` and `CInterface` constraints; ADT and TNat bounds follow the same pattern.
 
-1. **Inference runs first, unconstrainted by bounds.** The type variable `S` is unified normally against the call site's argument types. Bounds do not participate in unification and do not drive inference.
+1. **Inference runs first, unconstrained by bounds.** The type variable `S` is unified normally against the call site's argument types. Bounds do not participate in unification and do not drive inference.
 
-2. **Bounds are checked after inference resolves `S`.** Once `S` is determined (either to a concrete type, or to another type variable), the compiler verifies that the resolved type satisfies the bound.
+2. **Bounds are emitted as constraints.** When a call site instantiates a function with bounds, the type-checker emits bound constraints (e.g., `CADTBound("ConnState", T)`) into `pending_constraints` alongside any existing `CInterface` constraints.
+
+3. **Constraints are discharged after each call site.** When `S` resolves to a concrete type `T`, the bound constraint fires: check that `T` satisfies the bound. If it does not, report an error at the call site.
 
 This means bounds cannot rescue inference — they cannot help the compiler choose between two types that would both unify. They are purely a gate on the resolved result.
 
-**Consequence for error locality:** The error appears at the call site where the type variable was instantiated to an illegal value, not inside the function body where the mismatch would otherwise eventually surface. This is the primary benefit.
+**Consequence for error locality:** The error appears at the call site where the type variable was instantiated to an illegal value, not inside the function body where the mismatch would otherwise surface. This is the primary benefit.
 
 ---
 
@@ -225,48 +227,71 @@ Bounds must be a sum type (ADT), an interface, or `TNat`.
 
 ### Parser conflict analysis
 
-The `[bound_list]` appears after the function name and before `(`. In March's grammar today:
-- After `fn name`, the only valid next token is `(` (start of parameter list)
-- `[` does not appear in any existing declaration-position rule
-
-The LALR(1) parser resolves this by adding a single alternative to the `fn_decl` production:
+The `[bound_list]` appears after the function name and before `(`. The current `fn_decl` production in `lib/parser/parser.mly` is:
 
 ```
 fn_decl:
-  | FN lower_name LPAREN params RPAREN ...          (* no bounds — today *)
-  | FN lower_name LBRACKET bounds RBRACKET LPAREN params RPAREN ...  (* Phase 3a *)
+  | FN; name = lower_name; LPAREN; params = ...; RPAREN;
+    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
 ```
 
-`LBRACKET` after a function name is unambiguous — it can only be bounds syntax, not list/array syntax, because lists and arrays do not appear at declaration level. No new conflicts are introduced.
+After `lower_name`, the only valid next token today is `LPAREN`. `LBRACKET` does not appear in any declaration-position rule — there is no other grammar production that puts `[` after a function name. Adding a second alternative is unambiguous:
+
+```
+fn_decl:
+  | FN lower_name LPAREN params RPAREN ...                             (* no bounds *)
+  | FN lower_name LBRACKET bounds RBRACKET LPAREN params RPAREN ...    (* Phase 3a *)
+```
+
+`LBRACKET` after a lower name in declaration position can only be bounds syntax — lists and arrays only appear inside expression contexts. No new LALR(1) conflicts are introduced.
+
+Note: `pfn` shares the same production structure. Both `FN` and `PFN` tokens would need the bounds alternative, or `fn_decl` can be refactored to a shared `fn_head` nonterminal that covers both visibility tokens.
 
 ---
 
 ### Implementation notes
 
-**Type environment extension.** Add `tv_bounds : (string * tv_bound) list` to `env` in `typecheck.ml`:
+**AST.** Add `fn_bounds : (string * Ast.ty) list` to the `fn_def` record in `lib/ast/ast.ml`. (There is no separate `DPFn` — both `fn` and `pfn` produce `DFn`; privacy is `fn_vis = Private`. The `fn_def` record is shared.)
 
 ```ocaml
-type tv_bound =
-  | BoundADT of string          (* S must be a constructor of this ADT name *)
-  | BoundInterface of string    (* S must implement this interface *)
-  | BoundTNat                   (* S must be a type-level natural *)
-
-(* Added to typecheck_env *)
-tv_bounds : (string * tv_bound) list
+and fn_def = {
+  fn_name    : name;
+  fn_vis     : visibility;
+  fn_doc     : string option;
+  fn_attrs   : string list;
+  fn_ret_ty  : ty option;
+  fn_clauses : fn_clause list;
+  fn_bounds  : (string * ty) list;   (* NEW: [(type_var_name, bound_type)] *)
+}
 ```
 
-**At function definition.** `infer_fn_def` parses `fn_bounds` from the AST, resolves each bound type to a `tv_bound`, and adds entries to `env.tv_bounds` before checking the body.
+**`constraint_` extension.** The existing `pending_constraints : constraint_ list ref` field in `env` accumulates type constraints that are discharged after unification. Extend `constraint_` in `typecheck.ml` to cover the two new bound kinds:
 
-**At call sites / monomorphization.** When unification resolves a type variable `s` to a concrete type `T`, look up `s` in `env.tv_bounds`:
-- `BoundADT name`: verify `T` is a constructor of the ADT named `name`. Requires looking up `name` in the type environment's ADT table and checking `T ∈ constructors(name)`.
-- `BoundInterface name`: verify `impl name(T)` exists in scope (existing interface-check mechanism).
-- `BoundTNat`: verify `T` is a `TNat` node.
+```ocaml
+type constraint_ =
+  | CNum       of ty
+  | COrd       of ty
+  | CInterface of string * ty
+  | CADTBound  of string * ty   (* NEW: ty must be a constructor of ADT named string *)
+  | CTNatBound of ty            (* NEW: ty must be a TNat node *)
+```
 
-If `T` is itself a type variable `s'`, propagate: add the same bound for `s'` and continue.
+`CInterface` already handles interface bounds (`[a : Ord]`) — no new constraint_ variant needed for those.
 
-**Eval, TIR, codegen, runtime:** no changes. Bounds are fully erased after typechecking — they do not appear in TIR or LLVM IR.
+**At function definition** (`infer_fn_def`). Parse `fn_bounds` from the AST node. Validate that each bound type is legal (ADT, interface, or `TNat`; anything else is an immediate error). Store the validated bounds in a local map `bound_vars : (string * constraint_kind) StrMap.t` scoped to this function.
 
-**Estimated scope:** ~350 lines (`parser.mly` ~50, `ast.ml` ~20, `typecheck.ml` ~280). No eval, TIR, codegen, or runtime changes. ~10 new capability tests.
+**At call sites** (`instantiate_fn_scheme` or the unification path). When instantiating a polymorphic function that has bounds, emit the appropriate constraint for each bound type variable:
+- Bound is an ADT name → emit `CADTBound(adt_name, T)` where `T` is the inferred type for that variable
+- Bound is an interface name → emit `CInterface(iface_name, T)` (existing mechanism, no new code)
+- Bound is `TNat` → emit `CTNatBound(T)`
+
+**Constraint discharge.** When `pending_constraints` are checked:
+- `CADTBound(name, T)`: call `lookup_ctor_in_type (ctor_name_of T) name env`. `lookup_ctor_in_type` already exists (`lib/typecheck/typecheck.ml:489`) and takes `constructor_name -> adt_name -> env -> ctor_info option`. If it returns `None`, the type is not a constructor of that ADT — emit the error. If `T` is still a type variable, propagate the constraint to it.
+- `CTNatBound(T)`: match `T` against the internal `ty` type — valid iff `T = TNat _` (a literal) or `T = TNatOp _` (a type-level arithmetic expression). Otherwise error.
+
+**Eval, TIR, codegen, runtime:** no changes. Bounds are fully erased after typechecking — they produce no nodes in TIR or LLVM IR.
+
+**Estimated scope:** ~350 lines (`parser.mly` ~50, `ast.ml` ~15, `typecheck.ml` ~285). No eval, TIR, codegen, or runtime changes. ~10 new capability tests.
 
 ---
 
@@ -291,9 +316,9 @@ The pass runs after monomorphization (`lib/tir/mono.ml`) and before defunctional
 **Step 1 — Identify constrained specializations.** Walk all monomorphized functions. If a function's type includes `Tagged(_, P)` where `P` is a constraining policy (defined in the policy table), collect it with its policy set.
 
 **Step 2 — Walk TIR bodies.** For each constrained specialization, walk the TIR body and flag:
-- **`NoAlloc` policy:** any `EAlloc`, `EAllocTuple`, `EAllocVariant`, `EBox` node — allocation sites
-- **`NoIO` policy:** any call to a function that `needs IO` in its declaration
-- **`NoPanic` policy:** any `EPanic`, `EAssert`, integer division (`EBinOp Div`), array indexing without bounds result type
+- **`NoAlloc` policy:** any `EAlloc` or `EStackAlloc` node (`lib/tir/tir.ml` — these are the only two allocation constructors; there is no `EBox`, `EAllocTuple`, or `EAllocVariant`)
+- **`NoIO` policy:** any `EApp` or `ECallPtr` call to a function whose name is in the `needs IO` declared set (tracked in `env.module_caps` during typecheck; needs to be propagated into TIR metadata or re-queried at this pass)
+- **`NoPanic` policy:** any `EApp` to a known panicking builtin (division, `unwrap`, `assert`, `panic`); see §3 for the panic-surface set definition
 
 **Step 3 — Report or prune.**
 - **Audit mode (default, Phase 3b initial):** Report violations as errors. "Function `dsp_callback` is specialized to `Tagged(DSP, Realtime)` but contains an allocation at line N. Move this allocation outside the realtime callback."
@@ -307,9 +332,9 @@ Defined in `lib/tir/policy_dce.ml` (new file):
 
 ```ocaml
 type policy_constraint =
-  | NoAlloc   (* prohibits EAlloc, EBox, EAllocTuple, EAllocVariant *)
-  | NoIO      (* prohibits calls to IO-needful functions *)
-  | NoPanic   (* prohibits EPanic, EAssert, integer division, bounds-unguarded indexing *)
+  | NoAlloc   (* prohibits EAlloc and EStackAlloc nodes *)
+  | NoIO      (* prohibits EApp/ECallPtr to IO-needful functions *)
+  | NoPanic   (* prohibits EApp to panicking builtins; see panic_surface set in §3 *)
 
 (* Maps policy type names to their constraints *)
 let policy_table : (string * policy_constraint list) list = [
@@ -321,7 +346,7 @@ let policy_table : (string * policy_constraint list) list = [
 
 ### Integration with Phase 2c narrowing rules
 
-Phase 2c's `Tagged(DSP, Realtime)` narrowing in `cap_subsumes` remains. The DCE pass is additive — it catches violations that slip past the declaration-level check (e.g., via inlining from a non-tagged helper that happens to allocate).
+Phase 2c's realtime-exclusion check (Check 7 in `check_decl`, `lib/typecheck/typecheck.ml:~4679`) pattern-matches on `Tagged(_, Realtime)` parameters and rejects co-presence of `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` in the same signature. Note: this check is in `check_decl`, not in `cap_subsumes` — `cap_subsumes` is purely the `cap_ancestors` membership test. The DCE pass is additive — it catches violations that slip past the declaration-level check (e.g., allocation injected via inlining of a non-tagged helper after typechecking).
 
 ### Implementation notes
 
@@ -346,7 +371,13 @@ The full `Cap(Panic)` retrofit (§4) requires making `Cap(Panic)` explicit at ev
 
 ### Syntax
 
-A module-level `opts` directive:
+A module-level `no_panic` directive. The exact surface syntax is a design decision — `"opts"` does not currently exist as a keyword in `lib/lexer/lexer.mll`, so one of three approaches is needed:
+
+- **Option A:** Add `"no_panic"` as a standalone module-level keyword (most visible, easiest to parse, name is self-documenting)
+- **Option B:** Add `"opts"` as a new keyword taking an atom-like word argument (`opts no_panic`, `opts no_alloc` for future directives) — more general but requires a two-token production
+- **Option C:** Reuse the existing `@[attr]` attribute syntax on modules (`@[no_panic] mod SafeMath do`)
+
+Option B is shown in examples here as the most extensible. Choose at implementation time based on how many module-level directives are expected to accumulate.
 
 ```march
 mod SafeMath do
@@ -423,11 +454,12 @@ A handful of stdlib functions need non-panicking variants for use in `no_panic` 
 
 ### Implementation notes
 
-- New `opts` keyword (or reuse existing `opts` if present in lexer — check first)
-- `opts no_panic` recorded as a flag in module AST / type environment
-- New `panic_surface` metadata field in the builtin table (small addition to `typecheck.ml`)
-- Transitive panic analysis: during `check_module`, for each fn in a `no_panic` module, verify no call in its body has `panic_surface = true`
-- Error message: names the specific panic site and suggests the non-panicking alternative
+- **New keyword(s).** `"opts"` does not exist in `lib/lexer/lexer.mll`. Whichever surface syntax is chosen (see §Syntax above), the lexer and parser need updating. Option A (`no_panic` keyword) requires one new token; Option B (`opts` + identifier) requires one new token + a two-token production; Option C (`@[no_panic]` attribute) reuses existing attribute machinery if it already exists on modules.
+- **AST.** Add `mod_no_panic : bool` flag to the module AST node (or store it via the attribute list if option C is chosen).
+- **Type environment.** Propagate the flag into `env` as `in_no_panic_module : bool` during `check_module`, set when processing a module with the directive.
+- **Panic-surface table.** New `panic_surface : string list` — a set of builtin function names known to panic (e.g., `"int_div"`, `"list_nth"`, `"unwrap"`, `"assert_"`, `"panic_"`). These map to the internal names used in the eval/codegen builtins (`lib/typecheck/typecheck.ml` builtin table). The table is defined inline in `typecheck.ml` alongside the builtin signatures.
+- **Transitive analysis.** During `check_module`, for each fn in a `no_panic` module, walk the function body's `EApp` calls. Any call to a name in `panic_surface` is a violation. Calls to user-defined functions in the same module are checked recursively (they were already validated during their own `check_decl`). Calls to functions from other modules: check whether that module also carries the `no_panic` attribute and whether the function's `panic_surface` was recorded.
+- **Error message:** names the specific panic site and suggests the non-panicking alternative (using a suggestion table parallel to `panic_surface`).
 
 **Estimated scope:** ~400 lines (`lexer.mll`, `parser.mly`, `ast.ml`, `typecheck.ml`). No TIR/runtime changes. New stdlib functions: `checked_div`, `checked_mod`.
 
@@ -447,7 +479,7 @@ Cap(Panic)
 └── Cap(Panic.Ffi)           -- undefined behavior from C FFI
 ```
 
-A second root alongside `Cap(IO)`. The hierarchy would live in `io_cap_hierarchy` (rename: `cap_hierarchy`) in `typecheck.ml`.
+A second root alongside `Cap(IO)`. The `Cap(Panic)` sub-hierarchy would be added to `io_cap_hierarchy` (`lib/typecheck/typecheck.ml:877`) alongside the existing IO entries. The name `io_cap_hierarchy` is a misnomer at that point, but renaming it is optional cosmetic work.
 
 ### The implicit threading problem
 
