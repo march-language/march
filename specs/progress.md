@@ -294,7 +294,8 @@ march/
 - **P8 — FBIP cross-tag constructor reuse** (`lib/tir/perceus.ml`): replaced `shape_matches` (name equality) with `same_arity` (field-count equality). `add_scrutinee_free_for` encodes the consumed ctor's arity as dummy `TUnit` type-args in the DecRC var's type (`TCon(qualified_tag, [TUnit; …])`). `try_fbip_sink` and `fbip_expr` both use `same_arity dec_v.v_ty (List.length args)`. Cross-tag reuse safe because March allocates `[tag + nfields × ptr]` blocks — same arity ⟺ same block size.
 - **P1 — Let-floating past ECase** (`lib/tir/join_points.ml`, new file): detects `let` bindings that appear identically at the start of EVERY case branch and hoists them above the `ECase`. Safety: same var name, `expr_eq` RHS, RHS doesn't mention pattern-bound vars, name not pattern-bound. First pass in the `opt.ml` fixed-point loop.
 - **P15 — Boolean absorber peepholes** (`lib/tir/simplify.ml`): `x && false = false`, `false && x = false`, `x || true = true`, `true || x = true`, `not true = false`, `not false = true`. Fire after cprop propagates boolean constants into guards.
-- **23 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously + 5 fbip_p8 + 4 join_points + 5 simplify P15). Test count: **1531** (296 codegen + 780 stdlib).
+- **Fold: boolean comparison identities + int literal comparison folding** (`lib/tir/fold.ml`): `x==true→x`, `x==false→not x`, `a<b→bool` for literal operands. Fire after cprop produces known-constant comparisons.
+- **27 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously + 5 fbip_p8 + 4 join_points + 5 simplify P15 + 4 fold). Test count: **1535** (300 codegen + 780 stdlib).
 
 ## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
 

@@ -84,6 +84,37 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "string_is_empty" ->
     changed := true; mk_bool (String.length s = 0)
 
+  (* Boolean comparison identities — arise after inlining guard / predicate functions.
+     x == true  →  x
+     x == false →  not x  (new let needed for ANF; use simplified form via EApp)
+     true == x  →  x
+     false == x →  not x  *)
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitBool true)])
+    when f.Tir.v_name = "==" ->
+    changed := true; Tir.EAtom x
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); x])
+    when f.Tir.v_name = "==" ->
+    changed := true; Tir.EAtom x
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitBool false)])
+    when f.Tir.v_name = "==" ->
+    let not_v = { Tir.v_name = "not"; v_ty = Tir.TFn ([Tir.TBool], Tir.TBool); v_lin = Tir.Unr } in
+    changed := true; Tir.EApp (not_v, [x])
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); x])
+    when f.Tir.v_name = "==" ->
+    let not_v = { Tir.v_name = "not"; v_ty = Tir.TFn ([Tir.TBool], Tir.TBool); v_lin = Tir.Unr } in
+    changed := true; Tir.EApp (not_v, [x])
+
+  (* Integer comparison with known constant: int_op(lit_a, lit_b) → bool *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt a); Tir.ALit (March_ast.Ast.LitInt b)])
+    when (match f.Tir.v_name with "<" | "<=" | ">" | ">=" | "==" | "!=" -> true | _ -> false) ->
+    changed := true;
+    let result = match f.Tir.v_name with
+      | "<"  -> a < b   | "<=" -> a <= b
+      | ">"  -> a > b   | ">=" -> a >= b
+      | "==" -> a = b   | "!=" -> a <> b
+      | _    -> false
+    in mk_bool result
+
   (* Recurse into all other nodes *)
   | Tir.ELet (v, rhs, body) ->
     Tir.ELet (v, fold_expr ~changed rhs, fold_expr ~changed body)

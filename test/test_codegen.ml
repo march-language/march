@@ -1859,6 +1859,46 @@ let test_fold_string_is_empty_false () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit false)))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* ── Fold: boolean comparison identities + int comparison folding ─────────── *)
+
+let test_fold_eq_true_rhs () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TBool in
+  let m = mk_module [mk_fn "f" (app "==" [x; blit true])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x==true → x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_eq_false_rhs () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TBool in
+  let m = mk_module [mk_fn "f" (app "==" [x; blit false])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  match first_body m' with
+  | March_tir.Tir.EApp (f, [_]) when f.March_tir.Tir.v_name = "not" -> ()
+  | e -> Alcotest.failf "x==false → not x, got: %s" (March_tir.Tir.show_expr e)
+
+let test_fold_int_cmp_lit () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "<" [ilit 3; ilit 5])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "3 < 5 → true"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit true)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_int_cmp_lit_false () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app ">" [ilit 3; ilit 5])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "3 > 5 → false"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit false)))
+    (March_tir.Tir.show_expr (first_body m'))
+
 let test_simplify_add_zero () =
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TInt in
@@ -4724,6 +4764,10 @@ let codegen_suites =
         Alcotest.test_case "string_byte_length"      `Quick test_fold_string_byte_length;
         Alcotest.test_case "string_is_empty"         `Quick test_fold_string_is_empty;
         Alcotest.test_case "string_is_empty_false"   `Quick test_fold_string_is_empty_false;
+        Alcotest.test_case "eq_true_rhs"             `Quick test_fold_eq_true_rhs;
+        Alcotest.test_case "eq_false_rhs"            `Quick test_fold_eq_false_rhs;
+        Alcotest.test_case "int_cmp_lit_true"        `Quick test_fold_int_cmp_lit;
+        Alcotest.test_case "int_cmp_lit_false"       `Quick test_fold_int_cmp_lit_false;
       ]);
       ("simplify", [
         Alcotest.test_case "add_zero"          `Quick test_simplify_add_zero;
