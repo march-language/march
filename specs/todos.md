@@ -235,6 +235,8 @@ finding, and convention drift.  Listed in the recommended order.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` builtin, global `revocation_table`, `is_cap_valid(cap)`, and VCap handling in ESend. C runtime: `march_revoke_cap` / `march_is_cap_valid`. 5 new tests in supervision phase3 group.
 - ✅ **Supervisor restart policies: `rest_for_one`/`one_for_all`** — Both policies fully implemented in `eval.ml` and tested (tests pass).
 - ✅ **Improve error messages for complex types** — Added `pp_ty_pretty` (line-wrapping at 60 chars with indented args), `find_arg_mismatch` (identifies which arg differs), and enhanced `report_mismatch` with multi-line format for long types and contextual notes identifying the mismatching arg/field.
+- [ ] **Capability body enforcement — Phase 1: stdlib `needs` annotation** — Add `needs IO.FileRead`, `needs IO.FileWrite`, `needs IO.Process`, `needs IO.Console`, `needs IO.Clock`, `needs IO.Random` (new cap) to the ~8 stdlib IO modules (`io.march`, `file.march`, `system.march`, `csv.march`, `uuid.march`, `random.march`, `crypto.march`). Prerequisite for Phase 2. ~0.5 days. Spec: `specs/capability-body-enforcement.md`.
+- [ ] **Capability body enforcement — Phase 2: body-scanning pass** — Extend `check_module_needs` to walk `fc_body` of all function clauses (and `DLet` RHS) for calls to builtins in a `builtin_cap_table` (50-entry table mapping builtins to required caps). Calls without a matching `needs` declaration are errors. Add `IO.Random` to `io_cap_hierarchy`. ~1.5 days, ~15 tests. Ships as a warning first, then promoted to error. Spec: `specs/capability-body-enforcement.md`.
 
 ---
 
