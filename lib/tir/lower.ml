@@ -2345,7 +2345,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     tm_types = builtin_type_defs @ List.rev !types;
     tm_externs = List.rev !externs;
     tm_exports = [];
-    tm_tests = List.rev !test_pairs } in
+    tm_tests = List.rev !test_pairs;
+    tm_io_fns = [] } in
   _type_map_ref := None;
   (* Save a snapshot before clearing so the mono pass can use it. *)
   _saved_iface_methods := Hashtbl.copy !_iface_methods;

@@ -252,6 +252,11 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context m in
   let iface_methods = March_tir.Lower.get_iface_methods () in
   let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  (* Policy audit — report any Tagged(_, P) violations before defun. *)
+  let violations = March_tir.Policy_dce.audit tir in
+  List.iter (fun (_fn_name, msg) ->
+    Printf.eprintf "Error: %s\n\n" msg
+  ) violations;
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus ~repl_vars tir in
   let tir = March_tir.Escape.escape_analysis tir in

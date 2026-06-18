@@ -307,55 +307,435 @@ The goal: **when a function is specialized to a policy that excludes allocation 
 
 **Type-level (Phase 2c, shipped):** The function signature is checked. A `Realtime`-tagged function cannot accept a `Cap(Alloc)` parameter. The type system prevents the *interface* from lying.
 
-**IR-level (Phase 3b, this section):** After monomorphization, a new DCE/audit pass walks the TIR body of every function specialized with a constraining policy tag and verifies (or enforces) that no policy-violating operations remain.
+**IR-level (Phase 3b, this section):** After monomorphization, a new audit pass walks the TIR body of every function whose parameter list includes a `Tagged(_, P)` where P names a constraining policy, and reports any policy-violating operations. Audit-only first; DCE (conditional branch pruning) is a follow-up.
 
-### Pass design
+---
 
-The pass runs after monomorphization (`lib/tir/mono.ml`) and before defunctionalization.
+### TIR representation of `Tagged` constraints (verified)
 
-**Step 1 — Identify constrained specializations.** Walk all monomorphized functions. If a function's type includes `Tagged(_, P)` where `P` is a constraining policy (defined in the policy table), collect it with its policy set.
+After `Mono.monomorphize`, all type variables are replaced with concrete types.
+A parameter `cap : Tagged(DSP, Realtime)` becomes a `var` with:
 
-**Step 2 — Walk TIR bodies.** For each constrained specialization, walk the TIR body and flag:
-- **`NoAlloc` policy:** any `EAlloc` or `EStackAlloc` node (`lib/tir/tir.ml` — these are the only two allocation constructors; there is no `EBox`, `EAllocTuple`, or `EAllocVariant`)
-- **`NoIO` policy:** any `EApp` or `ECallPtr` call to a function whose name is in the `needs IO` declared set (tracked in `env.module_caps` during typecheck; needs to be propagated into TIR metadata or re-queried at this pass)
-- **`NoPanic` policy:** any `EApp` to a known panicking builtin (division, `unwrap`, `assert`, `panic`); see §3 for the panic-surface set definition
+```ocaml
+{ v_name = "cap";
+  v_ty   = TCon("Tagged", [TCon("DSP", []); TCon("Realtime", [])]);
+  v_lin  = Unr }
+```
 
-**Step 3 — Report or prune.**
-- **Audit mode (default, Phase 3b initial):** Report violations as errors. "Function `dsp_callback` is specialized to `Tagged(DSP, Realtime)` but contains an allocation at line N. Move this allocation outside the realtime callback."
-- **DCE mode (optional, Phase 3b follow-up):** Prune statically dead allocation branches — e.g., if a `match` arm that allocates is only reachable when a policy is `WithAlloc`, and we're specializing to `NoAlloc`, eliminate that arm. This is conditional dead-code elimination driven by the policy value.
+`Tagged` survives monomorphization because it is a regular `TCon` (arity 2, registered at typecheck line 1587 as `("Tagged", 2)`). The pass can identify constrained functions by scanning `fn_params` for params whose `v_ty` matches `TCon("Tagged", [_; TCon(policy_name, [])])`. This is the correct detection strategy.
 
-Audit mode ships first; DCE mode is the harder follow-up.
+---
+
+### Pipeline position (verified)
+
+The compilation pipeline in `bin/main.ml` (lines 1064–1105) is:
+
+```
+Lower → Mono → Fusion → [Phase 3b HERE] → Defun → Known_call → Perceus → Escape → Opt → Emit
+```
+
+The pass inserts between `Fusion.run` (line 1089) and `Defun.defunctionalize` (line 1092). It must run after mono (needs concrete types to identify policies) and before defun (closures are still first-class, making body walking cleaner). `Fusion` can be run before the audit because it never introduces allocations or IO calls.
+
+Integration in `bin/main.ml`:
+```ocaml
+let tir = March_tir.Fusion.run ~changed:(ref false) tir in
+(* NEW: policy audit *)
+let () = March_tir.Policy_dce.audit ~io_fns:io_fn_set tir in
+let tir = March_tir.Defun.defunctionalize tir in
+```
+
+The same insertion point applies in `lib/jit/repl_jit.ml` (which has its own pipeline invocation).
+
+---
 
 ### Policy table
 
-Defined in `lib/tir/policy_dce.ml` (new file):
-
 ```ocaml
+(* lib/tir/policy_dce.ml *)
+
 type policy_constraint =
   | NoAlloc   (* prohibits EAlloc and EStackAlloc nodes *)
-  | NoIO      (* prohibits EApp/ECallPtr to IO-needful functions *)
-  | NoPanic   (* prohibits EApp to panicking builtins; see panic_surface set in §3 *)
+  | NoPanic   (* prohibits transitive calls to panic-surface builtins *)
+  | NoIO      (* prohibits calls to IO-needful functions *)
 
-(* Maps policy type names to their constraints *)
 let policy_table : (string * policy_constraint list) list = [
-  ("NoAlloc",    [NoAlloc]);
-  ("Realtime",   [NoAlloc; NoIO; NoPanic]);  (* realtime = all three *)
-  ("NoPanic",    [NoPanic]);
+  ("NoAlloc",  [NoAlloc]);
+  ("NoPanic",  [NoPanic]);
+  ("Realtime", [NoAlloc; NoPanic; NoIO]);  (* all three *)
 ]
 ```
 
+`Realtime` carries all three because a realtime callback that prints to stdout or blocks on a file read is as broken as one that allocates.
+
+---
+
+### Phase A: transitive panic analysis (reusing `Purity.ml` architecture)
+
+`Purity.ml` already contains `impure_fns_of_module` — a fixpoint that computes which module functions are transitively impure. The panic analysis uses the same algorithm with a narrower seed set.
+
+**Panic-surface builtins** (verified against `typecheck.ml` lines 1243–1246 and `purity.ml` lines 38–47):
+
+```ocaml
+let direct_panic_builtins = Purity.StringSet.of_list [
+  (* Integer arithmetic — panic on zero divisor *)
+  "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "/"; "%";
+  (* Explicit abort *)
+  "panic"; "panic_"; "todo_"; "unreachable_";
+]
+```
+
+Note: `"assert"` is desugared to `if not cond do panic_ "..." end` before lowering, so it does not appear as a direct `EApp` in TIR — it is already handled by the `panic_` entry.
+
+`unwrap`, `expect`, `List.nth`, `List.hd`, etc. are *stdlib* functions, not builtins. Their TIR bodies contain `EApp({v_name="panic_"}, ...)`. The fixpoint picks them up automatically — after seed expansion, `unwrap$Option$Int`, `List.nth$Int`, and friends all join the `panicky` set because their bodies call `panic_`.
+
+**Algorithm** (adapted from `Purity.impure_fns_of_module`):
+
+```ocaml
+let panicky_fns_of_module (m : Tir.tir_module) : Purity.StringSet.t =
+  let seed = direct_panic_builtins in
+  (* body_calls: set of function names directly called in an expression *)
+  let rec calls_in_expr acc = function
+    | Tir.EApp (f, _) -> Purity.StringSet.add f.Tir.v_name acc
+    | Tir.ELet (_, rhs, body) -> calls_in_expr (calls_in_expr acc rhs) body
+    | Tir.ECase (_, branches, def) ->
+        let acc = List.fold_left (fun a b -> calls_in_expr a b.Tir.br_body) acc branches in
+        Option.fold ~none:acc ~some:(calls_in_expr acc) def
+    | Tir.ELetRec (fns, body) ->
+        List.fold_left (fun a fd -> calls_in_expr a fd.Tir.fn_body)
+          (calls_in_expr acc body) fns
+    | Tir.ESeq (a, b) -> calls_in_expr (calls_in_expr acc a) b
+    | _ -> acc
+  in
+  let rec fixpoint panicky =
+    let panicky' = List.fold_left (fun acc fd ->
+      if Purity.StringSet.mem fd.Tir.fn_name acc then acc
+      else
+        let callees = calls_in_expr Purity.StringSet.empty fd.Tir.fn_body in
+        if not (Purity.StringSet.is_empty
+                  (Purity.StringSet.inter callees panicky))
+        then Purity.StringSet.add fd.Tir.fn_name acc
+        else acc
+    ) panicky m.Tir.tm_fns in
+    if Purity.StringSet.cardinal panicky' = Purity.StringSet.cardinal panicky
+    then panicky'
+    else fixpoint panicky'
+  in
+  fixpoint seed
+```
+
+The fixpoint terminates because `tm_fns` is finite and the set only grows.
+
+---
+
+### Phase B: NoAlloc check
+
+Walk an `expr` tree. An allocation violation is any `EAlloc` or `EStackAlloc` node.
+
+```ocaml
+(* Returns the first violating node found, None if clean *)
+let rec find_alloc : Tir.expr -> Tir.expr option = function
+  | Tir.EAlloc _ as e      -> Some e
+  | Tir.EStackAlloc _ as e -> Some e
+  | Tir.ELet (_, rhs, body) ->
+      (match find_alloc rhs with Some _ as r -> r | None -> find_alloc body)
+  | Tir.ECase (_, branches, def) ->
+      let r = List.find_map (fun b -> find_alloc b.Tir.br_body) branches in
+      (match r with Some _ -> r | None -> Option.bind def find_alloc)
+  | Tir.ELetRec (fns, body) ->
+      let r = List.find_map (fun fd -> find_alloc fd.Tir.fn_body) fns in
+      (match r with Some _ -> r | None -> find_alloc body)
+  | Tir.ESeq (a, b) ->
+      (match find_alloc a with Some _ as r -> r | None -> find_alloc b)
+  | _ -> None
+```
+
+`EAlloc` is heap allocation; `EStackAlloc` is inserted by `Escape` analysis — but since the audit runs *before* `Escape`, `EStackAlloc` cannot appear yet at this pipeline position. The check is future-proof: if the pipeline order ever changes, both cases are handled.
+
+---
+
+### Phase C: NoPanic check
+
+Walk an `expr` tree checking `EApp` call targets against the `panicky` set from Phase A.
+
+```ocaml
+let rec find_panic (panicky : Purity.StringSet.t) : Tir.expr -> string option =
+  function
+  | Tir.EApp (f, _) when Purity.StringSet.mem f.Tir.v_name panicky ->
+      Some f.Tir.v_name
+  | Tir.ELet (_, rhs, body) ->
+      (match find_panic panicky rhs with
+       | Some _ as r -> r
+       | None -> find_panic panicky body)
+  (* ... same structural recursion as find_alloc *)
+  | _ -> None
+```
+
+---
+
+### Phase D: NoIO check and the `tm_io_fns` field
+
+This is the gap identified in the original spec. The fix is a one-field addition to `tir_module` and a small extraction step in `bin/main.ml`.
+
+**Root cause.** `env.module_caps : (string * string list) list` tracks `(module_name → cap_paths)` accumulated during `check_module`. The cap paths include `"IO"`, `"IO.FileSystem"`, etc. This information exists at typecheck time but is not threaded into TIR.
+
+**Fix: add `tm_io_fns` to `tir_module`.**
+
+```ocaml
+(* lib/tir/tir.ml — add one field *)
+type tir_module = {
+  tm_name    : string;
+  tm_fns     : fn_def list;
+  tm_types   : type_def list;
+  tm_externs : extern_decl list;
+  tm_exports : string list;
+  tm_tests   : (string * string) list;
+  tm_io_fns  : string list;
+  (** Names of functions that require Cap(IO), extracted from typecheck env
+      at lower time. Used by policy_dce's NoIO check. Empty in pre-policy builds. *)
+}
+```
+
+**Extraction at `bin/main.ml`.**
+
+`check_module_full` (typecheck line 7006) returns the final `env`. From it, extract all function names that appeared under an `"IO"`-capped module:
+
+```ocaml
+(* bin/main.ml — after check_module_full returns *)
+let io_fn_set =
+  List.concat_map (fun (mod_name, caps) ->
+    if List.exists (fun c -> c = "IO" || String.length c > 3
+                             && String.sub c 0 3 = "IO.") caps
+    then (* collect function names from that module in the tir *)
+         (* simplest: record the module_name prefix and match fn names at audit time *)
+         [mod_name]
+    else []
+  ) final_env.module_caps
+```
+
+Wait — `module_caps` maps module *names* to cap lists, not function names. The function names are inside those modules. The most practical strategy: store the *module names that need IO* in `tm_io_fns`, then in the audit pass match `EApp({v_name=f}, _)` against functions whose prefix is in `io_mod_set` — i.e., `f` starts with `"ModName."`.
+
+```ocaml
+(* In policy_dce.ml — NoIO check *)
+let io_mod_set = Purity.StringSet.of_list m.Tir.tm_io_fns in
+let fn_needs_io f_name =
+  (* f_name after mono looks like "Http.get$String" or "HttpClient.run" *)
+  Purity.StringSet.exists (fun mod_name ->
+    let prefix = mod_name ^ "." in
+    String.length f_name >= String.length prefix
+    && String.sub f_name 0 (String.length prefix) = prefix
+  ) io_mod_set
+```
+
+And then apply `impure_fns_of_module`-style fixpoint seeded with `fn_needs_io` to find transitive IO callers.
+
+**Populating `tm_io_fns`.**
+
+In `bin/main.ml`, after `check_module_full` and before `Lower.lower_module`:
+
+```ocaml
+let io_modules =
+  List.filter_map (fun (mod_name, caps) ->
+    if List.exists (String.equal "IO") caps
+    || List.exists (fun c -> String.length c > 3 && String.sub c 0 3 = "IO.") caps
+    then Some mod_name
+    else None
+  ) final_env.module_caps
+in
+(* Pass io_modules to Lower, which stores them in tm_io_fns *)
+```
+
+`Lower.lower_module` gets a new optional `~io_modules` parameter that is stored verbatim into the produced `tir_module.tm_io_fns`.
+
+Alternatively (simpler): `tm_io_fns` is filled post-lowering in `bin/main.ml` by direct field update:
+```ocaml
+let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
+```
+This avoids touching `lower.ml`'s signature.
+
+---
+
+### Error reporting (no span problem)
+
+TIR does not carry source spans — they are dropped during `lower.ml`. Violations therefore cannot point to a precise source line. The error message names the **function** and the **violation type**, which is actionable even without a line number.
+
+**Strategy:** `policy_dce.audit` returns a `(string * string) list` of `(violating_function_name, message)` pairs. The caller (`bin/main.ml`) adds them to the existing `Err.ctx` using `Err.error ~span:Ast.dummy_span`:
+
+```ocaml
+(* bin/main.ml, after the audit call *)
+List.iter (fun (fn_name, msg) ->
+  Err.error errors ~span:Ast.dummy_span msg
+) (March_tir.Policy_dce.audit ~io_fns:io_module_set tir)
+```
+
+`Ast.dummy_span` renders as no location in the error output — the user sees a bare "Error: ..." with no file/line. That is correct and honest: the violation is detected at the IR level after source info is gone.
+
+**Message format:**
+
+```
+Error: function `dsp_callback` (specialized to `Tagged(DSP, Realtime)`)
+       allocates heap memory (EAlloc).
+       Realtime functions must not allocate.
+       Move the allocation outside the realtime boundary.
+```
+
+```
+Error: function `timer_tick` (specialized to `Tagged(Ticker, NoPanic)`)
+       calls `List.nth`, which can panic on out-of-bounds access.
+       Use `List.nth_opt` to return `None` instead.
+```
+
+```
+Error: function `render_callback` (specialized to `Tagged(UI, Realtime)`)
+       calls `Http.get`, which requires `Cap(IO)`.
+       IO is forbidden in Realtime functions.
+```
+
+---
+
+### Full `audit` function signature
+
+```ocaml
+(* lib/tir/policy_dce.ml *)
+
+val audit : tir_module -> (string * string) list
+(** [audit m] walks every function in [m] whose parameter list includes
+    a [Tagged(_, P)] parameter where [P] is a constrained policy.
+    Returns a list of [(fn_name, error_message)] violation reports.
+    Returns [[]] if no violations are found. *)
+```
+
+The `tm_io_fns` field on `tir_module` is the NoIO oracle; no extra parameter needed.
+
+---
+
+### Structural walk utility
+
+To avoid duplicating the recursive walk across the three check functions, extract a single `fold_expr` that accumulates violations:
+
+```ocaml
+let rec fold_expr (f : 'a list -> Tir.expr -> 'a list) acc expr =
+  let acc = f acc expr in
+  match expr with
+  | Tir.ELet (_, rhs, body) -> fold_expr f (fold_expr f acc rhs) body
+  | Tir.ECase (_, branches, def) ->
+      let acc = List.fold_left (fun a b -> fold_expr f a b.Tir.br_body) acc branches in
+      Option.fold ~none:acc ~some:(fold_expr f acc) def
+  | Tir.ELetRec (fns, body) ->
+      let acc = List.fold_left (fun a fd -> fold_expr f a fd.Tir.fn_body) acc fns in
+      fold_expr f acc body
+  | Tir.ESeq (a, b) -> fold_expr f (fold_expr f acc a) b
+  | _ -> acc
+```
+
+Each check becomes a one-liner pattern match passed as `f`.
+
+---
+
+### Complete module outline
+
+```
+lib/tir/policy_dce.ml  (~250 lines)
+  module StringSet = Set.Make(String)
+
+  -- Policy table
+  type policy_constraint = NoAlloc | NoPanic | NoIO
+  val policy_table : (string * policy_constraint list) list
+
+  -- Panic analysis
+  val direct_panic_builtins : StringSet.t
+  val panicky_fns_of_module : Tir.tir_module -> StringSet.t
+
+  -- IO analysis (uses tm_io_fns)
+  val io_fns_of_module : Tir.tir_module -> StringSet.t
+
+  -- Body walkers
+  val fold_expr : ('a list -> Tir.expr -> 'a list) -> 'a list -> Tir.expr -> 'a list
+  val check_noalloc : Tir.fn_def -> string option
+  val check_nopanic : StringSet.t -> Tir.fn_def -> string option
+  val check_noio    : StringSet.t -> Tir.fn_def -> string option
+
+  -- Entry point
+  val audit : Tir.tir_module -> (string * string) list
+```
+
+Changes to existing files:
+
+| File | Change | ~Lines |
+|------|--------|--------|
+| `lib/tir/tir.ml` | Add `tm_io_fns : string list` to `tir_module` | +2 |
+| `lib/tir/tir.ml` | Update all `tir_module` constructors to include `tm_io_fns = []` | +N (grep `tm_tests`) |
+| `lib/tir/dune` | Add `policy_dce` to library modules list | +1 |
+| `bin/main.ml` | Extract `io_modules` from final typecheck env, patch `tir.tm_io_fns`, call `Policy_dce.audit` | +15 |
+| `lib/jit/repl_jit.ml` | Same audit call in JIT pipeline | +10 |
+
+---
+
 ### Integration with Phase 2c narrowing rules
 
-Phase 2c's realtime-exclusion check (Check 7 in `check_decl`, `lib/typecheck/typecheck.ml:~4679`) pattern-matches on `Tagged(_, Realtime)` parameters and rejects co-presence of `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` in the same signature. Note: this check is in `check_decl`, not in `cap_subsumes` — `cap_subsumes` is purely the `cap_ancestors` membership test. The DCE pass is additive — it catches violations that slip past the declaration-level check (e.g., allocation injected via inlining of a non-tagged helper after typechecking).
+Phase 2c's `check_decl` Check 7 (typecheck line ~4813) pattern-matches on `Tagged(_, Realtime)` *at the type-checker level* and rejects co-presence of `Cap(Alloc)` or `Cap(IO)` in the same signature. The Phase 3b audit is **complementary**, not redundant:
 
-### Implementation notes
+- Phase 2c catches: "your signature accepts `Cap(Alloc)` alongside `Tagged(_, Realtime)`"
+- Phase 3b catches: "your body allocates, even though you didn't accept `Cap(Alloc)`" (e.g., allocation slipped in via a helper that was typed generically)
 
-- New `lib/tir/policy_dce.ml` (~200 lines): policy table, TIR walker, violation reporter
-- `lib/tir/lower.ml`: call the new pass after `mono` and before `defun`
-- Violations are `Error` diagnostics with the same `MPCode`/`MPText`/`MPBreak` structure as other capability errors
-- DCE mode (conditional branch elimination) is a separate follow-up; audit mode ships first
+Both checks are necessary. Phase 2c gates at the declaration boundary; Phase 3b gates at the IR body.
 
-**Estimated scope:** ~300 lines (new `lib/tir/policy_dce.ml` + 20-line integration in `lib/tir/lower.ml`). No runtime changes.
+---
+
+### Deferred: DCE mode (conditional branch elimination)
+
+Audit mode reports violations as errors and lets the programmer fix them manually. DCE mode would *automatically eliminate* branches that are only reachable under a policy that is statically absent.
+
+Example:
+```march
+fn process[P : AllocPolicy](cap : Tagged(Alloc, P), buf : Buffer(Byte)) : Buffer(Byte) do
+  if can_alloc(cap) do
+    let result = Buffer.copy(buf)   -- allocates
+    transform(result)
+  else
+    transform_in_place(buf)         -- no allocation
+  end
+end
+```
+
+When specialized to `Tagged(Alloc, NoAlloc)`, the `can_alloc` branch is statically dead. DCE mode would eliminate it, making the `NoAlloc` specialization clean without programmer intervention.
+
+This requires:
+1. A policy-value type in TIR (currently `Tagged`'s second arg is just a `TCon` with no special semantics)
+2. Conditional expression forms that DCE can act on (`if can_alloc(cap)` must desugar to something the pass can pattern-match)
+
+Both are significant. DCE mode is a follow-up; file separately when a use case requires it.
+
+---
+
+### Test cases (~8 new tests in `tag_and_typestate` or new `policy_dce` suite)
+
+| # | Description | Expected |
+|---|-------------|---------|
+| 1 | `Tagged(DSP, NoAlloc)` fn with `List.map` (allocates) | error |
+| 2 | `Tagged(DSP, NoAlloc)` fn with no allocation | no error |
+| 3 | `Tagged(T, NoPanic)` fn calls `List.nth` | error |
+| 4 | `Tagged(T, NoPanic)` fn uses `List.nth_opt` | no error |
+| 5 | `Tagged(T, NoPanic)` fn calls a helper that calls `panic_` | error (transitive) |
+| 6 | `Tagged(T, Realtime)` fn calls IO function | error |
+| 7 | `Tagged(T, Realtime)` fn that is clean | no error |
+| 8 | Non-tagged fn with allocation | no error (not checked) |
+
+---
+
+### Estimated scope
+
+| File | Lines |
+|------|-------|
+| `lib/tir/policy_dce.ml` (new) | ~250 |
+| `lib/tir/tir.ml` | +5 |
+| `lib/tir/dune` | +1 |
+| `bin/main.ml` | +20 |
+| `lib/jit/repl_jit.ml` | +10 |
+| `test/test_compiler.ml` | +100 |
+| **Total** | **~390** |
+
+No runtime changes. No changes to `parser.mly`, `ast.ml`, or `typecheck.ml`.
 
 ---
 

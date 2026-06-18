@@ -2467,7 +2467,7 @@ let test_thm_defun_preserves_linearity () =
                   fn_ret_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
                   fn_body = outer } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [main_fn];
-            tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
+            tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let m' = March_tir.Defun.defunctionalize m in
   let all_vars = collect_all_vars_in_module m' in
   let x_bindings = List.filter (fun v -> v.March_tir.Tir.v_name = "x") all_vars in

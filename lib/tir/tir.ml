@@ -96,6 +96,9 @@ type tir_module = {
   tm_exports : string list;  (* extra root function names to keep alive during DCE *)
   tm_tests   : (string * string) list;
   (* (fn_name, display_name) pairs for --test mode *)
+  tm_io_fns  : string list;
+  (** Names of modules that require Cap(IO), extracted from typecheck env.
+      Used by policy_dce's NoIO check. Empty in pre-policy builds. *)
 }
 
 (* ── Hand-written show functions — used for content-addressed fingerprinting ── *)

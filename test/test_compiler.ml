@@ -3018,6 +3018,92 @@ let test_bound_tag_as_adt () =
   let ctx = typecheck src in
   Alcotest.(check bool) "ADT bound with tag-style type: valid" false (has_errors ctx)
 
+(* ── Phase 3b: Policy-tag DCE audit (TIR-level unit tests) ──────────── *)
+
+let mk_tagged_param policy_name =
+  { March_tir.Tir.v_name = "cap";
+    v_ty = March_tir.Tir.TCon ("Tagged",
+             [March_tir.Tir.TCon ("DSP", []);
+              March_tir.Tir.TCon (policy_name, [])]);
+    v_lin = March_tir.Tir.Unr }
+
+let mk_tagged_fn policy_name body =
+  { March_tir.Tir.fn_name = "process";
+    fn_params = [mk_tagged_param policy_name];
+    fn_ret_ty  = March_tir.Tir.TInt;
+    fn_body    = body }
+
+let tir_int_lit n =
+  March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt n))
+
+let tir_call name arg_tys ret_ty args =
+  let f = { March_tir.Tir.v_name = name;
+            v_ty = March_tir.Tir.TFn (arg_tys, ret_ty);
+            v_lin = March_tir.Tir.Unr } in
+  March_tir.Tir.EApp (f, args)
+
+let test_policy_noalloc_alloc_violation () =
+  let body = March_tir.Tir.EAlloc (March_tir.Tir.TCon ("List", [March_tir.Tir.TInt]), []) in
+  let m = mk_module [mk_tagged_fn "NoAlloc" body] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "NoAlloc fn with EAlloc: violation" true (v <> [])
+
+let test_policy_noalloc_clean () =
+  let m = mk_module [mk_tagged_fn "NoAlloc" (tir_int_lit 42)] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "NoAlloc fn with no alloc: no violation" true (v = [])
+
+let test_policy_nopanic_int_div_violation () =
+  let body = tir_call "int_div"
+    [March_tir.Tir.TInt; March_tir.Tir.TInt] March_tir.Tir.TInt
+    [March_tir.Tir.ALit (March_ast.Ast.LitInt 10);
+     March_tir.Tir.ALit (March_ast.Ast.LitInt 2)] in
+  let m = mk_module [mk_tagged_fn "NoPanic" body] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "NoPanic fn calling int_div: violation" true (v <> [])
+
+let test_policy_nopanic_clean () =
+  let m = mk_module [mk_tagged_fn "NoPanic" (tir_int_lit 0)] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "NoPanic fn with safe body: no violation" true (v = [])
+
+let test_policy_nopanic_transitive () =
+  (* Helper that calls panic_ *)
+  let helper_body = tir_call "panic_"
+    [March_tir.Tir.TString] March_tir.Tir.TUnit
+    [March_tir.Tir.ALit (March_ast.Ast.LitString "oops")] in
+  let helper = { March_tir.Tir.fn_name = "my_helper"; fn_params = [];
+                 fn_ret_ty = March_tir.Tir.TUnit; fn_body = helper_body } in
+  (* Tagged fn calls the helper *)
+  let body = tir_call "my_helper" [] March_tir.Tir.TUnit [] in
+  let fd = mk_tagged_fn "NoPanic" body in
+  let m = mk_module [helper; fd] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "NoPanic fn with transitive panic helper: violation" true (v <> [])
+
+let test_policy_realtime_io_violation () =
+  let body = tir_call "Http.get"
+    [March_tir.Tir.TString] March_tir.Tir.TString
+    [March_tir.Tir.ALit (March_ast.Ast.LitString "url")] in
+  let fd = mk_tagged_fn "Realtime" body in
+  let m = { (mk_module [fd]) with March_tir.Tir.tm_io_fns = ["Http"] } in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "Realtime fn calling Http.get: violation" true (v <> [])
+
+let test_policy_realtime_clean () =
+  let fd = mk_tagged_fn "Realtime" (tir_int_lit 0) in
+  let m = { (mk_module [fd]) with March_tir.Tir.tm_io_fns = ["Http"] } in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "Realtime fn with clean body: no violation" true (v = [])
+
+let test_policy_untagged_not_checked () =
+  let body = March_tir.Tir.EAlloc (March_tir.Tir.TCon ("List", [March_tir.Tir.TInt]), []) in
+  let fd = { March_tir.Tir.fn_name = "normal_fn"; fn_params = [];
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+  let m = mk_module [fd] in
+  let v = March_tir.Policy_dce.audit m in
+  Alcotest.(check bool) "Untagged fn with alloc: no violation" true (v = [])
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3322,6 +3408,16 @@ let compiler_suites =
           Alcotest.test_case "Chan.new/send/recv/close in IR"   `Quick test_session_compile_chan_new;
           Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
+        ] );
+      ( "policy_dce", [
+          Alcotest.test_case "NoAlloc fn with EAlloc: violation"          `Quick test_policy_noalloc_alloc_violation;
+          Alcotest.test_case "NoAlloc fn clean: no violation"             `Quick test_policy_noalloc_clean;
+          Alcotest.test_case "NoPanic fn calls int_div: violation"        `Quick test_policy_nopanic_int_div_violation;
+          Alcotest.test_case "NoPanic fn safe body: no violation"         `Quick test_policy_nopanic_clean;
+          Alcotest.test_case "NoPanic fn transitive panic: violation"     `Quick test_policy_nopanic_transitive;
+          Alcotest.test_case "Realtime fn calls IO fn: violation"         `Quick test_policy_realtime_io_violation;
+          Alcotest.test_case "Realtime fn clean: no violation"            `Quick test_policy_realtime_clean;
+          Alcotest.test_case "Untagged fn with alloc: no violation"       `Quick test_policy_untagged_not_checked;
         ] );
   ]
 

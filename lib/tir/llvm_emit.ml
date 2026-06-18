@@ -5152,7 +5152,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math ~repl:true () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -5202,7 +5202,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     (body : Tir.expr) : string =
   ignore name;
   let ctx = make_ctx ~fast_math ~repl:true () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -5239,7 +5239,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math ~repl:true () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -5275,7 +5275,7 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     (fn : Tir.fn_def) : string =
   ignore bind_name;
   let ctx = make_ctx ~fast_math ~repl:true () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -5342,7 +5342,7 @@ let emit_fns_fragment
     () : string =
   let ctx = make_ctx ~repl () in
   let pseudo_mod : Tir.tir_module =
-    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
+    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   (* Register externals first so intra-fragment references resolve correctly. *)
   List.iter (fun f ->

@@ -982,7 +982,7 @@ let compile filename =
        - transitive needs propagation across module imports
        - extern block capability gating
      See also: March_effects.Effects.check_capabilities *)
-  let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
+  let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
@@ -1037,6 +1037,19 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
+    (* Inject IO-module names from the typecheck env so the policy audit can
+       identify calls that require Cap(IO) at the TIR level. *)
+    let io_modules =
+      List.filter_map (fun (mod_name, caps) ->
+        if List.exists (fun c ->
+          c = "IO" ||
+          (String.length c > 3 && String.sub c 0 3 = "IO.")
+        ) caps
+        then Some mod_name
+        else None
+      ) typecheck_env.March_typecheck.Typecheck.module_caps
+    in
+    let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
     stamp "lower";
     (* Capture the interface-dispatch table before it is cleared by lower_module.
@@ -1089,6 +1102,12 @@ let compile filename =
     let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
     snap_tir "tir-fusion" tir;
     stamp "fusion";
+    (* Phase 3b: policy-tag audit — report violations in Tagged(_, P) functions. *)
+    let policy_violations = March_tir.Policy_dce.audit tir in
+    List.iter (fun (_fn_name, msg) ->
+      Printf.eprintf "Error: %s\n\n" msg
+    ) policy_violations;
+    if policy_violations <> [] then exit 1;
     let tir = March_tir.Defun.defunctionalize tir in
     snap_tir "tir-defun" tir;
     stamp "defun";

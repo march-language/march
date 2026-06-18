@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, Phase 3b — Policy-tag DCE/audit pass)
+
+- **`lib/tir/policy_dce.ml` (new, ~260 lines)** — audit pass that walks every `Tagged(_, P)`-parameterized function in a TIR module after monomorphization and reports policy violations. Policy table: `NoAlloc` (no `EAlloc`/`EStackAlloc`), `NoPanic` (no transitive calls to panic-surface builtins), `NoIO` (no calls to IO-needful modules), and `Realtime` (all three). Panic analysis uses a fixpoint seeded from `direct_panic_builtins` (`int_div`, `panic_`, etc.). IO analysis uses `tm_io_fns` module-name list via prefix matching and a second fixpoint for transitive callers.
+- **`tm_io_fns : string list`** — new field on `tir_module` that stores IO-module names extracted from `typecheck_env.module_caps` at compile time. Populated in `bin/main.ml` after `check_module_full`; empty in JIT/eval paths.
+- **Pipeline integration** — audit runs after `Fusion.run` and before `Defun.defunctionalize` in `bin/main.ml`; same position added to JIT pipeline in `lib/jit/repl_jit.ml`. Violations print to stderr and cause `exit 1`.
+- **8 new unit tests** in `policy_dce` suite (TIR-level direct calls to `Policy_dce.audit`). **236 compiler / 780 total tests pass.**
+
 ## Current State (as of 2026-06-18, `let?` result-propagation binding)
 
 - **`let? p = e` syntax** — binds the `Ok` payload of a `Result` expression and propagates `Err` upward automatically. Requires `Result` on the RHS; the continuation (everything after the `let?`) must also produce a `Result` with a compatible error type. Empty continuation (i.e. `let?` as the last expression in a block) is a clear compile-time error.
