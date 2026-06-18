@@ -691,6 +691,18 @@ fn inc_leaves(t : Tree) : Tree do
   end
 end`;
 
+const FBIP_TRY = `type Tree = Leaf(Int) | Node(Tree, Tree)
+
+fn inc_leaves(t : Tree) : Tree do
+  match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l),
+                       inc_leaves(r))
+  end
+end
+
+inc_leaves(Node(Node(Leaf(1), Leaf(2)), Leaf(3)))`;
+
 const ACTOR = `supervisor AppSup do
   strategy OneForOne
   children [Counter, Logger]
@@ -809,7 +821,7 @@ function tryInRepl(code) {
   mReplLoad(code);
   document.getElementById('m-repl-wrap').scrollIntoView({ behavior: 'smooth' });
 }
-function tryFBIP()  { tryInRepl(FBIP);  }
+function tryFBIP()  { tryInRepl(FBIP_TRY);  }
 function tryACTOR() { tryInRepl(ACTOR); }
 function tryTYPES() { tryInRepl(TYPES); }
 // ─── Events ───────────────────────────────────────────────────────────────────
