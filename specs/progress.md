@@ -287,6 +287,12 @@ march/
 - **Pipeline integration** — audit runs after `Fusion.run` and before `Defun.defunctionalize` in `bin/main.ml`; same position added to JIT pipeline in `lib/jit/repl_jit.ml`. Violations print to stderr and cause `exit 1`.
 - **8 new unit tests** in `policy_dce` suite (TIR-level direct calls to `Policy_dce.audit`). **236 compiler / 780 total tests pass.**
 
+## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
+
+- **P13 — EField of known record** (`lib/tir/cprop.ml`): added a `field_env` (separate from the literal env) that tracks `ERecord`, `EUpdate`, and record-alias bindings. `EField(AVar r, k)` folds to the stored atom when `r` is in fenv. `EUpdate` merges new fields over the base record's known fields, so `{r with y=99}.x` still folds `x` from the base. RC operations are never substituted.
+- **P14 — Boolean simplify peepholes** (`lib/tir/simplify.ml`): `if x then true else false → x`, `if x then false else true → not x`, `x == x → true` (non-float), `x != x → false` (non-float). Guards against float identity (IEEE 754 NaN semantics).
+- **9 new tests** (6 simplify P14 + 3 cprop P13, including float-guard regression tests). Test count: **1492+** (276 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-18, `let?` result-propagation binding)
 
 - **`let? p = e` syntax** — binds the `Ok` payload of a `Result` expression and propagates `Err` upward automatically. Requires `Result` on the RHS; the continuation (everything after the `let?`) must also produce a `Result` with a compatible error type. Empty continuation (i.e. `let?` as the last expression in a block) is a clear compile-time error.

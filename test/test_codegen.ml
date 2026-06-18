@@ -1991,6 +1991,78 @@ let test_simplify_string_concat_empty_lhs () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* P14 — boolean conditional identities ──────────────────────────── *)
+
+let test_simplify_if_then_true_else_false () =
+  (* if x then true else false → x *)
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TBool in
+  let body = March_tir.Tir.ECase (x,
+    [{ March_tir.Tir.br_tag = "True"; br_vars = [];
+       br_body = March_tir.Tir.EAtom (blit true) }],
+    Some (March_tir.Tir.EAtom (blit false))) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "if x then true else false = x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_if_then_false_else_true () =
+  (* if x then false else true → not x *)
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TBool in
+  let body = March_tir.Tir.ECase (x,
+    [{ March_tir.Tir.br_tag = "True"; br_vars = [];
+       br_body = March_tir.Tir.EAtom (blit false) }],
+    Some (March_tir.Tir.EAtom (blit true))) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.EApp (f, [_]) when f.March_tir.Tir.v_name = "not" -> ()
+   | e -> Alcotest.failf "expected EApp(not, [x]), got: %s" (March_tir.Tir.show_expr e))
+
+let test_simplify_eq_self () =
+  (* x == x → true (non-float) *)
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "==" [March_tir.Tir.AVar x; March_tir.Tir.AVar x])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x==x=true"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit true)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_ne_self () =
+  (* x != x → false (non-float) *)
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "!=" [March_tir.Tir.AVar x; March_tir.Tir.AVar x])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x!=x=false"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit false)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_eq_self_float_no_reduce () =
+  (* x == x must NOT reduce when x is Float (NaN != NaN in IEEE 754) *)
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TFloat in
+  let m = mk_module [mk_fn "f" (app "==" [March_tir.Tir.AVar x; March_tir.Tir.AVar x])] in
+  let _ = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "not changed for float ==" false !changed
+
+let test_simplify_eq_self_tuple_float_no_reduce () =
+  (* x == x must NOT reduce for TTuple containing Float — NaN inside a tuple
+     means (NaN,1) == (NaN,1) is false at runtime but the rule would return true *)
+  let changed = ref false in
+  let ty = March_tir.Tir.TTuple [March_tir.Tir.TFloat; March_tir.Tir.TInt] in
+  let x = mk_var "x" ty in
+  let m = mk_module [mk_fn "f" (app "==" [March_tir.Tir.AVar x; March_tir.Tir.AVar x])] in
+  let _ = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "not changed for tuple-float ==" false !changed
+
 (* ── Function inlining ───────────────────────────────────────────── *)
 
 let test_inline_pure_small () =
@@ -2525,6 +2597,62 @@ let test_cprop_no_propagate_into_free () =
    | March_tir.Tir.ELet (_, _, March_tir.Tir.EFree (March_tir.Tir.ALit _)) ->
      Alcotest.fail "cprop corrupted Free target: substituted literal into Free argument"
    | e -> Alcotest.failf "unexpected shape: %s" (March_tir.Tir.show_expr e))
+
+(* P13 — EField of known record ──────────────────────────────────── *)
+
+let test_cprop_field_fold_record () =
+  (* let r = { x = 3, y = 4 } in r.x
+     CProp: r in fenv → EField(r,"x") folds to ALit 3 *)
+  let ty_r = March_tir.Tir.TRecord [("x", March_tir.Tir.TInt); ("y", March_tir.Tir.TInt)] in
+  let r = mk_var "r" ty_r in
+  let body = March_tir.Tir.ELet (r,
+    March_tir.Tir.ERecord [("x", ilit 3); ("y", ilit 4)],
+    March_tir.Tir.EField (March_tir.Tir.AVar r, "x")) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3))) -> ()
+   | e -> Alcotest.failf "expected r.x=3, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_alias () =
+  (* let r  = { x = 3 }
+     let r2 = r          -- alias: should copy r's fenv entry to r2
+     r2.x                -- folds to 3 via alias propagation *)
+  let ty_r = March_tir.Tir.TRecord [("x", March_tir.Tir.TInt)] in
+  let r  = mk_var "r"  ty_r in
+  let r2 = mk_var "r2" ty_r in
+  let body =
+    March_tir.Tir.ELet (r, March_tir.Tir.ERecord [("x", ilit 3)],
+      March_tir.Tir.ELet (r2, March_tir.Tir.EAtom (March_tir.Tir.AVar r),
+        March_tir.Tir.EField (March_tir.Tir.AVar r2, "x"))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
+   | e -> Alcotest.failf "expected r2.x=3 via alias, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_update () =
+  (* let r  = { x = 3, y = 4 }
+     let r2 = { r with y = 99 }
+     r2.x   — inherits x field from r → 3 *)
+  let ty_r = March_tir.Tir.TRecord [("x", March_tir.Tir.TInt); ("y", March_tir.Tir.TInt)] in
+  let r  = mk_var "r"  ty_r in
+  let r2 = mk_var "r2" ty_r in
+  let body =
+    March_tir.Tir.ELet (r, March_tir.Tir.ERecord [("x", ilit 3); ("y", ilit 4)],
+      March_tir.Tir.ELet (r2, March_tir.Tir.EUpdate (March_tir.Tir.AVar r, [("y", ilit 99)]),
+        March_tir.Tir.EField (March_tir.Tir.AVar r2, "x"))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
+   | e -> Alcotest.failf "expected r2.x=3 (from r), got: %s" (March_tir.Tir.show_expr e))
 
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
@@ -4245,6 +4373,12 @@ let codegen_suites =
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
         Alcotest.test_case "str_concat_empty_rhs" `Quick test_simplify_string_concat_empty_rhs;
         Alcotest.test_case "str_concat_empty_lhs" `Quick test_simplify_string_concat_empty_lhs;
+        Alcotest.test_case "if_then_true_else_false"  `Quick test_simplify_if_then_true_else_false;
+        Alcotest.test_case "if_then_false_else_true"  `Quick test_simplify_if_then_false_else_true;
+        Alcotest.test_case "eq_self"                  `Quick test_simplify_eq_self;
+        Alcotest.test_case "ne_self"                  `Quick test_simplify_ne_self;
+        Alcotest.test_case "eq_self_float_no_reduce"  `Quick test_simplify_eq_self_float_no_reduce;
+        Alcotest.test_case "eq_self_tuple_float_no_reduce" `Quick test_simplify_eq_self_tuple_float_no_reduce;
       ]);
       ("inline", [
         Alcotest.test_case "pure_small"            `Quick test_inline_pure_small;
@@ -4284,6 +4418,9 @@ let codegen_suites =
         Alcotest.test_case "no_propagate_into_decrc" `Quick test_cprop_no_propagate_into_rc;
         Alcotest.test_case "no_propagate_into_incrc" `Quick test_cprop_no_propagate_into_incrc;
         Alcotest.test_case "no_propagate_into_free"  `Quick test_cprop_no_propagate_into_free;
+        Alcotest.test_case "field_fold_record"       `Quick test_cprop_field_fold_record;
+        Alcotest.test_case "field_fold_alias"        `Quick test_cprop_field_fold_alias;
+        Alcotest.test_case "field_fold_update"       `Quick test_cprop_field_fold_update;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
