@@ -830,6 +830,37 @@ function renderInstall() {
 
     loadBundle(() => {
       if (!window.marchEvalLine) { addEntry('m-repl-eline', 'Interpreter not available.'); return; }
+
+      const hMatch = code.trim().match(/^h\((\w+)\)$/);
+      if (hMatch) {
+        const fnName = hMatch[1];
+        const stdlib = window.marchStdlib || {};
+        const re = new RegExp('^\\s*fn\\s+' + fnName + '\\s*\\(');
+        const hits = [];
+        Object.keys(stdlib).forEach(f => {
+          const mod = f.replace(/\.march$/, '');
+          const modName = mod.charAt(0).toUpperCase() + mod.slice(1);
+          stdlib[f].split('\n').forEach((line, i, lines) => {
+            if (re.test(line)) {
+              const prev = (i > 0 ? lines[i-1].trim() : '');
+              const m = prev.match(/^doc\s+"(.+)"$/);
+              const doc = m ? m[1] : '';
+              const sig = line.trim().replace(/\s+do\s*$/, '');
+              hits.push({ modName, sig, doc });
+            }
+          });
+        });
+        if (hits.length === 0) {
+          addEntry('m-repl-eline', "No stdlib docs found for '" + fnName + "'.");
+        } else {
+          hits.forEach(({ modName, sig, doc }) => {
+            addEntry('m-repl-nfo', modName + '.' + fnName + (doc ? ' — ' + doc : ''));
+            addEntry('m-repl-oline', '  ' + sig);
+          });
+        }
+        return;
+      }
+
       const result = window.marchEvalLine(code);
       if (result.output && result.output.trim()) addEntry('m-repl-oline', result.output.trimEnd());
       if (result.error !== null) addEntry('m-repl-eline', result.error);
