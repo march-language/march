@@ -287,6 +287,12 @@ march/
 - **Pipeline integration** — audit runs after `Fusion.run` and before `Defun.defunctionalize` in `bin/main.ml`; same position added to JIT pipeline in `lib/jit/repl_jit.ml`. Violations print to stderr and cause `exit 1`.
 - **8 new unit tests** in `policy_dce` suite (TIR-level direct calls to `Policy_dce.audit`). **236 compiler / 780 total tests pass.**
 
+## Current State (as of 2026-06-18, P11 + P12 compiler optimizations)
+
+- **P11 — Beta-ADT / case-of-known-constructor** (`lib/tir/beta_adt.ml`, new ~84 lines): matches `let r = EAlloc(tag, args) in ECase(r, [{tag; vs; body}], default)` and reduces to `let v0=args[0] in … in body`. Run pre-Perceus in `bin/main.ml` (before RC insertion). NOT in post-Perceus opt loop: Perceus inserts `EDecRC(scrutinee)` in the matching branch body, which would reference unbound `r` after P11 eliminates the ELet. `tags_match` handles qualified (`Result.Ok`) vs bare (`Ok`) tag names via `short_name` helper.
+- **P12 — Variable copy propagation** (`lib/tir/cprop.ml`): added `avar_env : (string * Tir.var) list` tracking `let x = y` variable aliases in addition to the existing literal env. Excludes `TFn`/`TVar` closure types (ECallPtr dispatch is name-sensitive in llvm_emit). Uses `~allow_avar:false` for ECallPtr's function argument position. RC operations (EFree/EIncRC/EDecRC/EAtomicIncRC/EAtomicDecRC) are never substituted.
+- **9 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously). Test count: **1517** (282 codegen + 780 stdlib).
+
 ## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
 
 - **P13 — EField of known record** (`lib/tir/cprop.ml`): added a `field_env` (separate from the literal env) that tracks `ERecord`, `EUpdate`, and record-alias bindings. `EField(AVar r, k)` folds to the stored atom when `r` is in fenv. `EUpdate` merges new fields over the base record's known fields, so `{r with y=99}.x` still folds `x` from the base. RC operations are never substituted.

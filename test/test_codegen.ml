@@ -2654,6 +2654,140 @@ let test_cprop_field_fold_update () =
    | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
    | e -> Alcotest.failf "expected r2.x=3 (from r), got: %s" (March_tir.Tir.show_expr e))
 
+(* ── P12: variable copy propagation ─────────────────────────────────────── *)
+
+(** P12 basic: let x = y in x + 1  →  y + 1
+    The alias is propagated into the EApp arg. *)
+let test_cprop_var_alias () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (x, March_tir.Tir.EAtom (March_tir.Tir.AVar y),
+      app "succ" [March_tir.Tir.AVar x]) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EApp (_, [March_tir.Tir.AVar v]))
+     when v.March_tir.Tir.v_name = "y" -> ()
+   | e -> Alcotest.failf "expected x→y propagation, got: %s" (March_tir.Tir.show_expr e))
+
+(** P12 chain: let x = y in let z = x in z + 1  →  y + 1
+    The second alias (z = x → y) is also propagated transitively. *)
+let test_cprop_var_chain () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let z = mk_var "z" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (x, March_tir.Tir.EAtom (March_tir.Tir.AVar y),
+      March_tir.Tir.ELet (z, March_tir.Tir.EAtom (March_tir.Tir.AVar x),
+        app "succ" [March_tir.Tir.AVar z])) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* After propagation, z → x → y, so the arg becomes y. *)
+  let rec find_innermost_app = function
+    | March_tir.Tir.ELet (_, _, body) -> find_innermost_app body
+    | e -> e in
+  (match find_innermost_app (first_body m') with
+   | March_tir.Tir.EApp (_, [March_tir.Tir.AVar v])
+     when v.March_tir.Tir.v_name = "y" -> ()
+   | e -> Alcotest.failf "expected chain x→y propagation, got: %s" (March_tir.Tir.show_expr e))
+
+(** P12 closure guard: let f = g (TFn type) must NOT be propagated.
+    Closure aliases are excluded to protect ECallPtr dispatch. *)
+let test_cprop_var_no_alias_closure () =
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let f = mk_var "f" fn_ty in
+  let g = mk_var "g" fn_ty in
+  let body =
+    March_tir.Tir.ELet (f, March_tir.Tir.EAtom (March_tir.Tir.AVar g),
+      March_tir.Tir.ECallPtr (March_tir.Tir.AVar f, [ilit 42])) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let _m' = March_tir.Cprop.run ~changed m in
+  (* Closure alias must NOT be propagated; changed may be false *)
+  (match first_body (March_tir.Cprop.run ~changed:(ref false) m) with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ECallPtr (March_tir.Tir.AVar fv, _))
+     when fv.March_tir.Tir.v_name = "f" -> ()
+   | e -> Alcotest.failf "expected f unchanged in ECallPtr, got: %s" (March_tir.Tir.show_expr e))
+
+(* ── P11: beta-ADT (case-of-known-constructor) ───────────────────────────── *)
+
+(** P11 basic: let r = EAlloc(Ok, [x]) in ECase(r, [{Ok; [v]; EAtom v}], None)
+    → let v = x in EAtom v  (reduced; EAlloc dead → DCE removes it) *)
+let test_beta_adt_ok_inline () =
+  let tcon_ty = March_tir.Tir.TCon ("Result", [March_tir.Tir.TInt; March_tir.Tir.TString]) in
+  let r = mk_var "r" tcon_ty in
+  let v = mk_var "v" March_tir.Tir.TInt in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let branch = { March_tir.Tir.br_tag = "Ok"; br_vars = [v];
+                 br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar v) } in
+  let body =
+    March_tir.Tir.ELet (r,
+      March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Result.Ok", [March_tir.Tir.TInt]), [March_tir.Tir.AVar x]),
+      March_tir.Tir.ECase (March_tir.Tir.AVar r, [branch], None)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Beta_adt.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* Result: let v = EAtom(x) in EAtom(v) — no EAlloc or ECase *)
+  let rec find = function
+    | March_tir.Tir.ELet (bv, March_tir.Tir.EAtom (March_tir.Tir.AVar src), inner)
+      when bv.March_tir.Tir.v_name = "v" && src.March_tir.Tir.v_name = "x" ->
+      (match inner with
+       | March_tir.Tir.EAtom (March_tir.Tir.AVar rv) when rv.March_tir.Tir.v_name = "v" -> ()
+       | e -> Alcotest.failf "expected EAtom(v), got: %s" (March_tir.Tir.show_expr e))
+    | March_tir.Tir.ELet (_, _, rest) -> find rest
+    | e -> Alcotest.failf "expected let v=x chain, got: %s" (March_tir.Tir.show_expr e) in
+  find (first_body m')
+
+(** P11 with qualified tag: EAlloc uses "Result.Ok" but branch tag is "Ok".
+    tags_match must handle the mismatch via short_name. *)
+let test_beta_adt_qualified_tag () =
+  let tcon_ty = March_tir.Tir.TCon ("Result", []) in
+  let r = mk_var "r" tcon_ty in
+  let v = mk_var "v" March_tir.Tir.TInt in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let branch = { March_tir.Tir.br_tag = "Ok"; br_vars = [v];
+                 br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar v) } in
+  let default_body = March_tir.Tir.EAtom (ilit 0) in
+  let body =
+    March_tir.Tir.ELet (r,
+      March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Result.Ok", [March_tir.Tir.TInt]), [March_tir.Tir.AVar x]),
+      March_tir.Tir.ECase (March_tir.Tir.AVar r, [branch], Some default_body)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Beta_adt.run ~changed m in
+  Alcotest.(check bool) "changed (qualified tag matched)" true !changed;
+  (* Default branch (with EAtom 0) must be dropped — we matched Ok *)
+  let contains_lit0 e =
+    let s = March_tir.Tir.show_expr e in
+    let lit0 = March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)) in
+    let n = String.length lit0 in
+    let ls = String.length s in
+    let found = ref false in
+    for i = 0 to ls - n do
+      if String.sub s i n = lit0 then found := true
+    done; !found in
+  if contains_lit0 (first_body m') then
+    Alcotest.fail "default branch (lit 0) must be dropped after P11 Ok match"
+
+(** P11 no-fire: ELet body is NOT an ECase — should not fire. *)
+let test_beta_adt_no_fire_non_case () =
+  let tcon_ty = March_tir.Tir.TCon ("Foo", []) in
+  let r = mk_var "r" tcon_ty in
+  let body =
+    March_tir.Tir.ELet (r,
+      March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Foo.Bar", []), []),
+      March_tir.Tir.EAtom (March_tir.Tir.AVar r)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let _m' = March_tir.Beta_adt.run ~changed m in
+  Alcotest.(check bool) "not changed" false !changed
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -4421,6 +4555,14 @@ let codegen_suites =
         Alcotest.test_case "field_fold_record"       `Quick test_cprop_field_fold_record;
         Alcotest.test_case "field_fold_alias"        `Quick test_cprop_field_fold_alias;
         Alcotest.test_case "field_fold_update"       `Quick test_cprop_field_fold_update;
+        Alcotest.test_case "var_alias"               `Quick test_cprop_var_alias;
+        Alcotest.test_case "var_chain"               `Quick test_cprop_var_chain;
+        Alcotest.test_case "no_alias_closure"        `Quick test_cprop_var_no_alias_closure;
+      ]);
+      ("beta_adt", [
+        Alcotest.test_case "ok_inline"               `Quick test_beta_adt_ok_inline;
+        Alcotest.test_case "qualified_tag"           `Quick test_beta_adt_qualified_tag;
+        Alcotest.test_case "no_fire_non_case"        `Quick test_beta_adt_no_fire_non_case;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

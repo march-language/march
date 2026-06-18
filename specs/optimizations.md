@@ -700,8 +700,8 @@ Edge cases:
 
 **Effort:** Medium (~100 lines) | **Impact:** Very high
 **Dependencies:** CProp (same env-tracking pattern); DCE (cleans up residuals)
-**Tests:** Add `beta_adt` group — test `Ok/Err`, `Some/None`, custom ADTs, nested reduces
-**Status:** Planned
+**Tests:** `beta_adt` group — `ok_inline`, `qualified_tag`, `no_fire_non_case` (3 tests)
+**Status:** Done — `lib/tir/beta_adt.ml` (new file); wired as pre-Perceus pass in `bin/main.ml`. NOT in post-Perceus opt loop (Perceus inserts EDecRC(scrutinee) in matching branch body, which would reference an unbound var after P11 drops the ELet). Uses `short_name` helper + `tags_match` for qualified-vs-bare tag matching.
 
 ---
 
@@ -731,8 +731,8 @@ RC-safety: same rule as existing CProp — skip EFree/EIncRC/EDecRC argument pos
 
 **Effort:** Low (~30 lines) | **Impact:** Medium — fires after every inline call
 **Dependencies:** Inline (creates alias chains); feeds Fold
-**Tests:** Extend `cprop` group — `let x = y in x + 1 → y + 1`
-**Status:** Planned
+**Tests:** `cprop` group — `var_alias`, `var_chain`, `no_alias_closure` (3 new tests)
+**Status:** Done — added `avar_env : (string * Tir.var) list` to `lib/tir/cprop.ml`. Excludes `TFn`/`TVar` (closure) types to protect ECallPtr dispatch; uses `~allow_avar:false` for ECallPtr's function argument. RC positions unchanged (EFree/EIncRC/EDecRC not substituted).
 
 ---
 

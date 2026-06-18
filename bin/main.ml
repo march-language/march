@@ -1118,6 +1118,13 @@ let compile filename =
               then March_tir.Known_call.run ~changed:(ref false) tir
               else tir in
     snap_tir "tir-known-call" tir;
+    (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
+       EAlloc is DCE'd before RC insertion, avoiding a spurious allocation and
+       its associated reference-count operations entirely. *)
+    let tir = if !opt_enabled
+              then March_tir.Beta_adt.run ~changed:(ref false) tir
+              else tir in
+    snap_tir "tir-beta-adt-pre" tir;
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";
