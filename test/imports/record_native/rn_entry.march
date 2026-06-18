@@ -50,8 +50,8 @@ fn from_list_a() do
 end
 
 fn main() do
-  let r = { name = "Alice", age = 30 }
-  let nums = { x = 10, y = 20 }
+  let r = { name: "Alice", age: 30 }
+  let nums = { x: 10, y: 20 }
 
   let failures =
     check("keys sorted", keys_csv(r) == "age,name")

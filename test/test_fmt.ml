@@ -145,7 +145,7 @@ end|} in
 let test_record_literal () =
   let src = {|mod Test do
 fn make_point(x : Float, y : Float) : Point do
-  { x = x, y = y }
+  { x: x, y: y }
 end
 end|} in
   check_parses "record literal" src;

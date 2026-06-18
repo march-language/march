@@ -142,7 +142,6 @@ rule token = parse
   | '-'           { MINUS }
   | '*'           { STAR }
   | '/'           { SLASH }
-  | "%{"          { RECORD_LBRACE }
   | '%'           { PERCENT }
   | '<'           { LT }
   | '>'           { GT }

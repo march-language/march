@@ -265,7 +265,7 @@ mod Sort do
 
   Algorithm: AlphaDev-inspired optimal sorting networks from Bert Dobbelaere's
   catalog, proven optimal by Floyd & Knuth (1966). Comparator counts:
-    n=2: 1, n=3: 3, n=4: 5, n=5: 9, n=6: 12, n=7: 16, n=8: 19
+    n=2: 1, n:3: 3, n:4: 5, n:5: 9, n:6: 12, n:7: 16, n:8: 19
 
   Stability: stable for n ≤ 8 (equal elements preserve original list order).
   Complexity: O(1) for n ≤ 8 (fixed comparator count), O(n log n) for n > 8.

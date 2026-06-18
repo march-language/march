@@ -14,12 +14,12 @@ mod StrategyDemo do
   -- Generic worker actor used across all demos.
   actor Worker do
     state { count : Int }
-    init  { count = 0 }
+    init  { count: 0 }
 
     on Work() do
       let n = state.count + 1
       println("[Worker] work #" ++ int_to_string(n))
-      { count = n }
+      { count: n }
     end
   end
 
@@ -27,7 +27,7 @@ mod StrategyDemo do
   -- Two independent workers; crashing one does not affect the other.
   actor OneForOneSup do
     state { wa : Int, wb : Int }
-    init  { wa = 0, wb = 0 }
+    init  { wa: 0, wb: 0 }
 
     supervise do
       strategy one_for_one
@@ -41,7 +41,7 @@ mod StrategyDemo do
   -- Two coupled workers; crashing any one triggers full group restart.
   actor OneForAllSup do
     state { wa : Int, wb : Int }
-    init  { wa = 0, wb = 0 }
+    init  { wa: 0, wb: 0 }
 
     supervise do
       strategy one_for_all
@@ -56,7 +56,7 @@ mod StrategyDemo do
   -- Crashing the parser also restarts writer (downstream); reader is kept.
   actor PipelineSup do
     state { reader : Int, parser : Int, writer : Int }
-    init  { reader = 0, parser = 0, writer = 0 }
+    init  { reader: 0, parser: 0, writer: 0 }
 
     supervise do
       strategy rest_for_one

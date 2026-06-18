@@ -493,7 +493,7 @@ let test_interface_cross_module_dispatch_record () =
 
     mod Widget do
       type T = { n : Int }
-      fn mk(x : Int) : T do { n = x } end
+      fn mk(x : Int) : T do { n: x } end
       impl Summarize(T) do
         fn summarize(w) do int_to_string(w.n) end
       end
@@ -1229,7 +1229,7 @@ let test_actor_handler_cap_needs_ok () =
     needs IO
     actor Counter do
       state { count: Int }
-      init { count = 0 }
+      init { count: 0 }
       on Inc(cap: Cap(IO)) do
         state
       end
@@ -1242,7 +1242,7 @@ let test_actor_handler_cap_missing_needs_error () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { count: Int }
-      init { count = 0 }
+      init { count: 0 }
       on Inc(cap: Cap(IO.Console)) do
         state
       end
@@ -2006,9 +2006,9 @@ let test_actor_handler_extra_field () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
+      init { value: 0 }
       on Bad() do
-        { value = 0, extra = true }
+        { value: 0, extra: true }
       end
     end
   end|} in
@@ -2033,9 +2033,9 @@ let test_actor_handler_missing_field () =
   let ctx = typecheck {|mod Test do
     actor Widget do
       state { value : Int, name : String }
-      init { value = 0, name = "x" }
+      init { value: 0, name: "x" }
       on Reset() do
-        { value = 0 }
+        { value: 0 }
       end
     end
   end|} in
@@ -2054,9 +2054,9 @@ let test_actor_handler_correct () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
+      init { value: 0 }
       on Inc() do
-        { value = state.value + 1 }
+        { value: state.value + 1 }
       end
     end
   end|} in
@@ -2069,12 +2069,12 @@ let test_actor_handler_duplicate_name () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
+      init { value: 0 }
       on Inc() do
-        { value = state.value + 1 }
+        { value: state.value + 1 }
       end
       on Inc() do
-        { value = state.value + 2 }
+        { value: state.value + 2 }
       end
     end
   end|} in
@@ -2094,7 +2094,7 @@ let test_actor_handler_wrong_return_type () =
   let ctx = typecheck {|mod Test do
     actor Ticker do
       state { count : Int }
-      init { count = 0 }
+      init { count: 0 }
       on Tick() do
         42
       end
@@ -2118,7 +2118,7 @@ let test_actor_handler_init_wrong_type () =
       state { x : Int }
       init 99
       on Noop() do
-        { x = state.x }
+        { x: state.x }
       end
     end
   end|} in
@@ -2129,15 +2129,15 @@ let test_actor_handler_multiple_all_correct () =
   let ctx = typecheck {|mod Test do
     actor Game do
       state { score : Int, lives : Int }
-      init { score = 0, lives = 3 }
+      init { score: 0, lives: 3 }
       on Score(n : Int) do
-        { score = state.score + n, lives = state.lives }
+        { score: state.score + n, lives: state.lives }
       end
       on Die() do
-        { score = state.score, lives = state.lives - 1 }
+        { score: state.score, lives: state.lives - 1 }
       end
       on Reset() do
-        { score = 0, lives = 3 }
+        { score: 0, lives: 3 }
       end
     end
   end|} in
@@ -2148,9 +2148,9 @@ let test_actor_handler_multiple_one_wrong () =
   let ctx = typecheck {|mod Test do
     actor Game do
       state { score : Int }
-      init { score = 0 }
+      init { score: 0 }
       on Add(n : Int) do
-        { score = state.score + n }
+        { score: state.score + n }
       end
       on Cheat() do
         "free win"
@@ -2171,9 +2171,9 @@ let test_actor_handler_unannotated_param_correct_arity () =
   let ctx = typecheck {|mod Test do
     actor Adder do
       state { total : Int }
-      init { total = 0 }
+      init { total: 0 }
       on Add(n) do
-        { total = state.total + n }
+        { total: state.total + n }
       end
     end
     fn go(pid : Pid(Int)) : Int do
@@ -2189,9 +2189,9 @@ let test_actor_handler_unannotated_param_wrong_arity () =
   let ctx = typecheck {|mod Test do
     actor Adder do
       state { total : Int }
-      init { total = 0 }
+      init { total: 0 }
       on Add(n) do
-        { total = state.total + n }
+        { total: state.total + n }
       end
     end
     fn go(pid : Pid(Int)) : Int do
@@ -2206,9 +2206,9 @@ let test_actor_handler_state_spread_correct () =
   let ctx = typecheck {|mod Test do
     actor Counter do
       state { count : Int, label : String }
-      init { count = 0, label = "x" }
+      init { count: 0, label: "x" }
       on Inc() do
-        { count = state.count + 1, label = state.label }
+        { count: state.count + 1, label: state.label }
       end
     end
   end|} in
@@ -2219,12 +2219,12 @@ let test_actor_handler_no_message_params_correct () =
   let ctx = typecheck {|mod Test do
     actor Toggle do
       state { active : Bool }
-      init { active = false }
+      init { active: false }
       on Flip() do
-        { active = true }
+        { active: true }
       end
       on Reset() do
-        { active = false }
+        { active: false }
       end
     end
   end|} in
@@ -2365,12 +2365,12 @@ let test_worker_named_spec () =
   let src = {|mod AppTest do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
-      worker(Counter, :permanent, {name = :my_svc})
+      worker(Counter, :permanent, {name: :my_svc})
     end
   end|} in
   let env = eval_module src in
@@ -2387,12 +2387,12 @@ let test_whereis_named () =
   let src = {|mod AppTest do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     app MyApp do
-      Supervisor.spec(:one_for_one, [worker(Counter, :permanent, {name = :counter_svc})])
+      Supervisor.spec(:one_for_one, [worker(Counter, :permanent, {name: :counter_svc})])
     end
   end|} in
   let m =
@@ -2414,8 +2414,8 @@ let test_whereis_live_actor () =
   let _env = eval_module {|mod TestWhereis do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
     fn main() do
       spawn(Counter)
@@ -2452,13 +2452,13 @@ let test_name_reregisters_on_restart () =
   let env = eval_module {|mod Test do
     actor Worker do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     actor Supervisor do
       state { worker : Int }
-      init { worker = 0 }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
@@ -2498,8 +2498,8 @@ let test_dyn_sup_start_child () =
   let env = eval_module {|mod Test do
     actor Worker do
       state { n : Int }
-      init { n = 0 }
-      on Inc() do { n = state.n + 1 } end
+      init { n: 0 }
+      on Inc() do { n: state.n + 1 } end
     end
 
     fn main() do
@@ -2523,8 +2523,8 @@ let test_dyn_sup_count_children () =
   let _env = eval_module {|mod Test do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -2553,8 +2553,8 @@ let test_dyn_sup_which_children () =
   let _env = eval_module {|mod Test do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -2577,8 +2577,8 @@ let test_dyn_sup_permanent_restart () =
   let _env = eval_module {|mod Test do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -2605,8 +2605,8 @@ let test_dyn_sup_temporary_not_restarted () =
   let _env = eval_module {|mod Test do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -2626,8 +2626,8 @@ let test_dyn_sup_stop_child () =
   let _env = eval_module {|mod Test do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Noop() do { x = 0 } end
+      init { x: 0 }
+      on Noop() do { x: 0 } end
     end
 
     fn main() do
@@ -2662,8 +2662,8 @@ let test_dyn_sup_in_app () =
   let src = {|mod DynApp do
     actor Worker do
       state { n : Int }
-      init { n = 0 }
-      on Inc() do { n = state.n + 1 } end
+      init { n: 0 }
+      on Inc() do { n: state.n + 1 } end
     end
 
     app MyApp do

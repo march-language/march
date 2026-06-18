@@ -310,7 +310,7 @@ mod Regex do
 
   doc "Default options: all flags disabled (case-sensitive, single-line)."
   fn default_opts() : RegexOpts do
-    %{ case_insensitive: false, multiline: false }
+    { case_insensitive: false, multiline: false }
   end
 
   -- Apply the case-insensitive transform to both pattern and input.
@@ -340,7 +340,7 @@ mod Regex do
   Like `matches`, but accepts a `RegexOpts` record for per-call flags.
 
       Regex.matches_opts("HELLO", "hello world",
-                         %{ case_insensitive: true, multiline: false })
+                         { case_insensitive: true, multiline: false })
       -- true
   """
   fn matches_opts(pattern, string, opts) do

@@ -134,12 +134,12 @@ let test_one_for_one_basic () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -163,12 +163,12 @@ let test_one_for_one_sibling_unchanged () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { wa : Int, wb : Int }
-      init { wa = 0, wb = 0 }
+      init { wa: 0, wb: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -191,12 +191,12 @@ let test_one_for_all_restarts_all () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { wa : Int, wb : Int, wc : Int }
-      init { wa = 0, wb = 0, wc = 0 }
+      init { wa: 0, wb: 0, wc: 0 }
       supervise do
         strategy one_for_all
         max_restarts 5 within 60
@@ -227,12 +227,12 @@ let test_rest_for_one_downstream_only () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { r : Int, p : Int, wr : Int }
-      init  { r = 0, p = 0, wr = 0 }
+      init  { r: 0, p: 0, wr: 0 }
       supervise do
         strategy rest_for_one
         max_restarts 5 within 60
@@ -263,12 +263,12 @@ let test_max_restarts_escalation () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 2 within 60
@@ -293,12 +293,12 @@ let test_restart_fresh_state () =
   let _env = eval_module {|mod T do
     actor Counter do
       state { count : Int }
-      init  { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init  { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
     actor Sup do
       state { c : Int }
-      init { c = 0 }
+      init { c: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -340,12 +340,12 @@ let test_epoch_increments_on_restart () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -370,12 +370,12 @@ let test_cap_stale_after_restart () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -404,12 +404,12 @@ let test_fresh_cap_after_restart_accepted () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -441,12 +441,12 @@ let test_restart_builtin_returns_new_pid () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60
@@ -473,12 +473,12 @@ let test_restart_builtin_increments_epoch () =
   let _env = eval_module {|mod T do
     actor W do
       state { x : Int }
-      init { x = 0 }
-      on Inc() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Inc() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 5 within 60

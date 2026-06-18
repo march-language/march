@@ -837,8 +837,8 @@ let test_app_desugars_to_app_init () =
   let src = {|mod AppTest do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     app MyApp do
@@ -854,8 +854,8 @@ let test_app_spawns_actors () =
   let src = {|mod AppTest do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     app MyApp do
@@ -894,8 +894,8 @@ let test_supervisor_spec_value () =
   let env = eval_module {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -916,8 +916,8 @@ let test_worker_builtin_fields () =
   let env = eval_module {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     fn main() do
@@ -938,8 +938,8 @@ let test_app_typechecks_valid () =
   let src = {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
     end
 
     app MyApp do
@@ -977,8 +977,8 @@ let test_shutdown_handler_runs () =
   let src = {|mod ShutTest do
     actor LogActor do
       state { stopped : Bool }
-      init  { stopped = false }
-      on Shutdown() do { stopped = true } end
+      init  { stopped: false }
+      on Shutdown() do { stopped: true } end
       on Ping() do state end
     end
 
@@ -1018,14 +1018,14 @@ let test_graceful_shutdown_reverse_order () =
   let src = {|mod RevTest do
     actor Worker1 do
       state { stopped : Bool }
-      init  { stopped = false }
-      on Shutdown() do { stopped = true } end
+      init  { stopped: false }
+      on Shutdown() do { stopped: true } end
     end
 
     actor Worker2 do
       state { stopped : Bool }
-      init  { stopped = false }
-      on Shutdown() do { stopped = true } end
+      init  { stopped: false }
+      on Shutdown() do { stopped: true } end
     end
 
     app RevApp do
@@ -1051,8 +1051,8 @@ let test_on_start_hook () =
   let src = {|mod HookTest do
     actor Counter do
       state { count : Int }
-      init  { count = 0 }
-      on Tick() do { count = state.count + 1 } end
+      init  { count: 0 }
+      on Tick() do { count: state.count + 1 } end
     end
 
     app HookApp do
@@ -1075,8 +1075,8 @@ let test_on_stop_hook () =
   let src = {|mod StopHookTest do
     actor W do
       state { n : Int }
-      init  { n = 0 }
-      on X() do { n = 1 } end
+      init  { n: 0 }
+      on X() do { n: 1 } end
     end
 
     app StopApp do
@@ -1096,8 +1096,8 @@ let test_actor_no_shutdown_handler_force_killed () =
   let src = {|mod NoHandlerTest do
     actor Silent do
       state { n : Int }
-      init  { n = 0 }
-      on Ping() do { n = state.n + 1 } end
+      init  { n: 0 }
+      on Ping() do { n: state.n + 1 } end
     end
 
     app SilentApp do
@@ -1113,8 +1113,8 @@ let test_shutdown_actor_pid_marks_dead () =
   let src = {|mod DeadTest do
     actor Mortal do
       state { alive : Bool }
-      init  { alive = true }
-      on Shutdown() do { alive = false } end
+      init  { alive: true }
+      on Shutdown() do { alive: false } end
     end
 
     app MortalApp do

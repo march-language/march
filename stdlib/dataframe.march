@@ -2649,7 +2649,7 @@ mod DataFrame do
   Example:
     let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
     let d  = DataFrame.summarize(df)
-    -- d has 1 row: column="x", type="Int", count=5, mean=3.0, ...
+    -- d has 1 row: column="x", type:"Int", count:5, mean:3.0, ...
   """
   fn summarize(df : DataFrame) : DataFrame do
     let stats = col_describe(df)

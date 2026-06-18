@@ -116,24 +116,24 @@ end
 
 actor Counter do
   state { value : Int }
-  init { value = 0 }
+  init { value: 0 }
 
   on Increment(n : Int) do
-    { state with value = state.value + n }
+    { state with value: state.value + n }
   end
 
   on Reset() do
-    { state with value = 0 }
+    { state with value: 0 }
   end
 end
 
 actor Logger do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
 
   on Record(msg : String) do
     println("[log] " ++ msg)
-    { state with count = state.count + 1 }
+    { state with count: state.count + 1 }
   end
 end
 

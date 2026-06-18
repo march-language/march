@@ -892,7 +892,7 @@ describe "pivot" do
     match DataFrame.pivot(df, "r", "c", "v") do
     Err(_) -> assert false
     Ok(wide) -> do
-      -- Row "X": a=1, b=2; Row "Y": a=3, b=NullVal
+      -- Row "X": a=1, b:2; Row "Y": a=3, b:NullVal
       assert (DataFrame.row_count(wide) == 2)
       -- Can at least access first row without error
       let row0 = DataFrame.get_row(wide, 0)

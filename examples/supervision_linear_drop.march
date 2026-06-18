@@ -45,10 +45,10 @@ mod LinearDropDemo do
   -- Step 4: Declare a worker actor.
   actor Worker do
     state { id : Int }
-    init { id = 0 }
-    on SetId(n : Int) do { id = n } end
+    init { id: 0 }
+    on SetId(n : Int) do { id: n } end
     on Work() do
-      println("[Worker] doing work, id = " ++ to_string(state.id))
+      println("[Worker] doing work, id: " ++ to_string(state.id))
       state
     end
   end

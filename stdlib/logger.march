@@ -18,7 +18,7 @@
 --     fn _ -> handle_request())
 --
 -- Output goes to stderr in the format:
---   [LEVEL] message {key=value, key2=value2}
+--   [LEVEL] message {key:value, key2:value2}
 --
 -- v1 API (still supported):
 --   Logger.set_level(Logger.Info)
@@ -155,7 +155,7 @@ mod Logger do
 
       Logger.with_field("user_id", Logger.i(42))
       Logger.info("login")
-      -- emits: [INFO] login {user_id=42}
+      -- emits: [INFO] login {user_id:42}
   """
   fn with_field(key : String, value : LogValue) : Unit do
     logger_add_field(key, value)
@@ -303,7 +303,7 @@ mod Logger do
 
   doc """
   Default text formatter.  Mirrors the v1 output:
-      [LEVEL] message {key=value, key2=value2}
+      [LEVEL] message {key:value, key2:value2}
   """
   fn format_text(e : LogEntry) : String do
     let fs = entry_fields(e)

@@ -6,9 +6,9 @@ mod ActorCounter do
 
   actor Counter do
     state { value : Int }
-    init { value = 0 }
+    init { value: 0 }
     -- FIRST handler (tag 0): receives the actor_call message.
-    -- The runtime builds { tag=0, field[0]=caller_proc } and the
+    -- The runtime builds { tag:0, field[0]=caller_proc } and the
     -- handler binds field[0] as `ref`.
     on GetValue(ref) do
       Actor.reply(ref, state.value)
@@ -16,7 +16,7 @@ mod ActorCounter do
     end
     -- SECOND handler (tag 1): normal fire-and-forget increment.
     on Increment(n : Int) do
-      { state with value = state.value + n }
+      { state with value: state.value + n }
     end
   end
 

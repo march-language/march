@@ -175,7 +175,7 @@ test "sample does not exceed list size" do
   assert List.length(samp) == 3
 end
 
-test "sample with n=0 returns empty" do
+test "sample with n:0 returns empty" do
   let xs = List.range(1, 11)
   let (samp, _) = Random.sample(Random.seed(0), xs, 0)
   assert List.is_empty(samp)
@@ -215,7 +215,7 @@ test "standard_normal is deterministic for same seed" do
   assert z1 == z2
 end
 
-test "normal with sigma=0 returns mu" do
+test "normal with sigma:0 returns mu" do
   let (x, _) = Random.normal(Random.seed(1), 42.0, 0.0)
   assert x == 42.0
 end

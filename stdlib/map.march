@@ -665,7 +665,7 @@ mod Map do
 
   doc """
   Merges two maps with a combining function for conflicting keys.
-  merge_with(a, b, f, cmp): when key exists in both, value = f(val_a)(val_b).
+  merge_with(a, b, f, cmp): when key exists in both, value: f(val_a)(val_b).
   cmp : k -> k -> Bool; f : v -> v -> v (curried).
   """
   fn merge_with(a, b, f, cmp) do

@@ -885,7 +885,7 @@ let rec value_to_string v =
     "(" ^ String.concat ", " (List.map value_to_string vs) ^ ")"
   | VRecord fields ->
     "{ " ^ String.concat ", "
-      (List.map (fun (k, v) -> k ^ " = " ^ value_to_string v) fields)
+      (List.map (fun (k, v) -> k ^ ": " ^ value_to_string v) fields)
     ^ " }"
   | VCon ("Nil", []) -> "[]"
   | VCon ("Cons", _) as v when is_list_value v ->
@@ -971,7 +971,7 @@ let value_to_string_pretty ?(width=80) ?(max_items=50) ?(max_depth=6) v =
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
         let strs = truncate_fields fields
-          (fun d (k, fv) -> k ^ " = " ^ pp (d + 1) fv) depth in
+          (fun d (k, fv) -> k ^ ": " ^ pp (d + 1) fv) depth in
         "{ " ^ String.concat ("\n" ^ pad ^ ", ") strs
         ^ "\n" ^ close_pad ^ "}"
       | VTuple vs ->

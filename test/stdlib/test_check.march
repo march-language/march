@@ -67,7 +67,7 @@ mod TestCheck do
     -- Run twice with the same seed via all_with; each should find the
     -- same minimal counterexample.  We verify by catching the panic
     -- via __try_call directly.
-    let config = { Check.default_config() with seed = Some(12345), num_runs = 200 }
+    let config = { Check.default_config() with seed: Some(12345), num_runs: 200 }
     let r1 = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
       -- __try_call is (Bool -> Bool); all_with panics before this is reached.
@@ -95,7 +95,7 @@ mod TestCheck do
     -- A property that never fails should run exactly num_runs times
     -- regardless of seed.  We can't observe run count directly, but we
     -- can ensure this doesn't panic with a low num_runs.
-    let config = { Check.default_config() with num_runs = 5 }
+    let config = { Check.default_config() with num_runs: 5 }
     Check.all_with(Gen.int(0, 100), fn n -> n >= 0, config)
   end
 
@@ -104,7 +104,7 @@ mod TestCheck do
   test "shrinking finds minimal failing input" do
     -- Property: n < 50 for Gen.int(0, 100).  Minimal counterexample is 50.
     -- Verify by catching the panic and checking the message mentions 50.
-    let config = { Check.default_config() with seed = Some(7), num_runs = 200 }
+    let config = { Check.default_config() with seed: Some(7), num_runs: 200 }
     let r = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(0, 100), fn n -> n < 50, config)
       true
@@ -119,7 +119,7 @@ mod TestCheck do
 
   test "property that crashes is reported as a failure" do
     -- int_div by zero raises; the runner should catch it.
-    let config = { Check.default_config() with seed = Some(99), num_runs = 50 }
+    let config = { Check.default_config() with seed: Some(99), num_runs: 50 }
     let r = __try_call(fn _ ->
       let _ = Check.all_with(Gen.int(-10, 10), fn n ->
         let _ = int_div(100, n)  -- crashes when n == 0

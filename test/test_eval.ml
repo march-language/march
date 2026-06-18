@@ -540,7 +540,7 @@ let test_tir_lower_match () =
 
 let test_tir_lower_record () =
   let m = lower_module {|mod Test do
-    fn make() do { x = 1, y = 2 } end
+    fn make() do { x: 1, y: 2 } end
   end|} in
   let f = find_fn "make" m in
   match f.fn_body with
@@ -1218,7 +1218,7 @@ let test_repl_parity_string_interp () =
 
 let test_repl_parity_records () =
   match repl_eval_exprs [
-    {|let p = { x = 1, y = 2 }|};
+    {|let p = { x: 1, y: 2 }|};
     {|p.x + p.y|};
   ] with
   | [`DeclOk; `Ok ("3", "Int")] -> ()
@@ -1242,7 +1242,7 @@ let test_repl_pretty_record () =
   let v = March_eval.Eval.VRecord [("name", March_eval.Eval.VString "Alice");
                                     ("age",  March_eval.Eval.VInt 30)] in
   let s = March_eval.Eval.value_to_string_pretty v in
-  Alcotest.(check string) "record" {|{ name = "Alice", age = 30 }|} s
+  Alcotest.(check string) "record" {|{ name: "Alice", age: 30 }|} s
 
 (** value_to_string_pretty: depth truncation *)
 let test_repl_pretty_depth_truncation () =
@@ -2455,8 +2455,8 @@ let test_atomic_rc_actor_send_uses_atomic_rc () =
     type Box = Box(Int)
     actor Counter do
       state { ticks : Int }
-      init { ticks = 0 }
-      on Tick() do { ticks = state.ticks + 1 } end
+      init { ticks: 0 }
+      on Tick() do { ticks: state.ticks + 1 } end
     end
     fn main() : Unit do
       let pid = spawn(Counter)
@@ -2481,8 +2481,8 @@ let test_atomic_rc_sent_box_shared_gets_atomic_inc () =
     type Box = Box(Int)
     actor Sink do
       state { count : Int }
-      init { count = 0 }
-      on Got(b : Box) do { count = state.count + 1 } end
+      init { count: 0 }
+      on Got(b : Box) do { count: state.count + 1 } end
     end
     fn f(b : Box) : Box do
       let pid = spawn(Sink)
@@ -2642,9 +2642,9 @@ let test_actor_tir_lowering_generates_types () =
   let m = lower_module_typed {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
-      on Increment() do { value = state.value + 1 } end
-      on Reset()     do { value = 0 } end
+      init { value: 0 }
+      on Increment() do { value: state.value + 1 } end
+      on Reset()     do { value: 0 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2666,9 +2666,9 @@ let test_actor_tir_lowering_generates_functions () =
   let m = lower_module_typed {|mod Test do
     actor Counter do
       state { value : Int }
-      init { value = 0 }
-      on Increment() do { value = state.value + 1 } end
-      on Reset()     do { value = 0 } end
+      init { value: 0 }
+      on Increment() do { value: state.value + 1 } end
+      on Reset()     do { value: 0 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2687,9 +2687,9 @@ let test_actor_tir_dispatch_has_ecase () =
   let m = lower_module_typed {|mod Test do
     actor Greeter do
       state { value : Int }
-      init { value = 0 }
-      on Hello() do { value = state.value + 1 } end
-      on Bye()   do { value = state.value - 1 } end
+      init { value: 0 }
+      on Hello() do { value: state.value + 1 } end
+      on Bye()   do { value: state.value - 1 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2706,10 +2706,10 @@ let test_actor_tir_dispatch_branch_count () =
   let m = lower_module_typed {|mod Test do
     actor Multi do
       state { value : Int }
-      init { value = 0 }
-      on A() do { value = state.value + 1 } end
-      on B() do { value = state.value + 2 } end
-      on C() do { value = state.value + 3 } end
+      init { value: 0 }
+      on A() do { value: state.value + 1 } end
+      on B() do { value: state.value + 2 } end
+      on C() do { value: state.value + 3 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2726,8 +2726,8 @@ let test_actor_tir_spawn_returns_ptr () =
   let m = lower_module_typed {|mod Test do
     actor Simple do
       state { value : Int }
-      init { value = 0 }
-      on Tick() do { value = state.value + 1 } end
+      init { value: 0 }
+      on Tick() do { value: state.value + 1 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2742,8 +2742,8 @@ let test_actor_tir_handler_params () =
   let m = lower_module_typed {|mod Test do
     actor Adder do
       state { value : Int }
-      init { value = 0 }
-      on Add(n : Int) do { value = state.value + n } end
+      init { value: 0 }
+      on Add(n : Int) do { value: state.value + n } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2761,8 +2761,8 @@ let test_actor_tir_handler_loads_state () =
   let m = lower_module_typed {|mod Test do
     actor Banked do
       state { balance : Int }
-      init { balance = 100 }
-      on Withdraw() do { balance = state.balance - 10 } end
+      init { balance: 100 }
+      on Withdraw() do { balance: state.balance - 10 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2782,8 +2782,8 @@ let test_actor_tir_spawn_contains_ealloc () =
   let m = lower_module_typed {|mod Test do
     actor Ticker do
       state { ticks : Int }
-      init { ticks = 0 }
-      on Tick() do { ticks = state.ticks + 1 } end
+      init { ticks: 0 }
+      on Tick() do { ticks: state.ticks + 1 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2803,18 +2803,18 @@ let test_actor_tir_supervisor_spawn_calls_register () =
   let m = lower_module_typed {|mod Test do
     actor Worker do
       state { count : Int }
-      init { count = 0 }
-      on DoWork() do { count = state.count + 1 } end
+      init { count: 0 }
+      on DoWork() do { count: state.count + 1 } end
     end
     actor Supervisor do
       state { count : Int }
-      init { count = 0 }
+      init { count: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
         Worker worker
       end
-      on Start() do { count = state.count } end
+      on Start() do { count: state.count } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2836,8 +2836,8 @@ let test_actor_tir_non_supervisor_no_register () =
   let m = lower_module_typed {|mod Test do
     actor Plain do
       state { value : Int }
-      init { value = 0 }
-      on Tick() do { value = state.value + 1 } end
+      init { value: 0 }
+      on Tick() do { value: state.value + 1 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2859,10 +2859,10 @@ let test_actor_tir_msg_variant_ctors () =
   let m = lower_module_typed {|mod Test do
     actor Calc do
       state { value : Int }
-      init { value = 0 }
-      on Add(n : Int) do { value = state.value + n } end
-      on Sub(n : Int) do { value = state.value - n } end
-      on Zero() do { value = 0 } end
+      init { value: 0 }
+      on Add(n : Int) do { value: state.value + n } end
+      on Sub(n : Int) do { value: state.value - n } end
+      on Zero() do { value: 0 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2885,8 +2885,8 @@ let test_actor_tir_actor_struct_has_dispatch_field () =
   let m = lower_module_typed {|mod Test do
     actor Box do
       state { value : Int }
-      init { value = 0 }
-      on Poke() do { value = state.value + 1 } end
+      init { value: 0 }
+      on Poke() do { value: state.value + 1 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2908,8 +2908,8 @@ let test_actor_tir_full_pipeline_no_crash () =
   let m = perceus_module {|mod Test do
     actor Echo do
       state { count : Int }
-      init { count = 0 }
-      on Ping() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Ping() do { count: state.count + 1 } end
     end
     fn main() : Unit do
       let pid = spawn(Echo)
@@ -2927,9 +2927,9 @@ let test_actor_compile_dispatch_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
-      on Inc() do { count = state.count + 1 } end
-      on Reset() do { count = 0 } end
+      init { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+      on Reset() do { count: 0 } end
     end
     fn main() : Unit do
       let pid = spawn(Counter)
@@ -2949,8 +2949,8 @@ let test_actor_compile_spawn_fn_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor Greeter do
       state { n : Int }
-      init { n = 0 }
-      on Hello() do { n = state.n + 1 } end
+      init { n: 0 }
+      on Hello() do { n: state.n + 1 } end
     end
     fn main() : Unit do
       let _ = spawn(Greeter)
@@ -2967,10 +2967,10 @@ let test_actor_compile_handlers_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on DoA() do { x = state.x + 1 } end
-      on DoB() do { x = state.x - 1 } end
-      on DoC() do { x = 0 } end
+      init { x: 0 }
+      on DoA() do { x: state.x + 1 } end
+      on DoB() do { x: state.x - 1 } end
+      on DoC() do { x: 0 } end
     end
     fn main() : Unit do () end
   end|} in
@@ -2986,12 +2986,12 @@ let test_actor_compile_supervisor_registers () =
   let ir = emit_actor_ir {|mod Test do
     actor Worker do
       state { x : Int }
-      init { x = 0 }
-      on Tick() do { x = state.x + 1 } end
+      init { x: 0 }
+      on Tick() do { x: state.x + 1 } end
     end
     actor Sup do
       state { w : Int }
-      init { w = 0 }
+      init { w: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 60
@@ -3012,12 +3012,12 @@ let test_actor_compile_monitor_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor Target do
       state { x : Int }
-      init { x = 0 }
-      on Stop() do { x = -1 } end
+      init { x: 0 }
+      on Stop() do { x: -1 } end
     end
     actor Watcher do
       state { ref_ : Int }
-      init { ref_ = 0 }
+      init { ref_: 0 }
     end
     fn main() : Unit do
       let t = spawn(Target)
@@ -3034,13 +3034,13 @@ let test_actor_compile_link_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor A do
       state { x : Int }
-      init { x = 0 }
-      on Ping() do { x = 1 } end
+      init { x: 0 }
+      on Ping() do { x: 1 } end
     end
     actor B do
       state { x : Int }
-      init { x = 0 }
-      on Pong() do { x = 1 } end
+      init { x: 0 }
+      on Pong() do { x: 1 } end
     end
     fn main() : Unit do
       let a = spawn(A)
@@ -3057,18 +3057,18 @@ let test_actor_compile_multi_actor_no_crash () =
   let ir = emit_actor_ir {|mod Test do
     actor A do
       state { v : Int }
-      init { v = 0 }
-      on MsgA() do { v = 1 } end
+      init { v: 0 }
+      on MsgA() do { v: 1 } end
     end
     actor B do
       state { v : Int }
-      init { v = 0 }
-      on MsgB() do { v = 2 } end
+      init { v: 0 }
+      on MsgB() do { v: 2 } end
     end
     actor C do
       state { v : Int }
-      init { v = 0 }
-      on MsgC() do { v = 3 } end
+      init { v: 0 }
+      on MsgC() do { v: 3 } end
     end
     fn main() : Unit do
       let _ = spawn(A)
@@ -3086,8 +3086,8 @@ let test_actor_compile_run_scheduler_in_main () =
   let ir = emit_actor_ir {|mod Test do
     actor Echo do
       state { count : Int }
-      init { count = 0 }
-      on Ping() do { count = state.count + 1 } end
+      init { count: 0 }
+      on Ping() do { count: state.count + 1 } end
     end
     fn main() : Unit do
       let pid = spawn(Echo)
@@ -3104,9 +3104,9 @@ let test_actor_compile_call_reply_emitted () =
   let ir = emit_actor_ir {|mod Test do
     actor Counter do
       state { count : Int }
-      init { count = 0 }
+      init { count: 0 }
       on Increment() do
-        { count = state.count + 1 }
+        { count: state.count + 1 }
       end
       on GetCount(reply_to) do
         Actor.reply(reply_to, state.count)
@@ -3666,7 +3666,7 @@ let test_perceus_record_param_multi_call_no_rc_underflow () =
     end
 
     fn main() do
-      let cfg = { dir = "content" }
+      let cfg = { dir: "content" }
       process(cfg, Cons("a", Cons("b", Nil)), 0)
     end
 
@@ -3811,7 +3811,7 @@ let test_perceus_local_record_field_no_spurious_decrc () =
     type Meta = { draft: Bool, title: String }
 
     pfn make_meta(s: String) : Meta do
-      { draft = false, title = s }
+      { draft: false, title: s }
     end
 
     pfn render(s: String) : Int do

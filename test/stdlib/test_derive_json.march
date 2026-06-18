@@ -139,7 +139,7 @@ mod TestDeriveJson do
 
   describe "derive Json for records" do
     test "to_json for User" do
-      let j = to_json({ name = "Alice", age = 30, active = true })
+      let j = to_json({ name: "Alice", age: 30, active: true })
       let s = Json.to_string(j)
       assert (String.contains(s, "\"name\""))
       assert (String.contains(s, "\"age\""))
@@ -147,7 +147,7 @@ mod TestDeriveJson do
     end
 
     test "roundtrip User" do
-      let u = { name = "Alice", age = 30, active = true }
+      let u = { name: "Alice", age: 30, active: true }
       let j = to_json(u)
       let result = from_json(j)
       match result do

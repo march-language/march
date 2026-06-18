@@ -1,7 +1,7 @@
 -- BigInt module: arbitrary-precision integers.
 --
 -- Representation: BigInt(sign, digits) where
---   sign   : Bool   — true = non-negative, false = negative
+--   sign   : Bool   — true = non-negative, false: negative
 --   digits : List(Int) — little-endian base-10000 digit list
 --                        (least significant limb first)
 --   BigInt(true, Nil) represents zero.
