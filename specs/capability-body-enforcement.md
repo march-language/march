@@ -42,7 +42,7 @@ The fix is two-phased:
 
 ## Capability Hierarchy Additions
 
-One new leaf needed; everything else already exists:
+Two new leaves needed; everything else already exists:
 
 ```
 IO
@@ -52,20 +52,42 @@ IO
 │   └── IO.FileWrite   (existing)
 ├── IO.Network
 │   ├── IO.NetConnect  (existing)
+│   │   └── IO.Database  ← NEW
 │   └── IO.NetListen   (existing)
 ├── IO.Process         (existing)
 ├── IO.Clock           (existing)
 └── IO.Random          ← NEW
 ```
 
-`IO.Random` covers CSPRNG operations. Reading entropy from the OS is a side
+**`IO.Random`** covers CSPRNG operations. Reading entropy from the OS is a side
 effect (it consumes kernel randomness pool state, is non-deterministic, and
 can block under rare conditions).
 
+**`IO.Database`** is a **declaration-only capability** — there are no
+database-specific builtins (Depot speaks PostgreSQL over raw `tcp_connect` /
+`tcp_send_all` / `tcp_recv_exact`). It lives as a child of `IO.NetConnect`
+because database connections are outbound TCP connections. Its purpose is
+semantic: a library that opens database connections declares `needs IO.Database`
+at its module top-level, and that declaration propagates transitively to any
+application that imports the library (Check 4). This makes database access
+visible in the application's own `needs` block without requiring any new
+builtins.
+
+Placement as a child of `IO.NetConnect` means `needs IO.NetConnect` (or any
+ancestor: `IO.Network`, `IO`) also satisfies a `needs IO.Database` requirement
+from an imported library. An application that already declares
+`needs IO.NetConnect` for HTTP client work therefore automatically covers
+database access too.
+
 Add to `io_cap_hierarchy` in `lib/typecheck/typecheck.ml`:
 ```ocaml
-("IO.Random", Some "IO");
+("IO.Random",   Some "IO");
+("IO.Database", Some "IO.NetConnect");
 ```
+
+**Note:** `IO.Database` has no entries in the `builtin_cap_table`. It is
+enforced only through library declarations and transitive propagation —
+not by the body-scanning pass.
 
 ---
 
@@ -210,49 +232,64 @@ that the capability system shouldn't gate.
 
 ---
 
-## Phase 1: Stdlib Annotation
+## Phase 1: Annotation Pass
 
-Before body-scanning is enforced, stdlib modules that call IO builtins must
-declare the appropriate `needs`. This is the prerequisite — without it, turning
-on Phase 2 would make the stdlib itself fail to compile.
+Before body-scanning is enforced, all library modules that call IO builtins
+must declare the appropriate `needs`. This covers both the March stdlib and
+external libraries that are already live (primarily Depot). Without this,
+turning on Phase 2 would make these libraries fail to compile.
 
-**Files to update with `needs` declarations:**
+### Stdlib modules
 
 | Module file | Declarations to add |
 |---|---|
 | `stdlib/io.march` | `needs IO.Console` |
-| `stdlib/file.march` | `needs IO.FileRead` — for `file_read`, `file_open`, `file_stat`, `file_exists` |
-| `stdlib/file.march` | `needs IO.FileWrite` — for `file_write`, `file_append`, `file_delete`, `file_rename`, `file_copy` |
-| `stdlib/dir.march` (or `file.march` if co-located) | `needs IO.FileRead`, `needs IO.FileWrite` |
+| `stdlib/file.march` | `needs IO.FileRead`, `needs IO.FileWrite` |
+| `stdlib/dir.march` | `needs IO.FileRead`, `needs IO.FileWrite` |
 | `stdlib/system.march` | `needs IO.Process`, `needs IO.Clock` |
-| `stdlib/csv.march` (if it exists as standalone) | `needs IO.FileRead` |
-| `stdlib/uuid.march` | `needs IO.Random` — for `uuid_v4`, `uuid_v7` |
+| `stdlib/csv.march` | `needs IO.FileRead` |
+| `stdlib/uuid.march` | `needs IO.Random` |
 | `stdlib/random.march` | `needs IO.Random` |
-| `stdlib/crypto.march` | `needs IO.Random` — for `random_bytes` only |
+| `stdlib/crypto.march` | `needs IO.Random` |
 
-The `needs` declaration goes at module top-level (inside the `mod Name do`
-block), exactly as user modules declare them:
+### Depot library modules
+
+Depot speaks PostgreSQL over raw TCP and is already live with real PG access.
+Its wire layer calls `tcp_connect`, `tcp_send_all`, and `tcp_recv_exact`
+directly — covered by `IO.NetConnect`. In addition, Depot declares
+`needs IO.Database` at the module level for semantic clarity (even though
+`IO.Database` has no builtin table entries). This makes database access
+visible in any application's transitive `needs` block.
+
+| Module file | Declarations to add |
+|---|---|
+| `depot/lib/wire/connection.march` | `needs IO.NetConnect`, `needs IO.Database` |
+| `depot/lib/wire/pool.march` | `needs IO.NetConnect`, `needs IO.Database` |
+| `depot/lib/depot.march` (top-level facade) | `needs IO.Database` |
+
+An application that imports Depot and declares `needs IO.NetConnect` (or any
+ancestor) automatically satisfies the `needs IO.Database` transitive
+requirement, since `IO.Database` is a child of `IO.NetConnect`.
+
+The `needs` declaration goes at module top-level, inside the `mod Name do`
+block:
 
 ```march
-mod File do
-  needs IO.FileRead
-  needs IO.FileWrite
+mod Connection do
+  needs IO.NetConnect
+  needs IO.Database
 
-  fn read(path) do
-    file_read(path)
+  pfn connect(cfg) do
+    match tcp_connect(cfg.host, cfg.port) do
+    ...
   end
-  ...
 end
 ```
 
 Once Phase 1 is complete, transitive enforcement (Check 4, already implemented)
-automatically propagates: any user module that imports `File` and calls
-`File.read` will be required to declare `needs IO.FileRead` — with no changes
-to the transitive enforcement code.
+propagates automatically — no changes to Check 4 needed.
 
-**LoE for Phase 1:** ~0.5 days. Mechanical annotation; each stdlib module
-needs one or two `needs` lines added and then the test suite re-run to verify
-the stdlib still typechecks cleanly.
+**LoE for Phase 1:** ~1 day total (stdlib ~0.5 days, Depot wire layer ~0.5 days).
 
 ---
 
@@ -504,12 +541,12 @@ by Check 1 (signature scanning).
 
 ## Implementation Plan
 
-### Phase 1 — Stdlib annotation
+### Phase 1 — Annotation pass
 
-**Files:** ~8 stdlib `.march` files  
+**Files:** ~8 stdlib `.march` files + Depot wire layer (`connection.march`, `pool.march`, `depot.march`)  
 **Changes:** Add 1–2 `needs X` lines per file  
 **Tests:** Run full suite after each file; expect zero failures (needs declarations are new, not changes)  
-**LoE:** ~0.5 days
+**LoE:** ~1 day
 
 ### Phase 2 — Body-scanning pass
 
@@ -519,7 +556,7 @@ by Check 1 (signature scanning).
   - Add `calls_in_expr` AST walker (~35 lines)
   - Extend `check_module_needs` to collect `body_cap_uses` and merge with
     existing `used_caps` (~25 lines)
-  - Add `IO.Random` to `io_cap_hierarchy` (~1 line)
+  - Add `IO.Random` and `IO.Database` to `io_cap_hierarchy` (~2 lines)
 - `lib/typecheck/typecheck.ml` (error message) — extend the Check 1 error path
   to mention "body call" vs. "signature mention" in the diagnostic
 
@@ -551,9 +588,9 @@ by Check 1 (signature scanning).
 
 | Phase | What it does | LoE | Breaking? |
 |---|---|---|---|
-| 1 — Stdlib annotation | Add `needs` to stdlib IO modules | 0.5 days | No |
+| 1 — Annotation pass | Add `needs` to stdlib + Depot wire layer; add `IO.Database`/`IO.Random` to hierarchy | 1 day | No |
 | 2 — Body scanning | Walk bodies; enforce builtin→cap table | 1.5 days | Warning then error |
-| Total | Full capability enforcement | **~2 days** | Soft migration |
+| Total | Full capability enforcement | **~2.5 days** | Soft migration |
 
 After both phases, `needs` declarations become a **real static guarantee**:
 a module's capability requirements are visible at its top level, and the
