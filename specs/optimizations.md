@@ -526,7 +526,9 @@ end
 **Effort:** Medium | **Impact:** Medium-High (tree-heavy workloads)
 **Dependencies:** Perceus (extends existing reuse logic)
 **Stage:** TIR pass — extends `lib/tir/perceus.ml`
-**Status:** Planned
+**Status:** Done
+
+**Implementation:** Replaced `shape_matches` (name equality) with `same_arity` (field-count equality) in `lib/tir/perceus.ml`. `add_scrutinee_free_for` encodes the consumed constructor's arity as dummy `TUnit` type-args in the DecRC var's type (`TCon(qualified_tag, [TUnit; …])`), so `same_arity` can compare field counts without type definitions. `try_fbip_sink` and `fbip_expr` both use `same_arity dec_v.v_ty (List.length args)` instead of name equality. Cross-ctor reuse is safe because March allocates `[tag + nfields × ptr]` blocks — same arity ⟺ same block size; the new tag is written into the reused cell by `llvm_emit`. 5 new tests in `fbip_p8` group (`same_arity` unit tests + `fbip_expr` integration tests).
 
 ---
 

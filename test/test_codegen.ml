@@ -2788,6 +2788,77 @@ let test_beta_adt_no_fire_non_case () =
   let _m' = March_tir.Beta_adt.run ~changed m in
   Alcotest.(check bool) "not changed" false !changed
 
+(* ── P8: FBIP cross-tag constructor reuse ───────────────────────────────── *)
+
+(** P8 basic: same_arity returns true when type has the same field count.
+    TCon("Foo.A", [TUnit; TUnit]) encodes arity=2; nfields=2 → true. *)
+let test_same_arity_match () =
+  let ty = March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit; March_tir.Tir.TUnit]) in
+  Alcotest.(check bool) "same arity matches" true
+    (March_tir.Perceus.same_arity ty 2)
+
+(** P8: different arity returns false. *)
+let test_same_arity_mismatch () =
+  let ty = March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit]) in
+  Alcotest.(check bool) "different arity does not match" false
+    (March_tir.Perceus.same_arity ty 2)
+
+(** P8: non-TCon type returns false (no arity info). *)
+let test_same_arity_non_tcon () =
+  Alcotest.(check bool) "non-TCon always false" false
+    (March_tir.Perceus.same_arity March_tir.Tir.TInt 0)
+
+(** P8 integration: cross-tag FBIP fires.  We construct a TIR expression that
+    mirrors what Perceus emits for a consumed scrutinee followed by a same-arity
+    alloc of a different constructor.  Perceus wraps the decrc in ESeq (via
+    add_scrutinee_free_for), so fbip_expr's ESeq path calls try_fbip_sink.
+
+    Shape (Perceus ESeq form):
+      ESeq(EDecRC(v : TCon("Foo.A", [TUnit])),   -- arity=1 encoded
+           ELet(result, EAlloc(TCon("Foo.B",[]), [arg]),
+                EAtom result))
+    → ELet(result, EReuse(AVar v, TCon("Foo.B",[]), [arg]),
+           EAtom result) *)
+let test_fbip_cross_tag_reuse () =
+  (* v's type encodes arity=1 as one dummy TUnit arg *)
+  let v = mk_var "v" (March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit])) in
+  let result = mk_var "result" (March_tir.Tir.TCon ("Foo", [])) in
+  let arg = March_tir.Tir.ALit (March_ast.Ast.LitInt 42) in
+  let e =
+    March_tir.Tir.ESeq (
+      March_tir.Tir.EDecRC (March_tir.Tir.AVar v),
+      March_tir.Tir.ELet (result,
+        March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Foo.B", []), [arg]),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar result))) in
+  let e' = March_tir.Perceus.fbip_expr e in
+  match e' with
+  | March_tir.Tir.ELet (_, March_tir.Tir.EReuse (March_tir.Tir.AVar rv, _, _), _) ->
+    Alcotest.(check string) "reuses v" "v" rv.March_tir.Tir.v_name
+  | _ ->
+    Alcotest.failf "expected EReuse, got: %s" (March_tir.Tir.show_expr e')
+
+(** P8: different arity does NOT produce EReuse — falls back to ESeq EDecRC. *)
+let test_fbip_no_reuse_arity_mismatch () =
+  (* v's type encodes arity=1; alloc has 2 fields → arity mismatch → no reuse *)
+  let v = mk_var "v" (March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit])) in
+  let result = mk_var "result" (March_tir.Tir.TCon ("Foo", [])) in
+  let arg1 = March_tir.Tir.ALit (March_ast.Ast.LitInt 1) in
+  let arg2 = March_tir.Tir.ALit (March_ast.Ast.LitInt 2) in
+  let e =
+    March_tir.Tir.ESeq (
+      March_tir.Tir.EDecRC (March_tir.Tir.AVar v),
+      March_tir.Tir.ELet (result,
+        March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Foo.B", []), [arg1; arg2]),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar result))) in
+  let e' = March_tir.Perceus.fbip_expr e in
+  match e' with
+  | March_tir.Tir.ESeq (March_tir.Tir.EDecRC _, _) ->
+    ()  (* correct: no reuse, kept as ESeq(EDecRC, ...) *)
+  | March_tir.Tir.ELet (_, March_tir.Tir.EReuse _, _) ->
+    Alcotest.fail "should NOT produce EReuse for arity mismatch"
+  | _ ->
+    Alcotest.failf "unexpected shape: %s" (March_tir.Tir.show_expr e')
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -4563,6 +4634,13 @@ let codegen_suites =
         Alcotest.test_case "ok_inline"               `Quick test_beta_adt_ok_inline;
         Alcotest.test_case "qualified_tag"           `Quick test_beta_adt_qualified_tag;
         Alcotest.test_case "no_fire_non_case"        `Quick test_beta_adt_no_fire_non_case;
+      ]);
+      ("fbip_p8", [
+        Alcotest.test_case "same_arity_match"        `Quick test_same_arity_match;
+        Alcotest.test_case "same_arity_mismatch"     `Quick test_same_arity_mismatch;
+        Alcotest.test_case "same_arity_non_tcon"     `Quick test_same_arity_non_tcon;
+        Alcotest.test_case "cross_tag_reuse"         `Quick test_fbip_cross_tag_reuse;
+        Alcotest.test_case "no_reuse_arity_mismatch" `Quick test_fbip_no_reuse_arity_mismatch;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

@@ -230,11 +230,19 @@ let vars_of_atoms (atoms : Tir.atom list) : StringSet.t =
   List.fold_left (fun s a -> StringSet.union s (vars_of_atom a))
     StringSet.empty atoms
 
-(** Shape compatibility for FBIP reuse. *)
-let shape_matches (t1 : Tir.ty) (t2 : Tir.ty) : bool =
-  match t1, t2 with
-  | Tir.TCon (n1, ts1), Tir.TCon (n2, ts2) ->
-    String.equal n1 n2 && List.length ts1 = List.length ts2
+(** Arity check for FBIP reuse — P8 extension.
+    [dec_v.v_ty] carries the arity of the consumed (freed) constructor as
+    the length of its dummy TUnit type-arg list (see [add_scrutinee_free_for]).
+    [nfields] is the number of arguments the new EAlloc will produce.
+    Two constructors are reuse-compatible iff they have the SAME field count:
+    the March GC allocates blocks as [tag + nfields × ptr], so any two
+    constructors with the same arity have identical allocation sizes and can
+    safely exchange their cells — the new tag is written into the reused block
+    by the FBIP branch in llvm_emit.  Cross-ctor reuse (P8) is enabled here
+    by NOT requiring the constructor name to match, only the arity. *)
+let same_arity (t : Tir.ty) (nfields : int) : bool =
+  match t with
+  | Tir.TCon (_, ts) -> List.length ts = nfields
   | _ -> false
 
 (* ── Phase 1: Backwards Liveness Analysis ────────────────────────────────── *)
@@ -766,33 +774,34 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        need to free the allocation header — EDecRC handles both the unique
        case (RC→0 → free) and the shared case (RC>1 → just decrement).
        We tag the DecRC var with the CONCRETE constructor type (br.br_tag)
-       so that the FBIP pass can match it against same-constructor EAllocs. *)
-    let add_scrutinee_free_for ctor_tag body =
+       so that the FBIP pass can match it against EAllocs of compatible arity.
+       The arity (number of branch-bound variables = number of fields) is
+       encoded as dummy TUnit type args so that [same_arity] can compare it
+       against the new EAlloc's arg count without needing type definitions. *)
+    let add_scrutinee_free_for ctor_tag arity body =
       match a with
       | Tir.AVar v when needs_rc v.Tir.v_ty
                      && not (StringSet.mem v.Tir.v_name live_after)
                      && not (name_free_in v.Tir.v_name body) ->
-        (* Use the concrete ctor type so shape_matches works in FBIP.
+        (* Use the concrete ctor type so FBIP can recognise the tag.
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
            of one of its fields via a nested match).
            IMPORTANT: qualify the ctor_tag with the scrutinee's type name so it
            matches the key format used by EAlloc (see lower.ml ECon case:
-           ctor_key = type_name ^ "." ^ tag).  Without this, shape_matches
-           compares e.g. "Leaf" vs "Tree.Leaf" and always returns false,
-           preventing FBIP from ever firing.
-           When the scrutinee's type is unknown (TVar — typical for closure-
-           internal helpers whose params are erased to TVar "_"), we cannot
-           form a qualified tag.  Falling back to the bare ctor_tag would let
-           shape_matches false-positive against any same-name ctor of a
-           different type and silently write wrong-layout fields into the
-           reused cell.  Instead, leave the var's type untouched: shape_matches
-           is total on its arguments and will simply return false, suppressing
-           FBIP for this scrutinee — the safe choice. *)
+           ctor_key = type_name ^ "." ^ tag).  Without this, the FBIP pass
+           compares e.g. "Leaf" vs "Tree.Leaf" and always returns false.
+           Encode [arity] as dummy TUnit args so [same_arity] can compare
+           field counts.  When the scrutinee's type is unknown (TVar — typical
+           for closure-internal helpers whose params are erased to TVar "_"),
+           we cannot form a qualified tag; falling back to the bare ctor_tag
+           would let [same_arity] false-positive — leave the type untouched
+           so [same_arity] returns false, suppressing FBIP conservatively. *)
         let ctor_v = match v.Tir.v_ty with
           | Tir.TCon (type_name, _) ->
             let qualified_tag = type_name ^ "." ^ ctor_tag in
-            { v with Tir.v_ty = Tir.TCon (qualified_tag, []) }
+            let dummy_args = List.init arity (fun _ -> Tir.TUnit) in
+            { v with Tir.v_ty = Tir.TCon (qualified_tag, dummy_args) }
           | _ -> v
         in
         Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
@@ -896,7 +905,8 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       ) dead_here body
     in
     let branches' = List.map (fun (br, body', live_before_br, bound) ->
-      let body_with_scrut = add_scrutinee_free_for br.Tir.br_tag body' in
+      let br_arity = List.length br.Tir.br_vars in
+      let body_with_scrut = add_scrutinee_free_for br.Tir.br_tag br_arity body' in
       let body_with_cross = add_cross_decrcs live_before_br bound body_with_scrut in
       { br with Tir.br_body = body_with_cross }
     ) branches_processed in
@@ -1243,13 +1253,13 @@ let elide_cancel_pairs (fn : Tir.fn_def) : Tir.fn_def =
     only when [dec_v] does not appear in any RHS along the chain. *)
 let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
   match body with
-  (* EAlloc in tail position — reuse directly *)
+  (* EAlloc in tail position — reuse directly if arities match *)
   | Tir.EAlloc (ty, args)
-    when shape_matches dec_v.Tir.v_ty ty ->
+    when same_arity dec_v.Tir.v_ty (List.length args) ->
     Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
   (* EAlloc bound to a result variable *)
   | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
-    when shape_matches dec_v.Tir.v_ty ty ->
+    when same_arity dec_v.Tir.v_ty (List.length args) ->
     Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
   (* dec_v not used in rhs — safe to sink past this binding *)
   | Tir.ELet (v, rhs, inner)
@@ -1258,15 +1268,15 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
                (try_fbip_sink dec_v inner)
   | _ -> None
 
-(** Detect DecRC + Alloc of matching shape and replace with Reuse. *)
+(** Detect DecRC + Alloc of compatible arity and replace with Reuse. *)
 let rec fbip_expr (e : Tir.expr) : Tir.expr =
   match e with
   (* Pattern: let _ = decrc(v) in let result = alloc(ty, args) in rest
-     where shape_matches(v.v_ty, ty)
+     where same_arity(v.v_ty, len(args)).
      Replace the whole thing, dropping the dead let binding for the decrc. *)
   | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
               Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when shape_matches dec_v.Tir.v_ty ty ->
+    when same_arity dec_v.Tir.v_ty (List.length args) ->
     let rest' = fbip_expr rest in
     Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
   (* ESeq(EDecRC v, body): try to sink the decrc to be adjacent to an

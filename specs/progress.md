@@ -287,11 +287,12 @@ march/
 - **Pipeline integration** — audit runs after `Fusion.run` and before `Defun.defunctionalize` in `bin/main.ml`; same position added to JIT pipeline in `lib/jit/repl_jit.ml`. Violations print to stderr and cause `exit 1`.
 - **8 new unit tests** in `policy_dce` suite (TIR-level direct calls to `Policy_dce.audit`). **236 compiler / 780 total tests pass.**
 
-## Current State (as of 2026-06-18, P11 + P12 compiler optimizations)
+## Current State (as of 2026-06-18, P8 + P11 + P12 compiler optimizations)
 
 - **P11 — Beta-ADT / case-of-known-constructor** (`lib/tir/beta_adt.ml`, new ~84 lines): matches `let r = EAlloc(tag, args) in ECase(r, [{tag; vs; body}], default)` and reduces to `let v0=args[0] in … in body`. Run pre-Perceus in `bin/main.ml` (before RC insertion). NOT in post-Perceus opt loop: Perceus inserts `EDecRC(scrutinee)` in the matching branch body, which would reference unbound `r` after P11 eliminates the ELet. `tags_match` handles qualified (`Result.Ok`) vs bare (`Ok`) tag names via `short_name` helper.
 - **P12 — Variable copy propagation** (`lib/tir/cprop.ml`): added `avar_env : (string * Tir.var) list` tracking `let x = y` variable aliases in addition to the existing literal env. Excludes `TFn`/`TVar` closure types (ECallPtr dispatch is name-sensitive in llvm_emit). Uses `~allow_avar:false` for ECallPtr's function argument position. RC operations (EFree/EIncRC/EDecRC/EAtomicIncRC/EAtomicDecRC) are never substituted.
-- **9 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously). Test count: **1517** (282 codegen + 780 stdlib).
+- **P8 — FBIP cross-tag constructor reuse** (`lib/tir/perceus.ml`): replaced `shape_matches` (name equality) with `same_arity` (field-count equality). `add_scrutinee_free_for` encodes the consumed ctor's arity as dummy `TUnit` type-args in the DecRC var's type (`TCon(qualified_tag, [TUnit; …])`). `try_fbip_sink` and `fbip_expr` both use `same_arity dec_v.v_ty (List.length args)`. Cross-tag reuse safe because March allocates `[tag + nfields × ptr]` blocks — same arity ⟺ same block size.
+- **14 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously + 5 fbip_p8). Test count: **1522** (287 codegen + 780 stdlib).
 
 ## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
 
