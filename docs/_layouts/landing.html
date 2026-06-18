@@ -242,8 +242,18 @@
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
       padding: 4px 12px; border-radius: 100px; border: 1px solid var(--border);
       background: transparent; color: var(--text-muted); cursor: pointer; letter-spacing: 0.02em;
+      position: relative;
     }
     .m-repl-chip:hover { border-color: var(--accent-border); color: var(--accent); }
+    .m-repl-chip[data-tip]::after {
+      content: attr(data-tip);
+      position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+      background: var(--bg-nav, var(--bg-code)); border: 1px solid var(--border);
+      color: var(--text-muted); font-size: 10px; white-space: nowrap;
+      padding: 3px 8px; border-radius: 4px; pointer-events: none;
+      opacity: 0; transition: opacity 0.15s 0.3s; z-index: 20;
+    }
+    .m-repl-chip[data-tip]:hover::after { opacity: 1; }
 
     /* INSTALL */
     .m-install { padding: 100px 32px; }
@@ -441,11 +451,11 @@
       </div>
     </div>
     <div class="m-repl-chips">
-      <button class="m-repl-chip" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
-      <button class="m-repl-chip" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
-      <button class="m-repl-chip" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
-      <button class="m-repl-chip" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet mean = List.fold_left(data, 0.0, fn (a, x) -> a +. x) /. n\nlet var  = List.fold_left(data, 0.0, fn (a, x) -> a +. (x -. mean) *. (x -. mean)) /. n\n(mean, Math.sqrt(var))')">std dev</button>
-      <button class="m-repl-chip" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
+      <button class="m-repl-chip" data-tip="actors + message passing from the BEAM" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc() do { n = state.n + 1 } end\n  on Get() -> reply state.n\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Get())\nrun_until_idle()')">Actors</button>
+      <button class="m-repl-chip" data-tip="ADTs + recursive pattern matching" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
+      <button class="m-repl-chip" data-tip="typed error handling without exceptions" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
+      <button class="m-repl-chip" data-tip="mean &amp; std dev via List.fold_left + Math" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet mean = List.fold_left(data, 0.0, fn (a, x) -> a +. x) /. n\nlet var  = List.fold_left(data, 0.0, fn (a, x) -> a +. (x -. mean) *. (x -. mean)) /. n\n(mean, Math.sqrt(var))')">std dev</button>
+      <button class="m-repl-chip" data-tip="print to stdout" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
     </div>
   </div>
 </section>
