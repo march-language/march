@@ -104,9 +104,10 @@
   /* Syntax highlighter — minimal, regex-free, single-pass              */
   /* ------------------------------------------------------------------ */
 
-  var _KWS = ['fn','pfn','let','type','mod','do','end','match','if','else',
+  var _KWS = ['fn','pfn','let','type','ptype','mod','do','end','match','if','else','with','when',
               'actor','state','init','on','reply','spawn','send','run_until_idle',
-              'true','false','in','import'];
+              'true','false','in','import','use','doc',
+              'linear','always_linear','needs','cap','proof','tag','transitions'];
 
   function _esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
