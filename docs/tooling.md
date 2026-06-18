@@ -36,7 +36,9 @@ forge search "map"
 ### Creating a Project
 
 ```sh
-forge new my_app
+forge new my_app           # application project (default)
+forge new my_lib --lib     # library project
+forge new my_tool --tool   # CLI tool project
 cd my_app
 ```
 
@@ -60,18 +62,53 @@ version = "0.1.0"
 # add deps here
 ```
 
+To add a `forge.toml` to an existing directory without scaffolding:
+
+```sh
+forge init
+```
+
 ### Building and Running
 
 ```sh
 # Build the project
 forge build
 
+# Build in release mode (optimized)
+forge build --release
+
 # Build and run
 forge run
 
 # Run with arguments
 forge run -- --port 8080
+
+# Compile to native binary via LLVM (instead of the interpreter)
+forge run --compiled
+
+# Dump compiler IR phases to trace/phases/phases.json
+forge build --dump-phases
+forge run --dump-phases
+
+# Fail if forge.lock is out of sync with forge.toml
+forge build --frozen
 ```
+
+In a workspace, build a single member:
+
+```sh
+forge build -p my_lib
+```
+
+### Checking Types
+
+`forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
+
+```sh
+forge check
+```
+
+This catches type errors in every file under `lib/` (including orphaned modules that aren't reachable from the entry point), without paying for codegen or linking.
 
 ### Testing
 
@@ -81,19 +118,72 @@ forge test
 
 # Run tests matching a filter
 forge test --filter "list operations"
+
+# Show each test name as it runs
+forge test --verbose
+
+# Run a specific test file
+forge test test/parser_test.march
+
+# Property tests: run with a fixed seed (for reproducibility)
+forge test --seed 42
+
+# Skip property-based tests (Check.all)
+forge test --skip-properties
+
+# Collect and report coverage
+forge test --coverage
+
+# Compile test binary at -O2 (slower build, faster runtime)
+forge test --release
+```
+
+### Linting
+
+`forge lint` runs the March coding-standard rule engine across all source files:
+
+```sh
+forge lint               # report errors and warnings
+forge lint --strict      # treat warnings as errors; exit 1 on any finding
+forge lint --all         # also report hint-level findings
+```
+
+Rules are configurable via `.march-lint.toml` at the project root:
+
+```toml
+[rules]
+snake_case_functions = "error"
+unused_let           = "warning"
+missing_doc          = "off"
+```
+
+### Watch Mode
+
+`forge watch` reruns a command whenever a source file changes. It never exits on failure — it reports and keeps watching. Press Ctrl-C to stop.
+
+```sh
+forge watch            # rebuild on change (default)
+forge watch test       # rerun tests on change
+forge watch run        # rerun the app on change
+
+forge watch --clear    # clear the screen before each run
+forge watch --interval 500   # poll every 500 ms (default: 300 ms)
 ```
 
 ### Formatting
 
 ```sh
-forge format
-forge format --check   # check without modifying
+forge format                # format all .march files
+forge format --check        # check without modifying (for CI)
+forge format --stdin        # read from stdin, write to stdout (editor integration)
 ```
 
 ### Cleaning Build Artifacts
 
 ```sh
-forge clean
+forge clean           # remove build outputs under .march/build/
+forge clean --cas     # also remove the content-addressable cache (.march/cas/)
+forge clean --all     # remove the entire .march/ directory
 ```
 
 ### Interactive Mode (REPL)
@@ -145,8 +235,9 @@ forge search --doc "hash"
 ### Output Options
 
 ```sh
-forge search "map" --limit 5
-forge search "map" --json   # JSON output
+forge search "map" --limit 5      # cap results (default: 20)
+forge search "map" --json         # JSON output
+forge search "map" --pretty       # colored, aligned table
 ```
 
 ### Rebuilding the Search Index
@@ -198,15 +289,40 @@ This gives you a top-level map of what your codebase touches and what resource l
 
 ### Adding Dependencies
 
-Edit `forge.toml`:
+Use `forge add` to add a dependency without manually editing `forge.toml`:
+
+```sh
+# Git dependency (pinned to a tag)
+forge add depot --git https://github.com/march-language/depot --tag v1.2.0
+
+# Git dependency (tracked branch)
+forge add depot --git https://github.com/march-language/depot --branch main
+
+# Git dependency (exact commit)
+forge add depot --git https://github.com/march-language/depot --rev a3f1c9b
+
+# Local path dependency
+forge add my_lib --path ../my_lib
+
+# Dev dependency (available in dev + test builds)
+forge add check --git https://github.com/march-language/check --tag v0.3.0 --dev
+
+# Test-only dependency
+forge add fixtures --path ../fixtures --test
+
+# Overwrite an existing dependency entry
+forge add depot --git https://github.com/march-language/depot --tag v1.3.0 --force
+```
+
+Or edit `forge.toml` directly:
 
 ```toml
 [dependencies]
-bastion = "~> 0.4"
-depot   = ">= 1.0.0, < 2.0.0"
+depot = { git = "https://github.com/march-language/depot", tag = "v1.2.0" }
 ```
 
-Then:
+Then resolve:
+
 ```sh
 forge deps
 ```
@@ -215,7 +331,7 @@ forge deps
 
 ```sh
 forge deps update
-forge deps update bastion   # update specific package
+forge deps update depot   # update a specific package
 ```
 
 ### Lock File
@@ -231,6 +347,255 @@ forge deps update bastion   # update specific package
 | `>= 1.0.0` | At least 1.0.0 |
 | `= 1.2.3` | Exactly 1.2.3 |
 
+### Dependency Tree
+
+```sh
+forge tree         # print the full dependency graph
+forge why depot    # show all paths that pull in `depot`
+```
+
+---
+
+## Refactoring
+
+`forge refactor` provides project-wide, parser-based refactorings. All subcommands accept `--dry-run` / `-n` to preview changes without writing any files.
+
+### Rename a Symbol
+
+```sh
+# Rename a function, type, constructor, or any symbol
+forge refactor rename old_name new_name
+
+# Restrict to a specific kind (fn, type, ctor, module, field, var)
+forge refactor rename Parser.parse Parser.run --kind fn
+
+# Regex rename with backreferences
+forge refactor rename 'get_(.+)' 'fetch_\1' --pattern
+```
+
+### Move a Declaration
+
+```sh
+# Move a top-level declaration to another file
+forge refactor move MyParser lib/parser.march
+```
+
+### Structural Find-and-Replace
+
+```sh
+# Swap argument order at all call sites
+forge refactor replace 'f($a, $b)' 'f($b, $a)'
+```
+
+### Apply Naming Conventions
+
+```sh
+# Auto-fix snake_case function names project-wide
+forge refactor fix
+
+# Preview without writing
+forge refactor fix --dry-run
+```
+
+### Bundle Parameters into a Record
+
+```sh
+# Turn a function's parameters into a generated record type
+forge refactor bundle parse_options
+forge refactor bundle parse_options --record ParseConfig
+```
+
+---
+
+## Documentation Generation
+
+`forge doc` generates HTML documentation from March source files. It requires the `march_doc` archive:
+
+```sh
+forge install march_doc   # install once
+```
+
+Then:
+
+```sh
+forge doc                    # generate to doc/ (default)
+forge doc -o docs/api        # custom output directory
+forge doc --private          # include private (pfn) functions
+forge doc --stdlib           # document stdlib only
+```
+
+---
+
+## Notebooks
+
+`forge notebook` provides a Livebook-style interactive environment for March using `.scrollmd` files. The live server requires the `scroll` archive:
+
+```sh
+forge install scroll   # install once
+```
+
+```sh
+# Start a fresh notebook in the browser
+forge notebook
+
+# Open or create a specific notebook
+forge notebook my_notes.scrollmd
+
+# Start the live server explicitly
+forge notebook my_notes.scrollmd --serve
+
+# Render a notebook to static HTML
+forge notebook my_notes.scrollmd -o output.html
+
+# Use a custom port (default: 4040)
+forge notebook --port 8080
+
+# Don't open the browser automatically
+forge notebook --no-open
+```
+
+---
+
+## Versioning and Release
+
+### Inspect and Bump Versions
+
+```sh
+forge version                # print current version
+forge version patch          # bump patch: 1.2.3 -> 1.2.4
+forge version minor          # bump minor: 1.2.3 -> 1.3.0
+forge version major          # bump major: 1.2.3 -> 2.0.0
+forge version 1.5.0          # set an explicit version
+
+# Commit the bump and create an annotated git tag
+forge version patch --tag
+```
+
+### Guarded Release Pipeline
+
+`forge release` requires a clean working tree, then runs build → test → version bump → git tag in sequence. Any failure aborts before the tag is created:
+
+```sh
+forge release                # patch bump (default)
+forge release --bump minor
+forge release --bump major
+```
+
+### Publishing
+
+`forge publish` validates the package and optionally checks that the version bump is correct given the API changes:
+
+```sh
+forge publish
+forge publish --dry-run                          # validate only, don't submit
+forge publish --old-source ../my_lib-v1.0        # enforce semver against old API surface
+```
+
+When `--old-source` is provided, forge computes the API surface diff and errors if the declared version bump is too small (e.g. a breaking change requires a major bump).
+
+---
+
+## Archive Management
+
+Archives are globally installed forge extensions — tools, task runners, and generators.
+
+```sh
+# Install from the registry or a git URL
+forge install march_doc
+forge install scroll
+forge install https://github.com/march-language/my_tool
+forge install --force scroll     # reinstall even if already installed
+
+# Remove an archive
+forge uninstall march_doc
+
+# List installed archives
+forge archives
+
+# Update installed archives
+forge update                     # update all
+forge update march_doc           # update one
+
+# Verify archive integrity
+forge verify                     # verify all
+forge verify march_doc           # verify one
+```
+
+Archive tasks are invoked as `forge <archive>.<task>`:
+
+```sh
+forge march_doc.build    # run the `build` task of march_doc
+```
+
+---
+
+## Toolchain Management
+
+`forge toolchain` manages installed March compiler versions.
+
+```sh
+# List installed toolchains
+forge toolchain list
+
+# List available versions from GitHub releases
+forge toolchain list --remote
+
+# Install a specific version
+forge toolchain install v0.3.0
+forge toolchain install nightly          # latest nightly
+forge toolchain install nightly-20251201
+
+# Switch the active toolchain
+forge toolchain use v0.3.0
+
+# Pin this project to a specific version (writes .march-version)
+forge toolchain pin v0.3.0
+
+# Show which toolchain resolves for the current directory
+forge toolchain which
+
+# Remove an installed toolchain
+forge toolchain uninstall v0.2.0
+
+# Install the latest stable and make it active
+forge upgrade
+```
+
+---
+
+## License Audit
+
+```sh
+forge licenses             # list each dependency and its declared license
+forge licenses --json      # JSON output for tooling
+forge licenses --strict    # exit non-zero if any dependency has no license
+```
+
+---
+
+## Capability Inspection
+
+`forge cap query` performs a static analysis pass over the project and summarizes all capability and typestate declarations:
+
+```sh
+forge cap query                 # scan the project root
+forge cap query --dir lib/      # scan a specific directory
+```
+
+Output lists every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration found in the source, by file.
+
+---
+
+## Shell Completions
+
+Generate a completion script for your shell and source it:
+
+```sh
+forge completions bash >> ~/.bashrc
+forge completions zsh  >> ~/.zshrc
+forge completions fish > ~/.config/fish/completions/forge.fish
+```
+
 ---
 
 ## LSP Server
@@ -244,7 +609,7 @@ hierarchy, workspace symbols, and per-function performance insights. A Debug
 Adapter Protocol server (`march dap`) and a standalone JSON query CLI ship
 alongside it.
 
-**See the dedicated [LSP & Editors]({{ site.baseurl }}/lsp) page** for the full feature list,
+**See the dedicated [LSP & Editors]({{ site.baseurl }}/docs/lsp/) page** for the full feature list,
 per-editor setup (Neovim, Helix, Zed, Emacs, VS Code), the `march-lsp query`
 CLI, and the DAP debugger.
 
@@ -328,13 +693,38 @@ The debugger captures a full execution trace including all actor message sends a
 
 ## Compiler Analysis
 
-The compiler can produce structured output for debugging and analysis:
+### Dumping IR Phases
+
+Add `--dump-phases` to any build or run command to serialize each compiler IR stage to `trace/phases/phases.json`:
 
 ```sh
-# Dump all compilation phases to trace/phases/
-forge compile --dump-phases my_program.march
+forge build --dump-phases
+forge run --dump-phases
+```
 
-# Analyze a GC trace
+To compile a single `.march` file and dump phases (without a forge project):
+
+```sh
+forge compile my_program.march
+```
+
+This compiles the file, writes the binary to `.forge/compile/my_program`, and writes phases to `trace/phases/phases.json`.
+
+### Viewing Phases in the Browser
+
+```sh
+forge phases          # serve phase viewer at http://localhost:7777
+forge phases --port 8888
+```
+
+`forge phases` opens the browser automatically and serves an interactive viewer showing:
+- Per-function TIR dumps at each compiler pass
+- Inline eligibility and reasoning
+- RC density visualization (which values are reference-counted most)
+
+### Analyzing GC Traces
+
+```sh
 MARCH_TRACE_GC=1 forge run my_program.march
 ```
 
@@ -343,19 +733,20 @@ With `MARCH_TRACE_GC=1` set, the runtime logs all reference-counting operations 
 - Double frees
 - Negative reference counts (invariant violations)
 
-### Visualizing Compiler Phases
-
-Open `tools/phase-viewer.html` in a browser after running `forge compile --dump-phases`. This shows:
-- Per-function TIR dumps at each pass
-- Inline eligibility and reasoning
-- RC density visualization (which values are RC'd most)
-
-### Visualizing GC Events
-
 Open `tools/gc-viewer.html` after running with `MARCH_TRACE_GC=1`:
 - Timeline of alloc/free/inc_ref/dec_ref events
 - Live-object count chart
 - Address history for any specific object
+
+### Benchmarking
+
+```sh
+forge bench                   # run all benchmarks under bench/
+forge bench list_ops          # run only benchmarks whose name contains "list_ops"
+forge bench --json            # emit timings as JSON (for CI tracking)
+```
+
+Each `bench/*.march` file is a standalone benchmark program with a `main()` function. Benchmarks are compiled at `-O2` and timed.
 
 ---
 
