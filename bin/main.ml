@@ -677,12 +677,15 @@ let run_test_cmd args =
     (* Run doctests extracted from fn_doc fields *)
     let parse_expr src =
       let lexbuf = Lexing.from_string src in
-      try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
-      with
-      | March_errors.Errors.ParseError (msg, _, _) ->
-        failwith ("doctest parse error: " ^ msg)
-      | March_parser.Parser.Error ->
-        failwith ("doctest parse error in: " ^ src)
+      let expr =
+        try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+        with
+        | March_errors.Errors.ParseError (msg, _, _) ->
+          failwith ("doctest parse error: " ^ msg)
+        | March_parser.Parser.Error ->
+          failwith ("doctest parse error in: " ^ src)
+      in
+      March_desugar.Desugar.desugar_expr expr
     in
     let (dt_total, dt_failed, dt_failures) =
       if !verbose then
