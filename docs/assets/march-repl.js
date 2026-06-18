@@ -148,7 +148,7 @@
         var w = line.slice(i, j);
         out += (_KWS.indexOf(w) >= 0) ? _col("--syn-kw", w) :
                hi                      ? _col("--syn-tp", w) :
-               _esc(w);
+               _col("--syn-id", w);
         i = j; continue;
       }
       // two-char operators
