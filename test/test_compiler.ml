@@ -3303,6 +3303,131 @@ let test_record_auto_satisfy_two_shapes_ok () =
   end|} in
   Alcotest.(check bool) "two different record shapes both auto-satisfy: no error" false (has_errors ctx)
 
+(* ── cap_body_enforce: Phase 2 body-scan capability enforcement ─────────── *)
+
+(* Modules that declare `needs` and call the matching builtin — clean. *)
+let test_cap_body_needs_ok () =
+  let ctx = typecheck {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do println("Hello " ++ name) end
+  end|} in
+  Alcotest.(check bool) "println with needs IO.Console: no warning" false
+    (has_warning_with ctx "builtin")
+
+(* Module without `needs` that calls println — body-scan emits warning. *)
+let test_cap_body_missing_console () =
+  let ctx = typecheck {|mod Greeter do
+    fn greet(name) do println("Hello " ++ name) end
+  end|} in
+  Alcotest.(check bool) "println without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Console")
+
+(* Module without `needs` that calls file_read — body-scan emits warning. *)
+let test_cap_body_missing_fileread () =
+  let ctx = typecheck {|mod Reader do
+    fn load(path) do file_read(path) end
+  end|} in
+  Alcotest.(check bool) "file_read without needs: body-scan warning" true
+    (has_warning_with ctx "IO.FileRead")
+
+(* Module without `needs` that calls file_write — body-scan emits warning. *)
+let test_cap_body_missing_filewrite () =
+  let ctx = typecheck {|mod Writer do
+    fn save(path, data) do file_write(path, data) end
+  end|} in
+  Alcotest.(check bool) "file_write without needs: body-scan warning" true
+    (has_warning_with ctx "IO.FileWrite")
+
+(* Module without `needs` that calls random_bytes — body-scan emits warning. *)
+let test_cap_body_missing_random () =
+  let ctx = typecheck {|mod Gen do
+    fn token() do random_bytes(16) end
+  end|} in
+  Alcotest.(check bool) "random_bytes without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Random")
+
+(* Module without `needs` that calls unix_time — body-scan emits warning. *)
+let test_cap_body_missing_clock () =
+  let ctx = typecheck {|mod Clk do
+    fn now() do unix_time(()) end
+  end|} in
+  Alcotest.(check bool) "unix_time without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Clock")
+
+(* Module without `needs` that calls process_env — body-scan emits warning. *)
+let test_cap_body_missing_process () =
+  let ctx = typecheck {|mod Env do
+    fn get_path() do process_env("PATH") end
+  end|} in
+  Alcotest.(check bool) "process_env without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Process")
+
+(* Body-scan warning does NOT escalate to an error. *)
+let test_cap_body_warn_not_error () =
+  let ctx = typecheck {|mod Greeter do
+    fn greet(name) do println("Hello " ++ name) end
+  end|} in
+  Alcotest.(check bool) "body-scan missing cap is only a warning, not an error" false
+    (has_errors ctx)
+
+(* Declared needs covers body call: no spurious warning. *)
+let test_cap_body_no_double_warn () =
+  let ctx = typecheck {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do println("Hello " ++ name) end
+  end|} in
+  Alcotest.(check bool) "declared needs suppresses body-scan warning" false
+    (has_warning_with ctx "builtin")
+
+(* needs IO.Console satisfies both `print` and `println` body calls. *)
+let test_cap_body_umbrella_parent () =
+  let ctx = typecheck {|mod Out do
+    needs IO.Console
+    fn say(x) do
+      print(x)
+      println(x)
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO.Console covers print+println calls" false
+    (has_warning_with ctx "IO.Console")
+
+(* Multiple distinct builtins from different cap trees each get their own warning. *)
+let test_cap_body_two_missing_caps () =
+  let ctx = typecheck {|mod Mixed do
+    fn run() do
+      let _ = file_read("/tmp/x")
+      println("done")
+    end
+  end|} in
+  Alcotest.(check bool) "file_read warns about IO.FileRead" true
+    (has_warning_with ctx "IO.FileRead")
+
+(* Check 2: a declared needs whose cap is inferred from body doesn't produce
+   the "declared but not used" warning. *)
+let test_cap_body_need_satisfied_by_body () =
+  let ctx = typecheck {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do println(name) end
+  end|} in
+  Alcotest.(check bool) "body call satisfies declared needs: no unused-cap warning" false
+    (has_warning_with ctx "not used")
+
+(* A DLet binding that calls a builtin also triggers body-scan. *)
+let test_cap_body_let_body () =
+  let ctx = typecheck {|mod Top do
+    let banner = println("app started")
+  end|} in
+  Alcotest.(check bool) "DLet body call triggers body-scan warning" true
+    (has_warning_with ctx "IO.Console")
+
+(* Pure module with no builtins: no spurious warnings. *)
+let test_cap_body_pure_no_warn () =
+  let ctx = typecheck {|mod Pure do
+    fn add(a, b) do a + b end
+  end|} in
+  Alcotest.(check bool) "pure module has no body-scan warnings" false
+    (has_warning_with ctx "builtin")
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3642,6 +3767,22 @@ let compiler_suites =
           Alcotest.test_case "named type + explicit impl: ok"   `Quick test_record_auto_satisfy_explicit_impl_ok;
           Alcotest.test_case "when constraint auto-satisfied"   `Quick test_record_auto_satisfy_when_constraint_ok;
           Alcotest.test_case "two record shapes both satisfy"   `Quick test_record_auto_satisfy_two_shapes_ok;
+        ] );
+      ( "cap_body_enforce", [
+          Alcotest.test_case "println with needs: no warn"           `Quick test_cap_body_needs_ok;
+          Alcotest.test_case "println missing needs: warn IO.Console" `Quick test_cap_body_missing_console;
+          Alcotest.test_case "file_read missing needs: warn"          `Quick test_cap_body_missing_fileread;
+          Alcotest.test_case "file_write missing needs: warn"         `Quick test_cap_body_missing_filewrite;
+          Alcotest.test_case "random_bytes missing needs: warn"       `Quick test_cap_body_missing_random;
+          Alcotest.test_case "unix_time missing needs: warn"          `Quick test_cap_body_missing_clock;
+          Alcotest.test_case "process_env missing needs: warn"        `Quick test_cap_body_missing_process;
+          Alcotest.test_case "missing cap is warning not error"       `Quick test_cap_body_warn_not_error;
+          Alcotest.test_case "declared needs: no dup warning"         `Quick test_cap_body_no_double_warn;
+          Alcotest.test_case "parent cap covers multiple calls"       `Quick test_cap_body_umbrella_parent;
+          Alcotest.test_case "two missing caps each warned"           `Quick test_cap_body_two_missing_caps;
+          Alcotest.test_case "body satisfies declared needs"          `Quick test_cap_body_need_satisfied_by_body;
+          Alcotest.test_case "DLet body triggers body-scan"          `Quick test_cap_body_let_body;
+          Alcotest.test_case "pure module: no spurious warning"       `Quick test_cap_body_pure_no_warn;
         ] );
   ]
 
