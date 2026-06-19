@@ -889,6 +889,76 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.Database",   Some "IO.NetConnect");
 ]
 
+(** Maps builtin function names to the IO capability they require.
+    Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
+let builtin_cap_table : (string * string) list = [
+  (* IO.Console *)
+  ("println",               "IO.Console");
+  ("print",                 "IO.Console");
+  (* IO.FileRead *)
+  ("file_exists",           "IO.FileRead");
+  ("file_read",             "IO.FileRead");
+  ("file_open",             "IO.FileRead");
+  ("file_read_line",        "IO.FileRead");
+  ("file_read_chunk",       "IO.FileRead");
+  ("file_stat",             "IO.FileRead");
+  ("dir_exists",            "IO.FileRead");
+  ("dir_list",              "IO.FileRead");
+  ("csv_open",              "IO.FileRead");
+  ("csv_next_row",          "IO.FileRead");
+  (* IO.FileWrite *)
+  ("file_write",            "IO.FileWrite");
+  ("file_append",           "IO.FileWrite");
+  ("file_delete",           "IO.FileWrite");
+  ("file_rename",           "IO.FileWrite");
+  ("dir_mkdir",             "IO.FileWrite");
+  ("dir_mkdir_p",           "IO.FileWrite");
+  ("dir_rmdir",             "IO.FileWrite");
+  ("dir_rm_rf",             "IO.FileWrite");
+  (* IO.FileSystem — needs both read+write *)
+  ("file_copy",             "IO.FileSystem");
+  (* IO.NetConnect *)
+  ("tcp_connect",           "IO.NetConnect");
+  ("tcp_send_all",          "IO.NetConnect");
+  ("tcp_recv_all",          "IO.NetConnect");
+  ("tcp_recv_exact",        "IO.NetConnect");
+  ("tcp_recv_http",         "IO.NetConnect");
+  ("tcp_recv_http_headers", "IO.NetConnect");
+  ("tcp_recv_chunk",        "IO.NetConnect");
+  ("tcp_recv_chunked_frame","IO.NetConnect");
+  ("ws_recv",               "IO.NetConnect");
+  ("ws_send",               "IO.NetConnect");
+  ("ws_select",             "IO.NetConnect");
+  (* IO.Network *)
+  ("dns_resolve",           "IO.Network");
+  (* IO.NetListen *)
+  ("http_server_listen",    "IO.NetListen");
+  ("http_server_spawn_n",   "IO.NetListen");
+  ("http_server_wait",      "IO.NetListen");
+  (* IO.Process *)
+  ("process_env",           "IO.Process");
+  ("process_set_env",       "IO.Process");
+  ("process_cwd",           "IO.Process");
+  ("process_argv",          "IO.Process");
+  ("process_pid",           "IO.Process");
+  ("process_exit",          "IO.Process");
+  ("process_spawn_sync",    "IO.Process");
+  ("process_spawn_lines",   "IO.Process");
+  ("process_spawn_async",   "IO.Process");
+  ("process_read_line",     "IO.Process");
+  ("process_write",         "IO.Process");
+  ("process_kill_proc",     "IO.Process");
+  ("process_wait_proc",     "IO.Process");
+  (* IO.Clock *)
+  ("unix_time",             "IO.Clock");
+  ("unix_time_ms",          "IO.Clock");
+  ("uuid_v7",               "IO.Clock");
+  (* IO.Random *)
+  ("random_bytes",          "IO.Random");
+  ("stdlib_random_bytes",   "IO.Random");
+  ("uuid_v4",               "IO.Random");
+]
+
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
     E.g., "IO.FileRead" → ["IO.FileRead"; "IO.FileSystem"; "IO"].
     FFI caps not in the table return just themselves. *)
@@ -4552,6 +4622,41 @@ let validate_island_protocol (env : env) (mod_name : Ast.name) (decls : Ast.decl
     end
   end
 
+(** Walk an expression and collect all direct function call names.
+    Returns [(fn_name, span)] for every EApp where the callee is a bare
+    variable or a qualified module-path field access.  Used by the
+    body-scanning pass to detect builtin capability uses. *)
+let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
+    : (string * Ast.span) list =
+  match e with
+  | Ast.EApp (Ast.EVar fn_name, args, _) ->
+    let acc = (fn_name.txt, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
+    let qname = mod_name.txt ^ "." ^ fn_name.txt in
+    let acc = (qname, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (f, args, _) ->
+    List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.EBlock (es, _) ->
+    List.fold_left calls_in_expr acc es
+  | Ast.ELet (b, _) ->
+    calls_in_expr acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = calls_in_expr acc scrut in
+    List.fold_left (fun a arm ->
+      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
+      calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.EIf (cond, then_, else_, _) ->
+    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
+  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
+  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.ELit _ | Ast.EVar _ -> acc
+  | _ -> acc
+
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
@@ -4584,6 +4689,30 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         ) actor.actor_handlers
     | _ -> []
   ) decls in
+  (* Body-scan: collect builtin calls that imply a cap need.
+     Deduplicated to one warning per cap (first call-site span). *)
+  let body_cap_uses : (string * Ast.span) list =
+    let all = List.concat_map (function
+      | Ast.DFn (def, _) ->
+        List.concat_map (fun clause ->
+          List.filter_map (fun (call_name, call_span) ->
+            match List.assoc_opt call_name builtin_cap_table with
+            | Some cap_name -> Some (cap_name, call_span)
+            | None -> None
+          ) (calls_in_expr [] clause.Ast.fc_body)
+        ) def.fn_clauses
+      | Ast.DLet (_vis, b, _) ->
+        List.filter_map (fun (call_name, call_span) ->
+          match List.assoc_opt call_name builtin_cap_table with
+          | Some cap_name -> Some (cap_name, call_span)
+          | None -> None
+        ) (calls_in_expr [] b.Ast.bind_expr)
+      | _ -> []
+    ) decls in
+    List.fold_left (fun acc (cap_name, sp) ->
+      if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
+    ) [] all
+  in
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
@@ -4615,6 +4744,22 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
             MPText " to the module body." ])
     end
   ) used_caps;
+  (* Check 1b: body-scanned builtin calls that imply an undeclared cap — warning only *)
+  List.iter (fun (cap_path, sp) ->
+    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+    let self_declared = match List.assoc_opt cap_path env.proof_caps with
+      | Some dm -> dm = mod_name.txt
+      | None -> false
+    in
+    if not covered && not self_declared then
+      Err.warning env.errors ~span:sp
+        (render_parts [
+          MPText "function body calls a builtin that requires "; cap cap_path;
+          MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
+          MPCode ("needs " ^ cap_path); MPText ".";
+          MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
+          MPText " to the module body." ])
+  ) body_cap_uses;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
     let need_sp =
@@ -4626,7 +4771,8 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       in
       find_span decls
     in
-    let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps in
+    let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses in
     if not used then
       Err.warning env.errors ~span:need_sp
         (render_parts [
