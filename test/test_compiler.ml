@@ -2903,6 +2903,109 @@ let test_tagged_standard_no_exclusion () =
   let ctx = typecheck src in
   Alcotest.(check bool) "Tagged(_, Standard) + Cap(IO): no error" false (has_errors ctx)
 
+(* ── Record field auto-satisfy tests ───────────────────────────────────── *)
+
+let test_record_auto_satisfy_ok () =
+  (* Anonymous record with a matching field auto-satisfies a single-method interface. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    fn main() do name({name: "Alice", age: 30}) end
+  end|} in
+  Alcotest.(check bool) "record with matching field auto-satisfies: no error" false (has_errors ctx)
+
+let test_record_auto_satisfy_wrong_type () =
+  (* Field exists but has wrong type (Int instead of String). *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    fn main() do name({name: 42, age: 30}) end
+  end|} in
+  Alcotest.(check bool) "record with wrong-type field: error" true (has_errors ctx)
+
+let test_record_auto_satisfy_missing_field () =
+  (* Anonymous record has no field named 'name'. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    fn main() do name({age: 30}) end
+  end|} in
+  Alcotest.(check bool) "record missing required field: error" true (has_errors ctx)
+
+let test_record_auto_satisfy_multi_method_error () =
+  (* Multi-method interfaces cannot auto-satisfy. *)
+  let ctx = typecheck {|mod Test do
+    interface Describable(a) do
+      fn label: a -> String
+      fn desc: a -> String
+    end
+    fn main() do label({label: "A", desc: "B"}) end
+  end|} in
+  Alcotest.(check bool) "multi-method interface does not auto-satisfy: error" true (has_errors ctx)
+
+let test_record_auto_satisfy_binary_method_error () =
+  (* Method with binary signature (a -> a -> Bool): the record field 'eq'
+     would need type (RecordType -> Bool), not Bool — type mismatch. *)
+  let ctx = typecheck {|mod Test do
+    interface Equal(a) do
+      fn eq: a -> a -> Bool
+    end
+    fn main() do eq({val: 1}) end
+  end|} in
+  Alcotest.(check bool) "binary method: record with plain field does not satisfy: error" true (has_errors ctx)
+
+let test_record_auto_satisfy_named_type_error () =
+  (* Named type constructors (TCon) do not auto-satisfy, only anonymous TRecord. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    fn main() do name(User("Alice")) end
+  end|} in
+  Alcotest.(check bool) "named type does not auto-satisfy: error" true (has_errors ctx)
+
+let test_record_auto_satisfy_explicit_impl_ok () =
+  (* Named type with explicit impl is still satisfied normally. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    impl Named(User) do
+      fn name(User(s)) do s end
+    end
+    fn main() do name(User("Alice")) end
+  end|} in
+  Alcotest.(check bool) "named type with explicit impl satisfies: no error" false (has_errors ctx)
+
+let test_record_auto_satisfy_when_constraint_ok () =
+  (* Record with matching field also satisfies inside a polymorphic fn. *)
+  let ctx = typecheck {|mod Test do
+    interface HasAge(a) do
+      fn age: a -> Int
+    end
+    fn main() do age({name: "Alice", age: 30}) end
+  end|} in
+  Alcotest.(check bool) "record with matching Int field auto-satisfies: no error" false (has_errors ctx)
+
+let test_record_auto_satisfy_two_shapes_ok () =
+  (* Two different anonymous record shapes both satisfying the same interface. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    fn main() do
+      let a = name({name: "Alice", age: 30})
+      let b = name({name: "Bob", score: 100})
+      a ++ b
+    end
+  end|} in
+  Alcotest.(check bool) "two different record shapes both auto-satisfy: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3197,6 +3300,17 @@ let compiler_suites =
           Alcotest.test_case "Chan.new/send/recv/close in IR"   `Quick test_session_compile_chan_new;
           Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
+        ] );
+      ( "record_auto_satisfy", [
+          Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;
+          Alcotest.test_case "wrong field type: error"          `Quick test_record_auto_satisfy_wrong_type;
+          Alcotest.test_case "missing field: error"             `Quick test_record_auto_satisfy_missing_field;
+          Alcotest.test_case "multi-method iface: no auto"      `Quick test_record_auto_satisfy_multi_method_error;
+          Alcotest.test_case "binary method: no auto"           `Quick test_record_auto_satisfy_binary_method_error;
+          Alcotest.test_case "named type: no auto"              `Quick test_record_auto_satisfy_named_type_error;
+          Alcotest.test_case "named type + explicit impl: ok"   `Quick test_record_auto_satisfy_explicit_impl_ok;
+          Alcotest.test_case "when constraint auto-satisfied"   `Quick test_record_auto_satisfy_when_constraint_ok;
+          Alcotest.test_case "two record shapes both satisfy"   `Quick test_record_auto_satisfy_two_shapes_ok;
         ] );
   ]
 

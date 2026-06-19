@@ -4429,12 +4429,32 @@ let discharge_constraints env span =
              | Some impl_tys -> List.exists (fun impl_ty ->
                  impl_matches_ty (repr impl_ty) ty) impl_tys
            in
-           if not satisfied then
-             Err.error env.errors ~span
-               (Printf.sprintf
-                  "`%s` does not implement interface `%s`.\n\
-                   Add `impl %s(%s) do ... end` to provide an implementation."
-                  (pp_ty ty) iface_name iface_name (pp_ty ty)))
+           if not satisfied then begin
+             let auto_satisfied =
+               match ty with
+               | TRecord flds ->
+                 (match StrMap.find_opt iface_name env.interfaces with
+                  | Some iface when List.length iface.iface_methods = 1 ->
+                    let m = List.hd iface.iface_methods in
+                    (match m.md_ty with
+                     | Ast.TyArrow (Ast.TyVar param, ret_surface)
+                       when param.txt = iface.iface_param.txt ->
+                       let tvars = ref [(iface.iface_param.txt, ty)] in
+                       let ret_ty = surface_ty env ~tvars ret_surface in
+                       (match List.assoc_opt m.md_name.txt flds with
+                        | Some fld_ty -> impl_matches_ty (repr fld_ty) ret_ty
+                        | None -> false)
+                     | _ -> false)
+                  | _ -> false)
+               | _ -> false
+             in
+             if not auto_satisfied then
+               Err.error env.errors ~span
+                 (Printf.sprintf
+                    "`%s` does not implement interface `%s`.\n\
+                     Add `impl %s(%s) do ... end` to provide an implementation."
+                    (pp_ty ty) iface_name iface_name (pp_ty ty))
+           end)
     ) !(env.pending_constraints);
   env.pending_constraints := []
 
