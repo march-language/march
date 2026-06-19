@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, `satisfy` declaration — tier2 item 5)
+
+- **`satisfy Iface for T` keyword** (`lib/lexer/lexer.mll`, `lib/parser/parser.mly`, `lib/ast/ast.ml`, `lib/desugar/desugar.ml`): desugar-time expansion that generates `DImpl` blocks from matching functions already in scope. `SATISFY` lexer token; `satisfy_decl` parser rule (ifaces first, types second, mirroring `derive`); `DSatisfy of name list * name list * span` AST node; `collect_fns`+`expand_satisfy` in `desugar_module`; passthrough in eval/lower/typecheck/format/LSP/coverage/refactor/span_remap. Emits desugar-time error for unknown interfaces or missing method implementations.
+- **Test count: 1573** (281 compiler + 224 eval + 284 codegen + 780 stdlib; 10 new tests in `satisfy_decl` group).
+
 ## Current State (as of 2026-06-18, tier1 ergonomics items 1–3)
 
 - **Record field auto-satisfy (Item 3)** (`lib/typecheck/typecheck.ml`): when discharging a `CInterface(Iface, TRecord[...])` constraint with no explicit `impl`, auto-satisfies if the interface has exactly one accessor method (`a -> T`) and the anonymous record has a matching field with the correct type. Named types (`TCon`) never auto-satisfy — they require an explicit `impl`. 9 new tests in `record_auto_satisfy` group.

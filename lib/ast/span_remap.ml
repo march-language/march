@@ -205,6 +205,8 @@ let rec remap_decl tbl = function
     }, remap_span tbl sp)
   | Ast.DDeriving (n, ifaces, sp) ->
     Ast.DDeriving (remap_name tbl n, List.map (remap_name tbl) ifaces, remap_span tbl sp)
+  | Ast.DSatisfy (ifaces, types, sp) ->
+    Ast.DSatisfy (List.map (remap_name tbl) ifaces, List.map (remap_name tbl) types, remap_span tbl sp)
   | Ast.DTest (td, sp) ->
     Ast.DTest ({ td with test_body = remap_expr tbl td.test_body }, remap_span tbl sp)
   | Ast.DDescribe (name, decls, sp) ->

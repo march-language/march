@@ -63,6 +63,7 @@ let () =
       ("only", ONLY);
       ("except", EXCEPT);
       ("derive", DERIVE);
+      ("satisfy", SATISFY);
       ("for", FOR);
       ("in", IN);
       ("opaque", OPAQUE);

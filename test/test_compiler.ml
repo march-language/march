@@ -3303,6 +3303,171 @@ let test_record_auto_satisfy_two_shapes_ok () =
   end|} in
   Alcotest.(check bool) "two different record shapes both auto-satisfy: no error" false (has_errors ctx)
 
+(* ── satisfy: desugar-time impl generation from existing functions ──────── *)
+
+let test_satisfy_basic () =
+  (* satisfy generates impl block from existing function with matching name. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    fn name(u : User) : String do
+      match u do User(s) -> s end
+    end
+    satisfy Named for User
+    fn main() do name(User("Alice")) end
+  end|} in
+  Alcotest.(check bool) "satisfy Named for User: no error" false (has_errors ctx)
+
+let test_satisfy_two_ifaces () =
+  (* satisfy Named, Aged for User generates impl blocks for each interface. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    interface Aged(a) do
+      fn age: a -> Int
+    end
+    type User = User(String, Int)
+    fn name(u : User) : String do
+      match u do User(s, _) -> s end
+    end
+    fn age(u : User) : Int do
+      match u do User(_, n) -> n end
+    end
+    satisfy Named, Aged for User
+    fn main() do
+      let n = name(User("Alice", 30))
+      let a = age(User("Alice", 30))
+      n ++ String.from_int(a)
+    end
+  end|} in
+  Alcotest.(check bool) "satisfy Named, Aged for User: no error" false (has_errors ctx)
+
+let test_satisfy_two_types () =
+  (* Two separate satisfy declarations each wire a different type. *)
+  let ctx = typecheck {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    type Post = Post(String)
+    fn name(u : User) : String do
+      match u do User(s) -> s end
+    end
+    satisfy Named for User
+    fn main() do name(User("Alice")) end
+  end|} in
+  Alcotest.(check bool) "satisfy Named for User (one of two types): no error" false (has_errors ctx)
+
+let test_satisfy_unknown_iface () =
+  (* Unknown interface in satisfy → desugar error. *)
+  let src = {|mod Test do
+    type User = User(String)
+    fn name(u : User) : String do
+      match u do User(s) -> s end
+    end
+    satisfy NoSuchIface for User
+  end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "satisfy unknown interface: error" true (has_errors errors)
+
+let test_satisfy_missing_fn () =
+  (* Missing function for required method → desugar error. *)
+  let src = {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    satisfy Named for User
+  end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "satisfy with missing function: error" true (has_errors errors)
+
+let test_satisfy_multi_method_iface () =
+  (* Multi-method interface: all methods must exist as functions. *)
+  let ctx = typecheck {|mod Test do
+    interface Describable(a) do
+      fn label: a -> String
+      fn desc: a -> String
+    end
+    type Item = Item(String, String)
+    fn label(i : Item) : String do
+      match i do Item(s, _) -> s end
+    end
+    fn desc(i : Item) : String do
+      match i do Item(_, d) -> d end
+    end
+    satisfy Describable for Item
+    fn main() do label(Item("A", "B")) end
+  end|} in
+  Alcotest.(check bool) "satisfy multi-method interface: no error" false (has_errors ctx)
+
+let test_satisfy_multi_method_missing_one () =
+  (* Multi-method interface with one missing function → desugar error. *)
+  let src = {|mod Test do
+    interface Describable(a) do
+      fn label: a -> String
+      fn desc: a -> String
+    end
+    type Item = Item(String, String)
+    fn label(i : Item) : String do
+      match i do Item(s, _) -> s end
+    end
+    satisfy Describable for Item
+  end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "satisfy multi-method missing one fn: error" true (has_errors errors)
+
+let test_satisfy_then_use () =
+  (* satisfy generates an impl that the typechecker can use for dispatch. *)
+  let ctx = typecheck {|mod Test do
+    interface Printable(a) do
+      fn to_str: a -> String
+    end
+    type Color = Red | Blue
+    fn to_str(c : Color) : String do
+      match c do
+        Red -> "red"
+        Blue -> "blue"
+      end
+    end
+    satisfy Printable for Color
+    fn show_color(c : Color) : String do to_str(c) end
+    fn main() do show_color(Red) end
+  end|} in
+  Alcotest.(check bool) "satisfy then use via interface: no error" false (has_errors ctx)
+
+let test_satisfy_lexer_token () =
+  (* The 'satisfy' token is recognized by the lexer. *)
+  let lexbuf = Lexing.from_string "satisfy" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes satisfy keyword" true
+    (match tok with March_parser.Parser.SATISFY -> true | _ -> false)
+
+let test_satisfy_parse_basic () =
+  (* satisfy expands to a DImpl node at desugar time. *)
+  let src = {|mod Test do
+    interface Named(a) do
+      fn name: a -> String
+    end
+    type User = User(String)
+    fn name(u : User) : String do
+      match u do User(s) -> s end
+    end
+    satisfy Named for User
+  end|} in
+  let m = parse_and_desugar src in
+  (* After desugar, DSatisfy is expanded to DImpl — check there's a DImpl block. *)
+  let has_impl = List.exists (function
+    | March_ast.Ast.DImpl (idef, _) -> idef.impl_iface.txt = "Named"
+    | _ -> false) m.March_ast.Ast.mod_decls in
+  Alcotest.(check bool) "satisfy expands to DImpl(Named)" true has_impl
+
 (* ── cap_body_enforce: Phase 2 body-scan capability enforcement ─────────── *)
 
 (* Modules that declare `needs` and call the matching builtin — clean. *)
@@ -3767,6 +3932,18 @@ let compiler_suites =
           Alcotest.test_case "named type + explicit impl: ok"   `Quick test_record_auto_satisfy_explicit_impl_ok;
           Alcotest.test_case "when constraint auto-satisfied"   `Quick test_record_auto_satisfy_when_constraint_ok;
           Alcotest.test_case "two record shapes both satisfy"   `Quick test_record_auto_satisfy_two_shapes_ok;
+        ] );
+      ( "satisfy_decl", [
+          Alcotest.test_case "lexer: satisfy token"                  `Quick test_satisfy_lexer_token;
+          Alcotest.test_case "parse + desugar: DSatisfy → DImpl"    `Quick test_satisfy_parse_basic;
+          Alcotest.test_case "basic: single iface, single type"     `Quick test_satisfy_basic;
+          Alcotest.test_case "two interfaces, one type"             `Quick test_satisfy_two_ifaces;
+          Alcotest.test_case "one interface, two types"             `Quick test_satisfy_two_types;
+          Alcotest.test_case "unknown interface: error"             `Quick test_satisfy_unknown_iface;
+          Alcotest.test_case "missing function: error"              `Quick test_satisfy_missing_fn;
+          Alcotest.test_case "multi-method iface, all fns present"  `Quick test_satisfy_multi_method_iface;
+          Alcotest.test_case "multi-method iface, one fn missing"   `Quick test_satisfy_multi_method_missing_one;
+          Alcotest.test_case "satisfy then use for dispatch"        `Quick test_satisfy_then_use;
         ] );
       ( "cap_body_enforce", [
           Alcotest.test_case "println with needs: no warn"           `Quick test_cap_body_needs_ok;

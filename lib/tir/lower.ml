@@ -2148,7 +2148,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           ) edef.ext_fns
       | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
       | Ast.DProtocol _ | Ast.DSig _
-      | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DApp _ | Ast.DDeriving _
+      | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DApp _ | Ast.DDeriving _ | Ast.DSatisfy _
       | Ast.DTest _ | Ast.DSetup _ | Ast.DSetupAll _ -> ()
       | Ast.DTransitions _ -> ()
       | Ast.DUse (ud, _) ->

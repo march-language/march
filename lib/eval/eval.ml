@@ -7750,6 +7750,10 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* DDeriving is expanded to DImpl blocks by the desugar pass; skip here. *)
     env
 
+  | DSatisfy _ ->
+    (* DSatisfy is expanded to DImpl blocks by the desugar pass; skip here. *)
+    env
+
   | DApp _ ->
     (* DApp is desugared to DFn(__app_init__) before eval; reaching here is a bug. *)
     env

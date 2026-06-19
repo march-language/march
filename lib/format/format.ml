@@ -643,7 +643,7 @@ let get_span = function
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
-  | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
+  | DDeriving (_, _, s) | DSatisfy (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
   | DTransitions (_, _, s) | DOpts (_, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
@@ -912,6 +912,11 @@ and emit_decl ctx = function
     line ctx (Printf.sprintf "derive %s for %s"
       (String.concat ", " (List.map (fun n -> n.txt) ifaces))
       type_name.txt)
+
+  | DSatisfy (ifaces, types, _) ->
+    line ctx (Printf.sprintf "satisfy %s for %s"
+      (String.concat ", " (List.map (fun n -> n.txt) ifaces))
+      (String.concat ", " (List.map (fun n -> n.txt) types)))
 
   | DTest (tdef, _) ->
     line ctx (Printf.sprintf "test \"%s\" do" tdef.test_name);

@@ -172,6 +172,10 @@ type decl =
   (** Derive declaration: [derive Eq, Show for Color]
       name = type name; name list = interface names to derive.
       Expanded to [DImpl] blocks by the desugar pass. *)
+  | DSatisfy of name list * name list * span
+  (** Satisfy declaration: [satisfy Named, Eq for User, Post]
+      first name list = interface names; second = type names.
+      Expanded to [DImpl] blocks by the desugar pass using existing functions. *)
   | DTest of test_def * span           (** Test case: test "name" do ... end *)
   | DDescribe of string * decl list * span (** describe "name" do tests end *)
   | DSetup of expr * span              (** Per-test setup: setup do ... end *)

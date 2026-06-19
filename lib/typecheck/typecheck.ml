@@ -6602,6 +6602,10 @@ let rec check_decl env (d : Ast.decl) : env =
       { env with no_panic_mod = true }
     else env
 
+  | Ast.DSatisfy _ ->
+    (* DSatisfy is expanded to DImpl blocks by the desugar pass; nothing to typecheck here. *)
+    env
+
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
   List.iter (fun ie ->

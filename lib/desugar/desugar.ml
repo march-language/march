@@ -690,6 +690,10 @@ let rec desugar_decl (d : decl) : decl =
     (* DDeriving is expanded by desugar_module before desugar_decl is called *)
     d
 
+  | DSatisfy _ ->
+    (* DSatisfy is expanded by desugar_module before desugar_decl is called *)
+    d
+
   | DTest (tdef, sp) ->
     DTest ({ tdef with test_body = desugar_expr tdef.test_body }, sp)
 
@@ -1377,6 +1381,58 @@ let expand_derive
         derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
       ) ifaces
 
+(** Collect top-level function definitions for satisfy expansion. *)
+let collect_fns (decls : decl list) : (string * fn_def) list =
+  List.filter_map (function
+    | DFn (def, _) -> Some (def.fn_name.txt, def)
+    | _ -> None
+  ) decls
+
+(** Expand a [DSatisfy] into [DImpl] blocks by matching existing functions to
+    interface methods by name.  Emits an error if the interface is not found or
+    a required method is missing. *)
+let expand_satisfy
+    (errors : Err.ctx)
+    (interfaces : (string * interface_def) list)
+    (fns : (string * fn_def) list)
+    (iface_names : name list)
+    (type_names : name list)
+    (sp : span)
+  : decl list =
+  List.concat_map (fun (iface_n : name) ->
+    List.concat_map (fun (type_n : name) ->
+      match List.assoc_opt iface_n.txt interfaces with
+      | None ->
+        Err.error errors ~span:iface_n.span
+          (Printf.sprintf "Unknown interface `%s` in satisfy declaration." iface_n.txt);
+        []
+      | Some iface ->
+        let methods = List.filter_map (fun (md : method_decl) ->
+          match List.assoc_opt md.md_name.txt fns with
+          | None ->
+            Err.error errors ~span:sp
+              (Printf.sprintf
+                 "satisfy %s for %s: no function `%s` found in scope."
+                 iface_n.txt type_n.txt md.md_name.txt);
+            None
+          | Some fn_def ->
+            Some (md.md_name, fn_def)
+        ) iface.iface_methods in
+        if List.length methods < List.length iface.iface_methods then []
+        else begin
+          let impl_ty = TyCon (type_n, []) in
+          let idef : impl_def = {
+            impl_iface       = iface_n;
+            impl_ty          = impl_ty;
+            impl_constraints = [];
+            impl_assoc_types = [];
+            impl_methods     = methods;
+          } in
+          [DImpl (idef, sp)]
+        end
+    ) type_names
+  ) iface_names
+
 (** Check mutual exclusivity of [main] and [app] declarations.
     Reports a proper error with span if both are present. *)
 let check_app_main_exclusivity (errors : Err.ctx) (decls : decl list) : unit =
@@ -1621,11 +1677,16 @@ let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
   check_app_main_exclusivity errors m.mod_decls;
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in
-  (* Expand DDeriving nodes and desugar everything else. *)
+  (* Collect interfaces and fns for satisfy expansion. *)
+  let raw_ifaces = collect_interfaces m.mod_decls in
+  let raw_fns    = collect_fns m.mod_decls in
+  (* Expand DDeriving and DSatisfy nodes; desugar everything else. *)
   let expanded = List.concat_map (fun d ->
       match d with
       | DDeriving (type_name, ifaces, sp) ->
         expand_derive errors type_defs type_name ifaces sp
+      | DSatisfy (iface_names, type_names, sp) ->
+        expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
       | _ -> expand_defaults_decl d
     ) m.mod_decls in
   (* Auto-generate island bridge functions if this is an island module. *)

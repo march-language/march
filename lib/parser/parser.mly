@@ -144,7 +144,7 @@
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
 %token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC
-%token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
+%token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
@@ -252,6 +252,7 @@ decl:
   | d = transitions_decl  { d }
   | d = app_decl          { d }
   | d = derive_decl    { d }
+  | d = satisfy_decl   { d }
   | d = test_decl      { d }
   | d = describe_decl  { d }
   | d = setup_decl     { d }
@@ -405,6 +406,11 @@ derive_decl:
   | DERIVE; ifaces = separated_nonempty_list(COMMA, upper_name);
     FOR; type_name = upper_name
     { DDeriving (type_name, ifaces, mk_span ($loc)) }
+
+satisfy_decl:
+  | SATISFY; ifaces = separated_nonempty_list(COMMA, upper_name);
+    FOR; types = separated_nonempty_list(COMMA, upper_name)
+    { DSatisfy (ifaces, types, mk_span ($loc)) }
 
 actor_decl:
   | ACTOR; _n = upper_name; error
