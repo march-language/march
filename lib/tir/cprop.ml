@@ -136,9 +136,21 @@ let rec cprop_expr ~changed (env : env) (aenv : alias_env) (cenv : ctor_env) (fe
       | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env
       | _                        -> env
     in
-    (* P12: extend alias env when the RHS is a variable atom. *)
+    (* P12: extend alias env when the RHS is a variable atom.
+       ONLY when the binding and the source have the SAME type.  A
+       type-changing alias — e.g. [let go : (List(Int),Int)->Int = $clo]
+       where [$clo : Ptr(Unit)] is the erased closure parameter of an apply
+       function — must NOT be propagated.  Downstream codegen selects an
+       indirect-call ABI from the callee atom's static type: calling through
+       the typed [go] uses the concrete signature (e.g. [(ptr,ptr,i64)]),
+       but calling through [$clo : Ptr(Unit)] falls back to the generic
+       all-boxed apply ABI [(ptr,ptr,ptr)], tag-encoding scalar arguments
+       that the callee then reads as raw i64 — a silent miscompile
+       (List.length of a 3-element list returning 21).  Copy propagation is
+       only sound when the copy is type-preserving. *)
     let aenv' = match rhs' with
-      | Tir.EAtom (Tir.AVar y) -> aenv_add v.Tir.v_name (Tir.AVar y) aenv
+      | Tir.EAtom (Tir.AVar y) when v.Tir.v_ty = y.Tir.v_ty ->
+        aenv_add v.Tir.v_name (Tir.AVar y) aenv
       | _                      -> aenv
     in
     (* P11: track constructor bindings for Beta-ADT reduction.
