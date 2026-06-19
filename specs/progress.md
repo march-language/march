@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, Browser REPL HTTP client)
+
+- **Browser playground HTTP client requests** — `HttpClient.get`/`post` (and everything funneling through `HttpTransport.request`) now run in the js_of_ocaml playground over `fetch`/XHR. New `http_fetch`/`http_fetch_available` builtins + `http_fetch_hook` ref in `lib/eval/eval.ml` (native inert); browser build (`js/march_browser.ml`) installs a synchronous-`XMLHttpRequest` impl and loads `http`/`http_transport`/`http_client` into the browser stdlib. `HttpTransport.request` branches on `http_fetch_available()`. Server side, streaming, and raw sockets remain native-only; browser requests are CORS-limited and block the page during the request.
+- **5 new eval tests** (`browser http` suite). Test count: **1507** (236 compiler + 224 eval + 267 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures). Verified end-to-end via a Node smoke test loading the compiled bundle with a polyfilled sync XHR.
+
 ## Current State (as of 2026-06-18, Phase 3b — Policy-tag DCE/audit pass)
 
 - **`lib/tir/policy_dce.ml` (new, ~260 lines)** — audit pass that walks every `Tagged(_, P)`-parameterized function in a TIR module after monomorphization and reports policy violations. Policy table: `NoAlloc` (no `EAlloc`/`EStackAlloc`), `NoPanic` (no transitive calls to panic-surface builtins), `NoIO` (no calls to IO-needful modules), and `Realtime` (all three). Panic analysis uses a fixpoint seeded from `direct_panic_builtins` (`int_div`, `panic_`, etc.). IO analysis uses `tm_io_fns` module-name list via prefix matching and a second fixpoint for transitive callers.
