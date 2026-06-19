@@ -7054,7 +7054,7 @@ let test_df_empty_row_count () =
 let test_df_make_df_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1, 2, 3]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2, 3]))])
       DataFrame.row_count(df)
     end
   end|} in
@@ -7063,7 +7063,7 @@ let test_df_make_df_row_count () =
 let test_df_make_df_col_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1,2])), FloatCol("b", typed_array_from_list([3.0, 4.0]))])
+      let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1,2])), FloatCol("b", native_float_arr_from_list([3.0, 4.0]))])
       DataFrame.col_count(df)
     end
   end|} in
@@ -7072,7 +7072,7 @@ let test_df_make_df_col_count () =
 let test_df_from_columns_ok () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      match DataFrame.from_columns([IntCol("x", typed_array_from_list([1,2,3])), StrCol("y", typed_array_from_list(["a","b","c"]))]) do
+      match DataFrame.from_columns([IntCol("x", native_int_arr_from_list([1,2,3])), StrCol("y", typed_array_from_list(["a","b","c"]))]) do
       Ok(df) -> DataFrame.row_count(df)
       Err(_) -> -1
       end
@@ -7083,7 +7083,7 @@ let test_df_from_columns_ok () =
 let test_df_from_columns_err_mismatch () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      match DataFrame.from_columns([IntCol("x", typed_array_from_list([1,2])), IntCol("y", typed_array_from_list([3,4,5]))]) do
+      match DataFrame.from_columns([IntCol("x", native_int_arr_from_list([1,2])), IntCol("y", native_int_arr_from_list([3,4,5]))]) do
       Ok(_)  -> false
       Err(_) -> true
       end
@@ -7110,7 +7110,7 @@ let test_df_from_rows () =
 let test_df_schema_length () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1])), StrCol("b", typed_array_from_list(["x"])), FloatCol("c", typed_array_from_list([1.0]))])
+      let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1])), StrCol("b", typed_array_from_list(["x"])), FloatCol("c", native_float_arr_from_list([1.0]))])
       List.length(DataFrame.schema(df))
     end
   end|} in
@@ -7119,7 +7119,7 @@ let test_df_schema_length () =
 let test_df_get_column_ok () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("score", typed_array_from_list([10, 20, 30]))])
+      let df = DataFrame.make_df([IntCol("score", native_int_arr_from_list([10, 20, 30]))])
       match DataFrame.get_column(df, "score") do
       Ok(col) -> DataFrame.col_len(col)
       Err(_)  -> -1
@@ -7131,7 +7131,7 @@ let test_df_get_column_ok () =
 let test_df_get_column_missing () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2]))])
       match DataFrame.get_column(df, "missing") do
       Ok(_)  -> false
       Err(_) -> true
@@ -7143,8 +7143,8 @@ let test_df_get_column_missing () =
 let test_df_add_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
-      match DataFrame.add_column(df, IntCol("y", typed_array_from_list([4,5,6]))) do
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3]))])
+      match DataFrame.add_column(df, IntCol("y", native_int_arr_from_list([4,5,6]))) do
       Ok(df2) -> DataFrame.col_count(df2)
       Err(_)  -> -1
       end
@@ -7155,7 +7155,7 @@ let test_df_add_column () =
 let test_df_drop_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2])), IntCol("y", typed_array_from_list([3,4])), IntCol("z", typed_array_from_list([5,6]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2])), IntCol("y", native_int_arr_from_list([3,4])), IntCol("z", native_int_arr_from_list([5,6]))])
       let df2 = DataFrame.drop_column(df, "y")
       DataFrame.col_count(df2)
     end
@@ -7167,7 +7167,7 @@ let test_df_drop_column () =
 let test_df_head () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3,4,5]))])
       DataFrame.row_count(DataFrame.head(df, 3))
     end
   end|} in
@@ -7176,7 +7176,7 @@ let test_df_head () =
 let test_df_tail () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3,4,5]))])
       DataFrame.row_count(DataFrame.tail(df, 2))
     end
   end|} in
@@ -7185,7 +7185,7 @@ let test_df_tail () =
 let test_df_slice_value () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10,20,30,40,50]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10,20,30,40,50]))])
       let s  = DataFrame.slice(df, 1, 3)
       match DataFrame.get_int_col(s, "x") do
       Ok(xs) -> List.nth(xs, 0)
@@ -7200,7 +7200,7 @@ let test_df_slice_value () =
 let test_df_lazy_filter () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3,4,5]))])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(3)))
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -7213,7 +7213,7 @@ let test_df_lazy_filter () =
 let test_df_lazy_select () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1,2])), IntCol("b", typed_array_from_list([3,4])), IntCol("c", typed_array_from_list([5,6]))])
+      let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1,2])), IntCol("b", native_int_arr_from_list([3,4])), IntCol("c", native_int_arr_from_list([5,6]))])
       let lf = DataFrame.lazy(df) |> DataFrame.select(["a","c"])
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.col_count(df2)
@@ -7226,7 +7226,7 @@ let test_df_lazy_select () =
 let test_df_lazy_sort_by () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([3,1,2]))])
+      let df = DataFrame.make_df([IntCol("v", native_int_arr_from_list([3,1,2]))])
       let lf = DataFrame.lazy(df) |> DataFrame.sort_by([("v", Asc)])
       match DataFrame.collect(lf) do
       Ok(df2) ->
@@ -7243,7 +7243,7 @@ let test_df_lazy_sort_by () =
 let test_df_lazy_limit () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10,20,30,40,50]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10,20,30,40,50]))])
       let lf = DataFrame.lazy(df) |> DataFrame.limit(3)
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -7256,7 +7256,7 @@ let test_df_lazy_limit () =
 let test_df_lazy_chain () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([5,1,4,2,3]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([5,1,4,2,3]))])
       let lf = DataFrame.lazy(df)
                |> DataFrame.filter(Gt(Col("x"), LitInt(2)))
                |> DataFrame.sort_by([("x", Asc)])
@@ -7276,7 +7276,7 @@ let test_df_lazy_chain () =
 let test_df_with_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3]))])
       let lf = DataFrame.lazy(df)
                |> DataFrame.with_column("doubled", fn row ->
                     match DataFrame.row_get_int(row, "x") do
@@ -7315,7 +7315,7 @@ let test_df_groupby_sum () =
     fn f() do
       let df = DataFrame.make_df([
         StrCol("cat", typed_array_from_list(["a","b","a"])),
-        IntCol("val", typed_array_from_list([10, 20, 30]))
+        IntCol("val", native_int_arr_from_list([10, 20, 30]))
       ])
       let gb = DataFrame.group_by(df, ["cat"])
       match DataFrame.agg(gb, [Sum("val")]) do
@@ -7335,8 +7335,8 @@ let test_df_groupby_sum () =
 let test_df_inner_join () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3])), StrCol("name", typed_array_from_list(["a","b","c"]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3,4])), IntCol("score", typed_array_from_list([10,20,30]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2,3])), StrCol("name", typed_array_from_list(["a","b","c"]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([2,3,4])), IntCol("score", native_int_arr_from_list([10,20,30]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -7349,8 +7349,8 @@ let test_df_inner_join () =
 let test_df_left_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2,3]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -7363,8 +7363,8 @@ let test_df_left_join_row_count () =
 let test_df_left_join_null_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2,3]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) ->
@@ -7381,8 +7381,8 @@ let test_df_left_join_null_count () =
 let test_df_right_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("name", typed_array_from_list(["b","c"]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3,4]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([2,3])), StrCol("name", typed_array_from_list(["b","c"]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2,3,4]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.right_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -7395,8 +7395,8 @@ let test_df_right_join_row_count () =
 let test_df_outer_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([2,3]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.outer_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -7409,8 +7409,8 @@ let test_df_outer_join_row_count () =
 let test_df_inner_join_col_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2])), StrCol("name", typed_array_from_list(["a","b"]))])
-      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2])), IntCol("score", typed_array_from_list([10,20]))])
+      let left  = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2])), StrCol("name", typed_array_from_list(["a","b"]))])
+      let right = DataFrame.make_df([IntCol("id", native_int_arr_from_list([1,2])), IntCol("score", native_int_arr_from_list([10,20]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.col_count(df)
@@ -7426,7 +7426,7 @@ let test_df_inner_join_col_count () =
 let test_df_col_describe_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([1,2,3,4,5]))])
+      let df = DataFrame.make_df([IntCol("v", native_int_arr_from_list([1,2,3,4,5]))])
       List.length(DataFrame.col_describe(df))
     end
   end|} in
@@ -7435,7 +7435,7 @@ let test_df_col_describe_count () =
 let test_df_describe_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3])), FloatCol("y", typed_array_from_list([4.0,5.0,6.0]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3])), FloatCol("y", native_float_arr_from_list([4.0,5.0,6.0]))])
       DataFrame.row_count(DataFrame.summarize(df))
     end
   end|} in
@@ -7444,7 +7444,7 @@ let test_df_describe_row_count () =
 let test_df_describe_column_name () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("score", typed_array_from_list([1,2,3]))])
+      let df = DataFrame.make_df([IntCol("score", native_int_arr_from_list([1,2,3]))])
       let d  = DataFrame.summarize(df)
       match DataFrame.get_string_col(d, "column") do
       Ok(names) -> List.nth(names, 0)
@@ -7457,7 +7457,7 @@ let test_df_describe_column_name () =
 let test_df_sample_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([0,1,2,3,4,5,6,7,8,9]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([0,1,2,3,4,5,6,7,8,9]))])
       DataFrame.row_count(DataFrame.sample(df, 3))
     end
   end|} in
@@ -7466,7 +7466,7 @@ let test_df_sample_count () =
 let test_df_sample_n_ge_total () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3]))])
       DataFrame.row_count(DataFrame.sample(df, 10))
     end
   end|} in
@@ -7475,7 +7475,7 @@ let test_df_sample_n_ge_total () =
 let test_df_sample_zero () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1,2,3]))])
       DataFrame.row_count(DataFrame.sample(df, 0))
     end
   end|} in
@@ -7484,7 +7484,7 @@ let test_df_sample_zero () =
 let test_df_train_test_split () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([0,1,2,3,4,5,6,7,8,9]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([0,1,2,3,4,5,6,7,8,9]))])
       let (train_df, test_df) = DataFrame.train_test_split(df, 0.8)
       DataFrame.row_count(train_df) * 100 + DataFrame.row_count(test_df)
     end
@@ -7496,9 +7496,9 @@ let test_df_train_test_split () =
 let test_df_col_add_float () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("p", typed_array_from_list([1.0, 2.0, 3.0]))
+      let col = FloatCol("p", native_float_arr_from_list([1.0, 2.0, 3.0]))
       match DataFrame.col_add_float(col, 10.0) do
-      Ok(FloatCol(_, data)) -> float_to_int(typed_array_get(data, 0))
+      Ok(FloatCol(_, data)) -> float_to_int(native_float_arr_get(data, 0))
       _ -> -1
       end
     end
@@ -7508,9 +7508,9 @@ let test_df_col_add_float () =
 let test_df_col_mul_float () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = IntCol("q", typed_array_from_list([2, 4, 6]))
+      let col = IntCol("q", native_int_arr_from_list([2, 4, 6]))
       match DataFrame.col_mul_float(col, 3.0) do
-      Ok(FloatCol(_, data)) -> float_to_int(typed_array_get(data, 1))
+      Ok(FloatCol(_, data)) -> float_to_int(native_float_arr_get(data, 1))
       _ -> -1
       end
     end
@@ -7520,10 +7520,10 @@ let test_df_col_mul_float () =
 let test_df_col_add_col_int () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let a = IntCol("a", typed_array_from_list([1, 2, 3]))
-      let b = IntCol("b", typed_array_from_list([10, 20, 30]))
+      let a = IntCol("a", native_int_arr_from_list([1, 2, 3]))
+      let b = IntCol("b", native_int_arr_from_list([10, 20, 30]))
       match DataFrame.col_add_col(a, b) do
-      Ok(IntCol(_, data)) -> typed_array_get(data, 2)
+      Ok(IntCol(_, data)) -> native_int_arr_get(data, 2)
       _ -> -1
       end
     end
@@ -7533,8 +7533,8 @@ let test_df_col_add_col_int () =
 let test_df_col_add_col_length_mismatch () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let a = IntCol("a", typed_array_from_list([1,2,3]))
-      let b = IntCol("b", typed_array_from_list([10,20]))
+      let a = IntCol("a", native_int_arr_from_list([1,2,3]))
+      let b = IntCol("b", native_int_arr_from_list([10,20]))
       match DataFrame.col_add_col(a, b) do
       Ok(_)  -> false
       Err(_) -> true
@@ -7548,10 +7548,10 @@ let test_df_col_add_col_length_mismatch () =
 let test_df_col_z_score () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("v", typed_array_from_list([1.0, 2.0, 3.0]))
+      let col = FloatCol("v", native_float_arr_from_list([1.0, 2.0, 3.0]))
       match DataFrame.col_z_score(col) do
       Ok(FloatCol(_, data)) -> do
-        let mid = typed_array_get(data, 1)
+        let mid = native_float_arr_get(data, 1)
         if mid > -0.001 && mid < 0.001 do 1 else 0 end
       end
       _ -> -1
@@ -7563,11 +7563,11 @@ let test_df_col_z_score () =
 let test_df_col_normalize () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("v", typed_array_from_list([0.0, 5.0, 10.0]))
+      let col = FloatCol("v", native_float_arr_from_list([0.0, 5.0, 10.0]))
       match DataFrame.col_normalize(col) do
       Ok(FloatCol(_, data)) -> do
-        let mn = typed_array_get(data, 0)
-        let mx = typed_array_get(data, 2)
+        let mn = native_float_arr_get(data, 0)
+        let mx = native_float_arr_get(data, 2)
         if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 do 1 else 0 end
       end
       _ -> -1
@@ -7601,7 +7601,7 @@ let test_df_empty_head () =
 let test_df_empty_filter () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([]))])
+      let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([]))])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(0)))
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -7614,7 +7614,7 @@ let test_df_empty_filter () =
 let test_df_single_row () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([42]))])
+      let df = DataFrame.make_df([IntCol("v", native_int_arr_from_list([42]))])
       match DataFrame.get_int_col(df, "v") do
       Ok(xs) -> List.nth(xs, 0)
       Err(_) -> -1
@@ -7626,7 +7626,7 @@ let test_df_single_row () =
 let test_df_rename_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("old_name", typed_array_from_list([1,2,3]))])
+      let df = DataFrame.make_df([IntCol("old_name", native_int_arr_from_list([1,2,3]))])
       match DataFrame.rename_column(df, "old_name", "new_name") do
       Ok(df2) -> List.nth(DataFrame.schema(df2), 0)
       Err(_)  -> "err"
@@ -7639,7 +7639,7 @@ let test_df_drop_nulls () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
       let df = DataFrame.make_df([
-        NullableIntCol("x", typed_array_from_list([1,0,3]), typed_array_from_list([false,true,false]))
+        NullableIntCol("x", native_int_arr_from_list([1,0,3]), typed_array_from_list([false,true,false]))
       ])
       let clean = DataFrame.drop_nulls(df)
       DataFrame.row_count(clean)

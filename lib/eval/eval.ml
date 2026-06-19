@@ -6140,6 +6140,30 @@ let base_env : env =
           done;
           !acc
         | _ -> eval_error "native_float_arr_fold: expected (init, NativeFloatArr, fn)"))
+  (* native_int_arr_filter_mask(arr, bool_typed_arr) → keep elements where mask is true *)
+  ; ("native_int_arr_filter_mask", VBuiltin ("native_int_arr_filter_mask", function
+        | [VNativeIntArr arr; VTypedArray mask] ->
+          let n = Array.length arr in
+          if n <> Array.length mask then
+            eval_error "native_int_arr_filter_mask: array length %d != mask length %d" n (Array.length mask);
+          let kept = ref [] in
+          for i = n - 1 downto 0 do
+            if mask.(i) = VBool true then kept := arr.(i) :: !kept
+          done;
+          VNativeIntArr (Array.of_list !kept)
+        | _ -> eval_error "native_int_arr_filter_mask: expected (NativeIntArr, TypedArray(Bool))"))
+  (* native_float_arr_filter_mask(arr, bool_typed_arr) → keep elements where mask is true *)
+  ; ("native_float_arr_filter_mask", VBuiltin ("native_float_arr_filter_mask", function
+        | [VNativeFloatArr arr; VTypedArray mask] ->
+          let n = Array.length arr in
+          if n <> Array.length mask then
+            eval_error "native_float_arr_filter_mask: array length %d != mask length %d" n (Array.length mask);
+          let kept = ref [] in
+          for i = n - 1 downto 0 do
+            if mask.(i) = VBool true then kept := arr.(i) :: !kept
+          done;
+          VNativeFloatArr (Array.of_list !kept)
+        | _ -> eval_error "native_float_arr_filter_mask: expected (NativeFloatArr, TypedArray(Bool))"))
   ; ("native_float_arr_from_list", VBuiltin ("native_float_arr_from_list", function
         | [lst] ->
           let rec to_ocaml_list = function

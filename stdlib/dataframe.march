@@ -28,12 +28,12 @@ mod DataFrame do
   -- Data is stored as a contiguous TypedArray for O(1) random access and cache efficiency.
   -- Null bitmap: parallel TypedArray(Bool) where true = that row is null.
   type Column =
-      IntCol(String, TypedArray(Int))
-    | FloatCol(String, TypedArray(Float))
+      IntCol(String, NativeIntArr)
+    | FloatCol(String, NativeFloatArr)
     | StrCol(String, TypedArray(String))
     | BoolCol(String, TypedArray(Bool))
-    | NullableIntCol(String, TypedArray(Int), TypedArray(Bool))
-    | NullableFloatCol(String, TypedArray(Float), TypedArray(Bool))
+    | NullableIntCol(String, NativeIntArr, TypedArray(Bool))
+    | NullableFloatCol(String, NativeFloatArr, TypedArray(Bool))
     | NullableStrCol(String, TypedArray(String), TypedArray(Bool))
     | NullableBoolCol(String, TypedArray(Bool), TypedArray(Bool))
 
@@ -86,12 +86,12 @@ mod DataFrame do
   doc "Returns the length (number of rows) of a column."
   fn col_len(col : Column) : Int do
     match col do
-    IntCol(_, data)         -> typed_array_length(data)
-    FloatCol(_, data)       -> typed_array_length(data)
+    IntCol(_, data)         -> native_int_arr_length(data)
+    FloatCol(_, data)       -> native_float_arr_length(data)
     StrCol(_, data)         -> typed_array_length(data)
     BoolCol(_, data)        -> typed_array_length(data)
-    NullableIntCol(_, data, _)   -> typed_array_length(data)
-    NullableFloatCol(_, data, _) -> typed_array_length(data)
+    NullableIntCol(_, data, _)   -> native_int_arr_length(data)
+    NullableFloatCol(_, data, _) -> native_float_arr_length(data)
     NullableStrCol(_, data, _)   -> typed_array_length(data)
     NullableBoolCol(_, data, _)  -> typed_array_length(data)
     end
@@ -100,14 +100,14 @@ mod DataFrame do
   -- Get the i-th value from a column as a Value. O(1) with contiguous TypedArray.
   fn col_value_at(col : Column, i : Int) : Value do
     match col do
-    IntCol(_, data)   -> IntVal(typed_array_get(data, i))
-    FloatCol(_, data) -> FloatVal(typed_array_get(data, i))
+    IntCol(_, data)   -> IntVal(native_int_arr_get(data, i))
+    FloatCol(_, data) -> FloatVal(native_float_arr_get(data, i))
     StrCol(_, data)   -> StrVal(typed_array_get(data, i))
     BoolCol(_, data)  -> BoolVal(typed_array_get(data, i))
     NullableIntCol(_, data, nulls) ->
-      if typed_array_get(nulls, i) do NullVal else IntVal(typed_array_get(data, i)) end
+      if typed_array_get(nulls, i) do NullVal else IntVal(native_int_arr_get(data, i)) end
     NullableFloatCol(_, data, nulls) ->
-      if typed_array_get(nulls, i) do NullVal else FloatVal(typed_array_get(data, i)) end
+      if typed_array_get(nulls, i) do NullVal else FloatVal(native_float_arr_get(data, i)) end
     NullableStrCol(_, data, nulls) ->
       if typed_array_get(nulls, i) do NullVal else StrVal(typed_array_get(data, i)) end
     NullableBoolCol(_, data, nulls) ->
@@ -118,16 +118,16 @@ mod DataFrame do
   -- Convert a column to List(Value). O(n).
   fn col_to_value_list(col : Column) : List(Value) do
     match col do
-    IntCol(_, data)   -> List.map(typed_array_to_list(data), fn x -> IntVal(x))
-    FloatCol(_, data) -> List.map(typed_array_to_list(data), fn x -> FloatVal(x))
+    IntCol(_, data)   -> List.map(native_int_arr_to_list(data), fn x -> IntVal(x))
+    FloatCol(_, data) -> List.map(native_float_arr_to_list(data), fn x -> FloatVal(x))
     StrCol(_, data)   -> List.map(typed_array_to_list(data), fn x -> StrVal(x))
     BoolCol(_, data)  -> List.map(typed_array_to_list(data), fn x -> BoolVal(x))
     NullableIntCol(_, data, nulls) -> do
-      List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      List.zip_with(native_int_arr_to_list(data), typed_array_to_list(nulls),
         fn (x, is_null) -> if is_null do NullVal else IntVal(x) end)
       end
     NullableFloatCol(_, data, nulls) -> do
-      List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      List.zip_with(native_float_arr_to_list(data), typed_array_to_list(nulls),
         fn (x, is_null) -> if is_null do NullVal else FloatVal(x) end)
       end
     NullableStrCol(_, data, nulls) -> do
@@ -145,21 +145,21 @@ mod DataFrame do
   fn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
     match col do
     IntCol(name, data) ->
-      IntCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
+      IntCol(name, native_int_arr_from_list(List.map(indices, fn i -> native_int_arr_get(data, i))))
     FloatCol(name, data) ->
-      FloatCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
+      FloatCol(name, native_float_arr_from_list(List.map(indices, fn i -> native_float_arr_get(data, i))))
     StrCol(name, data) ->
       StrCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
     BoolCol(name, data) ->
       BoolCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
     NullableIntCol(name, data, nulls) -> do
       NullableIntCol(name,
-        typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+        native_int_arr_from_list(List.map(indices, fn i -> native_int_arr_get(data, i))),
         typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
       end
     NullableFloatCol(name, data, nulls) -> do
       NullableFloatCol(name,
-        typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+        native_float_arr_from_list(List.map(indices, fn i -> native_float_arr_get(data, i))),
         typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
       end
     NullableStrCol(name, data, nulls) -> do
@@ -178,14 +178,14 @@ mod DataFrame do
   -- Filter a column by a boolean mask TypedArray. Single-pass vectorizable operation.
   fn filter_col_by_mask(col : Column, mask : TypedArray(Bool)) : Column do
     match col do
-    IntCol(name, data)   -> IntCol(name, typed_array_filter(data, mask))
-    FloatCol(name, data) -> FloatCol(name, typed_array_filter(data, mask))
+    IntCol(name, data)   -> IntCol(name, native_int_arr_filter_mask(data, mask))
+    FloatCol(name, data) -> FloatCol(name, native_float_arr_filter_mask(data, mask))
     StrCol(name, data)   -> StrCol(name, typed_array_filter(data, mask))
     BoolCol(name, data)  -> BoolCol(name, typed_array_filter(data, mask))
     NullableIntCol(name, data, nulls) ->
-      NullableIntCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
+      NullableIntCol(name, native_int_arr_filter_mask(data, mask), typed_array_filter(nulls, mask))
     NullableFloatCol(name, data, nulls) ->
-      NullableFloatCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
+      NullableFloatCol(name, native_float_arr_filter_mask(data, mask), typed_array_filter(nulls, mask))
     NullableStrCol(name, data, nulls) ->
       NullableStrCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
     NullableBoolCol(name, data, nulls) ->
@@ -223,8 +223,8 @@ mod DataFrame do
   doc "Wrap a non-nullable column in a nullable variant (all-false bitmap). No-op on already-nullable columns."
   fn col_to_nullable(col : Column) : Column do
     match col do
-    IntCol(name, data)   -> NullableIntCol(name, data, typed_array_create(typed_array_length(data), false))
-    FloatCol(name, data) -> NullableFloatCol(name, data, typed_array_create(typed_array_length(data), false))
+    IntCol(name, data)   -> NullableIntCol(name, data, typed_array_create(native_int_arr_length(data), false))
+    FloatCol(name, data) -> NullableFloatCol(name, data, typed_array_create(native_float_arr_length(data), false))
     StrCol(name, data)   -> NullableStrCol(name, data, typed_array_create(typed_array_length(data), false))
     BoolCol(name, data)  -> NullableBoolCol(name, data, typed_array_create(typed_array_length(data), false))
     NullableIntCol(_, _, _)   -> col
@@ -513,8 +513,8 @@ mod DataFrame do
   -- Finalize a builder into a Column.
   fn builder_to_column(b : ColumnBuilder) : Column do
     match b do
-    IntBuilder(name, xs)   -> IntCol(name, typed_array_from_list(List.reverse(xs)))
-    FloatBuilder(name, xs) -> FloatCol(name, typed_array_from_list(List.reverse(xs)))
+    IntBuilder(name, xs)   -> IntCol(name, native_int_arr_from_list(List.reverse(xs)))
+    FloatBuilder(name, xs) -> FloatCol(name, native_float_arr_from_list(List.reverse(xs)))
     StrBuilder(name, xs)   -> StrCol(name, typed_array_from_list(List.reverse(xs)))
     BoolBuilder(name, xs)  -> BoolCol(name, typed_array_from_list(List.reverse(xs)))
     NullBuilder(name, n)   -> StrCol(name, typed_array_create(n, ""))
@@ -730,7 +730,7 @@ mod DataFrame do
     Err(e) -> Err(e)
     Ok(col) -> do
       match col do
-      IntCol(_, data) -> Ok(typed_array_to_list(data))
+      IntCol(_, data) -> Ok(native_int_arr_to_list(data))
       _ -> Err("DataFrame: column '" ++ name ++ "' is not IntCol")
       end
       end
@@ -743,7 +743,7 @@ mod DataFrame do
     Err(e) -> Err(e)
     Ok(col) -> do
       match col do
-      FloatCol(_, data) -> Ok(typed_array_to_list(data))
+      FloatCol(_, data) -> Ok(native_float_arr_to_list(data))
       _ -> Err("DataFrame: column '" ++ name ++ "' is not FloatCol")
       end
       end
@@ -782,8 +782,8 @@ mod DataFrame do
     Err(e) -> Err(e)
     Ok(col) -> do
       match col do
-      FloatCol(_, data) -> Ok(typed_array_to_list(data))
-      IntCol(_, data)   -> Ok(List.map(typed_array_to_list(data), fn x -> int_to_float(x)))
+      FloatCol(_, data) -> Ok(native_float_arr_to_list(data))
+      IntCol(_, data)   -> Ok(List.map(native_int_arr_to_list(data), fn x -> int_to_float(x)))
       _ -> Err("DataFrame: column '" ++ name ++ "' cannot be converted to Float")
       end
       end
@@ -1262,8 +1262,8 @@ mod DataFrame do
     let n = row_count(df)
     match expr do
     Col(name) -> get_column(df, name)
-    LitInt(x)  -> Ok(IntCol("_lit", typed_array_create(n, x)))
-    LitFloat(f) -> Ok(FloatCol("_lit", typed_array_create(n, f)))
+    LitInt(x)  -> Ok(IntCol("_lit", native_int_arr_make(n, x)))
+    LitFloat(f) -> Ok(FloatCol("_lit", native_float_arr_make(n, f)))
     LitStr(s)   -> Ok(StrCol("_lit", typed_array_create(n, s)))
     LitBool(b)  -> Ok(BoolCol("_lit", typed_array_create(n, b)))
 
@@ -1447,7 +1447,7 @@ mod DataFrame do
                 lf +. rf
               end
               end)
-            Ok(FloatCol("_arith", typed_array_from_list(result)))
+            Ok(FloatCol("_arith", native_float_arr_from_list(result)))
           else
             let pairs = List.zip(lvals, rvals)
             let result = List.map(pairs, fn pair ->
@@ -1458,7 +1458,7 @@ mod DataFrame do
                 li + ri
               end
               end)
-            Ok(IntCol("_arith", typed_array_from_list(result)))
+            Ok(IntCol("_arith", native_int_arr_from_list(result)))
           end
         end
         end
@@ -1485,7 +1485,7 @@ mod DataFrame do
                 lf -. rf
               end
               end)
-            Ok(FloatCol("_arith", typed_array_from_list(result)))
+            Ok(FloatCol("_arith", native_float_arr_from_list(result)))
           else
             let pairs = List.zip(lvals, rvals)
             let result = List.map(pairs, fn pair ->
@@ -1496,7 +1496,7 @@ mod DataFrame do
                 li - ri
               end
               end)
-            Ok(IntCol("_arith", typed_array_from_list(result)))
+            Ok(IntCol("_arith", native_int_arr_from_list(result)))
           end
         end
         end
@@ -1523,7 +1523,7 @@ mod DataFrame do
                 lf *. rf
               end
               end)
-            Ok(FloatCol("_arith", typed_array_from_list(result)))
+            Ok(FloatCol("_arith", native_float_arr_from_list(result)))
           else
             let pairs = List.zip(lvals, rvals)
             let result = List.map(pairs, fn pair ->
@@ -1534,7 +1534,7 @@ mod DataFrame do
                 li * ri
               end
               end)
-            Ok(IntCol("_arith", typed_array_from_list(result)))
+            Ok(IntCol("_arith", native_int_arr_from_list(result)))
           end
         end
         end
@@ -1558,7 +1558,7 @@ mod DataFrame do
               lf /. rf
             end
             end)
-          Ok(FloatCol("_arith", typed_array_from_list(result)))
+          Ok(FloatCol("_arith", native_float_arr_from_list(result)))
         end
         end
       end
@@ -2223,14 +2223,14 @@ mod DataFrame do
   pfn col_from_idx_opts(col : Column, idx_opts : List(Option(Int))) : Column do
     match col do
     IntCol(name, data) -> do
-      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> typed_array_get(data, i) end)
+      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> native_int_arr_get(data, i) end)
       let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
-      NullableIntCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+      NullableIntCol(name, native_int_arr_from_list(vals), typed_array_from_list(nulls))
       end
     FloatCol(name, data) -> do
-      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> typed_array_get(data, i) end)
+      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> native_float_arr_get(data, i) end)
       let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
-      NullableFloatCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+      NullableFloatCol(name, native_float_arr_from_list(vals), typed_array_from_list(nulls))
       end
     StrCol(name, data) -> do
       let vals = List.map(idx_opts, fn opt -> match opt do None -> "" | Some(i) -> typed_array_get(data, i) end)
@@ -2243,14 +2243,14 @@ mod DataFrame do
       NullableBoolCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
       end
     NullableIntCol(name, data, col_nulls) -> do
-      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> typed_array_get(data, i) end)
+      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> native_int_arr_get(data, i) end)
       let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
-      NullableIntCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+      NullableIntCol(name, native_int_arr_from_list(vals), typed_array_from_list(nulls))
       end
     NullableFloatCol(name, data, col_nulls) -> do
-      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> typed_array_get(data, i) end)
+      let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> native_float_arr_get(data, i) end)
       let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
-      NullableFloatCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+      NullableFloatCol(name, native_float_arr_from_list(vals), typed_array_from_list(nulls))
       end
     NullableStrCol(name, data, col_nulls) -> do
       let vals = List.map(idx_opts, fn opt -> match opt do None -> "" | Some(i) -> typed_array_get(data, i) end)
@@ -2564,7 +2564,7 @@ mod DataFrame do
     let n = col_len(col)
     match col do
     IntCol(_, data) -> do
-      let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
+      let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
       ColStats(name, "Int", n,
         Some(Stats.mean(xs)), Some(Stats.std_dev(xs)),
         Some(Stats.min_val(xs)), Some(Stats.percentile(xs, 25.0)),
@@ -2572,7 +2572,7 @@ mod DataFrame do
         Some(Stats.max_val(xs)))
       end
     FloatCol(_, data) -> do
-      let lst = typed_array_to_list(data)
+      let lst = native_float_arr_to_list(data)
       ColStats(name, "Float", n,
         Some(Stats.mean(lst)), Some(Stats.std_dev(lst)),
         Some(Stats.min_val(lst)), Some(Stats.percentile(lst, 25.0)),
@@ -2592,21 +2592,21 @@ mod DataFrame do
   fn col_z_score(col : Column) : Result(Column, String) do
     match col do
     FloatCol(name, data) -> do
-      let lst = typed_array_to_list(data)
+      let lst = native_float_arr_to_list(data)
       let m = Stats.mean(lst)
       let s = Stats.std_dev(lst)
-      let n = typed_array_length(data)
-      if s == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
-      else Ok(FloatCol(name, typed_array_from_list(List.map(lst, fn x -> (x -. m) /. s))))
+      let n = native_float_arr_length(data)
+      if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. m) /. s))))
       end
       end
     IntCol(name, data) -> do
-      let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
+      let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
       let m = Stats.mean(xs)
       let s = Stats.std_dev(xs)
-      let n = typed_array_length(data)
-      if s == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
-      else Ok(FloatCol(name, typed_array_from_list(List.map(xs, fn x -> (x -. m) /. s))))
+      let n = native_int_arr_length(data)
+      if s == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. m) /. s))))
       end
       end
     _ -> Err("col_z_score: column must be IntCol or FloatCol")
@@ -2617,23 +2617,23 @@ mod DataFrame do
   fn col_normalize(col : Column) : Result(Column, String) do
     match col do
     FloatCol(name, data) -> do
-      let lst = typed_array_to_list(data)
+      let lst = native_float_arr_to_list(data)
       let mn = Stats.min_val(lst)
       let mx = Stats.max_val(lst)
       let range_ = mx -. mn
-      let n = typed_array_length(data)
-      if range_ == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
-      else Ok(FloatCol(name, typed_array_from_list(List.map(lst, fn x -> (x -. mn) /. range_))))
+      let n = native_float_arr_length(data)
+      if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else Ok(FloatCol(name, native_float_arr_from_list(List.map(lst, fn x -> (x -. mn) /. range_))))
       end
       end
     IntCol(name, data) -> do
-      let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
+      let xs = List.map(native_int_arr_to_list(data), fn x -> int_to_float(x))
       let mn = Stats.min_val(xs)
       let mx = Stats.max_val(xs)
       let range_ = mx -. mn
-      let n = typed_array_length(data)
-      if range_ == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
-      else Ok(FloatCol(name, typed_array_from_list(List.map(xs, fn x -> (x -. mn) /. range_))))
+      let n = native_int_arr_length(data)
+      if range_ == 0.0 do Ok(FloatCol(name, native_float_arr_make(n, 0.0)))
+      else Ok(FloatCol(name, native_float_arr_from_list(List.map(xs, fn x -> (x -. mn) /. range_))))
       end
       end
     _ -> Err("col_normalize: column must be IntCol or FloatCol")
@@ -2737,9 +2737,9 @@ mod DataFrame do
   fn col_add_float(col : Column, f : Float) : Result(Column, String) do
     match col do
     FloatCol(name, data) ->
-      Ok(FloatCol(name, typed_array_map(data, fn x -> x +. f)))
+      Ok(FloatCol(name, native_float_arr_map(data, fn x -> x +. f)))
     IntCol(name, data) ->
-      Ok(FloatCol(name, typed_array_map(data, fn x -> int_to_float(x) +. f)))
+      Ok(FloatCol(name, native_float_arr_from_list(List.map(native_int_arr_to_list(data), fn x -> int_to_float(x) +. f))))
     _ -> Err("col_add_float: column must be IntCol or FloatCol")
     end
   end
@@ -2754,9 +2754,9 @@ mod DataFrame do
   fn col_mul_float(col : Column, f : Float) : Result(Column, String) do
     match col do
     FloatCol(name, data) ->
-      Ok(FloatCol(name, typed_array_map(data, fn x -> x *. f)))
+      Ok(FloatCol(name, native_float_arr_map(data, fn x -> x *. f)))
     IntCol(name, data) ->
-      Ok(FloatCol(name, typed_array_map(data, fn x -> int_to_float(x) *. f)))
+      Ok(FloatCol(name, native_float_arr_from_list(List.map(native_int_arr_to_list(data), fn x -> int_to_float(x) *. f))))
     _ -> Err("col_mul_float: column must be IntCol or FloatCol")
     end
   end
@@ -2784,13 +2784,13 @@ mod DataFrame do
       IntCol(_, data1) -> do
         match col2 do
         IntCol(_, data2) -> do
-          let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
-          Ok(IntCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          let pairs = List.zip(native_int_arr_to_list(data1), native_int_arr_to_list(data2))
+          Ok(IntCol(name, native_int_arr_from_list(List.map(pairs, fn pair ->
             match pair do (a, b) -> a + b end))))
         end
         FloatCol(_, data2) -> do
-          let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
-          Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          let pairs = List.zip(native_int_arr_to_list(data1), native_float_arr_to_list(data2))
+          Ok(FloatCol(name, native_float_arr_from_list(List.map(pairs, fn pair ->
             match pair do (a, b) -> int_to_float(a) +. b end))))
         end
         _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
@@ -2799,13 +2799,13 @@ mod DataFrame do
       FloatCol(_, data1) -> do
         match col2 do
         FloatCol(_, data2) -> do
-          let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
-          Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          let pairs = List.zip(native_float_arr_to_list(data1), native_float_arr_to_list(data2))
+          Ok(FloatCol(name, native_float_arr_from_list(List.map(pairs, fn pair ->
             match pair do (a, b) -> a +. b end))))
         end
         IntCol(_, data2) -> do
-          let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
-          Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          let pairs = List.zip(native_float_arr_to_list(data1), native_int_arr_to_list(data2))
+          Ok(FloatCol(name, native_float_arr_from_list(List.map(pairs, fn pair ->
             match pair do (a, b) -> a +. int_to_float(b) end))))
         end
         _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
@@ -2872,8 +2872,8 @@ mod DataFrame do
     NullableIntCol(n, data, nulls) -> do
       match fill_val do
       IntVal(x) -> do
-        let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
-        Ok(IntCol(n, typed_array_from_list(List.map(pairs,
+        let pairs = List.zip(native_int_arr_to_list(data), typed_array_to_list(nulls))
+        Ok(IntCol(n, native_int_arr_from_list(List.map(pairs,
           fn pair -> match pair do (v, b) -> if b do x else v end end))))
       end
       _ -> Err("fill_null: column '" ++ nm ++ "' is Int; expected IntVal")
@@ -2882,14 +2882,14 @@ mod DataFrame do
     NullableFloatCol(n, data, nulls) -> do
       match fill_val do
       FloatVal(f) -> do
-        let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
-        Ok(FloatCol(n, typed_array_from_list(List.map(pairs,
+        let pairs = List.zip(native_float_arr_to_list(data), typed_array_to_list(nulls))
+        Ok(FloatCol(n, native_float_arr_from_list(List.map(pairs,
           fn pair -> match pair do (v, b) -> if b do f else v end end))))
       end
       IntVal(x) -> do
         let fx = int_to_float(x)
-        let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
-        Ok(FloatCol(n, typed_array_from_list(List.map(pairs,
+        let pairs = List.zip(native_float_arr_to_list(data), typed_array_to_list(nulls))
+        Ok(FloatCol(n, native_float_arr_from_list(List.map(pairs,
           fn pair -> match pair do (v, b) -> if b do fx else v end end))))
       end
       _ -> Err("fill_null: column '" ++ nm ++ "' is Float; expected FloatVal or IntVal")
@@ -2954,7 +2954,7 @@ mod DataFrame do
           end
         end
       end
-      IntCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), 0, Nil)))
+      IntCol(name, native_int_arr_from_list(go(native_int_arr_to_list(data), typed_array_to_list(nulls), 0, Nil)))
       end
     NullableFloatCol(name, data, nulls) -> do
       fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
@@ -2970,7 +2970,7 @@ mod DataFrame do
           end
         end
       end
-      FloatCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), 0.0, Nil)))
+      FloatCol(name, native_float_arr_from_list(go(native_float_arr_to_list(data), typed_array_to_list(nulls), 0.0, Nil)))
       end
     NullableStrCol(name, data, nulls) -> do
       fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
@@ -3027,9 +3027,9 @@ mod DataFrame do
           end
         end
       end
-      let dl = typed_array_to_list(data)
+      let dl = native_int_arr_to_list(data)
       let nl = typed_array_to_list(nulls)
-      IntCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), 0, Nil)))
+      IntCol(name, native_int_arr_from_list(go(List.reverse(dl), List.reverse(nl), 0, Nil)))
       end
     NullableFloatCol(name, data, nulls) -> do
       fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
@@ -3045,9 +3045,9 @@ mod DataFrame do
           end
         end
       end
-      let dl = typed_array_to_list(data)
+      let dl = native_float_arr_to_list(data)
       let nl = typed_array_to_list(nulls)
-      FloatCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), 0.0, Nil)))
+      FloatCol(name, native_float_arr_from_list(go(List.reverse(dl), List.reverse(nl), 0.0, Nil)))
       end
     NullableStrCol(name, data, nulls) -> do
       fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
@@ -3118,7 +3118,7 @@ mod DataFrame do
     match expr do
 
     RowNum ->
-      add_column(df, IntCol(out_col, typed_array_from_list(List.range(0, n))))
+      add_column(df, IntCol(out_col, native_int_arr_from_list(List.range(0, n))))
 
     Rank(key_col, dir) -> do
       let key_spec = Cons((key_col, dir), Nil)
@@ -3148,7 +3148,7 @@ mod DataFrame do
       let rank_map = assign_ranks(sorted, 0, None, 1, Nil)
       let rank_vals = List.map(sort_pairs_asc(rank_map),
         fn p -> match p do (_, r) -> r end)
-      add_column(df, IntCol(out_col, typed_array_from_list(rank_vals)))
+      add_column(df, IntCol(out_col, native_int_arr_from_list(rank_vals)))
 
       end
     DenseRank(key_col, dir) -> do
@@ -3175,7 +3175,7 @@ mod DataFrame do
       let rank_map = assign_dense(sorted, None, 0, Nil)
       let rank_vals = List.map(sort_pairs_asc(rank_map),
         fn p -> match p do (_, r) -> r end)
-      add_column(df, IntCol(out_col, typed_array_from_list(rank_vals)))
+      add_column(df, IntCol(out_col, native_int_arr_from_list(rank_vals)))
 
       end
     RunningSum(src_col) -> do
@@ -3193,7 +3193,7 @@ mod DataFrame do
             end
             end
           end
-          add_column(df, IntCol(out_col, typed_array_from_list(go(typed_array_to_list(data), 0, Nil))))
+          add_column(df, IntCol(out_col, native_int_arr_from_list(go(native_int_arr_to_list(data), 0, Nil))))
         end
         FloatCol(_, data) -> do
           fn go(xs : List(Float), s : Float, acc : List(Float)) : List(Float) do
@@ -3205,7 +3205,7 @@ mod DataFrame do
             end
             end
           end
-          add_column(df, FloatCol(out_col, typed_array_from_list(go(typed_array_to_list(data), 0.0, Nil))))
+          add_column(df, FloatCol(out_col, native_float_arr_from_list(go(native_float_arr_to_list(data), 0.0, Nil))))
         end
         _ -> Err("window RunningSum: column '" ++ src_col ++ "' must be Int or Float")
         end
@@ -3217,8 +3217,8 @@ mod DataFrame do
       Err(e) -> Err(e)
       Ok(col) -> do
         let floats_r = match col do
-          IntCol(_, data)   -> Ok(List.map(typed_array_to_list(data), fn x -> int_to_float(x)))
-          FloatCol(_, data) -> Ok(typed_array_to_list(data))
+          IntCol(_, data)   -> Ok(List.map(native_int_arr_to_list(data), fn x -> int_to_float(x)))
+          FloatCol(_, data) -> Ok(native_float_arr_to_list(data))
           _ -> Err("window RunningMean: column '" ++ src_col ++ "' must be Int or Float")
           end
         match floats_r do
@@ -3235,7 +3235,7 @@ mod DataFrame do
             end
             end
           end
-          add_column(df, FloatCol(out_col, typed_array_from_list(go(fs, 0.0, 0, Nil))))
+          add_column(df, FloatCol(out_col, native_float_arr_from_list(go(fs, 0.0, 0, Nil))))
         end
         end
       end

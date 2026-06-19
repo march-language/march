@@ -1602,6 +1602,12 @@ let builtin_bindings : (string * scheme) list =
        Mono (TArrow (t_list t_float, TCon ("NativeFloatArr", []))));
     ("native_float_arr_to_list",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_list t_float)));
+    ("native_int_arr_filter_mask",
+       Mono (TArrow (TCon ("NativeIntArr", []),
+             TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeIntArr", [])))));
+    ("native_float_arr_filter_mask",
+       Mono (TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TCon ("TypedArray", [t_bool]), TCon ("NativeFloatArr", [])))));
     (* TypedArray builtins — contiguous native arrays for columnar DataFrame storage *)
     ("typed_array_create",   poly1 (fun a ->
         TArrow (t_int, TArrow (a, TCon ("TypedArray", [a])))));
