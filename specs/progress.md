@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, P11 case-of-known-constructor)
+
+- **P11 — Case-of-known-constructor / Beta-ADT reduction** (`lib/tir/cprop.ml`): added `ctor_env` tracking `let v = EAlloc(TCon(tag, _), args)` bindings. In `ECase(AVar v, branches, _)` where `v` is in `ctor_env`, finds the matching branch (stripping `"TypeName."` prefix from the TCon key to match bare `br_tag`), extends `aenv` with `br_vars → ctor_args`, and calls `cprop_expr` on the branch body. Eliminates the ECase node entirely; DCE removes the dead EAlloc. Fires after every inline of a function returning `Option`/`Result`. 3 new tests in `cprop` group.
+- **Test count: 1502** (219 compiler + 219 eval + 284 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-18, P12 variable copy propagation)
 
 - **P12 — Variable copy propagation** (`lib/tir/cprop.ml`): added `alias_env` tracking `let x = y` atom-to-atom aliases. `subst_atom` checks alias env after literal env. `ELet` extends `aenv` when RHS is `EAtom(AVar y)`. RC positions (`EFree`/`EIncRC`/`EDecRC`/`EAtomicIncRC`/`EAtomicDecRC`) are never substituted — Perceus placed those ops for specific binding names. 3 new tests in `cprop` group: `cprop_alias_propagation`, `cprop_alias_in_app_args`, `cprop_alias_not_into_rc`.

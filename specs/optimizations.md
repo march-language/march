@@ -709,7 +709,7 @@ Edge cases:
 **Effort:** Medium (~100 lines) | **Impact:** Very high
 **Dependencies:** CProp (same env-tracking pattern); DCE (cleans up residuals)
 **Tests:** Add `beta_adt` group — test `Ok/Err`, `Some/None`, custom ADTs, nested reduces
-**Status:** Planned
+**Status:** Done (2026-06-18) — `ctor_env` in `lib/tir/cprop.ml`; `short_ctor_tag` strips the `"TypeName."` prefix that lower.ml embeds in EAlloc so the short tag matches `br_tag`. 3 tests in `cprop` group: `beta_adt_ok_reduction`, `beta_adt_none_branch`, `beta_adt_no_reduce_unknown`.
 
 ---
 
@@ -740,7 +740,7 @@ RC-safety: same rule as existing CProp — skip EFree/EIncRC/EDecRC argument pos
 **Effort:** Low (~30 lines) | **Impact:** Medium — fires after every inline call
 **Dependencies:** Inline (creates alias chains); feeds Fold
 **Tests:** Extend `cprop` group — `let x = y in x + 1 → y + 1`
-**Status:** Planned
+**Status:** Done (2026-06-18) — `alias_env` added to `lib/tir/cprop.ml`. 3 tests in `cprop` group: `alias_propagation`, `alias_in_app_args`, `alias_not_into_rc`.
 
 ---
 

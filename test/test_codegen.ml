@@ -2714,6 +2714,80 @@ let test_cprop_alias_not_into_rc () =
    | e -> Alcotest.failf "RC arg should not be substituted, got: %s" (March_tir.Tir.show_expr e));
   ignore !changed
 
+(* ── P11 — Case-of-known-constructor (Beta-ADT reduction) ─────────────────── *)
+
+(** P11: let v = Ok(x) in match v do Ok(w) -> EAtom(w) end
+    → EAtom(x)  (ECase eliminated, w substituted by x). *)
+let test_beta_adt_ok_reduction () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let v = mk_var "v" (March_tir.Tir.TCon ("Result.Ok", [])) in
+  let w = mk_var "w" March_tir.Tir.TInt in
+  (* let v = EAlloc("Result.Ok", [AVar x]) in
+     ECase(AVar v, [Ok(w) -> EAtom(AVar w)], None) *)
+  let body =
+    March_tir.Tir.ELet (v,
+      March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Result.Ok", []), [March_tir.Tir.AVar x]),
+      March_tir.Tir.ECase (March_tir.Tir.AVar v,
+        [{ March_tir.Tir.br_tag = "Ok"; br_vars = [w];
+           br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar w) }],
+        None)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* ECase is reduced: body is EAtom(AVar w) with w→x, so EAtom(AVar x) *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _,
+       March_tir.Tir.EAtom (March_tir.Tir.AVar v2))
+     when v2.March_tir.Tir.v_name = "x" -> ()
+   | e -> Alcotest.failf "expected ELet(_,EAlloc, EAtom x), got: %s"
+            (March_tir.Tir.show_expr e))
+
+(** P11: let v = None in match v do Some(w) -> body | None -> 0 end
+    → 0  (None branch taken, no br_vars to substitute). *)
+let test_beta_adt_none_branch () =
+  let v = mk_var "v" (March_tir.Tir.TCon ("Option.None", [])) in
+  let w = mk_var "w" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (v,
+      March_tir.Tir.EAlloc (March_tir.Tir.TCon ("Option.None", []), []),
+      March_tir.Tir.ECase (March_tir.Tir.AVar v,
+        [{ March_tir.Tir.br_tag = "Some"; br_vars = [w];
+           br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar w) };
+         { March_tir.Tir.br_tag = "None"; br_vars = [];
+           br_body = March_tir.Tir.EAtom (ilit 0) }],
+        None)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* None branch selected: body = EAtom(ilit 0) *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _,
+       March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 0))) -> ()
+   | e -> Alcotest.failf "expected ELet(_,EAlloc, 0), got: %s"
+            (March_tir.Tir.show_expr e))
+
+(** P11: no reduction when scrutinee is NOT a known constructor (literal scrutinee). *)
+let test_beta_adt_no_reduce_unknown () =
+  let x = mk_var "x" (March_tir.Tir.TCon ("Result", [])) in
+  let w = mk_var "w" March_tir.Tir.TInt in
+  (* ECase on a free variable x — not in cenv, should not reduce. *)
+  let body =
+    March_tir.Tir.ECase (March_tir.Tir.AVar x,
+      [{ March_tir.Tir.br_tag = "Ok"; br_vars = [w];
+         br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar w) }],
+      None) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  (* No reduction: ECase preserved *)
+  (match first_body m' with
+   | March_tir.Tir.ECase (March_tir.Tir.AVar _, [_], None) -> ()
+   | e -> Alcotest.failf "ECase should be preserved, got: %s"
+            (March_tir.Tir.show_expr e));
+  ignore !changed
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -4572,6 +4646,10 @@ let codegen_suites =
         Alcotest.test_case "alias_propagation"       `Quick test_cprop_alias_propagation;
         Alcotest.test_case "alias_in_app_args"       `Quick test_cprop_alias_in_app_args;
         Alcotest.test_case "alias_not_into_rc"       `Quick test_cprop_alias_not_into_rc;
+        (* P11: case-of-known-constructor *)
+        Alcotest.test_case "beta_adt_ok_reduction"   `Quick test_beta_adt_ok_reduction;
+        Alcotest.test_case "beta_adt_none_branch"    `Quick test_beta_adt_none_branch;
+        Alcotest.test_case "beta_adt_no_reduce_unknown" `Quick test_beta_adt_no_reduce_unknown;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

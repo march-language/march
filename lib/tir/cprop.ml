@@ -7,12 +7,18 @@
     Scope:
     - Propagates variables whose RHS is [EAtom (ALit ...)] (literals — P const)
     - Propagates variables whose RHS is [EAtom (AVar y)] (aliases — P12)
+    - Tracks [EAlloc(TCon(...))] bindings and reduces [ECase] on known constructors (P11)
     - Tracks [ERecord] and [EUpdate] bindings so that [EField] accesses on
       known-shape records can be folded to the field's atom directly (P13)
     - Does NOT propagate variables bound to complex expressions (no code dup)
     - Stops at any re-binding of the same name within nested scopes
     - RC positions (EFree/EIncRC/EDecRC/EAtomicIncRC/EAtomicDecRC) are never
       substituted: replacing a heap variable's atom there would corrupt RC state
+
+    P11 — Case-of-known-constructor (Beta-ADT reduction):
+        let v = Ok(x) in match v do Ok(w) -> body end  →  body[w := x]
+    Fires constantly after inlining Option/Result/let? chains. DCE removes the
+    dead EAlloc; orphaned RC ops on [v] are cleaned up by DCE.
 
     P12 — Variable copy propagation:
         let x = y in ... x ...  →  let x = y in ... y ...
@@ -56,6 +62,26 @@ let aenv_add name a (aenv : alias_env) : alias_env = (name, a) :: aenv
 let aenv_find name (aenv : alias_env) : Tir.atom option =
   List.assoc_opt name aenv
 
+(** A mapping from variable name to the constructor it is bound to (P11).
+    Populated for [EAlloc(TCon(tag, _), args)] bindings.  When an
+    [ECase(AVar v, branches, _)] is encountered and [v] is in this env, the
+    matching branch is substituted inline and the allocation is eliminated. *)
+type ctor_env = (string * (string * Tir.atom list)) list
+
+let cenv_add name tag_args (cenv : ctor_env) : ctor_env = (name, tag_args) :: cenv
+
+let cenv_find name (cenv : ctor_env) : (string * Tir.atom list) option =
+  List.assoc_opt name cenv
+
+(** Strip the type-name prefix that lower.ml embeds in EAlloc's TCon key
+    ("Result.Ok" → "Ok", "Option.Some" → "Some", "Foo" → "Foo").
+    [ECase] branch tags are bare constructor names, so we need to match them
+    against the short form. *)
+let short_ctor_tag name =
+  match String.rindex_opt name '.' with
+  | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+  | None   -> name
+
 (** A mapping from variable name to the record-field list it is bound to.
     Populated for [ERecord], [EUpdate] on a known base, and [EAtom(AVar base)]
     when [base] has a known field list. *)
@@ -86,13 +112,14 @@ let subst_atoms ~changed env aenv atoms =
 let subst_fields ~changed env aenv fields =
   List.map (fun (k, a) -> (k, subst_atom ~changed env aenv a)) fields
 
-(** Propagate literals, variable aliases, and record-field knowledge through
-    an expression.
+(** Propagate literals, variable aliases, constructor bindings, and record-field
+    knowledge through an expression.
     [env]  maps variable names to their literal values.
     [aenv] maps variable names to their atom aliases (P12 copy propagation).
+    [cenv] maps variable names to their known constructor (P11 Beta-ADT).
     [fenv] maps variable names to their known record-field lists (P13).
     New bindings are added as they are encountered; re-bindings shadow earlier ones. *)
-let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : Tir.expr -> Tir.expr = function
+let rec cprop_expr ~changed (env : env) (aenv : alias_env) (cenv : ctor_env) (fenv : field_env) : Tir.expr -> Tir.expr = function
   | Tir.EAtom a ->
     Tir.EAtom (subst_atom ~changed env aenv a)
 
@@ -103,7 +130,7 @@ let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : 
     Tir.ECallPtr (subst_atom ~changed env aenv f, subst_atoms ~changed env aenv args)
 
   | Tir.ELet (v, rhs, body) ->
-    let rhs' = cprop_expr ~changed env aenv fenv rhs in
+    let rhs' = cprop_expr ~changed env aenv cenv fenv rhs in
     (* Extend literal env when the RHS is a bare literal atom. *)
     let env' = match rhs' with
       | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env
@@ -113,6 +140,14 @@ let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : 
     let aenv' = match rhs' with
       | Tir.EAtom (Tir.AVar y) -> aenv_add v.Tir.v_name (Tir.AVar y) aenv
       | _                      -> aenv
+    in
+    (* P11: track constructor bindings for Beta-ADT reduction.
+       lower.ml embeds the parent type in TCon ("Result.Ok"), but br_tag is the
+       bare name ("Ok"), so strip the prefix via [short_ctor_tag]. *)
+    let cenv' = match rhs' with
+      | Tir.EAlloc (Tir.TCon (tag, _), args) ->
+        cenv_add v.Tir.v_name (short_ctor_tag tag, args) cenv
+      | _ -> cenv
     in
     (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
     let fenv' = match rhs' with
@@ -136,28 +171,52 @@ let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : 
          | None -> fenv)
       | _ -> fenv
     in
-    Tir.ELet (v, rhs', cprop_expr ~changed env' aenv' fenv' body)
+    Tir.ELet (v, rhs', cprop_expr ~changed env' aenv' cenv' fenv' body)
 
   | Tir.ELetRec (fns, body) ->
-    (* Do not propagate outer literals/aliases into recursive function bodies. *)
+    (* Do not propagate outer literals/aliases/constructors into recursive bodies. *)
     let fns' = List.map (fun fd ->
-      { fd with Tir.fn_body = cprop_expr ~changed [] [] [] fd.Tir.fn_body }
+      { fd with Tir.fn_body = cprop_expr ~changed [] [] [] [] fd.Tir.fn_body }
     ) fns in
-    Tir.ELetRec (fns', cprop_expr ~changed env aenv fenv body)
+    Tir.ELetRec (fns', cprop_expr ~changed env aenv cenv fenv body)
 
   | Tir.ECase (a, branches, default) ->
     let a' = subst_atom ~changed env aenv a in
-    (* Branch bound variables shadow any outer literal/alias/field binding. *)
-    let branches' = List.map (fun b ->
-      let bound_names =
-        List.fold_left (fun s v -> v.Tir.v_name :: s) [] b.Tir.br_vars in
-      let env_branch   = List.filter (fun (n, _) -> not (List.mem n bound_names)) env in
-      let aenv_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) aenv in
-      let fenv_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) fenv in
-      { b with Tir.br_body = cprop_expr ~changed env_branch aenv_branch fenv_branch b.Tir.br_body }
-    ) branches in
-    let default' = Option.map (cprop_expr ~changed env aenv fenv) default in
-    Tir.ECase (a', branches', default')
+    (* P11: case-of-known-constructor — if scrutinee is a known EAlloc, reduce to
+       the matching branch body with br_vars substituted by the constructor args. *)
+    let try_beta_adt () =
+      match a' with
+      | Tir.AVar v ->
+        (match cenv_find v.Tir.v_name cenv with
+         | Some (ctor_tag, ctor_args) ->
+           (match List.find_opt (fun b -> b.Tir.br_tag = ctor_tag) branches with
+            | Some b when List.length b.Tir.br_vars = List.length ctor_args ->
+              (* Extend aenv with br_vars → ctor_args so the body sees them as aliases. *)
+              let aenv_branch =
+                List.fold_left2 (fun acc bv arg -> aenv_add bv.Tir.v_name arg acc)
+                  aenv b.Tir.br_vars ctor_args
+              in
+              changed := true;
+              Some (cprop_expr ~changed env aenv_branch cenv fenv b.Tir.br_body)
+            | _ -> None)
+         | None -> None)
+      | _ -> None
+    in
+    (match try_beta_adt () with
+     | Some body -> body
+     | None ->
+       (* Branch bound variables shadow any outer literal/alias/constructor/field binding. *)
+       let branches' = List.map (fun b ->
+         let bound_names =
+           List.fold_left (fun s v -> v.Tir.v_name :: s) [] b.Tir.br_vars in
+         let env_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) env in
+         let aenv_branch = List.filter (fun (n, _) -> not (List.mem n bound_names)) aenv in
+         let cenv_branch = List.filter (fun (n, _) -> not (List.mem n bound_names)) cenv in
+         let fenv_branch = List.filter (fun (n, _) -> not (List.mem n bound_names)) fenv in
+         { b with Tir.br_body = cprop_expr ~changed env_branch aenv_branch cenv_branch fenv_branch b.Tir.br_body }
+       ) branches in
+       let default' = Option.map (cprop_expr ~changed env aenv cenv fenv) default in
+       Tir.ECase (a', branches', default'))
 
   | Tir.ETuple atoms ->
     Tir.ETuple (subst_atoms ~changed env aenv atoms)
@@ -198,10 +257,10 @@ let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : 
   | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC a
 
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (cprop_expr ~changed env aenv fenv e1, cprop_expr ~changed env aenv fenv e2)
+    Tir.ESeq (cprop_expr ~changed env aenv cenv fenv e1, cprop_expr ~changed env aenv cenv fenv e2)
 
 let run_fn ~changed (fd : Tir.fn_def) : Tir.fn_def =
-  { fd with Tir.fn_body = cprop_expr ~changed [] [] [] fd.Tir.fn_body }
+  { fd with Tir.fn_body = cprop_expr ~changed [] [] [] [] fd.Tir.fn_body }
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (run_fn ~changed) m.Tir.tm_fns }
