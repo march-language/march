@@ -4,6 +4,8 @@
 -- rm_rf refuses to operate on "/" or "" (returns Err).
 
 mod Dir do
+  needs IO.FileRead
+  needs IO.FileWrite
 
   doc """
   List the entries of a directory as bare names (no path prefix).

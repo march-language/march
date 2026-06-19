@@ -13,6 +13,7 @@
 --   let line = IO.gets("Name: ")   -- print prompt then read line
 
 mod IO do
+  needs IO.Console
 
   doc "Write a string to stdout without a trailing newline."
   fn write(s : String) : Unit do

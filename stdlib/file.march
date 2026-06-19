@@ -6,6 +6,8 @@
 -- guarantee cleanup even on unhandled exceptions.
 
 mod File do
+  needs IO.FileRead
+  needs IO.FileWrite
 
   ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
 

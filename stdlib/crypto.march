@@ -16,6 +16,7 @@
 -- All hex output is lowercase.
 
 mod Crypto do
+  needs IO.Random
 
   -- ── Private helpers ───────────────────────────────────────────────────────
 

@@ -885,6 +885,8 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.NetListen",  Some "IO.Network");
   ("IO.Process",    Some "IO");
   ("IO.Clock",      Some "IO");
+  ("IO.Random",     Some "IO");
+  ("IO.Database",   Some "IO.NetConnect");
 ]
 
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.

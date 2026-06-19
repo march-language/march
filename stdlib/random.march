@@ -13,6 +13,7 @@
 -- No global mutable state.
 
 mod Random do
+  needs IO.Random
 
   type Rng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
 
