@@ -3907,8 +3907,58 @@ let test_perceus_local_record_field_no_spurious_decrc () =
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
+(* ── Browser HTTP transport (http_fetch platform hook) ──────────────── *)
+
+let test_http_fetch_unavailable_by_default () =
+  March_eval.Eval.http_fetch_hook := None;
+  let env = eval_module {|mod T do
+  fn f() do http_fetch_available() end
+end|} in
+  Alcotest.(check bool) "unavailable by default" false (vbool (call_fn env "f" []))
+
+let test_http_fetch_available_when_hooked () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _meth _url _hdrs _body -> Ok "HTTP/1.1 200 OK\r\n\r\n");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch_available() end
+end|} in
+  let avail = vbool (call_fn env "f" []) in
+  March_eval.Eval.http_fetch_hook := None;
+  Alcotest.(check bool) "available when hooked" true avail
+
+let test_http_fetch_returns_ok_raw () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _ _ _ _ -> Ok "RAWBODY");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch("GET", "http://x/", "", "") end
+end|} in
+  let r = call_fn env "f" [] in
+  March_eval.Eval.http_fetch_hook := None;
+  (match vcon "Ok" r with
+   | [v] -> Alcotest.(check string) "ok payload is raw string" "RAWBODY" (vstr v)
+   | _ -> Alcotest.fail "expected Ok(_)")
+
+let test_http_fetch_maps_error () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _ _ _ _ -> Error "boom");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch("GET", "http://x/", "", "") end
+end|} in
+  let r = call_fn env "f" [] in
+  March_eval.Eval.http_fetch_hook := None;
+  (match vcon "Err" r with
+   | [v] -> Alcotest.(check string) "err payload" "boom" (vstr v)
+   | _ -> Alcotest.fail "expected Err(_)")
+
 let eval_suites =
   [
+      ( "browser http",
+        [
+          Alcotest.test_case "fetch unavailable by default" `Quick test_http_fetch_unavailable_by_default;
+          Alcotest.test_case "fetch available when hooked"  `Quick test_http_fetch_available_when_hooked;
+          Alcotest.test_case "fetch returns Ok raw"         `Quick test_http_fetch_returns_ok_raw;
+          Alcotest.test_case "fetch maps Error to Err"      `Quick test_http_fetch_maps_error;
+        ] );
       ( "eval",
         [
           Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);
