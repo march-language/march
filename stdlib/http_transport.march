@@ -171,6 +171,53 @@ mod HttpTransport do
     end
   end
 
+  -- ---- Browser/js_of_ocaml transport (synchronous XHR) ----
+  -- When running under js_of_ocaml there are no raw sockets, so the whole
+  -- request is handed to the platform `http_fetch` builtin (a synchronous
+  -- XMLHttpRequest).  Native builds leave `http_fetch_available()` false and
+  -- never take this path.
+
+  pfn scheme_to_string(sch) do
+    match sch do
+    SchemeHttp  -> "http"
+    SchemeHttps -> "https"
+    end
+  end
+
+  pfn build_url(req) do
+    let port_str = match Http.port(req) do
+      Some(p) -> ":" ++ int_to_string(p)
+      None -> ""
+      end
+    let query_str = match Http.query(req) do
+      Some(q) -> "?" ++ q
+      None -> ""
+      end
+    scheme_to_string(Http.scheme(req)) ++ "://" ++ Http.host(req) ++ port_str ++ Http.path(req) ++ query_str
+  end
+
+  pfn serialize_header_block(headers) do
+    match headers do
+    Nil -> ""
+    Cons(Header(n, v), rest) -> n ++ ": " ++ v ++ "\r\n" ++ serialize_header_block(rest)
+    end
+  end
+
+  pfn request_via_fetch(req) do
+    let meth = Http.method_to_string(Http.method(req))
+    let url = build_url(req)
+    let header_block = serialize_header_block(Http.headers(req))
+    match http_fetch(meth, url, header_block, Http.body(req)) do
+    Err(msg) -> Err(RecvError(msg))
+    Ok(raw) ->
+      match http_parse_response(raw) do
+      Err(msg) -> Err(ConnParseError(msg))
+      Ok((status_code, resp_headers, resp_body)) ->
+        Ok(Response(Status(status_code), resp_headers, resp_body))
+      end
+    end
+  end
+
   doc """
   Send an HTTP request and receive the response.
   Opens a TCP connection, sends the request with Connection: close,
@@ -178,11 +225,19 @@ mod HttpTransport do
 
   Refuses https:// requests with `SchemeNotSupported` — use the Tls
   module for TLS-enabled requests.
+
+  In js_of_ocaml builds (where `http_fetch_available()` is true) the request
+  is routed through a synchronous XHR instead, which handles both http and
+  https; the socket path below is skipped.
   """
   fn request(req) do
-    match require_plain_http(req) do
-    Err(e) -> Err(e)
-    Ok(_) -> request_plain(req)
+    if http_fetch_available() do
+      request_via_fetch(req)
+    else
+      match require_plain_http(req) do
+      Err(e) -> Err(e)
+      Ok(_) -> request_plain(req)
+      end
     end
   end
 
