@@ -212,6 +212,21 @@ let needs_rc : Tir.ty -> bool = function
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ -> false
 
+(** True for a defunctionalized closure apply wrapper ("<fn>$apply$<uid>").
+    Mirrors [Llvm_emit.is_apply_fn].  An apply function's first parameter is the
+    closure struct ([$clo]); the closure-apply ABI used by both [ECallPtr]
+    dispatch and the [EApp] form that [Known_call] rewrites it into CONSUMES
+    that closure argument (ownership transfers to the callee).  This must
+    override any borrow-map classification of the [$clo] slot — see the EApp
+    [post_dec_vars] computation. *)
+let is_apply_fn (name : string) : bool =
+  let marker = "$apply$" in
+  let nl = String.length name and ml = String.length marker in
+  let rec scan i =
+    i + ml <= nl && (String.sub name i ml = marker || scan (i + 1))
+  in
+  nl >= ml && scan 0
+
 (** Returns the set of variable names referenced by an atom.
 
     [ADefRef] resolves to a code-segment address (the function's symbol)
@@ -459,6 +474,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           borrowed positions (e.g. [f(x, x)] both borrowed, [x] dead after),
           the caller still owns exactly one reference and must emit exactly
           one DecRC.  Without dedup we would underflow the RC. *)
+    let callee_is_apply = is_apply_fn f.Tir.v_name in
     let post_dec_vars =
       let seen = ref StringSet.empty in
       List.filter_map (fun (i, a) ->
@@ -468,6 +484,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                && needs_rc v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed !_borrow_map f.Tir.v_name i
+               (* The closure slot (arg 0) of an apply function follows the
+                  closure-apply ABI: the callee consumes the closure regardless
+                  of the borrow map.  Emitting a caller-side post-call EDecRC
+                  here (as Known_call's ECallPtr->EApp rewrite would otherwise
+                  trigger when $clo is borrow-classified) double-frees the
+                  closure — the heap corruption behind the List.sort_by crash. *)
+               && not (i = 0 && callee_is_apply)
                && not (StringSet.mem v.Tir.v_name !_closure_fvs)
                && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->

@@ -1092,17 +1092,20 @@ let compile filename =
     let tir = March_tir.Defun.defunctionalize tir in
     snap_tir "tir-defun" tir;
     stamp "defun";
-    (* Known-call (ECallPtr -> EApp for statically-known closures) is
-       intentionally NOT run here, before Perceus.  Converting an indirect
-       closure call into a direct call to its apply function is an
-       RC-relevant structural change: it alters how the closure argument's
-       ownership is analysed.  Performing it before reference-counting makes
-       Perceus (and the post-Perceus Opt fixed-point loop) mis-account the
-       closure's refcount for apply-function calls, double-handling it and
-       corrupting the heap — e.g. List.sort_by with a heap-capturing
-       comparator at n >= ~90 crashes with SIGBUS.  The conversion is performed
-       later by the Opt coordinator's own "known-call" pass, AFTER Perceus has
-       settled RC, where it is sound and (per bench/list_ops) perf-neutral. *)
+    (* Known-call pass: run before Perceus so apply functions are still pure
+       and eligible for inlining in the subsequent Opt fixed-point loop.
+       Also included in the Opt coordinator for cases revealed after Perceus.
+       This rewrites ECallPtr(clo, args) -> EApp(clo_apply, clo :: args).  The
+       closure-apply ABI consumes the closure argument, so Perceus must NOT
+       emit a caller-side post-call EDecRC for the $clo slot of an apply
+       function even when borrow inference classifies it as borrowed — see the
+       [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars.  Without that
+       guard the rewrite double-freed the closure (List.sort_by SIGBUS at
+       n >= ~90 with a heap-capturing comparator). *)
+    let tir = if !opt_enabled
+              then March_tir.Known_call.run ~changed:(ref false) tir
+              else tir in
+    snap_tir "tir-known-call" tir;
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";
