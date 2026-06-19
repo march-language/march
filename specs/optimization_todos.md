@@ -231,8 +231,8 @@ becomes the dominant user complaint.
 | 1 | Cap enforcement Phase 1 (stdlib annotations) | 0.5–1 day | Unlocks Phase 2 | ✅ complete |
 | 2 | Cap enforcement Phase 2 (body-scanning pass) | 1.5 days | Catches bugs at compile time | ✅ complete |
 | 3 | Record field auto-satisfy | 0.5–1 day | Kills impl boilerplate | ✅ complete |
-| 4 | P10 Phase 3 (NativeArray DataFrame) | Medium | 5–10× analytical perf | ✅ partial |
-| 5 | `satisfy` keyword | 1.5–2 days | Ergonomics win | ✅ complete |
+| 4 | P10 Phase 3 (NativeArray DataFrame) | Medium | 5–10× analytical perf | ✅ complete |
+| 5 | `satisfy` keyword | 1.5–2 days | Ergonomics win | pending |
 | 6 | P5 stdlib specialization | Medium | Binary size / compile time | Outline only |
 | 7 | P4 lambda lifting | Medium | Low; already largely covered | Outline only |
 | 8 | P6 representation polymorphism | Very high | Zero-cost newtypes | Research |
