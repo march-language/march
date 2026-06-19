@@ -181,11 +181,18 @@ static void setup_alt_stack(void) {
  * with the usual signal.
  */
 static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
-    (void)sig;
     (void)uctx;
 
-    /* Only handle permission faults (SEGV_ACCERR), not invalid-address faults. */
-    if (info->si_code != SEGV_ACCERR) goto fatal;
+    /* A lazy-stack-growth fault is a protection fault on a PROT_NONE guard
+     * page.  On Linux that is delivered as SIGSEGV with si_code SEGV_ACCERR.
+     * On macOS the Mach exception EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE is
+     * translated to SIGBUS (not SIGSEGV), with a BUS_* si_code — so the old
+     * `SIGSEGV && SEGV_ACCERR` gate rejected every macOS stack-growth fault,
+     * leaving the thread to die with SIGBUS as soon as a green stack grew past
+     * the initial 4 KiB.  Accept SIGBUS regardless of si_code; the address-range
+     * check below is the real safety gate.  For SIGSEGV keep requiring
+     * SEGV_ACCERR so genuine invalid-address faults still terminate. */
+    if (sig == SIGSEGV && info->si_code != SEGV_ACCERR) goto fatal;
 
     {
         size_t page       = g_page_size;
@@ -217,14 +224,15 @@ static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
     }
 
 fatal:
-    /* Not a stack-growth fault — restore the default handler and re-raise. */
+    /* Not a stack-growth fault — restore the default handler for the signal
+     * that actually fired and re-raise it so the program terminates normally. */
     {
         struct sigaction sa;
         sa.sa_handler = SIG_DFL;
         sigemptyset(&sa.sa_mask);
         sa.sa_flags = 0;
-        sigaction(SIGSEGV, &sa, NULL);
-        raise(SIGSEGV);
+        sigaction(sig, &sa, NULL);
+        raise(sig);
     }
 }
 
@@ -245,6 +253,12 @@ static void install_stack_growth_handler(void) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     if (sigaction(SIGSEGV, &sa, NULL) != 0) {
         perror("march_sched: sigaction(SIGSEGV)");
+    }
+    /* macOS reports PROT_NONE guard-page hits as SIGBUS, not SIGSEGV, so the
+     * lazy-stack-growth handler must cover SIGBUS as well or green stacks can
+     * never grow past their initial size on Darwin. */
+    if (sigaction(SIGBUS, &sa, NULL) != 0) {
+        perror("march_sched: sigaction(SIGBUS)");
     }
 }
 

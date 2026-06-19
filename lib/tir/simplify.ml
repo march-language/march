@@ -118,13 +118,16 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool (not b)))
 
-  (* String identities: x ++ "" → x, "" ++ x → x *)
-  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitString "")])
-    when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
-    changed := true; Tir.EAtom x
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString ""); x])
-    when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
-    changed := true; Tir.EAtom x
+  (* String identities x ++ "" → x and "" ++ x → x are DELIBERATELY NOT folded
+     here.  This Simplify pass runs *after* Perceus (see the pipeline in
+     bin/main.ml: Perceus then Opt.run).  Perceus treats `"" ++ x` as a concat
+     that allocates a fresh owned string distinct from `x`, and emits a separate
+     dec_rc for each.  Folding the concat down to the bare atom `x` aliases the
+     two together while leaving both dec_rc operations in place — two decrements
+     on one object → RC underflow / double-free.  Eliminating an RC-tracked
+     allocation is unsound once RC ops have been inserted; the saved allocation
+     (one empty-string concat copy) is not worth the miscompile.  If this fold is
+     ever wanted, it must run in a pre-Perceus simplification pass instead. *)
 
   (* Boolean conditional identities arising from guard desugaring / inlining *)
 
