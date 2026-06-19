@@ -284,7 +284,7 @@ march/
 
 - **Fixed two native-codegen miscompiles in the TIR optimizer** (both compiled-only; the interpreter was always correct):
   - **P12 copy propagation** (`lib/tir/cprop.ml`): no longer propagates type-changing aliases (`let go : Fn = $clo : Ptr(Unit)`), which made indirect-call codegen pick the wrong apply ABI and tag-encode scalar args. Gated the alias-env extension on `v.v_ty = y.v_ty`. Fixed `List.length(List.range(0,5))` returning 93 instead of 5.
-  - **known-call before Perceus** (`bin/main.ml`): removed the pre-Perceus `Known_call` run; converting `ECallPtr→EApp` before reference counting made Perceus mis-account closure refcounts and corrupt the heap. The Opt-loop's own known-call pass still converts after Perceus. Fixed `List.sort_by` SIGBUS with a heap-capturing comparator at n≥~90. Perf-neutral (`bench/list_ops`).
+  - **Perceus post-dec on an apply-fn EApp's closure slot** (`lib/tir/perceus.ml`): `Known_call` rewrites `ECallPtr(clo,args)→EApp(clo_apply, clo::args)`; the closure-apply ABI consumes the closure, but the EApp handler post-dec'd it when borrow inference classified an apply fn's `$clo` as borrowed (single-use join-point continuations), double-freeing it → `List.sort_by` SIGBUS at n≥~90. Fix: never post-dec arg 0 when the callee `is_apply_fn` (matches the ECallPtr consume semantics). known-call before Perceus restored; perf-neutral.
 - **2 new `Slow` regression tests** in the stdlib `adversarial-regressions` group (compiled value checks). Test count: **1527** (242 compiler + 219 eval + 284 codegen + 782 stdlib; 2 pre-existing `parser gaps` failures, 1 pre-existing adversarial-regressions failure).
 
 ## Current State (as of 2026-06-18, tier1 ergonomics items 1–3)
