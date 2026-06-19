@@ -621,15 +621,23 @@ for sum, map, and fold over 100 000 elements.
 
 ---
 
-**Phase 2 — Flat array type in LLVM IR (planned):**
+**Phase 2 — NativeArray compiled path (done, 2026-06-18):**
 
-Add `TNativeArray of ty` to TIR:
-- `lib/tir/tir.ml` — new type constructor
-- `lib/tir/lower.ml` — lower `NativeArray` builtins to TIR `ENativeArrayOp` nodes
-- `lib/tir/llvm_emit.ml` — emit GEP-based load/store loops with:
-  - `!llvm.loop.vectorize.enable !1` metadata on numeric loops
-  - `align 32` on allocation sites (requires `posix_memalign` in runtime for AVX2)
-  - Loop structure: header → body (vector unrolled) → tail (scalar) → exit
+Pragmatic approach: register C runtime functions directly as builtins in the LLVM emitter without adding a new `TNativeArray` TIR constructor. This avoids touching the TIR type algebra while delivering full compiled-path support.
+
+Changes:
+- `lib/tir/llvm_emit.ml`:
+  - All 16 `native_int_arr_*` / `native_float_arr_*` functions added to `is_builtin_fn` (prevents erroneous RC wrapping and reduction-counter insertion)
+  - `builtin_ret_ty` entries: `i64` for length/get/sum; `ptr` (TCon("NativeIntArr/NativeFloatArr", [])) for make/set/map/from_list/to_list; `double` for float get/sum
+  - 16 explicit `declare` lines in the LLVM preamble (correct LLVM types: `i64` vs `double` vs `ptr` per builtin)
+- `runtime/march_runtime.c`:
+  - `native_int_arr_from_list`: reads tagged ptr fields (`(raw & 1) ? raw >> 1 : raw`) before writing to flat array
+  - `native_int_arr_to_list`: tags before storing to Cons cells (`(v << 1) | 1`)
+  - Float from_list/to_list: correct as-is (floats use bitcast convention, not tag-bit scheme)
+
+Testing: 2 new IR-level tests in `native_arrays` group (`int arr IR`, `float arr IR`) verify all 16 builtins appear in the emitted LLVM IR with correct return types.
+
+**Deferred (Phase 3):** GEP-based vectorizable loop emission with `!llvm.loop.vectorize.enable` metadata and `align 32` allocation (requires `posix_memalign`). The current Phase 2 calls the C runtime's tight loops; LLVM auto-vectorizes the runtime C loops at `-O2`/`-O3`, so this is a future enhancement for explicit vectorization hints.
 
 Example of what the Level 2 emit produces for `native_float_arr_map(arr, fn x -> x *. 2.0)`:
 ```llvm

@@ -3383,7 +3383,9 @@ void *native_int_arr_from_list(void *lst) {
     void *arr = native_arr_alloc(n);
     void *cur = lst;
     for (int64_t i = 0; i < n; i++) {
-        *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = *(int64_t *)((char *)cur + 16);
+        /* List Cons cells store Int elements as tagged ptrs: (n<<1)|1. Untag. */
+        int64_t raw = *(int64_t *)((char *)cur + 16);
+        *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = (raw & 1) ? (raw >> 1) : raw;
         cur = *(void **)((char *)cur + 24);
     }
     return arr;
@@ -3396,7 +3398,8 @@ void *native_int_arr_to_list(void *arr) {
         int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         void *cons = march_alloc(32);
         *(int32_t *)((char *)cons + 8) = 1;
-        *(int64_t *)((char *)cons + 16) = v;
+        /* Tag as (n<<1)|1 so pattern-match untagging on the March side recovers v. */
+        *(int64_t *)((char *)cons + 16) = (v << 1) | 1;
         *(void **)((char *)cons + 24) = lst;
         lst = cons;
     }
