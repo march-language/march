@@ -3280,10 +3280,17 @@ void *march_typed_array_map(void *arr, void *f) {
     return new_arr;
 }
 
-void *march_typed_array_filter(void *arr, void *f) {
-    int64_t len = march_typed_array_length(arr);
-    /* Bug fix: malloc return was unchecked; also len*8 could overflow.
-     * typed_array_alloc already guards the overflow; use it for temp too. */
+/* typed_array_filter(arr, mask): keep elements of arr where the parallel
+ * TypedArray(Bool) mask is true.  Bool elements are tagged scalars:
+ * true=(1<<1)|1=3, false=(0<<1)|1=1; raw >> 1 gives the actual boolean. */
+void *march_typed_array_filter(void *arr, void *mask) {
+    int64_t len  = march_typed_array_length(arr);
+    int64_t mlen = march_typed_array_length(mask);
+    if (len != mlen) {
+        fprintf(stderr,
+            "march: typed_array_filter: array length %lld != mask length %lld\n",
+            (long long)len, (long long)mlen); exit(1);
+    }
     int64_t body;
     if (__builtin_mul_overflow(len, (int64_t)8, &body)) {
         fputs("march: runtime error: array too large (filter overflow)\n", stderr); exit(1);
@@ -3292,8 +3299,9 @@ void *march_typed_array_filter(void *arr, void *f) {
     if (!temp && len > 0) { fputs("march: out of memory\n", stderr); exit(1); }
     int64_t count = 0;
     for (int64_t i = 0; i < len; i++) {
-        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
-        if (call_closure_1_int(f, elem)) temp[count++] = elem;
+        int64_t raw_bool = *(int64_t *)((char *)mask + TYPED_ARRAY_HDR_SIZE + i * 8);
+        if (raw_bool >> 1)
+            temp[count++] = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
     }
     void *new_arr = typed_array_alloc(count);
     memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE, temp, (size_t)(count * 8));
@@ -3472,6 +3480,57 @@ void *native_float_arr_to_list(void *arr) {
         lst = cons;
     }
     return lst;
+}
+
+/* native_int_arr_filter_mask / native_float_arr_filter_mask:
+ * Keep elements where the parallel TypedArray(Bool) mask is true.
+ * TypedArray Bool elements are tagged scalars: true=(1<<1)|1=3, false=(0<<1)|1=1.
+ * Raw >> 1 gives the actual boolean (1 for true, 0 for false). */
+void *native_int_arr_filter_mask(void *arr, void *mask) {
+    int64_t len = *(int64_t *)((char *)arr  + 16);
+    int64_t mlen = *(int64_t *)((char *)mask + 16);
+    if (len != mlen) {
+        fprintf(stderr,
+            "march: native_int_arr_filter_mask: array length %lld != mask length %lld\n",
+            (long long)len, (long long)mlen); exit(1);
+    }
+    void *tmp = malloc((size_t)(len * 8));
+    if (!tmp && len > 0) { fputs("march: out of memory\n", stderr); exit(1); }
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t raw_bool = *(int64_t *)((char *)mask + TYPED_ARRAY_HDR_SIZE + i * 8);
+        if (raw_bool >> 1)
+            ((int64_t *)tmp)[count++] = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+    }
+    void *out = native_arr_alloc(count);
+    memcpy((char *)out + NATIVE_ARR_HDR, tmp, (size_t)(count * 8));
+    free(tmp);
+    return out;
+}
+
+void *native_float_arr_filter_mask(void *arr, void *mask) {
+    int64_t len = *(int64_t *)((char *)arr  + 16);
+    int64_t mlen = *(int64_t *)((char *)mask + 16);
+    if (len != mlen) {
+        fprintf(stderr,
+            "march: native_float_arr_filter_mask: array length %lld != mask length %lld\n",
+            (long long)len, (long long)mlen); exit(1);
+    }
+    void *tmp = malloc((size_t)(len * 8));
+    if (!tmp && len > 0) { fputs("march: out of memory\n", stderr); exit(1); }
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t raw_bool = *(int64_t *)((char *)mask + TYPED_ARRAY_HDR_SIZE + i * 8);
+        if (raw_bool >> 1) {
+            double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+            memcpy((char *)tmp + count * 8, &v, 8);
+            count++;
+        }
+    }
+    void *out = native_arr_alloc(count);
+    memcpy((char *)out + NATIVE_ARR_HDR, tmp, (size_t)(count * 8));
+    free(tmp);
+    return out;
 }
 
 /* ── UUID v7 ──────────────────────────────────────────────────────────── */

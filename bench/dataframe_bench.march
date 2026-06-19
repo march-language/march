@@ -9,6 +9,8 @@
 
 mod DataframeBench do
 
+needs IO.Clock
+
 -- ── Helpers ────────────────────────────────────────────────────────────────
 
 pfn elapsed_ms(t0 : Float, t1 : Float) : Int do
@@ -41,9 +43,9 @@ pfn make_frame(n : Int) : DataFrame do
   let ids  = gen_ids(n - 1, Nil)
   let vals = gen_values(n - 1, Nil)
   let cats = gen_cats(n - 1, Nil)
-  DataFrame.make_df(Cons(IntCol("id", ids),
-                    Cons(FloatCol("value", vals),
-                    Cons(StrCol("category", cats), Nil))))
+  DataFrame.make_df(Cons(IntCol("id", native_int_arr_from_list(ids)),
+                    Cons(FloatCol("value", native_float_arr_from_list(vals)),
+                    Cons(StrCol("category", typed_array_from_list(cats)), Nil))))
 end
 
 -- N rows: key (Int), extra (Float)
@@ -56,8 +58,8 @@ pfn make_join_frame(n : Int, label : String) : DataFrame do
   end
   let keys   = gen_keys(n - 1, Nil)
   let extras = gen_extras(n - 1, Nil)
-  DataFrame.make_df(Cons(IntCol("key", keys),
-                    Cons(FloatCol(label, extras), Nil)))
+  DataFrame.make_df(Cons(IntCol("key", native_int_arr_from_list(keys)),
+                    Cons(FloatCol(label, native_float_arr_from_list(extras)), Nil)))
 end
 
 -- ── Benchmarks ──────────────────────────────────────────────────────────────

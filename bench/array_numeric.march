@@ -13,6 +13,8 @@
 
 mod ArrayNumeric do
 
+needs IO.Clock
+
 pfn elapsed_ms(t0 : Float, t1 : Float) : Int do
   float_to_int((t1 -. t0) *. 1000.0)
 end
@@ -129,9 +131,9 @@ pfn bench_fold_list(lst : List(Int)) : Unit do
 end
 
 pfn bench_fold_native(arr) : Unit do
-  banner("Fold (+) ints — NativeIntArr fold (tight loop)")
+  banner("Sum ints — NativeIntArr sum (tight loop)")
   let t0 = unix_time(())
-  let s  = native_int_arr_fold(0, arr, fn (acc, x) -> acc + x)
+  let s  = native_int_arr_sum(arr)
   let t1 = unix_time(())
   println("result: " ++ int_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
