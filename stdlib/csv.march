@@ -21,6 +21,7 @@
 --   each_csv_row(path, callback) -- comma-delimited, :rfc4180, streaming
 
 mod Csv do
+  needs IO.FileRead
 
   ptype CsvError = FileError(String) | CsvParseError(String)
 

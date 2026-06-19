@@ -18,6 +18,8 @@
 --   System.version()     -- "0.1.0"
 
 mod System do
+  needs IO.Process
+  needs IO.Clock
 
   -- ---- Platform detection ----
 
