@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, tier1 ergonomics items 1–3)
+
+- **Record field auto-satisfy (Item 3)** (`lib/typecheck/typecheck.ml`): when discharging a `CInterface(Iface, TRecord[...])` constraint with no explicit `impl`, auto-satisfies if the interface has exactly one accessor method (`a -> T`) and the anonymous record has a matching field with the correct type. Named types (`TCon`) never auto-satisfy — they require an explicit `impl`. 9 new tests in `record_auto_satisfy` group.
+- **Capability Phase 1 — IO.Random/IO.Database in hierarchy + stdlib `needs` annotations (Item 1)**: added `IO.Random` and `IO.Database` to `io_cap_hierarchy` in `typecheck.ml`. Added `needs` declarations to 8 stdlib modules: `io.march` (`IO.Console`), `file.march` (`IO.FileRead`, `IO.FileWrite`), `dir.march` (`IO.FileRead`, `IO.FileWrite`), `system.march` (`IO.Process`, `IO.Clock`), `csv.march` (`IO.FileRead`), `uuid.march` (`IO.Random`), `random.march` (`IO.Random`), `crypto.march` (`IO.Random`).
+- **Capability Phase 2 — body-scan enforcement (Item 2)** (`lib/typecheck/typecheck.ml`): added `calls_in_expr` AST walker, `builtin_cap_table` (~65-entry association list mapping builtins to IO caps), and `body_cap_uses` collection pass inside `check_module_needs`. Emits `Err.warning` (not error) for each implied cap not covered by a declared `needs`. Check 2 now counts body-inferred calls as usage to suppress false "declared but not used" warnings. 14 new tests in `cap_body_enforce` group.
+- **Test count: 1540 + 23 new = 1563** (271 compiler + 224 eval + 284 codegen + 780 stdlib).
+
 ## Current State (as of 2026-06-18, Browser REPL HTTP client)
 
 - **Browser playground HTTP client requests** — `HttpClient.get`/`post` (and everything funneling through `HttpTransport.request`) now run in the js_of_ocaml playground over `fetch`/XHR. New `http_fetch`/`http_fetch_available` builtins + `http_fetch_hook` ref in `lib/eval/eval.ml` (native inert); browser build (`js/march_browser.ml`) installs a synchronous-`XMLHttpRequest` impl and loads `http`/`http_transport`/`http_client` into the browser stdlib. `HttpTransport.request` branches on `http_fetch_available()`. Server side, streaming, and raw sockets remain native-only; browser requests are CORS-limited and block the page during the request.
