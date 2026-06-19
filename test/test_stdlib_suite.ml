@@ -9944,6 +9944,80 @@ let test_compiled_recursive_closure_capture () =
     end
   end
 
+(* Regression: P12 copy propagation (cprop.ml) propagated a type-changing
+   alias [let go : (List,Int)->Int = $clo] where [$clo : Ptr(Unit)] is the
+   erased apply-fn closure param.  Substituting go -> $clo at an indirect call
+   made codegen pick the generic all-boxed apply ABI (ptr,ptr,ptr) instead of
+   the concrete (ptr,ptr,i64), tag-encoding a scalar arg the callee read back
+   as raw i64 — so List.length(List.range(0,5)) compiled to 93, not 5.
+   Fix: copy propagation only fires when v.v_ty = y.v_ty (type-preserving). *)
+let test_compiled_p12_type_preserving_alias () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_p12" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "p12.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod P12Regress do\n\
+      \  fn main() : Unit do\n\
+      \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "p12bin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled List.length(List.range(0,5)) == 5 (P12 type-preserving alias)"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
+
+(* Regression: known-call (ECallPtr->EApp) ran before Perceus, an RC-relevant
+   structural change that made Perceus + the post-Perceus Opt passes
+   mis-account a closure argument's refcount, corrupting the heap.  Symptom:
+   List.sort_by with a heap-capturing comparator crashed (SIGBUS) once the
+   input grew past ~90 elements.  Fix: run known-call only inside Opt.run,
+   after Perceus settles RC.  Guard: sort 98 elements with a comparator that
+   captures a heap list and calls List.filter, assert the result length. *)
+let test_compiled_sortby_heap_capturing_comparator () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_sortby" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "sortby.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod SortByRegress do\n\
+      \  fn main() : Unit do\n\
+      \    let xs = List.range(0, 98)\n\
+      \    let data = List.range(0, 5)\n\
+      \    let cmp = fn (a : Int, b : Int) ->\n\
+      \      List.length(List.filter(data, fn x -> x == a)) > 0\n\
+      \    if List.length(List.sort_by(xs, cmp)) == 98 do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "sortbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled sort_by(98 elems, heap-capturing cmp) returns length 98 (no SIGBUS)"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
+
 (* Regression: a user top-level function whose name collides with a stdlib
    internal helper (the canonical accumulator name `go`) silently broke the
    stdlib function.  Root cause: a local recursive fn's name was excluded from
@@ -11022,5 +11096,9 @@ let stdlib_suites =
           test_compiled_vault_scalar_roundtrip;
         Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
+        Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow
+          test_compiled_p12_type_preserving_alias;
+        Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
+          test_compiled_sortby_heap_capturing_comparator;
       ]);
     ]

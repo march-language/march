@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-19, optimizer miscompile fixes)
+
+- **Fixed two native-codegen miscompiles in the TIR optimizer** (both compiled-only; the interpreter was always correct):
+  - **P12 copy propagation** (`lib/tir/cprop.ml`): no longer propagates type-changing aliases (`let go : Fn = $clo : Ptr(Unit)`), which made indirect-call codegen pick the wrong apply ABI and tag-encode scalar args. Gated the alias-env extension on `v.v_ty = y.v_ty`. Fixed `List.length(List.range(0,5))` returning 93 instead of 5.
+  - **known-call before Perceus** (`bin/main.ml`): removed the pre-Perceus `Known_call` run; converting `ECallPtr→EApp` before reference counting made Perceus mis-account closure refcounts and corrupt the heap. The Opt-loop's own known-call pass still converts after Perceus. Fixed `List.sort_by` SIGBUS with a heap-capturing comparator at n≥~90. Perf-neutral (`bench/list_ops`).
+- **2 new `Slow` regression tests** in the stdlib `adversarial-regressions` group (compiled value checks). Test count: **1527** (242 compiler + 219 eval + 284 codegen + 782 stdlib; 2 pre-existing `parser gaps` failures, 1 pre-existing adversarial-regressions failure).
+
 ## Current State (as of 2026-06-18, tier1 ergonomics items 1–3)
 
 - **Record field auto-satisfy (Item 3)** (`lib/typecheck/typecheck.ml`): when discharging a `CInterface(Iface, TRecord[...])` constraint with no explicit `impl`, auto-satisfies if the interface has exactly one accessor method (`a -> T`) and the anonymous record has a matching field with the correct type. Named types (`TCon`) never auto-satisfy — they require an explicit `impl`. 9 new tests in `record_auto_satisfy` group.
