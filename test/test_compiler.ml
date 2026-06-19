@@ -3104,6 +3104,102 @@ let test_policy_untagged_not_checked () =
   let v = March_tir.Policy_dce.audit m in
   Alcotest.(check bool) "Untagged fn with alloc: no violation" true (v = [])
 
+(* ── opts no_panic tests ─────────────────────────────────────────────────── *)
+
+let test_opts_no_panic_lexes () =
+  let lexbuf = Lexing.from_string "opts" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "opts lexes as OPTS token" true
+    (match tok with March_parser.Parser.OPTS -> true | _ -> false)
+
+let test_opts_no_panic_safe_no_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "opts no_panic with safe body: no error" false (has_errors ctx)
+
+let test_opts_not_set_div_ok () =
+  let ctx = typecheck {|mod Unsafe do
+    fn divide(a : Int, b : Int) : Int do a / b end
+  end|} in
+  Alcotest.(check bool) "no opts no_panic: division is allowed" false (has_errors ctx)
+
+let test_opts_no_panic_div_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn divide(a : Int, b : Int) : Int do a / b end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + division: error" true (has_errors ctx)
+
+let test_opts_no_panic_mod_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn remainder(a : Int, b : Int) : Int do a % b end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + modulo: error" true (has_errors ctx)
+
+let test_opts_no_panic_explicit_panic_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn fail() : Int do
+      panic_("boom")
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + panic_: error" true (has_errors ctx)
+
+let test_opts_no_panic_todo_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn not_done() : Int do
+      todo_("not implemented")
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + todo_: error" true (has_errors ctx)
+
+let test_opts_no_panic_unreachable_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn unreachable(x : Int) : Int do
+      unreachable_("impossible")
+      x
+    end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + unreachable_: error" true (has_errors ctx)
+
+let test_opts_no_panic_unwrap_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn extract(x : Option(Int)) : Int do unwrap(x) end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + unwrap: error" true (has_errors ctx)
+
+let test_opts_no_panic_safe_helper_ok () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    pfn double(n : Int) : Int do n * 2 end
+    fn apply(x : Int) : Int do double(x) end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + safe local helper: no error" false (has_errors ctx)
+
+let test_opts_no_panic_transitive_error () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    pfn helper(a : Int, b : Int) : Int do a / b end
+    fn caller(x : Int) : Int do helper(x, 2) end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + transitive panic via helper: error" true (has_errors ctx)
+
+let test_opts_no_panic_two_safe_sibling_fns_ok () =
+  let ctx = typecheck {|mod Safe do
+    opts no_panic
+    fn ping(n : Int) : Int do pong(n) end
+    fn pong(n : Int) : Int do n end
+  end|} in
+  Alcotest.(check bool) "opts no_panic + two safe sibling fns: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3418,6 +3514,20 @@ let compiler_suites =
           Alcotest.test_case "Realtime fn calls IO fn: violation"         `Quick test_policy_realtime_io_violation;
           Alcotest.test_case "Realtime fn clean: no violation"            `Quick test_policy_realtime_clean;
           Alcotest.test_case "Untagged fn with alloc: no violation"       `Quick test_policy_untagged_not_checked;
+        ] );
+      ( "opts_no_panic", [
+          Alcotest.test_case "opts lexes as OPTS token"                   `Quick test_opts_no_panic_lexes;
+          Alcotest.test_case "opts no_panic safe body: no error"          `Quick test_opts_no_panic_safe_no_error;
+          Alcotest.test_case "no opts directive: division allowed"        `Quick test_opts_not_set_div_ok;
+          Alcotest.test_case "opts no_panic + division: error"            `Quick test_opts_no_panic_div_error;
+          Alcotest.test_case "opts no_panic + modulo: error"              `Quick test_opts_no_panic_mod_error;
+          Alcotest.test_case "opts no_panic + panic_: error"              `Quick test_opts_no_panic_explicit_panic_error;
+          Alcotest.test_case "opts no_panic + todo_: error"               `Quick test_opts_no_panic_todo_error;
+          Alcotest.test_case "opts no_panic + unreachable_: error"        `Quick test_opts_no_panic_unreachable_error;
+          Alcotest.test_case "opts no_panic + unwrap: error"              `Quick test_opts_no_panic_unwrap_error;
+          Alcotest.test_case "opts no_panic + safe local helper: no error" `Quick test_opts_no_panic_safe_helper_ok;
+          Alcotest.test_case "opts no_panic + transitive panic: error"    `Quick test_opts_no_panic_transitive_error;
+          Alcotest.test_case "opts no_panic + safe sibling fns: no error" `Quick test_opts_no_panic_two_safe_sibling_fns_ok;
         ] );
   ]
 

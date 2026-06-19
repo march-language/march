@@ -471,6 +471,12 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  no_panic_mod : bool;
+  (** True when the module currently being checked has `opts no_panic`.
+      Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
+  no_panic_modules : string list;
+  (** Names of modules (siblings/imports) that have been verified as [opts no_panic].
+      Functions from these modules are treated as safe in [check_no_panic_module]. *)
 }
 
 let make_env errors type_map = {
@@ -485,6 +491,8 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  no_panic_mod = false;
+  no_panic_modules = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -5372,6 +5380,167 @@ let reorder_decls (decls : Ast.decl list) : Ast.decl list =
   in
   go decls
 
+(* ── Panic-surface analysis for `opts no_panic` ────────────────────────── *)
+
+let panic_surface_direct : StringSet.t = StringSet.of_list [
+  "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  "panic"; "panic_"; "todo_"; "unreachable_";
+]
+
+let panic_surface_prelude : StringSet.t = StringSet.of_list [
+  "unwrap"; "expect"; "head"; "tail"; "last";
+]
+
+let panic_surface_stdlib : StringSet.t = StringSet.of_list [
+  "List.nth"; "List.hd"; "List.tl"; "List.head"; "List.last";
+  "List.min_elt"; "List.max_elt";
+  "Option.unwrap"; "Option.expect";
+  "Result.unwrap"; "Result.expect"; "Result.unwrap_err";
+  "Array.get"; "Array.set";
+  "String.slice_bytes"; "String.nth";
+  "NativeArray.get"; "NativeArray.set";
+]
+
+let panic_surface_all_direct : StringSet.t =
+  StringSet.union panic_surface_direct panic_surface_prelude
+
+let panic_surface_suggestion : string -> string = function
+  | "/" | "%" | "int_div" | "int_mod" | "int_div_euclid" | "int_mod_euclid" ->
+    "\n\nUse `Math.checked_div` or `Math.checked_mod` to return `None` instead of panicking."
+  | "List.nth" ->
+    "\n\nUse `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds."
+  | "List.hd" | "List.head" | "head" ->
+    "\n\nUse `List.head_opt` (or match on `Cons`/`Nil` directly) to avoid panicking on empty."
+  | "List.tl" | "List.tail" | "tail" ->
+    "\n\nUse `List.tail_opt` or match on `Nil` to avoid panicking on empty."
+  | "unwrap" | "Option.unwrap" ->
+    "\n\nUse `unwrap_or(opt, default)` or `match opt do Some(x) -> ... | None -> ... end`."
+  | "expect" | "Option.expect" ->
+    "\n\nUse `unwrap_or` or an explicit match to handle the `None` case."
+  | "Result.unwrap" | "Result.expect" ->
+    "\n\nUse `Result.unwrap_or` or match on `Ok`/`Err` to handle the error case."
+  | "Array.get" | "Array.set" | "NativeArray.get" | "NativeArray.set" ->
+    "\n\nBounds-check the index before access, or use a bounds-checked variant."
+  | "String.slice_bytes" | "String.nth" ->
+    "\n\nBounds-check the index/range before access."
+  | "panic" | "panic_" ->
+    "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
+  | "todo_" ->
+    "\n\nImplement the body instead of using `todo!`, or remove the `opts no_panic` directive."
+  | "unreachable_" ->
+    "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
+  | _ -> ""
+
+let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
+    : (string * Ast.span) list =
+  match e with
+  | Ast.EApp (Ast.EVar fn_name, args, _) ->
+    let acc = (fn_name.txt, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
+    let qname = mod_name.txt ^ "." ^ fn_name.txt in
+    let acc = (qname, fn_name.span) :: acc in
+    List.fold_left calls_in_expr acc args
+  | Ast.EApp (f, args, _) ->
+    List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.EBlock (es, _) ->
+    List.fold_left calls_in_expr acc es
+  | Ast.ELet (b, _) ->
+    calls_in_expr acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    let acc = calls_in_expr acc scrut in
+    List.fold_left (fun a arm ->
+      let a = Option.fold ~none:a ~some:(calls_in_expr a) arm.Ast.branch_guard in
+      calls_in_expr a arm.Ast.branch_body) acc arms
+  | Ast.EIf (cond, then_, else_, _) ->
+    calls_in_expr (calls_in_expr (calls_in_expr acc cond) then_) else_
+  | Ast.EField (inner, _, _) -> calls_in_expr acc inner
+  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.ELetFn (_, _, _, body, _) -> calls_in_expr acc body
+  | Ast.ELetQ (_, rhs, body, _) ->
+    calls_in_expr (calls_in_expr acc rhs) body
+  | Ast.ELit _ | Ast.EVar _ -> acc
+  | _ -> acc
+
+let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
+  let fn_entries : (string * (string * Ast.span) list * Ast.span) list =
+    List.filter_map (fun d ->
+      match d with
+      | Ast.DFn (def, fn_span) ->
+        let all_calls =
+          List.fold_left (fun acc clause ->
+            calls_in_expr acc clause.Ast.fc_body
+          ) [] def.Ast.fn_clauses
+        in
+        Some (def.Ast.fn_name.txt, all_calls, fn_span)
+      | _ -> None
+    ) decls
+  in
+  let local_fns =
+    List.fold_left (fun s (name, _, _) -> StringSet.add name s)
+      StringSet.empty fn_entries
+  in
+  let _no_panic_mod_names = StringSet.of_list env.no_panic_modules in
+  let is_direct_panic_site name =
+    StringSet.mem name panic_surface_all_direct
+    || StringSet.mem name panic_surface_stdlib
+  in
+  let seed =
+    List.fold_left (fun (panicky, site_map) (fn_name, calls, _span) ->
+      match List.find_opt (fun (n, _sp) ->
+        is_direct_panic_site n
+      ) calls with
+      | Some (site_name, site_span) ->
+        (StringSet.add fn_name panicky,
+         StrMap.add fn_name (site_name, site_span, `Direct) site_map)
+      | None ->
+        (panicky, site_map)
+    ) (StringSet.empty, StrMap.empty) fn_entries
+  in
+  let seed_panicky, seed_site_map = seed in
+  let rec fixpoint panicky site_map =
+    let (panicky', site_map') =
+      List.fold_left (fun (p, sm) (fn_name, calls, _span) ->
+        if StringSet.mem fn_name p then (p, sm)
+        else
+          match List.find_opt (fun (n, _sp) ->
+            StringSet.mem n p && StringSet.mem n local_fns
+          ) calls with
+          | Some (callee_name, callee_span) ->
+            (StringSet.add fn_name p,
+             StrMap.add fn_name (callee_name, callee_span, `Transitive) sm)
+          | None -> (p, sm)
+      ) (panicky, site_map) fn_entries
+    in
+    if StringSet.cardinal panicky' = StringSet.cardinal panicky then
+      (panicky', site_map')
+    else
+      fixpoint panicky' site_map'
+  in
+  let (all_panicky, site_map) = fixpoint seed_panicky seed_site_map in
+  List.iter (fun (fn_name, _calls, fn_span) ->
+    if StringSet.mem fn_name all_panicky then begin
+      match StrMap.find_opt fn_name site_map with
+      | None -> ()
+      | Some (site_name, site_span, kind) ->
+        let mod_name = env.current_module in
+        let msg = match kind with
+          | `Direct ->
+            let suggestion = panic_surface_suggestion site_name in
+            Printf.sprintf
+              "`%s` in `mod %s` (declared `opts no_panic`) calls `%s`, which can panic.%s"
+              fn_name mod_name site_name suggestion
+          | `Transitive ->
+            Printf.sprintf
+              "`%s` in `mod %s` (declared `opts no_panic`) transitively calls `%s`, \
+               which can panic."
+              fn_name mod_name site_name
+        in
+        let _ = fn_span in
+        Err.error errors ~span:site_span msg
+    end
+  ) fn_entries
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -5682,7 +5851,14 @@ let rec check_decl env (d : Ast.decl) : env =
           StrMap.add (name.txt ^ "." ^ k) v (StrMap.add k v acc)
         else acc
       ) inner_env.records StrMap.empty in
+    (* Validate no_panic invariant for this nested module if declared *)
+    if inner_env.no_panic_mod then
+      check_no_panic_module env.errors inner_env decls;
     let env' = bind_vars new_names env in
+    let no_panic_modules' =
+      if inner_env.no_panic_mod then name.txt :: env'.no_panic_modules
+      else env'.no_panic_modules
+    in
     { env' with
       types   = StrMap.union (fun _k v _ -> Some v) new_types env'.types;
       ctors   = (let all_new = StrMap.union (fun _k a _ -> Some a) qual_ctors new_ctors in
@@ -5695,7 +5871,8 @@ let rec check_decl env (d : Ast.decl) : env =
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
       proof_caps = inner_env.proof_caps;
-      always_linear_types = inner_env.always_linear_types }
+      always_linear_types = inner_env.always_linear_types;
+      no_panic_modules = no_panic_modules' }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
@@ -6240,6 +6417,11 @@ let rec check_decl env (d : Ast.decl) : env =
         end
       ) env.vars;
     env
+
+  | Ast.DOpts (opts, _sp) ->
+    if List.mem "no_panic" opts then
+      { env with no_panic_mod = true }
+    else env
 
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
@@ -6843,6 +7025,9 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  (* Validate no_panic invariant if declared *)
+  if final_env.no_panic_mod then
+    check_no_panic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)

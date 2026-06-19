@@ -315,8 +315,8 @@ mod Regex do
 
   -- Apply the case-insensitive transform to both pattern and input.
   -- ASCII-only fold: non-ASCII bytes pass through unchanged.
-  pfn fold_case(opts : RegexOpts, pattern : String, string : String) : (String, String) do
-    if opts.case_insensitive do
+  pfn fold_case(ropts : RegexOpts, pattern : String, string : String) : (String, String) do
+    if ropts.case_insensitive do
       (string_to_lowercase(pattern), string_to_lowercase(string))
     else
       (pattern, string)
@@ -343,8 +343,8 @@ mod Regex do
                          { case_insensitive: true, multiline: false })
       -- true
   """
-  fn matches_opts(pattern, string, opts) do
-    let (p, s) = fold_case(opts, pattern, string)
+  fn matches_opts(pattern, string, ropts) do
+    let (p, s) = fold_case(ropts, pattern, string)
     match compile(p) do
     Err(_) -> false
     Ok(rpat) -> do

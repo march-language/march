@@ -2202,7 +2202,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               Hashtbl.replace !_use_aliases (short_prefix ^ rest) fn_name
             end
           ) all_fn_names
-      | Ast.DDescribe _ -> ()
+      | Ast.DDescribe _ | Ast.DOpts _ -> ()
     ) m.mod_decls;
   (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
      them to TIR functions so they can be compiled into a test-runner binary. *)

@@ -280,6 +280,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, Phase 3c — `opts no_panic` module directive)
+
+- **`opts no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).
+- **AST, lexer, parser changes**: `OPTS` keyword; `DOpts of string list * span` node; passthrough in desugar/eval/coverage/format/LSP/lower/refactor/span_remap.
+- **Env fields**: `no_panic_mod : bool` and `no_panic_modules : string list` on typecheck env.
+- **Stdlib**: `Math.checked_div` and `Math.checked_mod` added to `stdlib/math.march`. `opts` parameter name conflicts fixed in `regex.march` (→ `ropts`) and `dataframe.march` (→ `wopts`).
+- **12 new tests** in `opts_no_panic` suite. **248 compiler / 1535 total tests pass.**
+
 ## Current State (as of 2026-06-18, Phase 3b — Policy-tag DCE/audit pass)
 
 - **`lib/tir/policy_dce.ml` (new, ~260 lines)** — audit pass that walks every `Tagged(_, P)`-parameterized function in a TIR module after monomorphization and reports policy violations. Policy table: `NoAlloc` (no `EAlloc`/`EStackAlloc`), `NoPanic` (no transitive calls to panic-surface builtins), `NoIO` (no calls to IO-needful modules), and `Realtime` (all three). Panic analysis uses a fixpoint seeded from `direct_panic_builtins` (`int_div`, `panic_`, etc.). IO analysis uses `tm_io_fns` module-name list via prefix matching and a second fixpoint for transitive callers.

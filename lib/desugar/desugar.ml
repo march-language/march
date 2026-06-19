@@ -683,7 +683,7 @@ let rec desugar_decl (d : decl) : decl =
     DImpl ({ idef with impl_methods = methods' }, sp)
 
   | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ | DProofCap _
-  | DAlwaysLinearType _ | DTransitions _ ->
+  | DAlwaysLinearType _ | DTransitions _ | DOpts _ ->
     d
 
   | DDeriving _ ->

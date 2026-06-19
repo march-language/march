@@ -463,7 +463,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
       Hashtbl.replace use_map a.tr_via.span a.tr_via.txt
     ) arms
 
-  | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _
+  | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DOpts _
   | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _
   | Ast.DDeriving _ | Ast.DDescribe _ -> ()
 

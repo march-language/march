@@ -83,6 +83,7 @@ let () =
       ("tag",           TAG);
       ("transitions",   TRANSITIONS);
       ("via",           VIA);
+      ("opts",          OPTS);
     ]
 }
 

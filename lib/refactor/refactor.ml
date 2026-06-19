@@ -382,7 +382,7 @@ let decl_span (d : Ast.decl) : Ast.span =
   | Ast.DNeeds (_, sp) | Ast.DProofCap (_, sp) | Ast.DTransitions (_, _, sp)
   | Ast.DApp (_, sp) | Ast.DDeriving (_, _, sp)
   | Ast.DTest (_, sp) | Ast.DDescribe (_, _, sp) | Ast.DSetup (_, sp)
-  | Ast.DSetupAll (_, sp) -> sp
+  | Ast.DSetupAll (_, sp) | Ast.DOpts (_, sp) -> sp
 
 (** Top-level definition name of a declaration, if it has one. *)
 let decl_def_name (d : Ast.decl) : string option =

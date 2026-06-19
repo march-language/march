@@ -217,6 +217,8 @@ let rec remap_decl tbl = function
     Ast.DActor (vis, remap_name tbl n, adef, remap_span tbl sp)
   | Ast.DProtocol (n, pdef, sp) ->
     Ast.DProtocol (remap_name tbl n, pdef, remap_span tbl sp)
+  | Ast.DOpts (opts, sp) ->
+    Ast.DOpts (opts, remap_span tbl sp)
 
 let remap_module tbl (m : Ast.module_) : Ast.module_ =
   if Array.length tbl = 0 then m

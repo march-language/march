@@ -190,4 +190,14 @@ mod Math do
     a +. (t *. (b -. a))
   end
 
+  doc "Divide `a` by `b`, returning `None` if `b` is zero."
+  fn checked_div(a : Int, b : Int) : Option(Int) do
+    if b == 0 do None else Some(a / b) end
+  end
+
+  doc "Compute `a % b`, returning `None` if `b` is zero."
+  fn checked_mod(a : Int, b : Int) : Option(Int) do
+    if b == 0 do None else Some(a % b) end
+  end
+
 end

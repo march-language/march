@@ -644,7 +644,7 @@ let get_span = function
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DProofCap (_, s) | DApp (_, s)
   | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s)
-  | DTransitions (_, _, s) -> s
+  | DTransitions (_, _, s) | DOpts (_, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
@@ -838,6 +838,9 @@ and emit_decl ctx = function
 
   | DProofCap (name, _) ->
     line ctx (Printf.sprintf "proof cap %s" name.txt)
+
+  | DOpts (opts, _) ->
+    List.iter (fun opt -> line ctx (Printf.sprintf "opts %s" opt)) opts
 
   | DProtocol (name, proto, _) ->
     line ctx (Printf.sprintf "protocol %s do" name.txt);

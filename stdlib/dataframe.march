@@ -1785,8 +1785,8 @@ mod DataFrame do
   end
 
   doc "Serialize a DataFrame to a CSV string with custom options."
-  fn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
-    match opts do
+  fn to_csv_string_opts(df : DataFrame, wopts : CsvWriteOpts) : String do
+    match wopts do
     CsvWriteOpts(delim, quote, write_hdr) -> do
       let lines =
         if write_hdr do

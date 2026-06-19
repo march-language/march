@@ -7674,7 +7674,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     Hashtbl.replace protocol_roles_tbl name.txt roles;
     env
 
-  | DSig _ | DInterface _ | DNeeds _ | DProofCap _ | DTransitions _ -> env
+  | DSig _ | DInterface _ | DNeeds _ | DProofCap _ | DTransitions _ | DOpts _ -> env
 
   | DAlwaysLinearType (_, name, _, td, _) ->
     (* Treat like DType at runtime — register constructors/records for dispatch. *)
