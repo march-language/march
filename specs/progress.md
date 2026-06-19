@@ -280,9 +280,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, P10 Phase 2 + P15 compiler optimizations)
+
+- **P15 — Boolean absorber peepholes** (`lib/tir/simplify.ml`): `x && false → false`, `false && x → false`, `x || true → true`, `true || x → true`. 4 new tests in `simplify` group.
+- **P15 — Boolean comparison identities + integer-literal folding** (`lib/tir/fold.ml`, new): `x == true → x`, `x == false → not x` (and symmetric); `LitInt(a) OP LitInt(b) → LitBool(result)` for `<`, `<=`, `>`, `>=`, `==`, `!=`. Fires on cprop literal-env hits. 5 new tests in `fold` group; integrated into `opt.ml` fixed-point loop.
+- **P10 Phase 2 — NativeArray compiled path** (`lib/tir/llvm_emit.ml`, `runtime/march_runtime.c`): All 16 `native_int_arr_*` / `native_float_arr_*` builtins registered in `is_builtin_fn`, `builtin_ret_ty`, and the LLVM preamble. Fixed `native_int_arr_from_list` / `to_list` integer-tagging bug (`(raw & 1) ? raw >> 1 : raw` untag, `(v << 1) | 1` retag). 2 new IR-level tests in `native_arrays` group.
+- **Test count: 1496** (219 compiler + 219 eval + 278 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
 
-- **P13 — EField of known record** (`lib/tir/cprop.ml`): added a `field_env` (separate from the literal env) that tracks `ERecord`, `EUpdate`, and record-alias bindings. `EField(AVar r, k)` folds to the stored atom when `r` is in fenv. `EUpdate` merges new fields over the base record's known fields, so `{r with y=99}.x` still folds `x` from the base. RC operations are never substituted.
+- **P13 — EField of known record** (`lib/tir/cprop.ml`): added a `field_env` (separate from the literal env) that tracks `ERecord`, `EUpdate`, and record-alias bindings. `EField(AVar r, k)` folds to the atom at position `k` when `r` is in fenv. `EUpdate` merges new fields over the base record's known fields, so `{r with y=99}.x` still folds `x` from the base. RC operations are never substituted.
 - **P14 — Boolean simplify peepholes** (`lib/tir/simplify.ml`): `if x then true else false → x`, `if x then false else true → not x`, `x == x → true` (non-float), `x != x → false` (non-float). Guards against float identity (IEEE 754 NaN semantics).
 - **7 new tests** (5 simplify P14 + 2 cprop P13). Test count: **1492** (219 compiler + 219 eval + 274 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
 

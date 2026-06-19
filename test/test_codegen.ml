@@ -3692,6 +3692,93 @@ let test_compile_cancel_token_ir () =
   Alcotest.(check bool) "cancel_token_is_cancelled declared" true
     (ir_contains ir "march_cancel_token_is_cancelled")
 
+(* ── P10 Phase 2: NativeArray compiled-path IR tests ────────────────────── *)
+
+(** native_int_arr_* builtins must appear in the LLVM preamble and generate
+    correct call instructions: i64 return for length/get/sum, ptr for make/set/map. *)
+let test_native_int_arr_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    fn sum_list(xs : List(Int)) : Int do
+      let arr = native_int_arr_from_list(xs)
+      native_int_arr_sum(arr)
+    end
+    fn roundtrip(xs : List(Int)) : List(Int) do
+      let arr = native_int_arr_from_list(xs)
+      native_int_arr_to_list(arr)
+    end
+    fn make_arr(n : Int) : Int do
+      let arr = native_int_arr_make(n, 0)
+      let arr2 = native_int_arr_set(arr, 0, 42)
+      native_int_arr_get(arr2, 0)
+    end
+    fn arr_len(xs : List(Int)) : Int do
+      let arr = native_int_arr_from_list(xs)
+      native_int_arr_length(arr)
+    end
+  end|} in
+  Alcotest.(check bool) "native_int_arr_from_list declared" true
+    (ir_contains ir "@native_int_arr_from_list");
+  Alcotest.(check bool) "native_int_arr_sum declared" true
+    (ir_contains ir "@native_int_arr_sum");
+  Alcotest.(check bool) "native_int_arr_to_list declared" true
+    (ir_contains ir "@native_int_arr_to_list");
+  Alcotest.(check bool) "native_int_arr_make declared" true
+    (ir_contains ir "@native_int_arr_make");
+  Alcotest.(check bool) "native_int_arr_set declared" true
+    (ir_contains ir "@native_int_arr_set");
+  Alcotest.(check bool) "native_int_arr_get declared" true
+    (ir_contains ir "@native_int_arr_get");
+  Alcotest.(check bool) "native_int_arr_length declared" true
+    (ir_contains ir "@native_int_arr_length");
+  (* IR calls must use correct return types *)
+  Alcotest.(check bool) "sum call returns i64" true
+    (ir_contains ir "= call i64 @native_int_arr_sum");
+  Alcotest.(check bool) "get call returns i64" true
+    (ir_contains ir "= call i64 @native_int_arr_get");
+  Alcotest.(check bool) "length call returns i64" true
+    (ir_contains ir "= call i64 @native_int_arr_length");
+  Alcotest.(check bool) "from_list call returns ptr" true
+    (ir_contains ir "= call ptr @native_int_arr_from_list")
+
+(** native_float_arr_* builtins must appear in the LLVM preamble and generate
+    correct call instructions: double return for get/sum, ptr for make/set/map. *)
+let test_native_float_arr_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    fn sum_arr(n : Int) : Float do
+      let arr = native_float_arr_make(n, 1.0)
+      native_float_arr_sum(arr)
+    end
+    fn get_arr(n : Int, i : Int) : Float do
+      let arr = native_float_arr_make(n, 2.5)
+      native_float_arr_get(arr, i)
+    end
+    fn set_arr(n : Int, i : Int, v : Float) : NativeFloatArr do
+      let arr = native_float_arr_make(n, 0.0)
+      native_float_arr_set(arr, i, v)
+    end
+    fn len_arr(n : Int) : Int do
+      let arr = native_float_arr_make(n, 0.0)
+      native_float_arr_length(arr)
+    end
+  end|} in
+  Alcotest.(check bool) "native_float_arr_make declared" true
+    (ir_contains ir "@native_float_arr_make");
+  Alcotest.(check bool) "native_float_arr_sum declared" true
+    (ir_contains ir "@native_float_arr_sum");
+  Alcotest.(check bool) "native_float_arr_get declared" true
+    (ir_contains ir "@native_float_arr_get");
+  Alcotest.(check bool) "native_float_arr_length declared" true
+    (ir_contains ir "@native_float_arr_length");
+  Alcotest.(check bool) "native_float_arr_set declared" true
+    (ir_contains ir "@native_float_arr_set");
+  (* IR calls must use correct return types *)
+  Alcotest.(check bool) "float sum call returns double" true
+    (ir_contains ir "= call double @native_float_arr_sum");
+  Alcotest.(check bool) "float get call returns double" true
+    (ir_contains ir "= call double @native_float_arr_get");
+  Alcotest.(check bool) "float make call returns ptr" true
+    (ir_contains ir "= call ptr @native_float_arr_make")
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -4520,6 +4607,11 @@ let codegen_suites =
           Alcotest.test_case "eval yields after budget"    `Quick (with_reset test_eval_yields_after_budget);
           Alcotest.test_case "eval no yield when disabled" `Quick (with_reset test_eval_no_yield_when_disabled);
           Alcotest.test_case "reduction count"             `Quick (with_reset test_eval_reduction_count);
+        ] );
+      ( "native_arrays",
+        [
+          Alcotest.test_case "int arr IR"   `Quick (with_reset test_native_int_arr_ir);
+          Alcotest.test_case "float arr IR" `Quick (with_reset test_native_float_arr_ir);
         ] );
       ( "tasks",
         [

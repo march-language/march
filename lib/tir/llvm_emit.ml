@@ -415,6 +415,14 @@ let is_builtin_fn name =
                  "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
                  "typed_array_length"; "typed_array_get"; "typed_array_set";
                  "typed_array_map"; "typed_array_filter"; "typed_array_fold";
+                 (* NativeIntArr builtins — flat i64 arrays for vectorizable loops *)
+                 "native_int_arr_make"; "native_int_arr_length"; "native_int_arr_get";
+                 "native_int_arr_set"; "native_int_arr_sum"; "native_int_arr_map";
+                 "native_int_arr_from_list"; "native_int_arr_to_list";
+                 (* NativeFloatArr builtins — flat double arrays for vectorizable loops *)
+                 "native_float_arr_make"; "native_float_arr_length"; "native_float_arr_get";
+                 "native_float_arr_set"; "native_float_arr_sum"; "native_float_arr_map";
+                 "native_float_arr_from_list"; "native_float_arr_to_list";
                  (* Time builtins *)
                  "unix_time";
                  (* HTTP builtins *)
@@ -679,6 +687,24 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "typed_array_get"     -> Some (Tir.TVar "a")
   | "typed_array_set"     -> Some (Tir.TVar "a")
   | "typed_array_fold"    -> Some (Tir.TVar "a")
+  (* NativeIntArr builtins — flat i64 arrays for vectorizable loops *)
+  | "native_int_arr_make"      -> Some (Tir.TCon ("NativeIntArr", []))
+  | "native_int_arr_length"    -> Some Tir.TInt
+  | "native_int_arr_get"       -> Some Tir.TInt
+  | "native_int_arr_set"       -> Some (Tir.TCon ("NativeIntArr", []))
+  | "native_int_arr_sum"       -> Some Tir.TInt
+  | "native_int_arr_map"       -> Some (Tir.TCon ("NativeIntArr", []))
+  | "native_int_arr_from_list" -> Some (Tir.TCon ("NativeIntArr", []))
+  | "native_int_arr_to_list"   -> Some (Tir.TCon ("List", [Tir.TInt]))
+  (* NativeFloatArr builtins — flat double arrays for vectorizable loops *)
+  | "native_float_arr_make"      -> Some (Tir.TCon ("NativeFloatArr", []))
+  | "native_float_arr_length"    -> Some Tir.TInt
+  | "native_float_arr_get"       -> Some Tir.TFloat
+  | "native_float_arr_set"       -> Some (Tir.TCon ("NativeFloatArr", []))
+  | "native_float_arr_sum"       -> Some Tir.TFloat
+  | "native_float_arr_map"       -> Some (Tir.TCon ("NativeFloatArr", []))
+  | "native_float_arr_from_list" -> Some (Tir.TCon ("NativeFloatArr", []))
+  | "native_float_arr_to_list"   -> Some (Tir.TCon ("List", [Tir.TFloat]))
   (* Time builtins *)
   | "unix_time" -> Some Tir.TFloat
   (* HTTP builtins *)
@@ -4648,6 +4674,24 @@ declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
 declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+; NativeIntArr builtins — flat i64 arrays for vectorizable loops
+declare ptr    @native_int_arr_make(i64 %len, i64 %def)
+declare i64    @native_int_arr_length(ptr %arr)
+declare i64    @native_int_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
+declare i64    @native_int_arr_sum(ptr %arr)
+declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_int_arr_from_list(ptr %lst)
+declare ptr    @native_int_arr_to_list(ptr %arr)
+; NativeFloatArr builtins — flat double arrays for vectorizable loops
+declare ptr    @native_float_arr_make(i64 %len, double %def)
+declare i64    @native_float_arr_length(ptr %arr)
+declare double @native_float_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
+declare double @native_float_arr_sum(ptr %arr)
+declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_float_arr_from_list(ptr %lst)
+declare ptr    @native_float_arr_to_list(ptr %arr)
 ; Time builtins
 declare double @march_unix_time()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
