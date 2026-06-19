@@ -80,9 +80,12 @@ List.filter(List.range(1, 20), fn x -> x % 2 == 0)
 
 The browser playground runs the March **interpreter** (tree-walking eval), not the compiled native backend. A few things work differently:
 
-- No file I/O, no HTTP server, no Unix processes
+- No file I/O, no HTTP **server**, no Unix processes
+- HTTP **client** requests work: `HttpClient.get` / `HttpClient.post` run via
+  the browser's `fetch`/`XHR`. Limited to CORS-permitted or same-origin URLs,
+  whole (non-streaming) responses only, and each request briefly blocks the page.
 - No LLVM compilation / native performance
 - Actor `spawn` runs synchronously (no scheduler)
-- Standard library modules loaded: prelude, option, result, list, map, set, array, math, string, sort, seq, enum, random, json, and a few others
+- Standard library modules loaded: prelude, option, result, list, map, set, array, math, string, sort, seq, enum, random, json, http, http_transport, http_client, and a few others
 
 For the full language including actors, supervision trees, session types, and native compilation, see [Installation]({{ site.baseurl }}/docs/installation/).

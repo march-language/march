@@ -3907,8 +3907,88 @@ let test_perceus_local_record_field_no_spurious_decrc () =
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
+(* ── Browser HTTP transport (http_fetch platform hook) ──────────────── *)
+
+let test_http_fetch_unavailable_by_default () =
+  March_eval.Eval.http_fetch_hook := None;
+  let env = eval_module {|mod T do
+  fn f() do http_fetch_available() end
+end|} in
+  Alcotest.(check bool) "unavailable by default" false (vbool (call_fn env "f" []))
+
+let test_http_fetch_available_when_hooked () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _meth _url _hdrs _body -> Ok "HTTP/1.1 200 OK\r\n\r\n");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch_available() end
+end|} in
+  let avail = vbool (call_fn env "f" []) in
+  March_eval.Eval.http_fetch_hook := None;
+  Alcotest.(check bool) "available when hooked" true avail
+
+let test_http_fetch_returns_ok_raw () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _ _ _ _ -> Ok "RAWBODY");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch("GET", "http://x/", "", "") end
+end|} in
+  let r = call_fn env "f" [] in
+  March_eval.Eval.http_fetch_hook := None;
+  (match vcon "Ok" r with
+   | [v] -> Alcotest.(check string) "ok payload is raw string" "RAWBODY" (vstr v)
+   | _ -> Alcotest.fail "expected Ok(_)")
+
+let test_http_fetch_maps_error () =
+  March_eval.Eval.http_fetch_hook :=
+    Some (fun _ _ _ _ -> Error "boom");
+  let env = eval_module {|mod T do
+  fn f() do http_fetch("GET", "http://x/", "", "") end
+end|} in
+  let r = call_fn env "f" [] in
+  March_eval.Eval.http_fetch_hook := None;
+  (match vcon "Err" r with
+   | [v] -> Alcotest.(check string) "err payload" "boom" (vstr v)
+   | _ -> Alcotest.fail "expected Err(_)")
+
+let test_http_transport_request_via_fetch () =
+  let http      = load_stdlib_file_for_test "http.march" in
+  let transport = load_stdlib_file_for_test "http_transport.march" in
+  let canned =
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world" in
+  March_eval.Eval.http_fetch_hook := Some (fun _ _ _ _ -> Ok canned);
+  let env = eval_with_stdlib [http; transport]
+    {|mod Test do
+  fn run() do
+    match Http.get("https://example.com/path") do
+    Ok(req) -> HttpTransport.request(Http.set_body(req, ""))
+    Err(_)  -> Err(ConnParseError("bad url"))
+    end
+  end
+end|} in
+  let result = call_fn env "run" [] in
+  March_eval.Eval.http_fetch_hook := None;
+  (match vcon "Ok" result with
+   | [resp] ->
+     (match vcon "Response" resp with
+      | [status; _headers; body_v] ->
+        (match vcon "Status" status with
+         | [code_v] ->
+           Alcotest.(check int) "status code" 200 (vint code_v);
+           Alcotest.(check string) "body" "hello world" (vstr body_v)
+         | _ -> Alcotest.fail "bad Status shape")
+      | _ -> Alcotest.fail "bad Response shape")
+   | _ -> Alcotest.fail "expected Ok(Response ...)")
+
 let eval_suites =
   [
+      ( "browser http",
+        [
+          Alcotest.test_case "fetch unavailable by default" `Quick test_http_fetch_unavailable_by_default;
+          Alcotest.test_case "fetch available when hooked"  `Quick test_http_fetch_available_when_hooked;
+          Alcotest.test_case "fetch returns Ok raw"         `Quick test_http_fetch_returns_ok_raw;
+          Alcotest.test_case "fetch maps Error to Err"      `Quick test_http_fetch_maps_error;
+          Alcotest.test_case "HttpTransport.request via fetch" `Quick test_http_transport_request_via_fetch;
+        ] );
       ( "eval",
         [
           Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);

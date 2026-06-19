@@ -393,6 +393,16 @@ let log_value_to_string = function
    Set by run_tests around each test body; None during normal execution. *)
 let test_capture_buf : Buffer.t option ref = ref None
 
+(** Platform hook for HTTP client requests.  Native builds leave this [None]
+    and use the socket transport (tcp_connect/tcp_send_all/...).  The
+    js_of_ocaml browser build sets it to a synchronous-XHR implementation.
+    Given (method, url, header_block, body) it returns [Ok raw_response] — a
+    synthesized raw "HTTP/1.1 ..." response string for [http_parse_response] —
+    or [Error msg] on a network/CORS failure. *)
+let http_fetch_hook
+  : (string -> string -> string -> string -> (string, string) result) option ref
+  = ref None
+
 let capture_write (s : string) : unit =
   match !test_capture_buf with
   | Some buf -> Buffer.add_string buf s
@@ -4665,6 +4675,21 @@ let base_env : env =
               | _ ->
                 VCon ("Err", [VString ("bad status line: " ^ (List.hd lines))])))
         | _ -> eval_error "http_parse_response(raw_string)"))
+
+  ; ("http_fetch", VBuiltin ("http_fetch", function
+        | [VString meth; VString url; VString header_block; VString body] ->
+          (match !http_fetch_hook with
+           | None ->
+             eval_error "http_fetch unavailable: native builds use the socket transport"
+           | Some f ->
+             (match f meth url header_block body with
+              | Ok raw    -> VCon ("Ok", [VString raw])
+              | Error msg -> VCon ("Err", [VString msg])))
+        | _ -> eval_error "http_fetch(method, url, header_block, body)"))
+  ; ("http_fetch_available", VBuiltin ("http_fetch_available", function
+        | [] | [VUnit] ->
+          VBool (match !http_fetch_hook with Some _ -> true | None -> false)
+        | _ -> eval_error "http_fetch_available()"))
 
   (* ── HTTP server (interpreter mode: pure-OCaml implementation) ──── *)
   (* Uses select with a 1-second timeout so the loop can check

@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, Browser REPL HTTP client)
+
+- **Browser playground HTTP client requests** — `HttpClient.get`/`post` (and everything funneling through `HttpTransport.request`) now run in the js_of_ocaml playground over `fetch`/XHR. New `http_fetch`/`http_fetch_available` builtins + `http_fetch_hook` ref in `lib/eval/eval.ml` (native inert); browser build (`js/march_browser.ml`) installs a synchronous-`XMLHttpRequest` impl and loads `http`/`http_transport`/`http_client` into the browser stdlib. `HttpTransport.request` branches on `http_fetch_available()`. Server side, streaming, and raw sockets remain native-only; browser requests are CORS-limited and block the page during the request.
+- **5 new eval tests** (`browser http` suite). Test count: **1540** (Phase 3c's 1535 + 5 new `browser http` eval tests; 2 pre-existing `parser gaps` failures). Verified end-to-end via a Node smoke test loading the compiled bundle with a polyfilled sync XHR.
+
 ## Current State (as of 2026-06-18, Phase 3c — `cap no_panic` module directive)
 
 - **`cap no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).
