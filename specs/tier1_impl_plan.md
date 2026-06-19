@@ -75,7 +75,7 @@ declaration — which no existing test does.
 
 ### Key reuse: `calls_in_expr` already exists
 
-The `opts no_panic` implementation (Phase 3c, committed) added `calls_in_expr`
+The `cap no_panic` implementation (Phase 3c, committed) added `calls_in_expr`
 at `lib/typecheck/typecheck.ml:5434`. It collects `(string * Ast.span) list`
 from any expression, walking lambdas, blocks, let-bindings, match arms, and
 if-expressions. **Do not write a new traversal** — use this one directly.

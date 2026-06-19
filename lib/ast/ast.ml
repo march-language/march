@@ -156,7 +156,7 @@ type decl =
   (** Proof capability declaration: [proof cap Migrated]
       Registers an unforgeable capability that can only be minted inside the declaring module. *)
   | DOpts of string list * span
-  (** Module-level directives: [`"no_panic"`] from `opts no_panic`.
+  (** Module-level capability directives: [`"no_panic"`] from `cap no_panic`.
       The list allows multiple future directives; Phase 3c only uses `"no_panic"`. *)
   | DAlwaysLinearType of visibility * name * name list * type_def * span
   (** Always-linear type definition: [always_linear type Handle(r, s) = Handle(r)]

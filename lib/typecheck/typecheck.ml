@@ -472,10 +472,10 @@ type env = {
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
   no_panic_mod : bool;
-  (** True when the module currently being checked has `opts no_panic`.
+  (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
   no_panic_modules : string list;
-  (** Names of modules (siblings/imports) that have been verified as [opts no_panic].
+  (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
 }
 
@@ -4489,12 +4489,37 @@ let discharge_constraints env span =
              | Some impl_tys -> List.exists (fun impl_ty ->
                  impl_matches_ty (repr impl_ty) ty) impl_tys
            in
-           if not satisfied then
-             Err.error env.errors ~span
-               (Printf.sprintf
-                  "`%s` does not implement interface `%s`.\n\
-                   Add `impl %s(%s) do ... end` to provide an implementation."
-                  (pp_ty ty) iface_name iface_name (pp_ty ty)))
+           if not satisfied then begin
+             (* Record field auto-satisfy: discharge a single-method
+                accessor-shaped interface against an anonymous TRecord when
+                the record has a field whose name and type match the method.
+                Eligibility: anonymous TRecord, exactly one interface method,
+                method shape `a -> T` (a = iface param), matching field. *)
+             let auto_satisfied =
+               match ty with
+               | TRecord flds ->
+                 (match StrMap.find_opt iface_name env.interfaces with
+                  | Some iface when List.length iface.iface_methods = 1 ->
+                    let m = List.hd iface.iface_methods in
+                    (match m.md_ty with
+                     | Ast.TyArrow (Ast.TyVar param, ret_surface)
+                       when param.txt = iface.iface_param.txt ->
+                       let tvars = ref [(iface.iface_param.txt, ty)] in
+                       let ret_ty = surface_ty env ~tvars ret_surface in
+                       (match List.assoc_opt m.md_name.txt flds with
+                        | Some fld_ty -> impl_matches_ty (repr fld_ty) ret_ty
+                        | None -> false)
+                     | _ -> false)
+                  | _ -> false)
+               | _ -> false
+             in
+             if not auto_satisfied then
+               Err.error env.errors ~span
+                 (Printf.sprintf
+                    "`%s` does not implement interface `%s`.\n\
+                     Add `impl %s(%s) do ... end` to provide an implementation."
+                    (pp_ty ty) iface_name iface_name (pp_ty ty))
+           end)
       | CADTBound (adt_name, t) ->
         let ty = repr t in
         (match ty with
@@ -5380,7 +5405,7 @@ let reorder_decls (decls : Ast.decl list) : Ast.decl list =
   in
   go decls
 
-(* ── Panic-surface analysis for `opts no_panic` ────────────────────────── *)
+(* ── Panic-surface analysis for `cap no_panic` ────────────────────────── *)
 
 let panic_surface_direct : StringSet.t = StringSet.of_list [
   "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
@@ -5426,7 +5451,7 @@ let panic_surface_suggestion : string -> string = function
   | "panic" | "panic_" ->
     "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
   | "todo_" ->
-    "\n\nImplement the body instead of using `todo!`, or remove the `opts no_panic` directive."
+    "\n\nImplement the body instead of using `todo!`, or remove the `cap no_panic` directive."
   | "unreachable_" ->
     "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
   | _ -> ""
@@ -5528,11 +5553,11 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
           | `Direct ->
             let suggestion = panic_surface_suggestion site_name in
             Printf.sprintf
-              "`%s` in `mod %s` (declared `opts no_panic`) calls `%s`, which can panic.%s"
+              "`%s` in `mod %s` (declared `cap no_panic`) calls `%s`, which can panic.%s"
               fn_name mod_name site_name suggestion
           | `Transitive ->
             Printf.sprintf
-              "`%s` in `mod %s` (declared `opts no_panic`) transitively calls `%s`, \
+              "`%s` in `mod %s` (declared `cap no_panic`) transitively calls `%s`, \
                which can panic."
               fn_name mod_name site_name
         in

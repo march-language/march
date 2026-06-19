@@ -2,7 +2,7 @@
 
 Ranked by benefit-to-lift ratio. Each item links to its authoritative spec for full detail.
 
-**Last updated:** 2026-06-18 (after Phase 3c `opts no_panic` landed)
+**Last updated:** 2026-06-18 (after Phase 3c `cap no_panic` landed)
 
 ---
 

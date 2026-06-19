@@ -280,13 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-06-18, Phase 3c — `opts no_panic` module directive)
+## Current State (as of 2026-06-18, Phase 3c — `cap no_panic` module directive)
 
-- **`opts no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).
-- **AST, lexer, parser changes**: `OPTS` keyword; `DOpts of string list * span` node; passthrough in desugar/eval/coverage/format/LSP/lower/refactor/span_remap.
+- **`cap no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).
+- **AST, lexer, parser changes**: `CAP_NO_PANIC` compound token (`"cap" whitespace+ "no_panic"`); `DOpts of string list * span` node; passthrough in desugar/eval/coverage/format/LSP/lower/refactor/span_remap.
 - **Env fields**: `no_panic_mod : bool` and `no_panic_modules : string list` on typecheck env.
-- **Stdlib**: `Math.checked_div` and `Math.checked_mod` added to `stdlib/math.march`. `opts` parameter name conflicts fixed in `regex.march` (→ `ropts`) and `dataframe.march` (→ `wopts`).
-- **12 new tests** in `opts_no_panic` suite. **248 compiler / 1535 total tests pass.**
+- **Stdlib**: `Math.checked_div` and `Math.checked_mod` added to `stdlib/math.march`.
+- **12 new tests** in `cap_no_panic` suite. **248 compiler / 1535 total tests pass.**
 
 ## Current State (as of 2026-06-18, Phase 3b — Policy-tag DCE/audit pass)
 

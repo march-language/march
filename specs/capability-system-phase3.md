@@ -20,7 +20,7 @@ Phase 3 completes what Phase 2 started:
 
 1. **Explicit bounded type parameters** — `fn f[S : ConnState](...)` syntax that makes `Handle` and `Tagged` APIs self-documenting and checkable without implicit inference
 2. **Policy-tag DCE pass** — the missing half of Phase 2c: IR-level enforcement that `NoAlloc`/`Realtime` functions contain no allocation or abort sites
-3. **No-panic modules** — an opt-in module directive (`opts no_panic`) that statically verifies a module contains no expressions that can panic; first step toward the full `Cap(Panic)` hierarchy
+3. **No-panic modules** — an opt-in module directive (`cap no_panic`) that statically verifies a module contains no expressions that can panic; first step toward the full `Cap(Panic)` hierarchy
 4. **Full `Cap(Panic)` hierarchy** — granular `Cap(Panic.Arithmetic)` / `Cap(Panic.Bounds)` etc. with implicit threading (high cost; deferred sub-spec)
 5. **GADT state refinement** — `Handle` state narrowing inside match arms (exploratory; complex)
 
@@ -739,7 +739,7 @@ No runtime changes. No changes to `parser.mly`, `ast.ml`, or `typecheck.ml`.
 
 ---
 
-## 3. No-Panic Modules (`opts no_panic`)
+## 3. No-Panic Modules (`cap no_panic`)
 
 ### 3.1 Motivation
 
@@ -755,17 +755,19 @@ Unlike Phase 3b's TIR-level audit (which operates after source information is go
 
 ### 3.2 Syntax Decision
 
-**Choose Option B: `opts` keyword + directive-name identifier.**
+**Use `cap no_panic` as a compound lexer token (same pattern as `proof cap`).**
 
-Rationale: `PROOFCAP` and `ALWAYSLINEAR` are precedents for single-token compound keywords, but they name unique constructs. `opts` is a meta-level keyword for *module options* — a namespace that can grow (`opts no_alloc`, `opts no_io`) without adding more compound keywords. Option A (`no_panic` alone) is not extensible. Option C (`@[no_panic]` attribute on `mod`) reuses the function-attribute mechanism which carries different semantics and requires AST changes to the module node rather than a new declaration variant.
+Rationale: `cap` is a common capability parameter name in March code (`fn process(cap : Cap(IO)) : ...`). Making `cap` a plain keyword would break its use as a variable name in expression position — `use_io(cap)` would fail to parse because `cap` would lex as `CAP` not `LOWER_IDENT`. The compound token approach sidesteps this entirely: the lexer rule matches the whole `cap no_panic` phrase at once, so `cap` alone (as a variable) still lexes as `LOWER_IDENT`. This is identical to how `proof cap` is handled — `"proof" [' ''\t']+ "cap" { PROOFCAP }` — neither `proof` nor `cap` is a keyword in isolation.
 
-**Verified:** `opts` does not appear in `lib/lexer/lexer.mll`'s keyword table (line 75–86). `no_panic` is not a keyword; it will parse as `LOWER_IDENT "no_panic"`.
+The `cap` prefix also connects directly to the capability vocabulary the rest of the language uses. Future directives (`cap no_alloc`, `cap no_io`) follow naturally and each gets its own compound token — a small cost given how rarely new module directives are added.
+
+**Verified:** `cap` is not in `lib/lexer/lexer.mll`'s keyword table (line 75–86). `no_panic` is also not a keyword. The lexer rule `"cap" [' ''\t']+ "no_panic" { CAP_NO_PANIC }` must appear **before** the generic `ident` rule (line 160) so it fires first when the scanner sees `cap` followed by whitespace and `no_panic`.
 
 **Surface syntax:**
 
 ```march
 mod SafeMath do
-  opts no_panic
+  cap no_panic
 
   fn divide(a : Int, b : Int) : Result(Int, String) do
     if b == 0 do
@@ -785,9 +787,9 @@ mod SafeMath do
 end
 ```
 
-`opts no_panic` must appear inside a `mod ... do ... end` body, as a declaration alongside `fn`, `type`, `needs`, etc. It applies to all `fn` and `pfn` declarations in the **same** `mod` body; nested `mod` blocks are checked independently and must opt in separately.
+`cap no_panic` must appear inside a `mod ... do ... end` body, as a declaration alongside `fn`, `type`, `needs`, etc. It applies to all `fn` and `pfn` declarations in the **same** `mod` body; nested `mod` blocks are checked independently and must opt in separately.
 
-Multiple opts on the same module are not supported in Phase 3c (only `no_panic` exists); the `string list` in `DOpts` is forward-looking for when `opts no_alloc` etc. are added.
+Only `cap no_panic` exists in Phase 3c; the `string list` in `DOpts` is forward-looking for when `cap no_alloc` etc. are added (each with its own compound token).
 
 ---
 
@@ -935,9 +937,9 @@ Phase 3c uses a **conservative but practical** cross-module policy:
 
 1. **Stdlib functions** — handled by the explicit panic-surface tables (§3.3). Functions not in the table are assumed safe. This is complete for the curated stdlib; new panicking stdlib functions must be added to the table manually.
 
-2. **Functions from other `no_panic` modules** — treated as **safe**. If module `SafeLib` declares `opts no_panic`, its exported functions passed the same check and are guaranteed panic-free. The typecheck env for the current module accumulates `no_panic_modules : StringSet.t` from previously-checked modules (via `env.module_caps` analogy; see §3.6.3).
+2. **Functions from other `no_panic` modules** — treated as **safe**. If module `SafeLib` declares `cap no_panic`, its exported functions passed the same check and are guaranteed panic-free. The typecheck env for the current module accumulates `no_panic_modules : StringSet.t` from previously-checked modules (via `env.module_caps` analogy; see §3.6.3).
 
-3. **Functions from non-`no_panic` user modules** — treated as **potentially panicking** and reported as a violation. This is conservative: a helper in a non-`no_panic` module *might* be panic-free, but we cannot prove it statically. The error message explicitly says "function from non-`no_panic` module — mark that module `opts no_panic` or use a different API."
+3. **Functions from non-`no_panic` user modules** — treated as **potentially panicking** and reported as a violation. This is conservative: a helper in a non-`no_panic` module *might* be panic-free, but we cannot prove it statically. The error message explicitly says "function from non-`no_panic` module — mark that module `cap no_panic` or use a different API."
 
 4. **FFI extern functions** — treated as **potentially panicking**. C code can call `abort()` or signal handlers. If a `no_panic` module uses an extern, it gets the same cross-module conservative error. (See §3.8 for the escape hatch.)
 
@@ -947,15 +949,13 @@ Phase 3c uses a **conservative but practical** cross-module policy:
 
 #### 3.7.1 Lexer changes (`lib/lexer/lexer.mll`)
 
-Add `"opts"` to the keyword table (at lines 75–86, after `"via"`):
+Add a compound token rule **before** the generic `ident` rule (line 159, alongside `"proof" [' ''\t']+ "cap" { PROOFCAP }`):
 
 ```ocaml
-("opts", OPTS);
+| "cap" [' ' '\t']+ "no_panic" { CAP_NO_PANIC }
 ```
 
-Add the `OPTS` token declaration in `parser.mly`'s `%token` list.
-
-No changes to the main `token` rule — the keyword table lookup handles it.
+No keyword table entry needed — this fires as a prefix match before the scanner falls through to `ident`. `cap` alone (as a variable name) is never consumed by this rule.
 
 **~1 line changed.**
 
@@ -966,26 +966,26 @@ No changes to the main `token` rule — the keyword table lookup handles it.
 Add to the `%token` list:
 
 ```
-%token OPTS
+%token CAP_NO_PANIC
 ```
 
 Add a new nonterminal after `proof_cap_decl`:
 
 ```
-opts_decl:
-  | OPTS; name = lower_name
-    { DOpts ([name.txt], mk_span ($loc)) }
+cap_no_panic_decl:
+  | CAP_NO_PANIC
+    { DOpts (["no_panic"], mk_span ($loc)) }
 ```
 
 Add to the `decl` alternatives (alongside `d = proof_cap_decl`):
 
 ```
-| d = opts_decl { d }
+| d = cap_no_panic_decl { d }
 ```
 
-**Parser conflict analysis:** After `OPTS`, the only valid next token is `LOWER_IDENT` (a directive name). `OPTS` does not appear anywhere else in the grammar. No LALR(1) conflict is introduced — `OPTS` is a fresh keyword that the shift/reduce automaton has not seen before, so it creates a new unambiguous production.
+**Parser conflict analysis:** `CAP_NO_PANIC` is a fresh token that appears nowhere else in the grammar. No LALR(1) conflict is introduced.
 
-**~8 lines changed.**
+**~6 lines changed.**
 
 ---
 
@@ -995,7 +995,7 @@ Add to the `decl` type (after `DProofCap`, around line 155):
 
 ```ocaml
 | DOpts of string list * span
-  (** Module-level directives: [`"no_panic"`] from `opts no_panic`.
+  (** Module-level capability directives: [`"no_panic"`] from `cap no_panic`.
       The list allows multiple future directives; Phase 3c only uses `"no_panic"`. *)
 ```
 
@@ -1011,10 +1011,10 @@ Add two fields to `type env`:
 type env = {
   (* ... all existing fields ... *)
   no_panic_mod : bool;
-  (** True when the module currently being checked has `opts no_panic`.
+  (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
   no_panic_modules : string list;
-  (** Names of modules (siblings/imports) that have been verified as [opts no_panic].
+  (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
 }
 ```
@@ -1121,12 +1121,12 @@ In `check_decl` (around line 6093, after `DProofCap` handler):
 
 ```ocaml
 | Ast.DOpts (opts, _sp) ->
-  (* Phase 3c: no_panic module directive *)
+  (* Phase 3c: cap no_panic module directive *)
   if List.mem "no_panic" opts then
     { env with no_panic_mod = true }
   else begin
-    (* Unknown opts names are silently ignored for forward compatibility.
-       Future directives (no_alloc, no_io) will be handled here. *)
+    (* Unknown directive names are silently ignored for forward compatibility.
+       Future directives (cap no_alloc, cap no_io) will be handled here. *)
     env
   end
 ```
@@ -1242,11 +1242,11 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
           | `Direct ->
             let suggestion = panic_surface_suggestion site_name in
             Printf.sprintf
-              "`%s` in `mod %s` (declared `opts no_panic`) calls `%s`, which can panic.%s"
+              "`%s` in `mod %s` (declared `cap no_panic`) calls `%s`, which can panic.%s"
               fn_name mod_name site_name suggestion
           | `Transitive ->
             Printf.sprintf
-              "`%s` in `mod %s` (declared `opts no_panic`) transitively calls `%s`, \
+              "`%s` in `mod %s` (declared `cap no_panic`) transitively calls `%s`, \
                which can panic."
               fn_name mod_name site_name
         in
@@ -1286,7 +1286,7 @@ let panic_surface_suggestion : string -> string = function
   | "panic" | "panic_" ->
     "\n\nReturn an error value (`Result`, `Option`) instead of calling `panic`."
   | "todo_" ->
-    "\n\nImplement the body instead of using `todo!`, or remove the `opts no_panic` directive."
+    "\n\nImplement the body instead of using `todo!`, or remove the `cap no_panic` directive."
   | "unreachable_" ->
     "\n\nAdd a proof comment if this branch is truly unreachable, or handle it explicitly."
   | _ -> ""
@@ -1339,7 +1339,7 @@ This is a localized addition to the existing `DMod` handling. **~5 lines added.*
 **Direct violation (call to panic-surface builtin/stdlib):**
 
 ```
-Error: `divide` in `mod SafeMath` (declared `opts no_panic`) calls `/`, which can panic.
+Error: `divide` in `mod SafeMath` (declared `cap no_panic`) calls `/`, which can panic.
 
 Use `Math.checked_div` or `Math.checked_mod` to return `None` instead of panicking.
 ```
@@ -1349,7 +1349,7 @@ The span points to the `/` token inside the function body — the operator's pos
 **Direct violation (stdlib function):**
 
 ```
-Error: `first` in `mod SafeMath` (declared `opts no_panic`) calls `List.nth`, which can panic.
+Error: `first` in `mod SafeMath` (declared `cap no_panic`) calls `List.nth`, which can panic.
 
 Use `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds.
 ```
@@ -1359,7 +1359,7 @@ The span points to `nth` in `List.nth(xs, 0)`.
 **Transitive violation:**
 
 ```
-Error: `process_list` in `mod SafeMath` (declared `opts no_panic`) transitively calls
+Error: `process_list` in `mod SafeMath` (declared `cap no_panic`) transitively calls
 `find_elem`, which can panic.
 ```
 
@@ -1368,10 +1368,10 @@ The span points to the `find_elem` call site inside `process_list`. The user the
 **Conservative cross-module violation:**
 
 ```
-Error: `run` in `mod SafeMath` (declared `opts no_panic`) calls `Parser.parse`,
+Error: `run` in `mod SafeMath` (declared `cap no_panic`) calls `Parser.parse`,
 which is in a non-`no_panic` module and may panic.
 
-Mark `mod Parser` with `opts no_panic` to verify it is panic-free, or use a
+Mark `mod Parser` with `cap no_panic` to verify it is panic-free, or use a
 panic-free alternative.
 ```
 
@@ -1393,7 +1393,7 @@ fn checked_mod(a : Int, b : Int) : Option(Int) do
 end
 ```
 
-Note: `checked_div` and `checked_mod` are defined in the `Math` module which is **not** `opts no_panic` (it uses `/` and `%` internally in the safe branch). Callers from a `no_panic` module call `Math.checked_div(a, b)` — the qualified name is not in `panic_surface_stdlib`, so no violation is reported.
+Note: `checked_div` and `checked_mod` are defined in the `Math` module which is **not** `cap no_panic` (it uses `/` and `%` internally in the safe branch). Callers from a `no_panic` module call `Math.checked_div(a, b)` — the qualified name is not in `panic_surface_stdlib`, so no violation is reported.
 
 **~10 lines added to `stdlib/math.march`.**
 
@@ -1412,13 +1412,13 @@ end
 
 -- In the no_panic module:
 mod SafeCalc do
-  opts no_panic
+  cap no_panic
   -- UnsafeMathFFI is not no_panic, so calls to it would be flagged.
   -- To fix: mark UnsafeMathFFI as no_panic too.
 end
 ```
 
-Full FFI safety in `no_panic` modules requires the user to also mark the wrapper module `opts no_panic`. If the wrapper calls an extern, the extern itself is the final boundary — the user accepts responsibility. Phase 3c cannot verify C code; it only verifies that the March wrapper is panic-free at the March level.
+Full FFI safety in `no_panic` modules requires the user to also mark the wrapper module `cap no_panic`. If the wrapper calls an extern, the extern itself is the final boundary — the user accepts responsibility. Phase 3c cannot verify C code; it only verifies that the March wrapper is panic-free at the March level.
 
 ---
 
@@ -1430,14 +1430,14 @@ They are **complementary and non-redundant**:
 
 | Dimension | Phase 3b | Phase 3c |
 |-----------|----------|----------|
-| Granularity | Per-function via `Tagged(_, NoPanic)` | Per-module via `opts no_panic` |
+| Granularity | Per-function via `Tagged(_, NoPanic)` | Per-module via `cap no_panic` |
 | Analysis level | TIR (after lower + mono) | AST (typecheck time) |
 | Source spans | No — TIR has no spans | Yes — AST retains spans |
 | Transitive analysis | Via `panicky_fns_of_module` fixpoint over stdlib bodies | Static table + intra-module fixpoint |
 | Stdlib coverage | Picks up `unwrap` transitively via TIR bodies | Static `panic_surface_stdlib` table |
 | Use case | Library APIs with policy-parameterized functions | Entire module guarantees |
 
-A module can use both: mark it `opts no_panic` AND have some functions take `Tagged(_, NoPanic)` parameters. The two checks are independent.
+A module can use both: mark it `cap no_panic` AND have some functions take `Tagged(_, NoPanic)` parameters. The two checks are independent.
 
 ---
 
@@ -1445,8 +1445,8 @@ A module can use both: mark it `opts no_panic` AND have some functions take `Tag
 
 | File | Change | ~Lines |
 |------|--------|--------|
-| `lib/lexer/lexer.mll` | Add `"opts"` to keyword table | +1 |
-| `lib/parser/parser.mly` | `%token OPTS`, `opts_decl` production, add to `decl` list | +8 |
+| `lib/lexer/lexer.mll` | Add `CAP_NO_PANIC` compound token rule (before `ident`) | +1 |
+| `lib/parser/parser.mly` | `%token CAP_NO_PANIC`, `cap_no_panic_decl` production, add to `decl` list | +6 |
 | `lib/ast/ast.ml` | Add `DOpts of string list * span` to `decl` type | +3 |
 | `lib/typecheck/typecheck.ml` | `panic_surface_*` tables, `calls_in_expr`, `panic_surface_suggestion`, `check_no_panic_module`, `check_decl DOpts` handler, env fields (`no_panic_mod`, `no_panic_modules`), integration in `check_module_core` and `DMod` handler | +175 |
 | `stdlib/math.march` | `checked_div`, `checked_mod` | +10 |
@@ -1467,7 +1467,7 @@ The four big blocks in `typecheck.ml`:
 
 | # | Description | Expected |
 |---|-------------|---------|
-| 1 | `opts no_panic` parses correctly (no other decls) | no error |
+| 1 | `cap no_panic` parses correctly (no other decls) | no error |
 | 2 | Non-`no_panic` module with `a / b` | no error |
 | 3 | `no_panic` module with `a / b` | error at `/` site |
 | 4 | `no_panic` module with `a % b` | error at `%` site |
@@ -1486,15 +1486,15 @@ Tests 1–9 use the AST-direct testing helper pattern (build a synthetic `module
 
 ### 3.14 Known Limitations and Future Work
 
-**1. Conservative cross-module check.** Functions from user modules without `opts no_panic` are treated as potentially panicking. This means a `no_panic` module cannot call any external helper unless that helper's module also declares `opts no_panic`. In practice, users structure `no_panic` code in cohesive modules and mark all dependencies accordingly.
+**1. Conservative cross-module check.** Functions from user modules without `cap no_panic` are treated as potentially panicking. This means a `no_panic` module cannot call any external helper unless that helper's module also declares `cap no_panic`. In practice, users structure `no_panic` code in cohesive modules and mark all dependencies accordingly.
 
 **2. Static stdlib table.** The `panic_surface_stdlib` table is manually maintained. If a new stdlib function panics and isn't added to the table, Phase 3c will not catch it. Mitigation: add a linter CI check that runs Phase 3b's TIR-level analysis over stdlib (which DOES pick up transitive panics) and cross-references the static table.
 
 **3. Value-range insensitivity.** If the programmer knows `b != 0` statically (e.g., from a match arm), `a / b` is still flagged. Phase 3c is purely syntactic. Callers must use `checked_div` and pattern-match the result, even when the non-zero invariant is locally obvious.
 
-**4. `todo_` in stub functions.** Using `todo_` (or `panic`) in a stub function body that will never be called generates a false positive. The escape: remove `opts no_panic` from modules under active development and add it back when the module is complete.
+**4. `todo_` in stub functions.** Using `todo_` (or `panic`) in a stub function body that will never be called generates a false positive. The escape: remove `cap no_panic` from modules under active development and add it back when the module is complete.
 
-**5. Nested mod scoping.** `opts no_panic` on an outer `mod` does NOT apply to inner `mod` blocks. Each must declare independently. This is intentional — nested modules may have different purity requirements — but can surprise users who expect the outer directive to propagate.
+**5. Nested mod scoping.** `cap no_panic` on an outer `mod` does NOT apply to inner `mod` blocks. Each must declare independently. This is intentional — nested modules may have different purity requirements — but can surprise users who expect the outer directive to propagate.
 
 ---
 
@@ -1537,15 +1537,15 @@ safe_index(xs, i)   : Option(a)      -- None on out-of-bounds
 safe_slice(s, l, h) : Option(String) -- None on out-of-bounds
 ```
 
-Some of these overlap with existing `_opt` variants. The naming convention for Phase 3a (`opts no_panic`) would be `checked_*` for arithmetic, matching the established stdlib convention.
+Some of these overlap with existing `_opt` variants. The naming convention for Phase 3a (`cap no_panic`) would be `checked_*` for arithmetic, matching the established stdlib convention.
 
 ### Path forward
 
-1. Phase 3c (this doc) — `opts no_panic` modules: binary gate, no implicit threading needed
+1. Phase 3c (this doc) — `cap no_panic` modules: binary gate, no implicit threading needed
 2. Future sub-spec — implicit `Cap(Panic)` threading mechanism design
 3. Future sub-spec — language-wide `Cap(Panic)` retrofit with migration guide
 
-Write the sub-spec when a concrete embedded/realtime use case requires fine-grained panic granularity beyond what `opts no_panic` provides.
+Write the sub-spec when a concrete embedded/realtime use case requires fine-grained panic granularity beyond what `cap no_panic` provides.
 
 ---
 
@@ -1643,7 +1643,7 @@ These are incremental LSP additions, each ~100–200 lines in `lsp/`.
 
 **Spec complete** — see §3 above for full implementation details.
 
-- `opts no_panic` module directive (Option B: `OPTS` keyword + `LOWER_IDENT` directive name)
+- `cap no_panic` module directive (compound lexer token `CAP_NO_PANIC`, same pattern as `PROOFCAP`)
 - `DOpts of string list * span` added to `Ast.decl`
 - `no_panic_mod : bool` + `no_panic_modules : string list` added to typecheck `env`
 - `panic_surface_direct`, `panic_surface_prelude`, `panic_surface_stdlib` tables in `typecheck.ml`
@@ -1676,7 +1676,7 @@ Out of scope for Phase 3. Requires significant type checker extension. Defer unt
 
 - **Phase 1 and Phase 2 enforcement** — all existing checks remain unchanged
 - **`Handle(R, S)` and `Tagged(X, T)` semantics** — Phase 3a adds syntax for expressing constraints that were already implicit; it does not change what's valid
-- **`opts no_panic` is opt-in** — no existing code breaks; modules without the directive behave identically
+- **`cap no_panic` is opt-in** — no existing code breaks; modules without the directive behave identically
 - **The runtime** — no runtime changes in Phase 3. All new mechanisms are compile-time
 
 ---
@@ -1687,7 +1687,7 @@ Out of scope for Phase 3. Requires significant type checker extension. Defer unt
 
 **Q2 — Bound syntax for TNat:** `[N : TNat]` bounds a type variable to be a type-level natural. Is this the same mechanism as `[S : ConnState]` (both are "S must be a value-in this type")? Or is `TNat` special (it's a kind, not a type)? Decide at implementation time.
 
-**Q3 — `opts no_panic` and FFI:** If a `no_panic` module calls a C FFI function, should that be a panic site (`Cap(Panic.Ffi)`)? Probably yes — C can abort. Phase 3c can treat any FFI call as a panic site in `no_panic` modules; the programmer must wrap it in a `no_ffi_panic_guard` or similar.
+**Q3 — `cap no_panic` and FFI:** If a `no_panic` module calls a C FFI function, should that be a panic site (`Cap(Panic.Ffi)`)? Probably yes — C can abort. Phase 3c can treat any FFI call as a panic site in `no_panic` modules; the programmer must wrap it in a `no_ffi_panic_guard` or similar.
 
 **Q4 — Panic surface for stdlib functions:** The panic-surface metadata table must be accurate. A conservative approach (anything that calls `panic` or `assert` is a panic site) is correct but may be too noisy. Consider letting stdlib functions opt out via annotation when they are provably non-panicking despite calling internal assert-style helpers.
 
