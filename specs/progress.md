@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, tier1 ergonomics items 1–3)
+
+- **Record field auto-satisfy (Item 3)** (`lib/typecheck/typecheck.ml`): when discharging a `CInterface(Iface, TRecord[...])` constraint with no explicit `impl`, auto-satisfies if the interface has exactly one accessor method (`a -> T`) and the anonymous record has a matching field with the correct type. Named types (`TCon`) never auto-satisfy — they require an explicit `impl`. 9 new tests in `record_auto_satisfy` group.
+- **Capability Phase 1 — IO.Random/IO.Database in hierarchy + stdlib `needs` annotations (Item 1)**: added `IO.Random` and `IO.Database` to `io_cap_hierarchy` in `typecheck.ml`. Added `needs` declarations to 8 stdlib modules: `io.march` (`IO.Console`), `file.march` (`IO.FileRead`, `IO.FileWrite`), `dir.march` (`IO.FileRead`, `IO.FileWrite`), `system.march` (`IO.Process`, `IO.Clock`), `csv.march` (`IO.FileRead`), `uuid.march` (`IO.Random`), `random.march` (`IO.Random`), `crypto.march` (`IO.Random`).
+- **Capability Phase 2 — body-scan enforcement (Item 2)** (`lib/typecheck/typecheck.ml`): added `calls_in_expr` AST walker, `builtin_cap_table` (~65-entry association list mapping builtins to IO caps), and `body_cap_uses` collection pass inside `check_module_needs`. Emits `Err.warning` (not error) for each implied cap not covered by a declared `needs`. Check 2 now counts body-inferred calls as usage to suppress false "declared but not used" warnings. 14 new tests in `cap_body_enforce` group.
+- **Test count: 1502 + 23 new = 1525** (242 compiler + 219 eval + 284 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures, 1 pre-existing adversarial-regressions failure).
+
 ## Current State (as of 2026-06-18, P11 case-of-known-constructor)
 
 - **P11 — Case-of-known-constructor / Beta-ADT reduction** (`lib/tir/cprop.ml`): added `ctor_env` tracking `let v = EAlloc(TCon(tag, _), args)` bindings. In `ECase(AVar v, branches, _)` where `v` is in `ctor_env`, finds the matching branch (stripping `"TypeName."` prefix from the TCon key to match bare `br_tag`), extends `aenv` with `br_vars → ctor_args`, and calls `cprop_expr` on the branch body. Eliminates the ECase node entirely; DCE removes the dead EAlloc. Fires after every inline of a function returning `Option`/`Result`. 3 new tests in `cprop` group.
