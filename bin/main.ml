@@ -1113,7 +1113,14 @@ let compile filename =
     stamp "defun";
     (* Known-call pass: run before Perceus so apply functions are still pure
        and eligible for inlining in the subsequent Opt fixed-point loop.
-       Also included in the Opt coordinator for cases revealed after Perceus. *)
+       Also included in the Opt coordinator for cases revealed after Perceus.
+       This rewrites ECallPtr(clo, args) -> EApp(clo_apply, clo :: args).  The
+       closure-apply ABI consumes the closure argument, so Perceus must NOT
+       emit a caller-side post-call EDecRC for the $clo slot of an apply
+       function even when borrow inference classifies it as borrowed — see the
+       [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars.  Without that
+       guard the rewrite double-freed the closure (List.sort_by SIGBUS at
+       n >= ~90 with a heap-capturing comparator). *)
     let tir = if !opt_enabled
               then March_tir.Known_call.run ~changed:(ref false) tir
               else tir in
