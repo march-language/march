@@ -1663,12 +1663,14 @@ Out of scope for Phase 3. Requires a separate sub-spec on implicit capability th
 
 Out of scope for Phase 3. Requires significant type checker extension. Defer until user demand justifies the complexity.
 
-### Phase 3f — Tooling completions (ongoing)
+### Phase 3f — Tooling completions ✅
 
-- `forge cap coverage --static`: ~300 lines in `forge/`
-- LSP find-references for `Cap(X)`: ~150 lines in `lsp/`
-- LSP go-to-definition for `proof cap`: ~100 lines in `lsp/`
-- LSP inlay hints for capability requirements: ~200 lines in `lsp/`
+- ✅ `forge cap coverage`: static call-graph BFS from test entry points; reports covered/uncovered capabilities as `N/M (X%)` — `forge/lib/cmd_cap.ml` + `forge/bin/main.ml`
+- ✅ LSP go-to-definition for `proof cap`: `proof_cap_defs` field on `Analysis.t`; Phase 1 registers defs into `def_map`; Phase 2 walks `Cap(X)` type annotations and `DNeeds` paths into `use_map`; go-to-def and find-refs work automatically via existing machinery — `lsp/lib/analysis.ml`
+- ✅ LSP find-references for `Cap(X)`: same machinery as go-to-def; `references_at` on the declaration span finds all `Cap(X)` annotation uses — `lsp/lib/analysis.ml`
+- ✅ LSP inlay hints for capability requirements: `⬡ IO.Console` after `println()` calls etc., emitted only when the file has `DNeeds` declarations; builtin-cap table of 25 functions — `lsp/lib/analysis.ml`
+- ✅ Bug fix: `DProofCap`, `DNeeds`, `DOpts`, `DTransitions`, `DAlwaysLinearType`, `DSetup`, `DSetupAll` now included in `user_decls` filter (were silently dropped by `_ -> dummy_span` fallback)
+- 4 new LSP tests: `test_proof_cap_defs_registered`, `test_proof_cap_goto_def`, `test_proof_cap_find_refs`, `test_cap_inlay_hints`
 
 ---
 

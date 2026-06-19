@@ -829,10 +829,25 @@ let cap_query_cmd =
            ~doc:"Print a capability and typestate summary for all .march files")
     Term.(const run $ dir)
 
+let cap_coverage_cmd =
+  let dir =
+    Arg.(value & opt (some string) None &
+         info ["dir"] ~docv:"DIR"
+           ~doc:"Root directory to scan (defaults to project root).")
+  in
+  let run d =
+    match Cmd_cap.coverage ~dir:d () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "coverage"
+           ~doc:"Report which declared capabilities have test coverage (static analysis)")
+    Term.(const run $ dir)
+
 let cap_cmd =
   Cmd.group (Cmd.info "cap"
                ~doc:"Capability and typestate inspection")
-    [cap_query_cmd]
+    [cap_query_cmd; cap_coverage_cmd]
 
 (* --------------------------------------------------------- forge completions *)
 

@@ -121,6 +121,185 @@ let render_summary ~root (s : cap_summary) : string option =
 (* Entry point                                                          *)
 (* ------------------------------------------------------------------ *)
 
+(* ------------------------------------------------------------------ *)
+(* Call graph + capability coverage                                     *)
+(* ------------------------------------------------------------------ *)
+
+(** Collect direct function-call names from an expression. *)
+let rec calls_in_expr acc (e : Ast.expr) =
+  let acc = match e with
+    | Ast.EApp (Ast.EVar n, _, _) -> n.Ast.txt :: acc
+    | Ast.EApp (Ast.EField (Ast.EVar m, f, _), _, _) ->
+      (m.Ast.txt ^ "." ^ f.Ast.txt) :: acc
+    | _ -> acc
+  in
+  match e with
+  | Ast.EApp (f, args, _)      -> List.fold_left calls_in_expr (calls_in_expr acc f) args
+  | Ast.ELet (b, _)            -> calls_in_expr acc b.Ast.bind_expr
+  | Ast.EBlock (es, _)         -> List.fold_left calls_in_expr acc es
+  | Ast.EMatch (s, brs, _)     ->
+    let acc = calls_in_expr acc s in
+    List.fold_left (fun a br -> calls_in_expr a br.Ast.branch_body) acc brs
+  | Ast.EIf (c, t, f, _)       ->
+    calls_in_expr (calls_in_expr (calls_in_expr acc c) t) f
+  | Ast.EPipe (x, y, _)
+  | Ast.ESend (x, y, _)        -> calls_in_expr (calls_in_expr acc x) y
+  | Ast.ETuple (es, _)
+  | Ast.EAtom (_, es, _)
+  | Ast.ECon (_, es, _)        -> List.fold_left calls_in_expr acc es
+  | Ast.ERecord (fs, _)        -> List.fold_left (fun a (_, e) -> calls_in_expr a e) acc fs
+  | Ast.ERecordUpdate (e, fs, _) ->
+    List.fold_left (fun a (_, e) -> calls_in_expr a e) (calls_in_expr acc e) fs
+  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+  | Ast.ESpawn (e, _)   | Ast.EAssert (e, _)   -> calls_in_expr acc e
+  | Ast.ELam (_, b, _)  | Ast.ELetFn (_, _, _, b, _) -> calls_in_expr acc b
+  | _ -> acc
+
+let fn_body_calls (fn : Ast.fn_def) : string list =
+  List.concat_map (fun (cl : Ast.fn_clause) -> calls_in_expr [] cl.Ast.fc_body)
+    fn.Ast.fn_clauses
+  |> List.sort_uniq String.compare
+
+let expr_calls (e : Ast.expr) : string list =
+  calls_in_expr [] e |> List.sort_uniq String.compare
+
+type coverage_data = {
+  cv_fn_calls  : (string, string list) Hashtbl.t;
+  cv_fn_file   : (string, string) Hashtbl.t;
+  cv_file_caps : (string, string list) Hashtbl.t;
+  cv_tests     : (string * string list) list;
+}
+
+let build_coverage_data files =
+  let fn_calls  = Hashtbl.create 64 in
+  let fn_file   = Hashtbl.create 64 in
+  let file_caps = Hashtbl.create 16 in
+  let tests     = ref [] in
+  let rec walk_decls ~prefix ~file decls =
+    List.iter (walk_decl ~prefix ~file) decls
+  and walk_decl ~prefix ~file (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, _) ->
+      let qname = if prefix = "" then fn.Ast.fn_name.Ast.txt
+                  else prefix ^ "." ^ fn.Ast.fn_name.Ast.txt in
+      Hashtbl.replace fn_calls qname (fn_body_calls fn);
+      Hashtbl.replace fn_file  qname file
+    | Ast.DMod (name, _, inner, _) ->
+      let p = if prefix = "" then name.Ast.txt
+              else prefix ^ "." ^ name.Ast.txt in
+      walk_decls ~prefix:p ~file inner
+    | Ast.DNeeds (paths, _) ->
+      let caps = List.map (fun path ->
+          String.concat "." (List.map (fun (n : Ast.name) -> n.txt) path)
+        ) paths in
+      let existing = match Hashtbl.find_opt file_caps file with
+        | Some cs -> cs | None -> []
+      in
+      Hashtbl.replace file_caps file
+        (List.sort_uniq String.compare (existing @ caps))
+    | Ast.DTest (td, _) ->
+      tests := (td.Ast.test_name, expr_calls td.Ast.test_body) :: !tests
+    | Ast.DDescribe (_, inner, _) -> walk_decls ~prefix ~file inner
+    | _ -> ()
+  in
+  List.iter (fun (path, decls) ->
+      walk_decls ~prefix:"" ~file:path decls
+    ) files;
+  { cv_fn_calls = fn_calls; cv_fn_file = fn_file;
+    cv_file_caps = file_caps; cv_tests = !tests }
+
+(** BFS from [entry_calls] collecting all transitively reachable fn names. *)
+let reachable_fns (cv : coverage_data) (entry_calls : string list) : string list =
+  let visited = Hashtbl.create 32 in
+  let queue = Queue.create () in
+  List.iter (fun n -> Queue.push n queue) entry_calls;
+  while not (Queue.is_empty queue) do
+    let n = Queue.pop queue in
+    if not (Hashtbl.mem visited n) then begin
+      Hashtbl.replace visited n ();
+      (match Hashtbl.find_opt cv.cv_fn_calls n with
+       | Some callees -> List.iter (fun c -> Queue.push c queue) callees
+       | None -> ())
+    end
+  done;
+  Hashtbl.fold (fun k () acc -> k :: acc) visited []
+
+(** All capability paths declared in files containing any of [fn_names]. *)
+let caps_for_fns (cv : coverage_data) (fn_names : string list) : string list =
+  let caps = ref [] in
+  List.iter (fun fn ->
+      match Hashtbl.find_opt cv.cv_fn_file fn with
+      | None -> ()
+      | Some f ->
+        (match Hashtbl.find_opt cv.cv_file_caps f with
+         | None -> ()
+         | Some cs -> caps := cs @ !caps)
+    ) fn_names;
+  List.sort_uniq String.compare !caps
+
+let coverage ~dir () =
+  let root = match dir with
+    | Some d -> d
+    | None ->
+      (match Project.load () with
+       | Ok proj -> proj.Project.root
+       | Error _ -> Sys.getcwd ())
+  in
+  let files = Cmd_build.find_march_files root in
+  if files = [] then
+    Error (Printf.sprintf "no .march files found under %s" root)
+  else begin
+    let parsed = List.filter_map (fun path ->
+        match parse_file path with
+        | Ok decls -> Some (path, decls)
+        | Error msg ->
+          Printf.eprintf "forge cap: %s: %s\n%!" path msg; None
+      ) files in
+    let cv = build_coverage_data parsed in
+    let all_caps =
+      Hashtbl.fold (fun _ caps acc ->
+          List.fold_left (fun a c -> if List.mem c a then a else c :: a) acc caps
+        ) cv.cv_file_caps []
+      |> List.sort String.compare
+    in
+    if all_caps = [] then begin
+      Printf.printf "no `needs` declarations found under %s\n%!" root; Ok ()
+    end else begin
+      let cap_to_tests : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+      List.iter (fun (test_name, entry_calls) ->
+          let reachable = reachable_fns cv entry_calls in
+          let caps = caps_for_fns cv (entry_calls @ reachable) in
+          List.iter (fun cap ->
+              let existing = match Hashtbl.find_opt cap_to_tests cap with
+                | Some ts -> ts | None -> []
+              in
+              if not (List.mem test_name existing) then
+                Hashtbl.replace cap_to_tests cap (test_name :: existing)
+            ) caps
+        ) cv.cv_tests;
+      let covered   = List.filter (fun c ->  Hashtbl.mem cap_to_tests c) all_caps in
+      let uncovered = List.filter (fun c -> not (Hashtbl.mem cap_to_tests c)) all_caps in
+      if covered <> [] then begin
+        Printf.printf "Covered:\n";
+        List.iter (fun cap ->
+            let n = List.length (match Hashtbl.find_opt cap_to_tests cap with
+                | Some ts -> ts | None -> []) in
+            Printf.printf "  %-30s  %d test%s\n%!" cap n (if n = 1 then "" else "s")
+          ) covered
+      end;
+      if uncovered <> [] then begin
+        if covered <> [] then Printf.printf "\n";
+        Printf.printf "Uncovered:\n";
+        List.iter (fun cap -> Printf.printf "  %s\n%!" cap) uncovered
+      end;
+      let total = List.length all_caps in
+      let n_cov  = List.length covered in
+      Printf.printf "\n%d/%d capabilities covered (%d%%)\n%!"
+        n_cov total (if total > 0 then n_cov * 100 / total else 0);
+      Ok ()
+    end
+  end
+
 let query ~dir () =
   let root = match dir with
     | Some d -> d

@@ -5774,6 +5774,69 @@ end|} in
   Alcotest.(check bool) "def on column string finds schema field" true (loc <> None)
 
 (* ------------------------------------------------------------------ *)
+(* Capability tooling (Phase 3f)                                       *)
+(* ------------------------------------------------------------------ *)
+
+let test_proof_cap_defs_registered () =
+  (* Sanity check: proof_cap_defs contains the declared cap name, and the
+     def_map and use_map are populated even when the typechecker adds errors. *)
+  let src = {|mod M do
+  proof cap Foo
+end|} in
+  let a = analyse src in
+  Alcotest.(check int) "no parse errors" 0 (List.length a.An.diagnostics);
+  Alcotest.(check bool) "proof_cap_defs has Foo" true (Hashtbl.mem a.An.proof_cap_defs "Foo");
+  Alcotest.(check bool) "def_map has Foo" true (Hashtbl.mem a.An.def_map "Foo")
+
+let test_proof_cap_goto_def () =
+  (* proof cap Foo declares "Foo"; fn f(c: Cap(Foo)) uses it.
+     Go-to-def on the Cap(Foo) annotation should resolve to the declaration. *)
+  let src = {|mod M do
+  proof cap Foo
+  fn f(c : Cap(Foo)) : Int do 1 end
+end|} in
+  let a = analyse src in
+  (* pos_of lands on the first char of "Foo)" in the type annotation *)
+  let (line, col) = pos_of src "Foo)" in
+  let loc = An.definition_at a ~line ~character:col in
+  Alcotest.(check bool) "Cap(Foo) annotation resolves to proof cap declaration" true (loc <> None)
+
+let test_proof_cap_find_refs () =
+  (* proof cap Bar declared once; two functions carry Cap(Bar) params.
+     find-references at the declaration span should find both uses. *)
+  let src = {|mod M do
+  proof cap Bar
+  fn f(c : Cap(Bar)) : Int do 1 end
+  fn g(c : Cap(Bar)) : Int do 2 end
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "proof cap Bar" in
+  let col = col + 10 in  (* skip "proof cap " to land on 'B' of Bar *)
+  let refs = An.references_at a ~include_declaration:false ~line ~character:col in
+  Alcotest.(check bool) "two Cap(Bar) uses found" true (List.length refs >= 2)
+
+let test_cap_inlay_hints () =
+  (* A module with `needs IO.Console` should emit a ⬡ IO.Console hint
+     at println() call sites when perf_annotations is on. *)
+  let src = {|mod M do
+  needs IO.Console
+  fn greet() do
+    println("hello")
+  end
+end|} in
+  let a = analyse src in
+  let range = Lsp.Types.Range.create
+      ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+      ~end_:(Lsp.Types.Position.create ~line:10 ~character:0)
+  in
+  let hints = An.inlay_hints_for ~perf_annotations:true a range in
+  let has_cap_hint = List.exists (fun (h : Lsp.Types.InlayHint.t) ->
+      match h.label with
+      | `String s -> contains_sub s "IO.Console"
+      | _ -> false) hints in
+  Alcotest.(check bool) "IO.Console hint emitted for println in needs module" true has_cap_hint
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -6257,5 +6320,11 @@ let () =
       "query->schema resolution + col_occ",        `Quick, test_query_schema_resolution;
       "query->schema via from(schema_fn())",        `Quick, test_query_schema_resolution_from_fn;
       "depot_source_decls retained in analysis",   `Quick, test_imported_decls_retained;
+    ];
+    "capability tooling (phase 3f)", [
+      "proof cap defs registered",                 `Quick, test_proof_cap_defs_registered;
+      "proof cap go-to-def resolves declaration",  `Quick, test_proof_cap_goto_def;
+      "proof cap find-refs finds type annotations", `Quick, test_proof_cap_find_refs;
+      "cap inlay hint emitted for builtin in needs module", `Quick, test_cap_inlay_hints;
     ];
   ]

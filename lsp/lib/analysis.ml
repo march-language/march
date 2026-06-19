@@ -264,6 +264,9 @@ type t = {
   param_name_map   : (string, string list) Hashtbl.t;
   (** Precomputed function-name → ordered param-names table, built once from
       [decls] and reused on every inlay-hint request for parameter-name hints. *)
+  proof_cap_defs   : (string, Ast.span) Hashtbl.t;
+  (** Proof-capability name → span of its [proof cap Foo] declaration.
+      Used by go-to-definition and find-references for Cap(X) type references. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -2609,7 +2612,8 @@ let analyse ~filename ~src : t =
       protocols         = [];
       transitions_index = [];
       always_linear_names = [];
-      param_name_map    = build_param_name_map [] }
+      param_name_map    = build_param_name_map [];
+      proof_cap_defs    = Hashtbl.create 0 }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -2697,6 +2701,13 @@ let analyse ~filename ~src : t =
             | Ast.DDescribe (_, _, sp) -> sp
             | Ast.DUse (_, sp)      -> sp
             | Ast.DAlias (_, sp)    -> sp
+            | Ast.DNeeds (_, sp)    -> sp
+            | Ast.DProofCap (_, sp) -> sp
+            | Ast.DOpts (_, sp)     -> sp
+            | Ast.DTransitions (_, _, sp) -> sp
+            | Ast.DAlwaysLinearType (_, _, _, _, sp) -> sp
+            | Ast.DSetup (_, sp)    -> sp
+            | Ast.DSetupAll (_, sp) -> sp
             | _                     -> Ast.dummy_span
           in
           is_user_file sp
@@ -2735,6 +2746,56 @@ let analyse ~filename ~src : t =
     (* User definitions win over same-named stdlib definitions. *)
     Hashtbl.iter (fun name sp -> Hashtbl.replace def_map name sp) user_defs;
     let actors = Hashtbl.fold (fun k v acc -> (k, v) :: acc) actors_tbl [] in
+    (* Collect proof cap declarations and references. *)
+    let proof_cap_defs = Hashtbl.create 4 in
+    (* Phase 1: register proof cap defs (go-to-def target), recursing into DMod. *)
+    let rec register_proof_caps decls =
+      List.iter (function
+        | Ast.DProofCap (name, _) ->
+          Hashtbl.replace def_map name.txt name.span;
+          Hashtbl.replace proof_cap_defs name.txt name.span
+        | Ast.DMod (_, _, inner, _) -> register_proof_caps inner
+        | _ -> ()
+      ) decls
+    in
+    register_proof_caps user_decls;
+    (* Phase 2: index Cap(X) type annotations and DNeeds paths as uses. *)
+    let rec collect_cap_ty_refs (t : Ast.ty) =
+      match t with
+      | Ast.TyCon ({txt="Cap"; _}, [Ast.TyCon (inner, [])]) ->
+        if Hashtbl.mem proof_cap_defs inner.txt then
+          Hashtbl.replace use_map inner.span inner.txt
+      | Ast.TyCon (_, args) -> List.iter collect_cap_ty_refs args
+      | Ast.TyArrow (a, b) -> collect_cap_ty_refs a; collect_cap_ty_refs b
+      | Ast.TyTuple ts -> List.iter collect_cap_ty_refs ts
+      | Ast.TyRecord fields -> List.iter (fun (_, t) -> collect_cap_ty_refs t) fields
+      | Ast.TyLinear (_, t) -> collect_cap_ty_refs t
+      | _ -> ()
+    in
+    let walk_fn_param_tys (fn : Ast.fn_def) =
+      Option.iter collect_cap_ty_refs fn.Ast.fn_ret_ty;
+      List.iter (fun (cl : Ast.fn_clause) ->
+        List.iter (function
+          | Ast.FPNamed p | Ast.FPDefault (p, _) ->
+            Option.iter collect_cap_ty_refs p.Ast.param_ty
+          | Ast.FPPat _ -> ()
+        ) cl.Ast.fc_params
+      ) fn.Ast.fn_clauses
+    in
+    let rec collect_proof_cap_uses (d : Ast.decl) =
+      match d with
+      | Ast.DNeeds (paths, _) ->
+        List.iter (fun path ->
+          List.iter (fun (n : Ast.name) ->
+            if Hashtbl.mem proof_cap_defs n.txt then
+              Hashtbl.replace use_map n.span n.txt
+          ) path
+        ) paths
+      | Ast.DFn (fn, _) -> walk_fn_param_tys fn
+      | Ast.DMod (_, _, inner, _) -> List.iter collect_proof_cap_uses inner
+      | _ -> ()
+    in
+    List.iter collect_proof_cap_uses user_decls;
     (* Build refs_map by inverting use_map *)
     let refs_map = Hashtbl.create 64 in
     Hashtbl.iter (fun sp name ->
@@ -3376,7 +3437,8 @@ let analyse ~filename ~src : t =
         List.filter_map (function
             | Ast.DAlwaysLinearType (_, n, _, _, _) -> Some n.Ast.txt
             | _ -> None) user_decls;
-      param_name_map   = build_param_name_map user_decls }
+      param_name_map   = build_param_name_map user_decls;
+      proof_cap_defs }
 
 (* ------------------------------------------------------------------ *)
 (* Phase 3: TIR pipeline analysis                                      *)
@@ -4426,6 +4488,54 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
       | _ -> ()
     in
     walk_decls a.decls
+  end;
+  (* Cap-requirement inlay hints: ⬡ Cap after calls to capability-requiring
+     builtins.  Emitted only when the file already has DNeeds declarations —
+     otherwise it's noise in cap-unaware code. *)
+  let file_has_needs =
+    List.exists (function Ast.DNeeds _ -> true | _ -> false) a.decls
+  in
+  if perf_annotations && file_has_needs then begin
+    let builtin_cap_tbl = [
+      "println",           "IO.Console";   "print",             "IO.Console";
+      "file_exists",       "IO.FileRead";  "file_read",         "IO.FileRead";
+      "file_open",         "IO.FileRead";  "file_stat",         "IO.FileRead";
+      "file_read_line",    "IO.FileRead";  "file_read_chunk",   "IO.FileRead";
+      "dir_exists",        "IO.FileRead";  "dir_list",          "IO.FileRead";
+      "csv_open",          "IO.FileRead";  "csv_next_row",      "IO.FileRead";
+      "file_write",        "IO.FileWrite"; "file_append",       "IO.FileWrite";
+      "file_delete",       "IO.FileWrite"; "file_rename",       "IO.FileWrite";
+      "dir_mkdir",         "IO.FileWrite"; "dir_mkdir_p",       "IO.FileWrite";
+      "dir_rmdir",         "IO.FileWrite"; "dir_rm_rf",         "IO.FileWrite";
+      "file_copy",         "IO.FileSystem";
+      "tcp_connect",       "IO.NetConnect"; "tcp_listen",        "IO.NetListen";
+      "http_get",          "IO.NetConnect"; "http_post",         "IO.NetConnect";
+      "unix_time",         "IO.Clock";     "unix_time_ms",      "IO.Clock";
+      "uuid_v7",           "IO.Clock";
+      "random_bytes",      "IO.Random";    "stdlib_random_bytes","IO.Random";
+      "process_argv",      "IO.Process";   "process_exit",      "IO.Process";
+      "process_env_get",   "IO.Process";   "process_spawn",     "IO.Process";
+    ] in
+    let walk_cap = iter_expr (fun e ->
+      match e with
+      | Ast.EApp (Ast.EVar n, _, sp) ->
+        (match List.assoc_opt n.Ast.txt builtin_cap_tbl with
+         | Some cap -> annotate sp ("⬡ " ^ cap)
+         | None -> ())
+      | _ -> ())
+    in
+    let rec walk_cap_decls ds = List.iter walk_cap_decl ds
+    and walk_cap_decl (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fd, _) ->
+        List.iter (fun cl -> walk_cap cl.Ast.fc_body) fd.Ast.fn_clauses
+      | Ast.DLet (_, b, _) -> walk_cap b.Ast.bind_expr
+      | Ast.DMod (_, _, inner, _) -> walk_cap_decls inner
+      | Ast.DTest (td, _) -> walk_cap td.Ast.test_body
+      | Ast.DDescribe (_, inner, _) -> walk_cap_decls inner
+      | _ -> ()
+    in
+    walk_cap_decls a.decls
   end;
   !hints
 
