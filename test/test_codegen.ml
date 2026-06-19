@@ -2654,6 +2654,66 @@ let test_cprop_field_fold_update () =
    | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
    | e -> Alcotest.failf "expected r2.x=3 (from r), got: %s" (March_tir.Tir.show_expr e))
 
+(* ── P12: Variable copy propagation ─────────────────────────────────────── *)
+
+(** P12: [let x = y in x]  →  [let x = y in y] — alias propagated. *)
+let test_cprop_alias_propagation () =
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  (* let y = 42 in let x = y in x *)
+  let body =
+    March_tir.Tir.ELet (y, March_tir.Tir.EAtom (ilit 42),
+      March_tir.Tir.ELet (x, March_tir.Tir.EAtom (March_tir.Tir.AVar y),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar x))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* x is an alias for y, which is literal 42.
+     After literal propagation: let x = y in y → 42 chain fully collapses
+     (first x→y alias, then y→42 literal, so body becomes ALit 42). *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 42)))) -> ()
+   | e -> Alcotest.failf "expected let y=42 in let x=y in 42, got: %s" (March_tir.Tir.show_expr e))
+
+(** P12: alias propagated into EApp args. *)
+let test_cprop_alias_in_app_args () =
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  (* let y = 5 in let x = y in f(x) *)
+  let body =
+    March_tir.Tir.ELet (y, March_tir.Tir.EAtom (ilit 5),
+      March_tir.Tir.ELet (x, March_tir.Tir.EAtom (March_tir.Tir.AVar y),
+        March_tir.Tir.EApp (mk_var "f" March_tir.Tir.TInt,
+          [March_tir.Tir.AVar x]))) in
+  let m = mk_module [mk_fn "g" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* x is alias for y (literal 5); arg becomes ALit 5 *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _,
+       March_tir.Tir.EApp (_, [March_tir.Tir.ALit (March_ast.Ast.LitInt 5)]))) -> ()
+   | e -> Alcotest.failf "expected app arg=5, got: %s" (March_tir.Tir.show_expr e))
+
+(** P12: alias NOT propagated into RC positions. *)
+let test_cprop_alias_not_into_rc () =
+  let y = mk_var "y" (March_tir.Tir.TCon ("Foo", [])) in
+  let x = mk_var "x" (March_tir.Tir.TCon ("Foo", [])) in
+  (* let x = y in EDecRC(x) — RC arg must stay as x, not y. *)
+  let body =
+    March_tir.Tir.ELet (x, March_tir.Tir.EAtom (March_tir.Tir.AVar y),
+      March_tir.Tir.EDecRC (March_tir.Tir.AVar x)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  (* alias may be set but RC arg must remain x — not substituted *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EDecRC (March_tir.Tir.AVar v))
+     when v.March_tir.Tir.v_name = "x" -> ()
+   | e -> Alcotest.failf "RC arg should not be substituted, got: %s" (March_tir.Tir.show_expr e));
+  ignore !changed
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -4508,6 +4568,10 @@ let codegen_suites =
         Alcotest.test_case "field_fold_record"       `Quick test_cprop_field_fold_record;
         Alcotest.test_case "field_fold_alias"        `Quick test_cprop_field_fold_alias;
         Alcotest.test_case "field_fold_update"       `Quick test_cprop_field_fold_update;
+        (* P12: variable copy propagation *)
+        Alcotest.test_case "alias_propagation"       `Quick test_cprop_alias_propagation;
+        Alcotest.test_case "alias_in_app_args"       `Quick test_cprop_alias_in_app_args;
+        Alcotest.test_case "alias_not_into_rc"       `Quick test_cprop_alias_not_into_rc;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

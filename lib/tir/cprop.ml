@@ -1,20 +1,23 @@
 (** Constant propagation pass.
 
-    Substitutes known-literal variables into their use sites, enabling downstream
-    [Fold] passes to evaluate the resulting literal expressions.
+    Substitutes known-literal variables and variable aliases into their use
+    sites, enabling downstream [Fold] passes to evaluate the resulting literal
+    expressions.
 
     Scope:
-    - Propagates variables whose RHS is [EAtom (ALit ...)] (literals only)
+    - Propagates variables whose RHS is [EAtom (ALit ...)] (literals — P const)
+    - Propagates variables whose RHS is [EAtom (AVar y)] (aliases — P12)
     - Tracks [ERecord] and [EUpdate] bindings so that [EField] accesses on
       known-shape records can be folded to the field's atom directly (P13)
     - Does NOT propagate variables bound to complex expressions (no code dup)
-    - Does NOT propagate [AVar] variable aliases in the main env — doing so
-      risks substituting closure struct names with function references in
-      positions where LLVM emit special-cases the variable name (ECallPtr
-      dispatch reads the var name for var_slot / top_fn membership checks).
     - Stops at any re-binding of the same name within nested scopes
     - RC positions (EFree/EIncRC/EDecRC/EAtomicIncRC/EAtomicDecRC) are never
       substituted: replacing a heap variable's atom there would corrupt RC state
+
+    P12 — Variable copy propagation:
+        let x = y in ... x ...  →  let x = y in ... y ...
+    Fires after every inline call; subst_args creates alias chains
+    (let param = arg) that DCE then removes once uses are gone.
 
     Interaction with Fold:
     This pass runs BEFORE [Fold] in the Opt coordinator so that
@@ -44,6 +47,15 @@ let env_add name lit (env : env) : env = (name, lit) :: env
 let env_find name (env : env) : March_ast.Ast.literal option =
   List.assoc_opt name env
 
+(** A mapping from variable name to its atom alias (P12 copy propagation).
+    Used to propagate [let x = y] into use sites so that DCE can drop [x]. *)
+type alias_env = (string * Tir.atom) list
+
+let aenv_add name a (aenv : alias_env) : alias_env = (name, a) :: aenv
+
+let aenv_find name (aenv : alias_env) : Tir.atom option =
+  List.assoc_opt name aenv
+
 (** A mapping from variable name to the record-field list it is bound to.
     Populated for [ERecord], [EUpdate] on a known base, and [EAtom(AVar base)]
     when [base] has a known field list. *)
@@ -55,47 +67,56 @@ let fenv_add name (fields : (string * Tir.atom) list) (fenv : field_env) : field
 let fenv_find name (fenv : field_env) : (string * Tir.atom) list option =
   List.assoc_opt name fenv
 
-(** Substitute a variable atom if it is bound to a literal in [env]. *)
-let subst_atom ~changed (env : env) (a : Tir.atom) : Tir.atom =
+(** Substitute a variable atom if it is bound to a literal in [env] or an
+    alias in [aenv] (P12 copy propagation). Literal substitution takes priority. *)
+let subst_atom ~changed (env : env) (aenv : alias_env) (a : Tir.atom) : Tir.atom =
   match a with
   | Tir.AVar v ->
     (match env_find v.Tir.v_name env with
      | Some lit -> changed := true; Tir.ALit lit
-     | None     -> a)
+     | None ->
+       match aenv_find v.Tir.v_name aenv with
+       | Some alias -> changed := true; alias
+       | None       -> a)
   | Tir.ADefRef _ | Tir.ALit _ -> a
 
-let subst_atoms ~changed env atoms =
-  List.map (subst_atom ~changed env) atoms
+let subst_atoms ~changed env aenv atoms =
+  List.map (subst_atom ~changed env aenv) atoms
 
-let subst_fields ~changed env fields =
-  List.map (fun (k, a) -> (k, subst_atom ~changed env a)) fields
+let subst_fields ~changed env aenv fields =
+  List.map (fun (k, a) -> (k, subst_atom ~changed env aenv a)) fields
 
-(** Propagate literals and record-field knowledge through an expression.
+(** Propagate literals, variable aliases, and record-field knowledge through
+    an expression.
     [env]  maps variable names to their literal values.
+    [aenv] maps variable names to their atom aliases (P12 copy propagation).
     [fenv] maps variable names to their known record-field lists (P13).
     New bindings are added as they are encountered; re-bindings shadow earlier ones. *)
-let rec cprop_expr ~changed (env : env) (fenv : field_env) : Tir.expr -> Tir.expr = function
+let rec cprop_expr ~changed (env : env) (aenv : alias_env) (fenv : field_env) : Tir.expr -> Tir.expr = function
   | Tir.EAtom a ->
-    Tir.EAtom (subst_atom ~changed env a)
+    Tir.EAtom (subst_atom ~changed env aenv a)
 
   | Tir.EApp (f, args) ->
-    Tir.EApp (f, subst_atoms ~changed env args)
+    Tir.EApp (f, subst_atoms ~changed env aenv args)
 
   | Tir.ECallPtr (f, args) ->
-    Tir.ECallPtr (subst_atom ~changed env f, subst_atoms ~changed env args)
+    Tir.ECallPtr (subst_atom ~changed env aenv f, subst_atoms ~changed env aenv args)
 
   | Tir.ELet (v, rhs, body) ->
-    let rhs' = cprop_expr ~changed env fenv rhs in
+    let rhs' = cprop_expr ~changed env aenv fenv rhs in
     (* Extend literal env when the RHS is a bare literal atom. *)
     let env' = match rhs' with
       | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env
       | _                        -> env
     in
+    (* P12: extend alias env when the RHS is a variable atom. *)
+    let aenv' = match rhs' with
+      | Tir.EAtom (Tir.AVar y) -> aenv_add v.Tir.v_name (Tir.AVar y) aenv
+      | _                      -> aenv
+    in
     (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
     let fenv' = match rhs' with
       | Tir.ERecord fields ->
-        (* [rhs'] is already fully substituted by the ERecord arm below, so
-           [fields] here is post-substitution — store directly. *)
         fenv_add v.Tir.v_name fields fenv
       | Tir.EAtom (Tir.AVar base) ->
         (* Record alias: let r2 = r. If r has a known field list, copy it. *)
@@ -115,36 +136,34 @@ let rec cprop_expr ~changed (env : env) (fenv : field_env) : Tir.expr -> Tir.exp
          | None -> fenv)
       | _ -> fenv
     in
-    Tir.ELet (v, rhs', cprop_expr ~changed env' fenv' body)
+    Tir.ELet (v, rhs', cprop_expr ~changed env' aenv' fenv' body)
 
   | Tir.ELetRec (fns, body) ->
-    (* Do not propagate outer literals into recursive function bodies:
-       recursive functions may be called from multiple contexts and the
-       outer binding is not in scope for the callers.
-       Recurse into fn bodies with empty envs for their local lets. *)
+    (* Do not propagate outer literals/aliases into recursive function bodies. *)
     let fns' = List.map (fun fd ->
-      { fd with Tir.fn_body = cprop_expr ~changed [] [] fd.Tir.fn_body }
+      { fd with Tir.fn_body = cprop_expr ~changed [] [] [] fd.Tir.fn_body }
     ) fns in
-    Tir.ELetRec (fns', cprop_expr ~changed env fenv body)
+    Tir.ELetRec (fns', cprop_expr ~changed env aenv fenv body)
 
   | Tir.ECase (a, branches, default) ->
-    let a' = subst_atom ~changed env a in
-    (* Branch bound variables shadow any outer literal/field binding. *)
+    let a' = subst_atom ~changed env aenv a in
+    (* Branch bound variables shadow any outer literal/alias/field binding. *)
     let branches' = List.map (fun b ->
       let bound_names =
         List.fold_left (fun s v -> v.Tir.v_name :: s) [] b.Tir.br_vars in
-      let env_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) env in
-      let fenv_branch = List.filter (fun (n, _) -> not (List.mem n bound_names)) fenv in
-      { b with Tir.br_body = cprop_expr ~changed env_branch fenv_branch b.Tir.br_body }
+      let env_branch   = List.filter (fun (n, _) -> not (List.mem n bound_names)) env in
+      let aenv_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) aenv in
+      let fenv_branch  = List.filter (fun (n, _) -> not (List.mem n bound_names)) fenv in
+      { b with Tir.br_body = cprop_expr ~changed env_branch aenv_branch fenv_branch b.Tir.br_body }
     ) branches in
-    let default' = Option.map (cprop_expr ~changed env fenv) default in
+    let default' = Option.map (cprop_expr ~changed env aenv fenv) default in
     Tir.ECase (a', branches', default')
 
   | Tir.ETuple atoms ->
-    Tir.ETuple (subst_atoms ~changed env atoms)
+    Tir.ETuple (subst_atoms ~changed env aenv atoms)
 
   | Tir.ERecord fields ->
-    Tir.ERecord (subst_fields ~changed env fields)
+    Tir.ERecord (subst_fields ~changed env aenv fields)
 
   (* P13: fold EField on a variable whose record shape is known. *)
   | Tir.EField (Tir.AVar v, k) ->
@@ -152,28 +171,26 @@ let rec cprop_expr ~changed (env : env) (fenv : field_env) : Tir.expr -> Tir.exp
      | Some fields ->
        (match List.assoc_opt k fields with
         | Some a -> changed := true; Tir.EAtom a
-        | None   -> Tir.EField (subst_atom ~changed env (Tir.AVar v), k))
-     | None -> Tir.EField (subst_atom ~changed env (Tir.AVar v), k))
+        | None   -> Tir.EField (subst_atom ~changed env aenv (Tir.AVar v), k))
+     | None -> Tir.EField (subst_atom ~changed env aenv (Tir.AVar v), k))
 
   | Tir.EField (a, f) ->
-    Tir.EField (subst_atom ~changed env a, f)
+    Tir.EField (subst_atom ~changed env aenv a, f)
 
   | Tir.EUpdate (a, fields) ->
-    Tir.EUpdate (subst_atom ~changed env a, subst_fields ~changed env fields)
+    Tir.EUpdate (subst_atom ~changed env aenv a, subst_fields ~changed env aenv fields)
 
   | Tir.EAlloc (ty, args) ->
-    Tir.EAlloc (ty, subst_atoms ~changed env args)
+    Tir.EAlloc (ty, subst_atoms ~changed env aenv args)
 
   | Tir.EStackAlloc (ty, args) ->
-    Tir.EStackAlloc (ty, subst_atoms ~changed env args)
+    Tir.EStackAlloc (ty, subst_atoms ~changed env aenv args)
 
   | Tir.EReuse (token, ty, args) ->
-    Tir.EReuse (subst_atom ~changed env token, ty, subst_atoms ~changed env args)
+    Tir.EReuse (subst_atom ~changed env aenv token, ty, subst_atoms ~changed env aenv args)
 
-  (* RC operations must NOT have their argument substituted.  For literals:
-     replacing a heap var with a literal in EDecRC would free a non-heap value.
-     Replacing with a variable alias could also cause double-decrement of the
-     aliased value's reference count when Perceus placed RC ops for both names. *)
+  (* RC operations must NOT have their argument substituted.  Replacing a heap
+     var with a literal or alias there would corrupt RC state. *)
   | Tir.EFree a        -> Tir.EFree a
   | Tir.EIncRC a       -> Tir.EIncRC a
   | Tir.EDecRC a       -> Tir.EDecRC a
@@ -181,10 +198,10 @@ let rec cprop_expr ~changed (env : env) (fenv : field_env) : Tir.expr -> Tir.exp
   | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC a
 
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (cprop_expr ~changed env fenv e1, cprop_expr ~changed env fenv e2)
+    Tir.ESeq (cprop_expr ~changed env aenv fenv e1, cprop_expr ~changed env aenv fenv e2)
 
 let run_fn ~changed (fd : Tir.fn_def) : Tir.fn_def =
-  { fd with Tir.fn_body = cprop_expr ~changed [] [] fd.Tir.fn_body }
+  { fd with Tir.fn_body = cprop_expr ~changed [] [] [] fd.Tir.fn_body }
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (run_fn ~changed) m.Tir.tm_fns }

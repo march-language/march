@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-18, P12 variable copy propagation)
+
+- **P12 — Variable copy propagation** (`lib/tir/cprop.ml`): added `alias_env` tracking `let x = y` atom-to-atom aliases. `subst_atom` checks alias env after literal env. `ELet` extends `aenv` when RHS is `EAtom(AVar y)`. RC positions (`EFree`/`EIncRC`/`EDecRC`/`EAtomicIncRC`/`EAtomicDecRC`) are never substituted — Perceus placed those ops for specific binding names. 3 new tests in `cprop` group: `cprop_alias_propagation`, `cprop_alias_in_app_args`, `cprop_alias_not_into_rc`.
+- **Test count: 1499** (219 compiler + 219 eval + 281 codegen + 780 stdlib; 2 pre-existing `parser gaps` failures).
+
 ## Current State (as of 2026-06-18, P10 Phase 2 + P15 compiler optimizations)
 
 - **P15 — Boolean absorber peepholes** (`lib/tir/simplify.ml`): `x && false → false`, `false && x → false`, `x || true → true`, `true || x → true`. 4 new tests in `simplify` group.
