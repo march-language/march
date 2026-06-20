@@ -67,6 +67,7 @@ let () =
       ("for", FOR);
       ("in", IN);
       ("opaque", OPAQUE);
+      ("resource", RESOURCE);
       ("pfn", PFN);
       ("ptype", PTYPE);
       ("app", APP);

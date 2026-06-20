@@ -92,6 +92,10 @@ void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
  * Compiled code never bakes in the layout — it builds strings via
  * march_string_lit — so this is a runtime-only change. */
 #define MARCH_STRING_TAG ((int32_t)-1) /* 0xFFFFFFFF — reserved sentinel, never a ctor index (ADT tags are >= 0). Matches the long-standing cross-heap copy convention in march_message.c. */
+/* FFI resource cell (opaque native handle). Distinct reserved tag so the
+ * RC free path can run the destructor. Layout: [rc][tag][pad][native_ptr@16]
+ * [dtor@24][type_id@32] (40 bytes). See runtime/march_ffi.c. */
+#define MARCH_RESOURCE_TAG ((int32_t)-2)
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 /* Allocate an uninitialised-data march_string of byte length [len], with the
  * header (rc=1, tag=MARCH_STRING_TAG, pad=0, len) filled in.  Callers fill

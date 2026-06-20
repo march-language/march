@@ -2,8 +2,15 @@
 #include "march_ffi.h"
 #include "march_runtime.h"  /* march_incrc / march_decrc */
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 int32_t march_ffi_abi_version(void) { return MARCH_FFI_ABI_VERSION; }
+
+void march_fatal(const char *msg) {
+    fprintf(stderr, "march: FFI fatal: %s\n", msg ? msg : "(null)");
+    abort();
+}
 
 march_value march_make_int(int64_t n)     { return ((march_value)n << 1) | 1; }
 int64_t     march_get_int(march_value v)  { return v >> 1; }
@@ -93,6 +100,46 @@ march_value march_some(march_value v) { return v; }
 march_value march_ok(march_value v)   { return mk_cell1(0, v); }
 march_value march_err(march_value e)  { return mk_cell1(1, e); }
 
+/* ── Resources ───────────────────────────────────────────────────────────────
+ * Type registry: a small fixed table of (name, dtor) indexed by type id.
+ * Idempotent registration by name.  Resource cell layout (40 bytes):
+ *   [rc@0][tag=MARCH_RESOURCE_TAG@8][pad@12][native_ptr@16][dtor@24][type_id@32]
+ * The RC free path (march_run_resource_dtor in march_runtime.c) reads dtor@24
+ * and native_ptr@16. */
+#define MARCH_FFI_MAX_RESOURCE_TYPES 256
+static const char    *res_type_names[MARCH_FFI_MAX_RESOURCE_TYPES];
+static march_destructor res_type_dtors[MARCH_FFI_MAX_RESOURCE_TYPES];
+static int32_t          res_type_count = 0;
+
+int32_t march_resource_type(const char *name, march_destructor dtor) {
+    for (int32_t i = 0; i < res_type_count; i++)
+        if (res_type_names[i] && strcmp(res_type_names[i], name) == 0)
+            return i;                         /* idempotent: first registration wins */
+    if (res_type_count >= MARCH_FFI_MAX_RESOURCE_TYPES) march_fatal("too many FFI resource types");
+    int32_t id = res_type_count++;
+    res_type_names[id] = name;
+    res_type_dtors[id] = dtor;
+    return id;
+}
+
+march_value march_resource_new(int32_t type_id, void *native_ptr) {
+    if (type_id < 0 || type_id >= res_type_count) march_fatal("march_resource_new: bad type id");
+    void *p = march_alloc(40);                 /* 16 header + native_ptr + dtor + type_id */
+    ((march_hdr *)p)->tag = MARCH_RESOURCE_TAG;
+    *(void **)((char *)p + 16) = native_ptr;
+    *(march_destructor *)((char *)p + 24) = res_type_dtors[type_id];
+    *(int64_t *)((char *)p + 32) = type_id;
+    return march_from_ptr(p);
+}
+
+void *march_resource_get(march_value v, int32_t type_id) {
+    if (!march_is_heap(v)) march_fatal("march_resource_get: not a heap value");
+    void *p = march_as_ptr(v);
+    if (((march_hdr *)p)->tag != MARCH_RESOURCE_TAG) march_fatal("march_resource_get: not a resource");
+    if (*(int64_t *)((char *)p + 32) != type_id) march_fatal("march_resource_get: resource type mismatch");
+    return *(void **)((char *)p + 16);
+}
+
 march_value march_dup(march_value v) {
     if (march_is_heap(v)) march_incrc(march_as_ptr(v));
     return v;
@@ -108,6 +155,17 @@ int64_t ffi_test_dbl(int64_t n) { return n * 2; }
  * retains ownership.  Used by the RC-leak gate: with borrow semantics the
  * caller frees the arg after the call, so a churn loop stays flat. */
 int64_t ffi_test_slen(march_value s) { return (int64_t)march_str_borrow(s).len; }
+
+/* Resource example: an incremental accumulator behind an opaque March handle.
+ * Exercises register/new/get and destructor-on-drop end to end. */
+typedef struct { int64_t acc; } TestAcc;
+static void ffi_acc_dtor(void *p) { free(p); }
+static int32_t ffi_acc_tid(void) { return march_resource_type("TestAcc", ffi_acc_dtor); }
+march_value ffi_acc_new(void)               { TestAcc *a = malloc(sizeof *a); a->acc = 0;
+                                              return march_resource_new(ffi_acc_tid(), a); }
+int64_t ffi_acc_push(march_value h, int64_t n) { TestAcc *a = march_resource_get(h, ffi_acc_tid());
+                                                 a->acc += n; return 0; }
+int64_t ffi_acc_total(march_value h)         { return ((TestAcc *)march_resource_get(h, ffi_acc_tid()))->acc; }
 
 /* Owned return: build a fresh copy of the borrowed String (rc=1). */
 march_value ffi_test_sdup(march_value s) {

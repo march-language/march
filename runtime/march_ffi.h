@@ -24,6 +24,9 @@ int32_t march_ffi_abi_version(void); /* returns MARCH_FFI_ABI_VERSION */
 
 typedef int64_t march_value;         /* opaque tagged value word */
 
+/* Fatal, unrecoverable error from a binding (programmer error): aborts. */
+void march_fatal(const char *msg);
+
 /* ── Primitive accessors (access by static type) ─────────────────────────── */
 march_value march_make_int(int64_t n);    /* (n << 1) | 1 */
 int64_t     march_get_int(march_value v); /* v >> 1 (arithmetic) */
@@ -57,6 +60,24 @@ march_value march_none(void);           /* Option None  (tag 0) */
 march_value march_some(march_value v);  /* Option Some  (tag 1) */
 march_value march_ok(march_value v);    /* Result Ok    (tag 0) */
 march_value march_err(march_value e);   /* Result Err   (tag 1) */
+
+/* ── Resources (opaque native handles with destructors) ──────────────────────
+ * A resource wraps a native pointer behind an opaque March value.  When March
+ * drops the value to rc=0, the runtime runs the registered destructor on the
+ * native pointer.  Register a type once (idempotent by name), then mint values
+ * with march_resource_new and read the native pointer back with
+ * march_resource_get (type-checked). */
+typedef void (*march_destructor)(void *native_ptr);
+
+/* Register (or look up) a resource type by name; returns a stable type id.
+ * Idempotent: the same name returns the same id (the first dtor wins). */
+int32_t     march_resource_type(const char *name, march_destructor dtor);
+
+/* Wrap [native_ptr] as an owned (rc=1) March resource value of [type_id]. */
+march_value march_resource_new(int32_t type_id, void *native_ptr);
+
+/* Borrow the native pointer back. Aborts if [v] is not a resource of [type_id]. */
+void       *march_resource_get(march_value v, int32_t type_id);
 
 /* ── Reference counting (tag-aware) ──────────────────────────────────────────
  * Safe to call on Int/Bool/heap value words: tagged words are a no-op, heap

@@ -1,0 +1,33 @@
+-- Regression: an opaque FFI resource (native handle) is RC-managed by March;
+-- its destructor runs when March drops it, with no leak.  `resource Acc` is an
+-- abstract heap type; values are minted/used only via extern functions.
+mod Test do
+  needs Ffi
+  resource Acc
+  extern "rt" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+    fn acc_new(): Acc = "ffi_acc_new"
+    fn acc_push(a: Acc, n: Int): Int = "ffi_acc_push"
+    fn acc_total(a: Acc): Int = "ffi_acc_total"
+  end
+  fn one() : Int do
+    let a = acc_new()
+    acc_push(a, 10)
+    acc_push(a, 32)
+    acc_total(a)
+  end
+  fn churn(n: Int) : Unit do
+    if n == 0 do () else
+      let a = acc_new()
+      acc_push(a, 1)
+      churn(n - 1)
+    end
+  end
+  fn main() : Unit do
+    println(int_to_string(one()))          -- correctness: 42
+    churn(50)                              -- warmup
+    let base = live_allocs()
+    churn(2000)
+    println(int_to_string(live_allocs() - base))  -- leak: 0 (every resource freed, dtor ran)
+  end
+end

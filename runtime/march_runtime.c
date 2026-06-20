@@ -93,6 +93,17 @@ int64_t march_live_allocs(void) {
 #define MARCH_ALLOC_BUMP() atomic_fetch_add_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
 #define MARCH_FREE_BUMP()  atomic_fetch_sub_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
 
+/* If [p] is an FFI resource cell (MARCH_RESOURCE_TAG), run its destructor on
+ * the wrapped native pointer before the cell itself is freed.  Called from
+ * every RC free-on-zero path.  Cell layout: native_ptr@16, dtor@24. */
+static inline void march_run_resource_dtor(void *p) {
+    if (((march_hdr *)p)->tag == MARCH_RESOURCE_TAG) {
+        void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
+        void *native = *(void **)((char *)p + 16);
+        if (dtor) dtor(native);
+    }
+}
+
 void *march_alloc(int64_t sz) {
     void *p = calloc(1, (size_t)sz);
     if (!p) { fputs("march: out of memory\n", stderr); exit(1); }
@@ -160,6 +171,7 @@ void march_decrc(void *p) {
     if (gc_trace_on())
         gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev == 1) {
+        march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
         free(p);
     } else if (prev < 1) {
@@ -178,7 +190,7 @@ int64_t march_decrc_freed(void *p) {
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (gc_trace_on())
         gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
-    if (prev == 1) { MARCH_FREE_BUMP(); free(p); return 1; }
+    if (prev == 1) { march_run_resource_dtor(p); MARCH_FREE_BUMP(); free(p); return 1; }
     if (prev < 1) {
         /* RC underflow: decrement-on-zero (or worse) detected.  Without this
          * guard we'd silently double-free.  Mirror march_decrc's behaviour. */
@@ -226,6 +238,7 @@ void march_decrc_local(void *p) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
             abort();
         }
+        march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
         free(p);
         /* TODO(audit-M4): when per-process arena becomes the default

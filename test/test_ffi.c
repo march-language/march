@@ -8,6 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Resource destructor for the resources test: frees the native allocation and
+ * records that it ran (so the test can assert dtor-on-drop). */
+static int res_dtor_calls = 0;
+static void test_res_dtor(void *p) { res_dtor_calls++; free(p); }
+
 int main(void) {
     /* ── version handshake ─────────────────────────────────────────────── */
     assert(march_ffi_abi_version() == MARCH_FFI_ABI_VERSION);
@@ -86,6 +91,27 @@ int main(void) {
         march_value err = march_err(march_make_int(2));
         assert(((int32_t *)march_as_ptr(err))[2] == 1);    /* Err tag */
         march_drop(err);
+    }
+
+    /* ── resources: opaque native handle with destructor on drop ───────── */
+    {
+        int32_t tid = march_resource_type("TestRes", test_res_dtor);
+        assert(tid >= 0);
+        assert(march_resource_type("TestRes", test_res_dtor) == tid);  /* idempotent */
+
+        long *native = malloc(sizeof(long));
+        *native = 99;
+        int64_t base = march_live_allocs();
+        march_value r = march_resource_new(tid, native);
+        assert(march_live_allocs() == base + 1);      /* the resource cell is counted */
+        assert(march_is_heap(r));
+        assert(march_resource_get(r, tid) == native); /* borrow native ptr back */
+        assert(*(long *)march_resource_get(r, tid) == 99);
+
+        res_dtor_calls = 0;
+        march_drop(r);                                /* rc 1->0: dtor runs, cell freed */
+        assert(res_dtor_calls == 1);                  /* destructor ran exactly once */
+        assert(march_live_allocs() == base);          /* cell freed (native freed by dtor) */
     }
 
     /* ── leak gauge balances across constructor churn ──────────────────── */

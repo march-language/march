@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — Phase 3: resources)
+
+- **Opaque native resources with destructor-on-drop** (`runtime/march_ffi.{h,c}`, `runtime/march_runtime.{c,h}`): `march_resource_type(name, dtor)` (idempotent registry), `march_resource_new(type_id, native_ptr)` (mints an `MARCH_RESOURCE_TAG` heap cell `[rc][tag][pad][native_ptr@16][dtor@24][type_id@32]`), `march_resource_get(v, type_id)` (type-checked borrow, aborts on mismatch via new `march_fatal`). Every RC free-on-zero path (`march_decrc`/`decrc_freed`/`decrc_local`) now runs the cell's destructor on the native pointer before freeing — so Perceus drops fire C cleanup deterministically.
+- **`resource Name` declaration** (`lib/lexer/lexer.mll`, `lib/parser/parser.mly`): a new keyword that desugars to an abstract type (`DType` with empty `TDVariant []`) — stays heap-Boxed (never newtype/niche-unboxed by P6), RC-managed, marshallable in `extern` signatures, and only constructible/inspectable via extern functions.
+- **Verified end-to-end** (`test/native/ffi_resource`): a `resource Acc` accumulator created/used/dropped through compiled March → correct value (42) and zero leak across 2000 create/drop cycles (destructor ran each time). C ABI unit test covers register/idempotency/new/get/dtor-on-drop/leak-balance.
+- **Test count:** +`native_ffi_resource`, +resources block in `test/test_ffi.c`. Deferred to later increments: `march_env`/`march_raise` error protocol + `consume` syntax; the `resource` keyword could also gain generics (`resource Conn(a)`) later.
+
 ## Current State (as of 2026-06-20, compiler fix — interface-method-name collision)
 
 - **User fn colliding with an interface method no longer hijacks dispatch** (`lib/tir/mono.ml`, `lib/tir/lower.ml`): defining a free top-level `fn show` (or `to_string`, etc. — names of `Show`/`ToString`/`Eq`/`Ord`/`Hash` methods) silently miscompiled, because prelude generics (`println`→`show`, `str`/`debug`→`to_string`) and direct calls mis-resolved, feeding a String where an Int was expected (segfault in `march_print`). Two fixes: mono dispatches a user-fn call to the interface impl when the user fn's first-param type doesn't match the concrete arg type but an impl does; lower scopes the entry module's own fn names during Pass 2 (like nested modules) so a bare call to the user's `show` resolves to the user's fn, matching the typechecker. Regression test: `test/native/iface_method_collision` (prints 7 then ok).

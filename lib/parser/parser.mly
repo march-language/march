@@ -145,6 +145,7 @@
 %token LINEAR AFFINE
 %token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
+%token RESOURCE
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
@@ -241,6 +242,7 @@ decl:
   | d = impl_decl      { d }
   | d = sig_decl       { d }
   | d = extern_decl    { d }
+  | d = resource_decl  { d }
   | d = mod_decl       { d }
   | d = use_decl       { d }
   | d = import_decl    { d }
@@ -746,6 +748,14 @@ sig_item:
     { (Some (name, params), None) }
   | FN; name = lower_name; COLON; t = ty
     { (None, Some (name, t)) }
+
+(** FFI resource: `resource Hasher` — an opaque, RC-managed native handle type.
+    Desugars to an abstract type (no constructors) so it stays heap-boxed (never
+    newtype/niche-unboxed) and Perceus drops it, running the destructor wired in
+    by march_resource_new. Only constructible/inspectable via extern functions. *)
+resource_decl:
+  | RESOURCE; name = upper_name
+    { DType (Public, name, [], TDVariant [], mk_span ($loc)) }
 
 (** FFI extern block: extern "libc": Cap(LibC) do fn malloc(n: Int): Int end *)
 extern_decl:
