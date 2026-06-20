@@ -6,11 +6,27 @@
 #include "../runtime/march_ffi.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int inc_calls = 0;
 static int dec_calls = 0;
 void march_incrc(void *p) { (void)p; inc_calls++; }
 void march_decrc(void *p) { (void)p; dec_calls++; }
+
+/* Build a heap value with the march_string layout {rc;tag;pad;len;data[]} so
+ * we can exercise march_str_borrow without linking the whole runtime. */
+static march_value make_test_string(const char *s) {
+    size_t len = strlen(s);
+    /* 24-byte header (rc:8, tag:4, pad:4, len:8) + data */
+    char *buf = malloc(24 + len);
+    *(int64_t *)(buf + 0)  = 1;        /* rc  */
+    *(int32_t *)(buf + 8)  = -1;       /* tag = MARCH_STRING_TAG */
+    *(int32_t *)(buf + 12) = 0;        /* pad */
+    *(int64_t *)(buf + 16) = (int64_t)len;
+    memcpy(buf + 24, s, len);
+    return march_from_ptr(buf);
+}
 
 int main(void) {
     /* version handshake */
@@ -50,6 +66,37 @@ int main(void) {
     assert(march_dup(hv) == hv);
     march_drop(hv);
     assert(inc_calls == 1 && dec_calls == 1);  /* heap: exactly one each */
+
+    /* string borrow: ptr + length view into march_string data */
+    march_value s = make_test_string("the quick brown fox");
+    march_slice sl = march_str_borrow(s);
+    assert(sl.len == 19);
+    assert(memcmp(sl.ptr, "the quick brown fox", 19) == 0);
+    /* borrowing must not touch the refcount */
+    inc_calls = dec_calls = 0;
+    (void)march_str_borrow(s);
+    assert(inc_calls == 0 && dec_calls == 0);
+    free(march_as_ptr(s));
+
+    /* embedded NUL: length-based borrow keeps both halves (strlen would stop at NUL) */
+    {
+        char *buf = malloc(24 + 3);
+        *(int64_t *)(buf + 0) = 1; *(int32_t *)(buf + 8) = -1;
+        *(int32_t *)(buf + 12) = 0; *(int64_t *)(buf + 16) = 3;
+        buf[24] = 'a'; buf[25] = '\0'; buf[26] = 'b';
+        march_slice e = march_str_borrow(march_from_ptr(buf));
+        assert(e.len == 3 && e.ptr[0] == 'a' && e.ptr[1] == '\0' && e.ptr[2] == 'b');
+        free(buf);
+    }
+
+    /* UTF-8 validation */
+    assert(march_utf8_valid((const uint8_t *)"hello", 5));
+    assert(march_utf8_valid((const uint8_t *)"caf\xC3\xA9", 5));        /* café */
+    assert(march_utf8_valid((const uint8_t *)"\xF0\x9F\x98\x80", 4));   /* 😀 */
+    assert(!march_utf8_valid((const uint8_t *)"\xFF", 1));              /* invalid lead */
+    assert(!march_utf8_valid((const uint8_t *)"\xC3", 1));              /* truncated */
+    assert(!march_utf8_valid((const uint8_t *)"\xC0\xAF", 2));          /* overlong */
+    assert(!march_utf8_valid((const uint8_t *)"\xED\xA0\x80", 3));      /* surrogate */
 
     printf("test_ffi: OK\n");
     return 0;
