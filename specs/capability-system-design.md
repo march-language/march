@@ -655,3 +655,103 @@ Requiring `Cap(Panic)` for `/`, `%`, indexing, and `assert` touches essentially 
 **Q6 — Explicit bounded type-parameter syntax:** Deferred to Phase 3. Phase 2 uses implicit state/tag type variables inferred from transition/narrowing rules.
 
 **Q7 — Allocation count assertions in tests:** Open. TIR/Perceus allocation insights (already exist) can surface per-function allocation data; a runtime allocation counter behind a test flag is the alternative.
+
+---
+
+## Future Capabilities
+
+*Date: 2026-06-20 — Status: Planned, not yet implemented*
+
+Six capabilities deferred from the first wave (IO.Spawn, IO.Mut, IO.NetConnect.TLS, IO.Telemetry). All follow the same pattern: add to `io_cap_hierarchy`, wire builtins to `builtin_cap_table`, annotate stdlib, write 3 tests, update docs.
+
+### IO.NetListen — TCP/port binding
+
+**Hierarchy:** child of `IO.Network` (already in hierarchy; no builtins wired yet)
+
+`IO.NetConnect` (outbound) and `IO.NetListen` (inbound binding) are logically different. A pure API client only needs outbound. Wiring builtins lets the compiler verify the distinction.
+
+Builtins: `tcp_listen`, `tcp_accept`, `tcp_bind` → `"IO.NetListen"`.
+Stdlib: `stdlib/http_server.march` — add `needs IO.NetListen`.
+**No blocker — builtins already exist in the runtime. Immediately actionable.**
+
+### IO.Database — database connections
+
+**Hierarchy:** child of `IO.NetConnect` (already in hierarchy; declaration-only today)
+
+Currently identical to IO.Telemetry's state. Upgrade path: wire Depot builtins (`db_query`, `db_exec`, `db_begin`, `db_commit`, `db_rollback`, `db_prepare`) when Depot stdlib lands in the march compiler. Do not wire until then.
+Stdlib: `stdlib/depot/repo.march` — add `needs IO.Database` when Depot lands.
+
+### IO.WebSocket — WebSocket sessions
+
+**Hierarchy:** child of `IO.NetConnect` (not in hierarchy yet)
+
+WebSocket requires an HTTP upgrade handshake and has its own framing — distinct from raw TCP. A module that speaks WebSocket is categorically different from one that opens raw TCP connections. TLS-secured WebSockets require both `needs IO.WebSocket` and `needs IO.NetConnect.TLS` (orthogonal dimensions, no implicit parent-child).
+
+Builtins: `ws_connect`, `ws_send`, `ws_recv`, `ws_close`, `ws_upgrade`, `ws_ping` → `"IO.WebSocket"`.
+Stdlib: `stdlib/websocket.march` — add `needs IO.WebSocket`.
+Confirm actual builtin names: `grep -E "march_ws_" runtime/*.c runtime/*.h`
+
+### IO.Crypto — cryptographic operations
+
+**Hierarchy:** leaf under `IO`, sibling of `IO.Random` (not in hierarchy yet)
+
+`IO.Random` covers entropy reads. Cryptographic operations (key derivation, HMAC, hashing, signing) are a separate higher-stakes category — a game needing random_bytes for a seed is not doing cryptography. `random_bytes` stays under `IO.Random`; `base64_encode`/`base64_decode` are pure and need no cap.
+
+Builtins: `crypto_sha256`, `crypto_sha512`, `crypto_hmac`, `crypto_hash_pw`, `crypto_verify_pw`, `crypto_secure_cmp` → `"IO.Crypto"`.
+Stdlib: `stdlib/crypto.march` — add `needs IO.Crypto` (currently only has `needs IO.Random`).
+Confirm actual builtin names: `grep -E "march_crypto_" runtime/*.c runtime/*.h`
+
+### IO.Timer — scheduled callbacks
+
+**Hierarchy:** leaf under `IO`, sibling of `IO.Clock` (not in hierarchy yet)
+
+Reading the current time (`IO.Clock`) is passive. Registering a future callback is active — it mutates the runtime scheduler. `sleep_ms` belongs here, not under IO.Clock: it registers a wake-up event. A module that both reads time and schedules work needs both caps.
+
+Builtins: `timer_after`, `timer_interval`, `timer_cancel`, `sleep_ms` → `"IO.Timer"`.
+Stdlib: `stdlib/duration.march` or a future `stdlib/timer.march`.
+Confirm builtins exist before wiring.
+
+### IO.IPC — inter-process communication
+
+**Hierarchy:** leaf under `IO.Process` (not in hierarchy yet)
+
+Pipes, Unix domain sockets, and POSIX signals are real side effects narrower than `IO.Process` (which also covers `exit` and env vars). Blocked on the IPC runtime being written.
+
+Builtins (when runtime lands): `pipe_open`, `pipe_read`, `pipe_write`, `pipe_close`, `unix_socket`, `send_signal` → `"IO.IPC"`.
+Stdlib: `stdlib/ipc.march` — add `needs IO.IPC` when the module is written.
+
+### Implementation order
+
+| Cap | Blocker | Priority |
+|-----|---------|----------|
+| IO.NetListen | none | do first |
+| IO.WebSocket | confirm ws_* builtin names | do next |
+| IO.Crypto | confirm crypto_* builtin names | do with WebSocket |
+| IO.Timer | confirm timer/sleep_ms builtins | do when confirmed |
+| IO.Database | Depot stdlib not in compiler | do when Depot lands |
+| IO.IPC | IPC runtime not written | do when IPC runtime lands |
+
+### Full hierarchy picture (implemented ✅ + planned)
+
+```
+IO
+├── IO.Console          — stdout/stderr ✅
+├── IO.FileSystem
+│   ├── IO.FileRead     — read files ✅
+│   └── IO.FileWrite    — write/delete/rename ✅
+├── IO.Network
+│   ├── IO.NetConnect   — outbound TCP/HTTP ✅
+│   │   ├── IO.NetConnect.TLS  — encrypted transport ✅
+│   │   ├── IO.Database        — database connections (planned)
+│   │   └── IO.WebSocket       — WebSocket sessions (planned)
+│   └── IO.NetListen    — bind + listen on a port (planned)
+├── IO.Process          — env vars, child processes, exit ✅
+│   └── IO.IPC          — pipes, unix sockets, signals (planned)
+├── IO.Clock            — read wall clock/monotonic time ✅
+├── IO.Random           — entropy (random_bytes, uuid_v4) ✅
+├── IO.Crypto           — cryptographic operations (planned)
+├── IO.Spawn            — task spawning ✅
+├── IO.Mut              — shared mutable state (Vault) ✅
+├── IO.Timer            — scheduled callbacks (planned)
+└── IO.Telemetry        — observability annotation ✅
+```
