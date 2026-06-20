@@ -1,0 +1,18 @@
+-- FFI error protocol: a fallible binding declared `: Result(T, E)` returns
+-- Ok/Err built on the C side via march_ok / march_err. Both arms round-trip.
+mod Test do
+  needs Ffi
+  extern "rt" : Cap(Ffi) do
+    fn parse(s: String): Result(Int, String) = "ffi_test_parse"
+  end
+  fn shown(r: Result(Int, String)) : String do
+    match r do
+      Ok(n) -> int_to_string(n)
+      Err(e) -> e
+    end
+  end
+  fn main() : Unit do
+    println(shown(parse("7")))    -- Ok(7)   -> 7
+    println(shown(parse("zz")))   -- Err     -> nan
+  end
+end
