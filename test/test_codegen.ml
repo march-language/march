@@ -3060,6 +3060,68 @@ let test_join_points_float_two_common_lets () =
     Alcotest.failf "expected outer ELet(x, ...), got: %s"
       (March_tir.Tir.show_expr body')
 
+(** P1 Layer 1 (pre-Perceus alpha-merge): arms share an identical RHS but bind
+    it to DIFFERENT variable names (fresh ANF temporaries).  [run_pre] floats a
+    single binding and substitutes each arm's binder with the floated one. *)
+let test_join_points_pre_float_alpha () =
+  let a  = mk_var "a"  (March_tir.Tir.TCon ("T", [])) in
+  let x  = mk_var "x"  March_tir.Tir.TInt in
+  let w  = mk_var "w"  March_tir.Tir.TInt in   (* different binder name *)
+  let y  = mk_var "y"  March_tir.Tir.TInt in
+  let f  = mk_var "f"  (March_tir.Tir.TFn ([], March_tir.Tir.TInt)) in
+  let rhs = March_tir.Tir.EApp (f, [March_tir.Tir.AVar y]) in
+  let br1 = { March_tir.Tir.br_tag = "T1"; br_vars = [];
+              br_body = March_tir.Tir.ELet (x, rhs,
+                March_tir.Tir.EAtom (March_tir.Tir.AVar x)) } in
+  let br2 = { March_tir.Tir.br_tag = "T2"; br_vars = [];
+              br_body = March_tir.Tir.ELet (w, rhs,
+                March_tir.Tir.EAtom (March_tir.Tir.AVar w)) } in
+  let e = March_tir.Tir.ECase (March_tir.Tir.AVar a, [br1; br2], None) in
+  let m = mk_module [mk_fn "g" e] in
+  let changed = ref false in
+  let m' = March_tir.Join_points.run_pre ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let body' = (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  match body' with
+  | March_tir.Tir.ELet (bv, March_tir.Tir.EApp (_, _),
+                         March_tir.Tir.ECase (_, branches, None)) ->
+    (* Every arm body must now reference the single floated binder. *)
+    List.iter (fun br ->
+      match br.March_tir.Tir.br_body with
+      | March_tir.Tir.EAtom (March_tir.Tir.AVar v) ->
+        Alcotest.(check string) "arm uses floated binder"
+          bv.March_tir.Tir.v_name v.March_tir.Tir.v_name
+      | other ->
+        Alcotest.failf "branch body should be EAtom(floated), got: %s"
+          (March_tir.Tir.show_expr other)
+    ) branches
+  | _ ->
+    Alcotest.failf "expected ELet(_, EApp, ECase), got: %s"
+      (March_tir.Tir.show_expr body')
+
+(** P1 Layer 1 no-fire: different RHS across arms, even with the alpha-merge
+    relaxation, must not float. *)
+let test_join_points_pre_no_float_different_rhs () =
+  let a  = mk_var "a"  (March_tir.Tir.TCon ("T", [])) in
+  let x  = mk_var "x"  March_tir.Tir.TInt in
+  let w  = mk_var "w"  March_tir.Tir.TInt in
+  let y  = mk_var "y"  March_tir.Tir.TInt in
+  let f1 = mk_var "f1" (March_tir.Tir.TFn ([], March_tir.Tir.TInt)) in
+  let f2 = mk_var "f2" (March_tir.Tir.TFn ([], March_tir.Tir.TInt)) in
+  let br1 = { March_tir.Tir.br_tag = "T1"; br_vars = [];
+              br_body = March_tir.Tir.ELet (x,
+                March_tir.Tir.EApp (f1, [March_tir.Tir.AVar y]),
+                March_tir.Tir.EAtom (March_tir.Tir.AVar x)) } in
+  let br2 = { March_tir.Tir.br_tag = "T2"; br_vars = [];
+              br_body = March_tir.Tir.ELet (w,
+                March_tir.Tir.EApp (f2, [March_tir.Tir.AVar y]),  (* different fn *)
+                March_tir.Tir.EAtom (March_tir.Tir.AVar w)) } in
+  let e = March_tir.Tir.ECase (March_tir.Tir.AVar a, [br1; br2], None) in
+  let m = mk_module [mk_fn "g" e] in
+  let changed = ref false in
+  let _m' = March_tir.Join_points.run_pre ~changed m in
+  Alcotest.(check bool) "not changed" false !changed
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -4944,6 +5006,8 @@ let codegen_suites =
         Alcotest.test_case "no_float_different_rhs" `Quick test_join_points_no_float_different_rhs;
         Alcotest.test_case "no_float_uses_br_var"   `Quick test_join_points_no_float_uses_br_var;
         Alcotest.test_case "float_two_common_lets"  `Quick test_join_points_float_two_common_lets;
+        Alcotest.test_case "pre_float_alpha"         `Quick test_join_points_pre_float_alpha;
+        Alcotest.test_case "pre_no_float_diff_rhs"   `Quick test_join_points_pre_no_float_different_rhs;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

@@ -127,12 +127,79 @@ let rec expr_mentions_any (names : string list) (e : Tir.expr) : bool =
   | Tir.EReuse (a, _, xs) ->
     atom_mentions_any names a || atoms_mention_any names xs
 
+(* ── Variable renaming (Layer 1: alpha-merge) ───────────────────────────── *)
+
+(* Fresh-name counter for floated binders.  The ["$jp"] prefix cannot collide
+   with user identifiers or ANF temporaries (both reserve the [$] sigil for
+   distinct synthetic names). *)
+let jp_counter = ref 0
+let fresh_name (base : string) : string =
+  incr jp_counter;
+  Printf.sprintf "$jp%d_%s" !jp_counter base
+
+let rename_atom (from_name : string) (to_name : string) (a : Tir.atom) : Tir.atom =
+  match a with
+  | Tir.AVar v when v.Tir.v_name = from_name ->
+    Tir.AVar { v with Tir.v_name = to_name }
+  | _ -> a
+
+(** Rename every [AVar] occurrence of [from_name] to [to_name] in [e].
+    Used to substitute a per-arm head-let binder with the single floated
+    binder.  Pre-Perceus only (no RC nodes carry independent ownership). *)
+let rec rename_expr (from_name : string) (to_name : string) (e : Tir.expr)
+    : Tir.expr =
+  let ra = rename_atom from_name to_name in
+  let re = rename_expr from_name to_name in
+  let rv (v : Tir.var) =
+    if v.Tir.v_name = from_name then { v with Tir.v_name = to_name } else v in
+  match e with
+  | Tir.EAtom a -> Tir.EAtom (ra a)
+  | Tir.EApp (f, xs) -> Tir.EApp (rv f, List.map ra xs)
+  | Tir.ECallPtr (f, xs) -> Tir.ECallPtr (ra f, List.map ra xs)
+  | Tir.ELet (v, rhs, body) ->
+    (* A binder re-using [from_name] shadows it: stop renaming in the body. *)
+    let body' = if v.Tir.v_name = from_name then body else re body in
+    Tir.ELet (v, re rhs, body')
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec
+      (List.map (fun fn -> { fn with Tir.fn_body = re fn.Tir.fn_body }) fns,
+       re body)
+  | Tir.ECase (a, brs, def) ->
+    Tir.ECase (ra a,
+      List.map (fun br ->
+        (* A pattern var named [from_name] shadows it in this arm. *)
+        if List.exists (fun v -> v.Tir.v_name = from_name) br.Tir.br_vars
+        then br
+        else { br with Tir.br_body = re br.Tir.br_body }) brs,
+      Option.map re def)
+  | Tir.ETuple xs -> Tir.ETuple (List.map ra xs)
+  | Tir.ERecord fs -> Tir.ERecord (List.map (fun (n, a) -> (n, ra a)) fs)
+  | Tir.EField (a, f) -> Tir.EField (ra a, f)
+  | Tir.EUpdate (a, fs) ->
+    Tir.EUpdate (ra a, List.map (fun (n, av) -> (n, ra av)) fs)
+  | Tir.EAlloc (t, xs) -> Tir.EAlloc (t, List.map ra xs)
+  | Tir.EStackAlloc (t, xs) -> Tir.EStackAlloc (t, List.map ra xs)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (re e1, re e2)
+  | Tir.EIncRC a -> Tir.EIncRC (ra a)
+  | Tir.EDecRC a -> Tir.EDecRC (ra a)
+  | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (ra a)
+  | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (ra a)
+  | Tir.EFree a -> Tir.EFree (ra a)
+  | Tir.EReuse (a, t, xs) -> Tir.EReuse (ra a, t, List.map ra xs)
+
 (* ── Core transform ─────────────────────────────────────────────────────── *)
 
 (** Try to peel one common leading [let x = rhs in …] from all branches.
     Returns [(x, rhs, branches_with_body_only, default_body_only)] on
-    success, or [None] when no common leading let exists. *)
+    success, or [None] when no common leading let exists.
+
+    When [~rename] is true (Layer 1, pre-Perceus), branches may bind the
+    common RHS under DIFFERENT names: a single fresh binder is floated and each
+    arm body has its own binder substituted for it.  When false (the in-loop
+    post-Perceus pass) binder names must already match — substitution post-RC
+    is unsafe, so we stay conservative. *)
 let peel_common_let
+    ?(rename = false)
     (branches : Tir.branch list)
     (default  : Tir.expr option)
     : (Tir.var * Tir.expr * Tir.branch list * Tir.expr option) option =
@@ -149,9 +216,11 @@ let peel_common_let
     (match first_opt with
      | None -> None
      | Some (v0, rhs0, _) ->
-       (* (1) All branch leading-lets must have the same var name and RHS. *)
+       (* (1) All branch leading-lets must have an equal RHS.  Without [rename]
+          the binder names must also match (post-Perceus safety). *)
        let all_match = List.for_all (function
-         | Some (v, rhs, _) -> v.Tir.v_name = v0.Tir.v_name && expr_eq rhs rhs0
+         | Some (v, rhs, _) ->
+           expr_eq rhs rhs0 && (rename || v.Tir.v_name = v0.Tir.v_name)
          | None -> false) rest_opts
        in
        if not all_match then None
@@ -163,59 +232,81 @@ let peel_common_let
          ) branches in
          if not rhs_safe then None
          else begin
-           (* (3) The floated variable name must not be pattern-bound in any branch. *)
-           let name_safe = List.for_all (fun br ->
-             not (List.exists (fun v -> v.Tir.v_name = v0.Tir.v_name) br.Tir.br_vars)
+           (* The floated binder: a fresh name under [rename] (cannot collide,
+              so each arm body is substituted onto it), else [v0] verbatim. *)
+           let floated_var =
+             if rename
+             then { v0 with Tir.v_name = fresh_name v0.Tir.v_name }
+             else v0
+           in
+           let float_name = floated_var.Tir.v_name in
+           (* (3) The floated variable name must not be pattern-bound in any
+              branch.  Always holds under [rename] (fresh name). *)
+           let name_safe = rename || List.for_all (fun br ->
+             not (List.exists (fun v -> v.Tir.v_name = float_name) br.Tir.br_vars)
            ) branches in
            if not name_safe then None
            else begin
-             (* (4) Default branch must also start with the same let (if present). *)
+             (* Strip the leading let from one branch, renaming its own binder
+                onto [floated_var] when names differ. *)
+             let strip_branch br =
+               match leading_let br with
+               | Some (v, _, body) ->
+                 let body' =
+                   if v.Tir.v_name = float_name then body
+                   else rename_expr v.Tir.v_name float_name body
+                 in
+                 { br with Tir.br_body = body' }
+               | None -> assert false
+             in
+             (* (4) Default branch must also start with an equal let (if present). *)
              let default_body_opt =
                match default with
                | None -> Some None  (* no default → OK, return None body *)
-               | Some def_expr ->
-                 match def_expr with
-                 | Tir.ELet (v, rhs, body)
-                   when v.Tir.v_name = v0.Tir.v_name && expr_eq rhs rhs0 ->
-                   Some (Some body)
-                 | _ -> None  (* default doesn't match → can't float *)
+               | Some (Tir.ELet (v, rhs, body))
+                 when expr_eq rhs rhs0 && (rename || v.Tir.v_name = float_name) ->
+                 let body' =
+                   if v.Tir.v_name = float_name then body
+                   else rename_expr v.Tir.v_name float_name body
+                 in
+                 Some (Some body')
+               | Some _ -> None  (* default doesn't match → can't float *)
              in
              match default_body_opt with
              | None -> None
              | Some new_default ->
-               let new_branches = List.map2 (fun br -> function
-                 | Some (_, _, body) -> { br with Tir.br_body = body }
-                 | None -> assert false
-               ) branches (List.map leading_let branches) in
-               Some (v0, rhs0, new_branches, new_default)
+               let new_branches = List.map strip_branch branches in
+               Some (floated_var, rhs0, new_branches, new_default)
            end
          end
        end)
 
 (** One pass: float common lets above ECases throughout an expression. *)
-let rec float_expr (changed : bool ref) (e : Tir.expr) : Tir.expr =
+let rec float_expr ?(rename = false) (changed : bool ref) (e : Tir.expr)
+    : Tir.expr =
+  let recur = float_expr ~rename changed in
   match e with
   | Tir.ECase (a, branches, default) ->
     (* Recurse into branches first. *)
     let branches' = List.map (fun br ->
-      { br with Tir.br_body = float_expr changed br.Tir.br_body }) branches in
-    let default' = Option.map (float_expr changed) default in
+      { br with Tir.br_body = recur br.Tir.br_body }) branches in
+    let default' = Option.map recur default in
     (* Now try to peel a common leading let from the (post-recursion) branches. *)
-    (match peel_common_let branches' default' with
+    (match peel_common_let ~rename branches' default' with
      | None -> Tir.ECase (a, branches', default')
      | Some (v, rhs, new_branches, new_default) ->
        changed := true;
        (* Wrap the result in the floated let, then recurse to catch chains. *)
        let new_case = Tir.ECase (a, new_branches, new_default) in
-       float_expr changed (Tir.ELet (v, rhs, new_case)))
+       recur (Tir.ELet (v, rhs, new_case)))
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, float_expr changed rhs, float_expr changed body)
+    Tir.ELet (v, recur rhs, recur body)
   | Tir.ELetRec (fns, body) ->
     let fns' = List.map (fun fn ->
-      { fn with Tir.fn_body = float_expr changed fn.Tir.fn_body }) fns in
-    Tir.ELetRec (fns', float_expr changed body)
+      { fn with Tir.fn_body = recur fn.Tir.fn_body }) fns in
+    Tir.ELetRec (fns', recur body)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (float_expr changed e1, float_expr changed e2)
+    Tir.ESeq (recur e1, recur e2)
   (* Leaf expressions — no sub-expressions to recurse into. *)
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _ | Tir.ETuple _ | Tir.ERecord _
   | Tir.EField _ | Tir.EUpdate _ | Tir.EAlloc _ | Tir.EStackAlloc _
@@ -223,11 +314,27 @@ let rec float_expr (changed : bool ref) (e : Tir.expr) : Tir.expr =
   | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
     e
 
-let float_fn (changed : bool ref) (fn : Tir.fn_def) : Tir.fn_def =
-  { fn with Tir.fn_body = float_expr changed fn.Tir.fn_body }
+let float_fn ?(rename = false) (changed : bool ref) (fn : Tir.fn_def)
+    : Tir.fn_def =
+  { fn with Tir.fn_body = float_expr ~rename changed fn.Tir.fn_body }
 
 (** Run let-floating on a TIR module.  Returns the transformed module.
     The [changed] ref is set to true if any transformation fired.
-    Runs as a fixpoint internally: repeats until stable. *)
+
+    This is the conservative variant (binder names must match) run inside the
+    post-Perceus opt loop. *)
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (float_fn changed) m.Tir.tm_fns }
+
+(** P1 Layer 1: pre-Perceus alpha-merge.  Floats common leading lets even when
+    arms bind the shared RHS under different (fresh ANF) names, substituting
+    each arm's binder for a single floated one.  Safe only on RC-free TIR, so
+    it must run BEFORE [Perceus.perceus].  Loops internally until stable. *)
+let run_pre ~changed (m : Tir.tir_module) : Tir.tir_module =
+  let rec fixpoint m =
+    let local = ref false in
+    let m' = { m with Tir.tm_fns =
+                 List.map (float_fn ~rename:true local) m.Tir.tm_fns } in
+    if !local then (changed := true; fixpoint m') else m'
+  in
+  fixpoint m
