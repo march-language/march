@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, P6 Milestone 2 — Option-shaped niche encoding)
+
+- **Option-niche encoding** (`lib/tir/repr.ml`, `lib/tir/llvm_emit.ml`, `runtime/march_extras.c`): Option-like ADTs (1 nullary + 1 single-field ctor) now use `None=0, Some(x)=x` — no heap allocation for either variant. `repr_of_ty` classifies as `Niche { payload; tagged }` when payload passes `niche_payload_ok` (TInt, TBool, TString, TPtr, Boxed TCon); Float/Unit/TVar/nested-niche stay Boxed. `llvm_emit`: `EAlloc` niche fast path, `EReuse` skips reuse, `emit_case` null-check dispatch, `llvm_param_ty` suppresses nonnull for niche params. `record_get` passes kind char as 3rd arg. Runtime: `make_some(v)=v`, `make_none()=null`; kind-aware `rec_some_k`/`rec_none_k`. 6 new repr unit tests.
+- **Test count: 1602** (281 compiler + 224 eval + 317 codegen [315 pass; 2 pre-existing str_concat failures] + 782 stdlib; vault scalar adversarial test green).
+
 ## Current State (as of 2026-06-20, P6 Milestone 1 — unboxed single-field constructors)
 
 - **Newtype unboxing** (`lib/tir/repr.ml` new, `lib/tir/llvm_emit.ml`): single-variant single-field ADTs (newtypes) now bypass heap allocation. `repr_of_ty` classifies a monomorphic `TCon` as `Newtype payload` or `Boxed`; Float-payload newtypes stay Boxed. `payload_needs_tag` detects scalars (Int/Bool and newtypes-over-scalars) that must be tagged `(v<<1)|1` to satisfy `IS_HEAP_PTR`. Three `llvm_emit` fast paths: `EAlloc` (construct — tag+inttoptr for scalar, ptr coerce for pointer), `EReuse` (FBIP reconstruct — skip RC reuse, manual DecRC of consumed box, emit new payload), `emit_case` (match — ptrtoint+ashr to recover scalar; strip Perceus `EDecRC` inside branch since ownership transfer is net-zero). Global `cur_type_defs` ref makes `repr_of_ty` available at all three sites.

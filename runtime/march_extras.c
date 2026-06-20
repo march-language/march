@@ -301,17 +301,35 @@ static void *make_err_str(const char *msg) {
     return r;
 }
 
-/* ── Option helpers ───────────────────────────────────────────────────── */
+/* ── Option helpers — NICHE encoding (None=0, Some(v)=v).
+ * All March values in ptr slots are either tagged scalars (odd-bit, nonzero)
+ * or heap pointers (even, nonzero from march_alloc).  The only exceptions are
+ * Float 0.0 (bitcast to 0) and Unit (inttoptr 0 = null), which are stored
+ * through separate boxed Option paths and never reach make_some/make_none. */
 
-static void *make_some(void *val) {
-    void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8) = 1;   /* tag = 1 = Some */
-    *(void **)((char *)r + 16) = val;
-    return r;
+static void *make_some(void *val) { return val; }
+static void *make_none(void) { return (void *)0; }
+
+/* ── Kind-aware Option helpers for march_record_get ─────────────────────────
+ * Kind chars match shape_kind_char in llvm_emit.ml:
+ *   'i' = Int/Bool/Unit/Atom (tagged (raw<<1)|1, always odd, nonzero)
+ *   'p' = String/List/heap ptr (nonzero march_alloc address)
+ *   'f' = Float (raw IEEE754 bits, 0.0 = 0 — cannot use niche; stay boxed)
+ *   'g' = generic/TVar (bits may be 0 for Unit; conservative boxed)          */
+
+static void *rec_some_k(int64_t bits, char kind) {
+    if (kind == 'f' || kind == 'g') {
+        void *r = march_alloc(16 + 8);
+        ((march_hdr *)r)->tag = 1;
+        *(int64_t *)((char *)r + 16) = bits;
+        return r;
+    }
+    return (void *)(uintptr_t)bits;
 }
 
-static void *make_none(void) {
-    return march_alloc(16); /* tag = 0 = None */
+static void *rec_none_k(char kind) {
+    if (kind == 'f' || kind == 'g') return march_alloc(16); /* tag 0 */
+    return (void *)0;
 }
 
 /* ── Hex encoding ─────────────────────────────────────────────────────── */
@@ -1078,9 +1096,9 @@ void *march_vault_ns_get(void *ns_val, void *key_val) {
     }
     pthread_mutex_unlock(&vault_registry_mutex);
     free(name);
-    /* Namespace doesn't exist — return None */
+    /* Namespace doesn't exist — return None (boxed: tag=0) */
     void *none = march_alloc(16);
-    *(int32_t *)((char *)none + 8) = 0; /* tag = 0 = None */
+    *(int32_t *)((char *)none + 8) = 0;
     return none;
 }
 
@@ -1839,14 +1857,7 @@ static void *rec_pair(void *fst, int64_t snd_bits) {
     return t;
 }
 
-static void *rec_none(void) { return march_alloc(16); }           /* tag 0 */
-
-static void *rec_some(int64_t bits) {
-    void *c = march_alloc(16 + 8);
-    ((march_hdr *)c)->tag = 1;
-    *(int64_t *)((char *)c + 16) = bits;
-    return c;
-}
+/* rec_none/rec_some removed — replaced by rec_none_k/rec_some_k above. */
 
 static march_record_shape *rec_shape_or_panic(void *rec, const char *who) {
     march_record_shape *s = rec_shape_of(rec);
@@ -1893,13 +1904,16 @@ void *march_record_entries(void *rec) {
     return list;
 }
 
-/* record_get(rec, key) -> Option(value). */
-void *march_record_get(void *rec, void *key) {
+/* record_get(rec, key, expected_kind) -> Option(value).
+ * expected_kind is the shape_kind_char of the payload type at the call site
+ * (passed from llvm_emit.ml).  Used for the None case (field absent) so the
+ * compiler-side dispatch (niche or boxed) matches the returned value. */
+void *march_record_get(void *rec, void *key, int64_t expected_kind) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_get");
     march_string *ks = (march_string *)key;
     int32_t i = rec_find_field(s, ks->data, ks->len);
-    if (i < 0) return rec_none();
-    return rec_some(rec_field_out_adt(rec, i, s->kinds[i]));
+    if (i < 0) return rec_none_k((char)expected_kind);
+    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), s->kinds[i]);
 }
 
 /* record_has_key(rec, key) -> Bool (i64 0/1). */

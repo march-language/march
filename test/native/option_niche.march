@@ -1,0 +1,33 @@
+-- Test Option niche: None=0, Some(x)=x
+-- Covers: Option(Int), Option(String), None arm, cross-function return.
+mod OptionNiche do
+
+fn safe_div(a : Int, b : Int) : Option(Int) do
+  if b == 0 do
+    None
+  else
+    Some(a / b)
+  end
+end
+
+fn greet(name : Option(String)) : String do
+  match name do
+    Some(s) -> "hello " ++ s
+    None -> "hello stranger"
+  end
+end
+
+fn main() do
+  match safe_div(10, 2) do
+    Some(n) -> println(int_to_string(n))
+    None -> println("none")
+  end
+  match safe_div(7, 0) do
+    Some(n) -> println(int_to_string(n))
+    None -> println("none")
+  end
+  println(greet(Some("world")))
+  println(greet(None))
+end
+
+end

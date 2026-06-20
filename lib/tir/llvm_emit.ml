@@ -275,10 +275,13 @@ let llvm_ret_ty : Tir.ty -> string = function
       never null; this lets LLVM elide null checks in alias analysis.
     - [dereferenceable(16)]: every March heap object has at least a 16-byte
       header (rc:i64 + tag:i32 + pad:i32), so the pointer can always be
-      safely dereferenced for 16 bytes. *)
-let llvm_param_ty (ty : Tir.ty) : string =
+      safely dereferenced for 16 bytes.
+    EXCEPTION: niche-encoded Option-shaped types can carry None=0 (null), so
+    [nonnull] and [dereferenceable] must be suppressed for them. *)
+let llvm_param_ty ?(type_defs : Tir.type_def list = []) (ty : Tir.ty) : string =
   match ty with
-  | Tir.TCon ("Atom", []) -> "i64"   (* atoms are i64 scalars, not heap pointers *)
+  | Tir.TCon ("Atom", []) -> "i64"
+  | Tir.TCon (name, _) when Repr.is_niche_shaped type_defs name -> "ptr"
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
@@ -2376,8 +2379,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (kt, kv) = emit_atom ctx k in
     let kp = coerce ctx kt kv "ptr" in
     let res = fresh ctx "cr" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_record_get(ptr %s, ptr %s)"
-                res rp kp);
+    (* Pass the payload kind so march_record_get returns the right None encoding
+       (niche null for scalar/ptr kinds; boxed heap cell for Float/generic). *)
+    let payload_kind = match f.Tir.v_ty with
+      | Tir.TFn (_, Tir.TCon ("Option", [p])) ->
+        Char.code (shape_kind_char p)
+      | _ -> Char.code 'g'
+    in
+    emit ctx (Printf.sprintf "%s = call ptr @march_record_get(ptr %s, ptr %s, i64 %d)"
+                res rp kp payload_kind);
     ("ptr", res)
 
   | Tir.EApp (f, [r; k]) when f.Tir.v_name = "record_has_key" ->
@@ -3057,6 +3067,64 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        end else
          (* Pointer payload: pass through raw *)
          ("ptr", coerce ctx v_ty v_val "ptr")
+     | _ when Repr.is_niche_shaped !cur_type_defs alloc_type_name ->
+       (* Niche (Option-shaped): None=0, Some(x)=x.
+          repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
+          params; we use the actual arg TIR type to determine tagging. *)
+       let emit_niche_payload arg =
+         let arg_tir_ty = match arg with
+           | Tir.AVar v -> v.Tir.v_ty
+           | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+           | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
+           | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
+           | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+           | _ -> Tir.TUnit
+         in
+         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         else begin
+           let (v_ty, v_val) = emit_atom ctx arg in
+           if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
+             let i64v = coerce ctx v_ty v_val "i64" in
+             let shifted = fresh ctx "niche_sh" in
+             emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+             let tagged_v = fresh ctx "niche_tag" in
+             emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged_v shifted);
+             let as_ptr = fresh ctx "niche_ptr" in
+             emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged_v);
+             Some ("ptr", as_ptr)
+           end else
+             Some ("ptr", coerce ctx v_ty v_val "ptr")
+         end
+       in
+       (match args with
+        | [] ->
+          (* Nullary ctor (None) = raw 0 *)
+          let z = fresh ctx "niche_none" in
+          emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
+          ("ptr", z)
+        | [arg] ->
+          (match emit_niche_payload arg with
+           | Some result -> result
+           | None ->
+             (* Payload not niche-safe (Float/Unit/Bool) — fall through to boxed *)
+             let entry = ctor_entry ctx ctor (List.length args) in
+             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+             let field_ty = match List.nth_opt entry.ce_fields 0 with
+               | Some t -> llvm_ty t | None -> "ptr" in
+             let (v_ty, v_val) = emit_atom ctx arg in
+             emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
+             ("ptr", ptr))
+        | _ ->
+          (* Multi-arg ctor that happens to share the type name — boxed *)
+          let entry = ctor_entry ctx ctor (List.length args) in
+          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+          List.iteri (fun i atom ->
+            let field_ty = match List.nth_opt entry.ce_fields i with
+              | Some t -> llvm_ty t | None -> "ptr" in
+            let (v_ty, v_val) = emit_atom ctx atom in
+            emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
+          ) args;
+          ("ptr", ptr))
      | _ ->
        let entry = ctor_entry ctx ctor (List.length args) in
        let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -3146,6 +3214,62 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          ("ptr", as_ptr)
        end else
          ("ptr", coerce ctx v_ty v_val "ptr")
+     | _ when Repr.is_niche_shaped !cur_type_defs reuse_type_name ->
+       (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
+          march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
+       let (_, old_v) = emit_atom ctx reuse_atom in
+       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" old_v);
+       let emit_niche_payload arg =
+         let arg_tir_ty = match arg with
+           | Tir.AVar v -> v.Tir.v_ty
+           | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+           | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
+           | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
+           | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+           | _ -> Tir.TUnit
+         in
+         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         else begin
+           let (v_ty, v_val) = emit_atom ctx arg in
+           if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
+             let i64v = coerce ctx v_ty v_val "i64" in
+             let shifted = fresh ctx "niche_sh" in
+             emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+             let tagged_v = fresh ctx "niche_tag" in
+             emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged_v shifted);
+             let as_ptr = fresh ctx "niche_ptr" in
+             emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged_v);
+             Some ("ptr", as_ptr)
+           end else
+             Some ("ptr", coerce ctx v_ty v_val "ptr")
+         end
+       in
+       (match args with
+        | [] ->
+          let z = fresh ctx "niche_none" in
+          emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
+          ("ptr", z)
+        | [arg] ->
+          (match emit_niche_payload arg with
+           | Some result -> result
+           | None ->
+             let entry = ctor_entry ctx ctor (List.length args) in
+             let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+             let field_ty = match List.nth_opt entry.ce_fields 0 with
+               | Some t -> llvm_ty t | None -> "ptr" in
+             let (v_ty, v_val) = emit_atom ctx arg in
+             emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
+             ("ptr", ptr))
+        | _ ->
+          let entry = ctor_entry ctx ctor (List.length args) in
+          let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+          List.iteri (fun i atom ->
+            let field_ty = match List.nth_opt entry.ce_fields i with
+              | Some t -> llvm_ty t | None -> "ptr" in
+            let (v_ty, v_val) = emit_atom ctx atom in
+            emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
+          ) args;
+          ("ptr", ptr))
      | _ ->
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
@@ -3479,6 +3603,105 @@ and emit_case ctx scrut_atom branches default_opt =
         | _ -> failwith "emit_case: newtype branch has multiple field vars (impossible)");
        emit_expr ctx (strip_decrc br.Tir.br_body)
      | _ -> failwith "emit_case: newtype type has multiple branches (impossible)")
+  | Repr.Niche { payload = _; tagged = niche_tagged } ->
+    (* Niche fast path: None = 0, Some(x) = x.
+       Emit an icmp eq null + conditional br.  Branch bodies handle their own
+       RC via Perceus, but for the Some(ptr) case the DecRC Perceus inserts on
+       scrut would incorrectly decrement the payload's RC (scrut IS the payload
+       in niche encoding) — strip it in that case. *)
+    let scrut_name = match scrut_atom with
+      | Tir.AVar v -> v.Tir.v_name | _ -> ""
+    in
+    let strip_decrc_niche body =
+      match body with
+      | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+      | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
+        when String.equal v.Tir.v_name scrut_name -> rest
+      | _ -> body
+    in
+    let snapshot_var_slot_n () = Hashtbl.copy ctx.var_slot in
+    let restore_var_slot_n snap =
+      Hashtbl.reset ctx.var_slot;
+      Hashtbl.iter (Hashtbl.add ctx.var_slot) snap
+    in
+    let result_slot_n = fresh ctx "res_slot" in
+    emit ctx (Printf.sprintf "%s = alloca ptr" result_slot_n);
+    let merge_lbl_n = fresh_block ctx "niche_merge" in
+    let none_lbl    = fresh_block ctx "niche_none" in
+    let some_lbl    = fresh_block ctx "niche_some" in
+    let scrut_p = coerce ctx scrut_ty scrut_val "ptr" in
+    let is_null = fresh ctx "is_null" in
+    emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" is_null scrut_p);
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                     is_null none_lbl some_lbl);
+    (* Find the None branch (no br_vars) and Some branch (has br_vars) *)
+    let none_branch = List.find_opt (fun br -> br.Tir.br_vars = []) branches in
+    let some_branch = List.find_opt (fun br -> br.Tir.br_vars <> []) branches in
+    (* None arm *)
+    let snap_none = snapshot_var_slot_n () in
+    emit_label ctx none_lbl;
+    (match none_branch with
+     | Some br ->
+       let body = strip_decrc_niche br.Tir.br_body in
+       let (bty, bval) = emit_expr ctx body in
+       emit ctx (Printf.sprintf "store ptr %s, ptr %s"
+                   (coerce ctx bty bval "ptr") result_slot_n);
+       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
+     | None ->
+       (* Wildcard/default fallback for None *)
+       (match default_opt with
+        | Some d ->
+          let (dty, dval) = emit_expr ctx d in
+          emit ctx (Printf.sprintf "store ptr %s, ptr %s"
+                      (coerce ctx dty dval "ptr") result_slot_n);
+          emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
+        | None -> emit_term ctx "unreachable"));
+    restore_var_slot_n snap_none;
+    (* Some arm *)
+    let snap_some = snapshot_var_slot_n () in
+    emit_label ctx some_lbl;
+    (match some_branch with
+     | Some br ->
+       (* Bind the field variable to the extracted payload *)
+       (match br.Tir.br_vars with
+        | [field_var] ->
+          let (fty, fval) =
+            if niche_tagged then begin
+              let raw = fresh ctx "niche_raw" in
+              emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" raw scrut_p);
+              let untagged = fresh ctx "niche_unt" in
+              emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" untagged raw);
+              ("i64", untagged)
+            end else
+              ("ptr", scrut_p)
+          in
+          let slot = alloca_name ctx (llvm_name field_var.Tir.v_name) in
+          emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot fty);
+          emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" fty fval slot);
+          Hashtbl.replace ctx.var_llvm_ty slot fty
+        | _ -> ());
+       (* Strip DecRC(scrut) always: niche has no outer box.
+          - None=0: IS_HEAP_PTR(0)=false, was a no-op anyway
+          - Some(int): IS_HEAP_PTR(odd)=false, was a no-op anyway
+          - Some(ptr): stripping is REQUIRED — scrut IS the payload *)
+       let body = strip_decrc_niche br.Tir.br_body in
+       let (bty, bval) = emit_expr ctx body in
+       emit ctx (Printf.sprintf "store ptr %s, ptr %s"
+                   (coerce ctx bty bval "ptr") result_slot_n);
+       emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
+     | None ->
+       (match default_opt with
+        | Some d ->
+          let (dty, dval) = emit_expr ctx d in
+          emit ctx (Printf.sprintf "store ptr %s, ptr %s"
+                      (coerce ctx dty dval "ptr") result_slot_n);
+          emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
+        | None -> emit_term ctx "unreachable"));
+    restore_var_slot_n snap_some;
+    emit_label ctx merge_lbl_n;
+    let r_n = fresh ctx "niche_r" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r_n result_slot_n);
+    ("ptr", r_n)
   | _ ->
 
   (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
@@ -4163,7 +4386,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
 
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = llvm_name v.Tir.v_name in
-      llvm_param_ty v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+      llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
   Buffer.add_string ctx.buf
@@ -4293,7 +4516,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     if all_params = [] then ""
     else ", " ^ String.concat ", "
       (List.map (fun (_, (v : Tir.var), base) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty v.Tir.v_ty) base
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) base
       ) all_params)
   in
   Buffer.add_string ctx.buf
@@ -4399,7 +4622,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     let fn_llvm     = mangle_extern fn.Tir.fn_name in
     let params_str  = String.concat ", "
       (List.map (fun (v : Tir.var) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty v.Tir.v_ty) (llvm_name v.Tir.v_name)
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) (llvm_name v.Tir.v_name)
       ) fn.Tir.fn_params)
     in
     Buffer.add_string ctx.buf
@@ -4509,7 +4732,7 @@ declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
 declare ptr  @march_record_keys(ptr %rec)
 declare ptr  @march_record_values(ptr %rec)
 declare ptr  @march_record_entries(ptr %rec)
-declare ptr  @march_record_get(ptr %rec, ptr %key)
+declare ptr  @march_record_get(ptr %rec, ptr %key, i64 %kind)
 declare i64  @march_record_has_key(ptr %rec, ptr %key)
 declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)
 declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)

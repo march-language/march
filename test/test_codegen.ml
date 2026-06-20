@@ -3138,12 +3138,57 @@ let test_repr_newtype_ptr () =
   | _ -> Alcotest.fail "expected Newtype TString"
 
 let test_repr_multivariant_is_boxed () =
-  (* Option-shaped stays Boxed in milestone 1 (niche is the follow-on plan). *)
+  (* No type params → can't determine payload → Boxed. *)
   let tds = [March_tir.Tir.TDVariant
     ("Option", [("None", []); ("Some", [March_tir.Tir.TInt])])] in
   match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [])) with
   | March_tir.Repr.Boxed -> ()
-  | _ -> Alcotest.fail "expected Boxed for Option in milestone 1"
+  | _ -> Alcotest.fail "expected Boxed for Option with no params"
+
+let test_repr_niche_int () =
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TInt])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])) with
+  | March_tir.Repr.Niche { payload = March_tir.Tir.TInt; tagged = true } -> ()
+  | _ -> Alcotest.fail "expected Niche{TInt, tagged=true}"
+
+let test_repr_niche_string () =
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TString])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TString])) with
+  | March_tir.Repr.Niche { payload = March_tir.Tir.TString; tagged = false } -> ()
+  | _ -> Alcotest.fail "expected Niche{TString, tagged=false}"
+
+let test_repr_niche_bool () =
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TBool])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TBool])) with
+  | March_tir.Repr.Niche { payload = March_tir.Tir.TBool; tagged = true } -> ()
+  | _ -> Alcotest.fail "expected Niche{TBool, tagged=true}"
+
+let test_repr_niche_float_is_boxed () =
+  (* Float 0.0 bitcasts to 0 → cannot use niche. *)
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TFloat])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TFloat])) with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for Option(Float)"
+
+let test_repr_niche_unit_is_boxed () =
+  (* Unit = i64 0 → null → unsafe for niche. *)
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TUnit])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TUnit])) with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for Option(Unit)"
+
+let test_repr_nested_niche_is_boxed () =
+  (* Some(None)=0=None: nested niche is ambiguous → must stay Boxed. *)
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [March_tir.Tir.TCon ("Option", [March_tir.Tir.TInt])])) with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for Option(Option(Int))"
 
 let test_repr_multifield_is_boxed () =
   let tds = [March_tir.Tir.TDVariant
@@ -3168,12 +3213,14 @@ let test_repr_scalar_is_boxed () =
     lower.ml embeds the parent type name in EAlloc TCon; build_ctor_info stores
     variants as "TypeName.CtorName"; emit_case qualifies br_tag at lookup time. *)
 let test_ctor_no_collision_different_tags () =
-  (* Type A: [Nil, Cons(Int)] — Nil=tag0, Cons=tag1
+  (* Type A: [Nil, Cons(Int), End] — Nil=tag0, Cons=tag1, End=tag2
      Type B: [Cons(Int), Nil] — Cons=tag0, Nil=tag1
      Without the fix, ctor_info["Cons"] would be overwritten by whichever type
-     is processed last, and make_a's allocation would get the wrong tag. *)
+     is processed last, and make_a's allocation would get the wrong tag.
+     A has 3 variants so it is NOT niche-shaped (niche needs exactly 1 nullary +
+     1 single-field); the boxed path emits "store i32 1" for A.Cons. *)
   let td_a = March_tir.Tir.TDVariant ("A",
-    [("Nil", []); ("Cons", [March_tir.Tir.TInt])]) in
+    [("Nil", []); ("Cons", [March_tir.Tir.TInt]); ("End", [])]) in
   let td_b = March_tir.Tir.TDVariant ("B",
     [("Cons", [March_tir.Tir.TInt]); ("Nil", [])]) in
   let x = mk_var "x" March_tir.Tir.TInt in
@@ -5077,6 +5124,12 @@ let codegen_suites =
         Alcotest.test_case "multivariant_boxed"   `Quick test_repr_multivariant_is_boxed;
         Alcotest.test_case "multifield_boxed"     `Quick test_repr_multifield_is_boxed;
         Alcotest.test_case "scalar_boxed"         `Quick test_repr_scalar_is_boxed;
+        Alcotest.test_case "niche_int"            `Quick test_repr_niche_int;
+        Alcotest.test_case "niche_string"         `Quick test_repr_niche_string;
+        Alcotest.test_case "niche_bool"           `Quick test_repr_niche_bool;
+        Alcotest.test_case "niche_float_boxed"    `Quick test_repr_niche_float_is_boxed;
+        Alcotest.test_case "niche_unit_boxed"     `Quick test_repr_niche_unit_is_boxed;
+        Alcotest.test_case "nested_niche_boxed"   `Quick test_repr_nested_niche_is_boxed;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

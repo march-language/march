@@ -424,29 +424,14 @@ int64_t march_string_is_empty(void *s) {
     return (!s || ((march_string *)s)->len == 0) ? 1 : 0;
 }
 
-/* Returns Option(Int): None(tag=0) on failure, Some(n)(tag=1,field=n) on success.
- * Option follows declaration order: type Option = None | Some('a)
- * Heap layout for Some(n): [rc:i64][tag=1:i32][pad:i32][n:i64] = 24 bytes.
- *
- * The payload stored in Some(Int)'s ptr-sized slot is pre-tagged with
- * (n<<1)|1 per the uniform low-bit integer tagging scheme: the compiler
- * emits `ashr #1` when extracting the Int, so a raw value would be halved
- * on untag (strtoll("42") would reach the March side as 21). */
+/* Returns Option(Int) using the niche representation: None=0, Some(n)=(n<<1)|1. */
 void *march_string_to_int(void *s) {
     march_string *str = (march_string *)s;
     char *end;
     long long n = strtoll(str->data, &end, 10);
-    /* None if no digits consumed or trailing non-digit characters */
-    if (end == str->data || *end != '\0') {
-        void *none = march_alloc(16);   /* tag stays 0 = None */
-        return none;
-    }
-    void *some = march_alloc(16 + 8);  /* 24 bytes: header + one i64 field */
-    int32_t *tp = (int32_t *)((char *)some + 8);
-    tp[0] = 1;                         /* tag = 1 = Some */
-    int64_t *fp = (int64_t *)((char *)some + 16);
-    fp[0] = ((int64_t)n << 1) | 1;
-    return some;
+    if (end == str->data || *end != '\0')
+        return (void *)0;  /* None */
+    return (void *)(((int64_t)n << 1) | 1);  /* Some(n) */
 }
 
 /* Returns a new String by joining all String elements of a March List(String)
@@ -1660,41 +1645,21 @@ double march_math_pow(double b, double e) { return pow(b, e); }
 
 /* ── Extended string builtins ────────────────────────────────────────── */
 
-/* Helper: allocate a None (tag=0, no fields). */
+/* Helper: None = raw 0 in the niche representation. */
 static void *make_none(void) {
-    return march_alloc(16);
+    return (void *)0;
 }
 
-/* Helper: allocate Some(val) where val is an Int stored at offset 16.
- *
- * The payload slot of Some('a) is a polymorphic ptr-sized field that the
- * compiler untags on extraction with `ashr #1` (uniform low-bit integer
- * tagging — see the comment at the top of the RC section).  Raw ints
- * would be halved on untag: storing 6 yields 3, storing 20 yields 10.
- *
- * Pre-tag the value here so the compiler's ashr recovers the original.
- *
- * Fixes: march_string_index_of / march_string_last_index_of returning
- * half the real byte offset to March callers, visible as wrong indices
- * in any extractor path (while substring-presence checks that only
- * distinguish Some(_) from None continue to "work"). */
+/* Helper: Some(int) = tagged immediate (val<<1)|1.
+ * march_alloc never returns 0 or an odd-bit pointer, so niche None=0 and
+ * Some(int)=odd are unambiguous against any heap pointer payload. */
 static void *make_some_i64(int64_t val) {
-    void *some = march_alloc(16 + 8);
-    int32_t *tp = (int32_t *)((char *)some + 8);
-    tp[0] = 1;  /* tag = Some */
-    int64_t *fp = (int64_t *)((char *)some + 16);
-    fp[0] = (val << 1) | 1;
-    return some;
+    return (void *)(((int64_t)val << 1) | 1);
 }
 
-/* Helper: allocate Some(ptr) where ptr is stored at offset 16. */
+/* Helper: Some(ptr) = the raw pointer (heap ptr is always nonzero). */
 static void *make_some_ptr(void *val) {
-    void *some = march_alloc(16 + 8);
-    int32_t *tp = (int32_t *)((char *)some + 8);
-    tp[0] = 1;  /* tag = Some */
-    void **fp = (void **)((char *)some + 16);
-    fp[0] = val;
-    return some;
+    return val;
 }
 
 /* Helper: allocate a Nil list node (tag=0). */
@@ -2087,13 +2052,14 @@ void *march_string_last_index_of(void *s, void *sub) {
     return make_none();
 }
 
-/* Returns Option(Float). */
+/* Returns Option(Float). Option(Float) stays BOXED (0.0 == raw 0, not niche-safe).
+ * None is a heap cell with tag=0; cannot use make_none() which returns raw 0. */
 void *march_string_to_float(void *s) {
     march_string *str = (march_string *)s;
     char *end;
     double f = strtod(str->data, &end);
     if (end == str->data || *end != '\0') {
-        return make_none();
+        return march_alloc(16);  /* boxed None: tag stays 0 */
     }
     /* Some(f): tag=1, one double field at offset 16. */
     void *some = march_alloc(16 + 8);
