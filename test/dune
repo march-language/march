@@ -870,3 +870,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))
+
+; ── Regression: FFI Option return must use the compiler niche representation ─
+(rule
+ (targets native_ffi_option native_ffi_option.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/ffi_option.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_option
+        native/ffi_option.march)
+   (with-stdout-to native_ffi_option.out
+        (system "./native_ffi_option")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_option.expected native_ffi_option.out)))

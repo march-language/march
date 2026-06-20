@@ -74,19 +74,22 @@ march_value march_bytes_new(const uint8_t *data, size_t len) {
 /* ── Option / Result constructors ────────────────────────────────────────────
  * ADT cell = 16-byte header {rc;tag;pad} + 8-byte fields at offset 16.
  * march_alloc sets rc=1, tag=0; we overwrite tag and (for 1-field cells) field0. */
-static march_value mk_cell0(int32_t tag) {
-    void *p = march_alloc(16);
-    ((march_hdr *)p)->tag = tag;
-    return march_from_ptr(p);
-}
 static march_value mk_cell1(int32_t tag, march_value field0) {
     void *p = march_alloc(24);
     ((march_hdr *)p)->tag = tag;
     ((int64_t *)p)[2] = field0;          /* field0 at byte offset 16 */
     return march_from_ptr(p);
 }
-march_value march_none(void)          { return mk_cell0(0); }
-march_value march_some(march_value v) { return mk_cell1(1, v); }
+/* Option uses the compiler's NICHE representation for niche-eligible payloads
+ * (Int/Bool/String/Bytes and any heap type): None = 0, Some(x) = x — no heap
+ * cell.  This matches make_some/make_none in march_extras.c.  (Option(Float)
+ * and Option(Unit) stay boxed in the compiler and are NOT supported by these
+ * bare constructors yet — they would need the kind-aware boxed path.)
+ *
+ * Result is NOT niche-shaped (two single-field constructors), so it stays a
+ * boxed cell: Ok=tag 0, Err=tag 1, payload at offset 16. */
+march_value march_none(void)          { return 0; }
+march_value march_some(march_value v) { return v; }
 march_value march_ok(march_value v)   { return mk_cell1(0, v); }
 march_value march_err(march_value e)  { return mk_cell1(1, e); }
 
@@ -110,6 +113,12 @@ int64_t ffi_test_slen(march_value s) { return (int64_t)march_str_borrow(s).len; 
 march_value ffi_test_sdup(march_value s) {
     march_slice v = march_str_borrow(s);
     return march_str_new(v.ptr, v.len);
+}
+
+/* Returns Some(n) for n >= 0, else None — exercises Option marshalling
+ * end-to-end (must match the compiler's niche representation). */
+march_value ffi_test_maybe(int64_t n) {
+    return n >= 0 ? march_some(march_make_int(n)) : march_none();
 }
 
 /* Fallible: a single ASCII digit → Ok(Int), else Err(String). Result built

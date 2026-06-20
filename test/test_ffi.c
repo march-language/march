@@ -74,15 +74,11 @@ int main(void) {
 
     /* ── Option / Result constructors ──────────────────────────────────── */
     {
-        march_value some = march_some(march_make_int(7));
-        assert(((int32_t *)march_as_ptr(some))[2] == 1);   /* Some tag */
-        assert(((int64_t *)march_as_ptr(some))[2] == march_make_int(7));
-        march_drop(some);
+        /* Option uses the niche representation: Some(x) = x, None = 0. */
+        assert(march_some(march_make_int(7)) == march_make_int(7));
+        assert(march_none() == 0);
 
-        march_value none = march_none();
-        assert(((int32_t *)march_as_ptr(none))[2] == 0);   /* None tag */
-        march_drop(none);
-
+        /* Result stays boxed: Ok = tag 0, Err = tag 1, payload at offset 16. */
         march_value ok = march_ok(march_make_int(1));
         assert(((int32_t *)march_as_ptr(ok))[2] == 0);     /* Ok tag */
         march_drop(ok);
