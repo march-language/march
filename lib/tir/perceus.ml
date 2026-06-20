@@ -42,6 +42,13 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
     the helpers' signatures unchanged and avoids pervasive API churn. *)
 let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
 
+(** Names of user-defined extern (FFI) functions.  These are called via
+    [ECallPtr] (not [EApp]) but, unlike opaque closures, their parameter
+    ownership is known from the borrow map (seeded in [Borrow.infer_module]).
+    We use this set in the [ECallPtr] case to apply borrow-aware RC — borrowed
+    args are not consumed by the callee, so the caller frees dead-after args. *)
+let _extern_names : StringSet.t ref = ref StringSet.empty
+
 (** Name of the function currently being processed by [insert_rc].
     Used in the EApp case to detect self-recursive calls, so that
     ESeq(EApp(self,...), EDecRC(arg)) is left intact for TCO to handle
@@ -562,6 +569,68 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          && / || into upstream live sets, potentially triggering spurious
          cross-branch EDecRC for names that have no alloca slot. *)
       |> StringSet.union (vars_of_atoms args)
+    in
+    (e'', lb)
+
+  | Tir.ECallPtr (Tir.AVar fv, args)
+    when StringSet.mem fv.Tir.v_name !_extern_names ->
+    (* Known user extern (FFI): the callee is a C symbol with a known borrow
+       map (seeded in Borrow.infer_module), so apply EApp-style borrow-aware
+       RC.  Borrowed args are NOT consumed by the C callee, so the caller keeps
+       ownership and must EDecRC any borrowed arg whose last use is this call.
+       Externs are never apply functions and take no closure slot, so the
+       apply/closure exemptions in the EApp case do not apply here. *)
+    let fname = fv.Tir.v_name in
+    let indexed_args = List.mapi (fun i a -> (i, a)) args in
+    let non_borrowed_args =
+      List.filter_map (fun (i, a) ->
+        if Borrow.is_borrowed !_borrow_map fname i then None else Some a
+      ) indexed_args
+    in
+    (* The callee symbol fv is a code address, not a heap closure — never inc it. *)
+    let inc_vars = find_inc_vars non_borrowed_args live_after in
+    let post_dec_vars =
+      let seen = ref StringSet.empty in
+      List.filter_map (fun (i, a) ->
+        match a with
+        | Tir.AVar v
+          when v.Tir.v_lin = Tir.Unr
+               && needs_rc v.Tir.v_ty
+               && not (StringSet.mem v.Tir.v_name live_after)
+               && Borrow.is_borrowed !_borrow_map fname i
+               && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+               && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)
+               && not (StringSet.mem v.Tir.v_name !seen) ->
+          seen := StringSet.add v.Tir.v_name !seen;
+          Some v
+        | _ -> None
+      ) indexed_args
+    in
+    let e' = wrap_incrcs inc_vars e in
+    let e'' =
+      match post_dec_vars with
+      | [] -> e'
+      | _ ->
+        let ret_ty = match fv.Tir.v_ty with
+          | Tir.TFn (_, r) -> r
+          | _ -> Tir.TVar "_"
+        in
+        (match ret_ty with
+         | Tir.TUnit ->
+           List.fold_left (fun acc v ->
+             Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+           ) e' post_dec_vars
+         | _ ->
+           let tmp = fresh_rc_var ret_ty in
+           let decrcs =
+             List.fold_right (fun v acc ->
+               Tir.ESeq (decrc_for v (Tir.AVar v), acc)
+             ) post_dec_vars (Tir.EAtom (Tir.AVar tmp))
+           in
+           Tir.ELet (tmp, e', decrcs))
+    in
+    let lb =
+      live_after |> StringSet.union (vars_of_atoms args)
     in
     (e'', lb)
 
@@ -1564,6 +1633,9 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
   _borrow_map := borrow_map;
+  _extern_names :=
+    List.fold_left (fun s (ed : Tir.extern_decl) ->
+      StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs;
   let repl_set =
     List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
   in

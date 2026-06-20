@@ -98,6 +98,25 @@ void march_drop(march_value v) {
     if (march_is_heap(v)) march_decrc(march_as_ptr(v));
 }
 
-/* Test-only helper, always linked. Bound from March via `fn dbl(n: Int): Int
- * = "ffi_test_dbl"` to exercise primitive marshalling end to end. */
+/* Test-only helpers, always linked. Exercise marshalling end to end. */
 int64_t ffi_test_dbl(int64_t n) { return n * 2; }
+
+/* Borrows the String (reads its length) and must NOT drop it — the caller
+ * retains ownership.  Used by the RC-leak gate: with borrow semantics the
+ * caller frees the arg after the call, so a churn loop stays flat. */
+int64_t ffi_test_slen(march_value s) { return (int64_t)march_str_borrow(s).len; }
+
+/* Owned return: build a fresh copy of the borrowed String (rc=1). */
+march_value ffi_test_sdup(march_value s) {
+    march_slice v = march_str_borrow(s);
+    return march_str_new(v.ptr, v.len);
+}
+
+/* Fallible: a single ASCII digit → Ok(Int), else Err(String). Result built
+ * directly via march_ok/march_err (no env needed). */
+march_value ffi_test_parse(march_value s) {
+    march_slice v = march_str_borrow(s);
+    if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
+        return march_ok(march_make_int(v.ptr[0] - '0'));
+    return march_err(march_str_new((const uint8_t *)"nan", 3));
+}

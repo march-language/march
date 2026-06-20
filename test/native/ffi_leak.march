@@ -1,0 +1,29 @@
+-- Regression: a borrowed String argument to an extern must be freed by the
+-- caller after the call (Phase 2 borrow-default ownership).  Under the old
+-- consume-default the churn loop leaked one string per iteration; with the
+-- borrow fix the net live-allocation count stays flat (delta 0).
+--
+-- live_allocs() and ffi_test_slen are C symbols in runtime/march_ffi.c, linked
+-- automatically into every --compile binary.
+mod Test do
+  needs Ffi
+  extern "rt" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+    fn slen(s: String): Int = "ffi_test_slen"
+  end
+  fn churn(n: Int) : Unit do
+    if n == 0 do
+      ()
+    else
+      let s = int_to_string(n)
+      slen(s)
+      churn(n - 1)
+    end
+  end
+  fn main() : Unit do
+    churn(50)                 -- warm up (one-time allocations)
+    let base = live_allocs()
+    churn(2000)
+    println(int_to_string(live_allocs() - base))
+  end
+end
