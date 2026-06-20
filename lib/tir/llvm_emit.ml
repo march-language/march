@@ -153,6 +153,9 @@ let target_int_ty = function
   | Native | Wasm64Wasi -> "i64"
   | Wasm32Wasi | Wasm32Unknown -> "i32"
 
+(* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
+let cur_type_defs : Tir.type_def list ref = ref []
+
 let make_ctx ?(fast_math=false) ?(repl=false) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
@@ -3027,22 +3030,50 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Heap allocation ───────────────────────────────────────────────── *)
   | Tir.EAlloc (Tir.TCon (ctor, _), args) ->
-    let entry = ctor_entry ctx ctor (List.length args) in
-    let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
-    List.iteri (fun i atom ->
-      let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t
-        | None ->
-          failwith (Printf.sprintf
-            "LLVM emit: constructor %s has %d field(s) but field index %d \
-             was requested (arity mismatch — cascading from a ctor_info collision?)"
-            ctor (List.length entry.ce_fields) i)
-      in
-      let (v_ty, v_val) = emit_atom ctx atom in
-      let v_coerced = coerce ctx v_ty v_val field_ty in
-      emit_store_field ctx ptr i field_ty v_coerced
-    ) args;
-    ("ptr", ptr)
+    (* EAlloc ctor key is "TypeName.CtorName"; repr_of_ty needs the TypeName. *)
+    let alloc_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty !cur_type_defs (Tir.TCon (alloc_type_name, [])) with
+     | Repr.Newtype payload ->
+       (* Newtype: no allocation. Emit the single payload atom directly. *)
+       if List.length args <> 1 then
+         failwith (Printf.sprintf
+           "LLVM emit: newtype constructor %s expects 1 arg, got %d \
+            (arity mismatch — malformed TIR)"
+           ctor (List.length args));
+       let (v_ty, v_val) = emit_atom ctx (List.hd args) in
+       if Repr.payload_needs_tag !cur_type_defs payload then begin
+         (* Scalar payload: tag (v<<1)|1 so it's odd → IS_HEAP_PTR = false *)
+         let i64v = coerce ctx v_ty v_val "i64" in
+         let shifted = fresh ctx "nt_sh" in
+         emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+         let tagged = fresh ctx "nt_tag" in
+         emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged shifted);
+         let as_ptr = fresh ctx "nt_ptr" in
+         emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged);
+         ("ptr", as_ptr)
+       end else
+         (* Pointer payload: pass through raw *)
+         ("ptr", coerce ctx v_ty v_val "ptr")
+     | _ ->
+       let entry = ctor_entry ctx ctor (List.length args) in
+       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+       List.iteri (fun i atom ->
+         let field_ty = match List.nth_opt entry.ce_fields i with
+           | Some t -> llvm_ty t
+           | None ->
+             failwith (Printf.sprintf
+               "LLVM emit: constructor %s has %d field(s) but field index %d \
+                was requested (arity mismatch — cascading from a ctor_info collision?)"
+               ctor (List.length entry.ce_fields) i)
+         in
+         let (v_ty, v_val) = emit_atom ctx atom in
+         let v_coerced = coerce ctx v_ty v_val field_ty in
+         emit_store_field ctx ptr i field_ty v_coerced
+       ) args;
+       ("ptr", ptr))
 
   | Tir.EAlloc (_, args) ->
     (* Non-TCon allocation (tuples / erased cells): UNIFORM slots — readers
@@ -3092,6 +3123,30 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      This is critical for correctness when the caller holds extra references
      (e.g. after IncRC before passing to a function). *)
   | Tir.EReuse (reuse_atom, Tir.TCon (ctor, _), args) ->
+    (* Newtype fast path: no heap cell to reuse. Emit new payload directly.
+       The old reuse_atom is a tagged scalar or pointer; release it via
+       march_decrc (IS_HEAP_PTR guards make it a no-op on tagged scalars). *)
+    let reuse_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty !cur_type_defs (Tir.TCon (reuse_type_name, [])) with
+     | Repr.Newtype payload ->
+       let (_, rv) = emit_atom ctx reuse_atom in
+       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
+       let (v_ty, v_val) = emit_atom ctx (List.hd args) in
+       if Repr.payload_needs_tag !cur_type_defs payload then begin
+         let i64v = coerce ctx v_ty v_val "i64" in
+         let shifted = fresh ctx "nt_sh" in
+         emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+         let tagged = fresh ctx "nt_tag" in
+         emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged shifted);
+         let as_ptr = fresh ctx "nt_ptr" in
+         emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged);
+         ("ptr", as_ptr)
+       end else
+         ("ptr", coerce ctx v_ty v_val "ptr")
+     | _ ->
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)
@@ -3145,7 +3200,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
-    ("ptr", result)
+    ("ptr", result))
 
   | Tir.EReuse (reuse_atom, reuse_ty, args) ->
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
@@ -3376,6 +3431,55 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     Result is materialized via ptr alloca slot with ptrtoint/inttoptr coercion. *)
 and emit_case ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
+  let scrut_tir_ty_init =
+    match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
+  in
+  (* Fast path: newtype scrutinee — the value IS the payload; no tag/alloc. *)
+  match Repr.repr_of_ty !cur_type_defs scrut_tir_ty_init with
+  | Repr.Newtype payload ->
+    (* Strip a leading DecRC(scrut) from a branch body.
+       Perceus inserts DecRC(box) inside the branch assuming box is a heap cell.
+       For a newtype, box IS the payload — DecRC would decrement the payload RC,
+       leaving our preds binding dangling.  Since box and preds are the same
+       object, consuming box's reference and creating preds is a net-zero RC
+       change: just drop the DecRC and emit the rest. *)
+    let scrut_name = match scrut_atom with Tir.AVar v -> v.Tir.v_name | _ -> "" in
+    let strip_decrc body =
+      match body with
+      | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+      | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
+        when String.equal v.Tir.v_name scrut_name -> rest
+      | _ -> body
+    in
+    (match branches with
+     | [] ->
+       (* Wildcard/default-only match *)
+       (match default_opt with
+        | Some d -> emit_expr ctx d
+        | None -> ("ptr", "poison"))
+     | [br] ->
+       (match br.Tir.br_vars with
+        | [field_var] ->
+          let needs_tag = Repr.payload_needs_tag !cur_type_defs payload in
+          let (fty, fval) =
+            if needs_tag then begin
+              let raw = fresh ctx "nt_raw" in
+              emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" raw scrut_val);
+              let untagged = fresh ctx "nt_unt" in
+              emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" untagged raw);
+              ("i64", untagged)
+            end else
+              ("ptr", coerce ctx scrut_ty scrut_val "ptr")
+          in
+          let slot = alloca_name ctx (llvm_name field_var.Tir.v_name) in
+          emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot fty);
+          emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" fty fval slot);
+          Hashtbl.replace ctx.var_llvm_ty slot fty
+        | [] -> ()
+        | _ -> failwith "emit_case: newtype branch has multiple field vars (impossible)");
+       emit_expr ctx (strip_decrc br.Tir.br_body)
+     | _ -> failwith "emit_case: newtype type has multiple branches (impossible)")
+  | _ ->
 
   (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
      integers (Int), ":name" (Atom).  ADT constructor tags are capitalized
@@ -4768,6 +4872,7 @@ let emit_main_wrapper (buf : Buffer.t) =
        ret i32 0\n}\n"
 
 let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
+  cur_type_defs := m.Tir.tm_types;
   let ctx = make_ctx ~fast_math () in
   (* Record shape metadata requires the native runtime (march_extras.c);
      the WASM runtime does not provide march_record_set_shape. *)

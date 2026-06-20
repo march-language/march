@@ -580,6 +580,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/atom_ctor_field.expected native_atom_ctor_field.out)))
 
+; ── P6 regression: unboxed newtype (Counter(Int)) — construct + match across ──
+; ── function boundaries with tagged scalar payload.  No heap allocation.     ──
+(rule
+ (targets native_newtype_counter native_newtype_counter.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/newtype_counter.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_newtype_counter
+        native/newtype_counter.march)
+   (with-stdout-to native_newtype_counter.out
+        (system "./native_newtype_counter")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/newtype_counter.expected native_newtype_counter.out)))
+
 ; ── Regression: cross-module ctor pattern whose name collides with a stdlib ──
 ; ── constructor, on the FIRST variant. ──
 ; A user type's first ctor `Text` collides with stdlib Xml.XmlNode.Text (tag 1).

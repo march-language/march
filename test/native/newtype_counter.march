@@ -1,0 +1,26 @@
+-- Regression: unboxed newtype (single-field single-variant type).
+-- Counter(Int) must be stored as the tagged scalar, not heap-allocated.
+-- bump: Counter -> Counter (construct + match across function boundary)
+-- unwrap: Counter -> Int   (extract the Int payload)
+-- Expected output: 42
+
+mod NewtypeCounter do
+  type Counter = Counter(Int)
+
+  fn bump(c) do
+    match c do
+    Counter(n) -> Counter(n + 1)
+    end
+  end
+
+  fn unwrap(c) do
+    match c do
+    Counter(n) -> n
+    end
+  end
+
+  fn main() do
+    let c = Counter(41)
+    println(int_to_string(unwrap(bump(c))))
+  end
+end

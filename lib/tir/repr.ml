@@ -25,7 +25,21 @@ let repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
   match ty with
   | Tir.TCon (name, _) ->
     (match find_variant type_defs name with
-     (* Newtype: exactly one variant with exactly one field. *)
+     (* Newtype: exactly one variant with exactly one field.
+        Float payload is deferred (can't tag float bits safely); falls through to Boxed. *)
+     | Some [ (_ctor, [ Tir.TFloat ]) ] -> Boxed
      | Some [ (_ctor, [ payload ]) ] -> Newtype payload
      | _ -> Boxed)
   | _ -> Boxed
+
+(** True when a newtype payload value must be tagged [(v<<1)|1] before being stored
+    in a ptr slot, to prevent IS_HEAP_PTR from treating the raw bits as a heap pointer.
+    Applies to Int and Bool (and recursively to newtypes-over-scalars). *)
+let rec payload_needs_tag (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TInt | Tir.TBool -> true
+  | Tir.TCon _ ->
+    (match repr_of_ty type_defs ty with
+     | Newtype inner -> payload_needs_tag type_defs inner
+     | _ -> false)
+  | _ -> false

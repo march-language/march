@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, P6 Milestone 1 — unboxed single-field constructors)
+
+- **Newtype unboxing** (`lib/tir/repr.ml` new, `lib/tir/llvm_emit.ml`): single-variant single-field ADTs (newtypes) now bypass heap allocation. `repr_of_ty` classifies a monomorphic `TCon` as `Newtype payload` or `Boxed`; Float-payload newtypes stay Boxed. `payload_needs_tag` detects scalars (Int/Bool and newtypes-over-scalars) that must be tagged `(v<<1)|1` to satisfy `IS_HEAP_PTR`. Three `llvm_emit` fast paths: `EAlloc` (construct — tag+inttoptr for scalar, ptr coerce for pointer), `EReuse` (FBIP reconstruct — skip RC reuse, manual DecRC of consumed box, emit new payload), `emit_case` (match — ptrtoint+ashr to recover scalar; strip Perceus `EDecRC` inside branch since ownership transfer is net-zero). Global `cur_type_defs` ref makes `repr_of_ty` available at all three sites.
+- **1 new native test** (`test/native/newtype_counter.march`): `Counter(Int)` — `bump`/`unwrap` across function boundaries; output 42. Test count: **1596** (281 compiler + 224 eval + 309 codegen [307 pass; 2 pre-existing str_concat failures] + 782 stdlib; native newtype_counter green).
+
 ## Current State (as of 2026-06-19, P1 Layer 1 — alpha-merge let-floating pre-Perceus)
 
 - **P1 join-points Layer 1** (`lib/tir/join_points.ml`, `bin/main.ml`): new `run_pre` entry point floats a common leading `let` above an `ECase` even when arms bind the shared RHS under *different* fresh ANF names — it mints one `$jp…` binder and substitutes each arm's binder onto it via a new `rename_expr` helper. Wired BEFORE `Perceus.perceus` (post-Perceus renaming of RC-decorated bindings is unsafe), so RC is inserted once for the hoisted binding. The existing conservative `run` (identical binder names) still runs in the post-Perceus opt loop. Because TIR is in ANF, this captures the spec's motivating shared-inline-subexpr case. Layers 2–3 (interleaved lets; general non-let CSE) remain open — see `specs/optimizations.md` §P1.
