@@ -101,7 +101,20 @@ rule token = parse
   | "--"          { line_comment lexbuf }
   | "{-"          { block_comment 0 lexbuf }
   | digit+ '.' digit+ as f { FLOAT (float_of_string f) }
-  | digit+ as n   { INT (int_of_string n) }
+  | digit+ as n   {
+      (* March integers are 63-bit (OCaml int).  An out-of-range literal would
+         crash int_of_string with an uncaught Failure; raise a positioned
+         ParseError instead so the frontend reports a clean diagnostic. *)
+      match int_of_string_opt n with
+      | Some v -> INT v
+      | None ->
+        raise (March_errors.Errors.ParseError
+          (Printf.sprintf
+             "Integer literal `%s` exceeds the maximum March integer (%d)"
+             n max_int,
+           Some "March integers are 63-bit; use a smaller literal or parse at \
+                 runtime with string_to_int.",
+           Lexing.lexeme_start_p lexbuf)) }
   | "\"\"\""      { read_triple_string (Buffer.create 64) lexbuf }
   | '"'           { read_string (Buffer.create 16) lexbuf }
   | ':' (atom_name as a) { ATOM a }

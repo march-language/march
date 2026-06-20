@@ -7,6 +7,28 @@ let test_lexer_int () =
   Alcotest.(check int) "lexes integer" 42
     (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
 
+let test_lexer_int_max () =
+  (* 2^62 - 1 = max March integer — must lex, not overflow. *)
+  let lexbuf = Lexing.from_string "4611686018427387903" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check int) "lexes max integer" max_int
+    (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
+
+let test_lexer_int_out_of_range () =
+  (* 2^62 = max + 1 — must raise a positioned ParseError, NOT crash with the
+     raw Failure("int_of_string") that int_of_string used to throw. *)
+  let lexbuf = Lexing.from_string "4611686018427387904" in
+  let raised =
+    try ignore (March_lexer.Lexer.token lexbuf); false
+    with
+    | March_errors.Errors.ParseError (msg, _hint, _pos) ->
+      (* message names the offending literal *)
+      (try ignore (Str.search_forward (Str.regexp_string "4611686018427387904") msg 0); true
+       with Not_found -> false)
+    | Failure _ -> false  (* the old, unfixed behavior — must NOT happen *)
+  in
+  Alcotest.(check bool) "out-of-range literal raises ParseError" true raised
+
 let test_lexer_ident () =
   let lexbuf = Lexing.from_string "hello" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -3751,6 +3773,8 @@ let compiler_suites =
       ( "lexer",
         [
           Alcotest.test_case "integer" `Quick test_lexer_int;
+          Alcotest.test_case "integer max" `Quick test_lexer_int_max;
+          Alcotest.test_case "integer out of range" `Quick test_lexer_int_out_of_range;
           Alcotest.test_case "identifier" `Quick test_lexer_ident;
           Alcotest.test_case "fn keyword" `Quick test_lexer_keyword_fn;
           Alcotest.test_case "do keyword" `Quick test_lexer_keyword_do;

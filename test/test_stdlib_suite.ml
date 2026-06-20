@@ -10114,6 +10114,65 @@ let test_compiled_vault_scalar_roundtrip () =
     end
   end
 
+(* Regression: march_string_to_int niche-tags its strtoll result as (n<<1)|1
+   with no range check.  For inputs outside March's 63-bit range (>= 2^62, or
+   beyond int64 where strtoll clamps to LLONG_MAX) the shift overflowed the sign
+   bit and returned a corrupt Some(garbage) — e.g. "4611686018427387904" came
+   back as Some(-4611686018427387904), and "99999999999999999999999" as Some(-1).
+   The interpreter (int_of_string, 63-bit) returns None for these; the compiled
+   path must agree.  The program below exits 0 only if every out-of-range input
+   is None and every in-range input round-trips. *)
+let test_compiled_string_to_int_overflow_is_none () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_stoi_ovf" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "s.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod StoiOverflow do\n\
+      \  fn is_none(s : String) : Bool do\n\
+      \    match string_to_int(s) do\n\
+      \      Some(_) -> false\n\
+      \      None -> true\n\
+      \    end\n\
+      \  end\n\
+      \  fn is_val(s : String, want : Int) : Bool do\n\
+      \    match string_to_int(s) do\n\
+      \      Some(n) -> n == want\n\
+      \      None -> false\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    let ok =\n\
+      \      is_none(\"4611686018427387904\") &&\n\
+      \      is_none(\"99999999999999999999999\") &&\n\
+      \      is_none(\"-4611686018427387905\") &&\n\
+      \      is_val(\"4611686018427387903\", 4611686018427387903) &&\n\
+      \      is_val(\"-4611686018427387904\", -4611686018427387904) &&\n\
+      \      is_val(\"42\", 42)\n\
+      \    if ok do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "sbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled string_to_int out-of-range returns None (no niche overflow)"
+        0 run_rc
+    end
+  end
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -11094,6 +11153,8 @@ let stdlib_suites =
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Slow
           test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "string_to_int out-of-range returns None (niche tag no overflow)" `Slow
+          test_compiled_string_to_int_overflow_is_none;
         Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
         Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow

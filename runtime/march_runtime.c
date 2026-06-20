@@ -438,13 +438,25 @@ int64_t march_string_is_empty(void *s) {
     return (!s || ((march_string *)s)->len == 0) ? 1 : 0;
 }
 
-/* Returns Option(Int) using the niche representation: None=0, Some(n)=(n<<1)|1. */
+/* Returns Option(Int) using the niche representation: None=0, Some(n)=(n<<1)|1.
+ *
+ * March integers are 63-bit (the low bit is the immediate tag), so the valid
+ * range is [-2^62, 2^62-1].  We must reject anything outside that range BEFORE
+ * the (n<<1)|1 tag, otherwise the shift overflows the sign bit and silently
+ * returns a corrupt Some(garbage) — e.g. "4611686018427387904" (2^62) would
+ * come back as Some(-4611686018427387904).  The interpreter (int_of_string,
+ * 63-bit OCaml int) rejects these as None, so we match it here. */
+#define MARCH_INT_MAX 4611686018427387903LL    /* 2^62 - 1 */
+#define MARCH_INT_MIN (-4611686018427387904LL) /* -2^62 */
 void *march_string_to_int(void *s) {
     march_string *str = (march_string *)s;
     char *end;
+    errno = 0;
     long long n = strtoll(str->data, &end, 10);
     if (end == str->data || *end != '\0')
-        return (void *)0;  /* None */
+        return (void *)0;  /* None: not a valid integer */
+    if (errno == ERANGE || n > MARCH_INT_MAX || n < MARCH_INT_MIN)
+        return (void *)0;  /* None: out of March's 63-bit integer range */
     return (void *)(((int64_t)n << 1) | 1);  /* Some(n) */
 }
 

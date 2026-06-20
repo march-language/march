@@ -2,4 +2,4 @@
 
 (library
  (name march_lexer)
- (libraries march_parser))
+ (libraries march_parser march_errors))
