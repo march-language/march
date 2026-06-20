@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, P6 Milestone 1 — unboxed single-field constructors)
+
+- **Newtype unboxing** (`lib/tir/repr.ml` new, `lib/tir/llvm_emit.ml`): single-variant single-field ADTs (newtypes) now bypass heap allocation. `repr_of_ty` classifies a monomorphic `TCon` as `Newtype payload` or `Boxed`; Float-payload newtypes stay Boxed. `payload_needs_tag` detects scalars (Int/Bool and newtypes-over-scalars) that must be tagged `(v<<1)|1` to satisfy `IS_HEAP_PTR`. Three `llvm_emit` fast paths: `EAlloc` (construct — tag+inttoptr for scalar, ptr coerce for pointer), `EReuse` (FBIP reconstruct — skip RC reuse, manual DecRC of consumed box, emit new payload), `emit_case` (match — ptrtoint+ashr to recover scalar; strip Perceus `EDecRC` inside branch since ownership transfer is net-zero). Global `cur_type_defs` ref makes `repr_of_ty` available at all three sites.
+- **1 new native test** (`test/native/newtype_counter.march`): `Counter(Int)` — `bump`/`unwrap` across function boundaries; output 42. Test count: **1596** (281 compiler + 224 eval + 309 codegen [307 pass; 2 pre-existing str_concat failures] + 782 stdlib; native newtype_counter green).
+
 ## Current State (as of 2026-06-19, External Function Interface — Phase 1: ABI core + primitives)
 
 - **FFI ABI core** (`runtime/march_ffi.h`, `runtime/march_ffi.c`): the stable C ABI bindings link against (the `erl_nif.h` analog). Version handshake (`march_ffi_abi_version`/`MARCH_FFI_ABI_VERSION`); value accessors that hide the tagged-word convention (`march_make_int`/`get_int` = `(n<<1)|1`/`>>1`, `make_bool`/`get_bool`, `make_float`/`get_float` = untagged bitcast, `is_heap`/`as_ptr`/`from_ptr`); tag-aware `march_dup`/`march_drop` (no-op on tagged ints, incrc/decrc on heap). Wired into both the JIT `.so` build and the native `--compile` link in `bin/main.ml` (and `test/test_helpers.ml`); auto-invalidated by the runtime-header digest. Spec: `specs/2026-06-19-c-ffi-abi-design.md`; plan: `specs/plans/2026-06-19-c-ffi-phase1.md`.
