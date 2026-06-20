@@ -280,6 +280,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-19, P1 Layer 1 — alpha-merge let-floating pre-Perceus)
+
+- **P1 join-points Layer 1** (`lib/tir/join_points.ml`, `bin/main.ml`): new `run_pre` entry point floats a common leading `let` above an `ECase` even when arms bind the shared RHS under *different* fresh ANF names — it mints one `$jp…` binder and substitutes each arm's binder onto it via a new `rename_expr` helper. Wired BEFORE `Perceus.perceus` (post-Perceus renaming of RC-decorated bindings is unsafe), so RC is inserted once for the hoisted binding. The existing conservative `run` (identical binder names) still runs in the post-Perceus opt loop. Because TIR is in ANF, this captures the spec's motivating shared-inline-subexpr case. Layers 2–3 (interleaved lets; general non-let CSE) remain open — see `specs/optimizations.md` §P1.
+- **2 new tests** in `join_points` group (`pre_float_alpha`, `pre_no_float_diff_rhs`). Verified: compiler 281 + eval 224 + codegen 304 (302 pass; 2 pre-existing unrelated `simplify` str-concat failures) + stdlib 782 all green; `tree_transform`/`list_ops` benchmarks unchanged.
+
 ## Current State (as of 2026-06-18, `satisfy` declaration — tier2 item 5)
 
 - **`satisfy Iface for T` keyword** (`lib/lexer/lexer.mll`, `lib/parser/parser.mly`, `lib/ast/ast.ml`, `lib/desugar/desugar.ml`): desugar-time expansion that generates `DImpl` blocks from matching functions already in scope. `SATISFY` lexer token; `satisfy_decl` parser rule (ifaces first, types second, mirroring `derive`); `DSatisfy of name list * name list * span` AST node; `collect_fns`+`expand_satisfy` in `desugar_module`; passthrough in eval/lower/typecheck/format/LSP/coverage/refactor/span_remap. Emits desugar-time error for unknown interfaces or missing method implementations.

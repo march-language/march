@@ -1132,6 +1132,16 @@ let compile filename =
               then March_tir.Beta_adt.run ~changed:(ref false) tir
               else tir in
     snap_tir "tir-beta-adt-pre" tir;
+    (* P1 Layer 1: alpha-merge let-floating on RC-free TIR.  Hoists common
+       leading lets above ECase even when arms bind the shared RHS under
+       different fresh ANF names, substituting onto one floated binder.  Must
+       run BEFORE Perceus so RC is inserted once for the hoisted binding.  The
+       conservative (name-equality) variant still runs in the post-Perceus opt
+       loop. *)
+    let tir = if !opt_enabled
+              then March_tir.Join_points.run_pre ~changed:(ref false) tir
+              else tir in
+    snap_tir "tir-join-points-pre" tir;
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";

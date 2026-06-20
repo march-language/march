@@ -339,10 +339,21 @@ end
 
 **Effort:** High | **Impact:** Very high
 **Dependencies:** Must run before Inline and Fold (to expose shared structure)
-**Stage:** TIR pass — `lib/tir/join_points.ml`; first pass in `lib/tir/opt.ml` fixed-point loop
-**Status:** Done (basic version — common leading let extraction)
+**Stage:** TIR pass — `lib/tir/join_points.ml`; `run_pre` pre-Perceus + `run` first in `lib/tir/opt.ml` fixed-point loop
+**Status:** Layer 1 done (alpha-merge, pre-Perceus). Layers 2–3 open.
 
-**Implementation:** `lib/tir/join_points.ml` detects and hoists `let` bindings that appear identically at the start of EVERY case branch (including the default). Safety conditions: same variable name, structurally equal RHS (via `expr_eq`), RHS does not mention any pattern-bound variable from any branch, variable name is not pattern-bound in any branch. Runs in the `opt.ml` fixed-point loop as the first pass (before `known-call`, `inline`, `cprop`, etc.) so floated lets are immediately available to downstream passes in the same iteration. `expr_eq` checks deep structural equality of atoms and all expression forms. 4 new tests in `join_points` group.
+**Implementation:** `lib/tir/join_points.ml` detects and hoists `let` bindings that appear identically at the start of EVERY case branch (including the default), structurally equal RHS (via `expr_eq`), RHS not mentioning any pattern-bound variable, floated name not pattern-bound. `expr_eq` checks deep structural equality of atoms and all expression forms.
+
+Two entry points:
+- **`run`** (conservative): requires identical *binder names* across arms. Runs in the `opt.ml` fixed-point loop as the first pass (before `known-call`, `inline`, `cprop`) so floated lets are visible downstream in the same iteration. Safe post-Perceus because the hoisted let is identical (incl. RC ops) in every arm.
+- **`run_pre`** (Layer 1 — alpha-merge): allows arms to bind the shared RHS under *different* names (the common case after ANF, where each arm gets a fresh temporary). Floats one fresh `$jp…` binder and substitutes each arm's binder onto it via `rename_expr`. Wired in `bin/main.ml` **before** `Perceus.perceus` (after `beta-adt`, gated on `opt_enabled`) so RC is inserted once for the hoisted binding — renaming RC-decorated bindings post-Perceus is unsafe (double-free class). Loops internally to a fixpoint. 6 tests in `join_points` group (`pre_float_alpha`, `pre_no_float_diff_rhs` added).
+
+Because TIR is in ANF, a shared inline sub-expression like `expensive(y)` in `expensive(y)+1` / `expensive(y)+2` is already a head `let` with a fresh temporary per arm — so Layer 1 captures the spec's motivating example.
+
+**Remaining:**
+- **Layer 2 — non-leading / interleaved common lets.** Today only the *first* let of each arm is peeled. Generalize to a common pure binding anywhere in each arm's leading let-chain whose RHS does not depend on arm-specific earlier bindings, with reordering. Medium.
+- **Layer 3 — general non-let-bound cross-arm CSE.** Hoist shared sub-expressions ANF did not already lift to a head let. Mostly subsumed by ANF; low marginal value. Would gate on `Purity.is_pure`.
+- **(Not planned) true GHC continuation join points.** March lowers `ECase` straight to an LLVM `switch` with a natural CFG merge block, so the continuation-duplication that join points solve in GHC does not arise here; little payoff absent aggressive case-of-case floating.
 
 ---
 
