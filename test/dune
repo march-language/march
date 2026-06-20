@@ -80,6 +80,24 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; ── FFI ABI accessor unit test (hermetic: stubs march_incrc/decrc) ───────
+(rule
+ (targets test_ffi_runner)
+ (deps    test_ffi.c
+          ../runtime/march_ffi.c
+          ../runtime/march_ffi.h
+          ../runtime/march_runtime.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -O2 -I../runtime
+               -o %{targets}
+               test_ffi.c
+               ../runtime/march_ffi.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_ffi_runner))
+ (action  (run ./test_ffi_runner)))
+
 ; ── Phase 5: per-process heap, message passing, GC tests ─────────────────
 (rule
  (targets test_heap_runner)

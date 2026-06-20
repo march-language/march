@@ -807,8 +807,11 @@ and emit_decl ctx = function
         let ps = String.concat ", "
           (List.map (fun (n, t) ->
              Printf.sprintf "%s : %s" n.txt (fmt_ty t)) ef.ef_params) in
-        line ctx (Printf.sprintf "fn %s(%s) : %s"
-          ef.ef_name.txt ps (fmt_ty ef.ef_ret_ty))
+        let sym = match ef.ef_symbol with
+          | Some s -> Printf.sprintf " = %S" s
+          | None -> "" in
+        line ctx (Printf.sprintf "fn %s(%s) : %s%s"
+          ef.ef_name.txt ps (fmt_ty ef.ef_ret_ty) sym)
       ) ext.ext_fns
     );
     line ctx "end"

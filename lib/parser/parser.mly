@@ -760,8 +760,8 @@ extern_decl:
 extern_fn_decl:
   | FN; name = lower_name;
     LPAREN; params = separated_list(COMMA, typed_param); RPAREN;
-    COLON; ret = ty
-    { { ef_name = name; ef_params = params; ef_ret_ty = ret } }
+    COLON; ret = ty; sym = option(preceded(EQUALS, STRING))
+    { { ef_name = name; ef_params = params; ef_ret_ty = ret; ef_symbol = sym } }
 
 typed_param:
   | name = lower_name; COLON; t = ty { (name, t) }

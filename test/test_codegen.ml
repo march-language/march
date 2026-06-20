@@ -4572,6 +4572,32 @@ let test_cap_extern_missing_needs_error () =
   end|} in
   Alcotest.(check bool) "extern without needs is an error" true (has_errors ctx)
 
+(* ── FFI: extern fn = "symbol" binds the explicit C symbol ──────────────── *)
+
+let test_ffi_extern_explicit_symbol_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    needs Ffi
+    extern "crc" : Cap(Ffi) do
+      fn crc32(n: Int): Int = "crc32_compute"
+    end
+    fn main() : Unit do println(int_to_string(crc32(255))) end
+  end|} in
+  Alcotest.(check bool) "calls the explicit C symbol" true
+    (ir_contains ir "@crc32_compute");
+  Alcotest.(check bool) "does not emit the default <lib>_<fn> name" false
+    (ir_contains ir "@crc_crc32")
+
+let test_ffi_extern_default_symbol_ir () =
+  let ir = emit_actor_ir {|mod Test do
+    needs Ffi
+    extern "crc" : Cap(Ffi) do
+      fn crc32(n: Int): Int
+    end
+    fn main() : Unit do println(int_to_string(crc32(255))) end
+  end|} in
+  Alcotest.(check bool) "falls back to <lib>_<fn> when no symbol given" true
+    (ir_contains ir "@crc_crc32")
+
 (* ── Capability enforcement path tests ─────────────────────────────────── *)
 
 (* Verify capability errors surface via check_capabilities (the effects-module
@@ -5107,6 +5133,8 @@ let codegen_suites =
           Alcotest.test_case "transitive chain error"    `Quick test_cap_transitive_chain_error;
           Alcotest.test_case "extern with needs ok"      `Quick test_cap_extern_with_needs_ok;
           Alcotest.test_case "extern missing needs error" `Quick test_cap_extern_missing_needs_error;
+          Alcotest.test_case "ffi: extern explicit symbol in IR" `Quick test_ffi_extern_explicit_symbol_ir;
+          Alcotest.test_case "ffi: extern default symbol in IR"  `Quick test_ffi_extern_default_symbol_ir;
           Alcotest.test_case "effects entry point clean"  `Quick test_cap_effects_clean;
           Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
           Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;

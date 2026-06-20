@@ -335,6 +335,7 @@ and extern_fn = {
   ef_name : name;
   ef_params : (name * ty) list;          (** Parameter names and types *)
   ef_ret_ty : ty;                        (** Return type *)
+  ef_symbol : string option;             (** Explicit C symbol; default <lib>_<fn> *)
 }
 
 (** A module is a list of declarations. *)
