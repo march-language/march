@@ -83,6 +83,16 @@ static void gc_trace_atexit(void) {
 
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
+/* Net count of live march objects (alloc +, free-on-rc=0 -).  An FFI/test
+ * leak gauge exposed via march_live_allocs(); relaxed atomics keep the hot
+ * RC paths cheap.  See specs/2026-06-19-c-ffi-abi-design.md §14.4. */
+static _Atomic int64_t march_live_alloc_count = 0;
+int64_t march_live_allocs(void) {
+    return atomic_load_explicit(&march_live_alloc_count, memory_order_relaxed);
+}
+#define MARCH_ALLOC_BUMP() atomic_fetch_add_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+#define MARCH_FREE_BUMP()  atomic_fetch_sub_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+
 void *march_alloc(int64_t sz) {
     void *p = calloc(1, (size_t)sz);
     if (!p) { fputs("march: out of memory\n", stderr); exit(1); }
@@ -91,6 +101,7 @@ void *march_alloc(int64_t sz) {
     h->rc  = 1;
     h->tag = 0;
     h->pad = 0;
+    MARCH_ALLOC_BUMP();
     if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
     return p;
 }
@@ -149,6 +160,7 @@ void march_decrc(void *p) {
     if (gc_trace_on())
         gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev == 1) {
+        MARCH_FREE_BUMP();
         free(p);
     } else if (prev < 1) {
         /* RC underflow: double-decrement detected — abort to surface the bug
@@ -166,7 +178,7 @@ int64_t march_decrc_freed(void *p) {
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (gc_trace_on())
         gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
-    if (prev == 1) { free(p); return 1; }
+    if (prev == 1) { MARCH_FREE_BUMP(); free(p); return 1; }
     if (prev < 1) {
         /* RC underflow: decrement-on-zero (or worse) detected.  Without this
          * guard we'd silently double-free.  Mirror march_decrc's behaviour. */
@@ -214,6 +226,7 @@ void march_decrc_local(void *p) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
             abort();
         }
+        MARCH_FREE_BUMP();
         free(p);
         /* TODO(audit-M4): when per-process arena becomes the default
          * allocator, plumb the owning march_heap_t* through to here and
@@ -279,6 +292,7 @@ void *march_string_alloc(int64_t len) {
     s->tag = MARCH_STRING_TAG;
     s->pad = 0;
     s->len = len;
+    MARCH_ALLOC_BUMP();
     return s;
 }
 

@@ -48,6 +48,16 @@ march_slice march_bytes_borrow(march_value b);  /* borrow a Bytes value's octets
 /* Validate that [p..p+len) is well-formed UTF-8.  Returns 1 if valid, 0 if not. */
 int march_utf8_valid(const uint8_t *p, size_t len);
 
+/* Construct an owned (rc=1) String/Bytes by copying len bytes. */
+march_value march_str_new(const uint8_t *utf8, size_t len);
+march_value march_bytes_new(const uint8_t *data, size_t len);
+
+/* ── Option / Result constructors (each takes ownership of its payload) ──────*/
+march_value march_none(void);           /* Option None  (tag 0) */
+march_value march_some(march_value v);  /* Option Some  (tag 1) */
+march_value march_ok(march_value v);    /* Result Ok    (tag 0) */
+march_value march_err(march_value e);   /* Result Err   (tag 1) */
+
 /* ── Reference counting (tag-aware) ──────────────────────────────────────────
  * Safe to call on Int/Bool/heap value words: tagged words are a no-op, heap
  * words adjust the refcount.  NEVER call on a Float word — its bit pattern may

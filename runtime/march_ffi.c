@@ -61,6 +61,35 @@ int         march_is_heap(march_value v)  { return v != 0 && (v & 1) == 0; }
 void       *march_as_ptr(march_value v)   { return (void *)(intptr_t)v; }
 march_value march_from_ptr(void *p)       { return (march_value)(intptr_t)p; }
 
+/* ── String/Bytes constructors ───────────────────────────────────────────── */
+march_value march_str_new(const uint8_t *utf8, size_t len) {
+    march_string *s = (march_string *)march_string_alloc((int64_t)len);
+    if (len) memcpy(s->data, utf8, len);
+    return march_from_ptr(s);
+}
+march_value march_bytes_new(const uint8_t *data, size_t len) {
+    return march_str_new(data, len);
+}
+
+/* ── Option / Result constructors ────────────────────────────────────────────
+ * ADT cell = 16-byte header {rc;tag;pad} + 8-byte fields at offset 16.
+ * march_alloc sets rc=1, tag=0; we overwrite tag and (for 1-field cells) field0. */
+static march_value mk_cell0(int32_t tag) {
+    void *p = march_alloc(16);
+    ((march_hdr *)p)->tag = tag;
+    return march_from_ptr(p);
+}
+static march_value mk_cell1(int32_t tag, march_value field0) {
+    void *p = march_alloc(24);
+    ((march_hdr *)p)->tag = tag;
+    ((int64_t *)p)[2] = field0;          /* field0 at byte offset 16 */
+    return march_from_ptr(p);
+}
+march_value march_none(void)          { return mk_cell0(0); }
+march_value march_some(march_value v) { return mk_cell1(1, v); }
+march_value march_ok(march_value v)   { return mk_cell1(0, v); }
+march_value march_err(march_value e)  { return mk_cell1(1, e); }
+
 march_value march_dup(march_value v) {
     if (march_is_heap(v)) march_incrc(march_as_ptr(v));
     return v;

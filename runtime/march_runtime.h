@@ -13,6 +13,10 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 /* Heap allocation: allocates sz bytes zeroed, returns a pointer. */
 void *march_alloc(int64_t sz);
 
+/* Net count of live march objects (alloc + / free-on-rc=0 -). FFI/test leak
+   gauge; see specs/2026-06-19-c-ffi-abi-design.md §14.4. */
+int64_t march_live_allocs(void);
+
 /* Reference counting (atomic — safe for cross-thread shared values). */
 void  march_incrc(void *p);
 void  march_decrc(void *p);
