@@ -280,6 +280,12 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-19, External Function Interface — Phase 1: ABI core + primitives)
+
+- **FFI ABI core** (`runtime/march_ffi.h`, `runtime/march_ffi.c`): the stable C ABI bindings link against (the `erl_nif.h` analog). Version handshake (`march_ffi_abi_version`/`MARCH_FFI_ABI_VERSION`); value accessors that hide the tagged-word convention (`march_make_int`/`get_int` = `(n<<1)|1`/`>>1`, `make_bool`/`get_bool`, `make_float`/`get_float` = untagged bitcast, `is_heap`/`as_ptr`/`from_ptr`); tag-aware `march_dup`/`march_drop` (no-op on tagged ints, incrc/decrc on heap). Wired into both the JIT `.so` build and the native `--compile` link in `bin/main.ml` (and `test/test_helpers.ml`); auto-invalidated by the runtime-header digest. Spec: `specs/2026-06-19-c-ffi-abi-design.md`; plan: `specs/plans/2026-06-19-c-ffi-phase1.md`.
+- **`extern fn name(...) : T = "symbol"`** — bind an existing C symbol by explicit name (`lib/ast/ast.ml` `ef_symbol`, `lib/parser/parser.mly`, `lib/format/format.ml`, `lib/tir/lower.ml`). Falls back to the original `<lib>_<fn>` convention when omitted. Primitive (Int/Float/Bool) marshalling verified end-to-end (compiled `dbl(21)` → `42`).
+- **Test count: 1575** (281 compiler + 224 eval + 286 codegen + 780 stdlib; 2 new codegen tests in the `capabilities` group) plus a standalone hermetic C ABI unit test (`test/test_ffi.c`, `dune build test/test_ffi_runner`). Phases 2–9 (strings/bytes, resources, Result/error, blocking, interpreter parity, forge build, generators) remain open.
+
 ## Current State (as of 2026-06-19, P1 Layer 1 — alpha-merge let-floating pre-Perceus)
 
 - **P1 join-points Layer 1** (`lib/tir/join_points.ml`, `bin/main.ml`): new `run_pre` entry point floats a common leading `let` above an `ECase` even when arms bind the shared RHS under *different* fresh ANF names — it mints one `$jp…` binder and substitutes each arm's binder onto it via a new `rename_expr` helper. Wired BEFORE `Perceus.perceus` (post-Perceus renaming of RC-decorated bindings is unsafe), so RC is inserted once for the hoisted binding. The existing conservative `run` (identical binder names) still runs in the post-Perceus opt loop. Because TIR is in ANF, this captures the spec's motivating shared-inline-subexpr case. Layers 2–3 (interleaved lets; general non-let CSE) remain open — see `specs/optimizations.md` §P1.

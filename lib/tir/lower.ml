@@ -2140,7 +2140,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         List.iter (fun (ef : Ast.extern_fn) ->
             let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
             let ret = lower_ty ef.ef_ret_ty in
-            let c_name = edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+            let c_name = match ef.ef_symbol with
+              | Some s -> s
+              | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
             externs := { Tir.ed_march_name = ef.ef_name.txt;
                          ed_c_name = c_name;
                          ed_params = params;
