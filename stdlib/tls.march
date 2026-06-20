@@ -26,6 +26,7 @@
 --   end
 
 mod Tls do
+  needs IO.NetConnect.TLS
 
   -- TlsVersion: minimum accepted TLS protocol version
   type TlsVersion = Tls12 | Tls13

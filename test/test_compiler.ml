@@ -3593,6 +3593,75 @@ let test_cap_body_pure_no_warn () =
   Alcotest.(check bool) "pure module has no body-scan warnings" false
     (has_warning_with ctx "builtin")
 
+(* ── IO.Mut: Vault shared-mutable-state capability ──────────────────────── *)
+
+let test_cap_body_missing_mut () =
+  let ctx = typecheck {|mod Store do
+    fn setup() do
+      let _ = vault_new("cache")
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "vault_new without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Mut")
+
+let test_cap_body_mut_ok () =
+  let ctx = typecheck {|mod Store do
+    needs IO.Mut
+    fn setup() do
+      let _ = vault_new("cache")
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "vault_new with needs IO.Mut: no warning" false
+    (has_warning_with ctx "IO.Mut")
+
+let test_cap_body_mut_parent_ok () =
+  let ctx = typecheck {|mod Store do
+    needs IO
+    fn setup() do
+      let _ = vault_new("cache")
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO umbrella covers vault_new: no warning" false
+    (has_warning_with ctx "IO.Mut")
+
+(* ── IO.NetConnect.TLS: encrypted transport capability ──────────────────── *)
+
+let test_cap_body_missing_tls () =
+  let ctx = typecheck {|mod Secure do
+    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+  end|} in
+  Alcotest.(check bool) "tls_connect without needs: body-scan warning" true
+    (has_warning_with ctx "IO.NetConnect.TLS")
+
+let test_cap_body_tls_ok () =
+  let ctx = typecheck {|mod Secure do
+    needs IO.NetConnect.TLS
+    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+  end|} in
+  Alcotest.(check bool) "tls_connect with needs IO.NetConnect.TLS: no warning" false
+    (has_warning_with ctx "IO.NetConnect.TLS")
+
+let test_cap_body_tls_parent_ok () =
+  let ctx = typecheck {|mod Secure do
+    needs IO.NetConnect
+    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+  end|} in
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no warning" false
+    (has_warning_with ctx "IO.NetConnect.TLS")
+
+(* ── IO.Telemetry: declaration-only cap; needs parses without error ──────── *)
+
+let test_cap_body_telemetry_decl_ok () =
+  let ctx = typecheck {|mod Metrics do
+    needs IO.Telemetry
+    fn record_hit() do () end
+  end|} in
+  Alcotest.(check bool) "needs IO.Telemetry: parses and typechecks cleanly" false
+    (has_errors ctx)
+
 (* task_spawn without needs IO.Spawn — body-scan warns. *)
 let test_cap_body_missing_spawn () =
   let ctx = typecheck {|mod Spawner do
@@ -3995,9 +4064,16 @@ let compiler_suites =
           Alcotest.test_case "body satisfies declared needs"          `Quick test_cap_body_need_satisfied_by_body;
           Alcotest.test_case "DLet body triggers body-scan"          `Quick test_cap_body_let_body;
           Alcotest.test_case "pure module: no spurious warning"       `Quick test_cap_body_pure_no_warn;
-          Alcotest.test_case "task_spawn missing needs: warn IO.Spawn" `Quick test_cap_body_missing_spawn;
-          Alcotest.test_case "task_spawn with needs IO.Spawn: no warn" `Quick test_cap_body_spawn_ok;
-          Alcotest.test_case "needs IO umbrella covers task_spawn"     `Quick test_cap_body_spawn_parent_ok;
+          Alcotest.test_case "task_spawn missing needs: warn IO.Spawn"    `Quick test_cap_body_missing_spawn;
+          Alcotest.test_case "task_spawn with needs IO.Spawn: no warn"    `Quick test_cap_body_spawn_ok;
+          Alcotest.test_case "needs IO umbrella covers task_spawn"         `Quick test_cap_body_spawn_parent_ok;
+          Alcotest.test_case "vault_new missing needs: warn IO.Mut"        `Quick test_cap_body_missing_mut;
+          Alcotest.test_case "vault_new with needs IO.Mut: no warn"        `Quick test_cap_body_mut_ok;
+          Alcotest.test_case "needs IO umbrella covers vault_new"          `Quick test_cap_body_mut_parent_ok;
+          Alcotest.test_case "tls_connect missing needs: warn TLS"         `Quick test_cap_body_missing_tls;
+          Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
+          Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
+          Alcotest.test_case "needs IO.Telemetry: valid declaration"       `Quick test_cap_body_telemetry_decl_ok;
         ] );
   ]
 

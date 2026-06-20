@@ -340,6 +340,14 @@ march/
 - **Fold: boolean comparison identities + int literal comparison folding** (`lib/tir/fold.ml`): `x==true→x`, `x==false→not x`, `a<b→bool` for literal operands. Fire after cprop produces known-constant comparisons.
 - **29 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously + 5 fbip_p8 + 4 join_points + 5 simplify P15 + 4 fold + 2 native_arrays). Test count: **1537** (302 codegen + 780 stdlib).
 
+## Current State (as of 2026-06-19, Cap(IO.Mut) + Cap(IO.NetConnect.TLS) + Cap(IO.Telemetry))
+
+- **`IO.Mut`** — shared mutable state via Vault. 15 vault_* builtins in `builtin_cap_table`; `stdlib/vault.march` annotated with `needs IO.Mut`. Proves a module never touches process-global shared state.
+- **`IO.NetConnect.TLS`** — encrypted transport, child of `IO.NetConnect`. 8 tls_* builtins (tls_close/tls_ctx_free exempt as cleanup). `stdlib/tls.march` annotated with `needs IO.NetConnect.TLS`. Declaring only this cap (not IO.NetConnect) proves a module uses no plaintext TCP.
+- **`IO.Telemetry`** — declaration-only observability cap, leaf under `IO`. No body-scan builtins yet (telemetry stdlib in bastion repo). Propagates transitively via Check 4 so importers see the annotation.
+- **`docs/capabilities.md`** updated: corrected hierarchy tree, added IO.Mut / IO.NetConnect.TLS / IO.Telemetry sections with code examples.
+- **10 new tests** in `cap_body_enforce` (7 enforcement + 1 declaration parse check + 2 others from IO.Spawn session = 27 total). 291 compiler tests pass.
+
 ## Current State (as of 2026-06-19, Cap(IO.Spawn) — task-spawning capability)
 
 - **`IO.Spawn` leaf** added to `io_cap_hierarchy` (child of `IO`). Five builtins added to `builtin_cap_table`: `task_spawn`, `task_spawn_link`, `task_spawn_steal`, `task_spawn_with_cancel`, `get_work_pool`. The existing Phase 2 body-scan pass picks them up automatically. `needs IO.Spawn` suppresses the warning; `needs IO` also satisfies it via `cap_subsumes`. 3 new tests in `cap_body_enforce` (17 total).

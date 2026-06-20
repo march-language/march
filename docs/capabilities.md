@@ -34,15 +34,21 @@ The compiler enforces this transitively: if your module calls `Server.listen`, y
 
 ```
 IO
-├── IO.Console
-├── IO.FileRead
-├── IO.FileWrite
+├── IO.Console          — stdout/stderr (println, print)
 ├── IO.FileSystem
+│   ├── IO.FileRead     — read files, list directories
+│   └── IO.FileWrite    — write, delete, rename files/dirs
 ├── IO.Network
-│   ├── IO.Network.Client
-│   └── IO.Network.Server
-├── IO.Process
-└── IO.Clock
+│   ├── IO.NetConnect   — outbound TCP, WebSocket
+│   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
+│   │   └── IO.Database — database connections (declaration-only; child of NetConnect)
+│   └── IO.NetListen    — bind + listen on a port
+├── IO.Process          — env vars, child processes, process exit
+├── IO.Clock            — wall clock, monotonic time
+├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
+├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
+├── IO.Mut              — shared mutable state (Vault tables)
+└── IO.Telemetry        — telemetry/observability emission (declaration-only)
 ```
 
 A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability:
@@ -53,6 +59,56 @@ fn restricted(cap : Cap(IO)) : () do
   Server.listen(net_cap, 8080)
 end
 ```
+
+### IO.Mut — shared mutable state
+
+`IO.Mut` covers any access to Vault tables, which are process-global shared mutable hash tables. A module that touches Vault (read or write) must declare `needs IO.Mut`:
+
+```march
+mod Cache do
+  needs IO.Mut
+
+  fn store(key : String, val : Int) : () do
+    let tbl = vault_new("app_cache")
+    vault_set(tbl, key, val)
+  end
+end
+```
+
+A module with no `needs IO.Mut` declaration is statically guaranteed never to touch shared mutable state — useful for proving that library code is side-effect-free.
+
+### IO.NetConnect.TLS — encrypted transport
+
+`IO.NetConnect.TLS` is a child of `IO.NetConnect`. It covers all TLS operations: establishing sessions (`tls_connect`, `tls_accept`), reading/writing (`tls_read`, `tls_write`), and querying session metadata (`tls_peer_cn`, `tls_negotiated_alpn`).
+
+Declaring `needs IO.NetConnect.TLS` (without `IO.NetConnect`) proves the module only uses encrypted connections — no plaintext TCP. Declaring `needs IO.NetConnect` covers both plain TCP and TLS.
+
+```march
+mod HttpsClient do
+  needs IO.NetConnect.TLS  -- no plaintext TCP allowed in this module
+
+  fn fetch(fd, h, host) do
+    tls_connect(fd, h, host)
+  end
+end
+```
+
+### IO.Telemetry — observability (declaration-only)
+
+`IO.Telemetry` is a declaration-only capability: the compiler accepts `needs IO.Telemetry` as a semantic annotation but does not (yet) enforce it via body scanning. Use it to make telemetry emission visible in a module's surface contract:
+
+```march
+mod Metrics do
+  needs IO.Telemetry
+
+  fn record_request(duration : Int) : () do
+    -- emit telemetry event via your telemetry module
+    ...
+  end
+end
+```
+
+Applications that import `Metrics` will see `IO.Telemetry` in their transitive `needs` set, making observability a visible architectural concern.
 
 ### `extern` blocks
 

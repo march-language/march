@@ -902,6 +902,9 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.Random",     Some "IO");
   ("IO.Database",   Some "IO.NetConnect");
   ("IO.Spawn",      Some "IO");
+  ("IO.Mut",        Some "IO");
+  ("IO.Telemetry",  Some "IO");
+  ("IO.NetConnect.TLS", Some "IO.NetConnect");
 ]
 
 (** Maps builtin function names to the IO capability they require.
@@ -978,6 +981,31 @@ let builtin_cap_table : (string * string) list = [
   ("task_spawn_steal",      "IO.Spawn");
   ("task_spawn_with_cancel","IO.Spawn");
   ("get_work_pool",         "IO.Spawn");
+  (* IO.Mut — shared mutable state via Vault *)
+  ("vault_new",             "IO.Mut");
+  ("vault_set",             "IO.Mut");
+  ("vault_set_ttl",         "IO.Mut");
+  ("vault_get",             "IO.Mut");
+  ("vault_drop",            "IO.Mut");
+  ("vault_update",          "IO.Mut");
+  ("vault_put_new",         "IO.Mut");
+  ("vault_incr",            "IO.Mut");
+  ("vault_push_capped",     "IO.Mut");
+  ("vault_ns_set",          "IO.Mut");
+  ("vault_ns_get",          "IO.Mut");
+  ("vault_ns_drop",         "IO.Mut");
+  ("vault_keys",            "IO.Mut");
+  ("vault_whereis",         "IO.Mut");
+  ("vault_size",            "IO.Mut");
+  (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
+  ("tls_client_ctx",        "IO.NetConnect.TLS");
+  ("tls_server_ctx",        "IO.NetConnect.TLS");
+  ("tls_connect",           "IO.NetConnect.TLS");
+  ("tls_accept",            "IO.NetConnect.TLS");
+  ("tls_read",              "IO.NetConnect.TLS");
+  ("tls_write",             "IO.NetConnect.TLS");
+  ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
+  ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.

@@ -23,6 +23,7 @@
 -- no background sweeper thread; expired entries are evicted on access.
 
 mod Vault do
+  needs IO.Mut
 
   doc "Create a new named vault table.  Returns an opaque table handle."
   fn new(name) do
