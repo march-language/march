@@ -34,7 +34,7 @@ let let_wrap ty op args =
   let rhs = Tir.EApp (op_var, args) in
   Tir.ELet (var, rhs, Tir.EAtom (Tir.AVar var))
 
-let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
+let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
   (* x + 0 | 0 + x → x *)
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitInt 0)]) when f.Tir.v_name = "+" ->
     changed := true; Tir.EAtom x
@@ -118,16 +118,21 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool (not b)))
 
-  (* String identities x ++ "" → x and "" ++ x → x are DELIBERATELY NOT folded
-     here.  This Simplify pass runs *after* Perceus (see the pipeline in
-     bin/main.ml: Perceus then Opt.run).  Perceus treats `"" ++ x` as a concat
-     that allocates a fresh owned string distinct from `x`, and emits a separate
-     dec_rc for each.  Folding the concat down to the bare atom `x` aliases the
-     two together while leaving both dec_rc operations in place — two decrements
-     on one object → RC underflow / double-free.  Eliminating an RC-tracked
-     allocation is unsound once RC ops have been inserted; the saved allocation
-     (one empty-string concat copy) is not worth the miscompile.  If this fold is
-     ever wanted, it must run in a pre-Perceus simplification pass instead. *)
+  (* String identities x ++ "" → x and "" ++ x → x.
+     These are ONLY sound BEFORE Perceus (guarded by [pre_perceus]).  Perceus
+     treats `"" ++ x` as a concat that allocates a fresh owned string distinct
+     from `x`, emitting a separate dec_rc for each; folding the concat to the
+     bare atom `x` post-Perceus aliases the two while leaving both dec_rc ops in
+     place — two decrements on one object → RC underflow / double-free.  Run
+     pre-Perceus the value is not yet RC-tracked, so aliasing `x` is safe: RC is
+     inserted once for `x` afterwards.  The post-Perceus Opt loop passes
+     [pre_perceus=false] (the default) so this fold never fires there. *)
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitString "")])
+    when pre_perceus && f.Tir.v_name = "++" ->
+    changed := true; Tir.EAtom x
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString ""); x])
+    when pre_perceus && f.Tir.v_name = "++" ->
+    changed := true; Tir.EAtom x
 
   (* Boolean conditional identities arising from guard desugaring / inlining *)
 
@@ -160,20 +165,28 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
 
   (* Recurse *)
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, simplify_expr ~changed rhs, simplify_expr ~changed body)
+    Tir.ELet (v, simplify_expr ~changed ~pre_perceus rhs,
+              simplify_expr ~changed ~pre_perceus body)
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
-      List.map (fun b -> { b with Tir.br_body = simplify_expr ~changed b.Tir.br_body }) branches,
-      Option.map (simplify_expr ~changed) default)
+      List.map (fun b ->
+        { b with Tir.br_body = simplify_expr ~changed ~pre_perceus b.Tir.br_body }) branches,
+      Option.map (simplify_expr ~changed ~pre_perceus) default)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
-      List.map (fun fd -> { fd with Tir.fn_body = simplify_expr ~changed fd.Tir.fn_body }) fns,
-      simplify_expr ~changed body)
+      List.map (fun fd ->
+        { fd with Tir.fn_body = simplify_expr ~changed ~pre_perceus fd.Tir.fn_body }) fns,
+      simplify_expr ~changed ~pre_perceus body)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (simplify_expr ~changed e1, simplify_expr ~changed e2)
+    Tir.ESeq (simplify_expr ~changed ~pre_perceus e1,
+              simplify_expr ~changed ~pre_perceus e2)
   | other -> other
 
-let run ~changed (m : Tir.tir_module) : Tir.tir_module =
+(** [pre_perceus] enables rewrites that are only sound before RC insertion
+    (currently the empty-string concat identities).  The post-Perceus Opt loop
+    omits it (default [false]); the dedicated pre-Perceus pipeline step passes
+    [~pre_perceus:true]. *)
+let run ?(pre_perceus = false) ~changed (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (fun fd ->
-      { fd with Tir.fn_body = simplify_expr ~changed fd.Tir.fn_body }
+      { fd with Tir.fn_body = simplify_expr ~changed ~pre_perceus fd.Tir.fn_body }
     ) m.Tir.tm_fns }

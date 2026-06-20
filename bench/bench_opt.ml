@@ -155,7 +155,7 @@ let () =
 
   Printf.printf "── Individual passes (single iteration) ─────────────────────\n%!";
   let m_after_fold     = run_pass "fold"       March_tir.Fold.run     m in
-  let m_after_simplify = run_pass "simplify"   March_tir.Simplify.run m_after_fold in
+  let m_after_simplify = run_pass "simplify"   (fun ~changed m -> March_tir.Simplify.run ~changed m) m_after_fold in
   let m_after_inline   = run_pass "inline"     March_tir.Inline.run   m in
   let m_after_dce      = run_pass "dce"        March_tir.Dce.run      m_after_simplify in
   ignore m_after_inline; ignore m_after_dce;

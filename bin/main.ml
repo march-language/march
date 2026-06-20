@@ -1144,6 +1144,15 @@ let compile filename =
               then March_tir.Join_points.run_pre ~changed:(ref false) tir
               else tir in
     snap_tir "tir-join-points-pre" tir;
+    (* Pre-Perceus simplify: folds that are only sound before RC insertion,
+       currently the empty-string concat identities (x ++ "" → x, "" ++ x → x).
+       Folding here aliases the result to `x` while it is still un-RC-tracked, so
+       Perceus inserts a single correct dec_rc afterwards.  The post-Perceus Opt
+       loop runs Simplify with pre_perceus=false and never applies these. *)
+    let tir = if !opt_enabled
+              then March_tir.Simplify.run ~pre_perceus:true ~changed:(ref false) tir
+              else tir in
+    snap_tir "tir-simplify-pre" tir;
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";

@@ -2011,11 +2011,14 @@ let test_simplify_bool_and_true () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* The empty-string concat identities are sound ONLY before Perceus, so they
+   fire under ~pre_perceus:true (the dedicated pre-Perceus pipeline step) and
+   are deliberately suppressed in the default post-Perceus Opt loop. *)
 let test_simplify_string_concat_empty_rhs () =
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TString in
   let m = mk_module [mk_fn "f" (app "++" [x; slit ""])] in
-  let m' = March_tir.Simplify.run ~changed m in
+  let m' = March_tir.Simplify.run ~pre_perceus:true ~changed m in
   Alcotest.(check bool) "changed" true !changed;
   Alcotest.(check string) "x++\"\"=x"
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
@@ -2025,11 +2028,20 @@ let test_simplify_string_concat_empty_lhs () =
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TString in
   let m = mk_module [mk_fn "f" (app "++" [slit ""; x])] in
-  let m' = March_tir.Simplify.run ~changed m in
+  let m' = March_tir.Simplify.run ~pre_perceus:true ~changed m in
   Alcotest.(check bool) "changed" true !changed;
   Alcotest.(check string) "\"\"++x=x"
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
     (March_tir.Tir.show_expr (first_body m'))
+
+(* Guard: the default (post-Perceus) Simplify must NOT fold empty-string concat,
+   else it would alias an RC-tracked value and double-free. *)
+let test_simplify_string_concat_not_folded_post_perceus () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TString in
+  let m = mk_module [mk_fn "f" (app "++" [x; slit ""])] in
+  let _m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "unchanged post-Perceus" false !changed
 
 (* P14 — boolean conditional identities ──────────────────────────── *)
 
@@ -5053,6 +5065,7 @@ let codegen_suites =
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
         Alcotest.test_case "str_concat_empty_rhs" `Quick test_simplify_string_concat_empty_rhs;
         Alcotest.test_case "str_concat_empty_lhs" `Quick test_simplify_string_concat_empty_lhs;
+        Alcotest.test_case "str_concat_not_folded_post_perceus" `Quick test_simplify_string_concat_not_folded_post_perceus;
         Alcotest.test_case "if_then_true_else_false"  `Quick test_simplify_if_then_true_else_false;
         Alcotest.test_case "if_then_false_else_true"  `Quick test_simplify_if_then_false_else_true;
         Alcotest.test_case "eq_self"                  `Quick test_simplify_eq_self;
