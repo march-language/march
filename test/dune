@@ -799,3 +799,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_leak.expected native_ffi_leak.out)))
+
+; ── Regression: a user fn colliding with an interface method (show) must not
+; ── hijack interface dispatch inside prelude generics (println/str).
+(rule
+ (targets native_iface_method_collision native_iface_method_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/iface_method_collision.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_iface_method_collision
+        native/iface_method_collision.march)
+   (with-stdout-to native_iface_method_collision.out
+        (system "./native_iface_method_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))

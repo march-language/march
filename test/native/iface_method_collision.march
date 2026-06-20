@@ -1,0 +1,18 @@
+-- Regression: a user top-level function whose name collides with an interface
+-- method (here `show`, from the prelude Show interface) must not hijack the
+-- interface dispatch used inside prelude generics (println -> show, str ->
+-- to_string).  Previously mono linked println's internal show(String) to this
+-- user `show` (Option -> Int), miscompiling println into march_print(<garbage>).
+mod Test do
+  fn mk() : Option(Int) do Some(7) end
+  fn show(r: Option(Int)) : Int do
+    match r do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  fn main() : Unit do
+    println(int_to_string(show(mk())))   -- user's show resolves by type -> 7
+    println("ok")                         -- builtin show(String) -> ok
+  end
+end

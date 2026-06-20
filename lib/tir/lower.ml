@@ -581,13 +581,21 @@ and lower_expr (e : Ast.expr) : Tir.expr =
             | None -> f_expr)
          | None ->
            (* Check for interface method resolution: redirect to the mangled
-              impl function based on the concrete type of the first argument. *)
+              impl function based on the concrete type of the first argument.
+              BUT if the current module defines a free function with this exact
+              name (e.g. the user wrote `fn show(...)`, colliding with the Show
+              interface method), that definition shadows the interface for calls
+              in this module — matching the typechecker's overload resolution.
+              Without this, `show(someOption)` would dispatch to Show$Option.show
+              (String) while typecheck bound it to the user's `show` (Int),
+              feeding a String where an Int is expected. *)
            (match args with
-            | first_arg :: _ ->
+            | first_arg :: _
+              when not (Hashtbl.mem !_current_module_fns name) ->
               (match resolve_iface_method name (Typecheck.span_of_expr first_arg) with
                | Some mangled_name -> Ast.EVar { txt = mangled_name; span = fn_span }
                | None -> f_expr)
-            | [] -> f_expr))
+            | _ -> f_expr))
       | _ -> f_expr
     in
     lower_to_atom_k resolved_f (fun f_atom ->
@@ -1997,6 +2005,20 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         end
       | _ -> ()
     ) stdlib_context;
+  (* Make the entry module's own top-level function names the "current module"
+     scope for Pass 2, mirroring what lower_mod_decls does for nested modules.
+     This lets a bare call in the entry module resolve to the module's own
+     function (e.g. a user `fn show` shadowing the Show interface method) rather
+     than being redirected to an interface impl — matching the typechecker.
+     Nested DMod lowering saves/restores this via with_current_module_fns. *)
+  let entry_fn_names =
+    List.filter_map (function
+      | Ast.DFn (def, _) -> Some def.fn_name.txt
+      | _ -> None) m.mod_decls
+  in
+  (let t = Hashtbl.create (List.length entry_fn_names) in
+   List.iter (fun n -> Hashtbl.replace t n ()) entry_fn_names;
+   _current_module_fns := t);
   (* Pass 2: Lower all other declarations. *)
   List.iter (fun d ->
       match d with
