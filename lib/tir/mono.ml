@@ -268,6 +268,52 @@ let rec rewrite_calls
     (record_to_typename : (string, string) Hashtbl.t)
     (expr             : Tir.expr)
   : Tir.expr =
+  (* Concrete type of the first call argument (for interface dispatch). *)
+  let first_arg_ty (args : Tir.atom list) : Tir.ty =
+    match args with
+    | (Tir.AVar v) :: _ -> v.Tir.v_ty
+    | (Tir.ALit l) :: _ ->
+      (match l with
+       | March_ast.Ast.LitInt _    -> Tir.TInt
+       | March_ast.Ast.LitFloat _  -> Tir.TFloat
+       | March_ast.Ast.LitBool _   -> Tir.TBool
+       | March_ast.Ast.LitString _ -> Tir.TString
+       | March_ast.Ast.LitAtom _   -> Tir.TUnit)
+    | _ -> Tir.TUnit
+  in
+  (* If [name] is an interface method, resolve it to the impl for the concrete
+     first-argument type.  Returns the mangled impl function name, or None.
+     Mirrors the inline resolution in the [None] branch below; used to fix the
+     case where a user top-level function (e.g. `show`) shares a name with an
+     interface method and would otherwise hijack the dispatch inside prelude
+     generics like `println`. *)
+  let iface_impl_name (name : string) (args : Tir.atom list) : string option =
+    let rec find_iface_impls n =
+      match Hashtbl.find_opt iface_methods n with
+      | Some impls -> Some impls
+      | None ->
+        (match String.index_opt n '.' with
+         | None -> None
+         | Some i -> find_iface_impls (String.sub n (i + 1) (String.length n - i - 1)))
+    in
+    match find_iface_impls name with
+    | None -> None
+    | Some impls ->
+      let type_name = match first_arg_ty args with
+        | Tir.TCon (n, _) -> Some n
+        | Tir.TRecord fs ->
+          let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+          Hashtbl.find_opt record_to_typename (mangle_ty (Tir.TRecord sorted))
+        | Tir.TString -> Some "String"
+        | Tir.TInt    -> Some "Int"
+        | Tir.TFloat  -> Some "Float"
+        | Tir.TBool   -> Some "Bool"
+        | _ -> None
+      in
+      (match type_name with
+       | None -> None
+       | Some tname -> resolve_impl_by_type impls tname)
+  in
   match expr with
   | Tir.EApp (f_var, args) ->
     (* Ensure functions passed as arguments are discovered *)
@@ -356,6 +402,30 @@ let rec rewrite_calls
                     | _ -> ());
                    let f_var' = { f_var with Tir.v_name = mangled_name } in
                    Tir.EApp (f_var', args)))))
+     | Some orig_fn
+       when (* Interface-method-name collision: the callee name is a user
+               function, but it is ALSO an interface method, AND the user
+               function's first-parameter type does not match this call's
+               concrete first-argument type, AND an interface impl exists for
+               that argument type.  This happens when a user defines e.g.
+               `fn show(r: Option(Int))` (named `show`, the Show method) and a
+               prelude generic like `println` calls `show(x)` on a different
+               type (e.g. String): mono must dispatch to the interface impl
+               (Show$String.show), not the user function. Same-type calls (the
+               user's own show(Option), or stdlib `BigInt.compare(BigInt)`)
+               have matching param/arg types and are left untouched. *)
+            (match iface_impl_name orig_name args, orig_fn.Tir.fn_params with
+             | Some _, p :: _ ->
+               mangle_ty p.Tir.v_ty <> mangle_ty (first_arg_ty args)
+             | _ -> false) ->
+       (match iface_impl_name orig_name args with
+        | Some mangled_name ->
+          (match Hashtbl.find_opt fn_table mangled_name with
+           | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
+             Queue.add (mangled_name, orig_impl, []) worklist
+           | _ -> ());
+          Tir.EApp ({ f_var with Tir.v_name = mangled_name }, args)
+        | None -> expr)
      | Some orig_fn
        when not (List.exists (fun v ->
          has_tvar v.Tir.v_ty ||

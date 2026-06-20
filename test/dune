@@ -80,18 +80,30 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
-; ── FFI ABI accessor unit test (hermetic: stubs march_incrc/decrc) ───────
+; ── FFI ABI unit test (links the real runtime for genuine alloc/RC/gauge) ─
 (rule
  (targets test_ffi_runner)
  (deps    test_ffi.c
           ../runtime/march_ffi.c
           ../runtime/march_ffi.h
-          ../runtime/march_runtime.h)
+          ../runtime/march_runtime.c
+          ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c
+          ../runtime/march_message.c
+          ../runtime/march_heap.c
+          ../runtime/march_gc.c
+          (glob_files ../runtime/*.h))
  (action  (run %{cc}
-               -std=gnu11 -Wall -Wextra -O2 -I../runtime
+               -std=gnu11 -Wall -I../runtime -O2
                -o %{targets}
                test_ffi.c
-               ../runtime/march_ffi.c)))
+               ../runtime/march_ffi.c
+               ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c
+               ../runtime/march_message.c
+               ../runtime/march_heap.c
+               ../runtime/march_gc.c
+               -lpthread -lm)))
 
 (rule
  (alias   runtest)
@@ -810,3 +822,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_counter.expected native_actor_counter.out)))
+
+; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
+(rule
+ (targets native_ffi_leak native_ffi_leak.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/ffi_leak.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_leak
+        native/ffi_leak.march)
+   (with-stdout-to native_ffi_leak.out
+        (system "./native_ffi_leak")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_leak.expected native_ffi_leak.out)))
+
+; ── Regression: a user fn colliding with an interface method (show) must not
+; ── hijack interface dispatch inside prelude generics (println/str).
+(rule
+ (targets native_iface_method_collision native_iface_method_collision.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/iface_method_collision.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_iface_method_collision
+        native/iface_method_collision.march)
+   (with-stdout-to native_iface_method_collision.out
+        (system "./native_iface_method_collision")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))

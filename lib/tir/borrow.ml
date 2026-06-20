@@ -447,5 +447,16 @@ let infer_module (m : Tir.tir_module) : borrow_map =
     if !changed then iterate bm' else bm'
   in
   let result = iterate init in
+  (* Seed user-defined extern (FFI) functions: their heap arguments are
+     borrowed by default (Phase 2 FFI ownership convention), so Perceus drops
+     them caller-side after the call.  Without this seeding they fall through to
+     the empty hardcoded [extern_borrow_table] → owned → the caller never frees
+     the arg and a borrow-style binding leaks. *)
+  let result =
+    List.fold_left (fun acc (ed : Tir.extern_decl) ->
+      let modes = Array.of_list (List.map needs_rc ed.Tir.ed_params) in
+      StringMap.add ed.Tir.ed_march_name modes acc
+    ) result m.Tir.tm_externs
+  in
   if Lazy.force _borrow_debug then print_borrow_map m result;
   result
