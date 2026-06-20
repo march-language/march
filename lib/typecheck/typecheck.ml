@@ -901,6 +901,7 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.Clock",      Some "IO");
   ("IO.Random",     Some "IO");
   ("IO.Database",   Some "IO.NetConnect");
+  ("IO.Spawn",      Some "IO");
 ]
 
 (** Maps builtin function names to the IO capability they require.
@@ -971,6 +972,12 @@ let builtin_cap_table : (string * string) list = [
   ("random_bytes",          "IO.Random");
   ("stdlib_random_bytes",   "IO.Random");
   ("uuid_v4",               "IO.Random");
+  (* IO.Spawn *)
+  ("task_spawn",            "IO.Spawn");
+  ("task_spawn_link",       "IO.Spawn");
+  ("task_spawn_steal",      "IO.Spawn");
+  ("task_spawn_with_cancel","IO.Spawn");
+  ("get_work_pool",         "IO.Spawn");
 ]
 
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.

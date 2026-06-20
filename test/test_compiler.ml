@@ -3593,6 +3593,41 @@ let test_cap_body_pure_no_warn () =
   Alcotest.(check bool) "pure module has no body-scan warnings" false
     (has_warning_with ctx "builtin")
 
+(* task_spawn without needs IO.Spawn — body-scan warns. *)
+let test_cap_body_missing_spawn () =
+  let ctx = typecheck {|mod Spawner do
+    fn run() do
+      let _ = task_spawn(fn _ -> 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "task_spawn without needs: body-scan warning" true
+    (has_warning_with ctx "IO.Spawn")
+
+(* task_spawn with needs IO.Spawn — no warning. *)
+let test_cap_body_spawn_ok () =
+  let ctx = typecheck {|mod Spawner do
+    needs IO.Spawn
+    fn run() do
+      let _ = task_spawn(fn _ -> 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "task_spawn with needs IO.Spawn: no warning" false
+    (has_warning_with ctx "IO.Spawn")
+
+(* needs IO (parent) satisfies IO.Spawn body call. *)
+let test_cap_body_spawn_parent_ok () =
+  let ctx = typecheck {|mod Spawner do
+    needs IO
+    fn run() do
+      let _ = task_spawn(fn _ -> 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO umbrella covers task_spawn: no warning" false
+    (has_warning_with ctx "IO.Spawn")
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3960,6 +3995,9 @@ let compiler_suites =
           Alcotest.test_case "body satisfies declared needs"          `Quick test_cap_body_need_satisfied_by_body;
           Alcotest.test_case "DLet body triggers body-scan"          `Quick test_cap_body_let_body;
           Alcotest.test_case "pure module: no spurious warning"       `Quick test_cap_body_pure_no_warn;
+          Alcotest.test_case "task_spawn missing needs: warn IO.Spawn" `Quick test_cap_body_missing_spawn;
+          Alcotest.test_case "task_spawn with needs IO.Spawn: no warn" `Quick test_cap_body_spawn_ok;
+          Alcotest.test_case "needs IO umbrella covers task_spawn"     `Quick test_cap_body_spawn_parent_ok;
         ] );
   ]
 

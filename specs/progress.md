@@ -340,6 +340,11 @@ march/
 - **Fold: boolean comparison identities + int literal comparison folding** (`lib/tir/fold.ml`): `x==true→x`, `x==false→not x`, `a<b→bool` for literal operands. Fire after cprop produces known-constant comparisons.
 - **29 new tests** (3 beta_adt + 3 cprop P12 + 3 cprop previously + 5 fbip_p8 + 4 join_points + 5 simplify P15 + 4 fold + 2 native_arrays). Test count: **1537** (302 codegen + 780 stdlib).
 
+## Current State (as of 2026-06-19, Cap(IO.Spawn) — task-spawning capability)
+
+- **`IO.Spawn` leaf** added to `io_cap_hierarchy` (child of `IO`). Five builtins added to `builtin_cap_table`: `task_spawn`, `task_spawn_link`, `task_spawn_steal`, `task_spawn_with_cancel`, `get_work_pool`. The existing Phase 2 body-scan pass picks them up automatically. `needs IO.Spawn` suppresses the warning; `needs IO` also satisfies it via `cap_subsumes`. 3 new tests in `cap_body_enforce` (17 total).
+- **Test count: 284 compiler** (3 new); stdlib/eval/codegen unchanged.
+
 ## Current State (as of 2026-06-18, P13 + P14 compiler optimizations)
 
 - **P13 — EField of known record** (`lib/tir/cprop.ml`): added a `field_env` (separate from the literal env) that tracks `ERecord`, `EUpdate`, and record-alias bindings. `EField(AVar r, k)` folds to the atom at position `k` when `r` is in fenv. `EUpdate` merges new fields over the base record's known fields, so `{r with y=99}.x` still folds `x` from the base. RC operations are never substituted.
