@@ -334,6 +334,7 @@ and extern_def = {
 and extern_fn = {
   ef_name : name;
   ef_params : (name * ty) list;          (** Parameter names and types *)
+  ef_param_consumed : bool list;         (** Per-param: true if `consume` (ownership transferred to the binding) *)
   ef_ret_ty : ty;                        (** Return type *)
   ef_symbol : string option;             (** Explicit C symbol; default <lib>_<fn> *)
 }

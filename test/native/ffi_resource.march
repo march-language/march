@@ -1,6 +1,7 @@
--- Regression: an opaque FFI resource (native handle) is RC-managed by March;
--- its destructor runs when March drops it, with no leak.  `resource Acc` is an
--- abstract heap type; values are minted/used only via extern functions.
+-- Regression: FFI resources (opaque native handles, destructor on Perceus drop)
+-- and the `consume` param mode (ownership transferred to the binding).
+-- `finish(consume a)` reads the total and drops the resource itself; March must
+-- NOT also drop it (that was a double-free / RC underflow before `consume`).
 mod Test do
   needs Ffi
   resource Acc
@@ -8,26 +9,27 @@ mod Test do
     fn live_allocs(): Int = "march_live_allocs"
     fn acc_new(): Acc = "ffi_acc_new"
     fn acc_push(a: Acc, n: Int): Int = "ffi_acc_push"
-    fn acc_total(a: Acc): Int = "ffi_acc_total"
+    fn finish(consume a: Acc): Int = "ffi_acc_finish"
   end
   fn one() : Int do
     let a = acc_new()
     acc_push(a, 10)
     acc_push(a, 32)
-    acc_total(a)
+    finish(a)                              -- consume: binding drops a
   end
   fn churn(n: Int) : Unit do
     if n == 0 do () else
       let a = acc_new()
       acc_push(a, 1)
+      finish(a)
       churn(n - 1)
     end
   end
   fn main() : Unit do
     println(int_to_string(one()))          -- correctness: 42
-    churn(50)                              -- warmup
+    churn(50)
     let base = live_allocs()
     churn(2000)
-    println(int_to_string(live_allocs() - base))  -- leak: 0 (every resource freed, dtor ran)
+    println(int_to_string(live_allocs() - base))  -- leak/double-free check: 0
   end
 end

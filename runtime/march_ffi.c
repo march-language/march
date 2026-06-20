@@ -166,6 +166,13 @@ march_value ffi_acc_new(void)               { TestAcc *a = malloc(sizeof *a); a-
 int64_t ffi_acc_push(march_value h, int64_t n) { TestAcc *a = march_resource_get(h, ffi_acc_tid());
                                                  a->acc += n; return 0; }
 int64_t ffi_acc_total(march_value h)         { return ((TestAcc *)march_resource_get(h, ffi_acc_tid()))->acc; }
+/* CONSUMES h: reads the total, then drops the resource itself (the binding owns
+ * it).  Must be declared `consume h` so March does NOT also drop it. */
+int64_t ffi_acc_finish(march_value h) {
+    int64_t total = ((TestAcc *)march_resource_get(h, ffi_acc_tid()))->acc;
+    march_drop(h);
+    return total;
+}
 
 /* Owned return: build a fresh copy of the borrowed String (rc=1). */
 march_value ffi_test_sdup(march_value s) {

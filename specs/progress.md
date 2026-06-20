@@ -280,6 +280,12 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — `consume` ownership + error protocol)
+
+- **`consume` parameter mode** (`lib/parser/parser.mly`, `lib/ast/ast.ml` `ef_param_consumed`, `lib/tir/tir.ml` `ed_consumed`, `lib/tir/lower.ml`, `lib/tir/borrow.ml`): an extern param prefixed `consume` transfers ownership to the binding — Perceus does NOT emit a caller-side drop, so a binding like `fn finish(consume h: Acc): Int` reads then `march_drop`s the resource itself. Without it, a binding that drops its arg double-freed (RC underflow). `consume` is a **contextual** word, not a reserved keyword (it is a common identifier in linear-types code): recognized only as the leading word of an extern parameter via a two-identifier grammar rule. The formatter prints it back (round-trip safe).
+- **Error protocol confirmed**: a fallible binding declared `: Result(T, E)` returns `Ok`/`Err` built on the C side via `march_ok`/`march_err` — both arms round-trip (`test/native/ffi_result` → `7`/`nan`). (The env-routed `march_raise(env, …)` convenience is still deferred; `march_ok`/`march_err` cover the cases today.)
+- **Verified** (`test/native/ffi_resource` now also exercises `consume finish` over 2000 cycles → `42`/`0`, no leak, no double-free). compiler 293, codegen 318 (2 pre-existing str_concat), stdlib 783, C ABI unit test all green.
+
 ## Current State (as of 2026-06-20, External Function Interface — Phase 3: resources)
 
 - **Opaque native resources with destructor-on-drop** (`runtime/march_ffi.{h,c}`, `runtime/march_runtime.{c,h}`): `march_resource_type(name, dtor)` (idempotent registry), `march_resource_new(type_id, native_ptr)` (mints an `MARCH_RESOURCE_TAG` heap cell `[rc][tag][pad][native_ptr@16][dtor@24][type_id@32]`), `march_resource_get(v, type_id)` (type-checked borrow, aborts on mismatch via new `march_fatal`). Every RC free-on-zero path (`march_decrc`/`decrc_freed`/`decrc_local`) now runs the cell's destructor on the native pointer before freeing — so Perceus drops fire C cleanup deterministically.

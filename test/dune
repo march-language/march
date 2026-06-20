@@ -918,3 +918,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_resource.expected native_ffi_resource.out)))
+
+; ── FFI error protocol: a Result-returning binding (march_ok / march_err) ──
+(rule
+ (targets native_ffi_result native_ffi_result.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/ffi_result.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_result
+        native/ffi_result.march)
+   (with-stdout-to native_ffi_result.out
+        (system "./native_ffi_result")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_result.expected native_ffi_result.out)))
