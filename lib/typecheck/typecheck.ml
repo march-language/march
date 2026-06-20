@@ -4795,6 +4795,11 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
             List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
           ) param_tys
         ) actor.actor_handlers
+    (* An extern block declares `extern "lib" : Cap(X)` — that Cap(X) is a use
+       of the capability, so a module with `needs X` + an extern block must not
+       trigger the "declared but not used" warning. *)
+    | Ast.DExtern (edef, sp) ->
+      List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty edef.ext_cap_ty)
     | _ -> []
   ) decls in
   (* Body-scan: collect builtin calls that imply a cap need.

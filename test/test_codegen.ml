@@ -4426,6 +4426,18 @@ let test_cap_unused_needs_warning () =
   Alcotest.(check bool) "unused needs produces a diagnostic" true
     (March_errors.Errors.has_diagnostics ctx)
 
+(* An extern block's Cap(X) counts as USING X, so `needs X` + an extern block
+   must NOT trigger the "declared but not used" warning. *)
+let test_cap_extern_block_counts_as_use () =
+  let ctx = typecheck {|mod Test do
+    needs Ffi
+    extern "m" : Cap(Ffi) do
+      fn dbl(n : Int) : Int = "ffi_test_dbl"
+    end
+  end|} in
+  Alcotest.(check bool) "extern Cap(Ffi) satisfies needs Ffi: no diagnostics" false
+    (March_errors.Errors.has_diagnostics ctx)
+
 (* Cap(IO) as supertype covers Cap(IO.Network) usage *)
 let test_cap_supertype_covers_subtype () =
   let ctx = typecheck {|mod Test do
@@ -5122,6 +5134,7 @@ let codegen_suites =
           Alcotest.test_case "declared needs ok"         `Quick test_cap_needs_declared_ok;
           Alcotest.test_case "missing needs error"       `Quick test_cap_missing_needs_error;
           Alcotest.test_case "unused needs warning"      `Quick test_cap_unused_needs_warning;
+          Alcotest.test_case "extern block counts as cap use" `Quick test_cap_extern_block_counts_as_use;
           Alcotest.test_case "supertype covers subtype"  `Quick test_cap_supertype_covers_subtype;
           Alcotest.test_case "wrong subtype error"       `Quick test_cap_needs_wrong_subtype;
           Alcotest.test_case "multiple needs"            `Quick test_cap_multiple_needs;
