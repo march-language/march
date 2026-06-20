@@ -3122,6 +3122,42 @@ let test_join_points_pre_no_float_different_rhs () =
   let _m' = March_tir.Join_points.run_pre ~changed m in
   Alcotest.(check bool) "not changed" false !changed
 
+(* ── P6 Repr classification ──────────────────────────────────────────────── *)
+
+let test_repr_newtype_int () =
+  let tds = [March_tir.Tir.TDVariant ("UserId", [("UserId", [March_tir.Tir.TInt])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("UserId", [])) with
+  | March_tir.Repr.Newtype March_tir.Tir.TInt -> ()
+  | other -> Alcotest.failf "expected Newtype TInt, got %s"
+      (match other with March_tir.Repr.Boxed -> "Boxed" | _ -> "other")
+
+let test_repr_newtype_ptr () =
+  let tds = [March_tir.Tir.TDVariant ("Wrap", [("Wrap", [March_tir.Tir.TString])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Wrap", [])) with
+  | March_tir.Repr.Newtype March_tir.Tir.TString -> ()
+  | _ -> Alcotest.fail "expected Newtype TString"
+
+let test_repr_multivariant_is_boxed () =
+  (* Option-shaped stays Boxed in milestone 1 (niche is the follow-on plan). *)
+  let tds = [March_tir.Tir.TDVariant
+    ("Option", [("None", []); ("Some", [March_tir.Tir.TInt])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Option", [])) with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for Option in milestone 1"
+
+let test_repr_multifield_is_boxed () =
+  let tds = [March_tir.Tir.TDVariant
+    ("Point", [("Point", [March_tir.Tir.TInt; March_tir.Tir.TInt])])] in
+  match March_tir.Repr.repr_of_ty tds (March_tir.Tir.TCon ("Point", [])) with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for 2-field ctor"
+
+let test_repr_scalar_is_boxed () =
+  (* Bare scalars are not TCon ctors — classify as Boxed (irrelevant). *)
+  match March_tir.Repr.repr_of_ty [] March_tir.Tir.TInt with
+  | March_tir.Repr.Boxed -> ()
+  | _ -> Alcotest.fail "expected Boxed for TInt"
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -5008,6 +5044,13 @@ let codegen_suites =
         Alcotest.test_case "float_two_common_lets"  `Quick test_join_points_float_two_common_lets;
         Alcotest.test_case "pre_float_alpha"         `Quick test_join_points_pre_float_alpha;
         Alcotest.test_case "pre_no_float_diff_rhs"   `Quick test_join_points_pre_no_float_different_rhs;
+      ]);
+      ("repr", [
+        Alcotest.test_case "newtype_int"          `Quick test_repr_newtype_int;
+        Alcotest.test_case "newtype_ptr"          `Quick test_repr_newtype_ptr;
+        Alcotest.test_case "multivariant_boxed"   `Quick test_repr_multivariant_is_boxed;
+        Alcotest.test_case "multifield_boxed"     `Quick test_repr_multifield_is_boxed;
+        Alcotest.test_case "scalar_boxed"         `Quick test_repr_scalar_is_boxed;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

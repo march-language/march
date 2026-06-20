@@ -21,5 +21,11 @@ let find_variant (type_defs : Tir.type_def list) (name : string)
     | Tir.TDVariant (n, variants) when n = name -> Some variants
     | _ -> None) type_defs
 
-let repr_of_ty (_type_defs : Tir.type_def list) (_ty : Tir.ty) : repr =
-  Boxed
+let repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
+  match ty with
+  | Tir.TCon (name, _) ->
+    (match find_variant type_defs name with
+     (* Newtype: exactly one variant with exactly one field. *)
+     | Some [ (_ctor, [ payload ]) ] -> Newtype payload
+     | _ -> Boxed)
+  | _ -> Boxed
