@@ -34,17 +34,51 @@ let scc_impl_hash = function
 (* ── hash_module ────────────────────────────────────────────────────────── *)
 
 (** Compute hashes for all SCCs in a [tir_module].
-    Returns SCCs in topological order (dependencies before dependents). *)
+    Returns SCCs in topological order (dependencies before dependents).
+
+    [impl_hash] is a true Merkle root: a definition's hash folds in the
+    [impl_hash]es of every callee resolved in an EARLIER SCC. Because SCCs
+    are returned dependencies-first, a change to any transitive dependency
+    propagates into the hash of everything that (directly or indirectly)
+    calls it — closing the cross-SCC stale-cache hole where an inlined
+    callee's body change left the caller's hash unchanged.
+
+    Intra-SCC references (self-recursion, and the members of a mutually-
+    recursive [Group]) are NOT folded: a [Single] cannot depend on its own
+    not-yet-computed hash, and a [Group]'s members are already covered
+    collectively by the group hash, which spans all their bodies. *)
 let hash_module (m : tir_module) : hashed_scc list =
   let sccs = Scc.compute_sccs m.tm_fns in
   (* Build a name → fn_def lookup table *)
   let fn_table = Hashtbl.create (List.length m.tm_fns) in
   List.iter (fun fd -> Hashtbl.replace fn_table fd.fn_name fd) m.tm_fns;
+  let all_names = List.map (fun fd -> fd.fn_name) m.tm_fns in
+  (* name → impl_hash, populated as each SCC is processed (earlier SCCs only). *)
+  let resolved : (string, string) Hashtbl.t =
+    Hashtbl.create (List.length m.tm_fns) in
+  (* Merkle hash: base impl_hash of [fd], then fold the (sorted) impl_hashes
+     of its callees that live in already-processed SCCs. *)
+  let merkle_hash_fn (fd : fn_def) : Hash.hashed_fn =
+    let base = Hash.hash_fn_def fd in
+    let dep_hashes =
+      Scc.deps_of all_names fd
+      |> List.filter_map (fun n -> Hashtbl.find_opt resolved n)
+      |> List.sort String.compare
+    in
+    match dep_hashes with
+    | [] -> base
+    | _  ->
+      let impl_hash =
+        Blake3.hash_string (String.concat "" (base.Hash.impl_hash :: dep_hashes))
+      in
+      { base with Hash.impl_hash }
+  in
   List.map (fun scc ->
     match scc with
     | Scc.Single name ->
       let fd = Hashtbl.find fn_table name in
-      let h  = Hash.hash_fn_def fd in
+      let h  = merkle_hash_fn fd in
+      Hashtbl.replace resolved name h.Hash.impl_hash;
       let hdef : Cas.hashed_def = {
         Cas.hd_sig_hash  = h.Hash.sig_hash;
         Cas.hd_impl_hash = h.Hash.impl_hash;
@@ -52,15 +86,19 @@ let hash_module (m : tir_module) : hashed_scc list =
       } in
       HSingle { hs_hdef = hdef }
     | Scc.Group members ->
-      (* Sort by name, hash each, then derive group hash *)
+      (* Sort by name, hash each (folding cross-group deps), derive group hash *)
       let sorted = List.sort String.compare members in
       let hdefs = List.map (fun name ->
         let fd = Hashtbl.find fn_table name in
-        let h  = Hash.hash_fn_def fd in
+        let h  = merkle_hash_fn fd in
         { Cas.hd_sig_hash  = h.Hash.sig_hash;
           Cas.hd_impl_hash = h.Hash.impl_hash;
           Cas.hd_def       = Cas.FnDef fd; }
       ) sorted in
+      (* Publish member hashes only after the whole group is hashed, so
+         intra-group references are excluded from the fold. *)
+      List.iter2 (fun name hd -> Hashtbl.replace resolved name hd.Cas.hd_impl_hash)
+        sorted hdefs;
       (* Group hash: BLAKE3 of all individual impl_hashes concatenated *)
       let group_hash = Blake3.hash_string
         (String.concat "" (List.map (fun hd -> hd.Cas.hd_impl_hash) hdefs)) in
