@@ -201,6 +201,46 @@ let collision_suite =
              \  end\n\
               end\n")) ]
 
+(* P1b: a user `@[measure]` function can appear in predicates; guarded bounds
+   over user-defined structure verify via path sensitivity. *)
+let measure_prog body =
+  Printf.sprintf
+    "mod M do\n\
+    \  @[measure]\n\
+    \  fn size(t : Tree(a)) : Int do\n\
+    \    match t do\n\
+    \      Leaf -> 0\n\
+    \      Node(l, x, r) -> 1 + size(l) + size(r)\n\
+    \    end\n\
+    \  end\n\
+    \  fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do get(t, i) end\n\
+     %s\n\
+     end\n"
+    body
+
+let measure_suite =
+  [ gated "guarded bounds over a user measure verifies" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (measure_prog
+                "  fn use_it(t : Tree(Int), i : Int) : Int do\n\
+                \    if i >= 0 && i < size(t) do get(t, i) else 0 end\n\
+                \  end")));
+
+    gated "a guard contradicting the measure bound is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (measure_prog
+                "  fn bad(t : Tree(Int), i : Int) : Int do\n\
+                \    if i >= size(t) do get(t, i) else 0 end\n\
+                \  end")));
+
+    gated "unguarded measure bound is conservatively skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (measure_prog
+                "  fn ung(t : Tree(Int), i : Int) : Int do get(t, i) end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -208,4 +248,5 @@ let () =
       ("path-sensitivity", path_suite);
       ("postconditions", post_suite);
       ("assume-p1c", assume_suite);
-      ("collision-p1a", collision_suite) ]
+      ("collision-p1a", collision_suite);
+      ("measures-p1b", measure_suite) ]
