@@ -8,10 +8,15 @@ export function march_print(s) {
   process.stdout.write(String(s));
 }
 
-/** Float → string matching March semantics (no trailing .0 for integers) */
+/** Float → string matching C's %g (6 significant digits, no trailing zeros) */
 export function march_float_to_string(f) {
-  if (Number.isInteger(f)) return f.toFixed(1);
-  return String(f);
+  if (!isFinite(f)) return String(f);
+  const s = f.toPrecision(6);
+  // Remove trailing zeros and unnecessary decimal point (like C's %g)
+  if (s.includes('e')) {
+    return s.replace(/\.?0+(e)/, '$1');
+  }
+  return s.replace(/\.?0+$/, '');
 }
 
 /** String byte length (UTF-8 bytes, matching the native backend) */
@@ -57,7 +62,7 @@ export function march_string_from_chars(list) {
   return s;
 }
 
-export function march_string_join(sep, list) {
+export function march_string_join(list, sep) {
   const parts = [];
   while (list.$ === "Cons") { parts.push(list._0); list = list._1; }
   return parts.join(sep);
@@ -81,7 +86,7 @@ export function march_string_split(s, sep) {
 export function march_string_split_first(s, sep) {
   const i = s.indexOf(sep);
   if (i < 0) return { $: "None" };
-  return { $: "Some", _0: [s.slice(0, i), s.slice(i + sep.length)] };
+  return { $: "Some", _0: { _0: s.slice(0, i), _1: s.slice(i + sep.length) } };
 }
 
 export function march_string_replace(s, from, to) {

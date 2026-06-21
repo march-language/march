@@ -9,11 +9,25 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Marshalling
 
-- **Records / variants have no canonical codecs.** Only primitives (Int/Float/
-  Bool/Char), `String`/`Bytes`, `Option`/`Result`, and opaque `resource`s cross
-  the boundary. Passing/returning a user record or arbitrary ADT is unsupported
-  (spec §6.4 "generated codecs", v1.1). Workaround: decompose into primitives or
-  wrap behind a `resource`.
+- **Records / variants — codecs DONE for C (Phase 9 accessors + type-directed
+  generators).** `march_variant_tag`/`variant_field`/`record_field` +
+  `march_make_variant`/`make_record` move ADTs/records across the boundary
+  (`test/native/ffi_variant`), and `forge ffi gen-c` now *generates* repr-C
+  mirror structs + `march_decode_T`/`march_encode_T` so the author works with
+  plain C structs, never touching slots (`test/native/ffi_codec`, spec §6.4).
+  Remaining sub-gaps:
+  - **Field kinds beyond the typed set are passed through as raw `march_value`.**
+    The generated mirror fully types `Int`/`Bool` (raw `int64_t`), `Float`
+    (`double`), `String`/`Bytes` (`march_slice`), and nested records/variants;
+    `Option`/`Result`/`resource`/`List` fields are exposed as the raw
+    `march_value` (author uses `march_some`/`ok`/`err`/`march_resource_get` +
+    accessors). Fully-typed `Option`/`Result` field decoding is future.
+  - **Recursive types** (reachable from themselves) and **generic** record/
+    variant types get no generated codec — a by-value mirror can't represent
+    them; they fall back to the `march_value` passthrough.
+  - **No List-copy** (§6.6): `List(T)` ⇄ C array+length is unbuilt.
+  - **Rust `#[derive(Encoder/Decoder)]`** — the Rust analog of these codecs — is
+    the next follow-on; it reuses this exact ABI.
 - **`Option(Float)` / `Option(Unit)` returns are unsupported by the bare
   constructors.** `march_some`/`march_none` emit the P6 *niche* form (`Some(x)=x`,
   `None=0`), correct only for niche-eligible payloads (Int/Bool/String/heap).
@@ -75,12 +89,15 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
     only the runtime `.so`, so a symbol from a `[ffi]` shim isn't resolvable
     under `march file.march` — only via `--compile`. (Interpreter FFI still
     works for symbols that live in the runtime itself.)
-- **Binding generators — `gen-c` DONE (Phase 7), `import` deferred.**
-  `forge ffi gen-c <file.march>` generates a compilable C shim skeleton from the
-  `extern` blocks (correct signatures, String/Bytes borrow slices, resource-get
-  + `consume`-drop hints, typed Option/Result/String return stubs, TODO for the
-  call). `forge ffi import <header.h>` (C header → draft `extern` + `.ffi.toml`)
-  is still unbuilt — it needs a C-header parser (libclang), a heavier dependency.
+- **Binding generators — `gen-c` DONE (Phase 7) incl. type-directed codecs,
+  `import` deferred.** `forge ffi gen-c <file.march>` generates a compilable C
+  shim skeleton from the `extern` blocks (correct signatures, String/Bytes borrow
+  slices, resource-get + `consume`-drop hints, typed Option/Result/String return
+  stubs, TODO for the call) AND repr-C mirror structs + `march_decode_T`/
+  `march_encode_T` for every record/variant type reachable from a signature
+  (§6.4), wiring shim bodies to decode params / encode returns. `forge ffi import
+  <header.h>` (C header → draft `extern` + `.ffi.toml`) is still unbuilt — it
+  needs a C-header parser (libclang), a heavier dependency.
 - **ABI version handshake not enforced.** `march_ffi_abi_version()` exists but
   nothing checks it at link/dlopen time. Only meaningful once separately-built
   binding objects exist (Phase 5).
@@ -94,7 +111,9 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   `parse` round-trip via March, both Result arms). Still missing: the `march`
   crate (`#[march]`, `#[derive(Encoder/Decoder)]`, `ResourceArc`, panic→Err) and
   `forge add-rust` / `[[ffi.rust]]` cargo integration. The OCaml layer is also
-  future. (Record/variant marshalling for `#[derive]` needs Phase 9.)
+  future. (Record/variant codecs now work for C — Phase 9 accessors + the
+  `forge ffi gen-c` generators; the Rust `#[derive]` codecs are the direct
+  analog and reuse this same ABI.)
 - **No native→March callbacks (upcalls).** Bindings cannot call back into March
   closures. Would need `march_call(env, fn, args…)` and passing closures across
   the boundary as resources (spec §19). Future.

@@ -80,6 +80,13 @@ type ctx = {
      that lower.ml emits without the module prefix (e.g. "base64_encode" →
      "Crypto.base64_encode").  Populated during emit_module init. *)
   unqualified_fns : (string, string) Hashtbl.t;
+  (* Hot Code Reload (Phase 2). When [hr_config] is [Some], a boundary→boundary
+     call is emitted as a versioned-dispatch indirect call instead of a direct
+     one. [hr_names] interns reloadable fn names → NAME_ID; [hr_cur_module] is
+     the module of the function currently being emitted (the caller). *)
+  hr_config : Hot_reload.config option;
+  hr_names  : Hot_reload.Name_table.t;
+  mutable hr_cur_module : string;
   (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
      Used to emit correct load types even when TIR var has unresolved TVar. *)
   var_llvm_ty : (string, string) Hashtbl.t;
@@ -161,7 +168,8 @@ let target_int_ty = function
 (* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
 let cur_type_defs : Tir.type_def list ref = ref []
 
-let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false) () = {
+let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
+    ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build []) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
   ctr      = 0; blk = 0; str_ctr = 0;
@@ -185,6 +193,9 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false) () = {
   blocking_externs = Hashtbl.create 4;
   unknown_decls = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
+  hr_config = hot_reload;
+  hr_names;
+  hr_cur_module = "";
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   tco_loop_label = "";
@@ -198,6 +209,9 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false) () = {
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
 }
+
+(* Shared with the inliner; single source of truth in Hot_reload. *)
+let module_of_name = Hot_reload.module_of_name
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
 
@@ -2823,6 +2837,40 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                    emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r); ("ptr", p)
        | _      -> (ret_ty, r))
     end
+    else if (match ctx.hr_config with
+             | None -> false
+             | Some cfg ->
+               (* Boundary→boundary call: route through the versioned dispatch
+                  table so the callee can be hot-swapped at runtime. *)
+               Hashtbl.mem ctx.top_fns resolved_name
+               && Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
+                    ~callee_module:(module_of_name resolved_name)
+               && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
+    then begin
+      let name_id =
+        match Hot_reload.Name_table.id_of ctx.hr_names resolved_name with
+        | Some i -> i | None -> 0 in
+      let vslot = fresh ctx "hrver" in
+      emit ctx (Printf.sprintf "%s = alloca i32" vslot);
+      let fp = fresh ctx "hrfp" in
+      emit ctx (Printf.sprintf
+        "%s = call ptr @march_dispatch_enter(i32 %d, ptr %s)" fp name_id vslot);
+      let result =
+        if ret_ty = "void" then begin
+          emit ctx (Printf.sprintf "call void %s(%s)" fp args_str);
+          ("i64", "0")
+        end else begin
+          let r = fresh ctx "cr" in
+          emit ctx (Printf.sprintf "%s = call %s %s(%s)" r ret_ty fp args_str);
+          (ret_ty, r)
+        end
+      in
+      let v = fresh ctx "hrv" in
+      emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
+      emit ctx (Printf.sprintf
+        "call void @march_dispatch_leave(i32 %d, i32 %s)" name_id v);
+      result
+    end
     else if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       ("i64", "0")
@@ -4429,6 +4477,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.var_slot;
   Hashtbl.clear ctx.var_llvm_ty;
   ctx.ret_ty <- fn.Tir.fn_ret_ty;
+  ctx.hr_cur_module <- module_of_name fn.Tir.fn_name;
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
      single calling convention works regardless of whether the lambda's return
@@ -4771,6 +4820,11 @@ let emit_preamble ?(target=Native) ?(repl=false) (buf : Buffer.t) =
   Buffer.add_string buf (Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" (target_triple target));
   (* Core runtime declarations — needed on all targets *)
   Buffer.add_string buf {|; Runtime declarations
+; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)
+declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
+declare void @march_dispatch_leave(i32 %name_id, i32 %version)
+declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, i8 %kind)
+declare void @march_dispatch_init(i32 %n_slots)
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
@@ -5157,9 +5211,46 @@ let emit_main_wrapper (buf : Buffer.t) =
        call void @march_run_scheduler()\n\
        ret i32 0\n}\n"
 
-let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native) (m : Tir.tir_module) : string =
+let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
+    ?(hot_reload=None) (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
-  let ctx = make_ctx ~fast_math ~pmap_threshold () in
+  (* Hot Code Reload: intern the names of every reloadable (boundary) function
+     into NAME_IDs for the dispatch table. *)
+  let hr_names =
+    match hot_reload with
+    | None -> Hot_reload.Name_table.build []
+    | Some cfg ->
+      m.Tir.tm_fns
+      |> List.filter_map (fun fn ->
+           if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name)
+           then Some fn.Tir.fn_name else None)
+      |> Hot_reload.Name_table.build
+  in
+  (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
+     dispatch table and publishes each boundary function as its NATIVE baseline
+     version. impl_hash is null for the baseline (the reload server stamps real
+     hashes on activation); see runtime/march_dispatch.c. *)
+  let hr_setup =
+    match hot_reload with
+    | None -> ""
+    | Some cfg ->
+      let n = Hot_reload.Name_table.count hr_names in
+      if n = 0 then "" else begin
+        let b = Buffer.create 256 in
+        Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" n;
+        List.iter (fun (fn : Tir.fn_def) ->
+          if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name) then
+            match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
+            | Some id ->
+              Printf.bprintf b
+                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, ptr null, i8 0)\n"
+                id (mangle_extern fn.Tir.fn_name)
+            | None -> ()
+        ) m.Tir.tm_fns;
+        Buffer.contents b
+      end
+  in
+  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
   (* Record shape metadata requires the native runtime (march_extras.c);
      the WASM runtime does not provide march_record_set_shape. *)
   ctx.shape_meta <- not (is_wasm_target target);
@@ -5459,9 +5550,10 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native) (m : 
              declare void @march_spawn_main(ptr %%fn)\n\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+             %s\
                call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" mangled)
+               ret i32 0\n}\n" hr_setup mangled)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

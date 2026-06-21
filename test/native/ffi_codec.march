@@ -1,0 +1,25 @@
+-- FFI type-directed codecs: a C shim built from generated record/variant codecs
+-- round-trips March aggregates BOTH ways — decode a March-built Shape/Point into
+-- plain C structs, compute, and encode a fresh Point/Shape back. ffi_codec.c is
+-- the realistic post-`forge ffi gen-c` artifact (codecs + filled-in shims).
+mod Test do
+  needs Ffi
+  type Point = { x : Int, y : Int }
+  type Shape = Circle(Int) | Rect(Int, Int)
+  extern "codec" : Cap(Ffi) do
+    fn area(s: Shape): Int = "ffi_codec_area"
+    fn translate(p: Point, dx: Int, dy: Int): Point = "ffi_codec_translate"
+    fn widen(s: Shape): Shape = "ffi_codec_widen"
+  end
+  fn main() : Unit do
+    println(int_to_string(area(Circle(5))))      -- decode Circle: 3*5*5 = 75
+    println(int_to_string(area(Rect(4, 6))))     -- decode Rect:  4*6   = 24
+    let q = translate({ x: 1, y: 2 }, 10, 20)    -- decode Point, encode new Point
+    println(int_to_string(q.x))                  -- 11
+    println(int_to_string(q.y))                  -- 22
+    match widen(Circle(7)) do                    -- decode Circle, encode Rect
+      Rect(w, h) -> println(int_to_string(w * h))  -- 49
+      Circle(_)  -> println("circle")
+    end
+  end
+end

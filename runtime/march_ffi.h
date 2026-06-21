@@ -55,6 +55,25 @@ int march_utf8_valid(const uint8_t *p, size_t len);
 march_value march_str_new(const uint8_t *utf8, size_t len);
 march_value march_bytes_new(const uint8_t *data, size_t len);
 
+/* ── Variants (ADTs) & records ───────────────────────────────────────────────
+ * These move a field SLOT verbatim; a slot holds March's NATIVE per-field
+ * representation, which you must match by the field's STATIC type:
+ *   - Int / Bool  : a RAW machine int (NOT a tagged value word — do not use
+ *                   march_make_int / march_get_int on a slot).
+ *   - Float       : raw IEEE-754 bits (march_make_float / march_get_float).
+ *   - String/Bytes/heap/Option-niche : the value word itself (march_str_new to
+ *                   build, march_str_borrow to read).
+ * Read: tag / field by index (borrowed — the cell owns heap fields).
+ * Construct: make_variant / make_record take ownership of heap field words.
+ * Record fields are in canonical (name-sorted) order; `desc` is the shape
+ * descriptor "name:k;name:k;…" with k in {i,f,p,g} (i=Int/Bool, f=Float,
+ * p=String/heap, g=generic), names sorted ascending. */
+int32_t     march_variant_tag(march_value v);
+march_value march_variant_field(march_value v, int32_t i);
+march_value march_record_field(march_value v, int32_t i);
+march_value march_make_variant(int32_t tag, int32_t nfields, const march_value *fields);
+march_value march_make_record(const char *desc, int32_t nfields, const march_value *fields);
+
 /* ── Option / Result constructors (each takes ownership of its payload) ──────*/
 march_value march_none(void);           /* Option None  (tag 0) */
 march_value march_some(march_value v);  /* Option Some  (tag 1) */

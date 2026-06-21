@@ -310,6 +310,7 @@ let ensure_runtime_so () =
           (opt_file compress_c)
       else Printf.sprintf "%s%s%s" (opt_file sched_c) (opt_file extras_c) (opt_file compress_c))
       ^ (opt_file ffi_c)
+      ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
     let tls_c = Filename.concat runtime_dir "march_tls.c" in
@@ -442,6 +443,13 @@ let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
+(* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
+   versioned dispatch table so their functions can be hot-swapped at runtime. *)
+let hot_reload_prefix = ref None
+let hr_config () =
+  Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
+(* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
+let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
@@ -886,7 +894,7 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1197,6 +1205,7 @@ let compile filename =
           ~snap:(fun label m ->
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
+          ~hot_reload:(hr_config ())
           tir
       else tir
     in
@@ -1232,6 +1241,23 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
+          (* Copy march_runtime.mjs alongside the output so the import works *)
+          let out_dir = Filename.dirname out_bin in
+          let rt_dest = Filename.concat out_dir "march_runtime.mjs" in
+          let rt_candidates = [
+            "runtime/march_runtime.mjs";
+            Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.mjs";
+            Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.mjs";
+          ] in
+          (match List.find_opt Sys.file_exists rt_candidates with
+          | Some src ->
+            let ic = open_in src in
+            let content = really_input_string ic (in_channel_length ic) in
+            close_in ic;
+            let oc2 = open_out rt_dest in
+            output_string oc2 content;
+            close_out oc2
+          | None -> Printf.eprintf "march: warning: cannot find march_runtime.mjs\n");
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)
@@ -1248,7 +1274,7 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
@@ -1261,7 +1287,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1372,6 +1398,7 @@ let compile filename =
                   (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
               else Printf.sprintf "%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2) (opt_file2 compress_c2))
               ^ (opt_file2 ffi_c2)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
               (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
               ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
             in
@@ -1454,7 +1481,7 @@ let compile filename =
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
@@ -1897,6 +1924,8 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),
+     "<Prefix> Compile modules under <Prefix> with the hot-reload dispatch table");
     ("--ffi-c",      Arg.String (fun f -> ffi_c_files := f :: !ffi_c_files),
                      "<file.c>  Compile+link an FFI shim C source (forge [[ffi]]); repeatable");
     ("--ffi-link",   Arg.String (fun f -> ffi_link_flags := f :: !ffi_link_flags),
@@ -1914,6 +1943,8 @@ let () =
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (* --target js implies --compile (skip JIT, emit .mjs) *)
+  if !target_str = "js" || !target_str = "javascript" then do_compile := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
