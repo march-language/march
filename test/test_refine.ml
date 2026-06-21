@@ -100,9 +100,39 @@ let solver_suite =
          | Solver.Sat _ -> ()
          | _ -> Alcotest.fail "invalid VC should be sat (push/pop leaked?)")) ]
 
+let cache_suite =
+  (* Unique temp root per process to avoid concurrent-session collisions. *)
+  let root =
+    Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_refine_cache_%d" (Unix.getpid ()))
+  in
+  let vc : Smt.vc =
+    { decls = [ ("d", Smt.SInt) ]; assumptions = []; goal =
+      Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+  in
+  [ Alcotest.test_case "key is stable for equal VCs" `Quick (fun () ->
+        Alcotest.(check string) "key" (Vc_cache.key_of_vc vc)
+          (Vc_cache.key_of_vc vc));
+
+    Alcotest.test_case "miss then store then hit (unsat)" `Quick (fun () ->
+        let key = Vc_cache.key_of_vc vc in
+        Alcotest.(check bool) "initial miss" true
+          (Vc_cache.lookup ~root key = None);
+        Vc_cache.store ~root key Solver.Unsat;
+        Alcotest.(check bool) "hit unsat" true
+          (Vc_cache.lookup ~root key = Some Solver.Unsat));
+
+    Alcotest.test_case "round-trips a sat model" `Quick (fun () ->
+        let key = "ff" ^ String.make 62 'a' in
+        let r = Solver.Sat [ ("d", "0"); ("i", "10") ] in
+        Vc_cache.store ~root key r;
+        Alcotest.(check bool) "hit sat" true
+          (Vc_cache.lookup ~root key = Some r)) ]
+
 let () =
   Alcotest.run "march-refine"
     [ ("smoke", smoke_suite);
       ("smt", smt_suite);
       ("model", model_suite);
-      ("solver", solver_suite) ]
+      ("solver", solver_suite);
+      ("cache", cache_suite) ]
