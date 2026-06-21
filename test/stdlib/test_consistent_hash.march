@@ -1,0 +1,106 @@
+mod TestConsistentHash do
+
+  describe "new" do
+
+    test "new ring is empty" do
+      assert (ConsistentHash.is_empty(ConsistentHash.new(3)))
+    end
+
+    test "new ring size is 0" do
+      assert (ConsistentHash.size(ConsistentHash.new(3)) == 0)
+    end
+
+    test "get on empty ring returns None" do
+      assert (ConsistentHash.get(ConsistentHash.new(3), "mykey") == None)
+    end
+
+  end
+
+  describe "add" do
+
+    test "add one node, is not empty" do
+      let ring = ConsistentHash.add(ConsistentHash.new(3), "node1", "server1")
+      assert (not(ConsistentHash.is_empty(ring)))
+    end
+
+    test "add one node, size is 1" do
+      let ring = ConsistentHash.add(ConsistentHash.new(3), "node1", "server1")
+      assert (ConsistentHash.size(ring) == 1)
+    end
+
+    test "get on single-node ring returns that node" do
+      let ring = ConsistentHash.add(ConsistentHash.new(3), "node1", "server1")
+      assert (ConsistentHash.get(ring, "anykey") == Some("server1"))
+    end
+
+    test "add two nodes, size is 2" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", "s1"), "n2", "s2")
+      assert (ConsistentHash.size(ring) == 2)
+    end
+
+    test "add two nodes, get returns one of them" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", "s1"), "n2", "s2")
+      match ConsistentHash.get(ring, "testkey") do
+      None -> assert false
+      Some(v) -> assert (v == "s1" || v == "s2")
+      end
+    end
+
+  end
+
+  describe "remove" do
+
+    test "remove leaves ring empty if only one node" do
+      let ring = ConsistentHash.add(ConsistentHash.new(3), "n1", "s1")
+      let ring2 = ConsistentHash.remove(ring, "n1")
+      assert (ConsistentHash.is_empty(ring2))
+    end
+
+    test "remove decreases size" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", "s1"), "n2", "s2")
+      let ring2 = ConsistentHash.remove(ring, "n1")
+      assert (ConsistentHash.size(ring2) == 1)
+    end
+
+    test "after remove, get returns remaining node" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", "s1"), "n2", "s2")
+      let ring2 = ConsistentHash.remove(ring, "n2")
+      assert (ConsistentHash.get(ring2, "anykey") == Some("s1"))
+    end
+
+  end
+
+  describe "consistent mapping" do
+
+    test "same key always maps to same node" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(5), "n1", "s1"), "n2", "s2")
+      let v1 = ConsistentHash.get(ring, "mykey")
+      let v2 = ConsistentHash.get(ring, "mykey")
+      assert (v1 == v2)
+    end
+
+    test "different keys may map to different nodes" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(50), "n1", "s1"), "n2", "s2")
+      let v1 = ConsistentHash.get(ring, "key-alpha")
+      let v2 = ConsistentHash.get(ring, "key-beta")
+      -- with 50 replicas each, at least some keys should differ; just confirm they're valid
+      let valid = match v1 do
+        Some(s) -> s == "s1" || s == "s2"
+        None -> false
+        end
+      assert valid
+    end
+
+  end
+
+  describe "node_names" do
+
+    test "node_names reflects added nodes" do
+      let ring = ConsistentHash.add(ConsistentHash.add(ConsistentHash.new(3), "n1", "s1"), "n2", "s2")
+      let names = ConsistentHash.node_names(ring)
+      assert (List.length(names) == 2)
+    end
+
+  end
+
+end

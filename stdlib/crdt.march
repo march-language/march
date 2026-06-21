@@ -1,0 +1,306 @@
+-- CRDT: state-based conflict-free replicated data types.
+--
+-- All CRDTs share the same contract:
+--   merge(a, b) -- commutative, associative, idempotent join
+--   equal(a, b) -- structural equality on the internal state
+--
+-- Sub-modules:
+--   CRDT.GCounter    -- grow-only counter
+--   CRDT.PNCounter   -- increment/decrement counter (two GCounters)
+--   CRDT.LWWRegister -- last-write-wins register (uses VectorClock)
+--   CRDT.ORSet       -- observed-remove set (add/remove with UUID tags)
+
+mod CRDT do
+
+  -- ── GCounter ──────────────────────────────────────────────────────────────
+  -- Grow-only counter. Each actor has its own slot; value = sum of all slots.
+
+  mod GCounter do
+
+    -- Internal: map from actor IDs to non-negative counts.
+    ptype T = GCounter(Map(String, Int))
+
+    doc "An empty counter (all actor counts are 0)."
+    fn new() : T do
+      GCounter(Map.empty())
+    end
+
+    doc "Increment actor_id's slot by 1."
+    fn increment(c : T, actor_id : String) : T do
+      match c do
+      GCounter(m) ->
+        let v = Map.get_or(m, actor_id, 0, Map.str_cmp)
+        GCounter(Map.insert(m, actor_id, v + 1, Map.str_cmp))
+      end
+    end
+
+    doc "Add n to actor_id's slot (n must be >= 0)."
+    fn add(c : T, actor_id : String, n : Int) : T do
+      match c do
+      GCounter(m) ->
+        let v = Map.get_or(m, actor_id, 0, Map.str_cmp)
+        GCounter(Map.insert(m, actor_id, v + n, Map.str_cmp))
+      end
+    end
+
+    doc "Sum of all actor slots."
+    fn value(c : T) : Int do
+      match c do
+      GCounter(m) -> Map.fold(m, 0, fn (acc, _k, v) -> acc + v)
+      end
+    end
+
+    doc "Component-wise maximum — the CRDT join."
+    fn merge(a : T, b : T) : T do
+      match (a, b) do
+      (GCounter(ma), GCounter(mb)) ->
+        let merged = Map.merge_with(ma, mb, fn va -> fn vb -> Math.max_int(va, vb), Map.str_cmp)
+        GCounter(merged)
+      end
+    end
+
+    doc "True when both counters have identical internal state."
+    fn equal(a : T, b : T) : Bool do
+      match (a, b) do
+      (GCounter(ma), GCounter(mb)) ->
+        let keys_a = Map.keys(ma)
+        let keys_b_extra = List.filter(Map.keys(mb), fn k -> not(Map.contains_key(ma, k, Map.str_cmp)))
+        let all_keys = List.append(keys_a, keys_b_extra)
+        List.all(all_keys, fn k ->
+          Map.get_or(ma, k, 0, Map.str_cmp) == Map.get_or(mb, k, 0, Map.str_cmp))
+      end
+    end
+
+    doc "All (actor_id, count) pairs."
+    fn entries(c : T) : List((String, Int)) do
+      match c do
+      GCounter(m) -> Map.to_list(m)
+      end
+    end
+
+  end
+
+  -- ── PNCounter ─────────────────────────────────────────────────────────────
+  -- Positive-negative counter: two maps (P for increments, N for decrements).
+  -- Each map tracks per-actor counts; value = sum(P) - sum(N).
+
+  mod PNCounter do
+
+    -- Internal: two per-actor count maps (P = increments, N = decrements).
+    ptype T = PNCounter(Map(String, Int), Map(String, Int))
+
+    pfn map_inc(m : Map(String, Int), actor_id : String) : Map(String, Int) do
+      let v = Map.get_or(m, actor_id, 0, Map.str_cmp)
+      Map.insert(m, actor_id, v + 1, Map.str_cmp)
+    end
+
+    pfn map_sum(m : Map(String, Int)) : Int do
+      Map.fold(m, 0, fn (acc, _k, v) -> acc + v)
+    end
+
+    pfn map_max_merge(ma : Map(String, Int), mb : Map(String, Int)) : Map(String, Int) do
+      Map.merge_with(ma, mb, fn va -> fn vb -> Math.max_int(va, vb), Map.str_cmp)
+    end
+
+    doc "An empty counter with value 0."
+    fn new() : T do
+      PNCounter(Map.empty(), Map.empty())
+    end
+
+    doc "Increment the counter for actor_id."
+    fn increment(c : T, actor_id : String) : T do
+      match c do
+      PNCounter(pm, nm) -> PNCounter(map_inc(pm, actor_id), nm)
+      end
+    end
+
+    doc "Decrement the counter for actor_id."
+    fn decrement(c : T, actor_id : String) : T do
+      match c do
+      PNCounter(pm, nm) -> PNCounter(pm, map_inc(nm, actor_id))
+      end
+    end
+
+    doc "Current value: sum of increments minus sum of decrements."
+    fn value(c : T) : Int do
+      match c do
+      PNCounter(pm, nm) -> map_sum(pm) - map_sum(nm)
+      end
+    end
+
+    doc "Merge two PNCounters: join both P and N maps independently."
+    fn merge(a : T, b : T) : T do
+      match (a, b) do
+      (PNCounter(pa, na), PNCounter(pb, nb)) ->
+        PNCounter(map_max_merge(pa, pb), map_max_merge(na, nb))
+      end
+    end
+
+    doc "True when both PNCounters have the same net increments and decrements."
+    fn equal(a : T, b : T) : Bool do
+      match (a, b) do
+      (PNCounter(pa, na), PNCounter(pb, nb)) ->
+        map_sum(pa) == map_sum(pb) && map_sum(na) == map_sum(nb)
+      end
+    end
+
+  end
+
+  -- ── LWWRegister ───────────────────────────────────────────────────────────
+  -- Last-write-wins register: each write carries a VectorClock timestamp.
+  -- On concurrent writes, the one with the higher total timestamp wins;
+  -- ties are broken by picking the existing value (left bias).
+
+  mod LWWRegister do
+
+    -- LWWRegister(value, clock_at_write)
+    type T(a) = LWWRegister(a, VectorClock)
+
+    doc "Create a new register with an initial value and the clock at write time."
+    fn new(value : a, clock : VectorClock) : T(a) do
+      LWWRegister(value, clock)
+    end
+
+    doc "Read the current value."
+    fn get(r : T(a)) : a do
+      match r do
+      LWWRegister(v, _) -> v
+      end
+    end
+
+    doc "Read the vector clock of the last write."
+    fn clock(r : T(a)) : VectorClock do
+      match r do
+      LWWRegister(_, vc) -> vc
+      end
+    end
+
+    doc "Write a new value, advancing the actor's clock slot."
+    fn set(r : T(a), new_val : a, actor_id : String) : T(a) do
+      match r do
+      LWWRegister(_, vc) ->
+        let new_vc = VectorClock.increment(vc, actor_id)
+        LWWRegister(new_val, new_vc)
+      end
+    end
+
+    doc "Merge: keep the value with the causally later clock. Concurrent = keep left."
+    fn merge(a : T(x), b : T(x)) : T(x) do
+      match (a, b) do
+      (LWWRegister(_, vca), LWWRegister(_, vcb)) ->
+        match VectorClock.compare(vca, vcb) do
+        VectorClock.Before -> b
+        _                  -> a
+        end
+      end
+    end
+
+    doc "True when both registers hold the same clock (values may still differ on concurrent writes)."
+    fn equal(a : T(x), b : T(x)) : Bool do
+      match (a, b) do
+      (LWWRegister(_, vca), LWWRegister(_, vcb)) ->
+        match VectorClock.compare(vca, vcb) do
+        VectorClock.Equal -> true
+        _                 -> false
+        end
+      end
+    end
+
+  end
+
+  -- ── ORSet ─────────────────────────────────────────────────────────────────
+  -- Observed-remove set: add operations attach unique tags; remove clears those
+  -- tags. If a concurrent add and remove arrive, the add wins (the new tag
+  -- survives). Elements with at least one surviving tag are in the set.
+  --
+  -- Elements are identified by a caller-supplied `to_key : a -> String`
+  -- function (e.g. int_to_string, string_to_string, JSON serialisation).
+
+  mod ORSet do
+
+    -- Internal: map from to_key(elem) to (elem, surviving_tags).
+    ptype T(a) = ORSet(Map(String, (a, List(String))))
+
+    doc "An empty set."
+    fn new() : T(a) do
+      ORSet(Map.empty())
+    end
+
+    doc "Add elem with a unique tag (use UUID.v4() for the tag)."
+    fn add(s : T(a), elem : a, to_key : a -> String, tag : String) : T(a) do
+      match s do
+      ORSet(m) ->
+        let k = to_key(elem)
+        let existing_tags = match Map.get(m, k, Map.str_cmp) do
+          None         -> Nil
+          Some((_, ts)) -> ts
+          end
+        ORSet(Map.insert(m, k, (elem, Cons(tag, existing_tags)), Map.str_cmp))
+      end
+    end
+
+    doc "Remove all observed tags for elem (concurrent adds in-flight survive)."
+    fn remove(s : T(a), elem : a, to_key : a -> String) : T(a) do
+      match s do
+      ORSet(m) -> ORSet(Map.remove(m, to_key(elem), Map.str_cmp))
+      end
+    end
+
+    doc "True if elem has at least one surviving tag."
+    fn contains(s : T(a), elem : a, to_key : a -> String) : Bool do
+      match s do
+      ORSet(m) ->
+        match Map.get(m, to_key(elem), Map.str_cmp) do
+        None         -> false
+        Some((_, ts)) -> not(List.is_empty(ts))
+        end
+      end
+    end
+
+    doc "All elements currently in the set."
+    fn elements(s : T(a)) : List(a) do
+      match s do
+      ORSet(m) ->
+        List.filter_map(Map.to_list(m), fn pair ->
+          match pair do
+          (_, (elem, tags)) ->
+            if List.is_empty(tags) do None
+            else Some(elem)
+            end
+          end)
+      end
+    end
+
+    pfn union_tags(va, vb) do
+      match (va, vb) do
+      ((elem, ta), (e2, tb)) -> (elem, List.append(ta, tb))
+      end
+    end
+
+    doc "Merge: union tags for each element key."
+    fn merge(a : T(x), b : T(x)) : T(x) do
+      match (a, b) do
+      (ORSet(ma), ORSet(mb)) ->
+        let merged = Map.merge_with(ma, mb, fn va -> fn vb -> union_tags(va, vb), Map.str_cmp)
+        ORSet(merged)
+      end
+    end
+
+    doc "True when both ORSets have the same elements (ignoring tag identity)."
+    fn equal(a : T(x), b : T(x)) : Bool do
+      match (a, b) do
+      (ORSet(ma), ORSet(mb)) ->
+        let elems_a = elements(a)
+        let elems_b = elements(b)
+        List.length(elems_a) == List.length(elems_b)
+      end
+    end
+
+    doc "Number of elements with at least one tag."
+    fn size(s : T(a)) : Int do
+      List.length(elements(s))
+    end
+
+  end
+
+end

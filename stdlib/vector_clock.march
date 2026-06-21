@@ -1,0 +1,113 @@
+-- VectorClock: causal ordering for distributed actors.
+--
+-- A vector clock is a map from actor-id (String) to logical timestamp (Int).
+-- Each actor increments only its own slot. Comparing two clocks determines
+-- causal order: one event "happened before" another when every slot in the
+-- first clock is <= the corresponding slot in the second and at least one is <.
+
+mod VectorClock do
+
+  -- Map from actor IDs to logical timestamps.
+  type VectorClock = VectorClock(Map(String, Int))
+
+  -- Causal ordering relationship between two vector clocks.
+  type ClockOrder = Before | After | Concurrent | Equal
+
+  doc "An empty vector clock (all timestamps implicitly 0)."
+  fn new() : VectorClock do
+    VectorClock(Map.empty())
+  end
+
+  doc "Return the logical timestamp for actor_id (0 if unseen)."
+  fn get(vc : VectorClock, actor_id : String) : Int do
+    match vc do
+    VectorClock(m) -> Map.get_or(m, actor_id, 0, Map.str_cmp)
+    end
+  end
+
+  doc "Increment the slot for actor_id, returning the updated clock."
+  fn increment(vc : VectorClock, actor_id : String) : VectorClock do
+    match vc do
+    VectorClock(m) ->
+      let current = Map.get_or(m, actor_id, 0, Map.str_cmp)
+      VectorClock(Map.insert(m, actor_id, current + 1, Map.str_cmp))
+    end
+  end
+
+  doc "Component-wise maximum: keep the higher timestamp for each slot."
+  fn merge(a : VectorClock, b : VectorClock) : VectorClock do
+    match (a, b) do
+    (VectorClock(ma), VectorClock(mb)) ->
+      let merged = Map.merge_with(ma, mb, fn va -> fn vb -> Math.max_int(va, vb), Map.str_cmp)
+      VectorClock(merged)
+    end
+  end
+
+  doc "Compare two vector clocks and return their causal relationship."
+  fn compare(a : VectorClock, b : VectorClock) : ClockOrder do
+    match (a, b) do
+    (VectorClock(ma), VectorClock(mb)) ->
+      let b_only = List.filter(Map.keys(mb), fn k -> not(Map.contains_key(ma, k, Map.str_cmp)))
+      let all_keys = List.append(Map.keys(ma), b_only)
+
+      let (has_lt, has_gt) = List.fold_left(all_keys, (false, false), fn (acc, k) ->
+        let va = Map.get_or(ma, k, 0, Map.str_cmp)
+        let vb = Map.get_or(mb, k, 0, Map.str_cmp)
+        let (lt, gt) = acc
+        if va < vb do (true, gt)
+        else if va > vb do (lt, true)
+        else acc
+        end end)
+
+      if has_lt && has_gt do Concurrent
+      else if has_lt do Before
+      else if has_gt do After
+      else Equal
+      end end end
+    end
+  end
+
+  doc "True when a causally precedes b (a happened-before b)."
+  fn happens_before(a : VectorClock, b : VectorClock) : Bool do
+    match compare(a, b) do
+    Before -> true
+    _      -> false
+    end
+  end
+
+  doc "True when neither clock precedes the other."
+  fn concurrent(a : VectorClock, b : VectorClock) : Bool do
+    match compare(a, b) do
+    Concurrent -> true
+    _          -> false
+    end
+  end
+
+  doc "Advance actor_id's slot to at least ts (no-op if already >= ts)."
+  fn advance(vc : VectorClock, actor_id : String, ts : Int) : VectorClock do
+    match vc do
+    VectorClock(m) ->
+      let current = Map.get_or(m, actor_id, 0, Map.str_cmp)
+      if ts > current do
+        VectorClock(Map.insert(m, actor_id, ts, Map.str_cmp))
+      else
+        vc
+      end
+    end
+  end
+
+  doc "All (actor_id, timestamp) pairs in arbitrary order."
+  fn entries(vc : VectorClock) : List((String, Int)) do
+    match vc do
+    VectorClock(m) -> Map.to_list(m)
+    end
+  end
+
+  doc "Sum of all timestamps (useful as a monotone scalar counter)."
+  fn sum(vc : VectorClock) : Int do
+    match vc do
+    VectorClock(m) -> Map.fold(m, 0, fn (acc, _k, v) -> acc + v)
+    end
+  end
+
+end
