@@ -291,9 +291,17 @@ and emit_val_impl ctx expr =
       emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
     emit ctx " }"
 
-  (* RC nodes are no-ops in JS *)
-  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-  | Tir.EFree _ | Tir.EReuse _ ->
+  (* EReuse(old, ty, args): Perceus reuses old's memory — in GC'd JS just alloc fresh *)
+  | Tir.EReuse (_, ty, args) ->
+    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+    emit ctx (Printf.sprintf "{ $: %S" tag);
+    List.iteri (fun i a ->
+      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
+    emit ctx " }"
+
+  (* EIncRC returns its atom; other RC ops are pure side-effects → undefined *)
+  | Tir.EIncRC a | Tir.EAtomicIncRC a -> emit_atom ctx a
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ ->
     emit ctx "undefined"
 
   (* Complex forms in value position: wrap in IIFE *)
