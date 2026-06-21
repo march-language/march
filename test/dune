@@ -80,6 +80,23 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; ── HCR versioned dispatch table unit test ───────────────────────────────
+(rule
+ (targets test_dispatch_runner)
+ (deps    test_dispatch.c
+          ../runtime/march_dispatch.c
+          ../runtime/march_dispatch.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_dispatch.c ../runtime/march_dispatch.c
+               -lpthread)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_dispatch_runner))
+ (action  (run ./test_dispatch_runner)))
+
 ; ── FFI ABI unit test (links the real runtime for genuine alloc/RC/gauge) ─
 (rule
  (targets test_ffi_runner)
