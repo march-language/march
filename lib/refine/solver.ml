@@ -36,6 +36,9 @@ let create () : t option =
       let ic = Unix.in_channel_of_descr stdout_r in
       (* print-success off: we only read explicit (check-sat)/(get-model) output *)
       output_string oc "(set-option :print-success false)\n";
+      (* Per-query wall-clock cap: a hard (e.g. quantified-datatype) query returns
+         `unknown` instead of looping — definite-failure then treats it as skip. *)
+      output_string oc "(set-option :timeout 3000)\n";
       flush oc;
       Some { ic; oc; pid }
 
