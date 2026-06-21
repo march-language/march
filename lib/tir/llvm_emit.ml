@@ -5212,7 +5212,8 @@ let emit_main_wrapper (buf : Buffer.t) =
        ret i32 0\n}\n"
 
 let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
-    ?(hot_reload=None) (m : Tir.tir_module) : string =
+    ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
      into NAME_IDs for the dispatch table. *)
@@ -5226,10 +5227,15 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
            then Some fn.Tir.fn_name else None)
       |> Hot_reload.Name_table.build
   in
+  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
   (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
      dispatch table and publishes each boundary function as its NATIVE baseline
-     version. impl_hash is null for the baseline (the reload server stamps real
-     hashes on activation); see runtime/march_dispatch.c. *)
+     version. Each boundary fn's per-definition impl_hash (a Merkle root over its
+     call graph + type usage, from the CAS) is emitted as a private NUL-terminated
+     string global and passed to march_dispatch_publish so the runtime can match a
+     hot-swap candidate against the running baseline. When no hash is known (e.g.
+     a non-CAS build path) the baseline is published with a null impl_hash and the
+     reload server stamps the real hash on activation; see runtime/march_dispatch.c. *)
   let hr_setup =
     match hot_reload with
     | None -> ""
@@ -5242,15 +5248,27 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
           if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name) then
             match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
             | Some id ->
+              (* Emit the impl_hash (if known) as a private string global and
+                 pass its ptr; otherwise fall back to a null baseline hash. *)
+              let hash_arg =
+                match Hashtbl.find_opt impl_hashes fn.Tir.fn_name with
+                | Some h when String.length h > 0 ->
+                  let g = Printf.sprintf "@.hr_hash%d" id in
+                  Buffer.add_string ctx.preamble
+                    (Printf.sprintf
+                       "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+                       g (String.length h + 1) (llvm_escape_string h));
+                  Printf.sprintf "ptr %s" g
+                | _ -> "ptr null"
+              in
               Printf.bprintf b
-                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, ptr null, i8 0)\n"
-                id (mangle_extern fn.Tir.fn_name)
+                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, i8 0)\n"
+                id (mangle_extern fn.Tir.fn_name) hash_arg
             | None -> ()
         ) m.Tir.tm_fns;
         Buffer.contents b
       end
   in
-  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
   (* Record shape metadata requires the native runtime (march_extras.c);
      the WASM runtime does not provide march_record_set_shape. *)
   ctx.shape_meta <- not (is_wasm_target target);

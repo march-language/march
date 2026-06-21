@@ -1271,6 +1271,22 @@ let compile filename =
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (* Hot Code Reload: per-function impl_hash map (qualified fn name →
+           64-char hex Merkle root) so the baseline dispatch-table publish can
+           carry real hashes instead of null. Built from the same CAS hashing
+           that keys the artifact cache; only consulted when --hot-reload is on. *)
+        let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        let add_hdef (hd : March_cas.Cas.hashed_def) =
+          match hd.March_cas.Cas.hd_def with
+          | March_cas.Cas.FnDef fd ->
+            Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
+              hd.March_cas.Cas.hd_impl_hash
+          | March_cas.Cas.TypeDef _ -> ()
+        in
+        List.iter (function
+          | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
+          | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
+          h_sccs;
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
@@ -1287,7 +1303,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1481,7 +1497,25 @@ let compile filename =
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
+        (* Mirror the compile path's per-fn impl_hash map so --emit-llvm
+           --hot-reload also publishes real baseline hashes (only built/used
+           when --hot-reload is active). *)
+        let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (match hr_config () with
+         | None -> ()
+         | Some _ ->
+           let add_hdef (hd : March_cas.Cas.hashed_def) =
+             match hd.March_cas.Cas.hd_def with
+             | March_cas.Cas.FnDef fd ->
+               Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
+                 hd.March_cas.Cas.hd_impl_hash
+             | March_cas.Cas.TypeDef _ -> ()
+           in
+           List.iter (function
+             | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
+             | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
+             (March_cas.Pipeline.hash_module tir));
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
