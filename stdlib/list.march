@@ -287,6 +287,36 @@ mod List do
     go(xs, Nil)
   end
 
+  -- ---- Parallel ----
+
+  doc """
+  Parallel map: applies `f` to every element, returning a new list in the
+  same order as `map`.  `f` MUST be safe to run concurrently (pure / no
+  cross-element ordering dependency).
+
+  Below `pmap_threshold()` elements this delegates to sequential `map`
+  (zero spawn overhead).  Above it, the list is split into threshold-sized
+  chunks, each mapped on its own task, and the results concatenated in
+  order.  In the interpreter tasks run eagerly (correct, sequential); in
+  compiled code they run on the multi-core scheduler.
+
+  ## Examples
+
+      march> List.pmap([1, 2, 3], fn x -> x * 2)
+      [2, 4, 6]
+  """
+  fn pmap(xs : List(a), f : a -> b) : List(b) do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      map(xs, f)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> map(c, f)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
   doc """
   Applies `f` to each element; collects Some values, discards None.
   Equivalent to map followed by filter for non-None values.

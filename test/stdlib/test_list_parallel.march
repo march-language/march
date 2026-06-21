@@ -10,4 +10,19 @@ describe "pmap_threshold builtin" do
   end
 end
 
+describe "pmap" do
+  test "matches map on empty list" do
+    assert (List.pmap([], fn x -> x + 1) == [])
+  end
+
+  test "matches map on small list (below threshold)" do
+    assert (List.pmap([1, 2, 3], fn x -> x * 2) == [2, 4, 6])
+  end
+
+  test "preserves order and matches map on a large list" do
+    let xs = List.range(0, 5000)
+    assert (List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x))
+  end
+end
+
 end
