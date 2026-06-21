@@ -5179,6 +5179,24 @@ let test_parity_bitwise_builtins () =
       ("int_or(int_shl(1, 3), int_shl(1, 1))",  "10");
     ]
 
+(** List.pmap must produce the same result as List.map in compiled/JIT code
+    as in the interpreter. The 2000-element list exceeds the default
+    pmap_threshold (1024), so the chunked parallel path is exercised. *)
+let test_parity_pmap_matches_map () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun (src, expected) ->
+      check_parity ~ctx:"pmap" ~runtime_so src;
+      match interp_eval_expr src with
+      | Some (v, _) ->
+        Alcotest.(check string) ("pmap: " ^ src) expected v
+      | None -> Alcotest.fail ("pmap eval failed: " ^ src)
+    ) [
+      ("List.pmap(List.range(0, 2000), fn x -> x * x) == List.map(List.range(0, 2000), fn x -> x * x)", "true");
+      ("List.pfilter(List.range(0, 2000), fn x -> x % 2 == 0) == List.filter(List.range(0, 2000), fn x -> x % 2 == 0)", "true");
+    ]
+
 (* ── Tail-call enforcement tests ────────────────────────────────────────── *)
 
 let test_tc_tail_factorial_ok () =
@@ -10739,6 +10757,7 @@ let stdlib_suites =
           Alcotest.test_case "closures"          `Slow test_parity_closures;
           Alcotest.test_case "if/else"           `Slow test_parity_if_else;
           Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;
+          Alcotest.test_case "pmap matches map"  `Slow test_parity_pmap_matches_map;
         ] );
       ( "tail_recursion",
         [
