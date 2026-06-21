@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — Phase 7: `forge ffi gen-c` generator)
+
+- **`forge ffi gen-c <file.march> [-o out.c]`** generates a compilable C shim skeleton from the `extern` blocks in a March file (`forge/lib/cmd_ffi.ml`, wired in `forge/bin/main.ml` as the `ffi` command group). For each `extern fn` it emits the correct C signature (Int/Bool→`int64_t`, Float→`double`, String/Bytes/Option/Result/resource→`march_value`), prefilled marshalling — `march_str_borrow` slices for String/Bytes params, `march_resource_get` + `consume`→`march_drop` hints for resource handles, typed `march_ok`/`march_err`/`march_some`/`march_none`/`march_str_new` return stubs — and a `TODO` for the actual library call. Output is `#include "march_ffi.h"`-ready; verified it compiles cleanly (`cc -c`).
+- **Workflow**: declare the `extern` block in March → `forge ffi gen-c` → fill in the TODOs → list the file under `[ffi] sources` → `forge build`. The "declare in March, generate the C glue" direction (spec §17).
+- **Deferred**: `forge ffi import` (C header → draft `extern` + `.ffi.toml`) needs a libclang C-header parser. See `specs/c-ffi-gaps.md`.
+- **Verified**: 2 new forge tests (`ffi` group: extern→skeleton, no-extern→error); forge 85 tests, compiler 293, codegen 319, stdlib 783, C ABI green.
+
 ## Current State (as of 2026-06-20, External Function Interface — Phase 6: blocking dispatch)
 
 - **`blocking fn` externs run on a dedicated OS thread** while the calling green thread cooperatively yields, so a long/blocking C call no longer stalls the scheduler worker. Runtime: `march_run_blocking_i`/`_d` (`runtime/march_ffi.c`) spawn a pthread that runs the call through a fixed-arity GP-register trampoline, then `march_sched_yield` in a loop until done (falls back to inline if `pthread_create` fails). Codegen: a `blocking` extern call marshals its args into a stack i64 array and dispatches via `march_run_blocking_*` instead of a direct call (`lib/tir/llvm_emit.ml`).

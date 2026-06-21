@@ -75,9 +75,12 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
     only the runtime `.so`, so a symbol from a `[ffi]` shim isn't resolvable
     under `march file.march` — only via `--compile`. (Interpreter FFI still
     works for symbols that live in the runtime itself.)
-- **No binding generators.** `forge ffi gen-c` (March `extern` → C shim skeleton)
-  and `forge ffi import` (C header → draft `extern` block + `.ffi.toml` sidecar)
-  are unbuilt (spec §17, Phase 7).
+- **Binding generators — `gen-c` DONE (Phase 7), `import` deferred.**
+  `forge ffi gen-c <file.march>` generates a compilable C shim skeleton from the
+  `extern` blocks (correct signatures, String/Bytes borrow slices, resource-get
+  + `consume`-drop hints, typed Option/Result/String return stubs, TODO for the
+  call). `forge ffi import <header.h>` (C header → draft `extern` + `.ffi.toml`)
+  is still unbuilt — it needs a C-header parser (libclang), a heavier dependency.
 - **ABI version handshake not enforced.** `march_ffi_abi_version()` exists but
   nothing checks it at link/dlopen time. Only meaningful once separately-built
   binding objects exist (Phase 5).

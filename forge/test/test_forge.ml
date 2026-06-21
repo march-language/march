@@ -684,6 +684,45 @@ let test_project_metadata_absent () =
   | Error e -> Alcotest.failf "load failed: %s" e
   | Ok p -> Alcotest.(check (option string)) "absent license -> None" None p.Project.license
 
+(* -------------------------------------------------------------------- ffi *)
+
+let test_ffi_gen_c () =
+  let dir = Filename.temp_file "march_ffi_gen" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let mfile = Filename.concat dir "b.march" in
+  let oc = open_out mfile in
+  output_string oc
+    "mod B do\n\
+    \  needs Ffi\n\
+    \  extern \"demo\" : Cap(Ffi) do\n\
+    \    fn add(a: Int, b: Int): Int = \"demo_add\"\n\
+    \    fn greet(name: String): String = \"demo_greet\"\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let cfile = Filename.concat dir "out.c" in
+  (match Cmd_ffi.run ~file:mfile ~out:(Some cfile) with
+   | Error e -> Alcotest.failf "gen-c failed: %s" e
+   | Ok () -> ());
+  let ic = open_in cfile in
+  let body = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let contains sub =
+    let n = String.length sub and h = String.length body in
+    let rec go i = i + n <= h && (String.sub body i n = sub || go (i+1)) in go 0 in
+  Alcotest.(check bool) "primitive signature" true (contains "int64_t demo_add(int64_t a, int64_t b)");
+  Alcotest.(check bool) "string return signature" true (contains "march_value demo_greet(march_value name)");
+  Alcotest.(check bool) "string borrow stub" true (contains "march_str_borrow(name)");
+  Alcotest.(check bool) "includes the ABI header" true (contains "march_ffi.h")
+
+let test_ffi_gen_c_no_extern () =
+  let mfile = Filename.temp_file "march_noffi" ".march" in
+  let oc = open_out mfile in
+  output_string oc "mod N do\n  fn main() : Unit do () end\nend\n"; close_out oc;
+  (match Cmd_ffi.run ~file:mfile ~out:None with
+   | Error _ -> ()  (* expected: no extern blocks *)
+   | Ok () -> Alcotest.fail "expected an error for a file with no extern blocks")
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -794,5 +833,9 @@ let () =
       Alcotest.test_case "added file -> change"             `Quick test_watch_added;
       Alcotest.test_case "removed file -> change"           `Quick test_watch_removed;
       Alcotest.test_case "order-insensitive"               `Quick test_watch_order_insensitive;
+    ];
+    "ffi", [
+      Alcotest.test_case "gen-c: extern block -> C skeleton" `Quick test_ffi_gen_c;
+      Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
     ];
   ]
