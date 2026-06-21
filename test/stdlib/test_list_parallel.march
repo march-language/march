@@ -40,4 +40,20 @@ describe "pmap_n" do
   end
 end
 
+describe "pfilter" do
+  test "matches filter on small list" do
+    assert (List.pfilter([1, 2, 3, 4, 5], fn x -> x > 2) == [3, 4, 5])
+  end
+
+  test "matches filter on large list, order preserved" do
+    let xs = List.range(0, 5000)
+    let pred = fn x -> x % 2 == 0
+    assert (List.pfilter(xs, pred) == List.filter(xs, pred))
+  end
+
+  test "handles empty list" do
+    assert (List.pfilter([], fn x -> x > 0) == [])
+  end
+end
+
 end

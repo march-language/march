@@ -341,6 +341,25 @@ mod List do
   end
 
   doc """
+  Parallel filter: keeps elements satisfying `pred`, in the same order as
+  sequential `filter`.  `pred` MUST be safe to run concurrently.  Below
+  `pmap_threshold()` elements it delegates to sequential `filter`; above it
+  each threshold-sized chunk is filtered on its own task and the kept
+  elements concatenated in order.
+  """
+  fn pfilter(xs : List(a), pred : a -> Bool) : List(a) do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      filter(xs, pred)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> filter(c, pred)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
+  doc """
   Applies `f` to each element; collects Some values, discards None.
   Equivalent to map followed by filter for non-None values.
   """
