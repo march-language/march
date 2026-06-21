@@ -137,6 +137,10 @@ runs the tasks eagerly on one thread (correct, but sequential).
 > **Tip:** the LSP flags a pure `List.map`/`List.filter` as a `pmap`/`pfilter`
 > candidate with a one-click "Convert to `List.pmap`" quick-fix.
 
+See the [Parallel Collections guide]({{ site.baseurl }}/docs/parallel-collections/)
+for how chunking works, the `--pmap-threshold` flag, when to parallelize, and the
+editor-driven detection.
+
 ---
 
 ## String
