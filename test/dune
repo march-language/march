@@ -1041,3 +1041,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_variant.expected native_ffi_variant.out)))
+
+; ── FFI codecs: a shim built from generated record/variant codecs (the filled-in
+; ── `forge ffi gen-c` artifact, ffi_codec.c via --ffi-c) round-trips March
+; ── aggregates both ways: decode March-built Shape/Point, encode fresh ones.
+(rule
+ (targets native_ffi_codec native_ffi_codec.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/ffi_codec.march) (file native/ffi_codec.c))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --ffi-c native/ffi_codec.c
+        -o native_ffi_codec native/ffi_codec.march)
+   (with-stdout-to native_ffi_codec.out (system "./native_ffi_codec")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_codec.expected native_ffi_codec.out)))
