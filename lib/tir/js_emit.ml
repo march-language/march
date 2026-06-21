@@ -263,7 +263,13 @@ and emit_val_impl ctx expr =
     emit ctx " })"
 
   | Tir.EField (a, field) ->
-    emit_atom ctx a; emit ctx "."; emit ctx field
+    emit_atom ctx a; emit ctx ".";
+    (* Closure free-variable fields are named "$fvN" in TIR but stored as "_N"
+       in the JS closure struct (EAlloc uses positional _0/_1/_2 ... layout) *)
+    if String.length field > 3 && String.sub field 0 3 = "$fv" then
+      emit ctx ("_" ^ String.sub field 3 (String.length field - 3))
+    else
+      emit ctx field
 
   | Tir.EUpdate (a, updates) ->
     emit ctx "({ ..."; emit_atom ctx a;
@@ -298,8 +304,14 @@ and emit_val_impl ctx expr =
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "})()"
 
-  | Tir.ECallPtr _ ->
-    failwith "js_emit: ECallPtr found — Defun must not run before the JS target"
+  | Tir.ECallPtr (f, args) ->
+    (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
+       Apply fn ABI: apply(clo, args...) — pass closure as first argument. *)
+    emit_atom ctx f;
+    emit ctx "._0(";
+    emit_atom ctx f;
+    List.iter (fun a -> emit ctx ", "; emit_atom ctx a) args;
+    emit ctx ")"
 
 (* ── Statement emission ──────────────────────────────────────────── *)
 
