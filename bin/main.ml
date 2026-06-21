@@ -1487,6 +1487,10 @@ let compile filename =
       end
     in
     March_eval.Eval.clear_march_stack ();
+    (* Interpreter FFI (Phase 4): provide the runtime .so so extern calls can be
+       resolved dynamically.  Lazy — only built if the program actually calls an
+       extern at runtime. *)
+    March_eval.Eval.ffi_runtime_so := (fun () -> Some (ensure_runtime_so ()));
     (try March_eval.Eval.run_module desugared
      with
      | March_eval.Eval.Eval_error msg ->

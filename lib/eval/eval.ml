@@ -38,7 +38,10 @@ type value =
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
   | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
-  | VForeign of string * string         (** FFI extern: (lib_name, symbol_name) *)
+  | VForeign of string * string * March_ast.Ast.ty list * March_ast.Ast.ty
+        (** FFI extern: (lib_name, symbol_name, param_types, return_type).
+            The types drive interpreter-side marshalling for the dynamic
+            (dlopen+trampoline) call path. *)
   | VMultiarity of (int * value) list   (** Arity-dispatched fn: [(arity, closure)] sorted ascending *)
   | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
@@ -917,7 +920,7 @@ let rec value_to_string v =
     Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
   | VMChan me ->
     Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
-  | VForeign (lib, sym) ->
+  | VForeign (lib, sym, _, _) ->
     Printf.sprintf "<foreign:%s:%s>" lib sym
   | VMultiarity variants ->
     let arities = List.map (fun (a, _) -> string_of_int a) variants in
@@ -1121,6 +1124,58 @@ let foreign_stubs : (string * string, value list -> value) Hashtbl.t =
       | _ -> eval_error "extern puts: expected String"))
     ["c"; "libc"; "libc.so"];
   t
+
+(* ------------------------------------------------------------------ *)
+(* Dynamic FFI (Phase 4): dlopen + fixed-arity trampoline for primitive *)
+(* externs not covered by the static foreign_stubs table above.         *)
+(* Interpreter-only; primitives only (Int/Bool args, Int/Bool/Float ret).*)
+(* ------------------------------------------------------------------ *)
+external _ffi_dlopen    : string -> nativeint = "march_eval_dlopen"
+external _ffi_dlsym     : nativeint -> string -> nativeint = "march_eval_dlsym"
+external _ffi_dyncall_i : nativeint -> int64 array -> int -> int64 = "march_eval_dyncall_i"
+external _ffi_dyncall_d : nativeint -> int64 array -> int -> float = "march_eval_dyncall_d"
+
+(** Thunk returning the path to the runtime .so holding FFI symbols; set by the
+    driver (bin/main.ml).  Called lazily on the first extern call so non-FFI
+    programs never pay the .so build cost.  Default/None ⇒ resolve from
+    already-loaded libs (RTLD_DEFAULT). *)
+let ffi_runtime_so : (unit -> string option) ref = ref (fun () -> None)
+let _ffi_handle : nativeint option ref = ref None
+let _ffi_get_handle () : nativeint =
+  match !_ffi_handle with
+  | Some h -> h
+  | None ->
+    let h = match !ffi_runtime_so () with
+      | Some path when path <> "" -> _ffi_dlopen path
+      | _ -> 0n  (* RTLD_DEFAULT *) in
+    _ffi_handle := Some h; h
+
+(** Dynamically call a primitive extern.  Returns None if the binding uses types
+    the interpreter cannot marshal (caller then reports a clear error). *)
+let dynamic_ffi_call (lib : string) (sym : string)
+    (ret_ty : March_ast.Ast.ty) (args : value list) : value option =
+  let to_i64 = function
+    | VInt n  -> Some (Int64.of_int n)
+    | VBool b -> Some (if b then 1L else 0L)
+    | _       -> None   (* Float/heap args unsupported via the GP-register trampoline *)
+  in
+  match List.map to_i64 args with
+  | margs when List.for_all (fun o -> o <> None) margs ->
+    let arr = Array.of_list (List.map Option.get margs) in
+    let n = Array.length arr in
+    let fnptr = _ffi_dlsym (_ffi_get_handle ()) sym in
+    if fnptr = 0n then
+      eval_error "extern %s:%s — symbol not found for interpreter FFI \
+                  (build the runtime, or run with --compile)" lib sym;
+    (match ret_ty with
+     | March_ast.Ast.TyCon ({ txt = ("Int" | "Char"); _ }, []) ->
+       Some (VInt (Int64.to_int (_ffi_dyncall_i fnptr arr n)))
+     | March_ast.Ast.TyCon ({ txt = "Bool"; _ }, []) ->
+       Some (VBool (_ffi_dyncall_i fnptr arr n <> 0L))
+     | March_ast.Ast.TyCon ({ txt = "Float"; _ }, []) ->
+       Some (VFloat (_ffi_dyncall_d fnptr arr n))
+     | _ -> None)   (* non-primitive return: caller falls back to an error *)
+  | _ -> None        (* a non-primitive argument *)
 
 (** Spawn a fresh child actor instance (for supervisor restarts).
     [crashed_pid] is the pid of the actor being replaced; its epoch is
@@ -6363,12 +6418,20 @@ and apply_inner (fn_val : value) (args : value list) : value =
 
   | VBuiltin (_, f) -> f args
 
-  | VForeign (lib, sym) ->
+  | VForeign (lib, sym, _param_tys, ret_ty) ->
+    (* 1. Static OCaml stub (libm/libc math etc.). Keyed by both the C symbol
+          and the bare extern name so `= "sym"` and default bindings both hit. *)
     (match Hashtbl.find_opt foreign_stubs (lib, sym) with
      | Some f -> f args
      | None ->
-       eval_error "extern %s:%s — no OCaml stub registered for this symbol \
-                   (add it to the foreign_stubs table in eval.ml)" lib sym)
+       (* 2. Dynamic primitive call (dlopen + trampoline). *)
+       (match dynamic_ffi_call lib sym ret_ty args with
+        | Some v -> v
+        | None ->
+          eval_error "extern %s:%s — interpreter FFI supports only Int/Bool \
+                      arguments and Int/Bool/Float returns; this binding uses \
+                      strings/floats-as-args/records/resources. Run with \
+                      --compile (or add an OCaml stub to foreign_stubs)." lib sym))
 
   | VMultiarity variants ->
     let n = List.length args in
@@ -7740,9 +7803,14 @@ let rec eval_decl (env : env) (d : decl) : env =
     env
 
   | DExtern (edef, _sp) ->
-    (* Bind each extern function name to a VForeign stub. *)
+    (* Bind each extern function name to a VForeign stub carrying its signature
+       (param types + return type) for interpreter-side marshalling. *)
     List.fold_left (fun env' (ef : extern_fn) ->
-      let stub = VForeign (edef.ext_lib_name, ef.ef_name.txt) in
+      let sym = match ef.ef_symbol with
+        | Some s -> s
+        | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+      let param_tys = List.map snd ef.ef_params in
+      let stub = VForeign (edef.ext_lib_name, sym, param_tys, ef.ef_ret_ty) in
       (ef.ef_name.txt, stub) :: env'
     ) env edef.ext_fns
 
