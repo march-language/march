@@ -986,3 +986,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_blocking.expected native_ffi_blocking.out)))
+
+; ── FFI Phase 9: a C binding builds a March variant (march_make_variant) and a
+; ── record (march_make_record); March pattern-matches / field-accesses them.
+(rule
+ (targets native_ffi_variant native_ffi_variant.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file native/ffi_variant.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_variant native/ffi_variant.march)
+   (with-stdout-to native_ffi_variant.out (system "./native_ffi_variant")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_variant.expected native_ffi_variant.out)))

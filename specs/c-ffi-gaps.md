@@ -9,11 +9,20 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Marshalling
 
-- **Records / variants have no canonical codecs.** Only primitives (Int/Float/
-  Bool/Char), `String`/`Bytes`, `Option`/`Result`, and opaque `resource`s cross
-  the boundary. Passing/returning a user record or arbitrary ADT is unsupported
-  (spec §6.4 "generated codecs", v1.1). Workaround: decompose into primitives or
-  wrap behind a `resource`.
+- **Records / variants — primitive codecs DONE (Phase 9); type-directed
+  generated codecs still open.** `march_variant_tag`/`variant_field`/
+  `record_field` (read) and `march_make_variant`/`make_record` (construct) move
+  ADTs and records across the boundary; a binding builds/reads them by hand
+  (`test/native/ffi_variant`). The accessors move a field *slot* verbatim, so the
+  binding must marshal each field in March's **native per-field representation**:
+  `Int`/`Bool` raw (NOT a tagged value word), `Float` raw bits, `String`/heap as
+  the value word. What's still missing (spec §6.4 "generated codecs", v1.1): the
+  *type-directed* layer that hides this per-field marshalling — i.e.
+  auto-generated encode/decode from a March type so the author never touches
+  slots. That's the prerequisite for Rust `#[derive(Encoder/Decoder)]`. Records
+  built this way are constructed in canonical (name-sorted) field order; nested
+  aggregates and `Float`/heap fields work but are the author's responsibility to
+  marshal correctly.
 - **`Option(Float)` / `Option(Unit)` returns are unsupported by the bare
   constructors.** `march_some`/`march_none` emit the P6 *niche* form (`Some(x)=x`,
   `None=0`), correct only for niche-eligible payloads (Int/Bool/String/heap).
@@ -94,7 +103,8 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   `parse` round-trip via March, both Result arms). Still missing: the `march`
   crate (`#[march]`, `#[derive(Encoder/Decoder)]`, `ResourceArc`, panic→Err) and
   `forge add-rust` / `[[ffi.rust]]` cargo integration. The OCaml layer is also
-  future. (Record/variant marshalling for `#[derive]` needs Phase 9.)
+  future. (Record/variant *primitives* now cross the boundary — Phase 9; the
+  `#[derive]` codecs still need the type-directed generated-codec layer.)
 - **No native→March callbacks (upcalls).** Bindings cannot call back into March
   closures. Would need `march_call(env, fn, args…)` and passing closures across
   the boundary as resources (spec §19). Future.
