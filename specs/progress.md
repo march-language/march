@@ -280,6 +280,12 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — Phase 4: interpreter FFI (primitives))
+
+- **Primitive extern calls now run under the tree-walking interpreter** (`march file.march`, no `--compile`), not just compiled. `lib/eval/eval_ffi_stubs.c` provides `dlopen`/`dlsym` + fixed-arity trampolines (`march_eval_dyncall_i`/`_d`, distinct from the JIT's stubs); `VForeign` now carries the extern's param/return types, and the call path falls back from the static `foreign_stubs` table to a dynamic dlopen+trampoline call. `bin/main.ml` sets `Eval.ffi_runtime_so` to a lazy thunk over `ensure_runtime_so` so the runtime `.so` (with FFI symbols) is built/dlopened only when an extern is actually invoked — non-FFI programs pay nothing.
+- **Scope**: no new dependency (no libffi). Supported in the interpreter: **Int/Bool arguments and Int/Bool/Float returns** (GP-register trampoline). Float-as-argument, String/Bytes, Option/Result, and resources are not marshallable interpreter-side (value-representation mismatch) and produce a clear `… run with --compile` error rather than crashing. Compiled mode remains fully featured.
+- **Verified**: `test/native/ffi_interp` (interpreter mode) → `42`/`200`; unsupported bindings error cleanly; non-FFI programs and compiled FFI unaffected. compiler 293, codegen 318 (str_concat pre-existing; fixed on main), stdlib 783, C ABI green.
+
 ## Current State (as of 2026-06-20, External Function Interface — `consume` ownership + error protocol)
 
 - **`consume` parameter mode** (`lib/parser/parser.mly`, `lib/ast/ast.ml` `ef_param_consumed`, `lib/tir/tir.ml` `ed_consumed`, `lib/tir/lower.ml`, `lib/tir/borrow.ml`): an extern param prefixed `consume` transfers ownership to the binding — Perceus does NOT emit a caller-side drop, so a binding like `fn finish(consume h: Acc): Int` reads then `march_drop`s the resource itself. Without it, a binding that drops its arg double-freed (RC underflow). `consume` is a **contextual** word, not a reserved keyword (it is a common identifier in linear-types code): recognized only as the leading word of an extern parameter via a two-identifier grammar rule. The formatter prints it back (round-trip safe).
