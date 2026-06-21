@@ -281,6 +281,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, Hot Code Reload — Phase 1: `impl_hash` is a true Merkle root)
+
+- **CAS prerequisite for Hot Code Reload + Distributed OTP — DONE.** `hash_module` (`lib/cas/pipeline.ml`) now makes each definition's `impl_hash` a Merkle root over both its call graph and its type usage: it folds in (a) the `impl_hash`es of its earlier-SCC callees (SCCs walked dependencies-first) and (b) the base hashes of every named type it *transitively* references. A callee body change propagates into every direct/transitive caller; a record/variant layout change propagates into every definition that uses the type. This fixes a real latent stale-cache bug (cross-SCC `known_call` inlining served stale inlined callees because callers referenced callees by name) and closes HCR Part 5's shared-type soundness gate (TIR references types by name, so a layout change moved GEP offsets while leaving the user's hash unchanged).
+- **Approach**: threaded callee/type hashes into the hash computation rather than emitting `ADefRef` nodes or extending `compute_sccs` to types — same Merkle guarantee, no TIR mutation. Type folding uses a transitive closure of type base hashes (cycle-safe; no type-SCC machinery). Externally-defined types are not folded (no base hash), mirroring the cross-SCC callee rule.
+- **Tests**: 6 new `test_cas.ml` `def_id` cases (direct + two-hop call propagation, unrelated-def isolation, direct + transitive type-layout propagation, unreferenced-type isolation). `test_cas` suite 44→50. Full TDD (bug reproduced via the real `hash_module` pipeline before the fix). Specs: `specs/hot-code-reload.md` (Part 1 sharpened: `ADefRef` is never constructed today), `specs/2026-06-21-distributed-otp-design.md` (P0).
+- **Test counts**: compiler 293, codegen 319, eval 224, stdlib 766 (-q) — all green, no regressions through the real CAS compile path; `test_cas` 50.
+
 ## Current State (as of 2026-06-21, Distributed algorithms stdlib — Deque, VectorClock, Merkle, CRDT, ConsistentHash)
 
 - **Five new stdlib modules** for distributed systems primitives. `stdlib/deque.march`: functional double-ended queue (banker's deque, O(1) size). `stdlib/vector_clock.march`: causal ordering (`Before | After | Concurrent | Equal`), happens-before, merge, advance. `stdlib/merkle.march`: SHA-256 content-addressed tree with tail-recursive `diff` (work-list). `stdlib/crdt.march`: four CRDTs nested as `CRDT.GCounter` / `CRDT.PNCounter` / `CRDT.LWWRegister` / `CRDT.ORSet`. `stdlib/consistent_hash.march`: sorted virtual-node ring with SHA-256 replica placement.
