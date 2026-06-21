@@ -1367,6 +1367,7 @@ let builtin_bindings : (string * scheme) list =
     ("task_yield",         Mono (TArrow (t_unit, t_unit)));
     ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (TArrow (t_int, a), TCon ("Task", [a])))));
     ("task_reductions",    Mono (TArrow (t_unit, t_int)));
+    ("pmap_threshold",     Mono (TArrow (t_unit, t_int)));
     ("get_work_pool",      Mono (TCon ("WorkPool", [])));
     (* Capability builtins *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
