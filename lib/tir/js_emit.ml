@@ -14,12 +14,15 @@ type ctx = {
   mutable indent : int;
   runtime_uses : (string, unit) Hashtbl.t;
   (* runtime function names referenced — imported at top of output *)
+  fn_names     : (string, unit) Hashtbl.t;
+  (* user-defined function names in this module — used to emit $clo wrappers *)
 }
 
 let create_ctx () = {
   buf          = Buffer.create 4096;
   indent       = 0;
   runtime_uses = Hashtbl.create 16;
+  fn_names     = Hashtbl.create 64;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -78,9 +81,27 @@ let emit_literal ctx lit =
   | LitString s -> emit ctx (Printf.sprintf "%S" s)
   | LitAtom a   -> emit ctx (Printf.sprintf "\":%s\"" a)
 
-let emit_atom ctx = function
+(* Emit an atom as a plain name — used for apply-function slots in EAlloc
+   where we need the raw function, not a closure wrapper. *)
+let emit_atom_raw ctx = function
   | Tir.AVar v    -> emit ctx (mangle v.Tir.v_name)
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
+  | Tir.ALit l    -> emit_literal ctx l
+
+(* Standard atom emission: user-defined function names use their $clo wrapper
+   so that ECallPtr dispatch (f._0(f, args)) works when they're first-class.
+   Both AVar and ADefRef can hold a module-level function reference — check fn_names. *)
+let emit_atom ctx = function
+  | Tir.AVar v ->
+    let n = mangle v.Tir.v_name in
+    if Hashtbl.mem ctx.fn_names v.Tir.v_name then emit ctx (n ^ "$clo")
+    else emit ctx n
+  | Tir.ADefRef d ->
+    let n = mangle d.Tir.did_name in
+    if Hashtbl.mem ctx.fn_names d.Tir.did_name then
+      emit ctx (n ^ "$clo")
+    else
+      emit ctx n
   | Tir.ALit l    -> emit_literal ctx l
 
 (* ── Builtin lowering ────────────────────────────────────────────── *)
@@ -263,10 +284,13 @@ and emit_val_impl ctx expr =
     end
 
   | Tir.ETuple atoms ->
-    emit ctx "[";
+    (* Tuples are accessed via EField with "$fvN" which maps to _N,
+       so use object form { _0: a, _1: b, ... } rather than JS array. *)
+    emit ctx "{ ";
     List.iteri (fun i a ->
-      if i > 0 then emit ctx ", "; emit_atom ctx a) atoms;
-    emit ctx "]"
+      if i > 0 then emit ctx ", ";
+      emit ctx (Printf.sprintf "_%d: " i); emit_atom ctx a) atoms;
+    emit ctx " }"
 
   | Tir.ERecord fields ->
     emit ctx "({ ";
@@ -292,9 +316,14 @@ and emit_val_impl ctx expr =
 
   | Tir.EAlloc (ty, args) ->
     let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+    (* Closure allocations: _0 is the apply function (must be a plain JS function,
+       not a $clo wrapper); free-variable slots _1+ are ordinary atoms. *)
+    let is_clo = String.length tag >= 4 && String.sub tag 0 4 = "$Clo" in
     emit ctx (Printf.sprintf "{ $: %S" tag);
     List.iteri (fun i a ->
-      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
+      emit ctx (Printf.sprintf ", _%d: " i);
+      if is_clo && i = 0 then emit_atom_raw ctx a
+      else emit_atom ctx a) args;
     emit ctx " }"
 
   | Tir.EStackAlloc (ty, args) ->
@@ -491,15 +520,27 @@ and emit_case_impl ctx result_var expr =
 (* ── Function definition emission ───────────────────────────────── *)
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
+  let fname = mangle fn.Tir.fn_name in
   emit_indent ctx;
-  emit ctx ("function " ^ mangle fn.Tir.fn_name ^ "(");
+  emit ctx ("function " ^ fname ^ "(");
   List.iteri (fun i p ->
     if i > 0 then emit ctx ", ";
     emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
   emit ctx ") {\n";
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
   emit_indent ctx;
-  emit ctx "}\n\n"
+  emit ctx "}\n";
+  (* Closure-protocol wrapper: allows this function to be used as a first-class
+     value via ECallPtr dispatch (f._0(f, args)).
+     $_ is the closure self-pointer (unused since top-level fns have no free vars). *)
+  emit_indent ctx;
+  emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
+  List.iter (fun p -> emit ctx (", " ^ mangle p.Tir.v_name)) fn.Tir.fn_params;
+  emit ctx (") => " ^ fname ^ "(");
+  List.iteri (fun i p ->
+    if i > 0 then emit ctx ", ";
+    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
+  emit ctx ") };\n\n"
 
 (* ── Structural equality ─────────────────────────────────────────── *)
 
@@ -575,6 +616,8 @@ const negate_float    = { _0: ($_, x) => -x };
 
 let emit_module (m : Tir.tir_module) : string =
   let ctx = create_ctx () in
+  (* Pre-register all function names so emit_atom can emit $clo versions *)
+  List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
   (* Top-level functions *)
