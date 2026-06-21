@@ -1,0 +1,55 @@
+mod TestNetFrame do
+
+  describe "NetFrame.encode" do
+
+    test "prepends a 4-byte big-endian length header" do
+      -- payload of length 3 -> [0,0,0,3, 10,20,30]
+      assert (NetFrame.encode(Cons(10, Cons(20, Cons(30, Nil))))
+              == Cons(0, Cons(0, Cons(0, Cons(3, Cons(10, Cons(20, Cons(30, Nil))))))))
+    end
+
+    test "empty payload encodes to a zero-length header" do
+      assert (NetFrame.encode(Nil) == Cons(0, Cons(0, Cons(0, Cons(0, Nil)))))
+    end
+
+  end
+
+  describe "NetFrame.decode" do
+
+    test "round-trips a single frame with no remainder" do
+      let payload = Cons(7, Cons(8, Cons(9, Nil)))
+      assert (NetFrame.decode(NetFrame.encode(payload)) == Some((payload, Nil)))
+    end
+
+    test "returns trailing bytes as the remainder" do
+      let frame = NetFrame.encode(Cons(1, Cons(2, Nil)))
+      let buf = List.append(frame, Cons(99, Cons(98, Nil)))
+      assert (NetFrame.decode(buf)
+              == Some((Cons(1, Cons(2, Nil)), Cons(99, Cons(98, Nil)))))
+    end
+
+    test "None when the header is incomplete" do
+      assert (NetFrame.decode(Cons(0, Cons(0, Nil))) == None)
+    end
+
+    test "None when the body is incomplete" do
+      -- header claims 5 bytes but only 2 are present
+      let buf = Cons(0, Cons(0, Cons(0, Cons(5, Cons(1, Cons(2, Nil))))))
+      assert (NetFrame.decode(buf) == None)
+    end
+
+    test "two concatenated frames decode one at a time" do
+      let f1 = NetFrame.encode(Cons(1, Nil))
+      let f2 = NetFrame.encode(Cons(2, Cons(3, Nil)))
+      let buf = List.append(f1, f2)
+      match NetFrame.decode(buf) do
+        Some((p1, rest)) ->
+          assert (p1 == Cons(1, Nil))
+          assert (NetFrame.decode(rest) == Some((Cons(2, Cons(3, Nil)), Nil)))
+        None -> assert false
+      end
+    end
+
+  end
+
+end

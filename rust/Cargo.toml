@@ -1,0 +1,9 @@
+# The `march` Rust FFI layer — the Rustler analog for binding Rust crates to
+# March (specs/2026-06-19-c-ffi-abi-design.md §16). Two crates:
+#   march        — runtime: the march_* C ABI, ToMarch/FromMarch, Error, ResourceArc
+#   march-macro  — proc-macros: #[march], #[derive(Encoder, Decoder)], init!
+# A user's binding crate is a `staticlib` (compiled) / `cdylib` (interpreter)
+# depending on `march` and linked through forge.toml [ffi].
+[workspace]
+members = ["march", "march-macro"]
+resolver = "2"

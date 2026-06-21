@@ -317,7 +317,7 @@ mod TestToml do
     end
 
     test "inline table" do
-      let v = parse_ok("point = { x: 1, y: 2 }")
+      let v = parse_ok("point = { x = 1, y = 2 }")
       let pt = get_table(v, "point")
       Test.assert_eq(get_int(pt, "x"), 1, "x")
       Test.assert_eq(get_int(pt, "y"), 2, "y")

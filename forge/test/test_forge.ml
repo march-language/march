@@ -764,6 +764,58 @@ let test_ffi_gen_c_codecs () =
   Alcotest.(check bool) "shim decodes codec param" true (contains "march_decode_Labeled(l_v)");
   Alcotest.(check bool) "shim encodes codec return" true (contains "return march_encode_Point(result)")
 
+let test_ffi_gen_c_raises () =
+  let dir = Filename.temp_file "march_ffi_raises" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let mfile = Filename.concat dir "r.march" in
+  let oc = open_out mfile in
+  output_string oc
+    "mod R do\n\
+    \  needs Ffi\n\
+    \  extern \"demo\" : Cap(Ffi) do\n\
+    \    raises fn parse(s: String): Result(Int, String) = \"demo_parse\"\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let cfile = Filename.concat dir "out.c" in
+  (match Cmd_ffi.run ~file:mfile ~out:(Some cfile) with
+   | Error e -> Alcotest.failf "gen-c failed: %s" e
+   | Ok () -> ());
+  let ic = open_in cfile in
+  let body = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let contains sub =
+    let n = String.length sub and h = String.length body in
+    let rec go i = i + n <= h && (String.sub body i n = sub || go (i+1)) in go 0 in
+  (* env-routed signature: hidden march_env* first param, bare Ok-payload return *)
+  Alcotest.(check bool) "env param + bare Int return" true
+    (contains "int64_t demo_parse(march_env *env, march_value s)");
+  Alcotest.(check bool) "march_raise hint" true (contains "march_raise(env,")
+
+let test_ffi_add_rust () =
+  let dir = Filename.temp_file "march_addrust" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  (match Cmd_ffi.add_rust ~name:"mylib" ~dir ~march_path:"/path/to/march" with
+   | Error e -> Alcotest.failf "add-rust failed: %s" e
+   | Ok () -> ());
+  let read p = let ic = open_in p in
+    let s = really_input_string ic (in_channel_length ic) in close_in ic; s in
+  let crate = Filename.concat dir "mylib" in
+  let cargo = read (Filename.concat crate "Cargo.toml") in
+  let lib = read (Filename.concat crate "src/lib.rs") in
+  let gen = read (Filename.concat crate "src/bin/gen_extern.rs") in
+  let contains hay sub =
+    let n = String.length sub and h = String.length hay in
+    let rec go i = i + n <= h && (String.sub hay i n = sub || go (i+1)) in go 0 in
+  Alcotest.(check bool) "staticlib+lib crate-type" true
+    (contains cargo "crate-type = [\"staticlib\", \"lib\"]");
+  Alcotest.(check bool) "march path dep" true (contains cargo "/path/to/march");
+  Alcotest.(check bool) "panic = unwind" true (contains cargo "panic = \"unwind\"");
+  Alcotest.(check bool) "uses #[march]" true (contains lib "use march::{march, Error}");
+  Alcotest.(check bool) "init! manifest" true (contains lib "march::init!(\"mylib\"");
+  Alcotest.(check bool) "gen_extern prints block" true
+    (contains gen "march_print_extern_block")
+
 let test_ffi_gen_c_no_extern () =
   let mfile = Filename.temp_file "march_noffi" ".march" in
   let oc = open_out mfile in
@@ -886,6 +938,8 @@ let () =
     "ffi", [
       Alcotest.test_case "gen-c: extern block -> C skeleton" `Quick test_ffi_gen_c;
       Alcotest.test_case "gen-c: record/variant codecs"      `Quick test_ffi_gen_c_codecs;
+      Alcotest.test_case "gen-c: raises (env-routed errors)" `Quick test_ffi_gen_c_raises;
+      Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
     ];
   ]

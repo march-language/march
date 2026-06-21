@@ -18,6 +18,16 @@ void march_fatal(const char *msg) {
     abort();
 }
 
+/* Per-call context for `raises` bindings.  Layout MUST match the wrapper the
+ * compiler emits (llvm_emit.ml): { i64 raised; i64 err } — raised != 0 means an
+ * error was raised; err holds the error march_value.  Allocated (zeroed) by the
+ * wrapper on the stack; only `err` is read, and only when `raised`. */
+struct march_env { int64_t raised; march_value err; };
+
+void march_raise(march_env *env, march_value e) {
+    if (env && !env->raised) { env->raised = 1; env->err = e; }
+}
+
 march_value march_make_int(int64_t n)     { return ((march_value)n << 1) | 1; }
 int64_t     march_get_int(march_value v)  { return v >> 1; }
 march_value march_make_bool(int b)        { return ((march_value)(b ? 1 : 0) << 1) | 1; }
@@ -315,4 +325,14 @@ march_value ffi_test_parse(march_value s) {
     if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
         return march_ok(march_make_int(v.ptr[0] - '0'));
     return march_err(march_str_new((const uint8_t *)"nan", 3));
+}
+
+/* `raises` variant: returns the bare Ok payload (Int) on success and raises an
+ * Err(String) out-of-band via march_env — the compiler wraps it into Ok/Err. */
+int64_t ffi_raise_parse(march_env *env, march_value s) {
+    march_slice v = march_str_borrow(s);
+    if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
+        return v.ptr[0] - '0';                  /* bare Int Ok payload */
+    march_raise(env, march_str_new((const uint8_t *)"bad int", 7));
+    return 0;
 }

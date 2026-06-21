@@ -1,0 +1,19 @@
+-- FFI env-routed error protocol: a `raises` binding takes a hidden march_env*
+-- and returns the bare Ok payload, calling march_raise(env, e) to fail. The
+-- compiler-emitted wrapper materializes Ok(payload) / Err(e). Both arms match.
+mod Test do
+  needs Ffi
+  extern "rt" : Cap(Ffi) do
+    raises fn parse(s: String): Result(Int, String) = "ffi_raise_parse"
+  end
+  fn shown(r: Result(Int, String)) : String do
+    match r do
+      Ok(n) -> int_to_string(n)
+      Err(e) -> e
+    end
+  end
+  fn main() : Unit do
+    println(shown(parse("7")))     -- Ok(7)   -> 7
+    println(shown(parse("zz")))    -- raised  -> bad int
+  end
+end

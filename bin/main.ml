@@ -111,6 +111,7 @@ let stdlib_file_list = [
   "string.march";
   "iolist.march";
   "html.march";
+  "dom.march";
   "sigil.march";
   "http.march";
   "http_transport.march";
@@ -295,10 +296,10 @@ let ensure_runtime_so () =
     let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
     let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
     let ffi_c     = Filename.concat runtime_dir "march_ffi.c" in
+    let sha1_c    = Filename.concat runtime_dir "sha1.c" in
+    let base64_c  = Filename.concat runtime_dir "base64.c" in
     let extra_files =
       (if Sys.file_exists http_c then
-        let sha1_c    = Filename.concat runtime_dir "sha1.c" in
-        let base64_c  = Filename.concat runtime_dir "base64.c" in
         let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
         let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
         let io_c      = Filename.concat runtime_dir "march_http_io.c" in
@@ -308,7 +309,15 @@ let ensure_runtime_so () =
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
           (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
           (opt_file compress_c)
-      else Printf.sprintf "%s%s%s" (opt_file sched_c) (opt_file extras_c) (opt_file compress_c))
+      else
+        (* march_extras.c unconditionally references base64_encode (base64.c) and
+           sha1 (sha1.c), so they must be linked whenever march_extras.c is —
+           independent of the HTTP stack. Without this, a build tree that has
+           march_extras.c but not march_http.c (e.g. a native test rule that
+           lists extras as a dep but not http) fails to link with undefined
+           _base64_encode / _sha1. opt_file-guarded so absent files are skipped. *)
+        Printf.sprintf "%s%s%s%s%s" (opt_file sched_c) (opt_file extras_c)
+          (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
     in
@@ -1241,23 +1250,27 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
-          (* Copy march_runtime.mjs alongside the output so the import works *)
+          (* Copy runtime .mjs files alongside the output so imports work *)
           let out_dir = Filename.dirname out_bin in
-          let rt_dest = Filename.concat out_dir "march_runtime.mjs" in
-          let rt_candidates = [
-            "runtime/march_runtime.mjs";
-            Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.mjs";
-            Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.mjs";
-          ] in
-          (match List.find_opt Sys.file_exists rt_candidates with
-          | Some src ->
-            let ic = open_in src in
-            let content = really_input_string ic (in_channel_length ic) in
-            close_in ic;
-            let oc2 = open_out rt_dest in
-            output_string oc2 content;
-            close_out oc2
-          | None -> Printf.eprintf "march: warning: cannot find march_runtime.mjs\n");
+          let copy_runtime name =
+            let dest = Filename.concat out_dir name in
+            let candidates = [
+              Filename.concat "runtime" name;
+              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../runtime" name);
+              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../../runtime" name);
+            ] in
+            match List.find_opt Sys.file_exists candidates with
+            | Some src ->
+              let ic = open_in src in
+              let content = really_input_string ic (in_channel_length ic) in
+              close_in ic;
+              let oc2 = open_out dest in
+              output_string oc2 content;
+              close_out oc2
+            | None -> Printf.eprintf "march: warning: cannot find %s\n" name
+          in
+          copy_runtime "march_runtime.mjs";
+          copy_runtime "march_dom.mjs";
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)
@@ -1271,6 +1284,22 @@ let compile filename =
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (* Hot Code Reload: per-function impl_hash map (qualified fn name →
+           64-char hex Merkle root) so the baseline dispatch-table publish can
+           carry real hashes instead of null. Built from the same CAS hashing
+           that keys the artifact cache; only consulted when --hot-reload is on. *)
+        let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        let add_hdef (hd : March_cas.Cas.hashed_def) =
+          match hd.March_cas.Cas.hd_def with
+          | March_cas.Cas.FnDef fd ->
+            Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
+              hd.March_cas.Cas.hd_impl_hash
+          | March_cas.Cas.TypeDef _ -> ()
+        in
+        List.iter (function
+          | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
+          | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
+          h_sccs;
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
@@ -1287,7 +1316,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1383,20 +1412,26 @@ let compile filename =
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
+            let sha1_c2   = Filename.concat runtime_dir "sha1.c" in
+            let base64_c2 = Filename.concat runtime_dir "base64.c" in
             let extra_c_files =
               (if Sys.file_exists http_c then
-                let sha1_c    = Filename.concat runtime_dir "sha1.c" in
-                let base64_c  = Filename.concat runtime_dir "base64.c" in
                 let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
                 let io_c      = Filename.concat runtime_dir "march_http_io.c" in
                 let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
                 let tls_c2    = Filename.concat runtime_dir "march_tls.c" in
-                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
+                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
                   (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c)
                   (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
-              else Printf.sprintf "%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2) (opt_file2 compress_c2))
+              else
+                (* march_extras.c references base64_encode (base64.c) and sha1
+                   (sha1.c), so link them whenever extras is linked — independent
+                   of the HTTP stack (else an extras-but-no-http build tree fails
+                   with undefined _base64_encode / _sha1). opt_file2-guarded. *)
+                Printf.sprintf "%s%s%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2)
+                  (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
               ^ (opt_file2 (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
               (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
@@ -1481,7 +1516,25 @@ let compile filename =
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) tir in
+        (* Mirror the compile path's per-fn impl_hash map so --emit-llvm
+           --hot-reload also publishes real baseline hashes (only built/used
+           when --hot-reload is active). *)
+        let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (match hr_config () with
+         | None -> ()
+         | Some _ ->
+           let add_hdef (hd : March_cas.Cas.hashed_def) =
+             match hd.March_cas.Cas.hd_def with
+             | March_cas.Cas.FnDef fd ->
+               Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
+                 hd.March_cas.Cas.hd_impl_hash
+             | March_cas.Cas.TypeDef _ -> ()
+           in
+           List.iter (function
+             | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
+             | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
+             (March_cas.Pipeline.hash_module tir));
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
