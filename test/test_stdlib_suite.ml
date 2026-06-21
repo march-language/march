@@ -10058,6 +10058,105 @@ let test_compiled_sortby_heap_capturing_comparator () =
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
+(* End-to-end guard for Hot Code Reload (HCR) Phase 2 versioned dispatch.
+   `--hot-reload <Prefix>` compiles modules under <Prefix> with a versioned
+   dispatch table: boundary→boundary calls route through march_dispatch_enter/
+   leave and @main emits march_dispatch_init(n) + per-fn march_dispatch_publish.
+   Three things must hold:
+     1. the --hot-reload build runs and prints "dispatch works";
+     2. it is behaviour-identical to a plain --compile build (same output);
+     3. real dispatch was emitted — the IR contains march_dispatch_enter as a
+        *call* (not merely the preamble `declare`).
+   Functions must live in a NESTED module so they get qualified names like
+   `Core.b`; top-level entry fns are emitted bare and never match a prefix. *)
+let test_compiled_hot_reload_dispatch () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_hotreload" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "disp.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod App do\n\
+      \  mod Core do\n\
+      \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
+      \    fn a(n : Int) : Int do b(n) end\n\
+      \  end\n\
+      \  fn main() do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
+       end\n";
+    close_out oc;
+    (* Read the whole stdout of a command (trimmed). *)
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 64 in
+      (try
+         while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      String.trim (Buffer.contents buf)
+    in
+    let plain_bin = Filename.concat tmp "plain" in
+    let hr_bin    = Filename.concat tmp "hr" in
+    (* Run compiles from the test CWD (project root) so the compiler resolves
+       its CWD-relative runtime/ and stdlib/ dirs; use absolute src/out paths. *)
+    let compile_plain = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote plain_bin) (Filename.quote src)) in
+    let compile_hr = Sys.command (Printf.sprintf
+      "%s --compile --hot-reload Core -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote hr_bin) (Filename.quote src)) in
+    (* Skip when compilation can't complete here (no clang / runtime sources) —
+       matches the other Slow compiled regression tests. *)
+    if compile_plain <> 0 || compile_hr <> 0 then ()
+    else begin
+      (* 1. the --hot-reload build prints exactly "dispatch works". *)
+      Alcotest.(check string)
+        "hot-reload build prints \"dispatch works\""
+        "dispatch works"
+        (read_cmd (Printf.sprintf "%s 2>/dev/null" (Filename.quote hr_bin)));
+      (* 2. behaviour-identical: plain build prints the same thing. *)
+      Alcotest.(check string)
+        "plain build prints the same output as the hot-reload build"
+        "dispatch works"
+        (read_cmd (Printf.sprintf "%s 2>/dev/null" (Filename.quote plain_bin)));
+      (* 3. real dispatch happened: --emit-llvm --hot-reload emits a *call* to
+         march_dispatch_enter (the IR is written to <src-without-ext>.ll). *)
+      let emit_rc = Sys.command (Printf.sprintf
+        "%s --emit-llvm --hot-reload Core -o %s %s >/dev/null 2>&1"
+        (Filename.quote main_exe)
+        (Filename.quote (Filename.concat tmp "ignored"))
+        (Filename.quote src)) in
+      Alcotest.(check int) "--emit-llvm --hot-reload exits 0" 0 emit_rc;
+      let ll_file = Filename.concat tmp "disp.ll" in
+      let ir =
+        let ic = open_in ll_file in
+        let n = in_channel_length ic in
+        let s = really_input_string ic n in
+        close_in ic; s
+      in
+      (* A bare `declare` of march_dispatch_enter is the preamble; a real call
+         site reads `call ptr @march_dispatch_enter`. Require the call form. *)
+      let contains hay needle =
+        let nl = String.length needle and hl = String.length hay in
+        let rec go i =
+          if i + nl > hl then false
+          else if String.sub hay i nl = needle then true
+          else go (i + 1)
+        in
+        go 0
+      in
+      Alcotest.(check bool)
+        "IR contains a CALL to march_dispatch_enter (real dispatch, not just declare)"
+        true (contains ir "call ptr @march_dispatch_enter");
+      Alcotest.(check bool)
+        "IR contains march_dispatch_init call (@main dispatch setup)"
+        true (contains ir "call void @march_dispatch_init")
+    end
+  end
+
 (* Regression: a user top-level function whose name collides with a stdlib
    internal helper (the canonical accumulator name `go`) silently broke the
    stdlib function.  Root cause: a local recursive fn's name was excluded from
@@ -11254,5 +11353,7 @@ let stdlib_suites =
           test_compiled_pmap_matches_map;
         Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
           test_compiled_sortby_heap_capturing_comparator;
+        Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
+          test_compiled_hot_reload_dispatch;
       ]);
     ]
