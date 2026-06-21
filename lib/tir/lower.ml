@@ -2168,6 +2168,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                                  ed_params = params;
                                  ed_consumed = ef.ef_param_consumed;
                                  ed_blocking = ef.ef_blocking;
+                                 ed_raises = ef.ef_raises;
                                  ed_ret = ret } :: !externs
                   ) edef.ext_fns
               | _ -> ()
