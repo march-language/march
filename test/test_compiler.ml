@@ -3719,6 +3719,76 @@ let test_cap_body_spawn_parent_ok () =
   Alcotest.(check bool) "needs IO umbrella covers task_spawn: no warning" false
     (has_warning_with ctx "IO.Spawn")
 
+(* ── Refinement types (A1a: parse + erase to base) ──────────────────────── *)
+
+(* Walk a surface type looking for a TyRefine node. *)
+let rec ty_has_refine : March_ast.Ast.ty -> bool = function
+  | March_ast.Ast.TyRefine _ -> true
+  | March_ast.Ast.TyCon (_, args) -> List.exists ty_has_refine args
+  | March_ast.Ast.TyArrow (a, b) | March_ast.Ast.TyNatOp (_, a, b) ->
+    ty_has_refine a || ty_has_refine b
+  | March_ast.Ast.TyTuple ts -> List.exists ty_has_refine ts
+  | March_ast.Ast.TyRecord fs -> List.exists (fun (_, t) -> ty_has_refine t) fs
+  | March_ast.Ast.TyLinear (_, t) -> ty_has_refine t
+  | March_ast.Ast.TyVar _ | March_ast.Ast.TyNat _ | March_ast.Ast.TyChan _ -> false
+
+let rec decl_has_refined_param : March_ast.Ast.decl -> bool = function
+  | March_ast.Ast.DFn (fd, _) ->
+    List.exists
+      (fun (c : March_ast.Ast.fn_clause) ->
+        List.exists
+          (function
+            | March_ast.Ast.FPNamed p | March_ast.Ast.FPDefault (p, _) ->
+              (match p.March_ast.Ast.param_ty with
+               | Some t -> ty_has_refine t
+               | None -> false)
+            | March_ast.Ast.FPPat _ -> false)
+          c.March_ast.Ast.fc_params)
+      fd.March_ast.Ast.fn_clauses
+  | March_ast.Ast.DMod (_, _, decls, _) ->
+    List.exists decl_has_refined_param decls
+  | _ -> false
+
+let test_parse_refinement_node_present () =
+  (* Both refinement forms must parse and construct a TyRefine (not be dropped). *)
+  let m =
+    Test_helpers.parse_module
+      "mod M do\n\
+      \  fn f(i : {Int | _ >= 0 && _ < 10}) : Int do i end\n\
+      \  fn g(d : {v : Int | v != 0}) : Int do d end\n\
+       end\n"
+  in
+  Alcotest.(check bool) "TyRefine present in parsed AST" true
+    (List.exists decl_has_refined_param m.March_ast.Ast.mod_decls)
+
+let test_refined_param_typechecks_as_base () =
+  (* A1a erasure: a refined param typechecks exactly like its base type. *)
+  let refined =
+    "mod M do\n\
+    \  fn f(i : {Int | _ >= 0}) : Int do i + 1 end\n\
+    \  fn main() : Int do f(5) end\n\
+     end\n"
+  in
+  let bare =
+    "mod M do\n\
+    \  fn f(i : Int) : Int do i + 1 end\n\
+    \  fn main() : Int do f(5) end\n\
+     end\n"
+  in
+  Alcotest.(check bool) "refined typechecks cleanly" false
+    (Test_helpers.has_errors (Test_helpers.typecheck refined));
+  Alcotest.(check bool) "bare typechecks cleanly" false
+    (Test_helpers.has_errors (Test_helpers.typecheck bare))
+
+let test_record_type_still_parses () =
+  (* Disambiguation regression: record types must not be misparsed as refinements. *)
+  let m =
+    Test_helpers.parse_module
+      "mod M do fn r(p : { x : Int, y : Int }) : Int do p.x end end\n"
+  in
+  Alcotest.(check bool) "record type is not a refinement" false
+    (List.exists decl_has_refined_param m.March_ast.Ast.mod_decls)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -3806,6 +3876,9 @@ let compiler_suites =
           Alcotest.test_case "lambda zero-arg block" `Quick test_parse_lambda_zero_arg_block;
           Alcotest.test_case "lambda multi-param block" `Quick test_parse_lambda_multi_param_block;
           Alcotest.test_case "application" `Quick test_parse_expr_app;
+          Alcotest.test_case "refinement node present" `Quick test_parse_refinement_node_present;
+          Alcotest.test_case "refined param typechecks as base" `Quick test_refined_param_typechecks_as_base;
+          Alcotest.test_case "record type still parses" `Quick test_record_type_still_parses;
         ] );
       ( "module",
         [
