@@ -412,24 +412,49 @@ let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
     function is invoked (i.e., when the closure's own RC > 1). *)
 let find_inc_vars ?(include_borrowed_fields = true)
     (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
-  List.filter_map (function
-    | Tir.AVar v
-      when v.Tir.v_lin = Tir.Unr
-           && needs_rc v.Tir.v_ty
-           && StringSet.mem v.Tir.v_name live_after
-           && (include_borrowed_fields
-               || not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)) ->
-      (* Borrowed field vars: the record owner holds their reference.  At a
-         CONSUMING position (call arg, constructor capture, return) they must
-         be dup'd (EIncRC) so the consumer's free does not invalidate the
-         owner's reference — passing them un-inc'd transfers a reference the
-         function does not own (use-after-free when the owner reads the field
-         again).  At pure BORROW reads (EField projection of a nested record)
-         the caller passes ~include_borrowed_fields:false to keep the old
-         suppression, since no ownership changes hands there. *)
-      Some v
-    | _ -> None
-  ) atoms
+  (* Every atom here is at a CONSUMING position (call arg, constructor / tuple /
+     record capture, return).  The caller holds exactly ONE reference to an
+     owned variable (its binding), but a variable may appear at [count]
+     consuming positions in this single node — each takes ownership — and one
+     reference must survive if it is still [live_after].  So the caller must
+     emit  count - 1 + (live_after ? 1 : 0)  EIncRC ops for it.
+
+     The previous version emitted one Inc per occurrence only when the variable
+     was live_after, and none otherwise.  That under-dup'd a variable passed to
+     SEVERAL consuming positions at once while dead afterwards — e.g. [f(x, x)],
+     [Cons(x, x)], [(x, x)] — so each extra position DecRC'd a reference the
+     caller never owned → RC underflow / double-free.  (Single-occurrence cases
+     are unchanged: count-1+1 = 1 when live, count-1 = 0 when dead.)
+
+     Borrowed field vars: the record owner holds their reference.  At a
+     consuming position they must still be dup'd so the consumer's free does not
+     invalidate the owner's reference.  At pure BORROW reads (EField projection)
+     the caller passes ~include_borrowed_fields:false to keep that suppression. *)
+  let eligible (v : Tir.var) : bool =
+    v.Tir.v_lin = Tir.Unr
+    && needs_rc v.Tir.v_ty
+    && (include_borrowed_fields
+        || not (StringSet.mem v.Tir.v_name !_borrowed_field_vars))
+  in
+  let counts : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  let vrec   : (string, Tir.var) Hashtbl.t = Hashtbl.create 8 in
+  let order  = ref [] in
+  List.iter (function
+    | Tir.AVar v when eligible v ->
+      (match Hashtbl.find_opt counts v.Tir.v_name with
+       | Some n -> Hashtbl.replace counts v.Tir.v_name (n + 1)
+       | None ->
+         order := v.Tir.v_name :: !order;
+         Hashtbl.replace counts v.Tir.v_name 1;
+         Hashtbl.replace vrec v.Tir.v_name v)
+    | _ -> ()
+  ) atoms;
+  List.rev !order
+  |> List.concat_map (fun name ->
+       let v = Hashtbl.find vrec name in
+       let count = Hashtbl.find counts name in
+       let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
+       List.init n (fun _ -> v))
 
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
