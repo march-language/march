@@ -10173,6 +10173,55 @@ let test_compiled_string_to_int_overflow_is_none () =
     end
   end
 
+(* Regression: Perceus under-dup'd a variable passed to MULTIPLE consuming
+   positions of one node while dead afterwards — e.g. BigInt.mul(a, a),
+   Cons(x, x), (x, x).  find_inc_vars emitted Inc only for live-after vars, so
+   f(x, x) with x:rc=1 got 0 Incs: the first owned arg freed the box and the
+   second DecRC underflowed (compiled double-free; interpreter was fine).
+   Squaring via BigInt.mul(a, a) on a multi-limb value is the natural trigger. *)
+let test_compiled_aliased_arg_no_double_free () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_alias_dup" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "a.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod AliasDup do\n\
+      \  fn main() : Unit do\n\
+      \    let a = BigInt.from_int(7)\n\
+      \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\
+      \    let s0 = BigInt.from_int(314159265358979)\n\
+      \    let s1 = BigInt.mul(s0, s0)\n\
+      \    let s2 = BigInt.mul(s1, s1)\n\
+      \    let s3 = BigInt.mul(s2, s2)        -- multi-limb squaring chain\n\
+      \    let xs = Cons(1, Cons(2, Nil))\n\
+      \    let pair = (xs, xs)                -- (x, x): heap list aliased\n\
+      \    let plen = match pair do (p, q) -> List.length(p) + List.length(q) end\n\
+      \    if BigInt.to_string(sq) == \"49\" && plen == 4\n\
+      \       && BigInt.to_string(s3) != \"0\"\n\
+      \    do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "abin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                  (Filename.quote bin)) in
+      Alcotest.(check int)
+        "compiled f(x,x) with owned heap arg does not double-free (exit 0)"
+        0 run_rc
+    end
+  end
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -11155,6 +11204,8 @@ let stdlib_suites =
           test_compiled_vault_scalar_roundtrip;
         Alcotest.test_case "string_to_int out-of-range returns None (niche tag no overflow)" `Slow
           test_compiled_string_to_int_overflow_is_none;
+        Alcotest.test_case "aliased owned arg f(x,x) does not double-free (compiled)" `Slow
+          test_compiled_aliased_arg_no_double_free;
         Alcotest.test_case "stdlib helper works despite user top-level name collision (go)" `Slow
           test_compiled_helper_name_collision;
         Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow

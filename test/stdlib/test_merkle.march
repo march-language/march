@@ -1,0 +1,159 @@
+mod TestMerkle do
+
+  describe "leaf" do
+
+    test "leaf root_hash is non-empty" do
+      let t = Merkle.leaf("hello", fn x -> x)
+      assert (not(String.is_empty(Merkle.root_hash(t))))
+    end
+
+    test "same content produces same hash" do
+      let t1 = Merkle.leaf("hello", fn x -> x)
+      let t2 = Merkle.leaf("hello", fn x -> x)
+      assert (Merkle.root_hash(t1) == Merkle.root_hash(t2))
+    end
+
+    test "different content produces different hash" do
+      let t1 = Merkle.leaf("hello", fn x -> x)
+      let t2 = Merkle.leaf("world", fn x -> x)
+      assert (not(Merkle.root_hash(t1) == Merkle.root_hash(t2)))
+    end
+
+    test "leaf size is 1" do
+      let t = Merkle.leaf(42, fn x -> int_to_string(x))
+      assert (Merkle.size(t) == 1)
+    end
+
+    test "leaf leaves returns singleton" do
+      let t = Merkle.leaf("abc", fn x -> x)
+      assert (Merkle.leaves(t) == Cons("abc", Nil))
+    end
+
+  end
+
+  describe "branch" do
+
+    test "branch hash differs from children hashes" do
+      let l = Merkle.leaf("a", fn x -> x)
+      let r = Merkle.leaf("b", fn x -> x)
+      let b = Merkle.branch(l, r)
+      assert (not(Merkle.root_hash(b) == Merkle.root_hash(l)))
+      assert (not(Merkle.root_hash(b) == Merkle.root_hash(r)))
+    end
+
+    test "branch size is 2" do
+      let b = Merkle.branch(Merkle.leaf("x", fn x -> x), Merkle.leaf("y", fn x -> x))
+      assert (Merkle.size(b) == 2)
+    end
+
+    test "branch leaves in order" do
+      let l = Merkle.leaf("first", fn x -> x)
+      let r = Merkle.leaf("second", fn x -> x)
+      let b = Merkle.branch(l, r)
+      assert (Merkle.leaves(b) == Cons("first", Cons("second", Nil)))
+    end
+
+  end
+
+  describe "build" do
+
+    test "build of empty list is None" do
+      assert (Merkle.build(Nil, fn x -> x) == None)
+    end
+
+    test "build of single element returns Some" do
+      match Merkle.build(Cons("a", Nil), fn x -> x) do
+      None -> assert false
+      Some(t) -> assert (Merkle.size(t) == 1)
+      end
+    end
+
+    test "build of two elements" do
+      match Merkle.build(Cons("a", Cons("b", Nil)), fn x -> x) do
+      None -> assert false
+      Some(t) -> assert (Merkle.size(t) == 2)
+      end
+    end
+
+    test "build preserves leaf order" do
+      let items = Cons("x", Cons("y", Cons("z", Nil)))
+      match Merkle.build(items, fn x -> x) do
+      None -> assert false
+      Some(t) -> assert (Merkle.leaves(t) == items)
+      end
+    end
+
+    test "build produces unique root hashes for different data" do
+      let t1 = Merkle.build(Cons("a", Cons("b", Nil)), fn x -> x)
+      let t2 = Merkle.build(Cons("a", Cons("c", Nil)), fn x -> x)
+      match (t1, t2) do
+      (Some(tree1), Some(tree2)) ->
+        assert (not(Merkle.root_hash(tree1) == Merkle.root_hash(tree2)))
+      _ -> assert false
+      end
+    end
+
+    test "build produces same root hash for same data" do
+      let items = Cons("1", Cons("2", Cons("3", Nil)))
+      let t1 = Merkle.build(items, fn x -> x)
+      let t2 = Merkle.build(items, fn x -> x)
+      match (t1, t2) do
+      (Some(tree1), Some(tree2)) ->
+        assert (Merkle.root_hash(tree1) == Merkle.root_hash(tree2))
+      _ -> assert false
+      end
+    end
+
+  end
+
+  describe "diff" do
+
+    test "diff of identical trees is empty" do
+      match Merkle.build(Cons("a", Cons("b", Cons("c", Nil))), fn x -> x) do
+      None -> assert false
+      Some(t) -> assert (Merkle.diff(t, t) == Nil)
+      end
+    end
+
+    test "diff of different single leaves finds difference" do
+      let t1 = Merkle.leaf("old", fn x -> x)
+      let t2 = Merkle.leaf("new", fn x -> x)
+      let changed = Merkle.diff(t1, t2)
+      assert (not(List.is_empty(changed)))
+    end
+
+    test "diff of same leaves is empty" do
+      let t1 = Merkle.leaf("same", fn x -> x)
+      let t2 = Merkle.leaf("same", fn x -> x)
+      assert (Merkle.diff(t1, t2) == Nil)
+    end
+
+    test "diff finds changed leaf in tree" do
+      let items1 = Cons("a", Cons("b", Cons("c", Nil)))
+      let items2 = Cons("a", Cons("CHANGED", Cons("c", Nil)))
+      match (Merkle.build(items1, fn x -> x), Merkle.build(items2, fn x -> x)) do
+      (Some(t1), Some(t2)) ->
+        let changed = Merkle.diff(t1, t2)
+        assert (not(List.is_empty(changed)))
+      _ -> assert false
+      end
+    end
+
+  end
+
+  describe "contains_hash" do
+
+    test "contains_hash finds a leaf hash" do
+      let t = Merkle.leaf("hello", fn x -> x)
+      let h = Merkle.root_hash(t)
+      assert (Merkle.contains_hash(t, h))
+    end
+
+    test "contains_hash false for unknown hash" do
+      let t = Merkle.leaf("hello", fn x -> x)
+      assert (not(Merkle.contains_hash(t, "not-a-real-hash")))
+    end
+
+  end
+
+end

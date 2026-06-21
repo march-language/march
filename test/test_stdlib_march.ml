@@ -136,6 +136,12 @@ let all_stdlib_decls =
     "config.march";
     "html.march";
     "sigil.march";
+    "crypto.march";
+    "deque.march";
+    "vector_clock.march";
+    "merkle.march";
+    "crdt.march";
+    "consistent_hash.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -283,4 +289,24 @@ let () =
       Alcotest.test_case "Flow module"
         `Quick (run_stdlib_test "test_flow.march" "TestFlow");
     ]); *)
+    ("deque", [
+      Alcotest.test_case "Deque module"
+        `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("vector_clock", [
+      Alcotest.test_case "VectorClock module"
+        `Quick (run_stdlib_test "test_vector_clock.march" "TestVectorClock");
+    ]);
+    ("merkle", [
+      Alcotest.test_case "Merkle module"
+        `Quick (run_stdlib_test "test_merkle.march" "TestMerkle");
+    ]);
+    ("crdt", [
+      Alcotest.test_case "CRDT module"
+        `Quick (run_stdlib_test "test_crdt.march" "TestCrdt");
+    ]);
+    ("consistent_hash", [
+      Alcotest.test_case "ConsistentHash module"
+        `Quick (run_stdlib_test "test_consistent_hash.march" "TestConsistentHash");
+    ]);
   ]
