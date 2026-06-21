@@ -4,6 +4,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+/* From the scheduler: cooperatively yield the green thread (no-op outside a
+ * scheduler context).  Declared here to avoid pulling the whole scheduler API. */
+void march_sched_yield(void);
 
 int32_t march_ffi_abi_version(void) { return MARCH_FFI_ABI_VERSION; }
 
@@ -138,6 +144,68 @@ void *march_resource_get(march_value v, int32_t type_id) {
     if (((march_hdr *)p)->tag != MARCH_RESOURCE_TAG) march_fatal("march_resource_get: not a resource");
     if (*(int64_t *)((char *)p + 32) != type_id) march_fatal("march_resource_get: resource type mismatch");
     return *(void **)((char *)p + 16);
+}
+
+/* ── Blocking FFI dispatch (Phase 6) ─────────────────────────────────────────
+ * A `blocking` extern is run on a dedicated OS thread while the calling green
+ * thread cooperatively yields, so other green threads keep running instead of
+ * the whole scheduler worker stalling for the duration of the C call.
+ * Fixed-arity GP-register trampolines (Int/ptr args); separate int64/double
+ * return shapes — same constraints as the interpreter trampoline. */
+static int64_t blk_call_i(void *fn, const int64_t *a, int n) {
+    switch (n) {
+        case 0: return ((int64_t(*)(void))fn)();
+        case 1: return ((int64_t(*)(int64_t))fn)(a[0]);
+        case 2: return ((int64_t(*)(int64_t,int64_t))fn)(a[0],a[1]);
+        case 3: return ((int64_t(*)(int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2]);
+        case 4: return ((int64_t(*)(int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3]);
+        case 5: return ((int64_t(*)(int64_t,int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3],a[4]);
+        default:return ((int64_t(*)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3],a[4],a[5]);
+    }
+}
+static double blk_call_d(void *fn, const int64_t *a, int n) {
+    switch (n) {
+        case 0: return ((double(*)(void))fn)();
+        case 1: return ((double(*)(int64_t))fn)(a[0]);
+        case 2: return ((double(*)(int64_t,int64_t))fn)(a[0],a[1]);
+        case 3: return ((double(*)(int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2]);
+        case 4: return ((double(*)(int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3]);
+        case 5: return ((double(*)(int64_t,int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3],a[4]);
+        default:return ((double(*)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t))fn)(a[0],a[1],a[2],a[3],a[4],a[5]);
+    }
+}
+typedef struct {
+    void *fn; const int64_t *args; int n; int is_double;
+    int64_t ri; double rd; _Atomic int done;
+} march_blk_call;
+static void *march_blk_thread(void *p) {
+    march_blk_call *b = (march_blk_call *)p;
+    if (b->is_double) b->rd = blk_call_d(b->fn, b->args, b->n);
+    else              b->ri = blk_call_i(b->fn, b->args, b->n);
+    atomic_store_explicit(&b->done, 1, memory_order_release);
+    return NULL;
+}
+static void march_run_blocking(march_blk_call *b) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, march_blk_thread, b) != 0) {
+        /* Can't offload — run inline (still correct, just stalls this worker). */
+        march_blk_thread(b);
+        return;
+    }
+    /* Cooperatively yield while the C call runs on the OS thread. */
+    while (!atomic_load_explicit(&b->done, memory_order_acquire))
+        march_sched_yield();
+    pthread_join(t, NULL);
+}
+int64_t march_run_blocking_i(void *fn, const int64_t *args, int n) {
+    march_blk_call b = { fn, args, n, 0, 0, 0.0, 0 };
+    march_run_blocking(&b);
+    return b.ri;
+}
+double march_run_blocking_d(void *fn, const int64_t *args, int n) {
+    march_blk_call b = { fn, args, n, 1, 0, 0.0, 0 };
+    march_run_blocking(&b);
+    return b.rd;
 }
 
 march_value march_dup(march_value v) {

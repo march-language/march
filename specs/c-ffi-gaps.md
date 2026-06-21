@@ -50,10 +50,17 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Scheduler
 
-- **No `fast`/`blocking` classification.** Every extern call runs inline on the
-  current scheduler thread. A long/blocking C call stalls all green threads
-  multiplexed onto that scheduler thread. The `blocking` modifier + OS-thread
-  pool dispatch (spec §9) is Phase 6.
+- **`blocking` dispatch — DONE (Phase 6), with caveats.** `blocking fn` runs the
+  C call on a dedicated OS thread while the green thread cooperatively yields, so
+  other green threads keep running. Remaining sub-gaps:
+  - **No thread pool.** A fresh `pthread` is spawned + joined per blocking call
+    (fine for occasional long calls; not for high-frequency ones).
+  - **Poll, not park.** The waiting green thread loops on `march_sched_yield`;
+    outside a scheduler context that yield is a no-op, so the loop busy-spins
+    until the call finishes (a true park/wake would be better).
+  - **Arg/return scope** matches the trampoline: Int/Bool/pointer args + Int/
+    Bool/Float returns; float-as-argument is a compile error for `blocking`.
+  - `fast` is the implicit default (no keyword); there's no explicit `fast`.
 
 ## Tooling / build
 

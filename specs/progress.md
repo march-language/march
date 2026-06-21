@@ -280,6 +280,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — Phase 6: blocking dispatch)
+
+- **`blocking fn` externs run on a dedicated OS thread** while the calling green thread cooperatively yields, so a long/blocking C call no longer stalls the scheduler worker. Runtime: `march_run_blocking_i`/`_d` (`runtime/march_ffi.c`) spawn a pthread that runs the call through a fixed-arity GP-register trampoline, then `march_sched_yield` in a loop until done (falls back to inline if `pthread_create` fails). Codegen: a `blocking` extern call marshals its args into a stack i64 array and dispatches via `march_run_blocking_*` instead of a direct call (`lib/tir/llvm_emit.ml`).
+- **`blocking` is a contextual word** before `fn` in an extern block (not a reserved keyword), threaded `ef_blocking` → `ed_blocking` → a `blocking_externs` codegen set.
+- **Scope**: Int/Bool/pointer (String/Bytes/resource handle) args + Int/Bool/Float returns — same GP-register trampoline constraints as the interpreter path (float-as-arg unsupported → compile error). Poll-based (per-call pthread, no pool yet; cooperative-yield loop spins in a no-scheduler context).
+- **Verified**: `test/native/ffi_blocking` (`blocking fn dbl`, literal + variable args) → `42`/`200`; C unit test calls `march_run_blocking_i` on a real OS thread. compiler 293, codegen 318 (str_concat pre-existing), stdlib 783, forge 83, C ABI green.
+
 ## Current State (as of 2026-06-20, External Function Interface — Phase 5: forge build integration)
 
 - **`forge.toml [ffi]` compiles + links C shim sources** so real C bindings work without editing the runtime. `[ffi] sources = ["native/x.c"]` (relative to project root) and `link = ["-lz"]` (raw linker flags). `forge build` resolves each source to an absolute path and passes `--ffi-c`/`--ffi-link` to the compiler. (`forge/lib/project.ml` parses the `[ffi]` section; `forge/lib/cmd_build.ml` `ffi_flags_of`/`compile_entry`.)
