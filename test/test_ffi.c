@@ -13,6 +13,12 @@
 static int res_dtor_calls = 0;
 static void test_res_dtor(void *p) { res_dtor_calls++; free(p); }
 
+/* march_make_record interns a shape via march_record_shape_intern (defined in
+ * march_extras.c, which drags in the whole crypto/compress chain). Stub it here
+ * so the ABI unit test stays self-contained — the returned id is only stored in
+ * the header pad word, not exercised by this test. */
+int32_t march_record_shape_intern(const char *desc) { (void)desc; return 0; }
+
 int main(void) {
     /* ── version handshake ─────────────────────────────────────────────── */
     assert(march_ffi_abi_version() == MARCH_FFI_ABI_VERSION);
@@ -112,6 +118,28 @@ int main(void) {
         march_drop(r);                                /* rc 1->0: dtor runs, cell freed */
         assert(res_dtor_calls == 1);                  /* destructor ran exactly once */
         assert(march_live_allocs() == base);          /* cell freed (native freed by dtor) */
+    }
+
+    /* ── variants (ADTs) & records: make + read round-trip ─────────────────
+     * Slots store March's native per-field word verbatim (raw Int here), so the
+     * round-trip is word-for-word: deposit N, read N back. */
+    {
+        march_value fs[2] = { 7, 8 };
+        march_value v = march_make_variant(2, 2, fs);   /* ctor tag 2, two fields */
+        assert(march_variant_tag(v) == 2);
+        assert(march_variant_field(v, 0) == 7);
+        assert(march_variant_field(v, 1) == 8);
+        march_drop(v);
+
+        march_value v0 = march_make_variant(5, 0, NULL); /* nullary ctor */
+        assert(march_variant_tag(v0) == 5);
+        march_drop(v0);
+
+        march_value rf[2] = { 3, 4 };
+        march_value r = march_make_record("x:i;y:i;", 2, rf);
+        assert(march_record_field(r, 0) == 3);
+        assert(march_record_field(r, 1) == 4);
+        march_drop(r);
     }
 
     /* ── blocking dispatch runs the call on an OS thread, returns result ── */
