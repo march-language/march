@@ -83,6 +83,7 @@ let rec pp_ast_ty = function
   | Ast.TyNat n -> string_of_int n
   | Ast.TyNatOp _ -> "_"
   | Ast.TyChan _ -> "Chan"
+  | Ast.TyRefine (base, _, _) -> pp_ast_ty base
 
 (* ------------------------------------------------------------------ *)
 (* Index building from AST declarations                                *)

@@ -2161,6 +2161,9 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
           TChan (ref SError)
         | Some sty ->
           TChan (ref sty)))
+  (* A1a: refinements erase to their base type — the predicate is dropped here
+     (no VC emission yet; that is A1b). *)
+  | Ast.TyRefine (base, _, _) -> surface_ty env ~tvars base
 
 (* Now that surface_ty and generalize are defined, wire up the forward ref so
    resolve_qualified_var can inject interface method bindings cross-module. *)
@@ -4497,6 +4500,7 @@ let register_impl_shape env (idef : Ast.impl_def) =
       TRecord (List.map (fun ((n : Ast.name), ft) -> (n.txt, lenient_ty ft)) fs)
     | Ast.TyLinear (l, t') -> TLin (l, lenient_ty t')
     | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> fresh_var 1
+    | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
   let inst_ty = lenient_ty idef.impl_ty in
   { env with impls =
@@ -5341,6 +5345,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.TyLinear (_, t) -> ty t
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyChan (a, b) -> add a.Ast.txt; add b.Ast.txt
+    | Ast.TyRefine (base, _, _) -> ty base
   in
   let oty = function Some t -> ty t | None -> () in
   let param (p : Ast.param) = oty p.Ast.param_ty in
@@ -5434,6 +5439,7 @@ let unqualified_module_deps
     | Ast.TyLinear (_, t) -> ty t
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
+    | Ast.TyRefine (base, _, _) -> ty base
   in
   let oty = function Some t -> ty t | None -> () in
   let rec pat (p : Ast.pattern) =

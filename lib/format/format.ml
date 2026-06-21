@@ -169,6 +169,11 @@ let fmt_lit = function
 (* Types                                                               *)
 (* ------------------------------------------------------------------ *)
 
+(* Forward reference to the inline expression formatter, used to render
+   refinement predicates faithfully (so reformatting never drops the predicate).
+   Assigned once [expr_inline] is in scope, at the bottom of this module. *)
+let fmt_pred_ref : (expr -> string) ref = ref (fun _ -> "...")
+
 let rec fmt_ty = function
   | TyCon ({ txt; _ }, [])   -> txt
   | TyCon ({ txt; _ }, args) -> Printf.sprintf "%s(%s)" txt (fmt_tys args)
@@ -185,6 +190,10 @@ let rec fmt_ty = function
     let s = match op with NatAdd -> "+" | NatMul -> "*" in
     Printf.sprintf "%s %s %s" (fmt_ty a) s (fmt_ty b)
   | TyChan (r, p)            -> Printf.sprintf "Chan(%s, %s)" r.txt p.txt
+  | TyRefine (base, None, pred) ->
+    Printf.sprintf "{ %s | %s }" (fmt_ty base) (!fmt_pred_ref pred)
+  | TyRefine (base, Some n, pred) ->
+    Printf.sprintf "{ %s : %s | %s }" n.txt (fmt_ty base) (!fmt_pred_ref pred)
 
 and fmt_ty_atom t = match t with TyArrow _ -> Printf.sprintf "(%s)" (fmt_ty t) | _ -> fmt_ty t
 
@@ -1054,3 +1063,6 @@ let format_source ~filename src =
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   format_module ~src m
+
+(* Wire the refinement-predicate formatter now that [expr_inline] is in scope. *)
+let () = fmt_pred_ref := expr_inline

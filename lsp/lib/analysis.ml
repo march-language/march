@@ -5226,6 +5226,9 @@ let rec surface_ty (t : Ast.ty) : string =
     surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ")
     ^ surface_ty b
   | Ast.TyChan (r, p)   -> "Chan(" ^ r.Ast.txt ^ ", " ^ p.Ast.txt ^ ")"
+  (* Best-effort (A1a): predicate elided in generated scaffolds. *)
+  | Ast.TyRefine (base, None, _)   -> "{ " ^ surface_ty base ^ " | ... }"
+  | Ast.TyRefine (base, Some n, _) -> "{ " ^ n.Ast.txt ^ " : " ^ surface_ty base ^ " | ... }"
 
 (** Split a surface arrow type into (param types, return type). *)
 let rec split_arrow (t : Ast.ty) : Ast.ty list * Ast.ty =
