@@ -416,6 +416,24 @@ let dump_phases    = ref false
 let do_timings     = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
+(* FFI Phase 5: extra C sources / linker flags from forge.toml [[ffi]] blocks,
+   compiled + linked into the native binary alongside the runtime. *)
+let ffi_c_files    = ref []      (* C source paths, in declaration order (reversed) *)
+let ffi_link_flags = ref []      (* extra linker flags, e.g. "-lz" *)
+(* A CAS-key fragment digesting the FFI shim sources + link flags, so editing a
+   shim (a .c file, not the .march source) invalidates the cached binary. Empty
+   when no FFI shims are in play. *)
+let ffi_cas_tag () : string list =
+  if !ffi_c_files = [] && !ffi_link_flags = [] then []
+  else begin
+    let buf = Buffer.create 64 in
+    List.iter (fun f ->
+      Buffer.add_string buf f;
+      (try Buffer.add_string buf (Digest.to_hex (Digest.file f)) with _ -> ()))
+      (List.rev !ffi_c_files);
+    List.iter (Buffer.add_string buf) (List.rev !ffi_link_flags);
+    ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
+  end
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
@@ -861,7 +879,8 @@ let compile filename =
           | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
+        let cas_flags =
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1207,7 +1226,8 @@ let compile filename =
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
+        let cas_flags =
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
@@ -1331,6 +1351,8 @@ let compile filename =
                   (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
               else Printf.sprintf "%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2) (opt_file2 compress_c2))
               ^ (opt_file2 ffi_c2)
+              (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
+              ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
             in
             (* OpenSSL flags for TLS *)
             let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
@@ -1387,9 +1409,11 @@ let compile filename =
               if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined"
               else ""
             in
+            (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
+            let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             let cmd = Printf.sprintf
-              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s%s %s -o %s%s"
-              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 compress_flags2 ll_file out_bin math_flag in
+              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s%s%s %s -o %s%s"
+              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -1847,6 +1871,10 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--ffi-c",      Arg.String (fun f -> ffi_c_files := f :: !ffi_c_files),
+                     "<file.c>  Compile+link an FFI shim C source (forge [[ffi]]); repeatable");
+    ("--ffi-link",   Arg.String (fun f -> ffi_link_flags := f :: !ffi_link_flags),
+                     "<flag>  Extra linker flag for FFI (e.g. -lz); repeatable");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");

@@ -227,13 +227,22 @@ let check_all ~lib_path_env files =
     if check_file ~lib_path_env f then failed else failed + 1
   ) 0 files
 
+(** FFI shim flags from forge.toml [[ffi]]: --ffi-c per source (resolved to an
+    absolute path under [root]) and --ffi-link per linker flag. *)
+let ffi_flags_of ~root (proj : Project.project) =
+  let srcs = List.map (fun s ->
+      let p = if Filename.is_relative s then Filename.concat root s else s in
+      " --ffi-c " ^ Filename.quote p) proj.Project.ffi_sources in
+  let links = List.map (fun l -> " --ffi-link " ^ Filename.quote l) proj.Project.ffi_link in
+  String.concat "" (srcs @ links)
+
 (** Compile the entry file to a native binary at [output]. *)
-let compile_entry ~lib_path_env ~output ~release ~dump_phases entry =
+let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry =
   let opt_flag  = if release then " --opt 2" else " --opt 0" in
   let dump_flag = if dump_phases then " --dump-phases" else "" in
   let cmd =
-    Printf.sprintf "%smarch --compile -o %s%s%s %s"
-      lib_path_env (Filename.quote output) opt_flag dump_flag (Filename.quote entry)
+    Printf.sprintf "%smarch --compile -o %s%s%s%s %s"
+      lib_path_env (Filename.quote output) opt_flag dump_flag ffi_flags (Filename.quote entry)
   in
   Sys.command cmd
 
@@ -399,7 +408,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) () =
           Error "typecheck failed"
         else begin
           let output = Filename.concat build_dir proj.Project.name in
-          let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
+          let ffi_flags = ffi_flags_of ~root:proj.Project.root proj in
+          let rc = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry_path in
           if rc = 0 then begin
             do_islands ();
             Ok output

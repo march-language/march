@@ -280,6 +280,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-20, External Function Interface — Phase 5: forge build integration)
+
+- **`forge.toml [ffi]` compiles + links C shim sources** so real C bindings work without editing the runtime. `[ffi] sources = ["native/x.c"]` (relative to project root) and `link = ["-lz"]` (raw linker flags). `forge build` resolves each source to an absolute path and passes `--ffi-c`/`--ffi-link` to the compiler. (`forge/lib/project.ml` parses the `[ffi]` section; `forge/lib/cmd_build.ml` `ffi_flags_of`/`compile_entry`.)
+- **Compiler `--ffi-c <file.c>` / `--ffi-link <flag>`** (repeatable) — the native `--compile` path compiles each shim alongside the runtime and appends the link flags to the clang invocation (`bin/main.ml`).
+- **Cache correctness**: the FFI shim sources + link flags are digested into the CAS binary key (`ffi_cas_tag`, applied to both the source-hash and TIR-module-hash cache layers), so editing a shim `.c` (which doesn't change the `.march` source) invalidates the cached binary — verified (edit `+1`→`+100` recompiles, no stale hit).
+- **Verified**: a fixture project (`[ffi] sources=["native/checksum.c"]`, `extern … = "checksum_add"`) builds via `forge build` and runs → `42`; shim edit → `141`. forge 83 tests, build-check 7, compiler 293, codegen 318 (str_concat pre-existing), C ABI all green.
+- **Limitations** (see `specs/c-ffi-gaps.md`): single `[ffi]` section only (no named `[[ffi]]` multi-lib yet); interpreter FFI (Phase 4) dlopens only the runtime `.so`, so user `[ffi]` shims are callable in **compiled** mode only, not under `march file.march`.
+
 ## Current State (as of 2026-06-20, External Function Interface — Phase 4: interpreter FFI (primitives))
 
 - **Primitive extern calls now run under the tree-walking interpreter** (`march file.march`, no `--compile`), not just compiled. `lib/eval/eval_ffi_stubs.c` provides `dlopen`/`dlsym` + fixed-arity trampolines (`march_eval_dyncall_i`/`_d`, distinct from the JIT's stubs); `VForeign` now carries the extern's param/return types, and the call path falls back from the static `foreign_stubs` table to a dynamic dlopen+trampoline call. `bin/main.ml` sets `Eval.ffi_runtime_so` to a lazy thunk over `ensure_runtime_so` so the runtime `.so` (with FFI symbols) is built/dlopened only when an extern is actually invoked — non-FFI programs pay nothing.
