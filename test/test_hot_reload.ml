@@ -57,6 +57,29 @@ let test_dotted_app_prefix_is_path_aware () =
   check "MyApp.Web.Handler under MyApp.Web"   true  (HR.is_reloadable cfg "MyApp.Web.Handler");
   check "MyApp.WebSocket NOT under MyApp.Web" false (HR.is_reloadable cfg "MyApp.WebSocket")
 
+(* ── dispatch-edge decision ───────────────────────────────────────────────── *)
+
+let test_boundary_to_boundary_needs_dispatch () =
+  let cfg = HR.default_config "MyApp" in
+  check "app→app routes through the table" true
+    (HR.needs_dispatch cfg ~caller_module:"MyApp.Router" ~callee_module:"MyApp.Service")
+
+let test_boundary_to_stdlib_is_direct () =
+  let cfg = HR.default_config "MyApp" in
+  check "app→stdlib stays direct" false
+    (HR.needs_dispatch cfg ~caller_module:"MyApp.Router" ~callee_module:"List")
+
+let test_stdlib_to_boundary_is_direct () =
+  (* Non-boundary callers are fully optimised and never dispatch-indirect. *)
+  let cfg = HR.default_config "MyApp" in
+  check "stdlib→app stays direct" false
+    (HR.needs_dispatch cfg ~caller_module:"List" ~callee_module:"MyApp.Service")
+
+let test_excluded_callee_is_direct () =
+  let cfg = { (HR.default_config "MyApp") with HR.excludes = ["MyApp.Hot.Inner"] } in
+  check "app→excluded stays direct" false
+    (HR.needs_dispatch cfg ~caller_module:"MyApp.Router" ~callee_module:"MyApp.Hot.Inner")
+
 (* ── NAME_ID interning ────────────────────────────────────────────────────── *)
 
 module NT = March_tir.Hot_reload.Name_table
@@ -116,6 +139,12 @@ let () =
       Alcotest.test_case "include root itself reloadable"    `Quick test_include_root_itself_reloadable;
       Alcotest.test_case "exclude does not widen boundary"   `Quick test_exclude_does_not_widen_boundary;
       Alcotest.test_case "dotted app_prefix is path-aware"   `Quick test_dotted_app_prefix_is_path_aware;
+    ]);
+    ("dispatch_edge", [
+      Alcotest.test_case "boundary→boundary needs dispatch"  `Quick test_boundary_to_boundary_needs_dispatch;
+      Alcotest.test_case "boundary→stdlib is direct"         `Quick test_boundary_to_stdlib_is_direct;
+      Alcotest.test_case "stdlib→boundary is direct"         `Quick test_stdlib_to_boundary_is_direct;
+      Alcotest.test_case "excluded callee is direct"         `Quick test_excluded_callee_is_direct;
     ]);
     ("name_table", [
       Alcotest.test_case "ids assigned in sorted order"  `Quick test_ids_assigned_in_sorted_order;

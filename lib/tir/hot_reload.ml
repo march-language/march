@@ -38,6 +38,20 @@ let is_reloadable (cfg : config) (m : string) : bool =
   (under cfg.app_prefix m || under_any cfg.includes m)
   && not (under_any cfg.excludes m)
 
+(** Must a direct call from [caller_module] to [callee_module] route through
+    the versioned dispatch table (vs. a plain, inlinable direct call)?
+
+    Per specs/hot-code-reload.md Part 2 only boundary→boundary edges cross the
+    table: the callee must be reloadable so a new version can be swapped in, and
+    the caller must be on the boundary (non-boundary code — stdlib/deps — is
+    fully optimised and direct-calls everything). Calls to stdlib/excluded
+    modules, and into the runtime, stay direct. (Intra-SCC calls also stay
+    direct; that is an SCC-level decision made by the caller of this predicate,
+    not a module-level one.) *)
+let needs_dispatch (cfg : config) ~(caller_module : string)
+    ~(callee_module : string) : bool =
+  is_reloadable cfg caller_module && is_reloadable cfg callee_module
+
 (* ── NAME_ID interning ─────────────────────────────────────────────────────
 
    The versioned dispatch table is a dense array indexed by NAME_ID. The
