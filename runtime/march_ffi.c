@@ -101,6 +101,32 @@ static march_value mk_cell1(int32_t tag, march_value field0) {
  *
  * Result is NOT niche-shaped (two single-field constructors), so it stays a
  * boxed cell: Ok=tag 0, Err=tag 1, payload at offset 16. */
+/* ── Variants (ADTs) & records ───────────────────────────────────────────────
+ * Both are heap cells: [rc][tag@8][pad@12][field0@16][field1@24]…  A variant's
+ * `tag` is its constructor index; a record's `pad` is its interned shape id and
+ * fields are stored in canonical (name-sorted) order.  Read accessors return a
+ * BORROWED field (the cell owns it); the make_* constructors TAKE OWNERSHIP of
+ * the field values (they are moved into the new cell, which March later drops). */
+int32_t march_record_shape_intern(const char *desc);  /* from march_extras.c */
+
+int32_t     march_variant_tag(march_value v)            { return ((march_hdr *)march_as_ptr(v))->tag; }
+march_value march_variant_field(march_value v, int32_t i){ return ((int64_t *)march_as_ptr(v))[2 + i]; }
+march_value march_record_field(march_value v, int32_t i) { return ((int64_t *)march_as_ptr(v))[2 + i]; }
+
+march_value march_make_variant(int32_t tag, int32_t nfields, const march_value *fields) {
+    void *p = march_alloc(16 + (int64_t)(nfields < 0 ? 0 : nfields) * 8);
+    ((march_hdr *)p)->tag = tag;
+    for (int32_t i = 0; i < nfields; i++) ((int64_t *)p)[2 + i] = fields[i];
+    return march_from_ptr(p);
+}
+
+march_value march_make_record(const char *desc, int32_t nfields, const march_value *fields) {
+    void *p = march_alloc(16 + (int64_t)(nfields < 0 ? 0 : nfields) * 8);
+    ((march_hdr *)p)->pad = march_record_shape_intern(desc);  /* shape id @ offset 12 */
+    for (int32_t i = 0; i < nfields; i++) ((int64_t *)p)[2 + i] = fields[i];
+    return march_from_ptr(p);
+}
+
 march_value march_none(void)          { return 0; }
 march_value march_some(march_value v) { return v; }
 march_value march_ok(march_value v)   { return mk_cell1(0, v); }
@@ -252,6 +278,34 @@ march_value ffi_test_sdup(march_value s) {
  * end-to-end (must match the compiler's niche representation). */
 march_value ffi_test_maybe(int64_t n) {
     return n >= 0 ? march_some(march_make_int(n)) : march_none();
+}
+
+/* Variant round-trip: build a Shape (Circle(r)=tag 0 | Rect(w,h)=tag 1) and
+ * read one back (area). Slots hold March's NATIVE per-field representation —
+ * a concrete Int field is a RAW machine int, not a tagged value word. */
+march_value ffi_test_mk_circle(int64_t r) {
+    march_value f[1] = { r };                    /* raw Int slot */
+    return march_make_variant(0, 1, f);
+}
+march_value ffi_test_mk_rect(int64_t w, int64_t h) {
+    march_value f[2] = { w, h };                 /* raw Int slots */
+    return march_make_variant(1, 2, f);
+}
+int64_t ffi_test_shape_area(march_value s) {
+    switch (march_variant_tag(s)) {
+        case 0: { int64_t r = march_variant_field(s, 0); return 3 * r * r; }
+        default: { int64_t w = march_variant_field(s, 0);
+                   int64_t h = march_variant_field(s, 1); return w * h; }
+    }
+}
+
+/* Record round-trip: build a Point {x,y} and read its fields back (raw Ints). */
+march_value ffi_test_mk_point(int64_t x, int64_t y) {
+    march_value f[2] = { x, y };                 /* sorted: x, y (raw Int slots) */
+    return march_make_record("x:i;y:i;", 2, f);
+}
+int64_t ffi_test_point_sum(march_value p) {
+    return march_record_field(p, 0) + march_record_field(p, 1);
 }
 
 /* Fallible: a single ASCII digit → Ok(Int), else Err(String). Result built

@@ -1,11 +1,17 @@
 (** March TIR → ES module (JavaScript) emission.
-    Consumes post-Mono TIR. Defun and Perceus must NOT have run.
+    Consumes the full post-pipeline TIR (after Mono, Fusion, Defun, Known_call,
+    Beta_adt, Join_points, Simplify, Perceus, Escape, Opt).
 
     Constructor layout: {$: "CtorName", _0: field0, _1: field1, ...}
-    The $ field holds the constructor tag; $ is not a valid March identifier.
+    Closure layout:     {$: "$Clo_name", _0: apply_fn, _1: fv1, _2: fv2, ...}
+    Tuple layout:       {_0: a, _1: b, ...}
+    The $ field holds the constructor/closure tag.
 
-    Runtime shim (march_runtime.mjs) must be co-located with the output .mjs.
-    M4 will add --runtime-dir to control placement. *)
+    Every user-defined function emits both a plain JS function (for direct
+    known-call sites) and a $clo closure-protocol object (for first-class use
+    via ECallPtr's f._0(f, args) dispatch).
+
+    Runtime shim (march_runtime.mjs) must be co-located with the output .mjs. *)
 
 (* ── Context ─────────────────────────────────────────────────────── *)
 
@@ -14,12 +20,19 @@ type ctx = {
   mutable indent : int;
   runtime_uses : (string, unit) Hashtbl.t;
   (* runtime function names referenced — imported at top of output *)
+  fn_names     : (string, unit) Hashtbl.t;
+  (* user-defined function names in this module — used to emit $clo wrappers *)
+  param_names  : (string, unit) Hashtbl.t;
+  (* local parameter names in the current function — excluded from $clo suffix
+     to avoid false positives when a parameter shadows a module function *)
 }
 
 let create_ctx () = {
   buf          = Buffer.create 4096;
   indent       = 0;
   runtime_uses = Hashtbl.create 16;
+  fn_names     = Hashtbl.create 64;
+  param_names  = Hashtbl.create 8;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -65,6 +78,27 @@ let bare_ctor key =
   | Some i -> String.sub key (i + 1) (String.length key - i - 1)
   | None   -> key
 
+(** Encode a March string as a JS string literal.
+    OCaml's %S uses octal escapes for non-ASCII bytes, which are not allowed
+    in ES module strict mode. This encoder keeps valid UTF-8 bytes verbatim
+    and uses \uXXXX only for control characters. *)
+let js_string_lit s =
+  let buf = Buffer.create (String.length s + 4) in
+  Buffer.add_char buf '"';
+  String.iter (fun c ->
+    match c with
+    | '"'  -> Buffer.add_string buf "\\\""
+    | '\\' -> Buffer.add_string buf "\\\\"
+    | '\n' -> Buffer.add_string buf "\\n"
+    | '\r' -> Buffer.add_string buf "\\r"
+    | '\t' -> Buffer.add_string buf "\\t"
+    | c when Char.code c < 0x20 ->
+      Buffer.add_string buf (Printf.sprintf "\\u%04X" (Char.code c))
+    | c -> Buffer.add_char buf c
+  ) s;
+  Buffer.add_char buf '"';
+  Buffer.contents buf
+
 (* ── Atom emission ───────────────────────────────────────────────── *)
 
 let emit_literal ctx lit =
@@ -75,12 +109,32 @@ let emit_literal ctx lit =
     let s = string_of_float f in
     emit ctx (if String.contains s '.' || String.contains s 'e' then s else s ^ ".0")
   | LitBool b   -> emit ctx (if b then "true" else "false")
-  | LitString s -> emit ctx (Printf.sprintf "%S" s)
+  | LitString s -> emit ctx (js_string_lit s)
   | LitAtom a   -> emit ctx (Printf.sprintf "\":%s\"" a)
 
-let emit_atom ctx = function
+(* Emit an atom as a plain name — used for apply-function slots in EAlloc
+   where we need the raw function, not a closure wrapper. *)
+let emit_atom_raw ctx = function
   | Tir.AVar v    -> emit ctx (mangle v.Tir.v_name)
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
+  | Tir.ALit l    -> emit_literal ctx l
+
+(* Standard atom emission: user-defined function names use their $clo wrapper
+   so that ECallPtr dispatch (f._0(f, args)) works when they're first-class.
+   Both AVar and ADefRef can hold a module-level function reference — check fn_names. *)
+let emit_atom ctx = function
+  | Tir.AVar v ->
+    let n = mangle v.Tir.v_name in
+    if Hashtbl.mem ctx.fn_names v.Tir.v_name
+       && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
+    then emit ctx (n ^ "$clo")
+    else emit ctx n
+  | Tir.ADefRef d ->
+    let n = mangle d.Tir.did_name in
+    if Hashtbl.mem ctx.fn_names d.Tir.did_name then
+      emit ctx (n ^ "$clo")
+    else
+      emit ctx n
   | Tir.ALit l    -> emit_literal ctx l
 
 (* ── Builtin lowering ────────────────────────────────────────────── *)
@@ -104,18 +158,19 @@ let inline_binop = function
   | "or_bool"                            -> Some "||"
   | "string_concat" | "++"              -> Some "+"
   (* Symbolic operator forms emitted by TIR after monomorphization *)
-  | "+"  -> Some "+"
-  | "-"  -> Some "-"   (* binary; unary negation is handled separately *)
-  | "*"  -> Some "*"
-  | "%"  -> Some "%"
-  | "<"  -> Some "<"
-  | ">"  -> Some ">"
-  | "<=" -> Some "<="
-  | ">=" -> Some ">="
-  | "==" -> Some "==="
-  | "!=" -> Some "!=="
-  | "&&" -> Some "&&"
-  | "||" -> Some "||"
+  | "+"  | "+." -> Some "+"
+  | "-"  | "-." -> Some "-"   (* binary; unary negation is handled separately *)
+  | "*"  | "*." -> Some "*"
+  | "/"  | "/." -> Some "/"
+  | "%"         -> Some "%"
+  | "<"         -> Some "<"
+  | ">"         -> Some ">"
+  | "<="        -> Some "<="
+  | ">="        -> Some ">="
+  | "==" | "=.=" -> Some "==="
+  | "!=" | "!=." -> Some "!=="
+  | "&&"        -> Some "&&"
+  | "||"        -> Some "||"
   | _    -> None
 
 (* ── Scrutinee type helpers ─────────────────────────────────────── *)
@@ -149,12 +204,13 @@ let literal_tag_js br_tag =
   | "False" | "false" -> "false"
   | _ when br_tag <> "" && (br_tag.[0] = '-'
                              || (br_tag.[0] >= '0' && br_tag.[0] <= '9')) ->
-    br_tag
+    br_tag  (* numeric literal — emit as-is *)
   | _ when br_tag <> "" && br_tag.[0] = '"' ->
-    br_tag  (* already an OCaml string literal including quotes *)
-  | _ when br_tag <> "" && br_tag.[0] = ':' ->
-    Printf.sprintf "%S" br_tag  (* atom: emit as JS string ":name" *)
-  | _ -> Printf.sprintf "%S" br_tag
+    (* lower.ml wraps the raw string s as "\"" ^ s ^ "\"" — unwrap and re-encode
+       using js_string_lit so special chars like newlines become \n, not literal bytes *)
+    let inner = String.sub br_tag 1 (String.length br_tag - 2) in
+    js_string_lit inner
+  | _ -> js_string_lit br_tag  (* atom tags (":name"), ADT ctor tags, etc. *)
 
 (* ── Forward declarations ────────────────────────────────────────── *)
 
@@ -180,9 +236,8 @@ and emit_val_impl ctx expr =
       emit ctx ")"
     | _ ->
       begin match name, args with
-      | "neg_int",   [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
-      | "neg_float", [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
-      | "not_bool",  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
+      | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
+      | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
         emit ctx "Math.trunc("; emit_atom ctx a;
         emit ctx " / "; emit_atom ctx b; emit ctx ")"
@@ -253,6 +308,27 @@ and emit_val_impl ctx expr =
         List.iteri (fun i a ->
           if i > 0 then emit ctx ", "; emit_atom ctx a) args;
         emit ctx ")"
+      (* Math builtins → JS Math.* *)
+      | "math_sqrt",  [a] -> emit ctx "Math.sqrt(";  emit_atom ctx a; emit ctx ")"
+      | "math_cbrt",  [a] -> emit ctx "Math.cbrt(";  emit_atom ctx a; emit ctx ")"
+      | "math_sin",   [a] -> emit ctx "Math.sin(";   emit_atom ctx a; emit ctx ")"
+      | "math_cos",   [a] -> emit ctx "Math.cos(";   emit_atom ctx a; emit ctx ")"
+      | "math_tan",   [a] -> emit ctx "Math.tan(";   emit_atom ctx a; emit ctx ")"
+      | "math_asin",  [a] -> emit ctx "Math.asin(";  emit_atom ctx a; emit ctx ")"
+      | "math_acos",  [a] -> emit ctx "Math.acos(";  emit_atom ctx a; emit ctx ")"
+      | "math_atan",  [a] -> emit ctx "Math.atan(";  emit_atom ctx a; emit ctx ")"
+      | "math_atan2", [a; b] ->
+        emit ctx "Math.atan2("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "math_sinh",  [a] -> emit ctx "Math.sinh(";  emit_atom ctx a; emit ctx ")"
+      | "math_cosh",  [a] -> emit ctx "Math.cosh(";  emit_atom ctx a; emit ctx ")"
+      | "math_tanh",  [a] -> emit ctx "Math.tanh(";  emit_atom ctx a; emit ctx ")"
+      | "math_exp",   [a] -> emit ctx "Math.exp(";   emit_atom ctx a; emit ctx ")"
+      | "math_exp2",  [a] -> emit ctx "Math.pow(2, "; emit_atom ctx a; emit ctx ")"
+      | "math_log",   [a] -> emit ctx "Math.log(";   emit_atom ctx a; emit ctx ")"
+      | "math_log2",  [a] -> emit ctx "Math.log2(";  emit_atom ctx a; emit ctx ")"
+      | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
+      | "math_pow",   [a; b] ->
+        emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       (* General call *)
       | _, _ ->
         emit ctx (mangle name ^ "(");
@@ -263,10 +339,13 @@ and emit_val_impl ctx expr =
     end
 
   | Tir.ETuple atoms ->
-    emit ctx "[";
+    (* Tuples are accessed via EField with "$fvN" which maps to _N,
+       so use object form { _0: a, _1: b, ... } rather than JS array. *)
+    emit ctx "{ ";
     List.iteri (fun i a ->
-      if i > 0 then emit ctx ", "; emit_atom ctx a) atoms;
-    emit ctx "]"
+      if i > 0 then emit ctx ", ";
+      emit ctx (Printf.sprintf "_%d: " i); emit_atom ctx a) atoms;
+    emit ctx " }"
 
   | Tir.ERecord fields ->
     emit ctx "({ ";
@@ -292,9 +371,14 @@ and emit_val_impl ctx expr =
 
   | Tir.EAlloc (ty, args) ->
     let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+    (* Closure allocations: _0 is the apply function (must be a plain JS function,
+       not a $clo wrapper); free-variable slots _1+ are ordinary atoms. *)
+    let is_clo = String.length tag >= 4 && String.sub tag 0 4 = "$Clo" in
     emit ctx (Printf.sprintf "{ $: %S" tag);
     List.iteri (fun i a ->
-      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
+      emit ctx (Printf.sprintf ", _%d: " i);
+      if is_clo && i = 0 then emit_atom_raw ctx a
+      else emit_atom ctx a) args;
     emit ctx " }"
 
   | Tir.EStackAlloc (ty, args) ->
@@ -340,17 +424,27 @@ and emit_stmts_impl ctx expr =
   match expr with
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
-    (* let v = match ... — emit switch that assigns to v *)
+    (* let v = match ... — emit switch that assigns to v.
+       Wrap in a block so this binding can shadow an outer variable of the same name. *)
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ mangle v.Tir.v_name ^ ";");
     emit_case ctx (Some (mangle v.Tir.v_name)) case_expr;
-    emit_stmts ctx rest
+    emit_stmts ctx rest;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELet (v, e1, e2) ->
+    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name. *)
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
     emit_indent ctx;
     emit ctx ("const " ^ mangle v.Tir.v_name ^ " = ");
     emit_val ctx e1;
     emit ctx ";\n";
-    emit_stmts ctx e2
+    emit_stmts ctx e2;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELetRec (fns, body) ->
     List.iter (emit_fn_decl ctx) fns;
@@ -408,6 +502,47 @@ and emit_case_impl ctx result_var expr =
         emit_val ctx body;
         emit ctx ";\n"
     in
+    (* Tuples can appear as TTuple or as TCon("$TupleN", ...) or detected
+       by the branch tag starting with "$Tuple". Use branch tags as the
+       authoritative signal since type info may be erased after Mono. *)
+    let is_tuple_case =
+      match s_ty with Tir.TTuple _ -> true | _ -> false
+      || (match branches with
+          | br :: _ -> let t = br.Tir.br_tag in
+                       String.length t >= 6 && String.sub t 0 6 = "$Tuple"
+          | [] -> false) in
+    if is_tuple_case then begin
+      (* Tuple: exactly one branch, directly destructure _0, _1, ... *)
+      List.iter (fun br ->
+        let scrut_name = match scrutinee with
+          | Tir.AVar sv -> mangle sv.Tir.v_name
+          | _ ->
+            let tmp = "_tup" in
+            emit_indent ctx;
+            emit ctx (Printf.sprintf "const %s = " tmp);
+            emit_atom ctx scrutinee;
+            emit ctx ";\n";
+            tmp
+        in
+        List.iteri (fun i bv ->
+          emitl ctx (Printf.sprintf "const %s = %s._%d;"
+            (mangle bv.Tir.v_name) scrut_name i)
+        ) br.Tir.br_vars;
+        (match result_var with
+         | Some rv ->
+           emit_indent ctx; emit ctx (rv ^ " = ");
+           emit_val ctx br.Tir.br_body; emit ctx ";\n"
+         | None -> emit_stmts ctx br.Tir.br_body)
+      ) branches;
+      (match default with
+       | Some d ->
+         (match result_var with
+          | Some rv ->
+            emit_indent ctx; emit ctx (rv ^ " = ");
+            emit_val ctx d; emit ctx ";\n"
+          | None -> emit_stmts ctx d)
+       | None -> ())
+    end else
     if is_literal_scrutinee_ty s_ty then begin
       (* Literal/bool: if/else chain *)
       List.iteri (fun i br ->
@@ -438,7 +573,9 @@ and emit_case_impl ctx result_var expr =
       emit_atom ctx scrutinee;
       emit ctx ".$) {\n";
       List.iter (fun br ->
-        emitl ctx (Printf.sprintf "  case %S: {" br.Tir.br_tag);
+        (* Use bare ctor name to match EAlloc which stores bare tag in $ field *)
+        let tag = bare_ctor br.Tir.br_tag in
+        emitl ctx (Printf.sprintf "  case %S: {" tag);
         with_indent ctx (fun () ->
           with_indent ctx (fun () ->
             (* Bind constructor fields to br_vars *)
@@ -491,15 +628,32 @@ and emit_case_impl ctx result_var expr =
 (* ── Function definition emission ───────────────────────────────── *)
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
+  let fname = mangle fn.Tir.fn_name in
   emit_indent ctx;
-  emit ctx ("function " ^ mangle fn.Tir.fn_name ^ "(");
+  emit ctx ("function " ^ fname ^ "(");
   List.iteri (fun i p ->
     if i > 0 then emit ctx ", ";
     emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
   emit ctx ") {\n";
+  (* Register params so emit_atom won't add $clo suffix to param variables
+     that happen to share a name with a module-level function. *)
+  Hashtbl.clear ctx.param_names;
+  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  Hashtbl.clear ctx.param_names;
   emit_indent ctx;
-  emit ctx "}\n\n"
+  emit ctx "}\n";
+  (* Closure-protocol wrapper: allows this function to be used as a first-class
+     value via ECallPtr dispatch (f._0(f, args)).
+     $_ is the closure self-pointer (unused since top-level fns have no free vars). *)
+  emit_indent ctx;
+  emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
+  List.iter (fun p -> emit ctx (", " ^ mangle p.Tir.v_name)) fn.Tir.fn_params;
+  emit ctx (") => " ^ fname ^ "(");
+  List.iteri (fun i p ->
+    if i > 0 then emit ctx ", ";
+    emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
+  emit ctx ") };\n\n"
 
 (* ── Structural equality ─────────────────────────────────────────── *)
 
@@ -575,6 +729,8 @@ const negate_float    = { _0: ($_, x) => -x };
 
 let emit_module (m : Tir.tir_module) : string =
   let ctx = create_ctx () in
+  (* Pre-register all function names so emit_atom can emit $clo versions *)
+  List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
   (* Top-level functions *)

@@ -5,7 +5,14 @@
     marshalling boilerplate prefilled (borrow slices for String/Bytes params,
     Option/Result/resource hints, a typed return stub), leaving a TODO for the
     actual library call.  The "declare in March, generate the C glue" direction
-    from specs/2026-06-19-c-ffi-abi-design.md §17. *)
+    from specs/2026-06-19-c-ffi-abi-design.md §17.
+
+    Type-directed codecs (§6.4): for each record/variant type reachable from an
+    `extern` signature, emits a repr-C mirror struct plus `march_decode_T` /
+    `march_encode_T` over the Phase 9 ABI accessors, and wires shim bodies to
+    decode record/variant params and encode record/variant returns — so the
+    author writes pure C over plain structs.  See
+    specs/plans/2026-06-21-c-ffi-codecs.md. *)
 
 module Ast = March_ast.Ast
 
@@ -36,20 +43,212 @@ let c_type ~ret (t : Ast.ty) : string =
   | Some ("Int" | "Char" | "Bool") -> "int64_t"
   | Some "Float"                    -> "double"
   | Some "Unit" when ret           -> "void"
-  | _                              -> "march_value"  (* String/Bytes/Option/Result/resource *)
+  | _                              -> "march_value"  (* String/Bytes/Option/Result/resource/record/variant *)
 
 let is_string_ty t = match con_name t with Some ("String" | "Bytes") -> true | _ -> false
 
+(* ── Codec type collection (§6.4) ────────────────────────────────────────────
+   A "codec type" is a non-generic record or variant whose decode/encode we
+   generate.  Recursive types (those reachable from themselves through other
+   codec types) are excluded — a by-value mirror struct cannot represent them;
+   they fall back to the `march_value` passthrough. *)
+
+(* All non-generic record/variant decls in the file: name -> type_def. *)
+let codec_candidates (decls : Ast.decl list) : (string * Ast.type_def) list =
+  List.filter_map (function
+    | Ast.DType (_, n, [], ((Ast.TDRecord _ | Ast.TDVariant _) as td), _) ->
+      Some (n.Ast.txt, td)
+    | _ -> None) decls
+
+(* Type names referenced by a record's fields / a variant's ctor args. *)
+let referenced (td : Ast.type_def) : string list =
+  match td with
+  | Ast.TDRecord fields -> List.filter_map (fun f -> con_name f.Ast.fld_ty) fields
+  | Ast.TDVariant vars  ->
+    List.concat_map (fun (v : Ast.variant) -> List.filter_map con_name v.Ast.var_args) vars
+  | Ast.TDAlias _ -> []
+
+(* Drop candidates that are part of a cycle (T reachable from itself). *)
+let acyclic_codecs (cands : (string * Ast.type_def) list)
+  : (string * Ast.type_def) list =
+  let names = List.map fst cands in
+  let deps n = match List.assoc_opt n cands with
+    | Some td -> List.filter (fun d -> List.mem d names) (referenced td)
+    | None -> [] in
+  (* transitive reachability from [start] *)
+  let reaches start =
+    let seen = Hashtbl.create 16 in
+    let rec go n =
+      List.iter (fun d ->
+        if not (Hashtbl.mem seen d) then begin
+          Hashtbl.replace seen d (); go d
+        end) (deps n) in
+    go start; Hashtbl.mem seen start in
+  List.filter (fun (n, _) -> not (reaches n)) cands
+
+(* ── Codec emission ──────────────────────────────────────────────────────── *)
+
+(* `tbl` is the set of generated codec types (acyclic). A nested field is fully
+   typed only if its type is in `tbl`; everything else is a march_value slot. *)
+
+let is_codec tbl t = match con_name t with Some n -> List.mem_assoc n tbl | None -> false
+
+(* C type of a record/ctor field in the mirror struct. *)
+let field_c_type tbl (t : Ast.ty) : string =
+  match con_name t with
+  | Some ("Int" | "Bool")   -> "int64_t"
+  | Some "Float"            -> "double"
+  | Some ("String"|"Bytes") -> "march_slice"
+  | Some n when List.mem_assoc n tbl -> n ^ "_c"
+  | _                       -> "march_value"
+
+(* Read a slot value into its mirror-struct representation. *)
+let decode_expr tbl (t : Ast.ty) (slot : string) : string =
+  match con_name t with
+  | Some ("Int" | "Bool")   -> slot
+  | Some "Float"            -> Printf.sprintf "march_get_float(%s)" slot
+  | Some ("String"|"Bytes") -> Printf.sprintf "march_str_borrow(%s)" slot
+  | Some n when List.mem_assoc n tbl -> Printf.sprintf "march_decode_%s(%s)" n slot
+  | _                       -> slot
+
+(* Build a slot value from a mirror-struct field. *)
+let encode_expr tbl (t : Ast.ty) (fld : string) : string =
+  match con_name t with
+  | Some ("Int" | "Bool")   -> fld
+  | Some "Float"            -> Printf.sprintf "march_make_float(%s)" fld
+  | Some ("String"|"Bytes") -> Printf.sprintf "march_str_new(%s.ptr, %s.len)" fld fld
+  | Some n when List.mem_assoc n tbl -> Printf.sprintf "march_encode_%s(%s)" n fld
+  | _                       -> fld
+
+(* Shape descriptor kind char — must match shape_kind_char in llvm_emit.ml so the
+   interned shape id matches March's own records of the same type. *)
+let kind_char (t : Ast.ty) : char =
+  match con_name t with
+  | Some ("Int" | "Bool" | "Unit" | "Atom") -> 'i'
+  | Some "Float" -> 'f'
+  | None         -> 'g'   (* type variable *)
+  | Some _       -> 'p'
+
+(* "name:k;name:k;…" with fields sorted by name (March's record layout). *)
+let shape_desc (fields : Ast.field list) : string =
+  let sorted = List.sort
+    (fun a b -> String.compare a.Ast.fld_name.Ast.txt b.Ast.fld_name.Ast.txt) fields in
+  String.concat "" (List.map (fun f ->
+    Printf.sprintf "%s:%c;" f.Ast.fld_name.Ast.txt (kind_char f.Ast.fld_ty)) sorted)
+
+(* Mirror struct + decode + encode for one record type. *)
+let gen_record tbl (name : string) (fields : Ast.field list) (b : Buffer.t) =
+  let sorted = List.sort
+    (fun a b -> String.compare a.Ast.fld_name.Ast.txt b.Ast.fld_name.Ast.txt) fields in
+  let n = List.length sorted in
+  (* struct *)
+  Buffer.add_string b (Printf.sprintf "typedef struct {\n");
+  List.iter (fun f ->
+    Buffer.add_string b (Printf.sprintf "    %s %s;\n"
+      (field_c_type tbl f.Ast.fld_ty) f.Ast.fld_name.Ast.txt)) sorted;
+  Buffer.add_string b (Printf.sprintf "} %s_c;\n" name);
+  (* decode *)
+  Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" name name);
+  Buffer.add_string b (Printf.sprintf "    %s_c o;\n" name);
+  List.iteri (fun i f ->
+    Buffer.add_string b (Printf.sprintf "    o.%s = %s;\n" f.Ast.fld_name.Ast.txt
+      (decode_expr tbl f.Ast.fld_ty (Printf.sprintf "march_record_field(v, %d)" i)))) sorted;
+  Buffer.add_string b "    return o;\n}\n";
+  (* encode *)
+  Buffer.add_string b (Printf.sprintf "static march_value march_encode_%s(%s_c o) {\n" name name);
+  if n = 0 then
+    Buffer.add_string b (Printf.sprintf "    return march_make_record(\"%s\", 0, (const march_value *)0);\n" (shape_desc sorted))
+  else begin
+    Buffer.add_string b (Printf.sprintf "    march_value f[%d];\n" n);
+    List.iteri (fun i f ->
+      Buffer.add_string b (Printf.sprintf "    f[%d] = %s;\n" i
+        (encode_expr tbl f.Ast.fld_ty (Printf.sprintf "o.%s" f.Ast.fld_name.Ast.txt)))) sorted;
+    Buffer.add_string b (Printf.sprintf "    return march_make_record(\"%s\", %d, f);\n" (shape_desc sorted) n)
+  end;
+  Buffer.add_string b "}\n"
+
+(* Mirror struct + decode + encode for one variant type. *)
+let gen_variant tbl (name : string) (vars : Ast.variant list) (b : Buffer.t) =
+  let has_fields = List.exists (fun (v : Ast.variant) -> v.Ast.var_args <> []) vars in
+  (* struct: tag + union of per-ctor field tuples (ctors with no args omitted). *)
+  Buffer.add_string b "typedef struct {\n    int32_t tag;\n";
+  if has_fields then begin
+    Buffer.add_string b "    union {\n";
+    List.iter (fun (v : Ast.variant) ->
+      if v.Ast.var_args <> [] then begin
+        Buffer.add_string b "        struct {";
+        List.iteri (fun i a ->
+          Buffer.add_string b (Printf.sprintf " %s f%d;" (field_c_type tbl a) i)) v.Ast.var_args;
+        Buffer.add_string b (Printf.sprintf " } %s;\n" v.Ast.var_name.Ast.txt)
+      end) vars;
+    Buffer.add_string b "    } u;\n"
+  end;
+  Buffer.add_string b (Printf.sprintf "} %s_c;\n" name);
+  (* decode *)
+  Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" name name);
+  Buffer.add_string b (Printf.sprintf "    %s_c o;\n    o.tag = march_variant_tag(v);\n" name);
+  if has_fields then begin
+    Buffer.add_string b "    switch (o.tag) {\n";
+    List.iteri (fun tag (v : Ast.variant) ->
+      if v.Ast.var_args <> [] then begin
+        Buffer.add_string b (Printf.sprintf "      case %d:\n" tag);
+        List.iteri (fun i a ->
+          Buffer.add_string b (Printf.sprintf "        o.u.%s.f%d = %s;\n"
+            v.Ast.var_name.Ast.txt i
+            (decode_expr tbl a (Printf.sprintf "march_variant_field(v, %d)" i)))) v.Ast.var_args;
+        Buffer.add_string b "        break;\n"
+      end) vars;
+    Buffer.add_string b "      default: break;\n    }\n"
+  end;
+  Buffer.add_string b "    return o;\n}\n";
+  (* encode *)
+  Buffer.add_string b (Printf.sprintf "static march_value march_encode_%s(%s_c o) {\n" name name);
+  if has_fields then begin
+    Buffer.add_string b "    switch (o.tag) {\n";
+    List.iteri (fun tag (v : Ast.variant) ->
+      let arity = List.length v.Ast.var_args in
+      if arity = 0 then
+        Buffer.add_string b (Printf.sprintf
+          "      case %d: return march_make_variant(%d, 0, (const march_value *)0);\n" tag tag)
+      else begin
+        Buffer.add_string b (Printf.sprintf "      case %d: {\n        march_value f[%d];\n" tag arity);
+        List.iteri (fun i a ->
+          Buffer.add_string b (Printf.sprintf "        f[%d] = %s;\n" i
+            (encode_expr tbl a (Printf.sprintf "o.u.%s.f%d" v.Ast.var_name.Ast.txt i)))) v.Ast.var_args;
+        Buffer.add_string b (Printf.sprintf "        return march_make_variant(%d, %d, f);\n      }\n" tag arity)
+      end) vars;
+    Buffer.add_string b "    }\n"
+  end;
+  Buffer.add_string b "    return march_make_variant(o.tag, 0, (const march_value *)0);\n}\n"
+
+(* Topologically order [needed] so a nested type is defined before its user. *)
+let topo_order (tbl : (string * Ast.type_def) list) (needed : string list) : string list =
+  let visited = Hashtbl.create 16 in
+  let order = ref [] in
+  let rec visit n =
+    if not (Hashtbl.mem visited n) then begin
+      Hashtbl.replace visited n ();
+      (match List.assoc_opt n tbl with
+       | Some td ->
+         List.iter (fun d -> if List.mem_assoc d tbl then visit d) (referenced td)
+       | None -> ());
+      order := n :: !order
+    end in
+  List.iter visit needed;
+  List.rev !order
+
 (* ── Skeleton generation ─────────────────────────────────────────────────── *)
 
-let gen_fn (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : string =
+let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : string =
   let c_name = match ef.Ast.ef_symbol with
     | Some s -> s
     | None   -> lib ^ "_" ^ ef.Ast.ef_name.Ast.txt in
   let consumed_of i = match List.nth_opt consumed i with Some b -> b | None -> false in
+  (* codec params take the raw march_value under a `_v` suffix; we decode below. *)
+  let pname (n : Ast.name) t = if is_codec tbl t then n.Ast.txt ^ "_v" else n.Ast.txt in
   let params =
     List.map (fun (n, t) ->
-      Printf.sprintf "%s %s" (c_type ~ret:false t) n.Ast.txt) ef.Ast.ef_params in
+      Printf.sprintf "%s %s" (c_type ~ret:false t) (pname n t)) ef.Ast.ef_params in
   let b = Buffer.create 256 in
   Buffer.add_string b (Printf.sprintf "/* %s%s(%s) : %s */\n"
     (if ef.Ast.ef_blocking then "blocking " else "")
@@ -59,10 +258,14 @@ let gen_fn (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : string =
     (Ast.show_ty ef.Ast.ef_ret_ty));
   Buffer.add_string b (Printf.sprintf "%s %s(%s) {\n"
     (c_type ~ret:true ef.Ast.ef_ret_ty) c_name (String.concat ", " params));
-  (* Per-param marshalling hints. *)
+  (* Per-param marshalling. *)
   List.iteri (fun i (n, t) ->
     let nm = n.Ast.txt in
-    if is_string_ty t then
+    if is_codec tbl t then
+      (match con_name t with Some ty ->
+        Buffer.add_string b (Printf.sprintf "    %s_c %s = march_decode_%s(%s_v);  (void)%s;\n"
+          ty nm ty nm nm) | None -> ())
+    else if is_string_ty t then
       Buffer.add_string b (Printf.sprintf
         "    march_slice %s_s = march_str_borrow(%s); (void)%s_s;  /* %s_s.ptr, %s_s.len */\n"
         nm nm nm nm nm)
@@ -77,7 +280,11 @@ let gen_fn (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : string =
       | None -> ())
   ) ef.Ast.ef_params;
   Buffer.add_string b "    /* TODO: call the C library and build the result. */\n";
-  (match con_name ef.Ast.ef_ret_ty with
+  (if is_codec tbl ef.Ast.ef_ret_ty then
+     (match con_name ef.Ast.ef_ret_ty with Some ty ->
+        Buffer.add_string b (Printf.sprintf
+          "    %s_c result = {0};\n    return march_encode_%s(result);\n" ty ty) | None -> ())
+   else match con_name ef.Ast.ef_ret_ty with
    | Some "Unit"   -> ()
    | Some "Result" -> Buffer.add_string b
        "    return march_err(march_str_new((const uint8_t *)\"not implemented\", 15));  /* or march_ok(v) */\n"
@@ -90,15 +297,33 @@ let gen_fn (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : string =
   Buffer.contents b
 
 let gen_c (decls : Ast.decl list) : string =
+  (* Codec types reachable from extern signatures (acyclic only). *)
+  let tbl = acyclic_codecs (codec_candidates decls) in
+  let extern_type_names =
+    List.concat_map (function
+      | Ast.DExtern (edef, _) ->
+        List.concat_map (fun (ef : Ast.extern_fn) ->
+          ef.Ast.ef_ret_ty :: List.map snd ef.Ast.ef_params) edef.Ast.ext_fns
+      | _ -> []) decls
+    |> List.filter_map con_name
+    |> List.filter (fun n -> List.mem_assoc n tbl) in
+  let needed = topo_order tbl extern_type_names in
   let b = Buffer.create 1024 in
   Buffer.add_string b
     "/* Generated by `forge ffi gen-c` — fill in the TODOs, then list this file\n\
     \   under [ffi] sources in forge.toml. */\n\
      #include \"march_ffi.h\"\n#include <stdint.h>\n\n";
+  if needed <> [] then begin
+    Buffer.add_string b "/* ── Generated codecs (record/variant <-> repr-C mirror) ── */\n";
+    List.iter (fun n -> match List.assoc_opt n tbl with
+      | Some (Ast.TDRecord fs)  -> gen_record tbl n fs b; Buffer.add_char b '\n'
+      | Some (Ast.TDVariant vs) -> gen_variant tbl n vs b; Buffer.add_char b '\n'
+      | _ -> ()) needed
+  end;
   List.iter (function
     | Ast.DExtern (edef, _) ->
       List.iter (fun (ef : Ast.extern_fn) ->
-        Buffer.add_string b (gen_fn edef.Ast.ext_lib_name ef.Ast.ef_param_consumed ef);
+        Buffer.add_string b (gen_fn tbl edef.Ast.ext_lib_name ef.Ast.ef_param_consumed ef);
         Buffer.add_char b '\n')
         edef.Ast.ext_fns
     | _ -> ()) decls;
