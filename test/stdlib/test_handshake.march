@@ -1,0 +1,58 @@
+mod TestHandshake do
+
+  pfn alice() : NodeIdentity.Identity do
+    NodeIdentity.make("alice@host", "alice-pubkey", 1)
+  end
+
+  describe "Handshake hello codec" do
+
+    test "encode/decode round-trips a hello" do
+      let h = Handshake.make_hello(alice(), "nonce-abc")
+      assert (Handshake.decode_hello(Handshake.encode_hello(h)) == Ok(h))
+    end
+
+    test "decode rejects malformed bytes" do
+      match Handshake.decode_hello(Cons(255, Cons(255, Nil))) do
+        Ok(_) -> assert false
+        Err(_) -> assert true
+      end
+    end
+
+  end
+
+  describe "Handshake.authenticate" do
+
+    test "accepts a peer whose proof matches the nonce we issued" do
+      -- we issued `our_nonce` to the peer; the peer proves it with the secret
+      let our_nonce = "chal-1"
+      let peer = Handshake.make_hello(alice(), "peer-nonce")
+      let proof = ClusterAuth.prove("cluster-secret", our_nonce)
+      match Handshake.authenticate("cluster-secret", our_nonce, peer, proof) do
+        Ok(id) -> assert (id == alice())
+        Err(_) -> assert false
+      end
+    end
+
+    test "rejects a peer without the secret" do
+      let our_nonce = "chal-1"
+      let peer = Handshake.make_hello(alice(), "peer-nonce")
+      let bad_proof = ClusterAuth.prove("wrong-secret", our_nonce)
+      match Handshake.authenticate("cluster-secret", our_nonce, peer, bad_proof) do
+        Ok(_) -> assert false
+        Err(_) -> assert true
+      end
+    end
+
+    test "rejects a proof replayed for a different nonce" do
+      let peer = Handshake.make_hello(alice(), "peer-nonce")
+      -- proof was computed for "old-nonce", but we issued "chal-2"
+      let stale = ClusterAuth.prove("cluster-secret", "old-nonce")
+      match Handshake.authenticate("cluster-secret", "chal-2", peer, stale) do
+        Ok(_) -> assert false
+        Err(_) -> assert true
+      end
+    end
+
+  end
+
+end

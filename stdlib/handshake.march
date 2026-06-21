@@ -1,0 +1,54 @@
+-- Handshake: the net-kernel greeting + authentication decision.
+--
+-- When two nodes connect, each sends a Hello { its identity, a fresh nonce }.
+-- Each then replies with a proof = ClusterAuth.prove(secret, peer_nonce). A
+-- node accepts the peer iff the peer's proof matches the nonce *it* issued —
+-- so only holders of the cluster secret join, and a proof can't be replayed
+-- for a different nonce. This module is the pure protocol logic; the socket
+-- I/O (framing via NetFrame, send/recv) lives in the net-kernel on top.
+mod Handshake do
+
+  type Hello = { identity : NodeIdentity.Identity, nonce : String }
+
+  fn make_hello(identity : NodeIdentity.Identity, nonce : String) : Hello do
+    { identity: identity, nonce: nonce }
+  end
+
+  -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation, nonce].
+  fn encode_hello(h : Hello) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.str(h.identity.name),
+      Cons(Msgpack.str(h.identity.node_id),
+      Cons(Msgpack.int(h.identity.incarnation),
+      Cons(Msgpack.str(h.nonce), Nil))))))
+  end
+
+  fn decode_hello(bytes : List(Int)) : Result(Hello, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Str(name),
+                        Cons(Msgpack.Str(nid),
+                        Cons(Msgpack.Int(inc),
+                        Cons(Msgpack.Str(nonce), Nil))))) ->
+            Ok({ identity: { name: name, node_id: nid, incarnation: inc },
+                 nonce: nonce })
+          _ -> Err("Handshake: malformed hello")
+        end
+    end
+  end
+
+  -- Given the cluster [secret], the nonce *we* issued to the peer, the peer's
+  -- decoded Hello, and the peer's proof, decide: authenticated peer identity
+  -- or a rejection reason. The proof must bind to the nonce we issued.
+  fn authenticate(secret : String, our_nonce : String, peer : Hello,
+                  peer_proof : String) : Result(NodeIdentity.Identity, String) do
+    if ClusterAuth.verify(secret, our_nonce, peer_proof) do
+      Ok(peer.identity)
+    else
+      Err("Handshake: peer failed authentication")
+    end
+  end
+
+end
