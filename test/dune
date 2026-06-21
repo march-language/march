@@ -217,6 +217,11 @@
  (libraries march_tir march_ast march_cas alcotest unix))
 
 (test
+ (name test_hot_reload)
+ (modules test_hot_reload)
+ (libraries march_tir alcotest))
+
+(test
  (name test_refine)
  (modules test_refine)
  (libraries march_refine alcotest unix))
