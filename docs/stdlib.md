@@ -1,13 +1,17 @@
 ---
 layout: docs
-title: Standard Library
-nav_order: 12
-permalink: /docs/stdlib/
+title: Stdlib Guide
+nav_order: 12.5
+permalink: /docs/stdlib-guide/
 ---
 
-# Standard Library
+# Standard Library Guide
 
-March ships with 57 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+> **Looking for the full API reference?** Every stdlib module, type, and function — with
+> signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
+> This page is a hand-written tour of the most commonly used modules.
+
+March ships with 76 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 

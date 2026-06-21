@@ -1,0 +1,76 @@
+name: Regenerate Stdlib Docs
+
+# The site at march-lang.org serves pre-generated HTML committed under docs/docs/stdlib/.
+# deploy-pages.yml only runs Jekyll over that committed HTML — it never runs the doc
+# generator — so the pages go stale whenever a stdlib module is added or changed (this
+# is how 11 modules added after 2026-04-13 went missing from the published docs).
+#
+# This workflow regenerates the stdlib API reference (docs/docs/stdlib/, served at
+# /docs/stdlib/) on every stdlib change and commits the result, so the committed HTML
+# can never drift from the stdlib source.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'stdlib/**'
+      - 'scripts/gen-stdlib-docs.sh'
+      - '.github/workflows/gen-stdlib-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Avoid races / duplicate commits if several stdlib pushes land in quick succession.
+concurrency:
+  group: gen-stdlib-docs
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          # libblake3-dev is not packaged for Ubuntu 24.04; build from source (same as ci.yml).
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Install dependencies
+        run: opam install --deps-only --with-test -y .
+
+      - name: Regenerate stdlib docs
+        run: |
+          eval $(opam env)
+          scripts/gen-stdlib-docs.sh
+
+      - name: Commit regenerated docs
+        run: |
+          # The generator clones march_doc into ./march_doc; never commit that.
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # No [skip ci]: the commit touches only docs/docs/stdlib/**, which is NOT in this
+          # workflow's trigger paths (so it won't self-retrigger) but IS in deploy-pages.yml's
+          # (docs/**), so the regenerated docs get published.
+          if git status --porcelain docs/docs/stdlib | grep -q .; then
+            git add docs/docs/stdlib
+            git commit -m "docs(stdlib): regenerate API docs from stdlib source"
+            git push
+          else
+            echo "docs/docs/stdlib already up to date — nothing to commit."
+          fi
