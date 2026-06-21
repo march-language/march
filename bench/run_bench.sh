@@ -509,6 +509,29 @@ let () =
 EOF
 
 # ============================================================================
+# DEQUE-OPS SOURCES
+# ============================================================================
+
+# --- OCaml (deque_ops) -------------------------------------------------------
+cp "$REPO_ROOT/bench/ocaml/deque_ops.ml" "$TMP/deque_ops.ml"
+
+# --- Rust (deque_ops) --------------------------------------------------------
+cp "$REPO_ROOT/bench/rust/deque_ops.rs" "$TMP/deque_ops.rs"
+
+# --- Elixir (deque_ops) ------------------------------------------------------
+cp "$REPO_ROOT/bench/elixir/deque_ops.exs" "$TMP/deque_ops.exs"
+
+# ============================================================================
+# MERKLE SOURCES
+# ============================================================================
+
+# --- OCaml (merkle) ----------------------------------------------------------
+cp "$REPO_ROOT/bench/ocaml/merkle.ml" "$TMP/merkle.ml"
+
+# --- Elixir (merkle) ---------------------------------------------------------
+cp "$REPO_ROOT/bench/elixir/merkle.exs" "$TMP/merkle.exs"
+
+# ============================================================================
 # COMPILE
 # ============================================================================
 bold "Compiling..."
@@ -530,6 +553,8 @@ DUNE=/Users/80197052/.opam/march/bin/dune
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/insertion_sort.march   -o "$TMP/march_insertion" 2>/dev/null) || true
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/sort_small_batched.march -o "$TMP/march_sortsmall" 2>/dev/null) || true
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/sort_nearly_sorted.march -o "$TMP/march_sortns"    2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/deque_ops.march         -o "$TMP/march_deque"    2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/merkle.march             -o "$TMP/march_merkle"   2>/dev/null) || true
 
 # C
 if has clang; then
@@ -544,6 +569,7 @@ fi
 
 # OCaml
 OCAMLOPT=/Users/80197052/.opam/march/bin/ocamlopt
+OCAMLFIND=/Users/80197052/.opam/march/bin/ocamlfind
 if [ -x "$OCAMLOPT" ]; then
   "$OCAMLOPT" "$TMP/fib.ml"  -o "$TMP/ocaml_fib"  2>/dev/null
   "$OCAMLOPT" "$TMP/bt.ml"   -o "$TMP/ocaml_bt"   2>/dev/null
@@ -551,7 +577,13 @@ if [ -x "$OCAMLOPT" ]; then
   "$OCAMLOPT" "$TMP/lo.ml"   -o "$TMP/ocaml_lo"   2>/dev/null
   "$OCAMLOPT" "$TMP/sb.ml"   -o "$TMP/ocaml_sb"   2>/dev/null
   "$OCAMLOPT" "$TMP/sp.ml"   -o "$TMP/ocaml_sp"   2>/dev/null
-  "$OCAMLOPT" "$TMP/sort.ml" -o "$TMP/ocaml_sort" 2>/dev/null
+  "$OCAMLOPT" "$TMP/sort.ml"      -o "$TMP/ocaml_sort"  2>/dev/null
+  "$OCAMLOPT" "$TMP/deque_ops.ml" -o "$TMP/ocaml_deque" 2>/dev/null
+  # merkle.ml uses digestif; compile via ocamlfind if available
+  if [ -x "$OCAMLFIND" ]; then
+    "$OCAMLFIND" ocamlopt -package digestif -linkpkg \
+      "$TMP/merkle.ml" -o "$TMP/ocaml_merkle" 2>/dev/null || true
+  fi
 elif has ocamlopt; then
   ocamlopt "$TMP/fib.ml"  -o "$TMP/ocaml_fib"  2>/dev/null
   ocamlopt "$TMP/bt.ml"   -o "$TMP/ocaml_bt"   2>/dev/null
@@ -559,17 +591,19 @@ elif has ocamlopt; then
   ocamlopt "$TMP/lo.ml"   -o "$TMP/ocaml_lo"   2>/dev/null
   ocamlopt "$TMP/sb.ml"   -o "$TMP/ocaml_sb"   2>/dev/null
   ocamlopt "$TMP/sp.ml"   -o "$TMP/ocaml_sp"   2>/dev/null
-  ocamlopt "$TMP/sort.ml" -o "$TMP/ocaml_sort" 2>/dev/null
+  ocamlopt "$TMP/sort.ml"      -o "$TMP/ocaml_sort"  2>/dev/null
+  ocamlopt "$TMP/deque_ops.ml" -o "$TMP/ocaml_deque" 2>/dev/null
 fi
 
 # Rust
 if has rustc; then
-  rustc -O "$TMP/fib.rs" -o "$TMP/rust_fib" 2>/dev/null
-  rustc -O "$TMP/bt.rs"  -o "$TMP/rust_bt"  2>/dev/null
-  rustc -O "$TMP/tt.rs"  -o "$TMP/rust_tt"  2>/dev/null
-  rustc -O "$TMP/lo.rs"  -o "$TMP/rust_lo"  2>/dev/null
-  rustc -O "$TMP/sb.rs"  -o "$TMP/rust_sb"  2>/dev/null
-  rustc -O "$TMP/sp.rs"  -o "$TMP/rust_sp"  2>/dev/null
+  rustc -O "$TMP/fib.rs"      -o "$TMP/rust_fib"   2>/dev/null
+  rustc -O "$TMP/bt.rs"       -o "$TMP/rust_bt"    2>/dev/null
+  rustc -O "$TMP/tt.rs"       -o "$TMP/rust_tt"    2>/dev/null
+  rustc -O "$TMP/lo.rs"       -o "$TMP/rust_lo"    2>/dev/null
+  rustc -O "$TMP/sb.rs"       -o "$TMP/rust_sb"    2>/dev/null
+  rustc -O "$TMP/sp.rs"       -o "$TMP/rust_sp"    2>/dev/null
+  rustc -O "$TMP/deque_ops.rs" -o "$TMP/rust_deque" 2>/dev/null
 fi
 
 # Go
@@ -589,7 +623,7 @@ fi
 run_if() {
   local bin="$1" label="$2"
   if [ -x "$bin" ]; then
-    ms=$(timeit_ms "$bin" 2>/dev/null)
+    ms=$(timeit_ms "$bin" 2>/dev/null) || { skip "$label" ""; return 0; }
     ok "$label" "${ms} ms" ""
   else
     skip "$label" ""
@@ -599,7 +633,7 @@ run_if() {
 run_if_interp() {
   local interp="$1" src="$2" label="$3"
   if has "$interp"; then
-    ms=$(timeit_ms "$interp" "$src" 2>/dev/null)
+    ms=$(timeit_ms "$interp" "$src" 2>/dev/null) || { skip "$label" ""; return 0; }
     ok "$label" "${ms} ms" ""
   else
     skip "$label" ""
@@ -714,5 +748,28 @@ printf '  Timsort harvests runs in O(n); Mergesort is blind to order.\n'
 printf '  %-18s %-12s\n' "Algorithm" "Time"
 printf '  %-18s %-12s\n' "---------" "----"
 run_if "$TMP/march_sortns" "M:sort-ns"
+
+echo ""
+bold "═══ deque-ops: 100 rounds × (push_front+push_back 10k, drain) ═══"
+printf '  March functional deque (two-list RC). Rust VecDeque is mutable ring buffer.\n'
+printf '  OCaml uses same two-list algorithm under tracing GC (isolates RC vs GC).\n'
+printf '  Elixir uses Erlang :queue (OTP two-list functional deque).\n'
+printf '  Expected output: 20001000000\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_deque"  "March"
+run_if      "$TMP/ocaml_deque" "OCaml"
+run_if      "$TMP/rust_deque"  "Rust"
+run_if_interp elixir "$TMP/deque_ops.exs" "Elixir"
+
+echo ""
+bold "═══ merkle: 50 rounds × build 1024-leaf tree + diff (128 changes) ═══"
+printf '  Tests Crypto.sha256 throughput, tree allocation/RC, 64-char string compare.\n'
+printf '  Expected output: 6400  (50 × 128 differing hashes)\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_merkle"  "March"
+run_if      "$TMP/ocaml_merkle" "OCaml"
+run_if_interp elixir "$TMP/merkle.exs" "Elixir"
 
 echo ""

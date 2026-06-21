@@ -168,7 +168,11 @@ mod BigInt do
     else shift_left(Cons(0, a), n - 1) end
   end
 
-  -- Multiply two digit lists, schoolbook O(n*m). Used as the Karatsuba base case.
+  -- Multiply two digit lists, schoolbook O(n*m).
+  -- (A Karatsuba variant was implemented and benchmarked but removed: for this
+  -- linked-List(Int) limb representation the per-limb constant cost dominates,
+  -- so it gave no measurable speedup at any size up to ~480 digits. See the
+  -- multi-limb multiplication tests in test/stdlib/test_bigint.march.)
   pfn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
     fn go(ys : List(Int), shift : Int, acc : List(Int)) : List(Int) do
       match ys do
@@ -180,65 +184,6 @@ mod BigInt do
       end
     end
     go(b, 0, Nil)
-  end
-
-  -- Take the low `m` limbs (LSB-first) of a digit list.
-  pfn take_limbs(xs : List(Int), m : Int) : List(Int) do
-    fn rev(ys, acc) do
-      match ys do
-      Nil -> acc
-      Cons(h, t) -> rev(t, Cons(h, acc))
-      end
-    end
-    fn go(ys : List(Int), k : Int, acc : List(Int)) : List(Int) do
-      if k <= 0 do rev(acc, Nil)
-      else match ys do
-        Nil        -> rev(acc, Nil)
-        Cons(h, t) -> go(t, k - 1, Cons(h, acc))
-        end end
-    end
-    go(xs, m, Nil)
-  end
-
-  -- Drop the low `m` limbs (LSB-first), returning the high part.
-  pfn drop_limbs(xs : List(Int), m : Int) : List(Int) do
-    if m <= 0 do xs
-    else match xs do
-      Nil        -> Nil
-      Cons(_, t) -> drop_limbs(t, m - 1)
-      end end
-  end
-
-  -- Karatsuba crossover in limbs. base() is 10000, so 4 limbs ≈ 16 decimal
-  -- digits — below this the recursion overhead loses to schoolbook.
-  pfn karatsuba_threshold() : Int do 4 end
-
-  -- Multiply two magnitude digit lists (LSB-first) using Karatsuba, falling
-  -- back to schoolbook below the threshold.  Split each operand at `m` limbs:
-  --   x = x_hi·B^m + x_lo            (x_lo = low m limbs, B = base())
-  --   z0 = a_lo·b_lo,  z2 = a_hi·b_hi
-  --   z1 = (a_lo+a_hi)(b_lo+b_hi) − z2 − z0     (always ≥ 0)
-  --   result = z2·B^(2m) + z1·B^m + z0
-  -- Replaces n·m limb-products with 3 sub-products of half the size, giving
-  -- O(n^1.585).  z1's two subtractions never underflow because the central
-  -- product expands to z0 + z1 + z2.
-  pfn kmul(a : List(Int), b : List(Int)) : List(Int) do
-    let la = length(a)
-    let lb = length(b)
-    if la <= karatsuba_threshold() || lb <= karatsuba_threshold() do
-      mul_digits(a, b)
-    else do
-      let m = (if la > lb do la else lb end) / 2
-      let a_lo = take_limbs(a, m)
-      let a_hi = drop_limbs(a, m)
-      let b_lo = take_limbs(b, m)
-      let b_hi = drop_limbs(b, m)
-      let z0 = kmul(a_lo, b_lo)
-      let z2 = kmul(a_hi, b_hi)
-      let z1mid = kmul(add_digits(a_lo, a_hi), add_digits(b_lo, b_hi))
-      let z1 = sub_digits(sub_digits(z1mid, z2), z0)
-      add_digits(add_digits(shift_left(z2, 2 * m), shift_left(z1, m)), z0)
-    end end
   end
 
   -- Divide digit list `a` by single limb `d`. Returns (quotient, remainder).
@@ -376,7 +321,7 @@ mod BigInt do
     BigInt(sa, da) -> do
       match b do
       BigInt(sb, db) -> do
-        let result_digits = kmul(da, db)
+        let result_digits = mul_digits(da, db)
         match result_digits do
         Nil -> BigInt(true, Nil)
         _   -> BigInt(sa == sb, result_digits)

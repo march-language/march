@@ -140,6 +140,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.TyNatOp (_, a, b) -> ty a; ty b
     | Ast.TyChan (r, p) -> f SType r; f SType p
     | Ast.TyNat _ -> ()
+    | Ast.TyRefine (base, _, _) -> ty base
   and pat (p : Ast.pattern) =
     match p with
     | Ast.PatWild _ | Ast.PatLit _ -> ()
@@ -649,6 +650,10 @@ let rec surface_ty (t : Ast.ty) : string =
   | Ast.TyNatOp (op, a, b) ->
     surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ") ^ surface_ty b
   | Ast.TyChan (r, p)   -> "Chan(" ^ r.Ast.txt ^ ", " ^ p.Ast.txt ^ ")"
+  (* Best-effort: the predicate is elided here (A1a). The faithful renderer is
+     March_format.fmt_ty; this module only generates preview/stub signatures. *)
+  | Ast.TyRefine (base, None, _)   -> "{ " ^ surface_ty base ^ " | ... }"
+  | Ast.TyRefine (base, Some n, _) -> "{ " ^ n.Ast.txt ^ " : " ^ surface_ty base ^ " | ... }"
 
 (** Split [s] on top-level commas, respecting (), [], {} nesting and string
     literals. Used to recover argument source text without trusting per-arg

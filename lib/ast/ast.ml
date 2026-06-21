@@ -28,23 +28,6 @@ type visibility =
   | Private       (** Only visible within the defining module (default) *)
   | Public        (** Exported from the module *)
 
-(** Type expressions as written by the user (surface syntax). *)
-type ty =
-  | TyCon of name * ty list          (** Type constructor: List(Int) *)
-  | TyVar of name                    (** Type variable: a *)
-  | TyArrow of ty * ty               (** Function type: a -> b *)
-  | TyTuple of ty list               (** Tuple type: (a, b, c) *)
-  | TyRecord of (name * ty) list     (** Record type: { x : Int, y : Float } *)
-  | TyLinear of linearity * ty       (** Linearity-annotated type *)
-  | TyNat of int                     (** Type-level natural literal: 3 *)
-  | TyNatOp of nat_op * ty * ty      (** Type-level arithmetic: n + m, n * m *)
-  | TyChan of name * name            (** Session-typed channel endpoint: Chan(Role, Protocol) *)
-
-(** Type-level natural number operations. *)
-and nat_op =
-  | NatAdd  (** + *)
-  | NatMul  (** * *)
-
 (** Literals. *)
 type literal =
   | LitInt of int
@@ -125,6 +108,30 @@ and branch = {
   branch_guard : expr option;
   branch_body : expr;
 }
+
+(** Type expressions as written by the user (surface syntax).
+    In the same recursive group as [expr] so that [TyRefine] can carry a
+    predicate expression. *)
+and ty =
+  | TyCon of name * ty list          (** Type constructor: List(Int) *)
+  | TyVar of name                    (** Type variable: a *)
+  | TyArrow of ty * ty               (** Function type: a -> b *)
+  | TyTuple of ty list               (** Tuple type: (a, b, c) *)
+  | TyRecord of (name * ty) list     (** Record type: { x : Int, y : Float } *)
+  | TyLinear of linearity * ty       (** Linearity-annotated type *)
+  | TyNat of int                     (** Type-level natural literal: 3 *)
+  | TyNatOp of nat_op * ty * ty      (** Type-level arithmetic: n + m, n * m *)
+  | TyChan of name * name            (** Session-typed channel endpoint: Chan(Role, Protocol) *)
+  | TyRefine of ty * name option * expr
+    (** Refinement type: [{ T | predicate }] or [{ v : T | predicate }].
+        The second field is the binder name ([None] means the implicit [_]).
+        The predicate reuses the expression grammar; it is validated against
+        the decidable fragment in the typechecker, not the parser. *)
+
+(** Type-level natural number operations. *)
+and nat_op =
+  | NatAdd  (** + *)
+  | NatMul  (** * *)
 
 (** One arm of a [transitions] block: [ResourceTag: FromState -> ToState via fn_name] *)
 type transition = {
@@ -377,6 +384,9 @@ let rec show_ty = function
   | TyNatOp (NatAdd, a, b) -> Printf.sprintf "%s + %s" (show_ty a) (show_ty b)
   | TyNatOp (NatMul, a, b) -> Printf.sprintf "%s * %s" (show_ty a) (show_ty b)
   | TyChan (role, proto) -> Printf.sprintf "Chan(%s, %s)" role.txt proto.txt
+  | TyRefine (base, None, _) -> Printf.sprintf "{ %s | ... }" (show_ty base)
+  | TyRefine (base, Some v, _) ->
+    Printf.sprintf "{ %s : %s | ... }" v.txt (show_ty base)
 
 (** Compact expression summary — used in test failure messages. *)
 let show_expr = function

@@ -47,6 +47,7 @@ type ctx = {
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
+  pmap_threshold : int;  (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
   (* For resolving concrete field types from polymorphic type definitions.
      poly_ctors: (type_name, ctor_name) -> generic field types (may contain TVar)
      type_params: type_name -> ordered list of type-variable parameter names *)
@@ -158,7 +159,7 @@ let target_int_ty = function
 (* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
 let cur_type_defs : Tir.type_def list ref = ref []
 
-let make_ctx ?(fast_math=false) ?(repl=false) () = {
+let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
   ctr      = 0; blk = 0; str_ctr = 0;
@@ -170,6 +171,7 @@ let make_ctx ?(fast_math=false) ?(repl=false) () = {
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
   fast_math;
+  pmap_threshold;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -373,6 +375,7 @@ let is_builtin_fn name =
                  "actor_call"; "actor_reply"; "actor_cast";
                  "task_spawn"; "task_await"; "task_await_unwrap";
                  "task_yield"; "task_spawn_steal"; "task_reductions";
+                 "pmap_threshold";
                  "get_work_pool";
                  (* Float builtins *)
                  "float_abs"; "float_ceil"; "float_floor"; "float_round";
@@ -2181,7 +2184,23 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
               end else
                 ("i64", r)
             | None -> fallback_cmp ())
-         | None -> fallback_cmp ())
+         | None ->
+           (* Polymorphic ptr comparison: the TIR type is TVar (e.g. the result
+              of a polymorphic function like root_hash).  Pointer identity
+              (fallback_cmp) compares addresses, not content — always false for
+              two distinct string allocations with equal content.  Use
+              march_poly_eq which checks string tags at runtime and delegates to
+              march_string_eq for strings, giving correct content equality. *)
+           let r = fresh ctx "ar" in
+           let va_ptr = coerce ctx ty_a va "ptr" in
+           let vb_ptr = coerce ctx ty_b vb "ptr" in
+           emit ctx (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" r va_ptr vb_ptr);
+           if f.Tir.v_name = "!=" then begin
+             let nr = fresh ctx "nr" in
+             emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
+             ("i64", nr)
+           end else
+             ("i64", r))
       else fallback_cmp ()
     end
 
@@ -2312,6 +2331,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
                 result clo_ptr);
     ("ptr", result)
+
+  (* pmap_threshold() → compile-time constant i64 from --pmap-threshold *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "pmap_threshold" ->
+    ("i64", string_of_int ctx.pmap_threshold)
 
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
@@ -5132,9 +5155,9 @@ let emit_main_wrapper (buf : Buffer.t) =
        call void @march_run_scheduler()\n\
        ret i32 0\n}\n"
 
-let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
+let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native) (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
-  let ctx = make_ctx ~fast_math () in
+  let ctx = make_ctx ~fast_math ~pmap_threshold () in
   (* Record shape metadata requires the native runtime (march_extras.c);
      the WASM runtime does not provide march_record_set_shape. *)
   ctx.shape_meta <- not (is_wasm_target target);

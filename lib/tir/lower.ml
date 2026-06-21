@@ -55,6 +55,7 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
   | Ast.TyNat n                           -> Tir.TCon ("Nat", [Tir.TCon (string_of_int n, [])])
   | Ast.TyNatOp _                         -> Tir.TCon ("NatOp", [])  (* placeholder *)
   | Ast.TyChan _                          -> Tir.TCon ("Chan", [])   (* lowered to opaque Chan ptr *)
+  | Ast.TyRefine (base, _, _)             -> lower_ty base  (* refinement erases to base in TIR *)
 
 (** Convert AST linearity to TIR linearity. *)
 let lower_linearity : Ast.linearity -> Tir.linearity = function

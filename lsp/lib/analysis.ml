@@ -119,6 +119,10 @@ type perf_insight_kind =
       (** A call whose callee is a parameter — dispatched through a pointer. *)
   | RecursiveAlloc of { pi_alloc : string }
       (** An allocation inside an arm of a self-recursive function (GC pressure). *)
+  | Parallelizable of { pi_op : string; pi_par : string; pi_name_span : Ast.span }
+      (** A pure [List.map]/[List.filter] ([pi_op]) that could become its
+          parallel form [pi_par] ([pmap]/[pfilter]). [pi_name_span] covers just
+          the method-name token, for the "Convert to parallel" code action. *)
 
 (** A performance insight produced by static AST analysis. *)
 type perf_insight = {
@@ -1569,6 +1573,7 @@ let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
     | TirIndirectCall _ -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/indirect-call"
     | IndirectCall _    -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/indirect-call"
     | RecursiveAlloc _  -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/recursive-alloc"
+    | Parallelizable _  -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/parallelizable"
   in
   Lsp.Types.Diagnostic.create
     ~range
@@ -1733,6 +1738,77 @@ let recursive_alloc_check fn_name (body : Ast.expr) acc =
     !acc
   end
 
+(** Conservative purity check for a function argument, operating on the
+    surface AST. Shares the impure-builtin whitelist with the TIR purity
+    oracle ([March_tir.Purity.impure_builtins]) so there is a single source
+    of truth. Returns [false] ("treat as impure") for anything not obviously
+    pure — the safe bias for suggesting parallelization. *)
+let rec ast_expr_is_pure (e : Ast.expr) : bool =
+  let impure name = List.mem name March_tir.Purity.impure_builtins in
+  match e with
+  | Ast.ELit _ | Ast.EVar _ -> true
+  | Ast.ECon (_, args, _) | Ast.ETuple (args, _) -> List.for_all ast_expr_is_pure args
+  | Ast.EApp (Ast.EVar n, args, _) ->
+    not (impure n.Ast.txt) && List.for_all ast_expr_is_pure args
+  | Ast.EApp (Ast.EField (recv, m, _), args, _) ->
+    (* Qualified call like Module.f(...) — conservative: the method name must
+       not be a known impure builtin, and receiver + args must be pure. *)
+    not (impure m.Ast.txt) && ast_expr_is_pure recv && List.for_all ast_expr_is_pure args
+  | Ast.EApp (f, args, _) -> ast_expr_is_pure f && List.for_all ast_expr_is_pure args
+  | Ast.ELam (_, body, _) -> ast_expr_is_pure body
+  | Ast.EIf (c, t, f, _) -> ast_expr_is_pure c && ast_expr_is_pure t && ast_expr_is_pure f
+  | Ast.ELet (b, _) -> ast_expr_is_pure b.Ast.bind_expr
+  | Ast.EBlock (es, _) -> List.for_all ast_expr_is_pure es
+  | Ast.EMatch (subj, brs, _) ->
+    ast_expr_is_pure subj
+    && List.for_all (fun (br : Ast.branch) ->
+         ast_expr_is_pure br.Ast.branch_body
+         && (match br.Ast.branch_guard with None -> true | Some g -> ast_expr_is_pure g)) brs
+  | Ast.EField (recv, _, _) | Ast.EAnnot (recv, _, _) -> ast_expr_is_pure recv
+  | _ -> false   (* ESend, ESpawn, EDbg, EAssert, ERecord*, EAtom, … → impure *)
+
+(** Flag a pure [List.map]/[List.filter] call that could become its parallel
+    form [List.pmap]/[List.pfilter]. Only direct module-qualified calls are
+    matched. Folds/reduces are NEVER flagged (purity does not imply the
+    associativity a parallel reduce needs). *)
+let parallelizable_check (e : Ast.expr) acc =
+  let acc = ref acc in
+  let rec walk e =
+    (* `List.map(xs, f)` parses as EApp(EField(ECon{"List"}, {"map"}, _),
+       [xs; f], _) — the upper identifier `List` is an ECon. The method-name
+       span covers just `map`, so the code action replaces it with `pmap`. *)
+    (match e with
+     | Ast.EApp (Ast.EField (Ast.ECon (m, [], _), meth, _), [_xs; f], app_sp)
+       when m.Ast.txt = "List"
+            && (meth.Ast.txt = "map" || meth.Ast.txt = "filter")
+            && ast_expr_is_pure f ->
+       let par = if meth.Ast.txt = "map" then "pmap" else "pfilter" in
+       acc := { pi_span    = app_sp;
+                pi_kind    = Parallelizable
+                    { pi_op = meth.Ast.txt; pi_par = par; pi_name_span = meth.Ast.span };
+                pi_message = Printf.sprintf
+                  "This `List.%s` over a pure function could be `List.%s` to run in parallel (worth it only for large lists / heavy per-element work)."
+                  meth.Ast.txt par } :: !acc
+     | _ -> ());
+    match e with
+    | Ast.EApp (f, args, _) -> walk f; List.iter walk args
+    | Ast.EMatch (subj, brs, _) ->
+      walk subj; List.iter (fun (br : Ast.branch) -> walk br.Ast.branch_body) brs
+    | Ast.EIf (c, t, f, _) -> walk c; walk t; walk f
+    | Ast.ELet (b, _) -> walk b.Ast.bind_expr
+    | Ast.EBlock (es, _) -> List.iter walk es
+    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk x; walk y
+    | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) -> List.iter walk es
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk e) fs
+    | Ast.ERecordUpdate (e, fs, _) -> walk e; List.iter (fun (_, e) -> walk e) fs
+    | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
+    | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) -> walk e
+    | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> walk b
+    | _ -> ()
+  in
+  walk e;
+  !acc
+
 (** Run all perf insight passes over [user_decls] and return the collected
     insights (Phase-1 AST passes + Phase-2 heuristics). *)
 let collect_perf_insights
@@ -1750,11 +1826,13 @@ let collect_perf_insights
           add_all (closure_capture_check is_global cl.Ast.fc_body []);
           add_all (send_copy_check type_map cl.Ast.fc_body []);
           add_all (indirect_call_check (clause_param_names cl) cl.Ast.fc_body []);
-          add_all (recursive_alloc_check fn_name cl.Ast.fc_body [])
+          add_all (recursive_alloc_check fn_name cl.Ast.fc_body []);
+          add_all (parallelizable_check cl.Ast.fc_body [])
         ) fn.Ast.fn_clauses
     | Ast.DLet (_, b, _) ->
       add_all (closure_capture_check is_global b.Ast.bind_expr []);
-      add_all (send_copy_check type_map b.Ast.bind_expr [])
+      add_all (send_copy_check type_map b.Ast.bind_expr []);
+      add_all (parallelizable_check b.Ast.bind_expr [])
     | Ast.DMod (_, _, decls, _) ->
       List.iter scan_decl decls
     | _ -> ()
@@ -5226,6 +5304,9 @@ let rec surface_ty (t : Ast.ty) : string =
     surface_ty a ^ (match op with Ast.NatAdd -> " + " | Ast.NatMul -> " * ")
     ^ surface_ty b
   | Ast.TyChan (r, p)   -> "Chan(" ^ r.Ast.txt ^ ", " ^ p.Ast.txt ^ ")"
+  (* Best-effort (A1a): predicate elided in generated scaffolds. *)
+  | Ast.TyRefine (base, None, _)   -> "{ " ^ surface_ty base ^ " | ... }"
+  | Ast.TyRefine (base, Some n, _) -> "{ " ^ n.Ast.txt ^ " : " ^ surface_ty base ^ " | ... }"
 
 (** Split a surface arrow type into (param types, return type). *)
 let rec split_arrow (t : Ast.ty) : Ast.ty list * Ast.ty =
@@ -7242,6 +7323,25 @@ let code_actions_at (a : t) ~line ~character
         end)
       groups []
   in
+  (* ---- Convert a pure List.map/filter to its parallel form ---- *)
+  let parallelize_actions =
+    List.filter_map (fun (pi : perf_insight) ->
+        match pi.pi_kind with
+        | Parallelizable { pi_op = _; pi_par; pi_name_span }
+          when Pos.span_contains pi.pi_span ~line ~character ->
+          let range = Pos.span_to_lsp_range pi_name_span in
+          let edit  = TextEdit.create ~range ~newText:pi_par in
+          let uri   = DocumentUri.of_path a.filename in
+          let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+          Some (CodeAction.create
+                  ~title:(Printf.sprintf "Convert to `List.%s`" pi_par)
+                  ~kind:CodeActionKind.RefactorRewrite
+                  ~edit:we
+                  ~diagnostics:[perf_insight_to_diag pi]
+                  ())
+        | _ -> None
+      ) a.perf_insights
+  in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
   @ wrap_inspect_actions @ remove_inspect_actions
@@ -7250,6 +7350,7 @@ let code_actions_at (a : t) ~line ~character
   @ ast_code_actions a ~line ~character
   @ registry_actions
   @ html_close_actions
+  @ parallelize_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

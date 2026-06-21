@@ -1,0 +1,56 @@
+-- Merkle tree benchmark: content-addressed tree build + structural diff.
+--
+-- Workload per round:
+--   1. Build a balanced 1024-leaf Merkle tree (the 'a' tree).
+--   2. Build a second 1024-leaf tree where every 8th leaf has modified content
+--      (128 of 1024 leaves differ — the 'b' tree).
+--   3. Run Merkle.diff(ta, tb): expects 128 differing hashes.
+--   4. Accumulate the diff count over 50 rounds.
+-- Expected output: 6400  (50 × 128)
+--
+-- Features exercised:
+--   Crypto.sha256 throughput   (≈2046 hash calls per build round, ×2 trees)
+--   Tree node allocation/RC    (1023 nodes allocated and freed per tree × 2)
+--   Tail-recursive work-list   (Merkle.diff uses a List-based stack)
+--   64-char hex string compare  (every diff step compares two SHA-256 hashes)
+--
+-- Comparison languages use their native SHA-256 (CommonCrypto / crypto/sha256
+-- / hashlib / digestif).  March uses Crypto.sha256 from the march stdlib.
+--
+-- Usage:
+--   dune exec march -- --compile --opt 2 bench/merkle.march -o /tmp/march_merkle
+--   /tmp/march_merkle
+
+mod MerkleBench do
+
+-- Build [lo, lo+1, ..., hi] by counting down from hi and prepending.
+pfn ilist(hi : Int, lo : Int, acc : List(Int)) : List(Int) do
+  if hi < lo do acc
+  else ilist(hi - 1, lo, Cons(hi, acc))
+  end
+end
+
+pfn run_once() : Int do
+  let indices  = ilist(1023, 0, Nil)
+  let leaves_a = List.map(indices, fn i -> int_to_string(i))
+  let leaves_b = List.map(indices, fn i ->
+    if i % 8 == 0 do "modified_" ++ int_to_string(i)
+    else int_to_string(i)
+    end)
+  match (Merkle.build(leaves_a, fn s -> s), Merkle.build(leaves_b, fn s -> s)) do
+  (Some(ta), Some(tb)) -> List.length(Merkle.diff(ta, tb))
+  _                    -> -1
+  end
+end
+
+pfn bench_loop(n : Int, acc : Int) : Int do
+  if n == 0 do acc
+  else bench_loop(n - 1, acc + run_once())
+  end
+end
+
+fn main() : Unit do
+  println(int_to_string(bench_loop(50, 0)))
+end
+
+end

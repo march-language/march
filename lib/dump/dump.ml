@@ -105,6 +105,7 @@ let rec ty_to_str = function
   | TyNat n         -> string_of_int n
   | TyNatOp (_, a, b) -> ty_to_str a ^ " op " ^ ty_to_str b
   | TyChan (r, p)   -> "Chan(" ^ r.txt ^ ", " ^ p.txt ^ ")"
+  | TyRefine (base, _, _) -> "{ " ^ ty_to_str base ^ " | ... }"
 
 let param_to_str p =
   match p.param_ty with

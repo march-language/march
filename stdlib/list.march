@@ -287,6 +287,111 @@ mod List do
     go(xs, Nil)
   end
 
+  -- ---- Parallel ----
+
+  doc """
+  Parallel map: applies `f` to every element, returning a new list in the
+  same order as `map`.  `f` MUST be safe to run concurrently (pure / no
+  cross-element ordering dependency).
+
+  Below `pmap_threshold()` elements this delegates to sequential `map`
+  (zero spawn overhead).  Above it, the list is split into threshold-sized
+  chunks, each mapped on its own task, and the results concatenated in
+  order.  In the interpreter tasks run eagerly (correct, sequential); in
+  compiled code they run on the multi-core scheduler.
+
+  ## Examples
+
+      march> List.pmap([1, 2, 3], fn x -> x * 2)
+      [2, 4, 6]
+  """
+  fn pmap(xs : List(a), f : a -> b) : List(b) do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      map(xs, f)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> map(c, f)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
+  doc """
+  Like `pmap`, but caps the number of concurrent tasks at `max_concurrency`
+  by splitting the input into at most that many contiguous chunks.  Use this
+  when each element is expensive (few elements, heavy work) so the threshold
+  heuristic doesn't apply.  No threshold check is performed.
+
+  `max_concurrency` is treated as at least 1.  Result order matches `map`.
+  """
+  fn pmap_n(xs : List(a), f : a -> b, max_concurrency : Int) : List(b) do
+    let n = length(xs)
+    if n == 0 do []
+    else do
+      let cap = if max_concurrency < 1 do 1 else max_concurrency end
+      -- ceil(n / cap), at least 1, so we get at most `cap` chunks
+      let csize = if n / cap * cap == n do n / cap else n / cap + 1 end
+      let csize2 = if csize < 1 do 1 else csize end
+      let cs = chunks(xs, csize2)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> map(c, f)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
+  doc """
+  Parallel filter: keeps elements satisfying `pred`, in the same order as
+  sequential `filter`.  `pred` MUST be safe to run concurrently.  Below
+  `pmap_threshold()` elements it delegates to sequential `filter`; above it
+  each threshold-sized chunk is filtered on its own task and the kept
+  elements concatenated in order.
+  """
+  fn pfilter(xs : List(a), pred : a -> Bool) : List(a) do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      filter(xs, pred)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> filter(c, pred)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
+  doc """
+  Parallel reduction over an associative `combine` with `identity` as its
+  unit.
+
+  **Contract:** `combine` MUST be associative — `combine(combine(x, y), z)`
+  must equal `combine(x, combine(y, z))` — and `identity` must be its unit.
+  Sum, product, max, min, string concat, and set union qualify; subtraction
+  and average DO NOT.  The compiler cannot check this; correctness is the
+  caller's responsibility.
+
+  Below `pmap_threshold()` elements this is sequential `fold_left`.  Above
+  it, each threshold-sized chunk is reduced on its own task and the partial
+  results are combined in order — identical to the sequential result iff the
+  contract holds.
+
+  ## Examples
+
+      march> List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b)
+      10
+  """
+  fn preduce(xs : List(a), identity : a, combine : a -> a -> a) : a do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      fold_left(xs, identity, combine)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> fold_left(c, identity, combine)))
+      let partials = map(tasks, fn tk -> task_await_unwrap(tk))
+      fold_left(partials, identity, combine)
+    end
+    end
+  end
+
   doc """
   Applies `f` to each element; collects Some values, discards None.
   Equivalent to map followed by filter for non-None values.
@@ -552,7 +657,7 @@ mod List do
   end
 
   doc "Splits the list into consecutive chunks of at most `size` elements."
-  fn chunks(xs : List(a), size : Int) : List(List(a)) do
+  fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do
     fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
       if is_empty(lst) do reverse(acc)
       else do

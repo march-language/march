@@ -441,6 +441,7 @@ let debug_mode     = ref false
 let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
+let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
@@ -636,6 +637,8 @@ let run_test_cmd args =
         March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
     in
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
+    (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
+    March_refinecheck.Refine_check.check_module errors desugared;
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -880,7 +883,8 @@ let compile filename =
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1004,6 +1008,8 @@ let compile filename =
        - extern block capability gating
      See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
+  (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
+  March_refinecheck.Refine_check.check_module errors desugared;
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
@@ -1227,7 +1233,8 @@ let compile filename =
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
@@ -1240,7 +1247,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1432,7 +1439,7 @@ let compile filename =
           end)
       end else begin
         (* --emit-llvm only: write IR and exit *)
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
@@ -1885,12 +1892,16 @@ let () =
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
+    ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (* Propagate --pmap-threshold to the interpreter (codegen reads it via
+     emit_module's ~pmap_threshold argument below). *)
+  March_eval.Eval.pmap_threshold_value := !pmap_threshold;
   match !files with
   | []  ->
     let runtime_so = ensure_runtime_so () in

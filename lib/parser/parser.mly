@@ -847,6 +847,16 @@ ty_atom:
   | LPAREN; t = ty; RPAREN { t }
   | LPAREN; t = ty; COMMA; ts = separated_nonempty_list(COMMA, ty); RPAREN
     { TyTuple (t :: ts) }
+  (* Refinement type, no binder: { Int | _ >= 0 }, { List(a) | len(_) > 0 }.
+     Base is a [ty_app] (constructor/atom application) — function-arrow and
+     nat-arithmetic bases are not refined directly in v1. *)
+  | LBRACE; t = ty_app; PIPE; p = expr; RBRACE
+    { TyRefine (t, None, p) }
+  (* Refinement type with binder: { v : Int | v != 0 }.  Shares the
+     `lower_name COLON ty` prefix with a record field; menhir resolves on the
+     PIPE (refinement) vs COMMA/RBRACE (record) lookahead. *)
+  | LBRACE; name = lower_name; COLON; t = ty; PIPE; p = expr; RBRACE
+    { TyRefine (t, Some name, p) }
   | LBRACE; fields = separated_nonempty_list(COMMA, ty_record_field); RBRACE
     { TyRecord fields }
 
@@ -1111,6 +1121,10 @@ expr_atom:
   | a = ATOM %prec prec_atom
     { EAtom (a, [], mk_span ($loc)) }
   | id = LOWER_IDENT { EVar (mk_name id $loc) }
+  (* `_` as an expression: the refinement-value placeholder inside a
+     refinement predicate `{ T | _ > 0 }`.  Elsewhere it resolves to an
+     unbound variable `_` and is rejected in the typechecker. *)
+  | UNDERSCORE       { EVar (mk_name "_" $loc) }
   | TAG              { EVar (mk_name "tag" $loc) }
   | con = UPPER_IDENT %prec prec_atom
     { ECon (mk_name con $loc, [], mk_span ($loc)) }
