@@ -22,6 +22,9 @@ type ctx = {
   (* runtime function names referenced — imported at top of output *)
   fn_names     : (string, unit) Hashtbl.t;
   (* user-defined function names in this module — used to emit $clo wrappers *)
+  param_names  : (string, unit) Hashtbl.t;
+  (* local parameter names in the current function — excluded from $clo suffix
+     to avoid false positives when a parameter shadows a module function *)
 }
 
 let create_ctx () = {
@@ -29,6 +32,7 @@ let create_ctx () = {
   indent       = 0;
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
+  param_names  = Hashtbl.create 8;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -100,7 +104,9 @@ let emit_atom_raw ctx = function
 let emit_atom ctx = function
   | Tir.AVar v ->
     let n = mangle v.Tir.v_name in
-    if Hashtbl.mem ctx.fn_names v.Tir.v_name then emit ctx (n ^ "$clo")
+    if Hashtbl.mem ctx.fn_names v.Tir.v_name
+       && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
+    then emit ctx (n ^ "$clo")
     else emit ctx n
   | Tir.ADefRef d ->
     let n = mangle d.Tir.did_name in
@@ -208,7 +214,7 @@ and emit_val_impl ctx expr =
     | _ ->
       begin match name, args with
       | ("neg_int" | "neg_float" | "negate"), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
-      | "not_bool",  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
+      | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
         emit ctx "Math.trunc("; emit_atom ctx a;
         emit ctx " / "; emit_atom ctx b; emit ctx ")"
@@ -463,6 +469,47 @@ and emit_case_impl ctx result_var expr =
         emit_val ctx body;
         emit ctx ";\n"
     in
+    (* Tuples can appear as TTuple or as TCon("$TupleN", ...) or detected
+       by the branch tag starting with "$Tuple". Use branch tags as the
+       authoritative signal since type info may be erased after Mono. *)
+    let is_tuple_case =
+      match s_ty with Tir.TTuple _ -> true | _ -> false
+      || (match branches with
+          | br :: _ -> let t = br.Tir.br_tag in
+                       String.length t >= 6 && String.sub t 0 6 = "$Tuple"
+          | [] -> false) in
+    if is_tuple_case then begin
+      (* Tuple: exactly one branch, directly destructure _0, _1, ... *)
+      List.iter (fun br ->
+        let scrut_name = match scrutinee with
+          | Tir.AVar sv -> mangle sv.Tir.v_name
+          | _ ->
+            let tmp = "_tup" in
+            emit_indent ctx;
+            emit ctx (Printf.sprintf "const %s = " tmp);
+            emit_atom ctx scrutinee;
+            emit ctx ";\n";
+            tmp
+        in
+        List.iteri (fun i bv ->
+          emitl ctx (Printf.sprintf "const %s = %s._%d;"
+            (mangle bv.Tir.v_name) scrut_name i)
+        ) br.Tir.br_vars;
+        (match result_var with
+         | Some rv ->
+           emit_indent ctx; emit ctx (rv ^ " = ");
+           emit_val ctx br.Tir.br_body; emit ctx ";\n"
+         | None -> emit_stmts ctx br.Tir.br_body)
+      ) branches;
+      (match default with
+       | Some d ->
+         (match result_var with
+          | Some rv ->
+            emit_indent ctx; emit ctx (rv ^ " = ");
+            emit_val ctx d; emit ctx ";\n"
+          | None -> emit_stmts ctx d)
+       | None -> ())
+    end else
     if is_literal_scrutinee_ty s_ty then begin
       (* Literal/bool: if/else chain *)
       List.iteri (fun i br ->
@@ -493,7 +540,9 @@ and emit_case_impl ctx result_var expr =
       emit_atom ctx scrutinee;
       emit ctx ".$) {\n";
       List.iter (fun br ->
-        emitl ctx (Printf.sprintf "  case %S: {" br.Tir.br_tag);
+        (* Use bare ctor name to match EAlloc which stores bare tag in $ field *)
+        let tag = bare_ctor br.Tir.br_tag in
+        emitl ctx (Printf.sprintf "  case %S: {" tag);
         with_indent ctx (fun () ->
           with_indent ctx (fun () ->
             (* Bind constructor fields to br_vars *)
@@ -553,7 +602,12 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
     if i > 0 then emit ctx ", ";
     emit ctx (mangle p.Tir.v_name)) fn.Tir.fn_params;
   emit ctx ") {\n";
+  (* Register params so emit_atom won't add $clo suffix to param variables
+     that happen to share a name with a module-level function. *)
+  Hashtbl.clear ctx.param_names;
+  List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  Hashtbl.clear ctx.param_names;
   emit_indent ctx;
   emit ctx "}\n";
   (* Closure-protocol wrapper: allows this function to be used as a first-class
