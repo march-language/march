@@ -87,8 +87,14 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Other languages / direction
 
-- **No Rust `#[march]` or OCaml binding layers** (spec §15–16). Designed for; the
-  C ABI is the substrate. Future.
+- **Rust: the manual C-ABI path works today; the ergonomic `#[march]` layer is
+  future.** A Rust `staticlib` crate with `extern "C"` functions that call the
+  `march_*` ABI binds cleanly through `forge.toml`'s `[ffi] link` — proven and
+  documented in `specs/c-ffi-rust-manual.md` (a real cargo crate: `add`/`shout`/
+  `parse` round-trip via March, both Result arms). Still missing: the `march`
+  crate (`#[march]`, `#[derive(Encoder/Decoder)]`, `ResourceArc`, panic→Err) and
+  `forge add-rust` / `[[ffi.rust]]` cargo integration. The OCaml layer is also
+  future. (Record/variant marshalling for `#[derive]` needs Phase 9.)
 - **No native→March callbacks (upcalls).** Bindings cannot call back into March
   closures. Would need `march_call(env, fn, args…)` and passing closures across
   the boundary as resources (spec §19). Future.
