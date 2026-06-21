@@ -25,6 +25,11 @@ type ctx = {
   param_names  : (string, unit) Hashtbl.t;
   (* local parameter names in the current function — excluded from $clo suffix
      to avoid false positives when a parameter shadows a module function *)
+  extern_names : (string, string) Hashtbl.t;
+  (* march_name → js_name for extern (FFI) functions;
+     calls through these use direct JS call syntax, not closure dispatch *)
+  dom_uses     : (string, unit) Hashtbl.t;
+  (* DOM wrapper names used — imported from march_dom.mjs *)
 }
 
 let create_ctx () = {
@@ -33,6 +38,8 @@ let create_ctx () = {
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
   param_names  = Hashtbl.create 8;
+  extern_names = Hashtbl.create 16;
+  dom_uses     = Hashtbl.create 16;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -410,13 +417,29 @@ and emit_val_impl ctx expr =
     emit_indent ctx; emit ctx "})()"
 
   | Tir.ECallPtr (f, args) ->
-    (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
-       Apply fn ABI: apply(clo, args...) — pass closure as first argument. *)
-    emit_atom ctx f;
-    emit ctx "._0(";
-    emit_atom ctx f;
-    List.iter (fun a -> emit ctx ", "; emit_atom ctx a) args;
-    emit ctx ")"
+    (* Extern functions: emit a direct JS call using the C/JS symbol name.
+       No closure dispatch — externs are native JS functions, not March closures. *)
+    let extern_js_name = match f with
+      | Tir.AVar v    -> Hashtbl.find_opt ctx.extern_names v.Tir.v_name
+      | Tir.ADefRef d -> Hashtbl.find_opt ctx.extern_names d.Tir.did_name
+      | _             -> None
+    in
+    (match extern_js_name with
+    | Some js_name ->
+      if String.length js_name >= 10 && String.sub js_name 0 10 = "march_dom_" then
+        Hashtbl.replace ctx.dom_uses js_name ();
+      emit ctx (js_name ^ "(");
+      List.iteri (fun i a ->
+        if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+      emit ctx ")"
+    | None ->
+      (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
+         Apply fn ABI: apply(clo, args...) — pass closure as first argument. *)
+      emit_atom ctx f;
+      emit ctx "._0(";
+      emit_atom ctx f;
+      List.iter (fun a -> emit ctx ", "; emit_atom ctx a) args;
+      emit ctx ")")
 
 (* ── Statement emission ──────────────────────────────────────────── *)
 
@@ -731,6 +754,10 @@ let emit_module (m : Tir.tir_module) : string =
   let ctx = create_ctx () in
   (* Pre-register all function names so emit_atom can emit $clo versions *)
   List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
+  (* Register extern names so ECallPtr emits direct JS calls instead of closure dispatch *)
+  List.iter (fun e ->
+    Hashtbl.replace ctx.extern_names e.Tir.ed_march_name e.Tir.ed_c_name
+  ) m.Tir.tm_externs;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
   (* Top-level functions *)
@@ -745,14 +772,17 @@ let emit_module (m : Tir.tir_module) : string =
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
     "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n"
   in
-  let imports =
-    let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
-    let sorted = List.sort String.compare names in
-    if sorted = [] then ""
-    else
-      "import { " ^ String.concat ", " sorted
-      ^ " } from \"./march_runtime.mjs\";\n\n"
+  let make_import src tbl =
+    let names = Hashtbl.fold (fun k () acc -> k :: acc) tbl [] in
+    match List.sort String.compare names with
+    | [] -> ""
+    | sorted -> "import { " ^ String.concat ", " sorted ^ " } from \"" ^ src ^ "\";\n"
   in
+  let import_lines =
+    make_import "./march_runtime.mjs" ctx.runtime_uses
+    ^ make_import "./march_dom.mjs"     ctx.dom_uses
+  in
+  let imports = if import_lines = "" then "" else import_lines ^ "\n" in
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in

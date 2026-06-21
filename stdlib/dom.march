@@ -1,0 +1,220 @@
+-- Dom — browser DOM bindings for March compiled with --target js.
+--
+-- Provides typed wrappers over the browser's Document Object Model.
+-- Requires --target js; calling these functions from a native build panics.
+--
+-- Usage:
+--   match Dom.find("counter") do
+--     None    -> ()
+--     Some(el) ->
+--       Dom.set_text(el, "0")
+--       Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
+--   end
+
+mod Dom do
+  needs Ffi
+
+  -- Opaque handle to a DOM Element.
+  resource Node
+
+  -- Opaque handle to a browser Event.
+  resource Event
+
+  extern "dom" : Cap(Ffi) do
+    -- ── Query ──────────────────────────────────────────────────────────
+    fn dom_get_element_by_id(id: String)        : Option(Node) = "march_dom_get_element_by_id"
+    fn dom_query_selector(sel: String)          : Option(Node) = "march_dom_query_selector"
+    fn dom_query_selector_all(sel: String)      : List(Node)   = "march_dom_query_selector_all"
+
+    -- ── Document ───────────────────────────────────────────────────────
+    fn dom_body()                               : Node         = "march_dom_body"
+    fn dom_document_element()                   : Node         = "march_dom_document_element"
+
+    -- ── Construction ───────────────────────────────────────────────────
+    fn dom_create_element(tag: String)          : Node         = "march_dom_create_element"
+    fn dom_create_text_node(text: String)       : Node         = "march_dom_create_text_node"
+    fn dom_clone(el: Node)                      : Node         = "march_dom_clone"
+
+    -- ── Tree manipulation ──────────────────────────────────────────────
+    fn dom_append_child(parent: Node, child: Node)   : Unit = "march_dom_append_child"
+    fn dom_prepend_child(parent: Node, child: Node)  : Unit = "march_dom_prepend_child"
+    fn dom_remove_child(parent: Node, child: Node)   : Unit = "march_dom_remove_child"
+    fn dom_replace_child(parent: Node, new_child: Node, old_child: Node) : Unit = "march_dom_replace_child"
+    fn dom_remove(el: Node)                          : Unit = "march_dom_remove"
+    fn dom_parent(el: Node)                          : Option(Node) = "march_dom_parent"
+    fn dom_children(el: Node)                        : List(Node)   = "march_dom_children"
+    fn dom_first_child(el: Node)                     : Option(Node) = "march_dom_first_child"
+    fn dom_last_child(el: Node)                      : Option(Node) = "march_dom_last_child"
+    fn dom_clear_children(el: Node)                  : Unit = "march_dom_clear_children"
+
+    -- ── Content ────────────────────────────────────────────────────────
+    fn dom_get_text(el: Node)                   : String = "march_dom_get_text"
+    fn dom_set_text(el: Node, text: String)     : Unit   = "march_dom_set_text"
+    fn dom_get_html(el: Node)                   : String = "march_dom_get_html"
+    fn dom_set_html(el: Node, html: String)     : Unit   = "march_dom_set_html"
+
+    -- ── Attributes ─────────────────────────────────────────────────────
+    fn dom_get_attribute(el: Node, name: String)            : Option(String) = "march_dom_get_attribute"
+    fn dom_set_attribute(el: Node, name: String, val: String) : Unit         = "march_dom_set_attribute"
+    fn dom_remove_attribute(el: Node, name: String)         : Unit           = "march_dom_remove_attribute"
+    fn dom_has_attribute(el: Node, name: String)            : Bool           = "march_dom_has_attribute"
+
+    -- ── CSS classes ────────────────────────────────────────────────────
+    fn dom_class_add(el: Node, cls: String)     : Unit = "march_dom_class_add"
+    fn dom_class_remove(el: Node, cls: String)  : Unit = "march_dom_class_remove"
+    fn dom_class_toggle(el: Node, cls: String)  : Unit = "march_dom_class_toggle"
+    fn dom_class_contains(el: Node, cls: String): Bool = "march_dom_class_contains"
+
+    -- ── Inline style ───────────────────────────────────────────────────
+    fn dom_set_style(el: Node, prop: String, val: String)   : Unit   = "march_dom_set_style"
+    fn dom_get_style(el: Node, prop: String)                : String = "march_dom_get_style"
+
+    -- ── Form values ────────────────────────────────────────────────────
+    fn dom_get_value(el: Node)                  : String = "march_dom_get_value"
+    fn dom_set_value(el: Node, val: String)     : Unit   = "march_dom_set_value"
+
+    -- ── Events ─────────────────────────────────────────────────────────
+    fn dom_add_event_listener(el: Node, event: String, handler: Event -> Unit) : Unit = "march_dom_add_event_listener"
+    fn dom_remove_event_listener(el: Node, event: String, handler: Event -> Unit) : Unit = "march_dom_remove_event_listener"
+
+    -- ── Event properties ───────────────────────────────────────────────
+    fn dom_event_target(ev: Event)              : Node   = "march_dom_event_target"
+    fn dom_event_type(ev: Event)                : String = "march_dom_event_type"
+    fn dom_prevent_default(ev: Event)           : Unit   = "march_dom_prevent_default"
+    fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
+
+    -- ── Window ─────────────────────────────────────────────────────────
+    fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
+    fn dom_href()                               : String = "march_dom_href"
+    fn dom_set_href(url: String)                : Unit   = "march_dom_set_href"
+    fn dom_set_timeout(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_timeout"
+    fn dom_set_interval(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_interval"
+    fn dom_request_animation_frame(cb: Unit -> Unit) : Unit = "march_dom_request_animation_frame"
+  end
+
+  -- ── Public API ─────────────────────────────────────────────────────────
+
+  doc "Find an element by its id attribute. Returns None if not found."
+  fn find(id)                          do dom_get_element_by_id(id) end
+
+  doc "Find the first element matching a CSS selector. Returns None if not found."
+  fn select(selector)                  do dom_query_selector(selector) end
+
+  doc "Find all elements matching a CSS selector."
+  fn select_all(selector)              do dom_query_selector_all(selector) end
+
+  doc "The document body element."
+  fn body()                            do dom_body() end
+
+  doc "Create a new element with the given tag name."
+  fn create(tag)                       do dom_create_element(tag) end
+
+  doc "Create a text node."
+  fn text_node(text)                   do dom_create_text_node(text) end
+
+  doc "Append child to parent."
+  fn append(parent, child)             do dom_append_child(parent, child) end
+
+  doc "Prepend child to parent."
+  fn prepend(parent, child)            do dom_prepend_child(parent, child) end
+
+  doc "Remove a child from its parent."
+  fn remove_child(parent, child)       do dom_remove_child(parent, child) end
+
+  doc "Remove an element from the DOM."
+  fn remove(el)                        do dom_remove(el) end
+
+  doc "Get the parent element."
+  fn parent(el)                        do dom_parent(el) end
+
+  doc "Get all child elements."
+  fn children(el)                      do dom_children(el) end
+
+  doc "Remove all children from an element."
+  fn clear(el)                         do dom_clear_children(el) end
+
+  doc "Get the text content of an element."
+  fn get_text(el)                      do dom_get_text(el) end
+
+  doc "Set the text content of an element."
+  fn set_text(el, text)                do dom_set_text(el, text) end
+
+  doc "Get the inner HTML of an element."
+  fn get_html(el)                      do dom_get_html(el) end
+
+  doc "Set the inner HTML of an element."
+  fn set_html(el, html)                do dom_set_html(el, html) end
+
+  doc "Get an attribute value."
+  fn get_attr(el, name)                do dom_get_attribute(el, name) end
+
+  doc "Set an attribute."
+  fn set_attr(el, name, val)           do dom_set_attribute(el, name, val) end
+
+  doc "Remove an attribute."
+  fn remove_attr(el, name)             do dom_remove_attribute(el, name) end
+
+  doc "Check if an element has an attribute."
+  fn has_attr(el, name)                do dom_has_attribute(el, name) end
+
+  doc "Add a CSS class."
+  fn add_class(el, cls)                do dom_class_add(el, cls) end
+
+  doc "Remove a CSS class."
+  fn remove_class(el, cls)             do dom_class_remove(el, cls) end
+
+  doc "Toggle a CSS class."
+  fn toggle_class(el, cls)             do dom_class_toggle(el, cls) end
+
+  doc "Check if an element has a CSS class."
+  fn has_class(el, cls)                do dom_class_contains(el, cls) end
+
+  doc "Set an inline CSS property."
+  fn set_style(el, prop, val)          do dom_set_style(el, prop, val) end
+
+  doc "Get an inline CSS property."
+  fn get_style(el, prop)               do dom_get_style(el, prop) end
+
+  doc "Get the value of a form input element."
+  fn get_value(el)                     do dom_get_value(el) end
+
+  doc "Set the value of a form input element."
+  fn set_value(el, val)                do dom_set_value(el, val) end
+
+  doc "Add an event listener. The handler receives the Event."
+  fn listen(el, event, handler)        do dom_add_event_listener(el, event, handler) end
+
+  doc "Remove an event listener."
+  fn unlisten(el, event, handler)      do dom_remove_event_listener(el, event, handler) end
+
+  doc "Get the target element from an event."
+  fn event_target(ev)                  do dom_event_target(ev) end
+
+  doc "Get the event type string."
+  fn event_type(ev)                    do dom_event_type(ev) end
+
+  doc "Prevent the default browser action for an event."
+  fn prevent_default(ev)               do dom_prevent_default(ev) end
+
+  doc "Stop the event from propagating to parent elements."
+  fn stop_propagation(ev)              do dom_stop_propagation(ev) end
+
+  doc "Show a browser alert dialog."
+  fn alert(msg)                        do dom_alert(msg) end
+
+  doc "Get the current page URL."
+  fn href()                            do dom_href() end
+
+  doc "Navigate to a URL."
+  fn navigate(url)                     do dom_set_href(url) end
+
+  doc "Run a callback after ms milliseconds."
+  fn set_timeout(ms, cb)               do dom_set_timeout(ms, cb) end
+
+  doc "Run a callback every ms milliseconds."
+  fn set_interval(ms, cb)              do dom_set_interval(ms, cb) end
+
+  doc "Schedule a callback on the next animation frame."
+  fn on_frame(cb)                      do dom_request_animation_frame(cb) end
+
+end
