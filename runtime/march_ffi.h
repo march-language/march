@@ -79,6 +79,13 @@ march_value march_resource_new(int32_t type_id, void *native_ptr);
 /* Borrow the native pointer back. Aborts if [v] is not a resource of [type_id]. */
 void       *march_resource_get(march_value v, int32_t type_id);
 
+/* ── Blocking dispatch ───────────────────────────────────────────────────────
+ * Run a `blocking` extern (`fn` with `args` of int64/ptr) on a dedicated OS
+ * thread while the calling green thread cooperatively yields.  Two return
+ * shapes (int64 / double).  Emitted by codegen for `blocking` extern calls. */
+int64_t march_run_blocking_i(void *fn, const int64_t *args, int n);
+double  march_run_blocking_d(void *fn, const int64_t *args, int n);
+
 /* ── Reference counting (tag-aware) ──────────────────────────────────────────
  * Safe to call on Int/Bool/heap value words: tagged words are a no-op, heap
  * words adjust the refcount.  NEVER call on a Float word — its bit pattern may
