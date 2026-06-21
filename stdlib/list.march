@@ -552,7 +552,7 @@ mod List do
   end
 
   doc "Splits the list into consecutive chunks of at most `size` elements."
-  fn chunks(xs : List(a), size : Int) : List(List(a)) do
+  fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do
     fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
       if is_empty(lst) do reverse(acc)
       else do

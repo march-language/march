@@ -145,7 +145,7 @@ mod Decimal do
   For half-up rounding (e.g. money arithmetic where 0.5 should round
   away from zero), use `div_round` instead.
   """
-  fn div(a : Decimal, b : Decimal, precision : Int) : Decimal do
+  fn div(a : Decimal, b : Decimal, precision : {Int | _ >= 0}) : Decimal do
     match a do
     Decimal(ca, sa) -> do
       match b do
