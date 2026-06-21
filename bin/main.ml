@@ -1411,9 +1411,13 @@ let compile filename =
             in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
+            (* When compiling user FFI shims, put the runtime dir on the include
+               path so their `#include "march_ffi.h"` resolves with no config. *)
+            let ffi_inc = if !ffi_c_files = [] then ""
+                          else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
             let cmd = Printf.sprintf
-              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s%s%s %s -o %s%s"
-              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag in
+              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s %s%s%s%s%s %s -o %s%s"
+              opt_flag dbg_flag san_flag evloop_flag ffi_inc runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
