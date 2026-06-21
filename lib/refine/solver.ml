@@ -36,6 +36,9 @@ let create () : t option =
       let ic = Unix.in_channel_of_descr stdout_r in
       (* print-success off: we only read explicit (check-sat)/(get-model) output *)
       output_string oc "(set-option :print-success false)\n";
+      (* Per-query wall-clock cap: a hard (e.g. quantified-datatype) query returns
+         `unknown` instead of looping — definite-failure then treats it as skip. *)
+      output_string oc "(set-option :timeout 3000)\n";
       flush oc;
       Some { ic; oc; pid }
 
@@ -60,8 +63,11 @@ let read_balanced (ic : in_channel) : string =
   done;
   Buffer.contents buf
 
-let check (t : t) (vc : Smt.vc) : result =
+let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   output_string t.oc "(push 1)\n";
+  (* Measure-axiom preamble (datatype + uninterpreted-fn declarations + axioms);
+     scoped inside the push so it never leaks across VCs. *)
+  if preamble <> "" then (output_string t.oc preamble; output_string t.oc "\n");
   output_string t.oc (Smt.assertion_block vc);
   output_string t.oc "(check-sat)\n";
   flush t.oc;

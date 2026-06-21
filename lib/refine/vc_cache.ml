@@ -3,8 +3,8 @@
    only on a miss.  Mirrors the git-style <prefix2>/<rest> layout used by the
    rest of the CAS. *)
 
-let key_of_vc (vc : Smt.vc) : string =
-  March_cas.Blake3.hash_string (Smt.assertion_block vc)
+let key_of_vc ?(preamble = "") (vc : Smt.vc) : string =
+  March_cas.Blake3.hash_string (preamble ^ "\n" ^ Smt.assertion_block vc)
 
 let string_of_result : Solver.result -> string = function
   | Solver.Unsat -> "unsat"
