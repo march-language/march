@@ -19,8 +19,8 @@ let get_solver () : Solver.t option =
       shared_solver := Some s;
       s
 
-let discharge ~root (vc : Smt.vc) : outcome =
-  let key = Vc_cache.key_of_vc vc in
+let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+  let key = Vc_cache.key_of_vc ~preamble vc in
   let result =
     match Vc_cache.lookup ~root key with
     | Some r -> r
@@ -28,7 +28,7 @@ let discharge ~root (vc : Smt.vc) : outcome =
         match get_solver () with
         | None -> Solver.Unknown (* z3 unavailable; do not cache *)
         | Some s ->
-            let r = Solver.check s vc in
+            let r = Solver.check ~preamble s vc in
             Vc_cache.store ~root key r;
             r)
   in

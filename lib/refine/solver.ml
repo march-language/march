@@ -60,8 +60,11 @@ let read_balanced (ic : in_channel) : string =
   done;
   Buffer.contents buf
 
-let check (t : t) (vc : Smt.vc) : result =
+let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   output_string t.oc "(push 1)\n";
+  (* Measure-axiom preamble (datatype + uninterpreted-fn declarations + axioms);
+     scoped inside the push so it never leaks across VCs. *)
+  if preamble <> "" then (output_string t.oc preamble; output_string t.oc "\n");
   output_string t.oc (Smt.assertion_block vc);
   output_string t.oc "(check-sat)\n";
   flush t.oc;
