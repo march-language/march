@@ -198,6 +198,34 @@ describe "BigInt" do
       assert (BigInt.to_string(BigInt.mul(big, BigInt.one())) == BigInt.to_string(big))
     end
 
+    -- Deep Karatsuba: both operands are well above the limb threshold, so the
+    -- recursion splits several levels (10-limb × 9-limb, 19-limb × 9-limb).
+
+    test "mul big×big commutes (deep Karatsuba)" do
+      let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
+                         BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
+      let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))
+      assert (BigInt.to_string(BigInt.mul(a, b)) == BigInt.to_string(BigInt.mul(b, a)))
+    end
+
+    test "mul big×big associative (deep Karatsuba)" do
+      let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
+                         BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
+      let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))
+      let c = BigInt.mul(BigInt.from_int(88888888888888888), BigInt.from_int(77777777777777777))
+      assert (BigInt.to_string(BigInt.mul(BigInt.mul(a, b), c))
+              == BigInt.to_string(BigInt.mul(a, BigInt.mul(b, c))))
+    end
+
+    test "mul big distributes over add (deep Karatsuba)" do
+      let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
+                         BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
+      let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))
+      let c = BigInt.mul(BigInt.from_int(88888888888888888), BigInt.from_int(77777777777777777))
+      assert (BigInt.to_string(BigInt.mul(a, BigInt.add(b, c)))
+              == BigInt.to_string(BigInt.add(BigInt.mul(a, b), BigInt.mul(a, c))))
+    end
+
     test "div basic" do
       let a = BigInt.from_int(20)
       let b = BigInt.from_int(4)
