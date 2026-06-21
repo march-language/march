@@ -34,7 +34,7 @@ Zero runtime cost. No change to codegen. Contained almost entirely to `lib/typec
 - `Vector(n,a)` / `Matrix(m,n,a)` dimension checking **augmented** by VC generation over their `Nat` indices (additive — existing `TNat` literal checking is preserved; see §Vector / Matrix / NDArray).
 
 **Out of scope (Phase B and beyond):**
-- **Float-valued predicates** (comparing `Float` *values*, e.g. `{Float | _ >= 0.0}`). Modeling IEEE-754 `Float` as SMT `Real` is unsound at NaN/∞/rounding; modeling it with Z3's `FloatingPoint` theory is slow and is deferred. Note this does **not** block `Matrix(m, n, Float)` — the *dimensions* are `Nat` and fully supported; only refinements on the *Float payload values* are deferred.
+- **Float-valued predicates** (comparing `Float` *values*, e.g. `{Float | _ >= 0.0}`) — deferred for soundness; rationale and revisit path documented in §Deferred: Float-Value Refinements. Does **not** block `Matrix(m, n, Float)` (dimensions are `Nat`).
 - Indexed families / GADT-style indexed datatypes.
 - Propositional equality (`refl`, rewrite).
 - User-defined measures.
@@ -347,15 +347,31 @@ New test suite: `test/run_refinement.exe` (mirrors `run_compiler`/`run_eval`/`ru
 - **Assume:** admitted obligations show up in `--warn-assumes` output.
 - **Alias flow / weakening:** `Nat` flows into `{Int | _ >= 0}` and into bare `Int`; a bare `Int` does **not** flow into `Nat` without a discharged VC.
 
+## Deferred: Float-Value Refinements (documented decision)
+
+Predicates that compare `Float` **values** (e.g. `{Float | _ >= 0.0}`, `{Float | _ < upper}`) are **deliberately excluded from v1**, recorded here so the decision is explicit and revisitable.
+
+**Why deferred.** March's `Float` is a 64-bit IEEE-754 double. The cheap encoding — map `Float` to SMT `Real` — is **unsound**: it ignores NaN (`x >= 0.0` is false for NaN, but Real reasoning assumes totality of order), ±∞, signed zero, and rounding, so the solver would discharge VCs that do not hold at runtime. Shipping a *sound* `Int`/`Bool` core is strictly better than an unsound superset.
+
+**What it does *not* block.** Dimensions are `Nat`, so `Vector(n, Float)`, `Matrix(m, n, Float)`, and `mat_mul` are fully supported in v1 — only refinements on the Float *payload values* are deferred.
+
+**Revisit path (when prioritized).** Two options, in increasing fidelity/cost:
+1. **Real modeling behind an explicit opt-in flag** (`--unsafe-float-refinements`), with the unsoundness documented at the use site. Cheap; appropriate only where the user asserts NaN/∞-freedom.
+2. **Z3 `FloatingPoint` (FP) theory** — sound, models IEEE-754 exactly. Heavier: FP solving is slower, and NaN/∞ make many "obvious" facts (`x <= x`) false, which surfaces as more `unknown`s and a steeper UX. This is the principled long-term answer.
+
+Until then, Float invariants use the runtime-check escape hatch (`assume` + a guard), the same mechanism as the no-Z3 fallback.
+
 ## Implementation Order
 
-Phase A is itself built in checkpointable increments, each independently testable:
+Phase A is built in checkpointable increments, each independently testable. The **Z3 bridge is proven standalone first** — de-risking the external dependency before any typechecker surgery, so integration work builds on a component already known to be correct.
 
-- **A0 — Plumbing, no solver.** `TyRefine` in AST + parser; `TRefine` in the internal `ty`; `unify` ignores predicates (base-type inference must be unchanged — regression-test the full existing suite here). Predicates parsed and fragment-validated but **not discharged**. Exit criterion: every existing test still passes; refined annotations parse and erase.
-- **A1 — Solver bridge + Int-only preconditions.** `lib/refine/` with the SMT-LIB2 renderer, long-lived `z3 -in` driver, CAS cache, and counterexample parser. VC emission for parameter preconditions and call-site instantiation over `Int`/`Bool`. No measures, no path sensitivity yet. Exit criterion: `divide(n, 0)` errors with a counterexample; `divide(n, 1)` passes.
-- **A2 — Measures + postconditions.** Builtin measure registry and axiom preamble; postcondition VCs (`append`'s `len` relation). Exit criterion: `len(append(xs, ys)) == len(xs) + len(ys)` verifies.
+- **A0 — Z3 bridge, standalone & proven.** Build `lib/refine/` in isolation: an internal VC datatype, the SMT-LIB2 renderer + measure-axiom preamble, the long-lived `z3 -in` driver with `push`/`pop`, the CAS `vc/` cache, and the counterexample-model parser. Driven entirely by **hand-authored VCs in a unit test** — *no typechecker involvement*. Exit criterion: the bridge returns `unsat`/`sat`(+model)/`unknown` correctly on a table of fixture VCs; the cache hits on repeat; the missing-`z3` path returns a clean "unavailable" signal (no crash). This proves Z3 discovery, the interactive protocol, push/pop scoping, model extraction, and caching with zero coupling to the rest of the compiler.
+- **A1 — Plumbing + wire-in (Int-only preconditions).** `TyRefine` in AST + parser; `TRefine` in the internal `ty`; `unify` ignores predicates (base-type inference must be unchanged — regression-test the full existing suite here); predicate fragment + sort/reflectability validator; call-site instantiation over `Int`/`Bool`; emit parameter-precondition VCs **through the A0 bridge**. No measures, no path sensitivity yet. Exit criterion: existing suite stays green; `divide(n, 0)` errors with a counterexample; `divide(n, 1)` passes.
+- **A2 — Measures + postconditions.** Builtin measure registry feeding the A0 preamble; postcondition VCs (`append`'s `len` relation). Exit criterion: `len(append(xs, ys)) == len(xs) + len(ys)` verifies.
 - **A3 — Path sensitivity + Vector/Matrix.** `if`/`when`/scalar-`match` assumptions; `Vector`/`Matrix` dimension VCs. Exit criterion: bounds checks discharged via a guarding `if`; symbolic `mat_mul` checks.
 - **A4 — Robustness.** No-Z3 runtime-check fallback pass; `--require-smt`; `assume` + `--warn-assumes`. Exit criterion: `MARCH_NO_Z3=1` build runs and panics on violation.
+
+Rationale for proving A0 first: the external solver is the only piece with unknowns outside March's own codebase (process protocol, version quirks, model-string format). Isolating and testing it before touching `typecheck.ml` means an A1 failure is unambiguously an *integration* bug, not a solver-bridge bug — the two failure domains never overlap.
 
 ## Consultation Sites
 
