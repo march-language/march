@@ -27,6 +27,31 @@ let smt_suite =
            (assert (not (not (= d 0))))\n"
           (Smt.assertion_block sample_vc)) ]
 
+let model_suite =
+  [ Alcotest.test_case "parses define-fun ints" `Quick (fun () ->
+        let s =
+          "(\n\
+          \  (define-fun d () Int 0)\n\
+          \  (define-fun i () Int 10)\n\
+           )"
+        in
+        let m = Model.of_string s in
+        Alcotest.(check (option string)) "d" (Some "0") (List.assoc_opt "d" m);
+        Alcotest.(check (option string)) "i" (Some "10") (List.assoc_opt "i" m));
+
+    Alcotest.test_case "parses negative and bool values" `Quick (fun () ->
+        let s =
+          "(model\n\
+          \  (define-fun n () Int (- 3))\n\
+          \  (define-fun b () Bool true)\n\
+           )"
+        in
+        let m = Model.of_string s in
+        Alcotest.(check (option string)) "n" (Some "(- 3)") (List.assoc_opt "n" m);
+        Alcotest.(check (option string)) "b" (Some "true") (List.assoc_opt "b" m)) ]
+
 let () =
   Alcotest.run "march-refine"
-    [ ("smoke", smoke_suite); ("smt", smt_suite) ]
+    [ ("smoke", smoke_suite);
+      ("smt", smt_suite);
+      ("model", model_suite) ]
