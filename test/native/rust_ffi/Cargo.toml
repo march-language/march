@@ -1,0 +1,14 @@
+[package]
+name = "demo_binding"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "demo_binding"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+march = { path = "../../../rust/march" }
+
+[profile.release]
+panic = "unwind"   # #[march] catch_unwind needs unwinding (not abort)

@@ -869,9 +869,32 @@ let ffi_gen_c_cmd =
            ~doc:"Generate a C shim skeleton from a March extern block")
     Term.(const run $ file $ out)
 
+let ffi_add_rust_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Crate name for the Rust binding.")
+  in
+  let dir =
+    Arg.(value & opt string "native" &
+         info ["dir"] ~docv:"DIR" ~doc:"Parent directory for the crate (default: native).")
+  in
+  let march_path =
+    Arg.(value & opt string "PATH/TO/march" &
+         info ["march-path"] ~docv:"PATH"
+           ~doc:"Path to the `march` runtime crate (rust/march in the compiler repo).")
+  in
+  let run n d mp =
+    match Cmd_ffi.add_rust ~name:n ~dir:d ~march_path:mp with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "add-rust"
+           ~doc:"Scaffold a Rust binding crate that uses the `march` crate")
+    Term.(const run $ name $ dir $ march_path)
+
 let ffi_cmd =
   Cmd.group (Cmd.info "ffi" ~doc:"FFI binding tooling")
-    [ffi_gen_c_cmd]
+    [ffi_gen_c_cmd; ffi_add_rust_cmd]
 
 (* --------------------------------------------------------- forge completions *)
 

@@ -1,0 +1,38 @@
+-- End-to-end: a March app bound to a Rust crate via the `march` crate.
+-- The extern block matches what `march::init!` generates; the binding is the
+-- staticlib built from src/lib.rs (#[march] / #[derive] / ResourceArc).
+mod App do
+  needs Ffi
+  type Point = { x : Int, y : Int }
+  type Shape = Circle(Int) | Rect(Int, Int)
+  resource Counter
+  extern "demo" : Cap(Ffi) do
+    fn add(a: Int, b: Int): Int = "add"
+    fn shout(s: String): String = "shout"
+    fn parse(s: String): Result(Int, String) = "parse"
+    fn boom(n: Int): Result(Int, String) = "boom"
+    fn translate(p: Point, dx: Int, dy: Int): Point = "translate"
+    fn area(s: Shape): Int = "area"
+    fn counter_new(start: Int): Counter = "counter_new"
+    fn counter_value(c: Counter): Int = "counter_value"
+  end
+  fn shown(r: Result(Int, String)) : String do
+    match r do
+      Ok(n) -> int_to_string(n)
+      Err(e) -> e
+    end
+  end
+  fn main() : Unit do
+    println(int_to_string(add(20, 22)))            -- 42
+    println(shout("hello"))                         -- HELLO
+    println(shown(parse("7")))                      -- 7
+    println(shown(boom(4)))                         -- 25
+    println(shown(boom(0)))                         -- panic -> Err
+    let p = translate({ x: 1, y: 2 }, 10, 20)
+    println(int_to_string(p.x + p.y))               -- 33
+    println(int_to_string(area(Circle(5))))         -- 75
+    println(int_to_string(area(Rect(4, 6))))        -- 24
+    let c = counter_new(41)
+    println(int_to_string(counter_value(c)))        -- 41
+  end
+end

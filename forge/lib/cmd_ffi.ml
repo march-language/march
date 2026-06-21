@@ -37,6 +37,11 @@ let con_name = function
   | Ast.TyCon ({ Ast.txt; _ }, _) -> Some txt
   | _ -> None
 
+(* Ok payload of a Result(T, E) — for `raises` bindings, the bare C return. *)
+let ok_payload (t : Ast.ty) : Ast.ty = match t with
+  | Ast.TyCon ({ Ast.txt = "Result"; _ }, [a; _]) -> a
+  | _ -> t
+
 (* C type for an extern parameter / return position. *)
 let c_type ~ret (t : Ast.ty) : string =
   match con_name t with
@@ -249,15 +254,22 @@ let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : stri
   let params =
     List.map (fun (n, t) ->
       Printf.sprintf "%s %s" (c_type ~ret:false t) (pname n t)) ef.Ast.ef_params in
+  (* A `raises` binding takes a hidden march_env* first param and returns the
+     bare Ok payload (T of Result(T,E)); errors go via march_raise(env, e). *)
+  let params = if ef.Ast.ef_raises then "march_env *env" :: params else params in
+  let ret_ty_str =
+    if ef.Ast.ef_raises then c_type ~ret:true (ok_payload ef.Ast.ef_ret_ty)
+    else c_type ~ret:true ef.Ast.ef_ret_ty in
   let b = Buffer.create 256 in
-  Buffer.add_string b (Printf.sprintf "/* %s%s(%s) : %s */\n"
+  Buffer.add_string b (Printf.sprintf "/* %s%s%s(%s) : %s */\n"
     (if ef.Ast.ef_blocking then "blocking " else "")
+    (if ef.Ast.ef_raises then "raises " else "")
     ef.Ast.ef_name.Ast.txt
     (String.concat ", " (List.map (fun (n,t) ->
        Printf.sprintf "%s : %s" n.Ast.txt (Ast.show_ty t)) ef.Ast.ef_params))
     (Ast.show_ty ef.Ast.ef_ret_ty));
   Buffer.add_string b (Printf.sprintf "%s %s(%s) {\n"
-    (c_type ~ret:true ef.Ast.ef_ret_ty) c_name (String.concat ", " params));
+    ret_ty_str c_name (String.concat ", " params));
   (* Per-param marshalling. *)
   List.iteri (fun i (n, t) ->
     let nm = n.Ast.txt in
@@ -280,7 +292,18 @@ let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : stri
       | None -> ())
   ) ef.Ast.ef_params;
   Buffer.add_string b "    /* TODO: call the C library and build the result. */\n";
-  (if is_codec tbl ef.Ast.ef_ret_ty then
+  (if ef.Ast.ef_raises then begin
+     (* Return the bare Ok payload; raise out-of-band for the Err case. *)
+     let t_ok = ok_payload ef.Ast.ef_ret_ty in
+     Buffer.add_string b
+       "    /* On error: march_raise(env, march_str_new((const uint8_t *)\"error\", 5)); return 0; */\n";
+     (match con_name t_ok with
+      | Some "Float" -> Buffer.add_string b "    return 0.0;\n"
+      | _ when is_string_ty t_ok -> Buffer.add_string b
+          "    return march_str_new((const uint8_t *)\"\", 0);\n"
+      | _ -> Buffer.add_string b "    return 0;\n")
+   end
+   else if is_codec tbl ef.Ast.ef_ret_ty then
      (match con_name ef.Ast.ef_ret_ty with Some ty ->
         Buffer.add_string b (Printf.sprintf
           "    %s_c result = {0};\n    return march_encode_%s(result);\n" ty ty) | None -> ())
@@ -328,6 +351,83 @@ let gen_c (decls : Ast.decl list) : string =
         edef.Ast.ext_fns
     | _ -> ()) decls;
   Buffer.contents b
+
+(* ── forge ffi add-rust: scaffold a Rust binding crate ───────────────────── *)
+
+let write_file path contents : (unit, string) result =
+  try
+    let oc = open_out path in
+    output_string oc contents;
+    close_out oc;
+    Ok ()
+  with Sys_error m -> Error m
+
+(* Scaffold a Rust `staticlib` binding crate under <dir>/<name> using the `march`
+   crate (#[march] / #[derive] / init!).  The Rust side is the only thing the
+   author writes; `march::init!` generates the March extern block (run the
+   `gen_extern` bin), and the staticlib links through forge.toml's [ffi] link. *)
+let add_rust ~name ~dir ~march_path : (unit, string) result =
+  let crate_dir = Filename.concat dir name in
+  let lib_ident = String.map (fun c -> if c = '-' then '_' else c) name in
+  let ( let* ) = Result.bind in
+  let mkdir d = if not (Sys.file_exists d) then Unix.mkdir d 0o755 in
+  let setup =
+    try
+      mkdir dir; mkdir crate_dir;
+      mkdir (Filename.concat crate_dir "src");
+      mkdir (Filename.concat crate_dir "src/bin");
+      Ok ()
+    with Unix.Unix_error (e, _, _) -> Error (Unix.error_message e) in
+  let* () = setup in
+  let cargo_toml = Printf.sprintf
+    "[package]\n\
+     name = \"%s\"\n\
+     version = \"0.1.0\"\n\
+     edition = \"2021\"\n\n\
+     [lib]\n\
+     name = \"%s\"\n\
+     crate-type = [\"staticlib\", \"lib\"]\n\n\
+     [dependencies]\n\
+     march = { path = \"%s\" }   # the March FFI runtime crate (rust/march)\n\n\
+     [profile.release]\n\
+     panic = \"unwind\"   # #[march] catch_unwind needs unwinding\n"
+    name lib_ident march_path in
+  let lib_rs = Printf.sprintf
+    "//! Rust binding for March via the `march` crate. Write idiomatic Rust; the\n\
+     //! #[march] macro generates the extern \"C\" shim and `march::init!` the\n\
+     //! March extern block (print it with `cargo run --bin gen_extern`).\n\n\
+     use march::{march, Error};\n\
+     // For records/variants, add: use march::{Encoder, Decoder};\n\n\
+     #[march]\n\
+     fn hello(name: &str) -> String {\n\
+     \    format!(\"Hello, {}!\", name)\n\
+     }\n\n\
+     #[march]\n\
+     fn checked_div(a: i64, b: i64) -> Result<i64, Error> {\n\
+     \    if b == 0 { return Err(Error::msg(\"divide by zero\")); }\n\
+     \    Ok(a / b)\n\
+     }\n\n\
+     // #[derive(Encoder, Decoder)] struct/enum <-> March record/variant.\n\n\
+     march::init!(\"%s\", [hello, checked_div]);\n"
+    name in
+  let gen_extern_rs = Printf.sprintf
+    "//! Prints the March `extern` block for this binding (paste into a .march\n\
+     //! file, or redirect to one). Generated from the #[march] signatures.\n\
+     fn main() { %s::march_print_extern_block(); }\n"
+    lib_ident in
+  let* () = write_file (Filename.concat crate_dir "Cargo.toml") cargo_toml in
+  let* () = write_file (Filename.concat crate_dir "src/lib.rs") lib_rs in
+  let* () = write_file (Filename.concat crate_dir "src/bin/gen_extern.rs") gen_extern_rs in
+  Printf.printf
+    "scaffolded Rust binding crate %s\n\
+     next steps:\n\
+    \  1. set the `march` path in %s/Cargo.toml\n\
+    \  2. write your #[march] functions in %s/src/lib.rs\n\
+    \  3. cargo build --release   (produces target/release/lib%s.a)\n\
+    \  4. cargo run --bin gen_extern  >>  your_app.march   (the extern block)\n\
+    \  5. link the .a via forge.toml:  [ffi] link = [\"%s/target/release/lib%s.a\"]\n"
+    crate_dir crate_dir crate_dir lib_ident crate_dir lib_ident;
+  Ok ()
 
 let run ~file ~out : (unit, string) result =
   match parse_file file with

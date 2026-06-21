@@ -1,0 +1,8 @@
+[package]
+name = "march"
+version = "0.1.0"
+edition = "2021"
+description = "March FFI runtime — bind Rust crates to March (the Rustler analog)"
+
+[dependencies]
+march-macro = { path = "../march-macro" }
