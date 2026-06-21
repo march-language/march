@@ -126,6 +126,78 @@ describe "BigInt" do
       assert (BigInt.to_string(BigInt.mul(a, b)) == "12")
     end
 
+    -- Larger-operand multiplication. base() is 10000, so these cross many limbs
+    -- and exercise the multi-limb path (the existing tests above are all single
+    -- limb). Most use algebraic invariants (commutativity / associativity /
+    -- distributivity) so they catch carry/sign/split bugs without a hand-computed
+    -- product — and so they would validate a future Karatsuba implementation.
+
+    test "mul known: (10^6 - 1)^2" do
+      let a = BigInt.from_int(999999)
+      assert (BigInt.to_string(BigInt.mul(a, a)) == "999998000001")
+    end
+
+    test "mul known: (10^9 - 1)^2" do
+      let a = BigInt.from_int(999999999)
+      assert (BigInt.to_string(BigInt.mul(a, a)) == "999999998000000001")
+    end
+
+    test "mul known: 10^9 * 10^9 = 10^18" do
+      let a = BigInt.from_int(1000000000)
+      assert (BigInt.to_string(BigInt.mul(a, a)) == "1000000000000000000")
+    end
+
+    test "mul deep multi-limb: 10^36 via two groupings agree" do
+      let b = BigInt.from_int(1000000000)                  -- 10^9
+      let b2 = BigInt.mul(b, b)                             -- 10^18 (multi-limb)
+      let grouped = BigInt.mul(b2, b2)                      -- (10^18)^2 = 10^36
+      let chained = BigInt.mul(BigInt.mul(BigInt.mul(b, b), b), b)
+      assert (BigInt.to_string(grouped) == BigInt.to_string(chained))
+    end
+
+    test "mul commutative on multi-limb operands" do
+      let p = BigInt.mul(BigInt.from_int(123456789), BigInt.from_int(1000000007))
+      let q = BigInt.mul(BigInt.from_int(987654321), BigInt.from_int(1000000009))
+      assert (BigInt.to_string(BigInt.mul(p, q)) == BigInt.to_string(BigInt.mul(q, p)))
+    end
+
+    test "mul associative on multi-limb operands" do
+      let x = BigInt.from_int(98765432)
+      let y = BigInt.from_int(123456789)
+      let z = BigInt.mul(BigInt.from_int(1000000007), BigInt.from_int(1000000009))
+      let left = BigInt.mul(BigInt.mul(x, y), z)
+      let right = BigInt.mul(x, BigInt.mul(y, z))
+      assert (BigInt.to_string(left) == BigInt.to_string(right))
+    end
+
+    test "mul distributes over add (multi-limb)" do
+      let x = BigInt.mul(BigInt.from_int(99999999), BigInt.from_int(99999999))
+      let y = BigInt.from_int(123456789)
+      let z = BigInt.from_int(987654321)
+      let lhs = BigInt.mul(x, BigInt.add(y, z))
+      let rhs = BigInt.add(BigInt.mul(x, y), BigInt.mul(x, z))
+      assert (BigInt.to_string(lhs) == BigInt.to_string(rhs))
+    end
+
+    test "mul very deep (10^72) commutes with a scalar" do
+      let b = BigInt.from_int(1000000000)                  -- 10^9
+      let big = BigInt.mul(BigInt.mul(b, b), BigInt.mul(b, b))  -- 10^36
+      let bigger = BigInt.mul(big, big)                    -- 10^72 (~19 limbs)
+      assert (BigInt.to_string(BigInt.mul(bigger, BigInt.from_int(7)))
+              == BigInt.to_string(BigInt.mul(BigInt.from_int(7), bigger)))
+    end
+
+    test "mul multi-limb with negative keeps sign and magnitude" do
+      let m = BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)) -- 10^18
+      let neg = BigInt.mul(BigInt.negate(m), BigInt.from_int(3))
+      assert (BigInt.to_string(neg) == "-3000000000000000000")
+    end
+
+    test "mul identity on large value" do
+      let big = BigInt.mul(BigInt.from_int(123456789), BigInt.from_int(987654321))
+      assert (BigInt.to_string(BigInt.mul(big, BigInt.one())) == BigInt.to_string(big))
+    end
+
     test "div basic" do
       let a = BigInt.from_int(20)
       let b = BigInt.from_int(4)
