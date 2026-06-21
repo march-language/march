@@ -353,6 +353,10 @@ let shutdown_requested : bool ref = ref false
    Trace=-1 below Debug and Fatal=4 above Error.  Default: Info. *)
 let logger_level : int ref = ref 1
 
+(* Sequential-fallback cutoff for List.pmap/pfilter/preduce, set by
+   bin/main.ml from --pmap-threshold (default 1024). *)
+let pmap_threshold_value : int ref = ref 1024
+
 (* Mirrors March's `LogValue` ADT for runtime context storage. *)
 type log_value =
   | LogStr of string
@@ -7134,6 +7138,10 @@ let task_builtins : env =
   ; ("task_reductions", VBuiltin ("task_reductions", function
     | [] -> VInt !last_reduction_count
     | _ -> eval_error "task_reductions: expected 0 arguments"))
+
+  ; ("pmap_threshold", VBuiltin ("pmap_threshold", function
+    | [] -> VInt !pmap_threshold_value
+    | _ -> eval_error "pmap_threshold: expected 0 arguments"))
 
   (* ── Phase 5B: cancellation token builtins ───────────────────────── *)
 

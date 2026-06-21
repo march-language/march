@@ -1,0 +1,81 @@
+-- Tests for the parallel List stdlib functions (pmap, pmap_n, pfilter,
+-- preduce) and the pmap_threshold() builtin.
+-- Run with: dune exec march -- test test/stdlib/test_list_parallel.march
+
+mod TestListParallel do
+
+describe "pmap_threshold builtin" do
+  test "default threshold is positive" do
+    assert (pmap_threshold() > 0)
+  end
+end
+
+describe "pmap" do
+  test "matches map on empty list" do
+    assert (List.pmap([], fn x -> x + 1) == [])
+  end
+
+  test "matches map on small list (below threshold)" do
+    assert (List.pmap([1, 2, 3], fn x -> x * 2) == [2, 4, 6])
+  end
+
+  test "preserves order and matches map on a large list" do
+    let xs = List.range(0, 5000)
+    assert (List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x))
+  end
+end
+
+describe "pmap_n" do
+  test "matches map regardless of concurrency cap" do
+    let xs = List.range(0, 100)
+    assert (List.pmap_n(xs, fn x -> x + 1, 4) == List.map(xs, fn x -> x + 1))
+  end
+
+  test "handles empty list" do
+    assert (List.pmap_n([], fn x -> x + 1, 4) == [])
+  end
+
+  test "cap of 1 still produces correct result" do
+    assert (List.pmap_n([5, 6, 7], fn x -> x * 10, 1) == [50, 60, 70])
+  end
+end
+
+describe "pfilter" do
+  test "matches filter on small list" do
+    assert (List.pfilter([1, 2, 3, 4, 5], fn x -> x > 2) == [3, 4, 5])
+  end
+
+  test "matches filter on large list, order preserved" do
+    let xs = List.range(0, 5000)
+    let pred = fn x -> x % 2 == 0
+    assert (List.pfilter(xs, pred) == List.filter(xs, pred))
+  end
+
+  test "handles empty list" do
+    assert (List.pfilter([], fn x -> x > 0) == [])
+  end
+end
+
+describe "preduce" do
+  test "sums a small list" do
+    assert (List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b) == 10)
+  end
+
+  test "matches fold_left sum on a large list" do
+    let xs = List.range(0, 5000)
+    let add = fn (a, b) -> a + b
+    assert (List.preduce(xs, 0, add) == List.fold_left(xs, 0, add))
+  end
+
+  test "empty list returns identity" do
+    assert (List.preduce([], 0, fn (a, b) -> a + b) == 0)
+  end
+
+  test "string concat (associative) preserves order" do
+    let xs = ["a", "b", "c", "d"]
+    let cat = fn (a, b) -> a ++ b
+    assert (List.preduce(xs, "", cat) == "abcd")
+  end
+end
+
+end

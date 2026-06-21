@@ -592,6 +592,123 @@ let test_different_targets_cause_separate_cache_entries () =
             ~compile:fake_compile h_scc in
   Alcotest.(check int) "different targets → two cache entries" 2 !calls
 
+(* Find a definition's impl_hash by name within a hashed_scc list. *)
+let impl_hash_of name (hmod : March_cas.Pipeline.hashed_scc list) : string =
+  let hdefs_of = function
+    | March_cas.Pipeline.HSingle { hs_hdef }     -> [hs_hdef]
+    | March_cas.Pipeline.HGroup  { hg_hdefs; _ } -> hg_hdefs
+  in
+  let named hd = match hd.March_cas.Cas.hd_def with
+    | March_cas.Cas.FnDef fd -> String.equal fd.fn_name name
+    | _ -> false
+  in
+  match List.find_map (fun h -> List.find_opt named (hdefs_of h)) hmod with
+  | Some hd -> hd.March_cas.Cas.hd_impl_hash
+  | None    -> Alcotest.fail ("no def named " ^ name)
+
+let test_caller_impl_hash_tracks_callee_body_via_pipeline () =
+  (* g calls f; f and g are independent SCCs. Changing f's BODY must change
+     g's impl_hash, because g transitively depends on f. Today hash_module
+     serializes g's call to f by NAME, so g's hash is invariant across an
+     f-body change — the cross-SCC stale-cache bug (HCR spec § Part 1). *)
+  let mk f_body =
+    let f = make_fn "f" f_body in
+    let g = make_fn "g"
+      (EApp ({ v_name = "f"; v_ty = TFn ([], TInt); v_lin = Unr }, [])) in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f; g]; tm_types = []; tm_externs = [];
+        tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let g_v1 = impl_hash_of "g" (mk (int_atom 1)) in
+  let g_v2 = impl_hash_of "g" (mk (int_atom 2)) in
+  Alcotest.(check bool) "g's impl_hash reflects f's body change"
+    false (String.equal g_v1 g_v2)
+
+let test_impl_hash_propagates_transitively_via_pipeline () =
+  (* h → g → f. A change to f (two hops away) must move h's impl_hash. *)
+  let call name = EApp ({ v_name = name; v_ty = TFn ([], TInt); v_lin = Unr }, []) in
+  let mk f_body =
+    let f = make_fn "f" f_body in
+    let g = make_fn "g" (call "f") in
+    let h = make_fn "h" (call "g") in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f; g; h]; tm_types = []; tm_externs = [];
+        tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let h_v1 = impl_hash_of "h" (mk (int_atom 1)) in
+  let h_v2 = impl_hash_of "h" (mk (int_atom 2)) in
+  Alcotest.(check bool) "h's impl_hash reflects transitive f change"
+    false (String.equal h_v1 h_v2)
+
+let test_impl_hash_unaffected_by_unrelated_def_via_pipeline () =
+  (* g depends on f; an unrelated def u must NOT move g's impl_hash
+     (guards against over-folding every module def into every hash). *)
+  let call name = EApp ({ v_name = name; v_ty = TFn ([], TInt); v_lin = Unr }, []) in
+  let mk u_body =
+    let f = make_fn "f" (int_atom 1) in
+    let g = make_fn "g" (call "f") in
+    let u = make_fn "u" u_body in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f; g; u]; tm_types = []; tm_externs = [];
+        tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let g_v1 = impl_hash_of "g" (mk (int_atom 1)) in
+  let g_v2 = impl_hash_of "g" (mk (int_atom 2)) in
+  Alcotest.(check bool) "g's impl_hash stable across unrelated change"
+    true (String.equal g_v1 g_v2)
+
+let fn_using ty name : fn_def =
+  (* a fn whose signature mentions [ty] *)
+  { fn_name = name; fn_params = [{ v_name = "u"; v_ty = ty; v_lin = Unr }];
+    fn_ret_ty = TInt; fn_body = EAtom (ALit (March_ast.Ast.LitInt 0)) }
+
+let test_impl_hash_tracks_referenced_type_layout () =
+  (* f takes a User. Changing User's record layout must move f's impl_hash
+     (GEP offsets change → f must recompile). Today the type is referenced
+     by NAME, so f's hash is invariant — the type-layout stale-cache hole. *)
+  let mk fields =
+    let f = fn_using (TCon ("User", [])) "f" in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f];
+        tm_types = [TDRecord ("User", fields)];
+        tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let f_v1 = impl_hash_of "f" (mk [("age", TInt)]) in
+  let f_v2 = impl_hash_of "f" (mk [("age", TInt); ("name", TString)]) in
+  Alcotest.(check bool) "f's impl_hash reflects User layout change"
+    false (String.equal f_v1 f_v2)
+
+let test_impl_hash_tracks_transitive_type_layout () =
+  (* f references User; User has a field of type Address. Changing Address
+     (two type-hops from f) must move f's impl_hash. *)
+  let mk addr_fields =
+    let f = fn_using (TCon ("User", [])) "f" in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f];
+        tm_types = [ TDRecord ("User", [("addr", TCon ("Address", []))]);
+                     TDRecord ("Address", addr_fields) ];
+        tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let f_v1 = impl_hash_of "f" (mk [("zip", TInt)]) in
+  let f_v2 = impl_hash_of "f" (mk [("zip", TString)]) in
+  Alcotest.(check bool) "f's impl_hash reflects transitive Address change"
+    false (String.equal f_v1 f_v2)
+
+let test_impl_hash_isolated_from_unreferenced_type () =
+  (* f references User only; changing an unrelated type V must NOT move f. *)
+  let mk v_fields =
+    let f = fn_using (TCon ("User", [])) "f" in
+    March_cas.Pipeline.hash_module
+      { tm_name = "T"; tm_fns = [f];
+        tm_types = [ TDRecord ("User", [("age", TInt)]);
+                     TDRecord ("V", v_fields) ];
+        tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let f_v1 = impl_hash_of "f" (mk [("x", TInt)]) in
+  let f_v2 = impl_hash_of "f" (mk [("x", TString)]) in
+  Alcotest.(check bool) "f's impl_hash stable across unrelated type change"
+    true (String.equal f_v1 f_v2)
+
 (* ──────────────────────────────────────────────────────────────────────────
    Runner
    ────────────────────────────────────────────────────────────────────────── *)
@@ -655,5 +772,11 @@ let () =
       Alcotest.test_case "ADefRef uses hash not name"         `Quick test_adefref_serializes_hash_not_name;
       Alcotest.test_case "ADefRef distinct hash → distinct"   `Quick test_adefref_distinct_hash_produces_distinct_bytes;
       Alcotest.test_case "dep hash change → caller impl_hash" `Quick test_impl_hash_changes_when_dependency_hash_changes;
+      Alcotest.test_case "pipeline: callee body → caller hash" `Quick test_caller_impl_hash_tracks_callee_body_via_pipeline;
+      Alcotest.test_case "pipeline: transitive dep propagation" `Quick test_impl_hash_propagates_transitively_via_pipeline;
+      Alcotest.test_case "pipeline: unrelated def is isolated"  `Quick test_impl_hash_unaffected_by_unrelated_def_via_pipeline;
+      Alcotest.test_case "pipeline: type layout → caller hash"  `Quick test_impl_hash_tracks_referenced_type_layout;
+      Alcotest.test_case "pipeline: transitive type layout"     `Quick test_impl_hash_tracks_transitive_type_layout;
+      Alcotest.test_case "pipeline: unreferenced type isolated" `Quick test_impl_hash_isolated_from_unreferenced_type;
     ]);
   ]

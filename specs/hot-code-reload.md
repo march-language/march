@@ -50,6 +50,16 @@ The hybrid target: a changed unit runs as a trampoline immediately (instant, cor
 
 ---
 
+## Relationship to Distributed OTP
+
+HCR has a downstream consumer: the distributed-OTP design ([`2026-06-21-distributed-otp-design.md`](2026-06-21-distributed-otp-design.md)) reuses this spec's machinery wholesale, which both validates the abstractions and creates ordering constraints worth recording here.
+
+- **Shared prerequisite.** § Part 1's `ADefRef`/`did_hash` work *is* distributed-OTP's P0. Build it once; both features are unsound without it.
+- **Sequencing (recommended).** Do HCR **through Model A** before distribution: it hardens the `impl_hash`-as-version substrate on a single node (easier than across a partition), and distribution's safe rolling upgrades (§ Part 6) and code-shipping depend on HCR pieces, not vice-versa. **Do not block distribution on Model B** — its homogeneous path needs none of the native-JIT research.
+- **Dispatch substrate is a sibling, not a copy.** Distribution's *enrollment* (a content-addressed function gets a retained, addressable entry point + an arg-marshalling stub) shares this spec's `NAME_ID`-interning + `impl_hash` identity, but **without the boundary deopt** — a remote call crosses no local call boundary, so a remote target stays fully optimized and can still be inlined into its *local* callers. Keep the two registries unified at the `NAME_ID`/`impl_hash` layer; do not assume distribution wants the version-ring/no-inline-edge semantics.
+- **Mixed-version becomes permanent.** § Part 6 treats version coexistence as a transient rolling-upgrade window; a long-lived cluster makes it a *standing* state, so the forward-compat guarantees (and the retain-unknowns serialization discipline) are always-on, not deploy-window-only.
+- **Stronger threat model for peer code.** § Part 9's trust model is "ed25519-signed deploys from CI." Code arriving over distribution's *peer CAS tier* may be untrusted and is **not** covered by that assumption — it requires the `cap_narrow` capability sandbox (distribution P6). Same loading mechanism, different trust boundary.
+
 ## Non-Goals
 
 - Hot-reloading the **runtime** (`runtime/*.c`), **stdlib**, or **dependencies** — never on the boundary; always direct-called and fully optimized; changes require a restart.
@@ -149,12 +159,12 @@ Artifacts are immutable and content-addressed, so **every version ever built rem
 
 ### PREREQUISITE (highest-leverage work in the codebase): Merkle `did_hash` + types in the graph
 
-The serializer is already built for this: `serialize.ml:166` writes **only `did.did_hash`** for an `ADefRef` ("name excluded for content-addressing"), and `tir.ml:30` documents `did_hash` as the callee's BLAKE3 `impl_hash`. **But nothing populates `did_hash` with a real callee hash** (only type decls and comparisons reference it). Two problems follow, and both must be fixed before the CAS can carry HCR:
+The serializer is *designed* for this but the wiring is absent. `serialize.ml:166` writes **only `did.did_hash`** for an `ADefRef` ("name excluded for content-addressing"), and `tir.ml:30` documents `did_hash` as the callee's BLAKE3 `impl_hash`. **But the `ADefRef` node is never constructed** — grep finds only *consumers* (pattern-matches in `scc.ml`, `serialize.ml`, `join_points.ml`, the TIR passes), zero *producers*. Top-level calls are lowered to `EApp(fn_v, args)` where `fn_v` is an ordinary `var` carrying the callee's **name** (`scc.ml:29-30`), and the serializer writes that name via the `AVar` path. So the `ADefRef`/`did_hash` content-addressing path in `serialize.ml` is **currently unreachable dead code**, and a call site is content-addressed *by callee name, not callee hash*. Two problems follow, and both must be fixed before the CAS can carry HCR:
 
-1. **Latent stale-cache bug, independent of HCR.** `compile_scc` keys on the SCC's *local* `impl_hash`. The optimizer inlines across SCCs (`known_call`, inline threshold 50), so changing callee B does not change inliner A's hash → a cache hit can serve A with an old inlined B.
+1. **Latent stale-cache bug, independent of HCR — confirmed mechanically.** `compile_scc` keys on the SCC's *local* `impl_hash`. A caller serializes its callee by name, so changing callee B's body leaves inliner A's serialized body — and `impl_hash` — unchanged; the optimizer inlines across SCCs (`known_call`, inline threshold 50), so a cache hit can serve A with an old inlined B.
 2. **HCR cannot compute a correct blast radius** without transitive hashing.
 
-**Fix:** add a bottom-up pass over the already-topo-sorted SCCs that sets each `ADefRef.did_hash = callee.impl_hash` before hashing, making `impl_hash` a true Merkle root. Then:
+**Fix (larger than "set a field" — the nodes must first be emitted):** introduce a pass that **rewrites each top-level call/reference to a known definition (`EApp`/`AVar` carrying a name) into an `ADefRef` node**, then, bottom-up over the already-topo-sorted SCCs, **populates `did_hash = callee.impl_hash`** before hashing — making `impl_hash` a true Merkle root. (Equivalently: thread the callee's `impl_hash` into the serialization of a top-level-name reference.) The earlier framing of "just populate `did_hash`" understated this: there are no `ADefRef` nodes today to populate. Then:
 
 - A change's reload set is **exactly** the defs whose Merkle `impl_hash` moved — minimal and correct.
 - **Borrow/RC ABI stability (Central Tension #3) is subsumed.** Borrow inference is deterministic in (own impl + callee sigs); Merkle-`impl_hash` stable ⟹ borrow output stable. The separate "frozen borrow ABI hash" the first draft proposed is unnecessary.
@@ -305,7 +315,7 @@ This is **schema evolution**, and the property "a record only adds fields, safe 
 ### Two regimes (they need different guarantees)
 
 - **Intra-node reload.** After `migrate_state`, only new code runs → only **backward** compatibility is required (the migration is total over the old value), checkable directly against the prior type in the CAS.
-- **Mixed-version cluster (rolling upgrade).** Old and new nodes coexist and exchange messages → **forward** compatibility is *also* required, because an old node receives a new-shaped value. This is the regime the "pass to nodes running old code" question targets, and the one that needs the subtyping story.
+- **Mixed-version cluster (rolling upgrade — *or a permanently-mixed distributed cluster*).** Old and new nodes coexist and exchange messages → **forward** compatibility is *also* required, because an old node receives a new-shaped value. This is the regime the "pass to nodes running old code" question targets, and the one that needs the subtyping story. Distributed OTP ([`2026-06-21-distributed-otp-design.md`](2026-06-21-distributed-otp-design.md)) makes this a *standing* state rather than a transient window, so these guarantees are load-bearing continuously.
 
 ### The variance duality (what makes this mechanizable in March)
 
@@ -379,7 +389,7 @@ Hot-reloaded code lives only in process memory; a crash/OOM/restart returns on t
 
 ## Part 9: Security
 
-The reload socket activates executable code; treat it as the highest-value attack surface.
+The reload socket activates executable code; treat it as the highest-value attack surface. (This section's trust model is *signed deploys from CI*. Code arriving over distributed OTP's peer CAS tier may be **untrusted** and is not covered by that assumption — it additionally requires the `cap_narrow` capability sandbox; see § Relationship to Distributed OTP.)
 
 1. **Mandatory ed25519 signing.** Public key embedded at build time; private key only on the build/CI machine. Unsigned/unverified activations are rejected before anything loads.
 2. **Compiler-identity gate, free via the CAS key** (§ Part 4) — doubles as downgrade/confusion defense.
@@ -434,9 +444,10 @@ Deliverable: a go/no-go on Model B with real numbers. Model A needs no spike and
 ## Implementation Plan (CAS-native, trampoline-first)
 
 ### Phase 1 — CAS prerequisite (highest leverage; also fixes a real stale-cache bug)
-- Merkle-populate `ADefRef.did_hash` via a bottom-up pass over the topo-sorted SCCs (`pipeline.ml`/`scc.ml`), so `impl_hash` is a true Merkle root.
+- **Emit `ADefRef`** for top-level references first (today calls are `EApp`/`AVar`-by-name and the `ADefRef` path is unreachable — see § Part 1 PREREQUISITE), **then** Merkle-populate `did_hash = callee.impl_hash` via a bottom-up pass over the topo-sorted SCCs (`pipeline.ml`/`scc.ml`), so `impl_hash` is a true Merkle root.
 - Add `TypeDef`s as nodes in the dependency graph so type-layout changes propagate into dependents' hashes.
-- Regression test the cross-SCC-inlining stale-cache case directly (independent of HCR).
+- Regression test the cross-SCC-inlining stale-cache case directly (independent of HCR) — start by *reproducing* it as a failing test (TDD red) before the fix.
+- **Shared with distributed OTP P0** ([`2026-06-21-distributed-otp-design.md`](2026-06-21-distributed-otp-design.md)): this exact phase is the prerequisite for cross-node type safety too; build it once.
 
 ### Phase 2 — Boundary + versioned dispatch (compiler + main-build)
 - `--hot-reload` in `Llvm_emit`; boundary detection (`src/` + `[hot-reload]`).
