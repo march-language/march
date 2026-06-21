@@ -286,6 +286,7 @@ march/
 - **Workflow**: declare the `extern` block in March → `forge ffi gen-c` → fill in the TODOs → list the file under `[ffi] sources` → `forge build`. The "declare in March, generate the C glue" direction (spec §17).
 - **Deferred**: `forge ffi import` (C header → draft `extern` + `.ffi.toml`) needs a libclang C-header parser. See `specs/c-ffi-gaps.md`.
 - **Verified**: 2 new forge tests (`ffi` group: extern→skeleton, no-extern→error); forge 85 tests, compiler 293, codegen 319, stdlib 783, C ABI green.
+- **Zero-config shim include (ergonomics fix, found via an end-to-end demo app):** the native `--compile` link now adds `-I<runtime_dir>` when user `[ffi]` sources are present, so a generated shim's `#include "march_ffi.h"` resolves with no manual flags. Verified: a `forge build` of a project whose `native/*.c` includes the ABI header builds and runs with just `[ffi] sources = [...]` (no `link = ["-I…"]` workaround). A full demo (`extern` block → `forge ffi gen-c` → fill TODOs → `forge build` → run) exercises primitives, String borrow/return, `Result` both arms, an `Acc` resource with `consume` finish, and a `blocking` call — all correct.
 
 ## Current State (as of 2026-06-20, External Function Interface — Phase 6: blocking dispatch)
 
