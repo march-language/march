@@ -458,6 +458,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/default_args_nested.march))
  (action
   (progn
@@ -486,6 +487,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/tuple_scalar_fields.march))
  (action
   (progn
@@ -515,6 +517,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/closure_bool_field.march))
  (action
   (progn
@@ -541,6 +544,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/let_tuple_destructure.march))
  (action
   (progn
@@ -573,6 +577,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/zero_arg_closure_default.march))
  (action
   (progn
@@ -602,6 +607,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/qualified_ctor_pattern.march))
  (action
   (progn
@@ -630,6 +636,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/atom_ctor_field.march))
  (action
   (progn
@@ -654,6 +661,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/newtype_counter.march))
  (action
   (progn
@@ -677,6 +685,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/option_niche.march))
  (action
   (progn
@@ -709,6 +718,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files_rec native/xmod_ctor_collision/*.march))
  (action
   (setenv MARCH_LIB_PATH native/xmod_ctor_collision/lib
@@ -743,6 +753,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
@@ -768,6 +779,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/record_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/record_native\" %{exe:../bin/main.exe} --compile -o record_native_bin \"$PWD/imports/record_native/rn_entry.march\" && ./record_native_bin")))
@@ -806,6 +818,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/param_shadow_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/param_shadow_native\" %{exe:../bin/main.exe} --compile -o param_shadow_native_bin \"$PWD/imports/param_shadow_native/ps_entry.march\" && ./param_shadow_native_bin")))
@@ -829,6 +842,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (glob_files imports/same_mod_shadow_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/same_mod_shadow_native\" %{exe:../bin/main.exe} --compile -o same_mod_shadow_native_bin \"$PWD/imports/same_mod_shadow_native/sms_entry.march\" && ./same_mod_shadow_native_bin")))
@@ -843,6 +857,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/actor_counter.march))
  (action
   (progn
@@ -867,6 +882,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_leak.march))
  (action
   (progn
@@ -891,6 +907,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/iface_method_collision.march))
  (action
   (progn
@@ -915,6 +932,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_option.march))
  (action
   (progn
@@ -939,6 +957,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_resource.march))
  (action
   (progn
@@ -963,6 +982,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_result.march))
  (action
   (progn
@@ -988,6 +1008,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_interp.march))
  (action
   (with-stdout-to native_ffi_interp.out
@@ -1009,6 +1030,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_blocking.march))
  (action
   (progn
@@ -1032,6 +1054,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_variant.march))
  (action
   (progn
@@ -1056,6 +1079,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../runtime/march_message.c) (file ../runtime/march_message.h)
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
        (file native/ffi_codec.march) (file native/ffi_codec.c))
  (action
   (progn
