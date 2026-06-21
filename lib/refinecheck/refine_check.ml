@@ -1,26 +1,30 @@
-(* Refinement checking (Phase A1b, minimal vertical slice).
+(* Refinement checking (Phases A1b + A2, minimal vertical slice).
 
-   A post-typecheck pass over the parsed AST: it collects functions whose
-   parameters carry an `{Int | predicate}` refinement, then walks every call
-   site and, for each refined parameter, discharges a verification condition
-   through the A0 Z3 bridge (`March_refine`):
+   A post-typecheck pass over the AST: it collects functions whose parameters
+   carry an `{Int | predicate}` refinement, then walks every call site and, for
+   each refined parameter, discharges a verification condition through the A0
+   Z3 bridge (`March_refine`).
 
-     - a literal / refined-local argument is reflected into SMT and the
-       precondition is proved (or refuted with a counterexample);
-     - an argument we cannot soundly reflect (an unconstrained variable, a
-       complex expression) is conservatively SKIPPED — no false positives.
+   A1b: Int/Bool predicates over the binder `_`, literal / refined-local args.
+   A2 : the `len` measure and cross-argument predicates, so bounds such as
+        `{Int | _ >= 0 && _ < len(xs)}` are checkable when the length is known
+        (a list literal) or symbolically related.
 
-   This is intentionally narrow: Int/Bool predicates over the binder `_` only,
-   direct (named) calls only, no path sensitivity.  It exists to exercise the
-   end-to-end pipeline; the full integration lives in the typechecker later. *)
+   Soundness stance: an argument we cannot reflect (an unconstrained variable,
+   a complex expression) is conservatively SKIPPED — no false positives.
+   Scope: direct (named) calls only, no path sensitivity. *)
 
 module A = March_ast.Ast
 module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
 
-(* A refined parameter of some function: position, predicate binder, predicate. *)
+(* A refined parameter: position, predicate binder, predicate expression. *)
 type rparam = { idx : int; binder : string; pred : A.expr }
+
+(* A function's signature: parameter names by position + its refined params. *)
+type fn_sig = { param_names : string list; refined : rparam list }
+type sigs = (string, fn_sig) Hashtbl.t
 
 let binder_name : A.name option -> string = function
   | None -> "_"
@@ -30,24 +34,32 @@ let is_int_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> true
   | _ -> false
 
+(* Length of a list literal (a Cons/Nil ECon chain); None if not a literal. *)
+let rec list_len (e : A.expr) : int option =
+  match e with
+  | A.ECon ({ A.txt = "Nil"; _ }, _, _) -> Some 0
+  | A.ECon ({ A.txt = "Cons"; _ }, [ _; tl ], _) ->
+    (match list_len tl with Some n -> Some (n + 1) | None -> None)
+  | _ -> None
+
 (* ── Translate the decidable predicate fragment to an SMT term ────────────── *)
-(* [resolve] maps a variable name to its SMT term (the binder -> the actual
-   argument; a refined-local -> its constant).  Returns None for anything
-   outside the supported Int/Bool linear fragment. *)
-let rec smt_of (resolve : string -> Smt.term option) (e : A.expr) : Smt.term option =
-  let b2 f a b =
-    match smt_of resolve a, smt_of resolve b with
-    | Some x, Some y -> Some (f x y)
-    | _ -> None
-  in
+(* [resolve_var] maps a scalar variable to its SMT term; [resolve_len] maps a
+   measure target name to a length term.  None => outside the supported
+   Int/Bool linear fragment. *)
+let rec smt_of ~resolve_var ~resolve_len (e : A.expr) : Smt.term option =
+  let r = smt_of ~resolve_var ~resolve_len in
+  let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Some (Smt.BoolLit b)
-  | A.EVar { A.txt; _ } -> resolve txt
+  | A.EApp (A.EVar { A.txt = "len"; _ }, [ a ], _) ->
+    (match a with
+     | A.EVar { A.txt; _ } -> resolve_len txt
+     | _ -> (match list_len a with Some n -> Some (Smt.IntLit n) | None -> None))
+  | A.EVar { A.txt; _ } -> resolve_var txt
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.And (x, y)) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Or (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
-    Option.map (fun x -> Smt.Not x) (smt_of resolve a)
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Option.map (fun x -> Smt.Not x) (r a)
   | A.EApp (A.EVar { A.txt = ">="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ge (x, y)) a b
   | A.EApp (A.EVar { A.txt = "<="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Le (x, y)) a b
   | A.EApp (A.EVar { A.txt = ">"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Gt (x, y)) a b
@@ -56,23 +68,21 @@ let rec smt_of (resolve : string -> Smt.term option) (e : A.expr) : Smt.term opt
   | A.EApp (A.EVar { A.txt = "!="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ne (x, y)) a b
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Add (x, y)) a b
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Sub (x, y)) a b
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
-    Option.map (fun x -> Smt.Neg x) (smt_of resolve a)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> Option.map (fun x -> Smt.Neg x) (r a)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) ->
-    (* linear arithmetic only: one factor must be an integer literal *)
     (match a, b with
-     | A.ELit (A.LitInt k, _), _ -> Option.map (fun y -> Smt.MulLit (k, y)) (smt_of resolve b)
-     | _, A.ELit (A.LitInt k, _) -> Option.map (fun x -> Smt.MulLit (k, x)) (smt_of resolve a)
+     | A.ELit (A.LitInt k, _), _ -> Option.map (fun y -> Smt.MulLit (k, y)) (r b)
+     | _, A.ELit (A.LitInt k, _) -> Option.map (fun x -> Smt.MulLit (k, x)) (r a)
      | _ -> None)
   | _ -> None
 
-(* User-facing infix rendering of a predicate (best-effort; falls back to a
-   generic phrase). *)
+(* User-facing infix rendering of a predicate (best-effort). *)
 let rec pred_str (e : A.expr) : string =
   let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
   match e with
   | A.ELit (A.LitInt n, _) -> string_of_int n
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
+  | A.EApp (A.EVar { A.txt = "len"; _ }, [ a ], _) -> "len(" ^ pred_str a ^ ")"
   | A.EVar { A.txt; _ } -> txt
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
     binop op a b
@@ -102,28 +112,37 @@ let scope_add_binding (sc : scope) (b : A.binding) : scope =
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | _ -> sc
 
-(* ── Collect refined-parameter signatures, keyed by bare + qualified name ── *)
-type sigs = (string, rparam list) Hashtbl.t
+(* ── Collect signatures, keyed by bare + qualified name ──────────────────── *)
+let param_name_of : A.fn_param -> string = function
+  | A.FPNamed p | A.FPDefault (p, _) -> p.A.param_name.A.txt
+  | A.FPPat _ -> "_"
 
-let params_of_clause (c : A.fn_clause) : rparam list =
-  List.filteri (fun _ _ -> true) c.A.fc_params
-  |> List.mapi (fun idx p -> (idx, p))
-  |> List.filter_map (fun (idx, fp) ->
-         match fp with
-         | A.FPNamed p | A.FPDefault (p, _) ->
-           (match refined_int_ty p.A.param_ty with
-            | Some (binder, pred) -> Some { idx; binder; pred }
-            | None -> None)
-         | A.FPPat _ -> None)
+let sig_of_clause (c : A.fn_clause) : fn_sig =
+  let param_names = List.map param_name_of c.A.fc_params in
+  let refined =
+    List.mapi (fun idx fp -> (idx, fp)) c.A.fc_params
+    |> List.filter_map (fun (idx, fp) ->
+           match fp with
+           | A.FPNamed p | A.FPDefault (p, _) ->
+             (match refined_int_ty p.A.param_ty with
+              | Some (binder, pred) -> Some { idx; binder; pred }
+              | None -> None)
+           | A.FPPat _ -> None)
+  in
+  { param_names; refined }
 
 let rec collect_sigs (tbl : sigs) (prefix : string) (decls : A.decl list) : unit =
   List.iter
     (function
       | A.DFn (fd, _) ->
-        let rps = List.concat_map params_of_clause fd.A.fn_clauses in
-        if rps <> [] then begin
-          Hashtbl.replace tbl fd.A.fn_name.A.txt rps;
-          if prefix <> "" then Hashtbl.replace tbl (prefix ^ "." ^ fd.A.fn_name.A.txt) rps
+        let sg =
+          match fd.A.fn_clauses with
+          | c :: _ -> sig_of_clause c
+          | [] -> { param_names = []; refined = [] }
+        in
+        if sg.refined <> [] then begin
+          Hashtbl.replace tbl fd.A.fn_name.A.txt sg;
+          if prefix <> "" then Hashtbl.replace tbl (prefix ^ "." ^ fd.A.fn_name.A.txt) sg
         end
       | A.DMod (name, _, ds, _) ->
         let p = if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt in
@@ -131,44 +150,102 @@ let rec collect_sigs (tbl : sigs) (prefix : string) (decls : A.decl list) : unit
       | _ -> ())
     decls
 
-(* ── Reflect an actual argument into (term, decls, assumptions) ──────────── *)
-let reflect_actual (sc : scope) (actual : A.expr)
+(* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
+let reflect_scalar (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   match actual with
   | A.EVar { A.txt = x; _ } ->
     (match List.assoc_opt x sc with
      | Some (b, q) ->
        let xc = Smt.Const x in
-       let resolve n = if n = b || n = "_" then Some xc else None in
-       let assumptions = match smt_of resolve q with Some qa -> [ qa ] | None -> [] in
+       let rv n = if n = b || n = "_" then Some xc else None in
+       let assumptions =
+         match smt_of ~resolve_var:rv ~resolve_len:(fun _ -> None) q with
+         | Some qa -> [ qa ]
+         | None -> []
+       in
        Some (xc, [ (x, Smt.SInt) ], assumptions)
-     | None -> None (* unconstrained variable: cannot prove soundly — skip *))
-  | _ -> (match smt_of (fun _ -> None) actual with Some t -> Some (t, [], []) | None -> None)
+     | None -> None)
+  | _ ->
+    (match smt_of ~resolve_var:(fun _ -> None) ~resolve_len:(fun _ -> None) actual with
+     | Some t -> Some (t, [], [])
+     | None -> None)
 
-(* ── Check one (refined param, actual argument) pair at a call site ──────── *)
-let check_call ~root errctx ~span (rp : rparam) (actual : A.expr) (sc : scope) : unit =
-  match reflect_actual sc actual with
+(* ── Check one refined parameter at a call site ──────────────────────────── *)
+let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list) (rp : rparam)
+    (sc : scope) : unit =
+  let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
+  let actual_of_name name =
+    match List.assoc_opt name name_pos with
+    | Some i -> List.nth_opt args i
+    | None -> None
+  in
+  match List.nth_opt args rp.idx with
   | None -> ()
-  | Some (aterm, decls, assumptions) ->
-    let resolve n = if n = rp.binder || n = "_" then Some aterm else None in
-    (match smt_of resolve rp.pred with
-     | None -> () (* predicate outside the supported fragment — skip *)
+  | Some self_actual ->
+    let decls = ref [] and assume = ref [] in
+    let absorb = function
+      | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
+      | None -> None
+    in
+    let resolve_var name =
+      if name = rp.binder || name = "_" then absorb (reflect_scalar sc self_actual)
+      else
+        match actual_of_name name with
+        | Some a -> absorb (reflect_scalar sc a)
+        | None -> None
+    in
+    let resolve_len name =
+      match actual_of_name name with
+      | Some a -> (
+          match list_len a with
+          | Some n -> Some (Smt.IntLit n)
+          | None -> (
+              match a with
+              | A.EVar { A.txt = x; _ } ->
+                let c = Smt.Const ("len$" ^ x) in
+                decls := ("len$" ^ x, Smt.SInt) :: !decls;
+                (* measure axiom: a length is non-negative *)
+                assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+                Some c
+              | _ -> None))
+      | None -> None
+    in
+    (match smt_of ~resolve_var ~resolve_len rp.pred with
+     | None -> ()
      | Some goal ->
-       let vc = { Smt.decls; assumptions; goal } in
+       (* de-duplicate decls (a symbol may be requested twice) *)
+       let decls =
+         List.fold_left
+           (fun acc d -> if List.mem d acc then acc else d :: acc)
+           [] !decls
+       in
+       let vc = { Smt.decls; assumptions = !assume; goal } in
+       (* Report a violation ONLY when the precondition can *never* hold under
+          the assumptions (a definite failure).  If it merely *might* fail
+          (e.g. a symbolic, unknown length), that is unprovable either way and
+          we stay silent — no false positives.
+
+          - discharge(goal=G) Verified  => G always holds        => pass
+          - else discharge(goal=¬G) Verified => G never holds     => violation
+          - otherwise (G depends on unknowns / solver unsure)     => skip *)
        (match Refine.discharge ~root vc with
         | Refine.Verified -> ()
-        | Refine.Refuted model ->
-          let cx =
-            model
-            |> List.map (fun (k, v) -> k ^ " = " ^ v)
-            |> String.concat ", "
-          in
-          Err.error errctx ~span
-            (Printf.sprintf
-               "refinement violation: argument does not satisfy precondition `%s`%s"
-               (pred_str rp.pred)
-               (if cx = "" then "" else Printf.sprintf " (counterexample: %s)" cx))
-        | Refine.Unverified -> () (* z3 unavailable / unknown — silent in A1b *)))
+        | first ->
+          (match Refine.discharge ~root { vc with Smt.goal = Smt.Not goal } with
+           | Refine.Verified ->
+             let cx =
+               match first with
+               | Refine.Refuted model ->
+                 model |> List.map (fun (k, v) -> k ^ " = " ^ v) |> String.concat ", "
+               | _ -> ""
+             in
+             Err.error errctx ~span
+               (Printf.sprintf
+                  "refinement violation: argument does not satisfy precondition `%s`%s"
+                  (pred_str rp.pred)
+                  (if cx = "" then "" else Printf.sprintf " (counterexample: %s)" cx))
+           | _ -> ())))
 
 (* ── Walk expressions, threading the refined-local scope ─────────────────── *)
 let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
@@ -176,19 +253,12 @@ let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match Hashtbl.find_opt tbl fname with
-     | Some rps ->
-       List.iter
-         (fun rp ->
-           match List.nth_opt args rp.idx with
-           | Some actual -> check_call ~root errctx ~span:sp rp actual sc
-           | None -> ())
-         rps
+     | Some sg -> List.iter (fun rp -> check_call ~root errctx ~span:sp sg args rp sc) sg.refined
      | None -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
-    (* block-scoped lets: thread scope left to right *)
     ignore
       (List.fold_left
          (fun sc e ->
@@ -197,11 +267,9 @@ let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
          sc es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
-    let sc' = List.fold_left scope_add_param sc ps in
-    visit ~root errctx tbl sc' body
+    visit ~root errctx tbl (List.fold_left scope_add_param sc ps) body
   | A.ELetFn (_, ps, _, body, _) ->
-    let sc' = List.fold_left scope_add_param sc ps in
-    visit ~root errctx tbl sc' body
+    visit ~root errctx tbl (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter (fun (br : A.branch) -> go br.A.branch_body) branches
@@ -217,7 +285,6 @@ let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
-(* Walk a function body with its refined Int params in scope. *)
 let visit_fn ~root errctx (tbl : sigs) (fd : A.fn_def) : unit =
   List.iter
     (fun (c : A.fn_clause) ->

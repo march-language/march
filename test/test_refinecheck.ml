@@ -54,4 +54,42 @@ let suite =
           (has_refine_error
              (decl "  fn fwd(m : {Int | _ >= 0}) : Int do take_n(m) end"))) ]
 
-let () = Alcotest.run "march-refinecheck" [ ("refinecheck", suite) ]
+(* A2: the `len` measure + cross-argument bounds.  `at` indexes a list with a
+   bounds-refined index; we check calls against list literals (statically sized). *)
+let bounds prog =
+  Printf.sprintf
+    "mod M do\n\
+    \  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do i end\n\
+     %s\n\
+     end\n"
+    prog
+
+let a2_suite =
+  [ gated "out-of-bounds index on a literal list is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (bounds "  fn main() : Int do at([10, 20, 30], 5) end")));
+
+    gated "in-bounds index passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (bounds "  fn main() : Int do at([10, 20, 30], 1) end")));
+
+    gated "boundary index 0 passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (bounds "  fn main() : Int do at([10, 20, 30], 0) end")));
+
+    gated "index == length is rejected (off-by-one)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (bounds "  fn main() : Int do at([10, 20, 30], 3) end")));
+
+    gated "negative index is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (bounds "  fn main() : Int do at([10, 20, 30], -1) end")));
+
+    gated "unknown-length list arg is conservatively skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (bounds "  fn f(ys : List(Int)) : Int do at(ys, 5) end"))) ]
+
+let () =
+  Alcotest.run "march-refinecheck"
+    [ ("refinecheck", suite); ("bounds-a2", a2_suite) ]
