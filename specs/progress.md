@@ -14,6 +14,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Error recovery via typed hole injection** — errors become typed holes; the compiler continues and reports multiple diagnostics. Same mechanism as user-written `?` holes.
 - **Unboxed types / representation polymorphism** — compiler chooses boxed vs unboxed based on usage, after monomorphization
 - **Type-level naturals** — `Nat` in type parameters with `+`, `*`, equality. Enables `Vector(n, a)`, `Matrix(m, n, a)`, `NDArray(shape, a)` with compile-time dimension checking. Not full dependent types.
+- **Refinement-types Z3 bridge (Phase A0)** — `lib/refine/`: SMT-LIB2 renderer for the Int/Bool linear-arithmetic + EUF fragment (`Smt`), a `(get-model)` s-expression parser (`Model`), a long-lived `z3 -in` driver with push/pop per VC (`Solver`), a BLAKE3-keyed verdict cache under `.march/cas/vc/` (`Vc_cache`), and a cache→solver→outcome orchestrator (`Refine.discharge`). Standalone and unit-tested (`test/test_refine.ml`, 14 cases); solver tests skip gracefully when z3 is absent. Not yet wired into the typechecker (that is Phase A1). Spec: `specs/2026-06-20-dependent-types-refinements-design.md`; plan: `specs/plans/2026-06-20-refinement-types-a0-z3-bridge.md`.
 - **No algebraic effects** (removed — concurrency is actors + message passing)
 - **ADTs use capitalized constructors** (`Ok`, `Err`, `Some`, `None`) — atoms (`:name`) are lightweight runtime tags for messaging, not type constructors
 - **Pony-style capabilities**: No. Linear/affine is the ceiling.
