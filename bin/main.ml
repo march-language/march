@@ -111,6 +111,7 @@ let stdlib_file_list = [
   "string.march";
   "iolist.march";
   "html.march";
+  "dom.march";
   "sigil.march";
   "http.march";
   "http_transport.march";
@@ -1241,23 +1242,27 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
-          (* Copy march_runtime.mjs alongside the output so the import works *)
+          (* Copy runtime .mjs files alongside the output so imports work *)
           let out_dir = Filename.dirname out_bin in
-          let rt_dest = Filename.concat out_dir "march_runtime.mjs" in
-          let rt_candidates = [
-            "runtime/march_runtime.mjs";
-            Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.mjs";
-            Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.mjs";
-          ] in
-          (match List.find_opt Sys.file_exists rt_candidates with
-          | Some src ->
-            let ic = open_in src in
-            let content = really_input_string ic (in_channel_length ic) in
-            close_in ic;
-            let oc2 = open_out rt_dest in
-            output_string oc2 content;
-            close_out oc2
-          | None -> Printf.eprintf "march: warning: cannot find march_runtime.mjs\n");
+          let copy_runtime name =
+            let dest = Filename.concat out_dir name in
+            let candidates = [
+              Filename.concat "runtime" name;
+              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../runtime" name);
+              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../../runtime" name);
+            ] in
+            match List.find_opt Sys.file_exists candidates with
+            | Some src ->
+              let ic = open_in src in
+              let content = really_input_string ic (in_channel_length ic) in
+              close_in ic;
+              let oc2 = open_out dest in
+              output_string oc2 content;
+              close_out oc2
+            | None -> Printf.eprintf "march: warning: cannot find %s\n" name
+          in
+          copy_runtime "march_runtime.mjs";
+          copy_runtime "march_dom.mjs";
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)
