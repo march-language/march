@@ -239,7 +239,22 @@ let measure_suite =
         Alcotest.(check bool) "no error" false
           (has_refine_error
              (measure_prog
-                "  fn ung(t : Tree(Int), i : Int) : Int do get(t, i) end"))) ]
+                "  fn ung(t : Tree(Int), i : Int) : Int do get(t, i) end")));
+
+    (* Non-negativity inference: `size` is syntactically non-negative, so it can
+       never satisfy a `_ < 0` postcondition — a definite violation.  Without the
+       inference this would be skipped (size symbolic, unconstrained). *)
+    gated "non-negative measure cannot satisfy a `_ < 0` postcondition" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (measure_prog
+                "  fn f(t : Tree(Int)) : {Int | _ < 0} do size(t) end")));
+
+    gated "non-negative measure DOES satisfy a `_ >= 0` postcondition" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (measure_prog
+                "  fn f(t : Tree(Int)) : {Int | _ >= 0} do size(t) end"))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
