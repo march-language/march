@@ -10,6 +10,13 @@
     of this threshold — they are handled by the size check implicitly. *)
 let inline_size_threshold = 50
 
+(** Hot Code Reload boundary config, set by [Opt.run] for the duration of a
+    run. When [Some], reloadable (boundary) functions are excluded from the
+    inline-candidate set so a boundary→boundary call survives to codegen as a
+    real call site that can route through the versioned dispatch table.
+    [None] (the default) keeps the inliner fully aggressive. *)
+let boundary_config : Hot_reload.config option ref = ref None
+
 (** Count TIR nodes (approximate size). *)
 let rec node_count : Tir.expr -> int = function
   | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _
@@ -157,7 +164,12 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
     let is_pure     = Purity.is_pure fd.Tir.fn_body in
     let is_small    = node_count fd.Tir.fn_body <= inline_size_threshold in
     let is_nonrec   = not (calls_self fd.Tir.fn_name fd.Tir.fn_body) in
-    if is_pure && is_small && is_nonrec then
+    (* Hot Code Reload: a reloadable (boundary) function must never be inlined,
+       or its call sites would be fixed into callers and could not be swapped. *)
+    let is_reloadable = match !boundary_config with
+      | Some cfg -> Hot_reload.is_reloadable cfg (Hot_reload.module_of_name fd.Tir.fn_name)
+      | None     -> false in
+    if is_pure && is_small && is_nonrec && not is_reloadable then
       Hashtbl.add fn_env fd.Tir.fn_name fd
   ) m.Tir.tm_fns;
   (* Conservative mutual-recursion filter:
