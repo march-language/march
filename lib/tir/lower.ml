@@ -2156,6 +2156,20 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let renamed_fns = List.map (rename_tir_vars prefix direct_fn_names) new_fns in
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns
+              | Ast.DExtern (edef, _) ->
+                List.iter (fun (ef : Ast.extern_fn) ->
+                    let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
+                    let ret = lower_ty ef.ef_ret_ty in
+                    let c_name = match ef.ef_symbol with
+                      | Some s -> s
+                      | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+                    externs := { Tir.ed_march_name = ef.ef_name.txt;
+                                 ed_c_name = c_name;
+                                 ed_params = params;
+                                 ed_consumed = ef.ef_param_consumed;
+                                 ed_blocking = ef.ef_blocking;
+                                 ed_ret = ret } :: !externs
+                  ) edef.ext_fns
               | _ -> ()
             ) decls)
         in
