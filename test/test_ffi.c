@@ -114,6 +114,16 @@ int main(void) {
         assert(march_live_allocs() == base);          /* cell freed (native freed by dtor) */
     }
 
+    /* ── blocking dispatch runs the call on an OS thread, returns result ── */
+    {
+        extern int64_t ffi_test_dbl(int64_t);
+        int64_t a1[1] = { 21 };
+        assert(march_run_blocking_i((void *)ffi_test_dbl, a1, 1) == 42);
+        int64_t a0[1] = { 0 };
+        assert(march_run_blocking_i((void *)march_live_allocs, a0, 0)
+               == march_live_allocs());  /* 0-arg blocking call */
+    }
+
     /* ── leak gauge balances across constructor churn ──────────────────── */
     {
         int64_t base = march_live_allocs();

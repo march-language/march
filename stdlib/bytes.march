@@ -61,13 +61,9 @@ mod Bytes do
   end
 
   pfn join_strings(xs) do
-    fn go(lst, acc) do
-      match lst do
-      Nil -> acc
-      Cons(s, rest) -> go(rest, acc ++ s)
-      end
-    end
-    go(xs, "")
+    -- O(total) single-pass join. The old `acc ++ s` left-fold was O(n^2)
+    -- (each ++ copies the whole accumulated string).
+    string_join(xs, "")
   end
 
   -- ---- Construction ----

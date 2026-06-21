@@ -804,9 +804,11 @@ and emit_decl ctx = function
       ext.ext_lib_name (fmt_ty ext.ext_cap_ty));
     indented ctx (fun () ->
       List.iter (fun ef ->
+        let consumed i =
+          match List.nth_opt ef.ef_param_consumed i with Some true -> "consume " | _ -> "" in
         let ps = String.concat ", "
-          (List.map (fun (n, t) ->
-             Printf.sprintf "%s : %s" n.txt (fmt_ty t)) ef.ef_params) in
+          (List.mapi (fun i (n, t) ->
+             Printf.sprintf "%s%s : %s" (consumed i) n.txt (fmt_ty t)) ef.ef_params) in
         let sym = match ef.ef_symbol with
           | Some s -> Printf.sprintf " = %S" s
           | None -> "" in

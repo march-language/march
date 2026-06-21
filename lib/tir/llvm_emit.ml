@@ -69,6 +69,8 @@ type ctx = {
   emitted_eq_fns : (string, unit) Hashtbl.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
+  (* Extern march_names declared `blocking` — dispatched on an OS thread. *)
+  blocking_externs : (string, unit) Hashtbl.t;
   (* Tracks forward declarations emitted for unknown functions (interface dispatch
      calls that are not resolved at compile time due to type erasure). Maps
      function LLVM name → declare string to avoid duplicate declarations. *)
@@ -176,6 +178,7 @@ let make_ctx ?(fast_math=false) ?(repl=false) () = {
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
   extern_map = Hashtbl.create 8;
+  blocking_externs = Hashtbl.create 4;
   unknown_decls = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
   var_llvm_ty = Hashtbl.create 32;
@@ -2760,7 +2763,42 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       Buffer.add_string ctx.preamble
         (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
     end;
-    if ret_ty = "void" then begin
+    if Hashtbl.mem ctx.blocking_externs resolved_name then begin
+      (* Blocking dispatch: marshal args into a stack i64 array and run the C
+         call on an OS thread via march_run_blocking_*, while the green thread
+         cooperatively yields.  Int/ptr args only (GP-register trampoline). *)
+      let n   = List.length arg_pairs in
+      let cap = if n = 0 then 1 else n in
+      let arr = fresh ctx "blkargs" in
+      emit ctx (Printf.sprintf "%s = alloca [%d x i64]" arr cap);
+      List.iteri (fun i (ty, v) ->
+        let iv = match ty with
+          | "i64" -> v
+          | "ptr" -> let t = fresh ctx "blki" in
+                     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" t v); t
+          | other ->
+            failwith (Printf.sprintf
+              "blocking extern `%s`: argument type %s is not supported \
+               (Int/Bool/pointer args only)" resolved_name other)
+        in
+        let slot = fresh ctx "blkslot" in
+        emit ctx (Printf.sprintf
+          "%s = getelementptr [%d x i64], ptr %s, i64 0, i64 %d" slot cap arr i);
+        emit ctx (Printf.sprintf "store i64 %s, ptr %s" iv slot)
+      ) arg_pairs;
+      let helper, hret =
+        if ret_ty = "double" then "march_run_blocking_d", "double"
+        else "march_run_blocking_i", "i64" in
+      let r = fresh ctx "blkr" in
+      emit ctx (Printf.sprintf "%s = call %s @%s(ptr @%s, ptr %s, i32 %d)"
+                  r hret helper fname arr n);
+      (match ret_ty with
+       | "void" -> ("i64", "0")
+       | "ptr"  -> let p = fresh ctx "blkp" in
+                   emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r); ("ptr", p)
+       | _      -> (ret_ty, r))
+    end
+    else if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       ("i64", "0")
     end else begin
@@ -5104,6 +5142,7 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
   (* Register user-defined extern functions *)
   List.iter (fun (ed : Tir.extern_decl) ->
       Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
+      if ed.ed_blocking then Hashtbl.replace ctx.blocking_externs ed.ed_march_name ();
       Hashtbl.replace ctx.top_fns ed.ed_march_name true;
       Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret;
       Hashtbl.replace ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params)
@@ -5166,6 +5205,11 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
       Buffer.add_string out
         (Printf.sprintf "declare %s @%s(%s)\n" ret_llty ed.ed_c_name params_str)
     ) m.Tir.tm_externs;
+  (* Blocking-dispatch helpers, if any extern is `blocking`. *)
+  if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_blocking) m.Tir.tm_externs then
+    Buffer.add_string out
+      "declare i64 @march_run_blocking_i(ptr, ptr, i32)\n\
+       declare double @march_run_blocking_d(ptr, ptr, i32)\n";
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 

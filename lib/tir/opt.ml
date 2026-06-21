@@ -24,7 +24,7 @@ let named_passes = [
   "inline",      Inline.run;
   "cprop",       Cprop.run;
   "fold",        Fold.run;
-  "simplify",    Simplify.run;
+  "simplify",    (fun ~changed m -> Simplify.run ~changed m);
   "fusion",      Fusion.run_struct;
   "dce",         Dce.run;
 ]

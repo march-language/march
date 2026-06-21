@@ -51,16 +51,18 @@ mod Iterable do
 
   doc "Applies f to each element; collects the resulting lists and concatenates them."
   fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-    fn append_list(left : List(b), right : List(b)) : List(b) do
-      match left do
-      Nil        -> right
-      Cons(x, r) -> Cons(x, append_list(r, right))
+    -- O(total output): accumulate each f(h) reversed onto acc, reverse once at
+    -- the end. The old append-based version was O(total^2) and non-tail.
+    fn prepend_reversed(sub : List(b), acc : List(b)) : List(b) do
+      match sub do
+      Nil           -> acc
+      Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
       end
     end
     fn go(lst : List(a), acc : List(b)) : List(b) do
       match lst do
-      Nil        -> acc
-      Cons(h, t) -> go(t, append_list(acc, f(h)))
+      Nil        -> rev(acc)
+      Cons(h, t) -> go(t, prepend_reversed(f(h), acc))
       end
     end
     go(xs, Nil)
@@ -146,11 +148,16 @@ mod Iterable do
 
   doc "Returns the first n elements. Returns the whole list if n >= length."
   fn take(xs : List(a), n : Int) : List(a) do
-    if n <= 0 do Nil
-    else match xs do
-      Nil        -> Nil
-      Cons(h, t) -> Cons(h, take(t, n - 1))
-      end end
+    -- Tail-recursive accumulator + single reverse (the Cons-wrapped recursion
+    -- below was non-tail and built O(n) stack).
+    fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
+      if k <= 0 do rev(acc)
+      else match lst do
+        Nil        -> rev(acc)
+        Cons(h, t) -> go(t, k - 1, Cons(h, acc))
+        end end
+    end
+    go(xs, n, Nil)
   end
 
   doc "Drops the first n elements. Returns [] if n >= length."
@@ -166,15 +173,20 @@ mod Iterable do
 
   doc "Pairs up elements from two lists. Stops at the shorter list."
   fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
-    match xs do
-    Nil -> Nil
-    Cons(x, xt) -> do
-      match ys do
-      Nil -> Nil
-      Cons(y, yt) -> Cons((x, y), zip(xt, yt))
+    -- Tail-recursive accumulator + single reverse (the Cons-wrapped recursion
+    -- was non-tail and built O(min(n,m)) stack).
+    fn go(al : List(a), bl : List(b), acc : List((a, b))) : List((a, b)) do
+      match al do
+      Nil -> rev(acc)
+      Cons(x, xt) -> do
+        match bl do
+        Nil -> rev(acc)
+        Cons(y, yt) -> go(xt, yt, Cons((x, y), acc))
+        end
+      end
       end
     end
-    end
+    go(xs, ys, Nil)
   end
 
   doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."

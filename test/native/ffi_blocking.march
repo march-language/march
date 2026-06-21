@@ -1,0 +1,14 @@
+-- Regression: a `blocking` extern is dispatched on an OS thread (the green
+-- thread cooperatively yields) and returns the correct result. ffi_test_dbl
+-- lives in runtime/march_ffi.c.
+mod Test do
+  needs Ffi
+  extern "m" : Cap(Ffi) do
+    blocking fn dbl(n: Int): Int = "ffi_test_dbl"
+  end
+  fn main() : Unit do
+    println(int_to_string(dbl(21)))
+    let x = 100
+    println(int_to_string(dbl(x)))
+  end
+end

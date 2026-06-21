@@ -768,13 +768,39 @@ extern_decl:
       }, mk_span ($loc)) }
 
 extern_fn_decl:
-  | FN; name = lower_name;
-    LPAREN; params = separated_list(COMMA, typed_param); RPAREN;
+  | blk = boption(extern_blocking); FN; name = lower_name;
+    LPAREN; params = separated_list(COMMA, ffi_param); RPAREN;
     COLON; ret = ty; sym = option(preceded(EQUALS, STRING))
-    { { ef_name = name; ef_params = params; ef_ret_ty = ret; ef_symbol = sym } }
+    { { ef_name = name;
+        ef_params = List.map (fun ((n, t), _) -> (n, t)) params;
+        ef_param_consumed = List.map snd params;
+        ef_blocking = blk;
+        ef_ret_ty = ret; ef_symbol = sym } }
 
-typed_param:
-  | name = lower_name; COLON; t = ty { (name, t) }
+(* Contextual `blocking` prefix before an extern `fn` (not a reserved keyword). *)
+extern_blocking:
+  | kw = lower_name
+    { if kw.txt <> "blocking" then
+        error_raise
+          (Printf.sprintf "unexpected `%s` before `fn` in extern block; \
+                           the only modifier here is `blocking`" kw.txt)
+          None $startpos }
+
+(* An extern parameter, optionally prefixed with the contextual word `consume`
+   (ownership transferred to the binding; the binding must drop or store it —
+   March will not).  `consume` is NOT a reserved keyword (it is a common
+   identifier in linear-types code) — it is recognized only here, as the leading
+   word of an extern parameter, via the two-identifier form. *)
+ffi_param:
+  | kw = lower_name; name = lower_name; COLON; t = ty
+    { if kw.txt <> "consume" then
+        error_raise
+          (Printf.sprintf "unexpected `%s` before extern parameter `%s`; \
+                           the only parameter modifier is `consume`" kw.txt name.txt)
+          None $startpos;
+      ((name, t), true) }
+  | name = lower_name; COLON; t = ty
+    { ((name, t), false) }
 
 (* ---- Types ---- *)
 

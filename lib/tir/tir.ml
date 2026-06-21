@@ -84,6 +84,8 @@ type extern_decl = {
   ed_march_name : string;     (* name as used in March source *)
   ed_c_name     : string;     (* C symbol name *)
   ed_params     : ty list;    (* parameter types *)
+  ed_consumed   : bool list;  (* per-param: true if `consume` (ownership to callee) *)
+  ed_blocking   : bool;       (* `blocking`: dispatch on an OS thread, yield the green thread *)
   ed_ret        : ty;         (* return type *)
 }
 

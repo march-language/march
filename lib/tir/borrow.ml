@@ -454,7 +454,14 @@ let infer_module (m : Tir.tir_module) : borrow_map =
      the arg and a borrow-style binding leaks. *)
   let result =
     List.fold_left (fun acc (ed : Tir.extern_decl) ->
-      let modes = Array.of_list (List.map needs_rc ed.Tir.ed_params) in
+      (* A heap param is borrowed by default (caller frees after the call),
+         EXCEPT when declared `consume`: ownership transfers to the binding,
+         so it is NOT borrowed and Perceus does not emit a caller-side drop. *)
+      let modes = Array.of_list (List.mapi (fun i pty ->
+        let consumed = match List.nth_opt ed.Tir.ed_consumed i with
+          | Some c -> c | None -> false in
+        needs_rc pty && not consumed
+      ) ed.Tir.ed_params) in
       StringMap.add ed.Tir.ed_march_name modes acc
     ) result m.Tir.tm_externs
   in

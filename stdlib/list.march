@@ -347,7 +347,21 @@ mod List do
 
   doc "Concatenates a list of lists into a single list."
   fn concat(xss : List(List(a))) : List(a) do
-    fold_right(xss, Nil, fn (xs, acc) -> append(xs, acc))
+    -- O(total): prepend each sublist reversed onto acc, reverse once at the end.
+    -- The old fold_right + append was O(total^2) (append is O(len) per sublist).
+    fn prepend_reversed(sub : List(a), acc : List(a)) : List(a) do
+      match sub do
+      Nil           -> acc
+      Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
+      end
+    end
+    fn go(lst : List(List(a)), acc : List(a)) : List(a) do
+      match lst do
+      Nil          -> reverse(acc)
+      Cons(xs, rest) -> go(rest, prepend_reversed(xs, acc))
+      end
+    end
+    go(xss, Nil)
   end
 
   doc "Inserts `sep` between every consecutive pair of elements."

@@ -52,6 +52,8 @@ type project = {
   archive_tasks : archive_task list;
   archive_deps  : (string * dep) list;
   preprocessors : (string * string) list;
+  ffi_sources   : string list;  (** [ffi] sources = [...]: C shim files to compile+link (relative to root) *)
+  ffi_link      : string list;  (** [ffi] link = [...]: extra linker flags, e.g. "-lz" *)
 }
 
 let project_type_of_string = function
@@ -226,10 +228,14 @@ let load_from root =
       | _ -> None
     ) (Toml.get_section doc "preprocessors")
   in
+  (* [ffi] section: C shim sources + extra linker flags for FFI bindings *)
+  let ffi_section = Toml.get_section doc "ffi" in
+  let ffi_sources = Toml.get_string_list ffi_section "sources" in
+  let ffi_link    = Toml.get_string_list ffi_section "link" in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
     deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
-    preprocessors }
+    preprocessors; ffi_sources; ffi_link }
 
 let load_from_dir dir =
   try Ok (load_from dir)
