@@ -1,0 +1,13 @@
+-- Tests for the parallel List stdlib functions (pmap, pmap_n, pfilter,
+-- preduce) and the pmap_threshold() builtin.
+-- Run with: dune exec march -- test test/stdlib/test_list_parallel.march
+
+mod TestListParallel do
+
+describe "pmap_threshold builtin" do
+  test "default threshold is positive" do
+    assert (pmap_threshold() > 0)
+  end
+end
+
+end
