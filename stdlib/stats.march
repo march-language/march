@@ -453,15 +453,18 @@ mod Stats do
     if nx != ny do panic("Stats.covariance: lists must have equal length")
     else if nx < 2 do panic("Stats.covariance: need at least 2 elements")
     else do
-      let mx = mean(xs)
-      let my = mean(ys)
       let n = int_to_float(nx)
-      let pairs = List.zip(xs, ys)
-      let cov_sum = List.fold_left(pairs, 0.0, fn (acc, p) ->
-        match p do
-        (x, y) -> acc +. (x -. mx) *. (y -. my)
+      -- single pass: sum_x, sum_y, sum_xy (was 4 traversals: 2 means + zip + fold)
+      let sums = List.fold_left(List.zip(xs, ys), (0.0, 0.0, 0.0), fn (acc, p) ->
+        match acc do
+        (sx, sy, sxy) ->
+          match p do
+          (x, y) -> (sx +. x, sy +. y, sxy +. x *. y)
+          end
         end)
-      cov_sum /. (n -. 1.0) end end
+      match sums do
+      (sum_x, sum_y, sum_xy) -> (sum_xy -. sum_x *. sum_y /. n) /. (n -. 1.0)
+      end end end
     end
   end
 
@@ -472,10 +475,27 @@ mod Stats do
   or if either list has zero standard deviation.
   """
   fn correlation(xs : List(Float), ys : List(Float)) : Float do
-    let sx = std_dev(xs)
-    let sy = std_dev(ys)
-    if sx == 0.0 || sy == 0.0 do panic("Stats.correlation: zero standard deviation")
-    else covariance(xs, ys) /. (sx *. sy) end
+    let nx = List.length(xs)
+    let ny = List.length(ys)
+    if nx != ny do panic("Stats.correlation: lists must have equal length")
+    else if nx < 2 do panic("Stats.correlation: need at least 2 elements")
+    else do
+      let n = int_to_float(nx)
+      -- single pass: sum_x, sum_y, sum_xx, sum_yy, sum_xy (was 5+ traversals:
+      -- std_dev(xs) + std_dev(ys) + covariance's means + zip + fold).
+      let s = List.fold_left(List.zip(xs, ys), (0.0, 0.0, 0.0, 0.0, 0.0), fn (acc, p) ->
+        match acc do
+        (sx, sy, sxx, syy, sxy) ->
+          match p do
+          (x, y) -> (sx +. x, sy +. y, sxx +. x *. x, syy +. y *. y, sxy +. x *. y)
+          end
+        end)
+      let (sum_x, sum_y, sum_xx, sum_yy, sum_xy) = s
+      let var_x = n *. sum_xx -. sum_x *. sum_x
+      let var_y = n *. sum_yy -. sum_y *. sum_y
+      if var_x == 0.0 || var_y == 0.0 do panic("Stats.correlation: zero standard deviation")
+      else (n *. sum_xy -. sum_x *. sum_y) /. math_sqrt(var_x *. var_y) end end end
+    end
   end
 
   -- ---- Linear regression ----
@@ -493,13 +513,15 @@ mod Stats do
     else if nx < 2 do panic("Stats.linear_regression: need at least 2 points")
     else do
       let n = int_to_float(nx)
-      let sum_x  = sum(xs)
-      let sum_y  = sum(ys)
-      let sum_xy = List.fold_left(List.zip(xs, ys), 0.0, fn (acc, p) ->
-        match p do
-        (x, y) -> acc +. x *. y
+      -- single pass: sum_x, sum_y, sum_xy, sum_xx (was 4 traversals)
+      let s = List.fold_left(List.zip(xs, ys), (0.0, 0.0, 0.0, 0.0), fn (acc, p) ->
+        match acc do
+        (sx, sy, sxy, sxx) ->
+          match p do
+          (x, y) -> (sx +. x, sy +. y, sxy +. x *. y, sxx +. x *. x)
+          end
         end)
-      let sum_xx = List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x *. x)
+      let (sum_x, sum_y, sum_xy, sum_xx) = s
       let denom = n *. sum_xx -. sum_x *. sum_x
       if denom == 0.0 do panic("Stats.linear_regression: xs have zero variance")
       else do

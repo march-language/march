@@ -24,11 +24,16 @@ mod Decimal do
   -- ---- Internal helpers ----
 
   pfn pow10(n : Int) : Int do
-    fn go(i : Int, acc : Int) : Int do
-      if i <= 0 do acc
-      else go(i - 1, acc * 10) end
+    -- Square-and-multiply: O(log n) instead of O(n). Same exact integer result.
+    fn go(b : Int, e : Int, acc : Int) : Int do
+      if e <= 0 do
+        acc
+      else
+        if e % 2 == 1 do go(b * b, e / 2, acc * b)
+        else go(b * b, e / 2, acc) end
+      end
     end
-    go(n, 1)
+    go(10, n, 1)
   end
 
   -- Scale up a coefficient by 10^n
