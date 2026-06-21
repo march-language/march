@@ -2950,6 +2950,79 @@ end
   Alcotest.(check bool) "allocation in non-recursive fn not flagged" false
     (has_recursive_alloc (perf_insights_of src))
 
+(* ---- parallelizable map/filter lint ---- *)
+
+let parallelizable_of src =
+  List.filter_map (fun (pi : An.perf_insight) ->
+      match pi.An.pi_kind with
+      | An.Parallelizable { pi_op; pi_par; _ } -> Some (pi_op, pi_par)
+      | _ -> None)
+    (perf_insights_of src)
+
+let test_perf_parallelizable_pure_map_flagged () =
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): List(Int) do
+    List.map(xs, fn x -> x * 2)
+  end
+end
+|} in
+  Alcotest.(check (list (pair string string)))
+    "pure List.map flagged as pmap candidate"
+    [("map", "pmap")] (parallelizable_of src)
+
+let test_perf_parallelizable_pure_filter_flagged () =
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): List(Int) do
+    List.filter(xs, fn x -> x > 2)
+  end
+end
+|} in
+  Alcotest.(check (list (pair string string)))
+    "pure List.filter flagged as pfilter candidate"
+    [("filter", "pfilter")] (parallelizable_of src)
+
+let test_perf_parallelizable_impure_map_not_flagged () =
+  (* The mapped function calls println (an impure builtin) → no hint. *)
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): List(Int) do
+    List.map(xs, fn x -> do println("x"); x end)
+  end
+end
+|} in
+  Alcotest.(check (list (pair string string)))
+    "impure List.map is NOT flagged" [] (parallelizable_of src)
+
+let test_perf_parallelizable_fold_not_flagged () =
+  (* fold_left must never be flagged: purity does not imply associativity. *)
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): Int do
+    List.fold_left(xs, 0, fn (a, b) -> a + b)
+  end
+end
+|} in
+  Alcotest.(check (list (pair string string)))
+    "List.fold_left is NOT flagged" [] (parallelizable_of src)
+
+let test_perf_parallelizable_hint_in_diagnostics () =
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): List(Int) do
+    List.map(xs, fn x -> x + 1)
+  end
+end
+|} in
+  let a = analyse src in
+  let has_hint = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.code with
+      | Some (`String "perf/parallelizable") -> true
+      | _ -> false) a.An.diagnostics
+  in
+  Alcotest.(check bool) "parallelizable hint present in diagnostics" true has_hint
+
 (* ---- perf_insight_at hover tests ---- *)
 
 let test_perf_insight_at_returns_message_at_call_site () =
@@ -6218,6 +6291,13 @@ let () =
     "perf insights: actor send copy", [
       "actor send analysis does not crash",           `Quick, test_perf_actor_send_copy_detected;
       "actor send completes without exception",       `Quick, test_perf_actor_send_copy_in_diagnostics_when_type_known;
+    ];
+    "perf insights: parallelizable map/filter", [
+      "pure List.map flagged as pmap",                `Quick, test_perf_parallelizable_pure_map_flagged;
+      "pure List.filter flagged as pfilter",          `Quick, test_perf_parallelizable_pure_filter_flagged;
+      "impure List.map not flagged",                  `Quick, test_perf_parallelizable_impure_map_not_flagged;
+      "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
+      "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
     ];
     "perf insights phase 2: indirect calls + recursive alloc", [
       "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;
