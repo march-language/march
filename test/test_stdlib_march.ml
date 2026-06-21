@@ -143,6 +143,7 @@ let all_stdlib_decls =
     "crdt.march";
     "consistent_hash.march";
     "net_frame.march";
+    "node_identity.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -297,6 +298,10 @@ let () =
     ("net_frame", [
       Alcotest.test_case "NetFrame module"
         `Quick (run_stdlib_test "test_net_frame.march" "TestNetFrame");
+    ]);
+    ("node_identity", [
+      Alcotest.test_case "NodeIdentity module"
+        `Quick (run_stdlib_test "test_node_identity.march" "TestNodeIdentity");
     ]);
     ("vector_clock", [
       Alcotest.test_case "VectorClock module"

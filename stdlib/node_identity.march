@@ -1,0 +1,42 @@
+-- NodeIdentity: a cluster node's identity, exchanged in the net-kernel handshake.
+--
+-- A node is named (e.g. "worker@host"), has a stable NodeId derived from its
+-- public key, and an incarnation counter that increments each time the node
+-- restarts (so peers can tell a fresh start from a stale one — SWIM-style).
+-- The identity is serialized with MessagePack and sent inside a NetFrame.
+mod NodeIdentity do
+
+  type Identity = { name : String, node_id : String, incarnation : Int }
+
+  -- Stable NodeId for a node: the hash of its public key.
+  fn derive_id(pubkey : String) : String do
+    Crypto.sha256(pubkey)
+  end
+
+  fn make(name : String, pubkey : String, incarnation : Int) : Identity do
+    { name: name, node_id: derive_id(pubkey), incarnation: incarnation }
+  end
+
+  -- Serialize to MessagePack bytes: a 3-element array [name, node_id, incarnation].
+  fn encode(id : Identity) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(Msgpack.str(id.name),
+      Cons(Msgpack.str(id.node_id),
+      Cons(Msgpack.int(id.incarnation), Nil)))))
+  end
+
+  fn decode(bytes : List(Int)) : Result(Identity, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Str(name),
+                        Cons(Msgpack.Str(nid),
+                        Cons(Msgpack.Int(inc), Nil)))) ->
+            Ok({ name: name, node_id: nid, incarnation: inc })
+          _ -> Err("NodeIdentity: malformed identity record")
+        end
+    end
+  end
+
+end
