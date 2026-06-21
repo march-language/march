@@ -12,7 +12,7 @@ let known_builtin_names =
     "interactive"; "i"; "clean"; "deps"; "add"; "publish";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
-    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "help";
+    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "help";
     "completions" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
@@ -849,6 +849,30 @@ let cap_cmd =
                ~doc:"Capability and typestate inspection")
     [cap_query_cmd; cap_coverage_cmd]
 
+(* --------------------------------------------------------- forge ffi -------- *)
+
+let ffi_gen_c_cmd =
+  let file =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"FILE.march" ~doc:"March file containing the extern block(s).")
+  in
+  let out =
+    Arg.(value & opt (some string) None &
+         info ["o"; "output"] ~docv:"OUT.c" ~doc:"Write the C skeleton here (default: stdout).")
+  in
+  let run f o =
+    match Cmd_ffi.run ~file:f ~out:o with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "gen-c"
+           ~doc:"Generate a C shim skeleton from a March extern block")
+    Term.(const run $ file $ out)
+
+let ffi_cmd =
+  Cmd.group (Cmd.info "ffi" ~doc:"FFI binding tooling")
+    [ffi_gen_c_cmd]
+
 (* --------------------------------------------------------- forge completions *)
 
 let completions_cmd =
@@ -896,7 +920,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; completions_cmd; help_cmd ]
+      cap_cmd; ffi_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
