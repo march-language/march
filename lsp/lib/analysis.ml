@@ -7320,6 +7320,25 @@ let code_actions_at (a : t) ~line ~character
         end)
       groups []
   in
+  (* ---- Convert a pure List.map/filter to its parallel form ---- *)
+  let parallelize_actions =
+    List.filter_map (fun (pi : perf_insight) ->
+        match pi.pi_kind with
+        | Parallelizable { pi_op = _; pi_par; pi_name_span }
+          when Pos.span_contains pi.pi_span ~line ~character ->
+          let range = Pos.span_to_lsp_range pi_name_span in
+          let edit  = TextEdit.create ~range ~newText:pi_par in
+          let uri   = DocumentUri.of_path a.filename in
+          let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+          Some (CodeAction.create
+                  ~title:(Printf.sprintf "Convert to `List.%s`" pi_par)
+                  ~kind:CodeActionKind.RefactorRewrite
+                  ~edit:we
+                  ~diagnostics:[perf_insight_to_diag pi]
+                  ())
+        | _ -> None
+      ) a.perf_insights
+  in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
   @ wrap_inspect_actions @ remove_inspect_actions
@@ -7328,6 +7347,7 @@ let code_actions_at (a : t) ~line ~character
   @ ast_code_actions a ~line ~character
   @ registry_actions
   @ html_close_actions
+  @ parallelize_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

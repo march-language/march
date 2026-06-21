@@ -3023,6 +3023,33 @@ end
   in
   Alcotest.(check bool) "parallelizable hint present in diagnostics" true has_hint
 
+let test_perf_parallelizable_code_action () =
+  let src = {|
+mod Test do
+  fn run(xs: List(Int)): List(Int) do
+    List.map(xs, fn x -> x + 1)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "List.map" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  match List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      ca.title = "Convert to `List.pmap`") acts with
+  | None -> Alcotest.fail "expected 'Convert to `List.pmap`' code action"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected a workspace edit"
+     | Some edit ->
+       let replaces_with_pmap =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) -> e.newText = "pmap") edits) m
+       in
+       Alcotest.(check bool) "edit replaces map with pmap" true replaces_with_pmap)
+
 (* ---- perf_insight_at hover tests ---- *)
 
 let test_perf_insight_at_returns_message_at_call_site () =
@@ -6298,6 +6325,7 @@ let () =
       "impure List.map not flagged",                  `Quick, test_perf_parallelizable_impure_map_not_flagged;
       "List.fold_left never flagged",                 `Quick, test_perf_parallelizable_fold_not_flagged;
       "parallelizable hint in diagnostics",           `Quick, test_perf_parallelizable_hint_in_diagnostics;
+      "convert-to-pmap code action",                  `Quick, test_perf_parallelizable_code_action;
     ];
     "perf insights phase 2: indirect calls + recursive alloc", [
       "calling a parameter is indirect",              `Quick, test_perf_indirect_call_on_param;
