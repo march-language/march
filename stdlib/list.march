@@ -360,6 +360,39 @@ mod List do
   end
 
   doc """
+  Parallel reduction over an associative `combine` with `identity` as its
+  unit.
+
+  **Contract:** `combine` MUST be associative — `combine(combine(x, y), z)`
+  must equal `combine(x, combine(y, z))` — and `identity` must be its unit.
+  Sum, product, max, min, string concat, and set union qualify; subtraction
+  and average DO NOT.  The compiler cannot check this; correctness is the
+  caller's responsibility.
+
+  Below `pmap_threshold()` elements this is sequential `fold_left`.  Above
+  it, each threshold-sized chunk is reduced on its own task and the partial
+  results are combined in order — identical to the sequential result iff the
+  contract holds.
+
+  ## Examples
+
+      march> List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b)
+      10
+  """
+  fn preduce(xs : List(a), identity : a, combine : a -> a -> a) : a do
+    let t = pmap_threshold()
+    if length(xs) <= t do
+      fold_left(xs, identity, combine)
+    else do
+      let cs = chunks(xs, t)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> fold_left(c, identity, combine)))
+      let partials = map(tasks, fn tk -> task_await_unwrap(tk))
+      fold_left(partials, identity, combine)
+    end
+    end
+  end
+
+  doc """
   Applies `f` to each element; collects Some values, discards None.
   Equivalent to map followed by filter for non-None values.
   """
