@@ -720,11 +720,61 @@ Pipes, Unix domain sockets, and POSIX signals are real side effects narrower tha
 Builtins (when runtime lands): `pipe_open`, `pipe_read`, `pipe_write`, `pipe_close`, `unix_socket`, `send_signal` → `"IO.IPC"`.
 Stdlib: `stdlib/ipc.march` — add `needs IO.IPC` when the module is written.
 
+### IO.Foreign — FFI / calling unverified C
+
+**Hierarchy:** leaf under `IO` (not in hierarchy yet)
+
+`extern` blocks in March already declare `Cap(X)` to describe *what* the C code does, but nothing in the module's surface contract says *"this module calls out to unverified C."* That is a distinct and audit-critical privilege: C code can bypass every March type guarantee regardless of the declared cap. `IO.Foreign` fills that gap.
+
+**Motivation:**
+
+- The declared `Cap(X)` on an extern block is the programmer's assertion, not a compiler-verified fact. C code under `extern "libc": Cap(IO.FileSystem)` could open network connections, spawn threads, or corrupt memory — the compiler cannot see into it.
+- `needs IO.Foreign` makes all FFI usage grep-auditable in one pass: any module that reaches outside the type system is visible in its `needs` set, which matters for security reviews and supply-chain audits.
+- Unlike all other IO caps, `IO.Foreign` is triggered by the *presence of an `extern` block*, not by specific builtin call names. The wiring point is `check_module_needs` in `typecheck.ml` — when a `DExtern` node is encountered in a module that lacks `needs IO.Foreign`, emit a warning.
+
+**Sub-cap: `IO.Foreign.Blocking`**
+
+The `blocking` modifier in an extern block (`extern "libfoo" blocking: Cap(X) do ... end`) causes the runtime to spawn an OS thread for the call (`march_run_blocking_i/d` in `runtime/march_ffi.c`). This bypasses the green-thread scheduler and is a different category of side effect from `IO.Spawn` (which spawns managed green tasks). A module using blocking FFI should declare both `needs IO.Foreign` and `needs IO.Foreign.Blocking`.
+
+```
+IO.Foreign
+└── IO.Foreign.Blocking  — blocking extern (spawns OS thread)
+```
+
+**Wiring point (different from other caps):**
+
+Unlike `builtin_cap_table` entries, this does not key on a function name. Instead, in `check_module_needs`, add a check on `DExtern` nodes:
+
+```ocaml
+(* pseudo-code for the check_module_needs pass *)
+| DExtern { blocking; _ } ->
+    if not (module_declares_needs env "IO.Foreign") then
+      emit warning "extern block requires needs IO.Foreign";
+    if blocking && not (module_declares_needs env "IO.Foreign.Blocking") then
+      emit warning "blocking extern block requires needs IO.Foreign.Blocking"
+```
+
+The existing `Cap(X)` check on the extern block (Check 5) is orthogonal and stays in place — `IO.Foreign` adds a meta-capability above it.
+
+**Stdlib annotation:**
+
+No stdlib module directly uses `extern` blocks (they call into the C runtime via builtins, not explicit `extern` syntax). `IO.Foreign` is primarily a user-space annotation for application and library code that binds to C.
+
+**Tests (4):**
+
+1. `extern "libc": Cap(IO.FileSystem) do ... end` without `needs IO.Foreign` → body-scan warning for `IO.Foreign`
+2. `needs IO.Foreign` declared → no warning
+3. `needs IO` (root) → no warning
+4. `extern ... blocking` without `needs IO.Foreign.Blocking` → warning for the blocking sub-cap
+
+**No blocker — `DExtern` is already an AST node; the check is a straightforward extension of `check_module_needs`. Immediately actionable.**
+
 ### Implementation order
 
 | Cap | Blocker | Priority |
 |-----|---------|----------|
 | IO.NetListen | none | do first |
+| IO.Foreign | none | do next (different wiring point — DExtern check) |
 | IO.WebSocket | confirm ws_* builtin names | do next |
 | IO.Crypto | confirm crypto_* builtin names | do with WebSocket |
 | IO.Timer | confirm timer/sleep_ms builtins | do when confirmed |
@@ -753,5 +803,7 @@ IO
 ├── IO.Spawn            — task spawning ✅
 ├── IO.Mut              — shared mutable state (Vault) ✅
 ├── IO.Timer            — scheduled callbacks (planned)
-└── IO.Telemetry        — observability annotation ✅
+├── IO.Telemetry        — observability annotation ✅
+└── IO.Foreign          — calling unverified C (planned)
+    └── IO.Foreign.Blocking — blocking extern / OS thread (planned)
 ```
