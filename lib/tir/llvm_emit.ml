@@ -123,9 +123,10 @@ type target_config =
   | Wasm64Wasi      (** wasm64-wasi — 8-byte pointers, WASI preview *)
   | Wasm32Wasi      (** wasm32-wasi — 4-byte pointers, WASI preview *)
   | Wasm32Unknown   (** wasm32-unknown-unknown — browser, no WASI *)
+  | Js              (** ES module output — no LLVM, no clang *)
 
 let is_wasm_target = function
-  | Native -> false
+  | Native | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
 
 let is_wasm32 = function
@@ -140,20 +141,21 @@ let target_triple = function
   | Wasm64Wasi      -> "wasm64-wasi"
   | Wasm32Wasi      -> "wasm32-wasi"
   | Wasm32Unknown   -> "wasm32-unknown-unknown"
+  | Js              -> "js"
 
 (** Pointer size in bytes for the target. *)
 let target_ptr_size = function
-  | Native | Wasm64Wasi -> 8
+  | Native | Wasm64Wasi | Js -> 8
   | Wasm32Wasi | Wasm32Unknown -> 4
 
 (** LLVM pointer type name for the target. *)
 let target_ptr_ty = function
-  | Native | Wasm64Wasi -> "ptr"
-  | Wasm32Wasi | Wasm32Unknown -> "ptr"  (* opaque ptr works for wasm32 too *)
+  | Native | Wasm64Wasi | Js -> "ptr"
+  | Wasm32Wasi | Wasm32Unknown -> "ptr"
 
 (** LLVM integer type matching pointer width. *)
 let target_int_ty = function
-  | Native | Wasm64Wasi -> "i64"
+  | Native | Wasm64Wasi | Js -> "i64"
   | Wasm32Wasi | Wasm32Unknown -> "i32"
 
 (* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
