@@ -129,10 +129,44 @@ let cache_suite =
         Alcotest.(check bool) "hit sat" true
           (Vc_cache.lookup ~root key = Some r)) ]
 
+let refine_suite =
+  let root =
+    Filename.concat (Filename.get_temp_dir_name ())
+      (Printf.sprintf "march_refine_disc_%d" (Unix.getpid ()))
+  in
+  [ Alcotest.test_case "cached unsat returns Verified without a solver" `Quick
+      (fun () ->
+        (* Pre-seed the cache so discharge never needs z3 — keeps this case
+           green in CI.  A subsequent lookup must report Verified. *)
+        let vc : Smt.vc =
+          { decls = [ ("d", Smt.SInt) ];
+            assumptions = [ Smt.Gt (Smt.Const "d", Smt.IntLit 0) ];
+            goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) Solver.Unsat;
+        match Refine.discharge ~root vc with
+        | Refine.Verified -> ()
+        | Refine.Refuted _ -> Alcotest.fail "expected Verified, got Refuted"
+        | Refine.Unverified -> Alcotest.fail "expected Verified, got Unverified");
+
+    Alcotest.test_case "cached sat returns Refuted with model" `Quick (fun () ->
+        let vc : Smt.vc =
+          { decls = [ ("d", Smt.SInt) ]; assumptions = []; goal =
+            Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc)
+          (Solver.Sat [ ("d", "0") ]);
+        match Refine.discharge ~root vc with
+        | Refine.Refuted model ->
+            Alcotest.(check (option string)) "d=0" (Some "0")
+              (List.assoc_opt "d" model)
+        | _ -> Alcotest.fail "expected Refuted") ]
+
 let () =
   Alcotest.run "march-refine"
     [ ("smoke", smoke_suite);
       ("smt", smt_suite);
       ("model", model_suite);
       ("solver", solver_suite);
-      ("cache", cache_suite) ]
+      ("cache", cache_suite);
+      ("refine", refine_suite) ]
