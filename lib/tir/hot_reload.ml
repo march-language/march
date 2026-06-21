@@ -11,7 +11,10 @@ type config = {
   excludes   : string list;   (** module prefixes to force-exclude (win over includes) *)
 }
 
-(** A config with no overrides for the given app prefix. *)
+(** A config with no overrides for the given app prefix.
+    [app_prefix] is expected to be a non-empty module name (March module names
+    start with an uppercase letter); an empty prefix means "no app code is
+    reloadable", which is internally consistent but rarely intended. *)
 let default_config (app_prefix : string) : config =
   { app_prefix; includes = []; excludes = [] }
 
@@ -45,7 +48,14 @@ let is_reloadable (cfg : config) (m : string) : bool =
    (independent of source/iteration order) — NOT a source-order integer that
    shifts when unrelated code is edited. Cross-build reload activation is keyed
    by NAME (string), so dense per-build ids are sufficient. *)
-module Name_table = struct
+module Name_table : sig
+  type t
+  val build   : string list -> t
+  val id_of   : t -> string -> int option
+  val name_of : t -> int -> string option
+  val count   : t -> int
+  val names   : t -> string list
+end = struct
   type t = {
     by_id   : string array;            (* id → name, sorted *)
     by_name : (string, int) Hashtbl.t; (* name → id *)

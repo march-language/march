@@ -43,6 +43,20 @@ let test_exclude_wins_over_include () =
   check "exclude beats include" false (HR.is_reloadable cfg "Shared.Internal");
   check "rest of include still in" true (HR.is_reloadable cfg "Shared.Util")
 
+let test_include_root_itself_reloadable () =
+  let cfg = { (HR.default_config "MyApp") with HR.includes = ["Shared"] } in
+  check "include root module itself reloadable" true (HR.is_reloadable cfg "Shared")
+
+let test_exclude_does_not_widen_boundary () =
+  (* An exclude on a module outside the boundary doesn't make it reloadable. *)
+  let cfg = { (HR.default_config "MyApp") with HR.excludes = ["External"] } in
+  check "external module still not reloadable" false (HR.is_reloadable cfg "External")
+
+let test_dotted_app_prefix_is_path_aware () =
+  let cfg = HR.default_config "MyApp.Web" in
+  check "MyApp.Web.Handler under MyApp.Web"   true  (HR.is_reloadable cfg "MyApp.Web.Handler");
+  check "MyApp.WebSocket NOT under MyApp.Web" false (HR.is_reloadable cfg "MyApp.WebSocket")
+
 (* ── NAME_ID interning ────────────────────────────────────────────────────── *)
 
 module NT = March_tir.Hot_reload.Name_table
@@ -79,6 +93,17 @@ let test_deduplicates_names () =
   Alcotest.(check int) "unique count" 2 (NT.count t);
   Alcotest.(check (list string)) "names in id order" ["a"; "b"] (NT.names t)
 
+let test_empty_table () =
+  let t = NT.build [] in
+  Alcotest.(check int) "empty count" 0 (NT.count t);
+  Alcotest.(check oid) "no id for any name" None (NT.id_of t "x");
+  Alcotest.(check ostr) "no name at id 0" None (NT.name_of t 0);
+  Alcotest.(check (list string)) "no names" [] (NT.names t)
+
+let test_negative_id_has_no_name () =
+  let t = NT.build ["a"] in
+  Alcotest.(check ostr) "negative id → None" None (NT.name_of t (-1))
+
 let () =
   Alcotest.run "hot_reload" [
     ("boundary", [
@@ -88,6 +113,9 @@ let () =
       Alcotest.test_case "exclude overrides default"         `Quick test_exclude_overrides_default;
       Alcotest.test_case "include extends boundary"          `Quick test_include_extends_boundary;
       Alcotest.test_case "exclude wins over include"         `Quick test_exclude_wins_over_include;
+      Alcotest.test_case "include root itself reloadable"    `Quick test_include_root_itself_reloadable;
+      Alcotest.test_case "exclude does not widen boundary"   `Quick test_exclude_does_not_widen_boundary;
+      Alcotest.test_case "dotted app_prefix is path-aware"   `Quick test_dotted_app_prefix_is_path_aware;
     ]);
     ("name_table", [
       Alcotest.test_case "ids assigned in sorted order"  `Quick test_ids_assigned_in_sorted_order;
@@ -95,5 +123,7 @@ let () =
       Alcotest.test_case "unknown name has no id"        `Quick test_unknown_name_has_no_id;
       Alcotest.test_case "assignment is order-independent" `Quick test_assignment_is_order_independent;
       Alcotest.test_case "deduplicates names"            `Quick test_deduplicates_names;
+      Alcotest.test_case "empty table"                   `Quick test_empty_table;
+      Alcotest.test_case "negative id has no name"       `Quick test_negative_id_has_no_name;
     ]);
   ]
