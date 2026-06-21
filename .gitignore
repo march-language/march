@@ -30,3 +30,6 @@ zed-march/target/
 .claude/worktrees/
 march-phases/
 docs/superpowers/
+
+# march_doc generator, auto-cloned by scripts/gen-stdlib-docs.sh in CI
+/march_doc/
