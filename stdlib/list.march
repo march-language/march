@@ -318,6 +318,29 @@ mod List do
   end
 
   doc """
+  Like `pmap`, but caps the number of concurrent tasks at `max_concurrency`
+  by splitting the input into at most that many contiguous chunks.  Use this
+  when each element is expensive (few elements, heavy work) so the threshold
+  heuristic doesn't apply.  No threshold check is performed.
+
+  `max_concurrency` is treated as at least 1.  Result order matches `map`.
+  """
+  fn pmap_n(xs : List(a), f : a -> b, max_concurrency : Int) : List(b) do
+    let n = length(xs)
+    if n == 0 do []
+    else do
+      let cap = if max_concurrency < 1 do 1 else max_concurrency end
+      -- ceil(n / cap), at least 1, so we get at most `cap` chunks
+      let csize = if n / cap * cap == n do n / cap else n / cap + 1 end
+      let csize2 = if csize < 1 do 1 else csize end
+      let cs = chunks(xs, csize2)
+      let tasks = map(cs, fn c -> task_spawn(fn _ -> map(c, f)))
+      concat(map(tasks, fn tk -> task_await_unwrap(tk)))
+    end
+    end
+  end
+
+  doc """
   Applies `f` to each element; collects Some values, discards None.
   Equivalent to map followed by filter for non-None values.
   """
