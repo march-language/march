@@ -57,10 +57,17 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Tooling / build
 
-- **No `forge [[ffi]]` build integration *(being built next — Phase 5)*.**
-  Until then, FFI symbols must already be linked into the runtime (bindings in
-  `runtime/march_ffi.c`) or resolvable from system libs; you cannot point at an
-  arbitrary C source/library from `forge.toml`.
+- **`forge [ffi]` build integration — DONE (Phase 5).** `forge.toml`:
+  `[ffi] sources = ["native/x.c"]` + `link = ["-lz"]` → compiled+linked via the
+  compiler's `--ffi-c`/`--ffi-link`; shim edits invalidate the CAS binary cache.
+  Remaining sub-gaps:
+  - **Single `[ffi]` section only.** No named `[[ffi]]` array-of-tables for
+    multiple independent binding libs yet (the TOML parser doesn't support
+    array-of-tables cleanly). One project-wide list of sources/link flags.
+  - **User shims are compiled-mode only.** The interpreter (Phase 4) dlopens
+    only the runtime `.so`, so a symbol from a `[ffi]` shim isn't resolvable
+    under `march file.march` — only via `--compile`. (Interpreter FFI still
+    works for symbols that live in the runtime itself.)
 - **No binding generators.** `forge ffi gen-c` (March `extern` → C shim skeleton)
   and `forge ffi import` (C header → draft `extern` block + `.ffi.toml` sidecar)
   are unbuilt (spec §17, Phase 7).
