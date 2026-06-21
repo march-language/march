@@ -881,7 +881,8 @@ let compile filename =
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1228,7 +1229,8 @@ let compile filename =
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
-          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt") :: ffi_cas_tag () in
+          (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
+          :: Printf.sprintf "pmt%d" !pmap_threshold :: ffi_cas_tag () in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
