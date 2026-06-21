@@ -352,6 +352,83 @@ let gen_c (decls : Ast.decl list) : string =
     | _ -> ()) decls;
   Buffer.contents b
 
+(* ── forge ffi add-rust: scaffold a Rust binding crate ───────────────────── *)
+
+let write_file path contents : (unit, string) result =
+  try
+    let oc = open_out path in
+    output_string oc contents;
+    close_out oc;
+    Ok ()
+  with Sys_error m -> Error m
+
+(* Scaffold a Rust `staticlib` binding crate under <dir>/<name> using the `march`
+   crate (#[march] / #[derive] / init!).  The Rust side is the only thing the
+   author writes; `march::init!` generates the March extern block (run the
+   `gen_extern` bin), and the staticlib links through forge.toml's [ffi] link. *)
+let add_rust ~name ~dir ~march_path : (unit, string) result =
+  let crate_dir = Filename.concat dir name in
+  let lib_ident = String.map (fun c -> if c = '-' then '_' else c) name in
+  let ( let* ) = Result.bind in
+  let mkdir d = if not (Sys.file_exists d) then Unix.mkdir d 0o755 in
+  let setup =
+    try
+      mkdir dir; mkdir crate_dir;
+      mkdir (Filename.concat crate_dir "src");
+      mkdir (Filename.concat crate_dir "src/bin");
+      Ok ()
+    with Unix.Unix_error (e, _, _) -> Error (Unix.error_message e) in
+  let* () = setup in
+  let cargo_toml = Printf.sprintf
+    "[package]\n\
+     name = \"%s\"\n\
+     version = \"0.1.0\"\n\
+     edition = \"2021\"\n\n\
+     [lib]\n\
+     name = \"%s\"\n\
+     crate-type = [\"staticlib\", \"lib\"]\n\n\
+     [dependencies]\n\
+     march = { path = \"%s\" }   # the March FFI runtime crate (rust/march)\n\n\
+     [profile.release]\n\
+     panic = \"unwind\"   # #[march] catch_unwind needs unwinding\n"
+    name lib_ident march_path in
+  let lib_rs = Printf.sprintf
+    "//! Rust binding for March via the `march` crate. Write idiomatic Rust; the\n\
+     //! #[march] macro generates the extern \"C\" shim and `march::init!` the\n\
+     //! March extern block (print it with `cargo run --bin gen_extern`).\n\n\
+     use march::{march, Error};\n\
+     // For records/variants, add: use march::{Encoder, Decoder};\n\n\
+     #[march]\n\
+     fn hello(name: &str) -> String {\n\
+     \    format!(\"Hello, {}!\", name)\n\
+     }\n\n\
+     #[march]\n\
+     fn checked_div(a: i64, b: i64) -> Result<i64, Error> {\n\
+     \    if b == 0 { return Err(Error::msg(\"divide by zero\")); }\n\
+     \    Ok(a / b)\n\
+     }\n\n\
+     // #[derive(Encoder, Decoder)] struct/enum <-> March record/variant.\n\n\
+     march::init!(\"%s\", [hello, checked_div]);\n"
+    name in
+  let gen_extern_rs = Printf.sprintf
+    "//! Prints the March `extern` block for this binding (paste into a .march\n\
+     //! file, or redirect to one). Generated from the #[march] signatures.\n\
+     fn main() { %s::march_print_extern_block(); }\n"
+    lib_ident in
+  let* () = write_file (Filename.concat crate_dir "Cargo.toml") cargo_toml in
+  let* () = write_file (Filename.concat crate_dir "src/lib.rs") lib_rs in
+  let* () = write_file (Filename.concat crate_dir "src/bin/gen_extern.rs") gen_extern_rs in
+  Printf.printf
+    "scaffolded Rust binding crate %s\n\
+     next steps:\n\
+    \  1. set the `march` path in %s/Cargo.toml\n\
+    \  2. write your #[march] functions in %s/src/lib.rs\n\
+    \  3. cargo build --release   (produces target/release/lib%s.a)\n\
+    \  4. cargo run --bin gen_extern  >>  your_app.march   (the extern block)\n\
+    \  5. link the .a via forge.toml:  [ffi] link = [\"%s/target/release/lib%s.a\"]\n"
+    crate_dir crate_dir crate_dir lib_ident crate_dir lib_ident;
+  Ok ()
+
 let run ~file ~out : (unit, string) result =
   match parse_file file with
   | Error e -> Error e
