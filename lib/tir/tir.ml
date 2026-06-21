@@ -86,6 +86,7 @@ type extern_decl = {
   ed_params     : ty list;    (* parameter types *)
   ed_consumed   : bool list;  (* per-param: true if `consume` (ownership to callee) *)
   ed_blocking   : bool;       (* `blocking`: dispatch on an OS thread, yield the green thread *)
+  ed_raises     : bool;       (* `raises`: env-routed errors (march_env* + bare Ok payload) *)
   ed_ret        : ty;         (* return type *)
 }
 

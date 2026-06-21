@@ -24,8 +24,21 @@ int32_t march_ffi_abi_version(void); /* returns MARCH_FFI_ABI_VERSION */
 
 typedef int64_t march_value;         /* opaque tagged value word */
 
+/* Per-call context, threaded as a hidden first parameter into `raises`
+ * bindings.  Opaque to bindings — manipulate only via march_raise. */
+typedef struct march_env march_env;
+
 /* Fatal, unrecoverable error from a binding (programmer error): aborts. */
 void march_fatal(const char *msg);
+
+/* ── Error protocol (`raises` bindings) ──────────────────────────────────────
+ * A binding for an extern declared `raises fn … : Result(T, E)` receives a
+ * hidden `march_env *env` first parameter and returns the bare Ok payload (T's
+ * natural C type) on success.  To fail, it builds the error value `e` (a
+ * march_value of type E) and calls march_raise(env, e), then returns any value.
+ * The compiler-emitted wrapper materializes Ok(payload) or Err(e).  Calling
+ * march_raise more than once keeps the first error. */
+void march_raise(march_env *env, march_value e);
 
 /* ── Primitive accessors (access by static type) ─────────────────────────── */
 march_value march_make_int(int64_t n);    /* (n << 1) | 1 */
