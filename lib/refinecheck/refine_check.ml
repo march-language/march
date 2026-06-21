@@ -155,9 +155,10 @@ let reflect_scalar (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   match actual with
   | A.EVar { A.txt = x; _ } ->
+    let xc = Smt.Const x in
     (match List.assoc_opt x sc with
      | Some (b, q) ->
-       let xc = Smt.Const x in
+       (* A refined local: carry its own refinement as an assumption. *)
        let rv n = if n = b || n = "_" then Some xc else None in
        let assumptions =
          match smt_of ~resolve_var:rv ~resolve_len:(fun _ -> None) q with
@@ -165,15 +166,21 @@ let reflect_scalar (sc : scope) (actual : A.expr)
          | None -> []
        in
        Some (xc, [ (x, Smt.SInt) ], assumptions)
-     | None -> None)
+     | None ->
+       (* An ordinary variable: reflect it as a constant so a path-context
+          guard about it can constrain it.  Without a guard it stays
+          unconstrained and the definite-failure check keeps us silent. *)
+       Some (xc, [ (x, Smt.SInt) ], []))
   | _ ->
     (match smt_of ~resolve_var:(fun _ -> None) ~resolve_len:(fun _ -> None) actual with
      | Some t -> Some (t, [], [])
      | None -> None)
 
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
-let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list) (rp : rparam)
-    (sc : scope) : unit =
+(* [path] is the path context: conditions known true here, each tagged with
+   whether it is negated (the else-branch of an `if`). *)
+let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
+    (path : (A.expr * bool) list) (rp : rparam) (sc : scope) : unit =
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   let actual_of_name name =
     match List.assoc_opt name name_pos with
@@ -188,29 +195,41 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list) (rp : rpara
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
     in
+    (* Resolve a scalar variable.  A predicate references callee parameters;
+       a path condition references caller variables — both go through the
+       actual caller values so the names line up in SMT. *)
     let resolve_var name =
       if name = rp.binder || name = "_" then absorb (reflect_scalar sc self_actual)
       else
         match actual_of_name name with
         | Some a -> absorb (reflect_scalar sc a)
-        | None -> None
+        | None ->
+          (* a caller-scope variable from the path context *)
+          decls := (name, Smt.SInt) :: !decls;
+          Some (Smt.Const name)
+    in
+    let len_of_var x =
+      let c = Smt.Const ("len$" ^ x) in
+      decls := ("len$" ^ x, Smt.SInt) :: !decls;
+      assume := Smt.Ge (c, Smt.IntLit 0) :: !assume; (* measure axiom: len >= 0 *)
+      Some c
     in
     let resolve_len name =
       match actual_of_name name with
       | Some a -> (
           match list_len a with
           | Some n -> Some (Smt.IntLit n)
-          | None -> (
-              match a with
-              | A.EVar { A.txt = x; _ } ->
-                let c = Smt.Const ("len$" ^ x) in
-                decls := ("len$" ^ x, Smt.SInt) :: !decls;
-                (* measure axiom: a length is non-negative *)
-                assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
-                Some c
-              | _ -> None))
-      | None -> None
+          | None -> (match a with A.EVar { A.txt = x; _ } -> len_of_var x | _ -> None))
+      | None -> len_of_var name (* a caller-scope list variable *)
     in
+    (* Translate the path conditions into assumptions (dropping any that fall
+       outside the supported fragment — sound, just weaker). *)
+    List.iter
+      (fun (cond, negated) ->
+        match smt_of ~resolve_var ~resolve_len cond with
+        | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
+        | None -> ())
+      path;
     (match smt_of ~resolve_var ~resolve_len rp.pred with
      | None -> ()
      | Some goal ->
@@ -247,13 +266,16 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list) (rp : rpara
                   (if cx = "" then "" else Printf.sprintf " (counterexample: %s)" cx))
            | _ -> ())))
 
-(* ── Walk expressions, threading the refined-local scope ─────────────────── *)
-let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
-  let go = visit ~root errctx tbl sc in
+(* ── Walk expressions, threading the refined-local scope and path context ── *)
+let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scope)
+    (e : A.expr) : unit =
+  let go = visit ~root errctx tbl path sc in
+  let go_path p = visit ~root errctx tbl p sc in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match Hashtbl.find_opt tbl fname with
-     | Some sg -> List.iter (fun rp -> check_call ~root errctx ~span:sp sg args rp sc) sg.refined
+     | Some sg ->
+       List.iter (fun rp -> check_call ~root errctx ~span:sp sg args path rp sc) sg.refined
      | None -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
@@ -262,19 +284,27 @@ let rec visit ~root errctx (tbl : sigs) (sc : scope) (e : A.expr) : unit =
     ignore
       (List.fold_left
          (fun sc e ->
-           visit ~root errctx tbl sc e;
+           visit ~root errctx tbl path sc e;
            match e with A.ELet (b, _) -> scope_add_binding sc b | _ -> sc)
          sc es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
-    visit ~root errctx tbl (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
   | A.ELetFn (_, ps, _, body, _) ->
-    visit ~root errctx tbl (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
-    List.iter (fun (br : A.branch) -> go br.A.branch_body) branches
-  | A.EIf (c, t, e, _) -> go c; go t; go e
-  | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+    List.iter
+      (fun (br : A.branch) ->
+        let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
+        go_path p br.A.branch_body)
+      branches
+  | A.EIf (c, t, e, _) ->
+    go c;
+    go_path ((c, false) :: path) t;
+    go_path ((c, true) :: path) e
+  | A.ECond (arms, _) ->
+    List.iter (fun (c, b) -> go c; go_path ((c, false) :: path) b) arms
   | A.ERecord (fields, _) -> List.iter (fun (_, v) -> go v) fields
   | A.ERecordUpdate (r, fields, _) -> go r; List.iter (fun (_, v) -> go v) fields
   | A.EField (r, _, _) -> go r
@@ -289,7 +319,8 @@ let visit_fn ~root errctx (tbl : sigs) (fd : A.fn_def) : unit =
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
-      visit ~root errctx tbl sc c.A.fc_body)
+      let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+      visit ~root errctx tbl path sc c.A.fc_body)
     fd.A.fn_clauses
 
 let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =

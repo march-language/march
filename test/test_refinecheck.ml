@@ -90,6 +90,46 @@ let a2_suite =
           (has_refine_error
              (bounds "  fn f(ys : List(Int)) : Int do at(ys, 5) end"))) ]
 
+(* Path sensitivity: a guard establishes facts that discharge a precondition. *)
+let path_suite =
+  [ gated "scalar guard `if i >= 0` lets take_n(i) verify" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do if i >= 0 do take_n(i) else 0 end end")));
+
+    gated "else-branch negates the guard (i < 0 else => i >= 0)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do if i < 0 do 0 else take_n(i) end end")));
+
+    gated "full bounds guard lets at(xs, i) verify" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (bounds
+                "  fn g(xs : List(Int), i : Int) : Int do\n\
+                \    if i >= 0 && i < len(xs) do at(xs, i) else 0 end\n\
+                \  end")));
+
+    gated "partial guard (no upper bound) is conservatively skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (bounds
+                "  fn g(xs : List(Int), i : Int) : Int do\n\
+                \    if i >= 0 do at(xs, i) else 0 end\n\
+                \  end")));
+
+    gated "guard contradicting the precondition is rejected" (fun () ->
+        (* inside `i < 0`, calling take_n (needs `_ >= 0`) can never hold *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
-    [ ("refinecheck", suite); ("bounds-a2", a2_suite) ]
+    [ ("refinecheck", suite);
+      ("bounds-a2", a2_suite);
+      ("path-sensitivity", path_suite) ]
