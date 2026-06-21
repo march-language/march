@@ -142,6 +142,7 @@ let all_stdlib_decls =
     "merkle.march";
     "crdt.march";
     "consistent_hash.march";
+    "net_frame.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -292,6 +293,10 @@ let () =
     ("deque", [
       Alcotest.test_case "Deque module"
         `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("net_frame", [
+      Alcotest.test_case "NetFrame module"
+        `Quick (run_stdlib_test "test_net_frame.march" "TestNetFrame");
     ]);
     ("vector_clock", [
       Alcotest.test_case "VectorClock module"

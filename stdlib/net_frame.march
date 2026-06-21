@@ -1,0 +1,48 @@
+-- NetFrame: length-prefixed framing for the distributed net-kernel transport.
+--
+-- A frame is a 4-byte big-endian length header followed by exactly that many
+-- payload bytes. Bytes are represented as List(Int) (each 0..255), matching
+-- Msgpack.encode's output, so a framed MessagePack value is
+-- NetFrame.encode(Msgpack.encode(value)).
+--
+-- decode pulls one complete frame off the front of a (possibly partial) buffer,
+-- returning the payload and the unconsumed remainder; None means "need more
+-- bytes" (the header or body has not fully arrived yet).
+mod NetFrame do
+
+  pfn lo8(n : Int) : Int do int_and(n, 255) end
+
+  -- 4-byte big-endian header encoding [n] (0 <= n < 2^32).
+  pfn len4(n : Int) : List(Int) do
+    Cons(lo8(int_shr(n, 24)),
+    Cons(lo8(int_shr(n, 16)),
+    Cons(lo8(int_shr(n, 8)),
+    Cons(lo8(n), Nil))))
+  end
+
+  -- Prepend a 4-byte big-endian length header to [payload].
+  fn encode(payload : List(Int)) : List(Int) do
+    List.append(len4(List.length(payload)), payload)
+  end
+
+  -- Pull one complete frame off the front of [buf]. Returns Some((payload, rest))
+  -- when a full header + body have arrived, or None when more bytes are needed.
+  fn decode(buf : List(Int)) : Option((List(Int), List(Int))) do
+    if List.length(buf) < 4 do
+      None
+    else
+      let len = match List.take(buf, 4) do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, _)))) ->
+          b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+        _ -> 0
+      end
+      let body = List.drop(buf, 4)
+      if List.length(body) < len do
+        None
+      else
+        Some((List.take(body, len), List.drop(body, len)))
+      end
+    end
+  end
+
+end
