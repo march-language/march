@@ -50,8 +50,59 @@ let model_suite =
         Alcotest.(check (option string)) "n" (Some "(- 3)") (List.assoc_opt "n" m);
         Alcotest.(check (option string)) "b" (Some "true") (List.assoc_opt "b" m)) ]
 
+(* Solver tests require a real z3 on PATH.  When absent (e.g. CI), they print a
+   skip notice and pass — matching the spec's graceful-degradation design. *)
+let with_solver name f =
+  Alcotest.test_case name `Quick (fun () ->
+      match Solver.create () with
+      | None -> Printf.printf "\n[skip] %s: no z3 on PATH\n" name
+      | Some s -> Fun.protect ~finally:(fun () -> Solver.close s) (fun () -> f s))
+
+let solver_suite =
+  [ with_solver "valid VC is unsat (verified)" (fun s ->
+        let vc : Smt.vc =
+          { decls = [ ("d", Smt.SInt) ];
+            assumptions = [ Smt.Gt (Smt.Const "d", Smt.IntLit 0) ];
+            goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+        in
+        match Solver.check s vc with
+        | Solver.Unsat -> ()
+        | Solver.Sat _ -> Alcotest.fail "expected unsat, got sat"
+        | Solver.Unknown -> Alcotest.fail "expected unsat, got unknown");
+
+    with_solver "invalid VC is sat with d=0 counterexample" (fun s ->
+        let vc : Smt.vc =
+          { decls = [ ("d", Smt.SInt) ];
+            assumptions = [];
+            goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+        in
+        match Solver.check s vc with
+        | Solver.Sat model ->
+            Alcotest.(check (option string)) "d=0" (Some "0")
+              (List.assoc_opt "d" model)
+        | Solver.Unsat -> Alcotest.fail "expected sat, got unsat"
+        | Solver.Unknown -> Alcotest.fail "expected sat, got unknown");
+
+    with_solver "two checks on one process are independent" (fun s ->
+        let valid : Smt.vc =
+          { decls = [ ("x", Smt.SInt) ];
+            assumptions = [ Smt.Ge (Smt.Const "x", Smt.IntLit 1) ];
+            goal = Smt.Gt (Smt.Const "x", Smt.IntLit 0) }
+        in
+        let invalid : Smt.vc =
+          { decls = [ ("x", Smt.SInt) ]; assumptions = []; goal =
+            Smt.Gt (Smt.Const "x", Smt.IntLit 0) }
+        in
+        (match Solver.check s valid with
+         | Solver.Unsat -> ()
+         | _ -> Alcotest.fail "valid VC should be unsat");
+        (match Solver.check s invalid with
+         | Solver.Sat _ -> ()
+         | _ -> Alcotest.fail "invalid VC should be sat (push/pop leaked?)")) ]
+
 let () =
   Alcotest.run "march-refine"
     [ ("smoke", smoke_suite);
       ("smt", smt_suite);
-      ("model", model_suite) ]
+      ("model", model_suite);
+      ("solver", solver_suite) ]
