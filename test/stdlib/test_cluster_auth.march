@@ -1,0 +1,45 @@
+mod TestClusterAuth do
+
+  describe "ClusterAuth.prove" do
+
+    test "is deterministic for the same secret and nonce" do
+      assert (ClusterAuth.prove("s3cret", "nonce-1") == ClusterAuth.prove("s3cret", "nonce-1"))
+    end
+
+    test "depends on the secret" do
+      assert (ClusterAuth.prove("s3cret", "nonce-1") != ClusterAuth.prove("other", "nonce-1"))
+    end
+
+    test "depends on the nonce" do
+      assert (ClusterAuth.prove("s3cret", "nonce-1") != ClusterAuth.prove("s3cret", "nonce-2"))
+    end
+
+    test "does not leak the secret" do
+      assert (ClusterAuth.prove("s3cret", "nonce-1") != "s3cret")
+    end
+
+  end
+
+  describe "ClusterAuth.verify" do
+
+    test "accepts a correct proof" do
+      let nonce = "nonce-1"
+      assert (ClusterAuth.verify("s3cret", nonce, ClusterAuth.prove("s3cret", nonce)))
+    end
+
+    test "rejects a wrong secret" do
+      let nonce = "nonce-1"
+      assert (not(ClusterAuth.verify("s3cret", nonce, ClusterAuth.prove("imposter", nonce))))
+    end
+
+    test "rejects a replayed proof for a different nonce" do
+      assert (not(ClusterAuth.verify("s3cret", "nonce-2", ClusterAuth.prove("s3cret", "nonce-1"))))
+    end
+
+    test "rejects a tampered proof" do
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", "deadbeef")))
+    end
+
+  end
+
+end
