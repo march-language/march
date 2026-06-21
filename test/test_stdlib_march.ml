@@ -309,4 +309,8 @@ let () =
       Alcotest.test_case "ConsistentHash module"
         `Quick (run_stdlib_test "test_consistent_hash.march" "TestConsistentHash");
     ]);
+    ("list_parallel", [
+      Alcotest.test_case "List parallel ops"
+        `Quick (run_stdlib_test "test_list_parallel.march" "TestListParallel");
+    ]);
   ]

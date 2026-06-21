@@ -282,6 +282,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, Parallel list ops + parallelization lint)
+
+- **Parallel `List` functions** (`stdlib/list.march`): `pmap`, `pmap_n` (bounded concurrency), `pfilter`, and `preduce` (parallel associative reduction; caller asserts associativity). All are order-preserving and produce results identical to their sequential equivalents. They chunk the input with the existing `List.chunks` and spawn one task per chunk over the existing multithreaded scheduler — real CPU parallelism in compiled code (verified ~281% CPU on a 200k-element workload), correct-but-sequential in the interpreter.
+- **Configurable threshold**: new nullary builtin `pmap_threshold() -> Int` (typecheck `Mono Int`; interpreter reads `Eval.pmap_threshold_value`; LLVM backend emits it as a compile-time constant). Below it, the parallel functions fall back to sequential. Set via the `--pmap-threshold=N` compiler flag (default 1024), threaded into both the interpreter and codegen, included in the CAS cache key, and passed through by `forge` via `MARCH_PMAP_THRESHOLD`.
+- **Parallelization lint (LSP)**: a `Hint`-severity diagnostic (`perf/parallelizable`) flags a pure `List.map`/`List.filter` as a `pmap`/`pfilter` candidate, with a "Convert to `List.pmap`/`List.pfilter`" quick-fix. Purity is checked on the surface AST sharing `March_tir.Purity.impure_builtins` (single source of truth); folds/reduces are never flagged (purity ≠ associativity).
+- **Tests**: `test/stdlib/test_list_parallel.march` (registered in `test_stdlib_march.ml`) covers all four functions across empty/below/above-threshold sizes; a Slow compiled end-to-end parity test in `test_stdlib_suite.ml`; 6 LSP tests for the lint + code action. Design: `specs/2026-06-21-parallel-list-ops-design.md`; plan: `specs/2026-06-21-parallel-list-ops-plan.md`. Deferred (designed, not built): a `--auto-parallel` TIR rewrite pass.
+
 ## Current State (as of 2026-06-21, Distributed algorithms stdlib — Deque, VectorClock, Merkle, CRDT, ConsistentHash)
 
 - **Five new stdlib modules** for distributed systems primitives. `stdlib/deque.march`: functional double-ended queue (banker's deque, O(1) size). `stdlib/vector_clock.march`: causal ordering (`Before | After | Concurrent | Equal`), happens-before, merge, advance. `stdlib/merkle.march`: SHA-256 content-addressed tree with tail-recursive `diff` (work-list). `stdlib/crdt.march`: four CRDTs nested as `CRDT.GCounter` / `CRDT.PNCounter` / `CRDT.LWWRegister` / `CRDT.ORSet`. `stdlib/consistent_hash.march`: sorted virtual-node ring with SHA-256 replica placement.

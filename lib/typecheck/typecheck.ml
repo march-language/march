@@ -1367,6 +1367,9 @@ let builtin_bindings : (string * scheme) list =
     ("task_yield",         Mono (TArrow (t_unit, t_unit)));
     ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (TArrow (t_int, a), TCon ("Task", [a])))));
     ("task_reductions",    Mono (TArrow (t_unit, t_int)));
+    (* Zero-arg: pmap_threshold() parses as EApp(f,[]); infer_app returns the
+       declared type directly, so declare as Mono Int (not TArrow unit Int). *)
+    ("pmap_threshold",     Mono t_int);
     ("get_work_pool",      Mono (TCon ("WorkPool", [])));
     (* Capability builtins *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));

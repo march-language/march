@@ -240,9 +240,17 @@ let ffi_flags_of ~root (proj : Project.project) =
 let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry =
   let opt_flag  = if release then " --opt 2" else " --opt 0" in
   let dump_flag = if dump_phases then " --dump-phases" else "" in
+  (* Optional List.pmap sequential-fallback cutoff, passed through to the
+     compiler.  Sourced from MARCH_PMAP_THRESHOLD so the value can flow
+     without a forge.toml schema change. *)
+  let pmap_flag =
+    match Sys.getenv_opt "MARCH_PMAP_THRESHOLD" with
+    | Some v when v <> "" -> " --pmap-threshold=" ^ v
+    | _ -> ""
+  in
   let cmd =
-    Printf.sprintf "%smarch --compile -o %s%s%s%s %s"
-      lib_path_env (Filename.quote output) opt_flag dump_flag ffi_flags (Filename.quote entry)
+    Printf.sprintf "%smarch --compile -o %s%s%s%s%s %s"
+      lib_path_env (Filename.quote output) opt_flag pmap_flag dump_flag ffi_flags (Filename.quote entry)
   in
   Sys.command cmd
 
