@@ -37,6 +37,11 @@ let con_name = function
   | Ast.TyCon ({ Ast.txt; _ }, _) -> Some txt
   | _ -> None
 
+(* Ok payload of a Result(T, E) — for `raises` bindings, the bare C return. *)
+let ok_payload (t : Ast.ty) : Ast.ty = match t with
+  | Ast.TyCon ({ Ast.txt = "Result"; _ }, [a; _]) -> a
+  | _ -> t
+
 (* C type for an extern parameter / return position. *)
 let c_type ~ret (t : Ast.ty) : string =
   match con_name t with
@@ -249,15 +254,22 @@ let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : stri
   let params =
     List.map (fun (n, t) ->
       Printf.sprintf "%s %s" (c_type ~ret:false t) (pname n t)) ef.Ast.ef_params in
+  (* A `raises` binding takes a hidden march_env* first param and returns the
+     bare Ok payload (T of Result(T,E)); errors go via march_raise(env, e). *)
+  let params = if ef.Ast.ef_raises then "march_env *env" :: params else params in
+  let ret_ty_str =
+    if ef.Ast.ef_raises then c_type ~ret:true (ok_payload ef.Ast.ef_ret_ty)
+    else c_type ~ret:true ef.Ast.ef_ret_ty in
   let b = Buffer.create 256 in
-  Buffer.add_string b (Printf.sprintf "/* %s%s(%s) : %s */\n"
+  Buffer.add_string b (Printf.sprintf "/* %s%s%s(%s) : %s */\n"
     (if ef.Ast.ef_blocking then "blocking " else "")
+    (if ef.Ast.ef_raises then "raises " else "")
     ef.Ast.ef_name.Ast.txt
     (String.concat ", " (List.map (fun (n,t) ->
        Printf.sprintf "%s : %s" n.Ast.txt (Ast.show_ty t)) ef.Ast.ef_params))
     (Ast.show_ty ef.Ast.ef_ret_ty));
   Buffer.add_string b (Printf.sprintf "%s %s(%s) {\n"
-    (c_type ~ret:true ef.Ast.ef_ret_ty) c_name (String.concat ", " params));
+    ret_ty_str c_name (String.concat ", " params));
   (* Per-param marshalling. *)
   List.iteri (fun i (n, t) ->
     let nm = n.Ast.txt in
@@ -280,7 +292,18 @@ let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : stri
       | None -> ())
   ) ef.Ast.ef_params;
   Buffer.add_string b "    /* TODO: call the C library and build the result. */\n";
-  (if is_codec tbl ef.Ast.ef_ret_ty then
+  (if ef.Ast.ef_raises then begin
+     (* Return the bare Ok payload; raise out-of-band for the Err case. *)
+     let t_ok = ok_payload ef.Ast.ef_ret_ty in
+     Buffer.add_string b
+       "    /* On error: march_raise(env, march_str_new((const uint8_t *)\"error\", 5)); return 0; */\n";
+     (match con_name t_ok with
+      | Some "Float" -> Buffer.add_string b "    return 0.0;\n"
+      | _ when is_string_ty t_ok -> Buffer.add_string b
+          "    return march_str_new((const uint8_t *)\"\", 0);\n"
+      | _ -> Buffer.add_string b "    return 0;\n")
+   end
+   else if is_codec tbl ef.Ast.ef_ret_ty then
      (match con_name ef.Ast.ef_ret_ty with Some ty ->
         Buffer.add_string b (Printf.sprintf
           "    %s_c result = {0};\n    return march_encode_%s(result);\n" ty ty) | None -> ())

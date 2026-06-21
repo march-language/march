@@ -768,22 +768,27 @@ extern_decl:
       }, mk_span ($loc)) }
 
 extern_fn_decl:
-  | blk = boption(extern_blocking); FN; name = lower_name;
+  | mods = list(extern_modifier); FN; name = lower_name;
     LPAREN; params = separated_list(COMMA, ffi_param); RPAREN;
     COLON; ret = ty; sym = option(preceded(EQUALS, STRING))
     { { ef_name = name;
         ef_params = List.map (fun ((n, t), _) -> (n, t)) params;
         ef_param_consumed = List.map snd params;
-        ef_blocking = blk;
+        ef_blocking = List.mem "blocking" mods;
+        ef_raises = List.mem "raises" mods;
         ef_ret_ty = ret; ef_symbol = sym } }
 
-(* Contextual `blocking` prefix before an extern `fn` (not a reserved keyword). *)
-extern_blocking:
+(* Contextual modifier words before an extern `fn` (not reserved keywords):
+   `blocking` (dispatch on an OS thread) and `raises` (env-routed errors —
+   the binding takes a march_env* and returns the bare Ok payload). *)
+extern_modifier:
   | kw = lower_name
-    { if kw.txt <> "blocking" then
+    { match kw.txt with
+      | "blocking" | "raises" -> kw.txt
+      | other ->
         error_raise
           (Printf.sprintf "unexpected `%s` before `fn` in extern block; \
-                           the only modifier here is `blocking`" kw.txt)
+                           the only modifiers are `blocking` and `raises`" other)
           None $startpos }
 
 (* An extern parameter, optionally prefixed with the contextual word `consume`

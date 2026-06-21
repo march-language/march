@@ -39,14 +39,20 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Errors
 
-- **No env-routed `march_raise`.** Fallible bindings return `Result` by building
-  `march_ok`/`march_err` directly (works, tested). The spec's `march_env` +
-  `march_raise(env, e)` convenience — `return` normally and raise out-of-band —
-  is not implemented. It needs the `march_env` parameter threaded through the
-  generated wrapper.
+- **Env-routed `march_raise` — DONE.** An extern declared `raises fn … :
+  Result(T, E)` gets a hidden `march_env *` first param; the binding returns the
+  bare Ok payload (T's natural C type) and calls `march_raise(env, e)` to fail,
+  and the compiler-emitted call-site wrapper materializes `Ok(payload)` /
+  `Err(e)` (`test/native/ffi_raise`, `gen-c` emits the `march_env*` signature).
+  The self-build path (`march_ok`/`march_err` directly, no `raises`) still works.
+  Remaining sub-gaps: `Result(Float, _)` Ok payload is not yet supported (compile
+  error); `march_env` is threaded only for `raises` bindings (the spec's
+  env-for-all-allocating-bindings + `march_str_new(env, …)` is not retrofitted —
+  the env-less constructors stay).
 - **Panic/longjmp safety is by convention only.** A C binding that `longjmp`s or
   segfaults across the boundary corrupts/aborts the process — inherent to
-  in-process C FFI. The Rust `#[march]` layer (future) will `catch_unwind`.
+  in-process C FFI. The Rust `#[march]` layer (future) will `catch_unwind` →
+  `march_raise` (the `raises` ABI is the exact hook).
 
 ## Interpreter (Phase 4 scope)
 

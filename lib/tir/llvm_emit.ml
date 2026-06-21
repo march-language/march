@@ -72,6 +72,10 @@ type ctx = {
   extern_map : (string, string) Hashtbl.t;
   (* Extern march_names declared `blocking` — dispatched on an OS thread. *)
   blocking_externs : (string, unit) Hashtbl.t;
+  (* Extern march_names declared `raises` — env-routed error protocol: the C
+     binding takes a march_env* + returns the bare Ok payload, and the call site
+     wraps the result into Ok/Err. *)
+  raises_externs : (string, unit) Hashtbl.t;
   (* Tracks forward declarations emitted for unknown functions (interface dispatch
      calls that are not resolved at compile time due to type erasure). Maps
      function LLVM name → declare string to avoid duplicate declarations. *)
@@ -191,6 +195,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   emitted_eq_fns = Hashtbl.create 16;
   extern_map = Hashtbl.create 8;
   blocking_externs = Hashtbl.create 4;
+  raises_externs = Hashtbl.create 4;
   unknown_decls = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
   hr_config = hot_reload;
@@ -293,6 +298,12 @@ let llvm_ty : Tir.ty -> string = function
 let llvm_ret_ty : Tir.ty -> string = function
   | Tir.TUnit -> "void"
   | t -> llvm_ty t
+
+(* For a `raises` extern declared `: Result(T, E)`, the C binding returns the
+   bare Ok payload of type T (not a march_value Result).  This is T. *)
+let ok_payload_ty : Tir.ty -> Tir.ty = function
+  | Tir.TCon ("Result", [t_ok; _]) -> t_ok
+  | t -> t
 
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.
@@ -1973,6 +1984,75 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
     end
   | _ -> None
 
+(** Emit the call-site wrapper for a `raises` extern (env-routed error protocol).
+    The C binding [fname] takes a hidden march_env* first param and returns the
+    bare Ok payload (T of Result(T,E) = [ret_tir]); to fail it calls
+    march_raise(env, e).  We pass a stack { i64 raised; i64 err }, call, then
+    materialize Ok(payload) / Err(env.err).  Result is boxed → returns ("ptr",_).
+    [arg_pairs] are the (llty, value) pairs for the binding's own (non-env) args. *)
+let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
+  let env = fresh ctx "env" in
+  emit ctx (Printf.sprintf "%s = alloca { i64, i64 }" env);
+  let rslot = fresh ctx "envraised" in
+  emit ctx (Printf.sprintf
+    "%s = getelementptr { i64, i64 }, ptr %s, i64 0, i32 0" rslot env);
+  emit ctx (Printf.sprintf "store i64 0, ptr %s" rslot);
+  let t_ok = ok_payload_ty ret_tir in
+  let payload_llty = llvm_ret_ty t_ok in
+  let call_args =
+    String.concat ", "
+      (Printf.sprintf "ptr %s" env
+       :: List.map (fun (ty, v) -> Printf.sprintf "%s %s" ty v) arg_pairs) in
+  let payload =
+    if payload_llty = "void" then begin
+      emit ctx (Printf.sprintf "call void @%s(%s)" fname call_args); "0"
+    end else begin
+      let p = fresh ctx "okpay" in
+      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" p payload_llty fname call_args); p
+    end in
+  let raisedv = fresh ctx "raised" in
+  emit ctx (Printf.sprintf "%s = load i64, ptr %s" raisedv rslot);
+  let cond = fresh ctx "rcond" in
+  emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" cond raisedv);
+  let err_lbl = fresh_block ctx "raise_err" in
+  let ok_lbl  = fresh_block ctx "raise_ok" in
+  let mrg_lbl = fresh_block ctx "raise_merge" in
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cond err_lbl ok_lbl);
+  (* Err: materialize Err(env.err) *)
+  emit_label ctx err_lbl;
+  let errslot = fresh ctx "enverr" in
+  emit ctx (Printf.sprintf
+    "%s = getelementptr { i64, i64 }, ptr %s, i64 0, i32 1" errslot env);
+  let errv = fresh ctx "errv" in
+  emit ctx (Printf.sprintf "%s = load i64, ptr %s" errv errslot);
+  let eres = fresh ctx "eres" in
+  emit ctx (Printf.sprintf "%s = call ptr @march_err(i64 %s)" eres errv);
+  emit_term ctx (Printf.sprintf "br label %%%s" mrg_lbl);
+  (* Ok: convert the bare payload to a march_value, then Ok(payload) *)
+  emit_label ctx ok_lbl;
+  let okval = (match t_ok with
+    | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
+      (* tag a raw scalar into a march_value: (v << 1) | 1 *)
+      let sh = fresh ctx "oksh" in
+      emit ctx (Printf.sprintf "%s = shl i64 %s, 1" sh payload);
+      let tg = fresh ctx "oktag" in
+      emit ctx (Printf.sprintf "%s = or i64 %s, 1" tg sh); tg
+    | Tir.TFloat ->
+      failwith (Printf.sprintf
+        "raises extern `%s`: Result(Float, _) Ok payload is not yet supported" fname)
+    | _ ->
+      (* heap/String/record/variant: the payload word is already a value *)
+      let pi = fresh ctx "okp2i" in
+      emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" pi payload); pi) in
+  let ores = fresh ctx "ores" in
+  emit ctx (Printf.sprintf "%s = call ptr @march_ok(i64 %s)" ores okval);
+  emit_term ctx (Printf.sprintf "br label %%%s" mrg_lbl);
+  emit_label ctx mrg_lbl;
+  let result = fresh ctx "raise_r" in
+  emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
+              result eres err_lbl ores ok_lbl);
+  ("ptr", result)
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -2806,7 +2886,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       Buffer.add_string ctx.preamble
         (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
     end;
-    if Hashtbl.mem ctx.blocking_externs resolved_name then begin
+    if Hashtbl.mem ctx.raises_externs resolved_name then
+      emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
+    else if Hashtbl.mem ctx.blocking_externs resolved_name then begin
       (* Blocking dispatch: marshal args into a stack i64 array and run the C
          call on an OS thread via march_run_blocking_*, while the green thread
          cooperatively yields.  Int/ptr args only (GP-register trampoline). *)
@@ -2883,6 +2965,24 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
       (ret_ty, r)
     end
+
+  (* ── ECallPtr to a `raises` extern: env-routed error wrapper ─────────── *)
+  (* defun may emit extern calls as ECallPtr.  Catch `raises` externs here —
+     before the generic global-call arms — so they get the march_env* wrapper
+     (the EApp path handles the same via emit_raises_wrapper). *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when (not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)))
+      && (let rn = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+            | Some q -> q | None -> f.Tir.v_name in
+          Hashtbl.mem ctx.raises_externs rn) ->
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    let rn = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+      | Some q -> q | None -> f.Tir.v_name in
+    let fname = match Hashtbl.find_opt ctx.extern_map rn with
+      | Some c_name -> c_name | None -> mangle_extern rn in
+    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
+      | Some t -> t | None -> fn_ret_tir f.Tir.v_ty in
+    emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs
 
   (* ── ECallPtr where callee is an unqualified cross-module user function ── *)
   (* lower.ml may emit function references without their module prefix (e.g.
@@ -5239,6 +5339,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   List.iter (fun (ed : Tir.extern_decl) ->
       Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
       if ed.ed_blocking then Hashtbl.replace ctx.blocking_externs ed.ed_march_name ();
+      if ed.ed_raises then Hashtbl.replace ctx.raises_externs ed.ed_march_name ();
       Hashtbl.replace ctx.top_fns ed.ed_march_name true;
       Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret;
       Hashtbl.replace ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params)
@@ -5294,8 +5395,13 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   emit_preamble ~target out;
   (* Emit user-defined extern function declarations *)
   List.iter (fun (ed : Tir.extern_decl) ->
-      let ret_llty = llvm_ret_ty ed.ed_ret in
+      (* A `raises` binding takes a hidden march_env* first param and returns the
+         bare Ok payload (T of Result(T,E)); the call site wraps it into Ok/Err. *)
+      let ret_llty =
+        if ed.ed_raises then llvm_ret_ty (ok_payload_ty ed.ed_ret)
+        else llvm_ret_ty ed.ed_ret in
       let param_lltys = List.map (fun _t -> "ptr") ed.ed_params in
+      let param_lltys = if ed.ed_raises then "ptr" :: param_lltys else param_lltys in
       let params_str = String.concat ", " (List.mapi (fun i ty ->
           Printf.sprintf "%s %%%d" ty i) param_lltys) in
       Buffer.add_string out
@@ -5306,6 +5412,12 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     Buffer.add_string out
       "declare i64 @march_run_blocking_i(ptr, ptr, i32)\n\
        declare double @march_run_blocking_d(ptr, ptr, i32)\n";
+  (* Error-protocol Ok/Err constructors, if any extern is `raises` (the call-site
+     wrapper calls them; march_raise itself is called only from the C binding). *)
+  if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_raises) m.Tir.tm_externs then
+    Buffer.add_string out
+      "declare ptr @march_ok(i64)\n\
+       declare ptr @march_err(i64)\n";
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 
