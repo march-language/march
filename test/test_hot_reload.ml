@@ -166,6 +166,32 @@ let test_no_flag_keeps_direct_call () =
   check "direct call to MyApp.B preserved" true
     (contains ir "call i64 @MyApp.B(")
 
+(* MyApp.A → MyApp.B (boundary), plus a bare `main` so @main is emitted. *)
+let boundary_module_with_main () : Tir.tir_module =
+  let m = two_boundary_module () in
+  let main : Tir.fn_def =
+    { fn_name = "main"; fn_params = []; fn_ret_ty = Tir.TInt;
+      fn_body = Tir.EApp ({ Tir.v_name = "MyApp.A";
+                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []) } in
+  { m with Tir.tm_fns = m.Tir.tm_fns @ [main] }
+
+let test_startup_registers_boundary_fns () =
+  let ir = LE.emit_module ~hot_reload:(Some (HR.default_config "MyApp"))
+             (boundary_module_with_main ()) in
+  check "table sized to the 2 boundary fns" true
+    (contains ir "call void @march_dispatch_init(i32 2)");
+  check "MyApp.A published" true
+    (contains ir "@march_dispatch_publish(i32 0, ptr @MyApp.A");
+  check "MyApp.B published" true
+    (contains ir "@march_dispatch_publish(i32 1, ptr @MyApp.B");
+  check "bare main not published (not on boundary)" false
+    (contains ir "ptr @main,")
+
+let test_no_startup_registration_without_flag () =
+  let ir = LE.emit_module (boundary_module_with_main ()) in
+  check "no dispatch_init when flag off" false
+    (contains ir "call void @march_dispatch_init")
+
 (* ── inliner no-inline guard for boundary edges ───────────────────────────── *)
 
 let a_body_after_inline (cfg : HR.config option) : Tir.expr =
@@ -213,6 +239,8 @@ let () =
     ("llvm_emit", [
       Alcotest.test_case "hot_reload emits dispatch call"    `Quick test_hot_reload_emits_dispatch_call;
       Alcotest.test_case "no flag keeps direct call"         `Quick test_no_flag_keeps_direct_call;
+      Alcotest.test_case "startup registers boundary fns"    `Quick test_startup_registers_boundary_fns;
+      Alcotest.test_case "no startup registration off"       `Quick test_no_startup_registration_without_flag;
     ]);
     ("inline_guard", [
       Alcotest.test_case "boundary callee not inlined"       `Quick test_inliner_skips_boundary_callee;
