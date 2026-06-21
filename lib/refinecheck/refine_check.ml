@@ -131,24 +131,43 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
   in
   { param_names; refined }
 
-let rec collect_sigs (tbl : sigs) (prefix : string) (decls : A.decl list) : unit =
+(* Gather every refined function as (bare_name, qualified_name option, sig). *)
+let collect_sig_list (decls : A.decl list) : (string * string option * fn_sig) list =
+  let acc = ref [] in
+  let rec go prefix decls =
+    List.iter
+      (function
+        | A.DFn (fd, _) ->
+          let sg =
+            match fd.A.fn_clauses with
+            | c :: _ -> sig_of_clause c
+            | [] -> { param_names = []; refined = [] }
+          in
+          if sg.refined <> [] then
+            let q = if prefix = "" then None else Some (prefix ^ "." ^ fd.A.fn_name.A.txt) in
+            acc := (fd.A.fn_name.A.txt, q, sg) :: !acc
+        | A.DMod (name, _, ds, _) ->
+          go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
+        | _ -> ())
+      decls
+  in
+  go "" decls;
+  !acc
+
+(* Build the lookup table.  Qualified names are always registered (unique).  A
+   bare name is registered ONLY when a single definition uses it — colliding
+   bare names across modules are dropped, so an ambiguous bare call is
+   conservatively skipped rather than checked against the wrong predicate. *)
+let build_table (lst : (string * string option * fn_sig) list) : sigs =
+  let tbl : sigs = Hashtbl.create 64 in
+  List.iter (fun (_, q, sg) -> match q with Some qn -> Hashtbl.replace tbl qn sg | None -> ()) lst;
+  let counts = Hashtbl.create 64 in
   List.iter
-    (function
-      | A.DFn (fd, _) ->
-        let sg =
-          match fd.A.fn_clauses with
-          | c :: _ -> sig_of_clause c
-          | [] -> { param_names = []; refined = [] }
-        in
-        if sg.refined <> [] then begin
-          Hashtbl.replace tbl fd.A.fn_name.A.txt sg;
-          if prefix <> "" then Hashtbl.replace tbl (prefix ^ "." ^ fd.A.fn_name.A.txt) sg
-        end
-      | A.DMod (name, _, ds, _) ->
-        let p = if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt in
-        collect_sigs tbl p ds
-      | _ -> ())
-    decls
+    (fun (b, _, _) ->
+      Hashtbl.replace counts b (1 + (try Hashtbl.find counts b with Not_found -> 0)))
+    lst;
+  List.iter (fun (b, _, sg) -> if Hashtbl.find counts b = 1 then Hashtbl.replace tbl b sg) lst;
+  tbl
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
 let reflect_scalar (sc : scope) (actual : A.expr)
@@ -371,12 +390,19 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
+    (* Thread BOTH the path context and the refined-local scope left-to-right:
+       a `let` extends the scope; an `assert(p)` (used as an `assume`) extends
+       the path so a later call can rely on p. *)
     ignore
       (List.fold_left
-         (fun sc e ->
+         (fun (path, sc) e ->
            visit ~root errctx tbl path sc e;
-           match e with A.ELet (b, _) -> scope_add_binding sc b | _ -> sc)
-         sc es)
+           let path' =
+             match e with A.EAssert (p, _) -> (p, false) :: path | _ -> path
+           in
+           let sc' = match e with A.ELet (b, _) -> scope_add_binding sc b | _ -> sc in
+           (path', sc'))
+         (path, sc) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
@@ -425,8 +451,7 @@ let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
-  let tbl : sigs = Hashtbl.create 64 in
-  collect_sigs tbl "" m.A.mod_decls;
+  let tbl = build_table (collect_sig_list m.A.mod_decls) in
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [tbl]. *)
   visit_decls ~root errctx tbl m.A.mod_decls

@@ -815,7 +815,13 @@ let generalize level ty =
        Level 0 is used so these sentinel refs are never themselves
        generalized or lowered by occurs-check level adjustments. *)
     let refresh = List.map (fun id -> (id, ref (Unbound (id, 0)))) !ids in
-    let rec copy t = match repr t with
+    let rec copy t =
+      (* Preserve a refinement wrapper through generalization so the predicate
+         survives into the scheme; only the base is copied. *)
+      match t with
+      | TRefine (base, b, p) -> TRefine (copy base, b, p)
+      | _ ->
+      match repr t with
       | TVar r ->
         (match !r with
          | Unbound (id, _) ->
@@ -830,7 +836,7 @@ let generalize level ty =
       | TLin   (l, t)      -> TLin   (l, copy t)
       | TNatOp (op, a, b)  -> TNatOp (op, copy a, copy b)
       | TChan  _           -> t   (* session_ty has no polymorphic variables *)
-      | TRefine (base, _, _) -> copy base  (* unreachable: repr strips it (increment 1) *)
+      | TRefine (base, _, _) -> copy base  (* unreachable: a behind-a-link refinement, repr-stripped *)
       | TNat _ | TError    -> t
     in
     Poly (!ids, [], copy ty)
@@ -844,7 +850,13 @@ let instantiate level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
-    let rec inst t = match repr t with
+    let rec inst t =
+      (* Preserve a refinement wrapper through instantiation so call sites see
+         the predicate on the parameter type; only the base is instantiated. *)
+      match t with
+      | TRefine (base, b, p) -> TRefine (inst base, b, p)
+      | _ ->
+      match repr t with
       | TVar r ->
         (match !r with
          | Unbound (id, _) ->
@@ -859,7 +871,7 @@ let instantiate level env = function
       | TLin   (l, t)      -> TLin   (l, inst t)
       | TNatOp (op, a, b)  -> TNatOp (op, inst a, inst b)
       | TChan  _           -> t   (* session_ty has no polymorphic variables *)
-      | TRefine (base, _, _) -> inst base  (* unreachable: repr strips it (increment 1) *)
+      | TRefine (base, _, _) -> inst base  (* unreachable: a behind-a-link refinement, repr-stripped *)
       | TNat _ | TError    -> t
     in
     let inst_cs = List.map (function

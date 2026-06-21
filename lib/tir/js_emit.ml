@@ -41,10 +41,23 @@ let with_indent ctx f =
 
 (** March qualified names use '.'; JS identifiers cannot. Replace with '$'.
     E.g. "List.map" -> "List$map". *)
+let js_reserved = [
+  (* strict-mode reserved identifiers *)
+  "eval"; "arguments"; "implements"; "interface"; "let"; "package";
+  "private"; "protected"; "public"; "static"; "yield";
+  (* keywords *)
+  "break"; "case"; "catch"; "class"; "const"; "continue"; "debugger";
+  "default"; "delete"; "do"; "else"; "export"; "extends"; "finally";
+  "for"; "function"; "if"; "import"; "in"; "instanceof"; "new"; "return";
+  "super"; "switch"; "this"; "throw"; "try"; "typeof"; "var"; "void";
+  "while"; "with";
+]
+
 let mangle name =
   let b = Bytes.of_string name in
   Bytes.iteri (fun i c -> if c = '.' then Bytes.set b i '$') b;
-  Bytes.to_string b
+  let s = Bytes.to_string b in
+  if List.mem s js_reserved then "_" ^ s else s
 
 (** Constructor key in EAlloc is "TypeName.CtorName"; return just "CtorName". *)
 let bare_ctor key =
@@ -263,7 +276,13 @@ and emit_val_impl ctx expr =
     emit ctx " })"
 
   | Tir.EField (a, field) ->
-    emit_atom ctx a; emit ctx "."; emit ctx field
+    emit_atom ctx a; emit ctx ".";
+    (* Closure free-variable fields are named "$fvN" in TIR but stored as "_N"
+       in the JS closure struct (EAlloc uses positional _0/_1/_2 ... layout) *)
+    if String.length field > 3 && String.sub field 0 3 = "$fv" then
+      emit ctx ("_" ^ String.sub field 3 (String.length field - 3))
+    else
+      emit ctx field
 
   | Tir.EUpdate (a, updates) ->
     emit ctx "({ ..."; emit_atom ctx a;
@@ -285,9 +304,17 @@ and emit_val_impl ctx expr =
       emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
     emit ctx " }"
 
-  (* RC nodes are no-ops in JS *)
-  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-  | Tir.EFree _ | Tir.EReuse _ ->
+  (* EReuse(old, ty, args): Perceus reuses old's memory — in GC'd JS just alloc fresh *)
+  | Tir.EReuse (_, ty, args) ->
+    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+    emit ctx (Printf.sprintf "{ $: %S" tag);
+    List.iteri (fun i a ->
+      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
+    emit ctx " }"
+
+  (* EIncRC returns its atom; other RC ops are pure side-effects → undefined *)
+  | Tir.EIncRC a | Tir.EAtomicIncRC a -> emit_atom ctx a
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ ->
     emit ctx "undefined"
 
   (* Complex forms in value position: wrap in IIFE *)
@@ -298,8 +325,14 @@ and emit_val_impl ctx expr =
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "})()"
 
-  | Tir.ECallPtr _ ->
-    failwith "js_emit: ECallPtr found — Defun must not run before the JS target"
+  | Tir.ECallPtr (f, args) ->
+    (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
+       Apply fn ABI: apply(clo, args...) — pass closure as first argument. *)
+    emit_atom ctx f;
+    emit ctx "._0(";
+    emit_atom ctx f;
+    List.iter (fun a -> emit ctx ", "; emit_atom ctx a) args;
+    emit ctx ")"
 
 (* ── Statement emission ──────────────────────────────────────────── *)
 
@@ -336,9 +369,18 @@ and emit_stmts_impl ctx expr =
   | Tir.ECase _ ->
     emit_case ctx None expr
 
-  (* RC no-ops *)
+  (* RC side-effects in terminal position — no side effects needed in JS *)
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
-  | Tir.EFree _ | Tir.EReuse _ -> ()
+  | Tir.EFree _ -> ()
+
+  (* EReuse in terminal position: Perceus reuses old's slot — in JS emit a fresh object *)
+  | Tir.EReuse (_, ty, args) ->
+    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
+    emit_indent ctx;
+    emit ctx (Printf.sprintf "return { $: %S" tag);
+    List.iteri (fun i a ->
+      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
+    emit ctx " };\n"
 
   | e ->
     emit_indent ctx;
@@ -515,6 +557,22 @@ let emit_eq_fn ctx (td : Tir.type_def) =
 
 (* ── Module emission ─────────────────────────────────────────────── *)
 
+(* Closure-protocol wrappers for builtins used as first-class values.
+   When a builtin is captured in a closure, Defun calls it via f._0(f, args...).
+   These objects satisfy that protocol while also being directly callable.
+   Inline call sites still emit the faster form (String(x), etc.). *)
+let builtin_wrappers = {|
+const int_to_string   = { _0: ($_, x) => String(x) };
+const bool_to_string  = { _0: ($_, x) => String(x) };
+const int_to_float    = { _0: ($_, x) => x };
+const float_to_int    = { _0: ($_, x) => Math.trunc(x) };
+const float_truncate  = { _0: ($_, x) => Math.trunc(x) };
+const string_is_empty = { _0: ($_, x) => x === "" };
+const not_bool        = { _0: ($_, x) => !x };
+const negate_int      = { _0: ($_, x) => -x };
+const negate_float    = { _0: ($_, x) => -x };
+|}
+
 let emit_module (m : Tir.tir_module) : string =
   let ctx = create_ctx () in
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
@@ -522,7 +580,15 @@ let emit_module (m : Tir.tir_module) : string =
   (* Top-level functions *)
   List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
   let fns_js = Buffer.contents ctx.buf in
-  (* Build runtime imports *)
+  (* Runtime-dependent builtin wrappers need these in the import regardless of
+     whether the compiled code already uses them directly. *)
+  Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
+  Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
+  let runtime_wrappers =
+    "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
+    "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
+    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n"
+  in
   let imports =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
     let sorted = List.sort String.compare names in
@@ -531,14 +597,16 @@ let emit_module (m : Tir.tir_module) : string =
       "import { " ^ String.concat ", " sorted
       ^ " } from \"./march_runtime.mjs\";\n\n"
   in
-  (* Build ES exports *)
+  (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
-  if has_main then
+  if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
+    Buffer.add_string export_buf "main();\n"
+  end;
   List.iter (fun name ->
     if name <> "main" then
       Buffer.add_string export_buf
         (Printf.sprintf "export { %s };\n" (mangle name))
   ) m.Tir.tm_exports;
-  imports ^ fns_js ^ Buffer.contents export_buf
+  imports ^ builtin_wrappers ^ runtime_wrappers ^ fns_js ^ Buffer.contents export_buf
