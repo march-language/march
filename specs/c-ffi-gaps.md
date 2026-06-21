@@ -110,16 +110,20 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Other languages / direction
 
-- **Rust: the manual C-ABI path works today; the ergonomic `#[march]` layer is
-  future.** A Rust `staticlib` crate with `extern "C"` functions that call the
-  `march_*` ABI binds cleanly through `forge.toml`'s `[ffi] link` — proven and
-  documented in `specs/c-ffi-rust-manual.md` (a real cargo crate: `add`/`shout`/
-  `parse` round-trip via March, both Result arms). Still missing: the `march`
-  crate (`#[march]`, `#[derive(Encoder/Decoder)]`, `ResourceArc`, panic→Err) and
-  `forge add-rust` / `[[ffi.rust]]` cargo integration. The OCaml layer is also
-  future. (Record/variant codecs now work for C — Phase 9 accessors + the
-  `forge ffi gen-c` generators; the Rust `#[derive]` codecs are the direct
-  analog and reuse this same ABI.)
+- **Rust: the ergonomic `march` crate — DONE.** `rust/march` (+ `rust/march-macro`)
+  is the Rustler analog: `#[march]` generates the `extern "C"` shim
+  (decode → `catch_unwind` → encode; `Result` routes `Err`/panic via `march_err`),
+  `#[derive(Encoder, Decoder)]` marshals structs↔records / enums↔variants,
+  `ResourceArc<T>` wraps native state behind a March resource, and `march::init!`
+  generates the March extern block. `forge ffi add-rust <name>` scaffolds a
+  binding crate. Proven end-to-end (`scripts/verify-rust-ffi.sh`,
+  `test/native/rust_ffi/`). The manual `extern "C"` path
+  (`specs/c-ffi-rust-manual.md`) still works for zero-extra-crate bindings. Full
+  doc: `specs/c-ffi-rust-layer.md`. Remaining: `f64` inside `Result`/`Option`/
+  fields (top-level f64 works), a `consume`-and-free `ResourceArc` mode (the
+  borrow/net-zero mode ships; consume would leak a ref), auto cargo build +
+  extern-block generation inside `forge build` (manual today), publishing the
+  `march` crate (path-only), and `[[ffi.rust]]`. The OCaml layer is still future.
 - **No native→March callbacks (upcalls).** Bindings cannot call back into March
   closures. Would need `march_call(env, fn, args…)` and passing closures across
   the boundary as resources (spec §19). Future.

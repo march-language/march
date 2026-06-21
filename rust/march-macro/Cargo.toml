@@ -1,0 +1,13 @@
+[package]
+name = "march-macro"
+version = "0.1.0"
+edition = "2021"
+description = "Proc-macros for the March Rust FFI layer (#[march], #[derive(Encoder, Decoder)], init!)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
