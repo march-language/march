@@ -8,10 +8,15 @@ export function march_print(s) {
   process.stdout.write(String(s));
 }
 
-/** Float → string matching March semantics (no trailing .0 for integers) */
+/** Float → string matching C's %g (6 significant digits, no trailing zeros) */
 export function march_float_to_string(f) {
-  if (Number.isInteger(f)) return f.toFixed(1);
-  return String(f);
+  if (!isFinite(f)) return String(f);
+  const s = f.toPrecision(6);
+  // Remove trailing zeros and unnecessary decimal point (like C's %g)
+  if (s.includes('e')) {
+    return s.replace(/\.?0+(e)/, '$1');
+  }
+  return s.replace(/\.?0+$/, '');
 }
 
 /** String byte length (UTF-8 bytes, matching the native backend) */
