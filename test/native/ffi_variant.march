@@ -1,0 +1,26 @@
+-- FFI Phase 9: record/variant codecs. A C binding builds a March ADT
+-- (Shape: Circle/Rect via march_make_variant) and a record (Point via
+-- march_make_record); March pattern-matches the C-built variant and
+-- field-accesses the C-built record — proving aggregates round-trip in.
+mod Test do
+  needs Ffi
+  type Shape = Circle(Int) | Rect(Int, Int)
+  type Point = { x : Int, y : Int }
+  extern "rt" : Cap(Ffi) do
+    fn mk_circle(r: Int): Shape = "ffi_test_mk_circle"
+    fn mk_rect(w: Int, h: Int): Shape = "ffi_test_mk_rect"
+    fn mk_point(x: Int, y: Int): Point = "ffi_test_mk_point"
+  end
+  fn area(s: Shape) : Int do
+    match s do
+      Circle(r) -> 3 * r * r
+      Rect(w, h) -> w * h
+    end
+  end
+  fn main() : Unit do
+    println(int_to_string(area(mk_circle(5))))    -- Circle(5)  -> 75
+    println(int_to_string(area(mk_rect(4, 6))))   -- Rect(4,6)  -> 24
+    let p = mk_point(3, 4)
+    println(int_to_string(p.x + p.y))             -- {x:3,y:4}  -> 7
+  end
+end

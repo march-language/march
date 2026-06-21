@@ -715,6 +715,55 @@ let test_ffi_gen_c () =
   Alcotest.(check bool) "string borrow stub" true (contains "march_str_borrow(name)");
   Alcotest.(check bool) "includes the ABI header" true (contains "march_ffi.h")
 
+let test_ffi_gen_c_codecs () =
+  let dir = Filename.temp_file "march_ffi_codec" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let mfile = Filename.concat dir "c.march" in
+  let oc = open_out mfile in
+  output_string oc
+    "mod C do\n\
+    \  needs Ffi\n\
+    \  type Point = { x : Int, y : Int }\n\
+    \  type Shape = Circle(Int) | Rect(Int, Int)\n\
+    \  type Labeled = { name : String, at : Point, kind : Shape }\n\
+    \  extern \"demo\" : Cap(Ffi) do\n\
+    \    fn area(s: Shape): Int = \"demo_area\"\n\
+    \    fn describe(l: Labeled): String = \"demo_describe\"\n\
+    \    fn origin(): Point = \"demo_origin\"\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let cfile = Filename.concat dir "out.c" in
+  (match Cmd_ffi.run ~file:mfile ~out:(Some cfile) with
+   | Error e -> Alcotest.failf "gen-c failed: %s" e
+   | Ok () -> ());
+  let ic = open_in cfile in
+  let body = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let contains sub =
+    let n = String.length sub and h = String.length body in
+    let rec go i = i + n <= h && (String.sub body i n = sub || go (i+1)) in go 0 in
+  (* mirror structs *)
+  Alcotest.(check bool) "record mirror struct" true (contains "} Point_c;");
+  Alcotest.(check bool) "variant tagged union" true (contains "    int32_t tag;");
+  Alcotest.(check bool) "variant ctor field tuple" true (contains "struct { int64_t f0; int64_t f1; } Rect;");
+  (* decode / encode *)
+  Alcotest.(check bool) "variant decode reads tag" true (contains "o.tag = march_variant_tag(v);");
+  Alcotest.(check bool) "record encode interns shape" true (contains "march_make_record(\"x:i;y:i;\", 2, f)");
+  Alcotest.(check bool) "variant encode builds" true (contains "march_make_variant(1, 2, f)");
+  (* nesting: Labeled decode recurses into Point/Shape codecs *)
+  Alcotest.(check bool) "nested decode recurses" true (contains "march_decode_Point(march_record_field");
+  Alcotest.(check bool) "nested encode recurses" true (contains "march_encode_Shape(o.kind)");
+  (* topo order: Point defined before Labeled that embeds it *)
+  let idx sub =
+    let n = String.length sub and h = String.length body in
+    let rec go i = if i + n > h then -1 else if String.sub body i n = sub then i else go (i+1) in go 0 in
+  Alcotest.(check bool) "nested type defined after its members" true
+    (idx "} Point_c;" < idx "} Labeled_c;");
+  (* shim wiring: codec param decoded, codec return encoded *)
+  Alcotest.(check bool) "shim decodes codec param" true (contains "march_decode_Labeled(l_v)");
+  Alcotest.(check bool) "shim encodes codec return" true (contains "return march_encode_Point(result)")
+
 let test_ffi_gen_c_no_extern () =
   let mfile = Filename.temp_file "march_noffi" ".march" in
   let oc = open_out mfile in
@@ -836,6 +885,7 @@ let () =
     ];
     "ffi", [
       Alcotest.test_case "gen-c: extern block -> C skeleton" `Quick test_ffi_gen_c;
+      Alcotest.test_case "gen-c: record/variant codecs"      `Quick test_ffi_gen_c_codecs;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
     ];
   ]
