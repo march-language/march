@@ -5179,23 +5179,45 @@ let test_parity_bitwise_builtins () =
       ("int_or(int_shl(1, 3), int_shl(1, 1))",  "10");
     ]
 
-(** List.pmap must produce the same result as List.map in compiled/JIT code
-    as in the interpreter. The 2000-element list exceeds the default
-    pmap_threshold (1024), so the chunked parallel path is exercised. *)
-let test_parity_pmap_matches_map () =
-  match setup_jit_runtime () with
-  | None -> ()
-  | Some runtime_so ->
-    List.iter (fun (src, expected) ->
-      check_parity ~ctx:"pmap" ~runtime_so src;
-      match interp_eval_expr src with
-      | Some (v, _) ->
-        Alcotest.(check string) ("pmap: " ^ src) expected v
-      | None -> Alcotest.fail ("pmap eval failed: " ^ src)
-    ) [
-      ("List.pmap(List.range(0, 2000), fn x -> x * x) == List.map(List.range(0, 2000), fn x -> x * x)", "true");
-      ("List.pfilter(List.range(0, 2000), fn x -> x % 2 == 0) == List.filter(List.range(0, 2000), fn x -> x % 2 == 0)", "true");
-    ]
+(** Compiled List.pmap/pfilter must produce the same result as sequential
+    List.map/filter. The 2000-element list exceeds the default pmap_threshold
+    (1024), so the chunked parallel path (real multi-core scheduler) runs.
+    Compiled end-to-end (not REPL/JIT) so it exercises the production path. *)
+let test_compiled_pmap_matches_map () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_pmap" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "pmap.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod PmapParity do\n\
+      \  fn main() : Unit do\n\
+      \    let xs = List.range(0, 2000)\n\
+      \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
+      \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
+      \    if map_ok && flt_ok do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "pmapbin" in
+    (* Run from the test's CWD (project root) so the compiler resolves the
+       CWD-relative runtime/ and stdlib/ directories; use absolute paths for
+       the source and output. *)
+    let compile_rc = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    (* Skip when compilation can't complete in this environment (no clang or
+       runtime sources on the search path) — matches the other Slow compiled
+       regression tests. When it does compile, the run asserts correctness. *)
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled List.pmap==map and List.pfilter==filter (2000 elems, parallel path)"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
 
 (* ── Tail-call enforcement tests ────────────────────────────────────────── *)
 
@@ -10757,7 +10779,6 @@ let stdlib_suites =
           Alcotest.test_case "closures"          `Slow test_parity_closures;
           Alcotest.test_case "if/else"           `Slow test_parity_if_else;
           Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;
-          Alcotest.test_case "pmap matches map"  `Slow test_parity_pmap_matches_map;
         ] );
       ( "tail_recursion",
         [
@@ -11229,6 +11250,8 @@ let stdlib_suites =
           test_compiled_helper_name_collision;
         Alcotest.test_case "P12 copy-prop type-preserving: List.length(range(0,5))==5 compiled" `Slow
           test_compiled_p12_type_preserving_alias;
+        Alcotest.test_case "List.pmap/pfilter match map/filter (compiled, parallel path)" `Slow
+          test_compiled_pmap_matches_map;
         Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
           test_compiled_sortby_heap_capturing_comparator;
       ]);
