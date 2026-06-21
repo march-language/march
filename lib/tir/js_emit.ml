@@ -1,11 +1,17 @@
 (** March TIR → ES module (JavaScript) emission.
-    Consumes post-Mono TIR. Defun and Perceus must NOT have run.
+    Consumes the full post-pipeline TIR (after Mono, Fusion, Defun, Known_call,
+    Beta_adt, Join_points, Simplify, Perceus, Escape, Opt).
 
     Constructor layout: {$: "CtorName", _0: field0, _1: field1, ...}
-    The $ field holds the constructor tag; $ is not a valid March identifier.
+    Closure layout:     {$: "$Clo_name", _0: apply_fn, _1: fv1, _2: fv2, ...}
+    Tuple layout:       {_0: a, _1: b, ...}
+    The $ field holds the constructor/closure tag.
 
-    Runtime shim (march_runtime.mjs) must be co-located with the output .mjs.
-    M4 will add --runtime-dir to control placement. *)
+    Every user-defined function emits both a plain JS function (for direct
+    known-call sites) and a $clo closure-protocol object (for first-class use
+    via ECallPtr's f._0(f, args) dispatch).
+
+    Runtime shim (march_runtime.mjs) must be co-located with the output .mjs. *)
 
 (* ── Context ─────────────────────────────────────────────────────── *)
 
@@ -201,8 +207,7 @@ and emit_val_impl ctx expr =
       emit ctx ")"
     | _ ->
       begin match name, args with
-      | "neg_int",   [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
-      | "neg_float", [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
+      | ("neg_int" | "neg_float" | "negate"), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | "not_bool",  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
         emit ctx "Math.trunc("; emit_atom ctx a;
@@ -274,6 +279,27 @@ and emit_val_impl ctx expr =
         List.iteri (fun i a ->
           if i > 0 then emit ctx ", "; emit_atom ctx a) args;
         emit ctx ")"
+      (* Math builtins → JS Math.* *)
+      | "math_sqrt",  [a] -> emit ctx "Math.sqrt(";  emit_atom ctx a; emit ctx ")"
+      | "math_cbrt",  [a] -> emit ctx "Math.cbrt(";  emit_atom ctx a; emit ctx ")"
+      | "math_sin",   [a] -> emit ctx "Math.sin(";   emit_atom ctx a; emit ctx ")"
+      | "math_cos",   [a] -> emit ctx "Math.cos(";   emit_atom ctx a; emit ctx ")"
+      | "math_tan",   [a] -> emit ctx "Math.tan(";   emit_atom ctx a; emit ctx ")"
+      | "math_asin",  [a] -> emit ctx "Math.asin(";  emit_atom ctx a; emit ctx ")"
+      | "math_acos",  [a] -> emit ctx "Math.acos(";  emit_atom ctx a; emit ctx ")"
+      | "math_atan",  [a] -> emit ctx "Math.atan(";  emit_atom ctx a; emit ctx ")"
+      | "math_atan2", [a; b] ->
+        emit ctx "Math.atan2("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "math_sinh",  [a] -> emit ctx "Math.sinh(";  emit_atom ctx a; emit ctx ")"
+      | "math_cosh",  [a] -> emit ctx "Math.cosh(";  emit_atom ctx a; emit ctx ")"
+      | "math_tanh",  [a] -> emit ctx "Math.tanh(";  emit_atom ctx a; emit ctx ")"
+      | "math_exp",   [a] -> emit ctx "Math.exp(";   emit_atom ctx a; emit ctx ")"
+      | "math_exp2",  [a] -> emit ctx "Math.pow(2, "; emit_atom ctx a; emit ctx ")"
+      | "math_log",   [a] -> emit ctx "Math.log(";   emit_atom ctx a; emit ctx ")"
+      | "math_log2",  [a] -> emit ctx "Math.log2(";  emit_atom ctx a; emit ctx ")"
+      | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
+      | "math_pow",   [a; b] ->
+        emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       (* General call *)
       | _, _ ->
         emit ctx (mangle name ^ "(");
