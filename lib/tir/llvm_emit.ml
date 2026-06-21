@@ -5226,6 +5226,30 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
            then Some fn.Tir.fn_name else None)
       |> Hot_reload.Name_table.build
   in
+  (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
+     dispatch table and publishes each boundary function as its NATIVE baseline
+     version. impl_hash is null for the baseline (the reload server stamps real
+     hashes on activation); see runtime/march_dispatch.c. *)
+  let hr_setup =
+    match hot_reload with
+    | None -> ""
+    | Some cfg ->
+      let n = Hot_reload.Name_table.count hr_names in
+      if n = 0 then "" else begin
+        let b = Buffer.create 256 in
+        Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" n;
+        List.iter (fun (fn : Tir.fn_def) ->
+          if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name) then
+            match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
+            | Some id ->
+              Printf.bprintf b
+                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, ptr null, i8 0)\n"
+                id (mangle_extern fn.Tir.fn_name)
+            | None -> ()
+        ) m.Tir.tm_fns;
+        Buffer.contents b
+      end
+  in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
   (* Record shape metadata requires the native runtime (march_extras.c);
      the WASM runtime does not provide march_record_set_shape. *)
@@ -5526,9 +5550,10 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
              declare void @march_spawn_main(ptr %%fn)\n\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+             %s\
                call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" mangled)
+               ret i32 0\n}\n" hr_setup mangled)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)
