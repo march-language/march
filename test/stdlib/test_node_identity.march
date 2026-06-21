@@ -1,0 +1,42 @@
+mod TestNodeIdentity do
+
+  describe "NodeIdentity.derive_id" do
+
+    test "is deterministic" do
+      assert (NodeIdentity.derive_id("pubkey-a") == NodeIdentity.derive_id("pubkey-a"))
+    end
+
+    test "depends on the key" do
+      assert (NodeIdentity.derive_id("pubkey-a") != NodeIdentity.derive_id("pubkey-b"))
+    end
+
+  end
+
+  describe "NodeIdentity.make" do
+
+    test "derives node_id from the pubkey and keeps name/incarnation" do
+      let id = NodeIdentity.make("alice@host", "pubkey-a", 3)
+      assert (id.name == "alice@host")
+      assert (id.incarnation == 3)
+      assert (id.node_id == NodeIdentity.derive_id("pubkey-a"))
+    end
+
+  end
+
+  describe "NodeIdentity encode/decode" do
+
+    test "round-trips an identity" do
+      let id = NodeIdentity.make("alice@host", "pubkey-a", 7)
+      assert (NodeIdentity.decode(NodeIdentity.encode(id)) == Ok(id))
+    end
+
+    test "decode rejects malformed bytes" do
+      match NodeIdentity.decode(Cons(255, Cons(255, Nil))) do
+        Ok(_) -> assert false
+        Err(_) -> assert true
+      end
+    end
+
+  end
+
+end
