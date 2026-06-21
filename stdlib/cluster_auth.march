@@ -1,0 +1,24 @@
+-- ClusterAuth: shared-secret challenge/response for the net-kernel handshake.
+--
+-- Only nodes that hold the cluster secret may join. The challenger sends a
+-- random nonce; the responder returns HMAC(secret, nonce) without ever
+-- transmitting the secret itself; the challenger recomputes and compares.
+-- This is the "shared cluster secret + signed challenge" auth from the
+-- distributed-OTP design (an alternative/complement to mutual TLS).
+mod ClusterAuth do
+
+  -- Proof that the prover holds the cluster secret, bound to this challenge
+  -- nonce: HMAC-SHA256(secret, nonce) as a lowercase hex string. The secret
+  -- itself never goes on the wire.
+  fn prove(secret : String, nonce : String) : String do
+    Crypto.hmac(:sha256, secret, nonce)
+  end
+
+  -- Verify a peer's [proof] for a nonce we issued. Recomputes the expected
+  -- HMAC and compares; a mismatch means the peer lacks the secret or replayed
+  -- a proof for a different nonce.
+  fn verify(secret : String, nonce : String, proof : String) : Bool do
+    prove(secret, nonce) == proof
+  end
+
+end
