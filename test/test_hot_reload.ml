@@ -127,6 +127,45 @@ let test_negative_id_has_no_name () =
   let t = NT.build ["a"] in
   Alcotest.(check ostr) "negative id → None" None (NT.name_of t (-1))
 
+(* ── Llvm_emit dispatch emission (IR-level) ───────────────────────────────── *)
+
+module Tir = March_tir.Tir
+module LE = March_tir.Llvm_emit
+
+let contains (haystack : string) (needle : string) : bool =
+  let nl = String.length needle and hl = String.length haystack in
+  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+(* MyApp.A() = MyApp.B();  MyApp.B() = 1  — both reloadable under "MyApp". *)
+let two_boundary_module () : Tir.tir_module =
+  let b : Tir.fn_def =
+    { fn_name = "MyApp.B"; fn_params = []; fn_ret_ty = Tir.TInt;
+      fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 1)) } in
+  let a : Tir.fn_def =
+    { fn_name = "MyApp.A"; fn_params = []; fn_ret_ty = Tir.TInt;
+      fn_body = Tir.EApp ({ Tir.v_name = "MyApp.B";
+                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []) } in
+  { Tir.tm_name = "MyApp"; tm_fns = [a; b]; tm_types = []; tm_externs = [];
+    tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+let test_hot_reload_emits_dispatch_call () =
+  let ir = LE.emit_module ~hot_reload:(Some (HR.default_config "MyApp"))
+             (two_boundary_module ()) in
+  check "boundary→boundary emits dispatch enter" true
+    (contains ir "call ptr @march_dispatch_enter");
+  check "boundary→boundary emits dispatch leave" true
+    (contains ir "call void @march_dispatch_leave");
+  check "direct call to MyApp.B is replaced" false
+    (contains ir "call i64 @MyApp.B(")
+
+let test_no_flag_keeps_direct_call () =
+  let ir = LE.emit_module (two_boundary_module ()) in  (* hot_reload defaults None *)
+  check "no dispatch enter call when flag off" false
+    (contains ir "call ptr @march_dispatch_enter");
+  check "direct call to MyApp.B preserved" true
+    (contains ir "call i64 @MyApp.B(")
+
 let () =
   Alcotest.run "hot_reload" [
     ("boundary", [
@@ -145,6 +184,10 @@ let () =
       Alcotest.test_case "boundary→stdlib is direct"         `Quick test_boundary_to_stdlib_is_direct;
       Alcotest.test_case "stdlib→boundary is direct"         `Quick test_stdlib_to_boundary_is_direct;
       Alcotest.test_case "excluded callee is direct"         `Quick test_excluded_callee_is_direct;
+    ]);
+    ("llvm_emit", [
+      Alcotest.test_case "hot_reload emits dispatch call"    `Quick test_hot_reload_emits_dispatch_call;
+      Alcotest.test_case "no flag keeps direct call"         `Quick test_no_flag_keeps_direct_call;
     ]);
     ("name_table", [
       Alcotest.test_case "ids assigned in sorted order"  `Quick test_ids_assigned_in_sorted_order;
