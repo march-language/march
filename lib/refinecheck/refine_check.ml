@@ -42,20 +42,50 @@ let rec list_len (e : A.expr) : int option =
     (match list_len tl with Some n -> Some (n + 1) | None -> None)
   | _ -> None
 
+(* Registered measure names for this compilation: the builtin `len` plus any
+   user function annotated `@[measure]`.  Set once per [check_module]. *)
+let registered_measures : string list ref = ref []
+let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measures
+
+(* Measures known to be non-negative (so `m(x) >= 0` is a sound axiom).  `len`
+   always; a user measure when its body is syntactically non-negative. *)
+let measure_nonneg : string list ref = ref []
+let is_nonneg_measure (m : string) : bool = m = "len" || List.mem m !measure_nonneg
+
+(* Conservative syntactic non-negativity of a measure body: every return path is
+   a non-negative literal, a sum/product of non-negatives, or a call to a measure
+   already known non-negative (incl. the measure itself, inductively). *)
+let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : bool =
+  let rec go e =
+    match e with
+    | A.ELit (A.LitInt n, _) -> n >= 0
+    | A.EApp (A.EVar { A.txt = ("+" | "*"); _ }, [ a; b ], _) -> go a && go b
+    | A.EApp (A.EVar { A.txt = m; _ }, [ _ ], _)
+      when m = self || m = "len" || List.mem m known -> true
+    | A.EIf (_, t, e, _) -> go t && go e
+    | A.ECond (arms, _) -> List.for_all (fun (_, b) -> go b) arms
+    | A.EMatch (_, brs, _) -> List.for_all (fun (br : A.branch) -> go br.A.branch_body) brs
+    | A.EBlock (es, _) -> (match List.rev es with last :: _ -> go last | [] -> false)
+    | _ -> false (* variables, subtraction, arbitrary calls: unknown sign *)
+  in
+  go body
+
 (* ── Translate the decidable predicate fragment to an SMT term ────────────── *)
-(* [resolve_var] maps a scalar variable to its SMT term; [resolve_len] maps a
-   measure target name to a length term.  None => outside the supported
-   Int/Bool linear fragment. *)
-let rec smt_of ~resolve_var ~resolve_len (e : A.expr) : Smt.term option =
-  let r = smt_of ~resolve_var ~resolve_len in
+(* [resolve_var] maps a scalar variable to its SMT term; [resolve_measure]
+   maps a (measure-name, argument-name) to its measure term.  None => outside
+   the supported Int/Bool linear fragment. *)
+let rec smt_of ~resolve_var ~resolve_measure (e : A.expr) : Smt.term option =
+  let r = smt_of ~resolve_var ~resolve_measure in
   let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Some (Smt.BoolLit b)
-  | A.EApp (A.EVar { A.txt = "len"; _ }, [ a ], _) ->
+  (* A measure application m(e): m(var) reflects to a consistent measure symbol;
+     len(list-literal) is computed concretely. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m ->
     (match a with
-     | A.EVar { A.txt; _ } -> resolve_len txt
-     | _ -> (match list_len a with Some n -> Some (Smt.IntLit n) | None -> None))
+     | A.EVar { A.txt = x; _ } -> resolve_measure m x
+     | _ -> if m = "len" then (match list_len a with Some n -> Some (Smt.IntLit n) | None -> None) else None)
   | A.EVar { A.txt; _ } -> resolve_var txt
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.And (x, y)) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Or (x, y)) a b
@@ -82,13 +112,29 @@ let rec pred_str (e : A.expr) : string =
   match e with
   | A.ELit (A.LitInt n, _) -> string_of_int n
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
-  | A.EApp (A.EVar { A.txt = "len"; _ }, [ a ], _) -> "len(" ^ pred_str a ^ ")"
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m -> m ^ "(" ^ pred_str a ^ ")"
   | A.EVar { A.txt; _ } -> txt
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
   | _ -> "<predicate>"
+
+(* Render an SMT counterexample model for humans: a measure symbol `m$x` is
+   shown as `m(x)`.  Empty model => "". *)
+let format_cx (model : (string * string) list) : string =
+  if model = [] then ""
+  else
+    let entry (k, v) =
+      match String.index_opt k '$' with
+      | Some i ->
+        Printf.sprintf "%s(%s) = %s"
+          (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v
+      | None -> Printf.sprintf "%s = %s" k v
+    in
+    " (counterexample: " ^ String.concat ", " (List.map entry model) ^ ")"
+
+let model_of = function Refine.Refuted m -> m | _ -> []
 
 (* ── Scope of refined locals/params: name -> (binder, predicate) ─────────── *)
 type scope = (string * (string * A.expr)) list
@@ -180,7 +226,7 @@ let reflect_scalar (sc : scope) (actual : A.expr)
        (* A refined local: carry its own refinement as an assumption. *)
        let rv n = if n = b || n = "_" then Some xc else None in
        let assumptions =
-         match smt_of ~resolve_var:rv ~resolve_len:(fun _ -> None) q with
+         match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
          | Some qa -> [ qa ]
          | None -> []
        in
@@ -191,7 +237,7 @@ let reflect_scalar (sc : scope) (actual : A.expr)
           unconstrained and the definite-failure check keeps us silent. *)
        Some (xc, [ (x, Smt.SInt) ], []))
   | _ ->
-    (match smt_of ~resolve_var:(fun _ -> None) ~resolve_len:(fun _ -> None) actual with
+    (match smt_of ~resolve_var:(fun _ -> None) ~resolve_measure:(fun _ _ -> None) actual with
      | Some t -> Some (t, [], [])
      | None -> None)
 
@@ -227,29 +273,31 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
           decls := (name, Smt.SInt) :: !decls;
           Some (Smt.Const name)
     in
-    let len_of_var x =
-      let c = Smt.Const ("len$" ^ x) in
-      decls := ("len$" ^ x, Smt.SInt) :: !decls;
-      assume := Smt.Ge (c, Smt.IntLit 0) :: !assume; (* measure axiom: len >= 0 *)
+    let measure_of_var m x =
+      let c = Smt.Const (m ^ "$" ^ x) in
+      decls := (m ^ "$" ^ x, Smt.SInt) :: !decls;
+      (* `len` is known non-negative; user measures get no axiom in v1 (sound;
+         guarded uses still discharge via the path context). *)
+      if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
       Some c
     in
-    let resolve_len name =
+    let resolve_measure m name =
       match actual_of_name name with
       | Some a -> (
-          match list_len a with
+          match (if m = "len" then list_len a else None) with
           | Some n -> Some (Smt.IntLit n)
-          | None -> (match a with A.EVar { A.txt = x; _ } -> len_of_var x | _ -> None))
-      | None -> len_of_var name (* a caller-scope list variable *)
+          | None -> (match a with A.EVar { A.txt = x; _ } -> measure_of_var m x | _ -> None))
+      | None -> measure_of_var m name (* a caller-scope variable *)
     in
     (* Translate the path conditions into assumptions (dropping any that fall
        outside the supported fragment — sound, just weaker). *)
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_len cond with
+        match smt_of ~resolve_var ~resolve_measure cond with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_len rp.pred with
+    (match smt_of ~resolve_var ~resolve_measure rp.pred with
      | None -> ()
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
@@ -272,17 +320,11 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
         | first ->
           (match Refine.discharge ~root { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
-             let cx =
-               match first with
-               | Refine.Refuted model ->
-                 model |> List.map (fun (k, v) -> k ^ " = " ^ v) |> String.concat ", "
-               | _ -> ""
-             in
              Err.error errctx ~span
                (Printf.sprintf
-                  "refinement violation: argument does not satisfy precondition `%s`%s"
-                  (pred_str rp.pred)
-                  (if cx = "" then "" else Printf.sprintf " (counterexample: %s)" cx))
+                  "refinement violation: argument does not satisfy precondition `%s`%s\n\
+                   note: guard the call (e.g. `if %s do …`) or pass a value known to satisfy it"
+                  (pred_str rp.pred) (format_cx (model_of first)) (pred_str rp.pred))
            | _ -> ())))
 
 (* ── Postconditions: a function's return value must satisfy its return
@@ -316,7 +358,7 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list =
       let c = Smt.Const name in
       let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
       let ds = (name, Smt.SInt) :: ds in
-      match smt_of ~resolve_var:rv ~resolve_len:(fun _ -> None) q with
+      match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
       | Some qa -> (ds, qa :: asm)
       | None -> (ds, asm))
     ([], []) sc
@@ -326,24 +368,24 @@ let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.e
   let base_decls, base_assume = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   let var_const name = decls := (name, Smt.SInt) :: !decls; Some (Smt.Const name) in
-  let resolve_len name =
-    let c = Smt.Const ("len$" ^ name) in
-    decls := ("len$" ^ name, Smt.SInt) :: !decls;
-    assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+  let resolve_measure m name =
+    let c = Smt.Const (m ^ "$" ^ name) in
+    decls := (m ^ "$" ^ name, Smt.SInt) :: !decls;
+    if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
     Some c
   in
   (* The returned value, reflected (variables become their constants). *)
-  match smt_of ~resolve_var:var_const ~resolve_len tail_e with
+  match smt_of ~resolve_var:var_const ~resolve_measure tail_e with
   | None -> ()
   | Some tail_term ->
     let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_len cond with
+        match smt_of ~resolve_var ~resolve_measure cond with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_len ret_pred with
+    (match smt_of ~resolve_var ~resolve_measure ret_pred with
      | None -> ()
      | Some goal ->
        let decls =
@@ -352,14 +394,15 @@ let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.e
        let vc = { Smt.decls; assumptions = !assume; goal } in
        (match Refine.discharge ~root vc with
         | Refine.Verified -> ()
-        | _ -> (
+        | first -> (
             match Refine.discharge ~root { vc with Smt.goal = Smt.Not goal } with
             | Refine.Verified ->
               ignore tail_e;
               Err.error errctx ~span
                 (Printf.sprintf
-                   "refinement violation: return value cannot satisfy postcondition `%s`"
-                   (pred_str ret_pred))
+                   "refinement violation: return value cannot satisfy postcondition `%s`%s\n\
+                    note: every return path of this function must satisfy `%s`"
+                   (pred_str ret_pred) (format_cx (model_of first)) (pred_str ret_pred))
             | _ -> ())))
 
 let check_fn_post ~root errctx (fd : A.fn_def) : unit =
@@ -450,7 +493,27 @@ let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =
 
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
+(* Functions annotated `@[measure]` as (bare name, body); measures are referenced
+   bare in predicates. *)
+let rec collect_measure_defs (decls : A.decl list) : (string * A.expr) list =
+  List.concat_map
+    (function
+      | A.DFn (fd, _) when List.mem "measure" fd.A.fn_attrs ->
+        (match fd.A.fn_clauses with c :: _ -> [ (fd.A.fn_name.A.txt, c.A.fc_body) ] | [] -> [])
+      | A.DMod (_, _, ds, _) -> collect_measure_defs ds
+      | _ -> [])
+    decls
+
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
+  let mdefs = collect_measure_defs m.A.mod_decls in
+  registered_measures := List.map fst mdefs;
+  (* Determine which measures are non-negative (single pass; a measure depending
+     only on already-classified ones, itself, and `len` is classified). *)
+  measure_nonneg :=
+    List.fold_left
+      (fun known (name, body) ->
+        if measure_body_nonneg name known body then name :: known else known)
+      [] mdefs;
   let tbl = build_table (collect_sig_list m.A.mod_decls) in
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [tbl]. *)
