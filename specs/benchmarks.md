@@ -215,6 +215,52 @@ uneven workloads. The `Cap(WorkPool)` threading should have zero runtime cost
 
 ---
 
+## bench/deque_ops.march — Functional deque (push_front/push_back/drain, ×100)
+
+**Command:** 100 rounds of `push_phase(empty(), 10000)` → `drain`
+**Expected output:** `20001000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `Deque.push_front` / `Deque.push_back` | O(1) worst-case Cons prepend |
+| `Deque.pop_front` with rebalance | O(n) amortized; triggers `List.reverse` when front exhausted |
+| `Deque.empty` | Zero-allocation initial state |
+| RC overhead per push | Every `push_front`/`push_back` allocates one Cons cell |
+| Persistent value semantics | Each call returns a new `Deque(Int)` — no mutation |
+
+**Comparison baseline:** OCaml (same two-list algorithm, tracing GC — isolates RC vs GC cost),
+Rust `std::collections::VecDeque` (mutable ring buffer — no allocation in steady state),
+Elixir `:queue` (OTP two-list functional deque).
+
+**What to watch:** March pays ~2× OCaml due to RC vs GC; gap vs Rust is larger because
+VecDeque is mutable and allocation-free in steady state. A regression vs the prior March
+run points to RC overhead in the Perceus pass or Cons-cell allocation cost.
+
+---
+
+## bench/merkle.march — Merkle tree build+diff (50 rounds, 1024 leaves, 128 changes)
+
+**Command:** 50 rounds of build two 1024-leaf trees + `Merkle.diff`
+**Expected output:** `6400` (50 × 128 differing hashes)
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `Crypto.sha256` throughput | Hash every leaf string each build |
+| `Merkle.build` | Recursive halving, `Some`/`None` tree allocation |
+| `Merkle.diff` / `diff_work` | Work-list tail-recursive diff, skips unchanged subtrees via hash compare |
+| String equality dispatch | `root_hash(t1) == root_hash(t2)` on polymorphic TVar return — routes through `march_poly_eq` |
+| Reference counting on deep trees | 1024-leaf trees freed each round |
+
+**Comparison baseline:** OCaml with `digestif` SHA-256 (requires `ocamlfind`),
+Elixir with `:crypto.hash(:sha256, ...)` OTP builtin.
+Rust not included (SHA-256 crate requires `Cargo.toml`).
+
+**What to watch:** If output is `51200` instead of `6400`, the `==` comparison in
+`diff_work` is using pointer identity instead of string content equality — this was
+a real bug (fixed in `lib/tir/llvm_emit.ml`, TVar equality dispatch now routes to
+`march_poly_eq`). A regression in SHA-256 throughput points to `Crypto.sha256`
+or the C `mbedtls_sha256` binding.
+
 ---
 
 ## HTTP benchmark: March vs Rust actix-web 4 vs Python FastAPI
@@ -305,3 +351,6 @@ to the features it exercises. Quick reference:
 | Task / `task_spawn` / `task_await` | `parallel` + `par_fib` + `par_map` |
 | Work-stealing / `task_spawn_steal` / Chase-Lev | `par_worksteal` |
 | `Cap(WorkPool)` capability | `par_worksteal` |
+| `Deque.*` / Cons allocation / RC amortised | `deque_ops` |
+| `Merkle.*` / `Crypto.sha256` / TVar equality | `merkle` |
+| `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |

@@ -129,8 +129,8 @@ describe "BigInt" do
     -- Larger-operand multiplication. base() is 10000, so these cross many limbs
     -- and exercise the multi-limb path (the existing tests above are all single
     -- limb). Most use algebraic invariants (commutativity / associativity /
-    -- distributivity) so they catch carry/sign/split bugs without a hand-computed
-    -- product — and so they would validate a future Karatsuba implementation.
+    -- distributivity) so they catch carry/sign bugs without a hand-computed
+    -- product — and would validate any alternative multiplication algorithm.
 
     test "mul known: (10^6 - 1)^2" do
       let a = BigInt.from_int(999999)
@@ -198,17 +198,17 @@ describe "BigInt" do
       assert (BigInt.to_string(BigInt.mul(big, BigInt.one())) == BigInt.to_string(big))
     end
 
-    -- Deep Karatsuba: both operands are well above the limb threshold, so the
-    -- recursion splits several levels (10-limb × 9-limb, 19-limb × 9-limb).
+    -- Deep multi-limb: both operands span many limbs (10-limb × 9-limb,
+    -- 19-limb × 9-limb), stressing carry propagation across the whole product.
 
-    test "mul big×big commutes (deep Karatsuba)" do
+    test "mul big×big commutes (deep multi-limb)" do
       let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
                          BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
       let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))
       assert (BigInt.to_string(BigInt.mul(a, b)) == BigInt.to_string(BigInt.mul(b, a)))
     end
 
-    test "mul big×big associative (deep Karatsuba)" do
+    test "mul big×big associative (deep multi-limb)" do
       let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
                          BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
       let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))
@@ -217,7 +217,7 @@ describe "BigInt" do
               == BigInt.to_string(BigInt.mul(a, BigInt.mul(b, c))))
     end
 
-    test "mul big distributes over add (deep Karatsuba)" do
+    test "mul big distributes over add (deep multi-limb)" do
       let a = BigInt.mul(BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)),
                          BigInt.mul(BigInt.from_int(1000000000), BigInt.from_int(1000000000)))  -- 10^36
       let b = BigInt.mul(BigInt.from_int(99999999999999999), BigInt.from_int(99999999999999999))

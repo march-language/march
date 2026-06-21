@@ -2181,7 +2181,23 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
               end else
                 ("i64", r)
             | None -> fallback_cmp ())
-         | None -> fallback_cmp ())
+         | None ->
+           (* Polymorphic ptr comparison: the TIR type is TVar (e.g. the result
+              of a polymorphic function like root_hash).  Pointer identity
+              (fallback_cmp) compares addresses, not content — always false for
+              two distinct string allocations with equal content.  Use
+              march_poly_eq which checks string tags at runtime and delegates to
+              march_string_eq for strings, giving correct content equality. *)
+           let r = fresh ctx "ar" in
+           let va_ptr = coerce ctx ty_a va "ptr" in
+           let vb_ptr = coerce ctx ty_b vb "ptr" in
+           emit ctx (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %s, ptr %s)" r va_ptr vb_ptr);
+           if f.Tir.v_name = "!=" then begin
+             let nr = fresh ctx "nr" in
+             emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
+             ("i64", nr)
+           end else
+             ("i64", r))
       else fallback_cmp ()
     end
 

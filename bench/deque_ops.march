@@ -1,0 +1,66 @@
+-- Deque operations benchmark: alternating push_front/push_back then drain.
+--
+-- Workload per round:
+--   Phase 1 (push): for n in 10000..1,
+--     push_front(d, n)            -- prepend n to the front
+--     push_back(d, n + 10000)     -- append n+10000 to the back
+--   This yields a deque of 20000 elements:
+--     front = [1, 2, ..., 10000]
+--     back  = [20000, 19999, ..., 10001]  (stored reversed internally)
+--
+--   Phase 2 (drain): pop_front repeatedly, summing values.
+--     Drain order: 1..10000, then (after rebalance) 20000..10001
+--     Sum per round = sum(1..20000) = 200,010,000
+--
+-- 100 rounds → expected output: 20001000000
+--
+-- Features exercised:
+--   push_front / push_back   O(1) worst case (simple Cons prepend)
+--   pop_front with rebalance  O(n) on front-exhaustion (reverse back list)
+--   RC overhead               every push allocates a Cons cell
+--   Persistent value semantics each call returns a new Deque(Int) value
+--
+-- Comparison context:
+--   Python collections.deque / Rust VecDeque / C circular-buffer are
+--   *mutable* and do zero allocation during steady-state push/pop.
+--   March's functional deque pays one Cons allocation per push.
+--   OCaml comparison uses the same two-list algorithm under a tracing GC
+--   rather than RC, isolating the GC-vs-RC difference.
+--
+-- Usage:
+--   dune exec march -- --compile --opt 2 bench/deque_ops.march -o /tmp/march_deque
+--   /tmp/march_deque
+
+mod DequeOps do
+
+-- One push step: push n to front and n+10000 to back.
+pfn push_step(d, n : Int) do
+  Deque.push_back(Deque.push_front(d, n), n + 10000)
+end
+
+-- Push 10000 items front+back, counting down from n to 1.
+pfn push_phase(d, n : Int) do
+  if n == 0 do d
+  else push_phase(push_step(d, n), n - 1)
+  end
+end
+
+-- Pop all elements from the front, accumulating their sum.
+pfn drain(d, acc : Int) : Int do
+  match Deque.pop_front(d) do
+  (None, _)    -> acc
+  (Some(v), r) -> drain(r, acc + v)
+  end
+end
+
+pfn bench_loop(rounds : Int, acc : Int) : Int do
+  if rounds == 0 do acc
+  else bench_loop(rounds - 1, acc + drain(push_phase(Deque.empty(), 10000), 0))
+  end
+end
+
+fn main() : Unit do
+  println(int_to_string(bench_loop(100, 0)))
+end
+
+end
