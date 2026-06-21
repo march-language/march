@@ -256,6 +256,41 @@ let measure_suite =
              (measure_prog
                 "  fn f(t : Tree(Int)) : {Int | _ >= 0} do size(t) end"))) ]
 
+(* M-a: with the ADT declared, `size` is AXIOMATISED — the solver computes
+   measure values structurally from the recursion equations. *)
+let axiom_prog body =
+  Printf.sprintf
+    "mod M do\n\
+    \  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))\n\
+    \  @[measure]\n\
+    \  fn size(t : Tree(a)) : Int do\n\
+    \    match t do\n\
+    \      Leaf -> 0\n\
+    \      Node(l, x, r) -> 1 + size(l) + size(r)\n\
+    \    end\n\
+    \  end\n\
+    \  fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do get(t, i) end\n\
+     %s\n\
+     end\n"
+    body
+
+let axiom_suite =
+  [ gated "axioms compute size(Node(Leaf,x,Leaf))=1: index 5 is out of bounds" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (axiom_prog "  fn f(x : Int) : Int do get(Node(Leaf, x, Leaf), 5) end")));
+
+    gated "axioms compute size=1: index 0 is in bounds" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (axiom_prog "  fn f(x : Int) : Int do get(Node(Leaf, x, Leaf), 0) end")));
+
+    gated "axioms compute size(Node(Node(Leaf,x,Leaf),y,Leaf))=2: index 2 out of bounds" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (axiom_prog
+                "  fn f(x : Int, y : Int) : Int do get(Node(Node(Leaf, x, Leaf), y, Leaf), 2) end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -264,4 +299,5 @@ let () =
       ("postconditions", post_suite);
       ("assume-p1c", assume_suite);
       ("collision-p1a", collision_suite);
-      ("measures-p1b", measure_suite) ]
+      ("measures-p1b", measure_suite);
+      ("axioms-ma", axiom_suite) ]
