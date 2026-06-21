@@ -78,6 +78,27 @@ let bare_ctor key =
   | Some i -> String.sub key (i + 1) (String.length key - i - 1)
   | None   -> key
 
+(** Encode a March string as a JS string literal.
+    OCaml's %S uses octal escapes for non-ASCII bytes, which are not allowed
+    in ES module strict mode. This encoder keeps valid UTF-8 bytes verbatim
+    and uses \uXXXX only for control characters. *)
+let js_string_lit s =
+  let buf = Buffer.create (String.length s + 4) in
+  Buffer.add_char buf '"';
+  String.iter (fun c ->
+    match c with
+    | '"'  -> Buffer.add_string buf "\\\""
+    | '\\' -> Buffer.add_string buf "\\\\"
+    | '\n' -> Buffer.add_string buf "\\n"
+    | '\r' -> Buffer.add_string buf "\\r"
+    | '\t' -> Buffer.add_string buf "\\t"
+    | c when Char.code c < 0x20 ->
+      Buffer.add_string buf (Printf.sprintf "\\u%04X" (Char.code c))
+    | c -> Buffer.add_char buf c
+  ) s;
+  Buffer.add_char buf '"';
+  Buffer.contents buf
+
 (* ── Atom emission ───────────────────────────────────────────────── *)
 
 let emit_literal ctx lit =
@@ -88,7 +109,7 @@ let emit_literal ctx lit =
     let s = string_of_float f in
     emit ctx (if String.contains s '.' || String.contains s 'e' then s else s ^ ".0")
   | LitBool b   -> emit ctx (if b then "true" else "false")
-  | LitString s -> emit ctx (Printf.sprintf "%S" s)
+  | LitString s -> emit ctx (js_string_lit s)
   | LitAtom a   -> emit ctx (Printf.sprintf "\":%s\"" a)
 
 (* Emit an atom as a plain name — used for apply-function slots in EAlloc
@@ -137,18 +158,19 @@ let inline_binop = function
   | "or_bool"                            -> Some "||"
   | "string_concat" | "++"              -> Some "+"
   (* Symbolic operator forms emitted by TIR after monomorphization *)
-  | "+"  -> Some "+"
-  | "-"  -> Some "-"   (* binary; unary negation is handled separately *)
-  | "*"  -> Some "*"
-  | "%"  -> Some "%"
-  | "<"  -> Some "<"
-  | ">"  -> Some ">"
-  | "<=" -> Some "<="
-  | ">=" -> Some ">="
-  | "==" -> Some "==="
-  | "!=" -> Some "!=="
-  | "&&" -> Some "&&"
-  | "||" -> Some "||"
+  | "+"  | "+." -> Some "+"
+  | "-"  | "-." -> Some "-"   (* binary; unary negation is handled separately *)
+  | "*"  | "*." -> Some "*"
+  | "/"  | "/." -> Some "/"
+  | "%"         -> Some "%"
+  | "<"         -> Some "<"
+  | ">"         -> Some ">"
+  | "<="        -> Some "<="
+  | ">="        -> Some ">="
+  | "==" | "=.=" -> Some "==="
+  | "!=" | "!=." -> Some "!=="
+  | "&&"        -> Some "&&"
+  | "||"        -> Some "||"
   | _    -> None
 
 (* ── Scrutinee type helpers ─────────────────────────────────────── *)
@@ -182,12 +204,13 @@ let literal_tag_js br_tag =
   | "False" | "false" -> "false"
   | _ when br_tag <> "" && (br_tag.[0] = '-'
                              || (br_tag.[0] >= '0' && br_tag.[0] <= '9')) ->
-    br_tag
+    br_tag  (* numeric literal — emit as-is *)
   | _ when br_tag <> "" && br_tag.[0] = '"' ->
-    br_tag  (* already an OCaml string literal including quotes *)
-  | _ when br_tag <> "" && br_tag.[0] = ':' ->
-    Printf.sprintf "%S" br_tag  (* atom: emit as JS string ":name" *)
-  | _ -> Printf.sprintf "%S" br_tag
+    (* lower.ml wraps the raw string s as "\"" ^ s ^ "\"" — unwrap and re-encode
+       using js_string_lit so special chars like newlines become \n, not literal bytes *)
+    let inner = String.sub br_tag 1 (String.length br_tag - 2) in
+    js_string_lit inner
+  | _ -> js_string_lit br_tag  (* atom tags (":name"), ADT ctor tags, etc. *)
 
 (* ── Forward declarations ────────────────────────────────────────── *)
 
@@ -213,7 +236,7 @@ and emit_val_impl ctx expr =
       emit ctx ")"
     | _ ->
       begin match name, args with
-      | ("neg_int" | "neg_float" | "negate"), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
+      | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
       | "div_int", [a; b] ->
         emit ctx "Math.trunc("; emit_atom ctx a;
@@ -401,17 +424,27 @@ and emit_stmts_impl ctx expr =
   match expr with
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
-    (* let v = match ... — emit switch that assigns to v *)
+    (* let v = match ... — emit switch that assigns to v.
+       Wrap in a block so this binding can shadow an outer variable of the same name. *)
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
     emitl ctx ("let " ^ mangle v.Tir.v_name ^ ";");
     emit_case ctx (Some (mangle v.Tir.v_name)) case_expr;
-    emit_stmts ctx rest
+    emit_stmts ctx rest;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELet (v, e1, e2) ->
+    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name. *)
+    emit_indent ctx; emit ctx "{\n";
+    ctx.indent <- ctx.indent + 1;
     emit_indent ctx;
     emit ctx ("const " ^ mangle v.Tir.v_name ^ " = ");
     emit_val ctx e1;
     emit ctx ";\n";
-    emit_stmts ctx e2
+    emit_stmts ctx e2;
+    ctx.indent <- ctx.indent - 1;
+    emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELetRec (fns, body) ->
     List.iter (emit_fn_decl ctx) fns;
