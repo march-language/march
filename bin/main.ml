@@ -1232,6 +1232,23 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
+          (* Copy march_runtime.mjs alongside the output so the import works *)
+          let out_dir = Filename.dirname out_bin in
+          let rt_dest = Filename.concat out_dir "march_runtime.mjs" in
+          let rt_candidates = [
+            "runtime/march_runtime.mjs";
+            Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.mjs";
+            Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.mjs";
+          ] in
+          (match List.find_opt Sys.file_exists rt_candidates with
+          | Some src ->
+            let ic = open_in src in
+            let content = really_input_string ic (in_channel_length ic) in
+            close_in ic;
+            let oc2 = open_out rt_dest in
+            output_string oc2 content;
+            close_out oc2
+          | None -> Printf.eprintf "march: warning: cannot find march_runtime.mjs\n");
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)

@@ -57,7 +57,7 @@ export function march_string_from_chars(list) {
   return s;
 }
 
-export function march_string_join(sep, list) {
+export function march_string_join(list, sep) {
   const parts = [];
   while (list.$ === "Cons") { parts.push(list._0); list = list._1; }
   return parts.join(sep);
@@ -81,7 +81,7 @@ export function march_string_split(s, sep) {
 export function march_string_split_first(s, sep) {
   const i = s.indexOf(sep);
   if (i < 0) return { $: "None" };
-  return { $: "Some", _0: [s.slice(0, i), s.slice(i + sep.length)] };
+  return { $: "Some", _0: { _0: s.slice(0, i), _1: s.slice(i + sep.length) } };
 }
 
 export function march_string_replace(s, from, to) {
