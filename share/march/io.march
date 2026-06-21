@@ -1,0 +1,72 @@
+-- IO module: explicit I/O operations separate from Process.
+--
+-- Wraps the core print/read builtins under a clean IO namespace.
+-- All functions in this module operate on the standard streams (stdin,
+-- stdout, stderr) of the current OS process.
+--
+-- Usage:
+--   IO.puts("Hello!")              -- write to stdout with newline
+--   IO.write("no newline")         -- write to stdout, no newline
+--   IO.warn("something went wrong") -- write to stderr with newline
+--   let line = IO.read_line()      -- read a line from stdin
+--   let x = IO.inspect(some_value) -- pretty-print and return value
+--   let line = IO.gets("Name: ")   -- print prompt then read line
+
+mod IO do
+
+doc "Write a string to stdout without a trailing newline."
+fn write(s : String) : Unit do
+  print(s)
+end
+
+doc "Write a string to stdout with a trailing newline."
+fn puts(s : String) : Unit do
+  println(s)
+end
+
+doc "Write a string to stderr with a trailing newline."
+fn warn(s : String) : Unit do
+  print_stderr(s ++ "\n")
+end
+
+doc """
+Read a line from stdin and return it (without the trailing newline).
+Returns empty string on EOF.
+"""
+fn read_line() : String do
+  io_read_line()
+end
+
+doc """
+Print prompt to stdout (no newline) then read and return a line from stdin.
+Equivalent to Elixir's IO.gets/1.
+
+    let name = IO.gets("What is your name? ")
+"""
+fn gets(prompt : String) : String do
+  print(prompt)
+  read_line()
+end
+
+doc """
+Pretty-print value to stdout (with newline) and return the value unchanged.
+Useful for mid-pipeline debugging, like Elixir's IO.inspect/2.
+
+    some_list |> IO.inspect() |> Enum.map(fn x -> x + 1)
+"""
+fn inspect(value : a) : a do
+  println(show(value))
+  value
+end
+
+doc """
+Convert an IOList to a String by flattening all segments.
+Delegates to IOList.to_string/1.
+
+    IO.iodata_to_string(IOList.from_string("hello"))  -- "hello"
+"""
+fn iodata_to_string(iodata) : String do
+  IOList.to_string(iodata)
+end
+
+end -- mod IO

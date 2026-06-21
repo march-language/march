@@ -1,0 +1,155 @@
+-- System module: OS and runtime information.
+--
+-- Exposes host OS/arch detection, process metadata, environment variables,
+-- and subprocess execution under a unified System namespace.
+--
+-- Usage:
+--   System.os()          -- :macos | :linux | :windows | :unknown
+--   System.arch()        -- :x86_64 | :aarch64 | :x86 | ...
+--   System.cpu_count()   -- number of logical CPUs
+--   System.monotonic_time()  -- milliseconds since process start
+--   System.env("PATH")   -- Some(value) | None
+--   System.put_env("KEY", "val")
+--   System.argv()        -- List(String)
+--   System.cwd()         -- String
+--   System.pid()         -- Int
+--   System.exit(0)       -- terminate process
+--   System.cmd("ls", ["-la"])  -- Ok(ProcessResult) | Err(msg)
+--   System.version()     -- "0.1.0"
+
+mod System do
+
+-- ---- Platform detection ----
+
+doc """
+Return the host operating system as an atom.
+Possible values: :macos, :linux, :windows, :unknown.
+"""
+fn os() do
+  sys_os()
+end
+
+doc """
+Return the host CPU architecture as an atom.
+Possible values: :x86_64, :aarch64, :x86, or a lowercase uname string.
+"""
+fn arch() do
+  sys_arch()
+end
+
+doc "Return the number of logical CPUs available to the runtime."
+fn cpu_count() : Int do
+  sys_cpu_count()
+end
+
+doc """
+Return milliseconds elapsed since the process started.
+Suitable for rough timing; not a wall-clock time.
+
+    let t0 = System.monotonic_time()
+    -- ... work ...
+    let elapsed = System.monotonic_time() - t0
+"""
+fn monotonic_time() : Int do
+  sys_uptime_ms()
+end
+
+-- ---- Environment variables ----
+
+doc """
+Get the value of an environment variable.
+Returns Some(value) if set, None if not set.
+"""
+fn env(name : String) : Option(String) do
+  process_env(name)
+end
+
+doc "Set an environment variable."
+fn put_env(name : String, value : String) : Unit do
+  process_set_env(name, value)
+end
+
+-- ---- Process metadata ----
+
+doc """
+Return command-line arguments as List(String).
+argv()[0] is the path to the executable.
+"""
+fn argv() : List(String) do
+  process_argv()
+end
+
+doc "Return the current working directory as a String."
+fn cwd() : String do
+  process_cwd()
+end
+
+doc "Return the OS-level PID of the current process as an Int."
+fn pid() : Int do
+  process_pid()
+end
+
+doc "Terminate the process with the given exit code."
+fn exit(code : Int) : Unit do
+  process_exit(code)
+end
+
+-- ---- Subprocess execution ----
+
+-- Result of a completed subprocess.
+-- Mirrors Process.ProcessResult for symmetry.
+type ProcessResult = ProcessResult(Int, String, String)
+
+doc """
+Run an external command synchronously, capturing stdout.
+Returns Ok(ProcessResult(exit_code, stdout, stderr)) or Err(msg).
+
+    match System.cmd("git", ["status"]) do
+    Ok(r)    -> println(System.stdout(r))
+    Err(msg) -> IO.warn("cmd failed: " ++ msg)
+    end
+"""
+fn cmd(command : String, args : List(String)) : Result(ProcessResult, String) do
+  process_spawn_sync(command, args)
+end
+
+doc "Extract the exit code from a ProcessResult."
+fn exit_code(r : ProcessResult) : Int do
+  match r do
+  ProcessResult(code, _, _) -> code
+  end
+end
+
+doc "Extract captured stdout from a ProcessResult."
+fn stdout(r : ProcessResult) : String do
+  match r do
+  ProcessResult(_, out, _) -> out
+  end
+end
+
+doc "Extract captured stderr from a ProcessResult."
+fn stderr(r : ProcessResult) : String do
+  match r do
+  ProcessResult(_, _, err) -> err
+  end
+end
+
+doc "True if the command exited with code 0."
+fn ok(r : ProcessResult) : Bool do
+  match r do
+  ProcessResult(code, _, _) -> code == 0
+  end
+end
+
+-- ---- Runtime version ----
+
+doc """
+Return the March runtime version string.
+
+    System.version()  -- "0.1.0"
+"""
+fn version() : String do
+  march_version()
+end
+
+end -- mod System

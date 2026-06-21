@@ -1,0 +1,80 @@
+(lang dune 3.21)
+(name march)
+(version 0.1.0)
+(sections
+ (lib /Users/80197052/code/march/lib/march)
+ (bin /Users/80197052/code/march/bin)
+ (share /Users/80197052/code/march/share/march)
+ (doc /Users/80197052/code/march/doc/march))
+(files
+ (lib (META dune-package opam))
+ (bin (march))
+ (share
+  (actor.march
+   array.march
+   base64.march
+   bigint.march
+   bytes.march
+   channel.march
+   channel_server.march
+   channel_socket.march
+   char.march
+   config.march
+   correlation.march
+   crypto.march
+   csv.march
+   dataframe.march
+   datetime.march
+   decimal.march
+   dir.march
+   duration.march
+   enum.march
+   env.march
+   file.march
+   flow.march
+   forge_nb.march
+   hamt.march
+   html.march
+   http.march
+   http_client.march
+   http_server.march
+   http_transport.march
+   io.march
+   iolist.march
+   iterable.march
+   json.march
+   list.march
+   logger.march
+   map.march
+   math.march
+   native_array.march
+   option.march
+   ordered_map.march
+   path.march
+   plot.march
+   prelude.march
+   presence.march
+   process.march
+   pubsub.march
+   queue.march
+   random.march
+   range.march
+   regex.march
+   result.march
+   seq.march
+   set.march
+   sigil.march
+   sort.march
+   sorted_set.march
+   stats.march
+   string.march
+   system.march
+   task.march
+   test.march
+   tls.march
+   tuple.march
+   uri.march
+   uuid.march
+   vault.march
+   websocket.march))
+ (doc (README.md)))
