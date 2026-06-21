@@ -1914,6 +1914,8 @@ let () =
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  (* --target js implies --compile (skip JIT, emit .mjs) *)
+  if !target_str = "js" || !target_str = "javascript" then do_compile := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
