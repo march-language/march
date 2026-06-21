@@ -453,8 +453,9 @@ let parse_target s =
   | "wasm64-wasi" | "wasm64" -> March_tir.Llvm_emit.Wasm64Wasi
   | "wasm32-wasi" | "wasm32" -> March_tir.Llvm_emit.Wasm32Wasi
   | "wasm32-unknown-unknown" | "wasm-browser" | "browser" -> March_tir.Llvm_emit.Wasm32Unknown
+  | "js" | "javascript" -> March_tir.Llvm_emit.Js
   | other ->
-    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown\n" other;
+    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
     exit 1
 
 (* ------------------------------------------------------------------ *)
@@ -880,6 +881,7 @@ let compile filename =
           | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
+          | March_tir.Llvm_emit.Js              -> "js"
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
@@ -891,6 +893,7 @@ let compile filename =
         let out_bin  =
           if !output_file <> "" then !output_file
           else if is_wasm then basename ^ ".wasm"
+          else if target_parsed = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
         (match March_cas.Cas.lookup_artifact store ch with
@@ -1219,14 +1222,25 @@ let compile filename =
         let out_bin =
           if !output_file <> "" then !output_file
           else if is_wasm then basename ^ ".wasm"
+          else if target = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
+        (* JS target: skip LLVM/clang entirely *)
+        if target = March_tir.Llvm_emit.Js then begin
+          let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
+          let js = March_tir.Js_emit.emit_module tir_for_js in
+          let oc = open_out out_bin in
+          output_string oc js;
+          close_out oc;
+          Printf.eprintf "compiled %s\n" out_bin
+        end else begin
         (* CAS: check for a cached binary before running clang *)
         let target_label = match target with
           | March_tir.Llvm_emit.Native -> "native"
           | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"
+          | March_tir.Llvm_emit.Js -> "js"
         in
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
@@ -1437,6 +1451,7 @@ let compile filename =
               Printf.eprintf "compiled %s\n" out_bin
             end
           end)
+      end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target tir in

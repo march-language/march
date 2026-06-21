@@ -128,8 +128,47 @@ let path_suite =
                 "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")))
   ]
 
+(* Postconditions: a function's return value must satisfy its return refinement. *)
+let post src = Printf.sprintf "mod M do\n%s\nend\n" src
+
+let post_suite =
+  [ gated "returning a violating literal is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post "  fn f() : {Int | _ >= 0} do -1 end")));
+
+    gated "returning a valid literal passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (post "  fn f() : {Int | _ >= 0} do 5 end")));
+
+    gated "`_ > 0` return of 0 is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (post "  fn f() : {Int | _ > 0} do 0 end")));
+
+    gated "returning a refined param satisfies the postcondition" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post "  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0} do n end")));
+
+    gated "unconstrained return is conservatively skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (post "  fn f(n : Int) : {Int | _ >= 0} do n end")));
+
+    gated "guarded branches each satisfy the postcondition" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn f(n : Int) : {Int | _ >= 0} do if n >= 0 do n else 0 end end")));
+
+    gated "a branch that definitely violates is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
       ("bounds-a2", a2_suite);
-      ("path-sensitivity", path_suite) ]
+      ("path-sensitivity", path_suite);
+      ("postconditions", post_suite) ]

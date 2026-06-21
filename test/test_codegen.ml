@@ -4916,6 +4916,49 @@ let test_proof_cap_pfn_passthrough_ok () =
   let ctx = typecheck src in
   Alcotest.(check bool) "proof cap pfn passthrough: private relay is allowed" false (has_errors ctx)
 
+(** Opt.run is safe on RC-free TIR (the JS target skips Perceus). *)
+let test_opt_without_perceus () =
+  let src = {|mod Test do
+    type Tree = Leaf | Node(Tree, Int, Tree)
+
+    fn sum(t : Tree) : Int do
+      match t do
+        Leaf -> 0
+        Node(l, n, r) -> sum(l) + n + sum(r)
+      end
+    end
+
+    fn main() : Unit do
+      let t = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
+      println(int_to_string(sum(t)))
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  (* NOTE: Defun and Perceus intentionally skipped — this is the JS pipeline *)
+  let opt_tir = March_tir.Opt.run tir in
+  (* Opt must not introduce RC nodes when given RC-free TIR *)
+  let rec has_rc = function
+    | March_tir.Tir.EIncRC _ | March_tir.Tir.EDecRC _ | March_tir.Tir.EFree _
+    | March_tir.Tir.EReuse _ | March_tir.Tir.EAtomicIncRC _
+    | March_tir.Tir.EAtomicDecRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_rc e1 || has_rc e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_rc f.March_tir.Tir.fn_body) fns || has_rc body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_rc b.March_tir.Tir.br_body) brs
+      || (match def with Some e -> has_rc e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_rc a || has_rc b
+    | _ -> false
+  in
+  let any_rc = List.exists
+    (fun fn -> has_rc fn.March_tir.Tir.fn_body)
+    opt_tir.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "Opt on RC-free TIR produces no RC nodes" false any_rc
+
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
 let codegen_suites =
@@ -5334,6 +5377,9 @@ let codegen_suites =
           Alcotest.test_case "proof cap: implicit needs"      `Quick test_proof_cap_implicit_needs;
           Alcotest.test_case "proof cap: pfn forge error"     `Quick test_proof_cap_pfn_forge_error;
           Alcotest.test_case "proof cap: pfn passthrough ok"  `Quick test_proof_cap_pfn_passthrough_ok;
+        ] );
+      ( "js_backend_opt", [
+          Alcotest.test_case "Opt safe without Perceus" `Quick test_opt_without_perceus;
         ] );
   ]
 
