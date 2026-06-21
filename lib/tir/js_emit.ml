@@ -46,6 +46,12 @@ let mangle name =
   Bytes.iteri (fun i c -> if c = '.' then Bytes.set b i '$') b;
   Bytes.to_string b
 
+(** Constructor key in EAlloc is "TypeName.CtorName"; return just "CtorName". *)
+let bare_ctor key =
+  match String.rindex_opt key '.' with
+  | Some i -> String.sub key (i + 1) (String.length key - i - 1)
+  | None   -> key
+
 (* ── Atom emission ───────────────────────────────────────────────── *)
 
 let emit_literal ctx lit =
@@ -68,6 +74,7 @@ let emit_atom ctx = function
 
 (** Binary arithmetic/comparison builtins that inline as JS infix operators. *)
 let inline_binop = function
+  (* Named (fully-qualified monomorphic) forms *)
   | "add_int" | "add_float"              -> Some "+"
   | "sub_int" | "sub_float"              -> Some "-"
   | "mul_int" | "mul_float"              -> Some "*"
@@ -83,7 +90,20 @@ let inline_binop = function
   | "and_bool"                           -> Some "&&"
   | "or_bool"                            -> Some "||"
   | "string_concat" | "++"              -> Some "+"
-  | _                                    -> None
+  (* Symbolic operator forms emitted by TIR after monomorphization *)
+  | "+"  -> Some "+"
+  | "-"  -> Some "-"   (* binary; unary negation is handled separately *)
+  | "*"  -> Some "*"
+  | "%"  -> Some "%"
+  | "<"  -> Some "<"
+  | ">"  -> Some ">"
+  | "<=" -> Some "<="
+  | ">=" -> Some ">="
+  | "==" -> Some "==="
+  | "!=" -> Some "!=="
+  | "&&" -> Some "&&"
+  | "||" -> Some "||"
+  | _    -> None
 
 (* ── Scrutinee type helpers ─────────────────────────────────────── *)
 
@@ -150,9 +170,14 @@ and emit_val_impl ctx expr =
       | "neg_int",   [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | "neg_float", [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | "not_bool",  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
-      | "div_int",   [a; b] ->
+      | "div_int", [a; b] ->
         emit ctx "Math.trunc("; emit_atom ctx a;
         emit ctx " / "; emit_atom ctx b; emit ctx ")"
+      | "/", [a; b] when (match atom_ty a with Tir.TInt -> true | _ -> false) ->
+        emit ctx "Math.trunc("; emit_atom ctx a;
+        emit ctx " / "; emit_atom ctx b; emit ctx ")"
+      | "/", [a; b] ->
+        emit ctx "("; emit_atom ctx a; emit ctx " / "; emit_atom ctx b; emit ctx ")"
       | "mod_int",   [a; b] ->
         emit ctx "("; emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ")"
       | "int_to_float", [a] ->
@@ -247,14 +272,14 @@ and emit_val_impl ctx expr =
     emit ctx " })"
 
   | Tir.EAlloc (ty, args) ->
-    let tag = match ty with Tir.TCon (t, _) -> t | _ -> "_" in
+    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
     emit ctx (Printf.sprintf "{ $: %S" tag);
     List.iteri (fun i a ->
       emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
     emit ctx " }"
 
   | Tir.EStackAlloc (ty, args) ->
-    let tag = match ty with Tir.TCon (t, _) -> t | _ -> "_" in
+    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
     emit ctx (Printf.sprintf "{ $: %S" tag);
     List.iteri (fun i a ->
       emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
@@ -299,9 +324,13 @@ and emit_stmts_impl ctx expr =
     emit_stmts ctx body
 
   | Tir.ESeq (e1, e2) ->
-    emit_indent ctx;
-    emit_val ctx e1;
-    emit ctx ";\n";
+    (match e1 with
+     | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+     | Tir.EFree _ | Tir.EReuse _ -> ()
+     | _ ->
+       emit_indent ctx;
+       emit_val ctx e1;
+       emit ctx ";\n");
     emit_stmts ctx e2
 
   | Tir.ECase _ ->
