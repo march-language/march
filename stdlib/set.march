@@ -28,7 +28,7 @@ mod Set do
     | SBranch(Int, List(SEntry(a)))
     | SCollision(Int, List(a))
 
-  ptype Set(a) = HamtSet(SEntry(a))
+  ptype Set(a) = HamtSet(Int, SEntry(a))
 
   -- ── Private helpers ────────────────────────────────────────────────────────
 
@@ -359,13 +359,13 @@ mod Set do
 
   doc "Returns an empty set."
   fn empty() do
-    HamtSet(SEmpty)
+    HamtSet(0, SEmpty)
   end
 
   doc "Returns a set containing exactly one element."
   fn singleton(x) do
     let h = key_hash(x)
-    HamtSet(SLeaf(h, x))
+    HamtSet(1, SLeaf(h, x))
   end
 
   -- ---- Query ----
@@ -373,15 +373,14 @@ mod Set do
   doc "Returns true if the set contains no elements."
   fn is_empty(s) do
     match s do
-    HamtSet(SEmpty) -> true
-    _               -> false
+    HamtSet(n, _) -> n == 0
     end
   end
 
-  doc "Returns the number of elements in the set. O(n)."
+  doc "Returns the number of elements in the set. O(1)."
   fn size(s) do
     match s do
-    HamtSet(node) -> node_size(node)
+    HamtSet(n, _) -> n
     end
   end
 
@@ -391,7 +390,7 @@ mod Set do
   """
   fn contains(s, elem, cmp) do
     match s do
-    HamtSet(node) -> do
+    HamtSet(_, node) -> do
       let h = key_hash(elem)
       let eq = fn (a, b) -> cmp_eq(cmp, a, b)
       node_contains(node, elem, h, eq, 0)
@@ -407,10 +406,11 @@ mod Set do
   """
   fn insert(s, elem, cmp) do
     match s do
-    HamtSet(node) -> do
+    HamtSet(n, node) -> do
       let h = key_hash(elem)
       let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-      HamtSet(node_insert(node, elem, h, eq, 0))
+      let already = node_contains(node, elem, h, eq, 0)
+      HamtSet(if already do n else n + 1 end, node_insert(node, elem, h, eq, 0))
     end
     end
   end
@@ -421,10 +421,11 @@ mod Set do
   """
   fn remove(s, elem, cmp) do
     match s do
-    HamtSet(node) -> do
+    HamtSet(n, node) -> do
       let h = key_hash(elem)
       let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-      HamtSet(node_remove(node, elem, h, eq, 0))
+      let present = node_contains(node, elem, h, eq, 0)
+      HamtSet(if present do n - 1 else n end, node_remove(node, elem, h, eq, 0))
     end
     end
   end
@@ -440,7 +441,7 @@ mod Set do
       insert(acc, x, cmp)
     end
     match b do
-    HamtSet(node) -> node_fold(a, node, go)
+    HamtSet(_, node) -> node_fold(a, node, go)
     end
   end
 
@@ -454,7 +455,7 @@ mod Set do
       else acc end
     end
     match a do
-    HamtSet(node) ->
+    HamtSet(_, node) ->
       node_fold(empty(), node, go)
     end
   end
@@ -469,7 +470,7 @@ mod Set do
       else insert(acc, x, cmp) end
     end
     match a do
-    HamtSet(node) ->
+    HamtSet(_, node) ->
       node_fold(empty(), node, go)
     end
   end
@@ -480,7 +481,7 @@ mod Set do
       ok && contains(b, x, cmp)
     end
     match a do
-    HamtSet(node) ->
+    HamtSet(_, node) ->
       node_fold(true, node, check)
     end
   end
@@ -490,7 +491,7 @@ mod Set do
   doc "Returns all elements as a list (hash-traversal order)."
   fn to_list(s) do
     match s do
-    HamtSet(node) -> do
+    HamtSet(_, node) -> do
       let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
       lst_rev(acc)
     end
@@ -518,7 +519,7 @@ mod Set do
   """
   fn fold(s, acc, f) do
     match s do
-    HamtSet(node) ->
+    HamtSet(_, node) ->
       node_fold(acc, node, f)
     end
   end
@@ -536,7 +537,7 @@ mod Set do
         ok && contains(b, x, cmp)
       end
       match a do
-      HamtSet(node) ->
+      HamtSet(_, node) ->
         node_fold(true, node, check)
       end end
     end

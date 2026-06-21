@@ -121,7 +121,9 @@ mod Deque do
 
   doc "Apply f to every element, returning a new deque in the same order. O(n)."
   fn map(d : Deque(a), f : a -> b) : Deque(b) do
-    from_list(List.map(to_list(d), f))
+    match d do
+    Deque(n, front, back) -> Deque(n, List.map(front, f), List.map(back, f))
+    end
   end
 
   doc "Keep only elements satisfying pred. O(n)."
