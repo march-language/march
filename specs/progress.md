@@ -280,6 +280,12 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, External Function Interface — type-directed generated codecs)
+
+- **`forge ffi gen-c` now generates type-directed codecs** (`forge/lib/cmd_ffi.ml`, spec §6.4). For each record/variant type reachable from an `extern` signature it emits a repr-C **mirror struct** plus `march_decode_T`/`march_encode_T` over the Phase 9 accessors, and wires shim bodies to decode record/variant params (into a local C struct) and encode record/variant returns. The author writes pure C over plain structs; `march_value` only appears in the generated glue. Pure tooling — no compiler-pipeline changes.
+- **Cycle-safe, topo-ordered, nesting-aware.** Records use name-sorted field order (matching the compiler's layout) and a descriptor whose kind chars mirror `shape_kind_char`; variants use a tagged union keyed by declaration-order ctor index. Nested record/variant fields recurse into their codecs; recursive types (reachable from themselves) and generic types fall back to the `march_value` passthrough. Field representation: Int/Bool→`int64_t` (raw slot), Float→`double`, String/Bytes→`march_slice` (decode borrows, encode owns), nested→`T2_c`, everything else (Option/Result/resource/List/type-var)→`march_value`.
+- **Verified**: forge unit test (`gen-c: record/variant codecs` — mirror struct, tagged union, decode/encode, nested recursion, topo order, shim wiring) → forge 86; end-to-end `test/native/ffi_codec` — the filled-in `forge ffi gen-c` artifact (`ffi_codec.c` via `--ffi-c`) round-trips March aggregates BOTH ways: decode March-built `Shape`/`Point` into C structs (area 75/24), encode a fresh `Point` (translate → 11/22) and a fresh `Shape` (widen Circle→Rect → 49). Whole-project build clean; C ABI + all FFI native rules green. Plan: `specs/plans/2026-06-21-c-ffi-codecs.md`.
+
 ## Current State (as of 2026-06-21, External Function Interface — Phase 9: record/variant codecs)
 
 - **Variants (ADTs) and records now cross the FFI boundary** (`runtime/march_ffi.{h,c}`). New ABI: `march_variant_tag`/`march_variant_field`/`march_record_field` (read) and `march_make_variant`/`march_make_record` (construct). A C binding can build a March ADT or record from native data and hand it back; March pattern-matches / field-accesses it directly. Record construction interns the shape descriptor (`"name:k;…"`, name-sorted, `k∈{i,f,p,g}`) via `march_record_shape_intern` and stamps the shape id into the header pad word.
