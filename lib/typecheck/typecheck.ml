@@ -94,6 +94,11 @@ type ty =
   | TNatOp  of Ast.nat_op * ty * ty      (** n + m, n * m *)
   | TChan   of session_ty ref            (** Linear session-typed channel endpoint *)
   | TError                               (** Error sentinel *)
+  | TRefine of ty * string * Ast.expr
+    (** Refinement type [{ base | predicate }] carrying the binder name and the
+        predicate expression.  Transparent to unification — [repr] strips it to
+        the base — so refinements never disturb base-type inference; the
+        predicate is read only at the deliberate sites that emit obligations. *)
 
 (** Local session type — per-endpoint view of a binary protocol.
     Computed by projecting the global [Ast.protocol_def] onto one role. *)
@@ -158,6 +163,9 @@ let rec repr = function
        r := Link t'';     (* path compression *)
        t''
      | Unbound _ -> t)
+  (* Refinements are transparent to everything that canonicalises through [repr]:
+     it strips to the base, so unification/occurs/etc. never see [TRefine]. *)
+  | TRefine (base, _, _) -> repr base
   | t -> t
 
 (** Does unification variable [id] at [level] appear free in [t]?
@@ -178,6 +186,7 @@ let rec occurs id level t =
   | TLin   (_, t)       -> occurs id level t
   | TNatOp (_, a, b)    -> occurs id level a || occurs id level b
   | TChan  _            -> false  (* session_ty is not polymorphic *)
+  | TRefine (base, _, _) -> occurs id level base
   | TNat _ | TError     -> false
 
 (* =================================================================
@@ -296,6 +305,7 @@ let rec pp_ty ?(parens = false) t =
     | TNatOp (Ast.NatMul, a, b)   ->
       Printf.sprintf "%s * %s" (pp_ty a) (pp_ty b)
     | TChan r -> "Chan(" ^ pp_session_ty !r ^ ")"
+    | TRefine (base, _, _) -> pp_ty ~parens base  (* unreachable: repr strips it *)
   in s
 
 (** Pretty-print a type with line-wrapping.
@@ -795,6 +805,7 @@ let generalize level ty =
     | TLin   (_, t)      -> collect t
     | TNatOp (_, a, b)   -> collect a; collect b
     | TChan  _           -> ()   (* session_ty has no polymorphic variables *)
+    | TRefine (base, _, _) -> collect base  (* unreachable: repr strips it *)
     | TNat _ | TError    -> ()
   in
   collect ty;
@@ -819,6 +830,7 @@ let generalize level ty =
       | TLin   (l, t)      -> TLin   (l, copy t)
       | TNatOp (op, a, b)  -> TNatOp (op, copy a, copy b)
       | TChan  _           -> t   (* session_ty has no polymorphic variables *)
+      | TRefine (base, _, _) -> copy base  (* unreachable: repr strips it (increment 1) *)
       | TNat _ | TError    -> t
     in
     Poly (!ids, [], copy ty)
@@ -847,6 +859,7 @@ let instantiate level env = function
       | TLin   (l, t)      -> TLin   (l, inst t)
       | TNatOp (op, a, b)  -> TNatOp (op, inst a, inst b)
       | TChan  _           -> t   (* session_ty has no polymorphic variables *)
+      | TRefine (base, _, _) -> inst base  (* unreachable: repr strips it (increment 1) *)
       | TNat _ | TError    -> t
     in
     let inst_cs = List.map (function
@@ -2164,9 +2177,12 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
           TChan (ref SError)
         | Some sty ->
           TChan (ref sty)))
-  (* A1a: refinements erase to their base type — the predicate is dropped here
-     (no VC emission yet; that is A1b). *)
-  | Ast.TyRefine (base, _, _) -> surface_ty env ~tvars base
+  (* Carry the refinement in the internal type.  It is transparent to
+     unification (repr strips it), so base-type inference is unchanged; the
+     predicate is read only at the deliberate obligation sites. *)
+  | Ast.TyRefine (base, binder, pred) ->
+    let b = match binder with None -> "_" | Some n -> n.Ast.txt in
+    TRefine (surface_ty env ~tvars base, b, pred)
 
 (* Now that surface_ty and generalize are defined, wire up the forward ref so
    resolve_qualified_var can inject interface method bindings cross-module. *)
@@ -2682,6 +2698,7 @@ let rec example_of (ty : ty) : string =
   | TLin (_, t)         -> example_of t
   | TNat n              -> string_of_int n
   | TNatOp _            -> "_"
+  | TRefine (base, _, _) -> example_of base  (* unreachable: repr strips it *)
 
 (** Core exhaustiveness algorithm (Maranget-style).
 
@@ -2719,6 +2736,7 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
     end else
     match ty with
     | TError -> None   (* error recovery — skip *)
+    | TRefine _ -> None  (* unreachable: [ty] was repr'd above, which strips it *)
     | TVar _ ->
       (* Unknown type: treat like infinite domain. *)
       let def = default_mc matrix in

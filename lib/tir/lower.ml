@@ -95,6 +95,7 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TNatOp _        -> Tir.TVar "_natop"
   | Typecheck.TChan _         -> Tir.TCon ("Chan", [])  (* lowered to opaque Chan ptr *)
   | Typecheck.TError          -> Tir.TVar "_err"
+  | Typecheck.TRefine (base, _, _) -> convert_ty base  (* refinements erase in TIR *)
 
 (* ── Parameter type scope (set by lower_fn_def, used by lower_to_atom_k) ── *)
 

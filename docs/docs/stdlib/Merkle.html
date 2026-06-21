@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CorrelationId — March Docs</title><style>:root{--bg:#09090b;--sb:#0f0f12;--card:#141418;--bdr:#23252b;--acc:#6FE3D6;--acc2:#3ABFF8;--text:#d4d4d8;--dim:#71717a;--bright:#fafafa;--code:#0c0c0f;--fn:#36D399;--ty:#FBBF24;--if:#3ABFF8;--prv:#3f3f46}[data-theme='light']{--bg:#ffffff;--sb:#f4f9fb;--card:#ffffff;--bdr:#d0e3eb;--acc:#0d9e8f;--acc2:#0284c7;--text:#0B1F2A;--dim:#4a6d7a;--bright:#0B1F2A;--code:#0F2A36;--fn:#047857;--ty:#b45309;--if:#0284c7;--prv:#8b9da7}*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:48px;background:var(--sb);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}#topbar .brand{font-size:14px;font-weight:700;color:var(--bright);letter-spacing:.04em;display:flex;align-items:center;gap:8px}#topbar .brand svg{width:20px;height:20px}#topbar .actions{display:flex;align-items:center;gap:12px}#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;display:flex;align-items:center;gap:4px;transition:all .15s}#theme-toggle:hover{color:var(--text);border-color:var(--acc)}#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}#search-trigger:hover{border-color:var(--acc);color:var(--text)}#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}.content-wrap{display:flex;flex:1;overflow:hidden}code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}h1{font-size:1.6rem;color:var(--bright);margin-bottom:10px;font-weight:700}h2{font-size:1.05rem;color:var(--bright);margin:32px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:600;text-transform:uppercase;letter-spacing:.04em;font-size:.85rem}p{margin:8px 0}#sb{width:240px;min-width:200px;background:var(--sb);border-right:1px solid var(--bdr);padding:20px 0;position:sticky;top:48px;height:calc(100vh - 48px);overflow-y:auto;flex-shrink:0}#sb::-webkit-scrollbar{width:4px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:2px}.sb-section{padding:0 14px;margin-bottom:6px}.sb-heading{font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;padding:10px 0 6px;user-select:none}.sl{display:block;padding:4px 10px;border-radius:5px;font-size:13px;color:var(--dim);transition:all .1s}.sl:hover{background:var(--card);color:var(--acc);text-decoration:none}.sl.active{background:var(--card);color:var(--acc);font-weight:500}.sb-group{margin-bottom:2px}.sb-group-hdr{display:flex;align-items:center;gap:4px;padding:4px 10px;border-radius:5px;font-size:13px;color:var(--dim);cursor:pointer;user-select:none;transition:all .1s}.sb-group-hdr:hover{background:var(--card);color:var(--acc)}.sb-group-hdr.active{color:var(--acc);font-weight:500}.sb-chevron{font-size:9px;transition:transform .15s;width:12px;flex-shrink:0;text-align:center;color:var(--dim)}.sb-group.open .sb-chevron{transform:rotate(90deg)}.sb-sub{display:none;padding-left:16px}.sb-group.open .sb-sub{display:block}.sb-sub .sl{font-size:12px;padding:2px 8px;color:var(--dim);opacity:.8}.sb-sub .sl:hover{opacity:1}.sb-sub .sb-kind{font-size:8px;font-weight:700;letter-spacing:.05em;margin-right:4px;text-transform:uppercase;opacity:.6}#main{flex:1;padding:36px 48px;max-width:880px;min-width:0;overflow-y:auto;height:calc(100vh - 48px)}.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}.breadcrumb .sep{color:var(--bdr)}.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}.badge{font-size:9px;font-weight:700;letter-spacing:.08em;padding:2px 7px;border-radius:4px;text-transform:uppercase;flex-shrink:0}.bfn{background:rgba(54,211,153,.12);color:var(--fn)}.bpfn{background:rgba(61,96,112,.2);color:var(--prv)}.bty{background:rgba(251,191,36,.1);color:var(--ty)}.bpt{background:rgba(61,96,112,.15);color:var(--prv)}.bif{background:rgba(58,191,248,.1);color:var(--if)}.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}.ib.open{display:block}.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}.mc:hover{border-color:var(--acc);transform:translateY(-1px)}.mc h3{color:var(--acc);font-size:.95rem;font-weight:600}.mc p{font-size:13px;color:var(--dim);margin-top:6px}.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}.st span{display:flex;align-items:center;gap:4px}.pre-wrap{position:relative}.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}.pre-wrap:hover .copy-btn{opacity:1}.copy-btn:hover{color:var(--text);border-color:var(--acc)}.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}#search-overlay.open{display:flex}#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}#search-input::placeholder{color:var(--dim)}#sr{max-height:50vh;overflow-y:auto;padding:8px}#sr:empty{display:none}.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}.sr-item:hover{background:var(--card);text-decoration:none}.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}.sr-fn{background:rgba(54,211,153,.12);color:var(--fn)}.sr-type{background:rgba(251,191,36,.1);color:var(--ty)}.sr-interface{background:rgba(58,191,248,.1);color:var(--if)}.sr-module{background:rgba(111,227,214,.1);color:var(--acc)}.sr-pfn{background:rgba(61,96,112,.2);color:var(--prv)}.sr-ptype{background:rgba(61,96,112,.15);color:var(--prv)}.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}.admonition.warning{border-left-color:var(--ty)}.admonition.note{border-left-color:var(--acc2)}ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}.guide-body{line-height:1.8;font-size:15px}.guide-body h3{font-size:1.2rem;margin:28px 0 12px;color:var(--bright)}.guide-body h4{font-size:1rem;margin:24px 0 10px;color:var(--bright)}[data-theme='light'] pre{background:#0F2A36;border-color:#133847}[data-theme='light'] pre code{color:#D6EEF5}[data-theme='light'] .copy-btn{background:#132F3D;color:#a8ccd8;border-color:#133847}@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&amp;#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Merkle — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}#topbar .brand svg{width:20px;height:20px}#topbar .actions{display:flex;align-items:center;gap:12px}#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}#theme-toggle:hover{color:var(--text);border-color:var(--acc)}#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}#search-trigger:hover{border-color:var(--acc);color:var(--text)}#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}.content-wrap{display:flex;flex:1;overflow:hidden}code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}p{margin:8px 0}#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}.sb-section{padding:0}.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}.sl.active{color:var(--acc);font-weight:500}.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}.sb-group{margin:1px 0}.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}.sb-group-hdr .sl{flex:1;padding-left:1px}.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}.sb-group.open .sb-sub{display:block}.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}.sb-sub .sl:hover{color:var(--text)}.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}#main{flex:1;padding:40px 52px;max-width:900px;min-width:0;overflow-y:auto;height:calc(100vh - 60px)}.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}.breadcrumb .sep{color:var(--bdr)}.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}.ib.open{display:block}.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}.mc:hover{border-color:var(--acc);transform:translateY(-1px)}.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}.mc p{font-size:13px;color:var(--dim);margin-top:6px}.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}.st span{display:flex;align-items:center;gap:4px}.pre-wrap{position:relative}.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}.pre-wrap:hover .copy-btn{opacity:1}.copy-btn:hover{color:var(--text);border-color:var(--acc)}.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}#search-overlay.open{display:flex}#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}#search-input::placeholder{color:var(--dim)}#sr{max-height:50vh;overflow-y:auto;padding:8px}#sr:empty{display:none}.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}.sr-item:hover{background:var(--card);text-decoration:none}.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}.admonition.warning{border-left-color:var(--ty)}.admonition.note{border-left-color:var(--acc2)}ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}.guide-body{line-height:1.8;font-size:15px}.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
 <a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
 <a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
@@ -57,6 +57,37 @@
 <a class="sl" href="Bytes.html#fn-from_hex"><span class="sb-kind" style="color:var(--fn)">F</span>from_hex</a>
 <a class="sl" href="Bytes.html#fn-encode_base64"><span class="sb-kind" style="color:var(--fn)">F</span>encode_base64</a>
 <a class="sl" href="Bytes.html#fn-decode_base64"><span class="sb-kind" style="color:var(--fn)">F</span>decode_base64</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div><div class="sb-sub"><a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
+<a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
+<a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
+<a class="sl" href="CRDT.html#type-T"><span class="sb-kind" style="color:var(--ty)">T</span>T</a>
+<a class="sl" href="CRDT.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="CRDT.html#fn-increment"><span class="sb-kind" style="color:var(--fn)">F</span>increment</a>
+<a class="sl" href="CRDT.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
+<a class="sl" href="CRDT.html#fn-value"><span class="sb-kind" style="color:var(--fn)">F</span>value</a>
+<a class="sl" href="CRDT.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="CRDT.html#fn-equal"><span class="sb-kind" style="color:var(--fn)">F</span>equal</a>
+<a class="sl" href="CRDT.html#fn-entries"><span class="sb-kind" style="color:var(--fn)">F</span>entries</a>
+<a class="sl" href="CRDT.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="CRDT.html#fn-increment"><span class="sb-kind" style="color:var(--fn)">F</span>increment</a>
+<a class="sl" href="CRDT.html#fn-decrement"><span class="sb-kind" style="color:var(--fn)">F</span>decrement</a>
+<a class="sl" href="CRDT.html#fn-value"><span class="sb-kind" style="color:var(--fn)">F</span>value</a>
+<a class="sl" href="CRDT.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="CRDT.html#fn-equal"><span class="sb-kind" style="color:var(--fn)">F</span>equal</a>
+<a class="sl" href="CRDT.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="CRDT.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="CRDT.html#fn-clock"><span class="sb-kind" style="color:var(--fn)">F</span>clock</a>
+<a class="sl" href="CRDT.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
+<a class="sl" href="CRDT.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="CRDT.html#fn-equal"><span class="sb-kind" style="color:var(--fn)">F</span>equal</a>
+<a class="sl" href="CRDT.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="CRDT.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
+<a class="sl" href="CRDT.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
+<a class="sl" href="CRDT.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
+<a class="sl" href="CRDT.html#fn-elements"><span class="sb-kind" style="color:var(--fn)">F</span>elements</a>
+<a class="sl" href="CRDT.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="CRDT.html#fn-equal"><span class="sb-kind" style="color:var(--fn)">F</span>equal</a>
+<a class="sl" href="CRDT.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Channel.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Channel.html">Channel</a></div><div class="sb-sub"><a class="sl" href="Channel.html#type-Socket"><span class="sb-kind" style="color:var(--ty)">T</span>Socket</a>
 <a class="sl" href="Channel.html#type-HandleResult"><span class="sb-kind" style="color:var(--ty)">T</span>HandleResult</a>
 <a class="sl" href="Channel.html#type-ChannelMailbox"><span class="sb-kind" style="color:var(--ty)">T</span>ChannelMailbox</a>
@@ -138,9 +169,23 @@
 <a class="sl" href="Char.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
 <a class="sl" href="Char.html#fn-is_ascii"><span class="sb-kind" style="color:var(--fn)">F</span>is_ascii</a>
 <a class="sl" href="Char.html#fn-is_printable"><span class="sb-kind" style="color:var(--fn)">F</span>is_printable</a>
+<a class="sl" href="Char.html#fn-digit_value_opt"><span class="sb-kind" style="color:var(--fn)">F</span>digit_value_opt</a>
 <a class="sl" href="Char.html#fn-digit_value"><span class="sb-kind" style="color:var(--fn)">F</span>digit_value</a>
+<a class="sl" href="Char.html#fn-hex_digit_value_opt"><span class="sb-kind" style="color:var(--fn)">F</span>hex_digit_value_opt</a>
 <a class="sl" href="Char.html#fn-hex_digit_value"><span class="sb-kind" style="color:var(--fn)">F</span>hex_digit_value</a>
 <a class="sl" href="Char.html#fn-is_hex_digit"><span class="sb-kind" style="color:var(--fn)">F</span>is_hex_digit</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Check.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Check.html">Check</a></div><div class="sb-sub"><a class="sl" href="Check.html#type-CheckConfig"><span class="sb-kind" style="color:var(--ty)">T</span>CheckConfig</a>
+<a class="sl" href="Check.html#fn-default_config"><span class="sb-kind" style="color:var(--fn)">F</span>default_config</a>
+<a class="sl" href="Check.html#fn-try_prop"><span class="sb-kind" style="color:var(--fn)">F</span>try_prop</a>
+<a class="sl" href="Check.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
+<a class="sl" href="Check.html#fn-all_with"><span class="sb-kind" style="color:var(--fn)">F</span>all_with</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Compress.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Compress.html">Compress</a></div><div class="sb-sub"><a class="sl" href="Compress.html#type-Error"><span class="sb-kind" style="color:var(--ty)">T</span>Error</a>
+<a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
+<a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
+<a class="sl" href="Compress.html#type-Mode"><span class="sb-kind" style="color:var(--ty)">T</span>Mode</a>
+<a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
+<a class="sl" href="Compress.html#fn-accept_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>accept_encoding</a>
+<a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Config.html">Config</a></div><div class="sb-sub"><a class="sl" href="Config.html#fn-put"><span class="sb-kind" style="color:var(--fn)">F</span>put</a>
 <a class="sl" href="Config.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Config.html#fn-get_with_default"><span class="sb-kind" style="color:var(--fn)">F</span>get_with_default</a>
@@ -167,7 +212,15 @@
 <a class="sl" href="Config.html#fn-store_get"><span class="sb-kind" style="color:var(--fn)">F</span>store_get</a>
 <a class="sl" href="Config.html#fn-store_put_in"><span class="sb-kind" style="color:var(--fn)">F</span>store_put_in</a>
 <a class="sl" href="Config.html#fn-store_get_in"><span class="sb-kind" style="color:var(--fn)">F</span>store_get_in</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="CorrelationId.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="CorrelationId.html">CorrelationId</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ConsistentHash.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ConsistentHash.html">ConsistentHash</a></div><div class="sb-sub"><a class="sl" href="ConsistentHash.html#type-HashRing"><span class="sb-kind" style="color:var(--ty)">T</span>HashRing</a>
+<a class="sl" href="ConsistentHash.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="ConsistentHash.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
+<a class="sl" href="ConsistentHash.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
+<a class="sl" href="ConsistentHash.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="ConsistentHash.html#fn-nodes"><span class="sb-kind" style="color:var(--fn)">F</span>nodes</a>
+<a class="sl" href="ConsistentHash.html#fn-node_names"><span class="sb-kind" style="color:var(--fn)">F</span>node_names</a>
+<a class="sl" href="ConsistentHash.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
+<a class="sl" href="ConsistentHash.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div><div class="sb-sub"><a class="sl" href="Crypto.html#fn-sha256"><span class="sb-kind" style="color:var(--fn)">F</span>sha256</a>
 <a class="sl" href="Crypto.html#fn-sha512"><span class="sb-kind" style="color:var(--fn)">F</span>sha512</a>
 <a class="sl" href="Crypto.html#fn-hmac"><span class="sb-kind" style="color:var(--fn)">F</span>hmac</a>
@@ -335,6 +388,8 @@
 <div class="sb-group"><div class="sb-group-hdr" data-href="DateTime.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="DateTime.html">DateTime</a></div><div class="sb-sub"><a class="sl" href="DateTime.html#type-Date"><span class="sb-kind" style="color:var(--ty)">T</span>Date</a>
 <a class="sl" href="DateTime.html#type-Time"><span class="sb-kind" style="color:var(--ty)">T</span>Time</a>
 <a class="sl" href="DateTime.html#type-DateTime"><span class="sb-kind" style="color:var(--ty)">T</span>DateTime</a>
+<a class="sl" href="DateTime.html#type-Tz"><span class="sb-kind" style="color:var(--ty)">T</span>Tz</a>
+<a class="sl" href="DateTime.html#type-LocalDateTime"><span class="sb-kind" style="color:var(--ty)">T</span>LocalDateTime</a>
 <a class="sl" href="DateTime.html#fn-now"><span class="sb-kind" style="color:var(--fn)">F</span>now</a>
 <a class="sl" href="DateTime.html#fn-from_timestamp"><span class="sb-kind" style="color:var(--fn)">F</span>from_timestamp</a>
 <a class="sl" href="DateTime.html#fn-to_timestamp"><span class="sb-kind" style="color:var(--fn)">F</span>to_timestamp</a>
@@ -347,7 +402,25 @@
 <a class="sl" href="DateTime.html#fn-compare"><span class="sb-kind" style="color:var(--fn)">F</span>compare</a>
 <a class="sl" href="DateTime.html#fn-day_of_week"><span class="sb-kind" style="color:var(--fn)">F</span>day_of_week</a>
 <a class="sl" href="DateTime.html#fn-format"><span class="sb-kind" style="color:var(--fn)">F</span>format</a>
-<a class="sl" href="DateTime.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a></div></div>
+<a class="sl" href="DateTime.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="DateTime.html#fn-utc_zone"><span class="sb-kind" style="color:var(--fn)">F</span>utc_zone</a>
+<a class="sl" href="DateTime.html#fn-fixed_zone"><span class="sb-kind" style="color:var(--fn)">F</span>fixed_zone</a>
+<a class="sl" href="DateTime.html#fn-fixed_zone_hours"><span class="sb-kind" style="color:var(--fn)">F</span>fixed_zone_hours</a>
+<a class="sl" href="DateTime.html#fn-fixed_zone_hm"><span class="sb-kind" style="color:var(--fn)">F</span>fixed_zone_hm</a>
+<a class="sl" href="DateTime.html#fn-zone_name"><span class="sb-kind" style="color:var(--fn)">F</span>zone_name</a>
+<a class="sl" href="DateTime.html#fn-zone_offset_seconds"><span class="sb-kind" style="color:var(--fn)">F</span>zone_offset_seconds</a>
+<a class="sl" href="DateTime.html#fn-format_offset"><span class="sb-kind" style="color:var(--fn)">F</span>format_offset</a>
+<a class="sl" href="DateTime.html#fn-local_of"><span class="sb-kind" style="color:var(--fn)">F</span>local_of</a>
+<a class="sl" href="DateTime.html#fn-local_now"><span class="sb-kind" style="color:var(--fn)">F</span>local_now</a>
+<a class="sl" href="DateTime.html#fn-local_from_timestamp"><span class="sb-kind" style="color:var(--fn)">F</span>local_from_timestamp</a>
+<a class="sl" href="DateTime.html#fn-local_from_utc"><span class="sb-kind" style="color:var(--fn)">F</span>local_from_utc</a>
+<a class="sl" href="DateTime.html#fn-local_datetime"><span class="sb-kind" style="color:var(--fn)">F</span>local_datetime</a>
+<a class="sl" href="DateTime.html#fn-local_zone"><span class="sb-kind" style="color:var(--fn)">F</span>local_zone</a>
+<a class="sl" href="DateTime.html#fn-local_to_utc"><span class="sb-kind" style="color:var(--fn)">F</span>local_to_utc</a>
+<a class="sl" href="DateTime.html#fn-local_to_timestamp"><span class="sb-kind" style="color:var(--fn)">F</span>local_to_timestamp</a>
+<a class="sl" href="DateTime.html#fn-local_with_zone"><span class="sb-kind" style="color:var(--fn)">F</span>local_with_zone</a>
+<a class="sl" href="DateTime.html#fn-local_format"><span class="sb-kind" style="color:var(--fn)">F</span>local_format</a>
+<a class="sl" href="DateTime.html#fn-parse_offset"><span class="sb-kind" style="color:var(--fn)">F</span>parse_offset</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Decimal.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Decimal.html">Decimal</a></div><div class="sb-sub"><a class="sl" href="Decimal.html#type-Decimal"><span class="sb-kind" style="color:var(--ty)">T</span>Decimal</a>
 <a class="sl" href="Decimal.html#fn-from_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_string</a>
 <a class="sl" href="Decimal.html#fn-from_int_scaled"><span class="sb-kind" style="color:var(--fn)">F</span>from_int_scaled</a>
@@ -356,6 +429,7 @@
 <a class="sl" href="Decimal.html#fn-sub"><span class="sb-kind" style="color:var(--fn)">F</span>sub</a>
 <a class="sl" href="Decimal.html#fn-mul"><span class="sb-kind" style="color:var(--fn)">F</span>mul</a>
 <a class="sl" href="Decimal.html#fn-div"><span class="sb-kind" style="color:var(--fn)">F</span>div</a>
+<a class="sl" href="Decimal.html#fn-div_round"><span class="sb-kind" style="color:var(--fn)">F</span>div_round</a>
 <a class="sl" href="Decimal.html#fn-round"><span class="sb-kind" style="color:var(--fn)">F</span>round</a>
 <a class="sl" href="Decimal.html#fn-compare"><span class="sb-kind" style="color:var(--fn)">F</span>compare</a>
 <a class="sl" href="Decimal.html#fn-eq"><span class="sb-kind" style="color:var(--fn)">F</span>eq</a>
@@ -366,98 +440,26 @@
 <a class="sl" href="Decimal.html#fn-coefficient"><span class="sb-kind" style="color:var(--fn)">F</span>coefficient</a>
 <a class="sl" href="Decimal.html#fn-is_zero"><span class="sb-kind" style="color:var(--fn)">F</span>is_zero</a>
 <a class="sl" href="Decimal.html#fn-abs"><span class="sb-kind" style="color:var(--fn)">F</span>abs</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Form.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Form.html">Depot.Form</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Gate.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Gate.html">Depot.Gate</a></div><div class="sb-sub"><a class="sl" href="Depot.Gate.html#type-DbConstraint"><span class="sb-kind" style="color:var(--ty)">T</span>DbConstraint</a>
-<a class="sl" href="Depot.Gate.html#type-Gate"><span class="sb-kind" style="color:var(--ty)">T</span>Gate</a>
-<a class="sl" href="Depot.Gate.html#type-LengthOpt"><span class="sb-kind" style="color:var(--ty)">T</span>LengthOpt</a>
-<a class="sl" href="Depot.Gate.html#type-NumberOpt"><span class="sb-kind" style="color:var(--ty)">T</span>NumberOpt</a>
-<a class="sl" href="Depot.Gate.html#type-ConstraintOpt"><span class="sb-kind" style="color:var(--ty)">T</span>ConstraintOpt</a>
-<a class="sl" href="Depot.Gate.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
-<a class="sl" href="Depot.Gate.html#fn-cast_record"><span class="sb-kind" style="color:var(--fn)">F</span>cast_record</a>
-<a class="sl" href="Depot.Gate.html#fn-get_field"><span class="sb-kind" style="color:var(--fn)">F</span>get_field</a>
-<a class="sl" href="Depot.Gate.html#fn-get_change"><span class="sb-kind" style="color:var(--fn)">F</span>get_change</a>
-<a class="sl" href="Depot.Gate.html#fn-put_change"><span class="sb-kind" style="color:var(--fn)">F</span>put_change</a>
-<a class="sl" href="Depot.Gate.html#fn-delete_change"><span class="sb-kind" style="color:var(--fn)">F</span>delete_change</a>
-<a class="sl" href="Depot.Gate.html#fn-base"><span class="sb-kind" style="color:var(--fn)">F</span>base</a>
-<a class="sl" href="Depot.Gate.html#fn-changed_fields"><span class="sb-kind" style="color:var(--fn)">F</span>changed_fields</a>
-<a class="sl" href="Depot.Gate.html#fn-changed"><span class="sb-kind" style="color:var(--fn)">F</span>changed</a>
-<a class="sl" href="Depot.Gate.html#fn-apply_changes"><span class="sb-kind" style="color:var(--fn)">F</span>apply_changes</a>
-<a class="sl" href="Depot.Gate.html#fn-add_error"><span class="sb-kind" style="color:var(--fn)">F</span>add_error</a>
-<a class="sl" href="Depot.Gate.html#fn-is_valid"><span class="sb-kind" style="color:var(--fn)">F</span>is_valid</a>
-<a class="sl" href="Depot.Gate.html#fn-errors"><span class="sb-kind" style="color:var(--fn)">F</span>errors</a>
-<a class="sl" href="Depot.Gate.html#fn-get_errors"><span class="sb-kind" style="color:var(--fn)">F</span>get_errors</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_required"><span class="sb-kind" style="color:var(--fn)">F</span>validate_required</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_length"><span class="sb-kind" style="color:var(--fn)">F</span>validate_length</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_format"><span class="sb-kind" style="color:var(--fn)">F</span>validate_format</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_inclusion"><span class="sb-kind" style="color:var(--fn)">F</span>validate_inclusion</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_exclusion"><span class="sb-kind" style="color:var(--fn)">F</span>validate_exclusion</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_number"><span class="sb-kind" style="color:var(--fn)">F</span>validate_number</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_acceptance"><span class="sb-kind" style="color:var(--fn)">F</span>validate_acceptance</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_confirmation"><span class="sb-kind" style="color:var(--fn)">F</span>validate_confirmation</a>
-<a class="sl" href="Depot.Gate.html#fn-validate_change"><span class="sb-kind" style="color:var(--fn)">F</span>validate_change</a>
-<a class="sl" href="Depot.Gate.html#fn-unique_constraint"><span class="sb-kind" style="color:var(--fn)">F</span>unique_constraint</a>
-<a class="sl" href="Depot.Gate.html#fn-foreign_key_constraint"><span class="sb-kind" style="color:var(--fn)">F</span>foreign_key_constraint</a>
-<a class="sl" href="Depot.Gate.html#fn-no_assoc_constraint"><span class="sb-kind" style="color:var(--fn)">F</span>no_assoc_constraint</a>
-<a class="sl" href="Depot.Gate.html#fn-check_constraint"><span class="sb-kind" style="color:var(--fn)">F</span>check_constraint</a>
-<a class="sl" href="Depot.Gate.html#fn-apply_constraint_error"><span class="sb-kind" style="color:var(--fn)">F</span>apply_constraint_error</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Migration.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Migration.html">Depot.Migration</a></div><div class="sb-sub"><a class="sl" href="Depot.Migration.html#fn-create_table"><span class="sb-kind" style="color:var(--fn)">F</span>create_table</a>
-<a class="sl" href="Depot.Migration.html#fn-alter_table"><span class="sb-kind" style="color:var(--fn)">F</span>alter_table</a>
-<a class="sl" href="Depot.Migration.html#fn-drop_table"><span class="sb-kind" style="color:var(--fn)">F</span>drop_table</a>
-<a class="sl" href="Depot.Migration.html#fn-create_index"><span class="sb-kind" style="color:var(--fn)">F</span>create_index</a>
-<a class="sl" href="Depot.Migration.html#fn-create_index_simple"><span class="sb-kind" style="color:var(--fn)">F</span>create_index_simple</a>
-<a class="sl" href="Depot.Migration.html#fn-drop_index"><span class="sb-kind" style="color:var(--fn)">F</span>drop_index</a>
-<a class="sl" href="Depot.Migration.html#fn-references"><span class="sb-kind" style="color:var(--fn)">F</span>references</a>
-<a class="sl" href="Depot.Migration.html#fn-rename_table"><span class="sb-kind" style="color:var(--fn)">F</span>rename_table</a>
-<a class="sl" href="Depot.Migration.html#fn-rename_column"><span class="sb-kind" style="color:var(--fn)">F</span>rename_column</a>
-<a class="sl" href="Depot.Migration.html#fn-execute"><span class="sb-kind" style="color:var(--fn)">F</span>execute</a>
-<a class="sl" href="Depot.Migration.html#fn-migrations_table"><span class="sb-kind" style="color:var(--fn)">F</span>migrations_table</a>
-<a class="sl" href="Depot.Migration.html#fn-record_migration"><span class="sb-kind" style="color:var(--fn)">F</span>record_migration</a>
-<a class="sl" href="Depot.Migration.html#fn-applied_migrations"><span class="sb-kind" style="color:var(--fn)">F</span>applied_migrations</a>
-<a class="sl" href="Depot.Migration.html#fn-is_applied"><span class="sb-kind" style="color:var(--fn)">F</span>is_applied</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Query.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Query.html">Depot.Query</a></div><div class="sb-sub"><a class="sl" href="Depot.Query.html#type-Query"><span class="sb-kind" style="color:var(--ty)">T</span>Query</a>
-<a class="sl" href="Depot.Query.html#fn-from"><span class="sb-kind" style="color:var(--fn)">F</span>from</a>
-<a class="sl" href="Depot.Query.html#fn-where_"><span class="sb-kind" style="color:var(--fn)">F</span>where_</a>
-<a class="sl" href="Depot.Query.html#fn-select"><span class="sb-kind" style="color:var(--fn)">F</span>select</a>
-<a class="sl" href="Depot.Query.html#fn-order_by"><span class="sb-kind" style="color:var(--fn)">F</span>order_by</a>
-<a class="sl" href="Depot.Query.html#fn-order_asc"><span class="sb-kind" style="color:var(--fn)">F</span>order_asc</a>
-<a class="sl" href="Depot.Query.html#fn-order_desc"><span class="sb-kind" style="color:var(--fn)">F</span>order_desc</a>
-<a class="sl" href="Depot.Query.html#fn-limit"><span class="sb-kind" style="color:var(--fn)">F</span>limit</a>
-<a class="sl" href="Depot.Query.html#fn-offset"><span class="sb-kind" style="color:var(--fn)">F</span>offset</a>
-<a class="sl" href="Depot.Query.html#fn-schema"><span class="sb-kind" style="color:var(--fn)">F</span>schema</a>
-<a class="sl" href="Depot.Query.html#fn-execute"><span class="sb-kind" style="color:var(--fn)">F</span>execute</a>
-<a class="sl" href="Depot.Query.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
-<a class="sl" href="Depot.Query.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
-<a class="sl" href="Depot.Query.html#fn-first"><span class="sb-kind" style="color:var(--fn)">F</span>first</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Repo.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Repo.html">Depot.Repo</a></div><div class="sb-sub"><a class="sl" href="Depot.Repo.html#fn-insert"><span class="sb-kind" style="color:var(--fn)">F</span>insert</a>
-<a class="sl" href="Depot.Repo.html#fn-update"><span class="sb-kind" style="color:var(--fn)">F</span>update</a>
-<a class="sl" href="Depot.Repo.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
-<a class="sl" href="Depot.Repo.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
-<a class="sl" href="Depot.Repo.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
-<a class="sl" href="Depot.Repo.html#fn-get_bang"><span class="sb-kind" style="color:var(--fn)">F</span>get_bang</a>
-<a class="sl" href="Depot.Repo.html#fn-get_by"><span class="sb-kind" style="color:var(--fn)">F</span>get_by</a>
-<a class="sl" href="Depot.Repo.html#fn-one"><span class="sb-kind" style="color:var(--fn)">F</span>one</a>
-<a class="sl" href="Depot.Repo.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
-<a class="sl" href="Depot.Repo.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
-<a class="sl" href="Depot.Repo.html#fn-delete_all"><span class="sb-kind" style="color:var(--fn)">F</span>delete_all</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Schema.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Schema.html">Depot.Schema</a></div><div class="sb-sub"><a class="sl" href="Depot.Schema.html#type-Schema"><span class="sb-kind" style="color:var(--ty)">T</span>Schema</a>
-<a class="sl" href="Depot.Schema.html#fn-define"><span class="sb-kind" style="color:var(--fn)">F</span>define</a>
-<a class="sl" href="Depot.Schema.html#fn-table"><span class="sb-kind" style="color:var(--fn)">F</span>table</a>
-<a class="sl" href="Depot.Schema.html#fn-fields"><span class="sb-kind" style="color:var(--fn)">F</span>fields</a>
-<a class="sl" href="Depot.Schema.html#fn-field_names"><span class="sb-kind" style="color:var(--fn)">F</span>field_names</a>
-<a class="sl" href="Depot.Schema.html#fn-field_type"><span class="sb-kind" style="color:var(--fn)">F</span>field_type</a>
-<a class="sl" href="Depot.Schema.html#fn-field_opts"><span class="sb-kind" style="color:var(--fn)">F</span>field_opts</a>
-<a class="sl" href="Depot.Schema.html#fn-primary_key"><span class="sb-kind" style="color:var(--fn)">F</span>primary_key</a>
-<a class="sl" href="Depot.Schema.html#fn-is_virtual"><span class="sb-kind" style="color:var(--fn)">F</span>is_virtual</a>
-<a class="sl" href="Depot.Schema.html#fn-associations"><span class="sb-kind" style="color:var(--fn)">F</span>associations</a>
-<a class="sl" href="Depot.Schema.html#fn-association"><span class="sb-kind" style="color:var(--fn)">F</span>association</a>
-<a class="sl" href="Depot.Schema.html#fn-db_fields"><span class="sb-kind" style="color:var(--fn)">F</span>db_fields</a>
-<a class="sl" href="Depot.Schema.html#fn-blank"><span class="sb-kind" style="color:var(--fn)">F</span>blank</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Depot.Test.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Depot.Test.html">Depot.Test</a></div><div class="sb-sub"><a class="sl" href="Depot.Test.html#fn-start_sandbox"><span class="sb-kind" style="color:var(--fn)">F</span>start_sandbox</a>
-<a class="sl" href="Depot.Test.html#fn-checkout"><span class="sb-kind" style="color:var(--fn)">F</span>checkout</a>
-<a class="sl" href="Depot.Test.html#fn-checkin"><span class="sb-kind" style="color:var(--fn)">F</span>checkin</a>
-<a class="sl" href="Depot.Test.html#fn-stop_sandbox"><span class="sb-kind" style="color:var(--fn)">F</span>stop_sandbox</a>
-<a class="sl" href="Depot.Test.html#fn-sandboxed"><span class="sb-kind" style="color:var(--fn)">F</span>sandboxed</a>
-<a class="sl" href="Depot.Test.html#fn-active"><span class="sb-kind" style="color:var(--fn)">F</span>active</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Deque.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Deque.html">Deque</a></div><div class="sb-sub"><a class="sl" href="Deque.html#type-Deque"><span class="sb-kind" style="color:var(--ty)">T</span>Deque</a>
+<a class="sl" href="Deque.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="Deque.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
+<a class="sl" href="Deque.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
+<a class="sl" href="Deque.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
+<a class="sl" href="Deque.html#fn-push_front"><span class="sb-kind" style="color:var(--fn)">F</span>push_front</a>
+<a class="sl" href="Deque.html#fn-push_back"><span class="sb-kind" style="color:var(--fn)">F</span>push_back</a>
+<a class="sl" href="Deque.html#fn-peek_front"><span class="sb-kind" style="color:var(--fn)">F</span>peek_front</a>
+<a class="sl" href="Deque.html#fn-peek_back"><span class="sb-kind" style="color:var(--fn)">F</span>peek_back</a>
+<a class="sl" href="Deque.html#fn-pop_front"><span class="sb-kind" style="color:var(--fn)">F</span>pop_front</a>
+<a class="sl" href="Deque.html#fn-pop_back"><span class="sb-kind" style="color:var(--fn)">F</span>pop_back</a>
+<a class="sl" href="Deque.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
+<a class="sl" href="Deque.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
+<a class="sl" href="Deque.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
+<a class="sl" href="Deque.html#fn-filter"><span class="sb-kind" style="color:var(--fn)">F</span>filter</a>
+<a class="sl" href="Deque.html#fn-fold_left"><span class="sb-kind" style="color:var(--fn)">F</span>fold_left</a>
+<a class="sl" href="Deque.html#fn-fold_right"><span class="sb-kind" style="color:var(--fn)">F</span>fold_right</a>
+<a class="sl" href="Deque.html#fn-concat"><span class="sb-kind" style="color:var(--fn)">F</span>concat</a>
+<a class="sl" href="Deque.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
+<a class="sl" href="Deque.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div><div class="sb-sub"><a class="sl" href="Dir.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Dir.html#fn-list_full"><span class="sb-kind" style="color:var(--fn)">F</span>list_full</a>
 <a class="sl" href="Dir.html#fn-mkdir"><span class="sb-kind" style="color:var(--fn)">F</span>mkdir</a>
@@ -465,6 +467,11 @@
 <a class="sl" href="Dir.html#fn-rmdir"><span class="sb-kind" style="color:var(--fn)">F</span>rmdir</a>
 <a class="sl" href="Dir.html#fn-rm_rf"><span class="sb-kind" style="color:var(--fn)">F</span>rm_rf</a>
 <a class="sl" href="Dir.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Dns.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Dns.html">Dns</a></div><div class="sb-sub"><a class="sl" href="Dns.html#type-DnsError"><span class="sb-kind" style="color:var(--ty)">T</span>DnsError</a>
+<a class="sl" href="Dns.html#fn-error_message"><span class="sb-kind" style="color:var(--fn)">F</span>error_message</a>
+<a class="sl" href="Dns.html#fn-resolve"><span class="sb-kind" style="color:var(--fn)">F</span>resolve</a>
+<a class="sl" href="Dns.html#fn-resolve_one"><span class="sb-kind" style="color:var(--fn)">F</span>resolve_one</a>
+<a class="sl" href="Dns.html#fn-is_ip"><span class="sb-kind" style="color:var(--fn)">F</span>is_ip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Duration.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Duration.html">Duration</a></div><div class="sb-sub"><a class="sl" href="Duration.html#type-Duration"><span class="sb-kind" style="color:var(--ty)">T</span>Duration</a>
 <a class="sl" href="Duration.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Duration.html#fn-milliseconds"><span class="sb-kind" style="color:var(--fn)">F</span>milliseconds</a>
@@ -503,6 +510,7 @@
 <a class="sl" href="Enum.html#fn-dedup"><span class="sb-kind" style="color:var(--fn)">F</span>dedup</a>
 <a class="sl" href="Enum.html#fn-uniq"><span class="sb-kind" style="color:var(--fn)">F</span>uniq</a>
 <a class="sl" href="Enum.html#fn-uniq_by"><span class="sb-kind" style="color:var(--fn)">F</span>uniq_by</a>
+<a class="sl" href="Enum.html#fn-uniq_ord"><span class="sb-kind" style="color:var(--fn)">F</span>uniq_ord</a>
 <a class="sl" href="Enum.html#fn-intersperse"><span class="sb-kind" style="color:var(--fn)">F</span>intersperse</a>
 <a class="sl" href="Enum.html#fn-scan"><span class="sb-kind" style="color:var(--fn)">F</span>scan</a>
 <a class="sl" href="Enum.html#fn-slide"><span class="sb-kind" style="color:var(--fn)">F</span>slide</a>
@@ -512,7 +520,8 @@
 <a class="sl" href="Enum.html#fn-max_by"><span class="sb-kind" style="color:var(--fn)">F</span>max_by</a>
 <a class="sl" href="Enum.html#fn-sum"><span class="sb-kind" style="color:var(--fn)">F</span>sum</a>
 <a class="sl" href="Enum.html#fn-product"><span class="sb-kind" style="color:var(--fn)">F</span>product</a>
-<a class="sl" href="Enum.html#fn-frequencies"><span class="sb-kind" style="color:var(--fn)">F</span>frequencies</a></div></div>
+<a class="sl" href="Enum.html#fn-frequencies"><span class="sb-kind" style="color:var(--fn)">F</span>frequencies</a>
+<a class="sl" href="Enum.html#fn-frequencies_ord"><span class="sb-kind" style="color:var(--fn)">F</span>frequencies_ord</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Env.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Env.html">Env</a></div><div class="sb-sub"><a class="sl" href="Env.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Env.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
 <a class="sl" href="Env.html#fn-get_int"><span class="sb-kind" style="color:var(--fn)">F</span>get_int</a>
@@ -527,6 +536,7 @@
 <a class="sl" href="File.html#fn-read_lines"><span class="sb-kind" style="color:var(--fn)">F</span>read_lines</a>
 <a class="sl" href="File.html#fn-exists"><span class="sb-kind" style="color:var(--fn)">F</span>exists</a>
 <a class="sl" href="File.html#fn-stat"><span class="sb-kind" style="color:var(--fn)">F</span>stat</a>
+<a class="sl" href="File.html#fn-mtime"><span class="sb-kind" style="color:var(--fn)">F</span>mtime</a>
 <a class="sl" href="File.html#fn-write"><span class="sb-kind" style="color:var(--fn)">F</span>write</a>
 <a class="sl" href="File.html#fn-append"><span class="sb-kind" style="color:var(--fn)">F</span>append</a>
 <a class="sl" href="File.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
@@ -557,6 +567,42 @@
 <a class="sl" href="Flow.html#fn-find"><span class="sb-kind" style="color:var(--fn)">F</span>find</a>
 <a class="sl" href="Flow.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
 <a class="sl" href="Flow.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Forge.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Forge.html">Forge</a></div><div class="sb-sub"><a class="sl" href="Forge.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Gen.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Gen.html">Gen</a></div><div class="sb-sub"><a class="sl" href="Gen.html#type-Thunk"><span class="sb-kind" style="color:var(--ty)">T</span>Thunk</a>
+<a class="sl" href="Gen.html#type-GenTree"><span class="sb-kind" style="color:var(--ty)">T</span>GenTree</a>
+<a class="sl" href="Gen.html#type-GenRng"><span class="sb-kind" style="color:var(--ty)">T</span>GenRng</a>
+<a class="sl" href="Gen.html#type-Generator"><span class="sb-kind" style="color:var(--ty)">T</span>Generator</a>
+<a class="sl" href="Gen.html#fn-force"><span class="sb-kind" style="color:var(--fn)">F</span>force</a>
+<a class="sl" href="Gen.html#fn-tree_root"><span class="sb-kind" style="color:var(--fn)">F</span>tree_root</a>
+<a class="sl" href="Gen.html#fn-tree_children"><span class="sb-kind" style="color:var(--fn)">F</span>tree_children</a>
+<a class="sl" href="Gen.html#fn-tree_singleton"><span class="sb-kind" style="color:var(--fn)">F</span>tree_singleton</a>
+<a class="sl" href="Gen.html#fn-tree_map"><span class="sb-kind" style="color:var(--fn)">F</span>tree_map</a>
+<a class="sl" href="Gen.html#fn-tree_bind"><span class="sb-kind" style="color:var(--fn)">F</span>tree_bind</a>
+<a class="sl" href="Gen.html#fn-tree_filter"><span class="sb-kind" style="color:var(--fn)">F</span>tree_filter</a>
+<a class="sl" href="Gen.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="Gen.html#fn-int_tree_toward"><span class="sb-kind" style="color:var(--fn)">F</span>int_tree_toward</a>
+<a class="sl" href="Gen.html#fn-constant"><span class="sb-kind" style="color:var(--fn)">F</span>constant</a>
+<a class="sl" href="Gen.html#fn-int"><span class="sb-kind" style="color:var(--fn)">F</span>int</a>
+<a class="sl" href="Gen.html#fn-int_sized"><span class="sb-kind" style="color:var(--fn)">F</span>int_sized</a>
+<a class="sl" href="Gen.html#fn-bool"><span class="sb-kind" style="color:var(--fn)">F</span>bool</a>
+<a class="sl" href="Gen.html#fn-float"><span class="sb-kind" style="color:var(--fn)">F</span>float</a>
+<a class="sl" href="Gen.html#fn-element"><span class="sb-kind" style="color:var(--fn)">F</span>element</a>
+<a class="sl" href="Gen.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
+<a class="sl" href="Gen.html#fn-bind"><span class="sb-kind" style="color:var(--fn)">F</span>bind</a>
+<a class="sl" href="Gen.html#fn-filter"><span class="sb-kind" style="color:var(--fn)">F</span>filter</a>
+<a class="sl" href="Gen.html#fn-one_of"><span class="sb-kind" style="color:var(--fn)">F</span>one_of</a>
+<a class="sl" href="Gen.html#fn-frequency"><span class="sb-kind" style="color:var(--fn)">F</span>frequency</a>
+<a class="sl" href="Gen.html#fn-tuple2"><span class="sb-kind" style="color:var(--fn)">F</span>tuple2</a>
+<a class="sl" href="Gen.html#fn-tuple3"><span class="sb-kind" style="color:var(--fn)">F</span>tuple3</a>
+<a class="sl" href="Gen.html#fn-option"><span class="sb-kind" style="color:var(--fn)">F</span>option</a>
+<a class="sl" href="Gen.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
+<a class="sl" href="Gen.html#fn-list_of_size"><span class="sb-kind" style="color:var(--fn)">F</span>list_of_size</a>
+<a class="sl" href="Gen.html#fn-ascii_char"><span class="sb-kind" style="color:var(--fn)">F</span>ascii_char</a>
+<a class="sl" href="Gen.html#fn-lowercase_char"><span class="sb-kind" style="color:var(--fn)">F</span>lowercase_char</a>
+<a class="sl" href="Gen.html#fn-string"><span class="sb-kind" style="color:var(--fn)">F</span>string</a>
+<a class="sl" href="Gen.html#fn-lowercase_string"><span class="sb-kind" style="color:var(--fn)">F</span>lowercase_string</a>
+<a class="sl" href="Gen.html#fn-string_of"><span class="sb-kind" style="color:var(--fn)">F</span>string_of</a>
+<a class="sl" href="Gen.html#fn-sized"><span class="sb-kind" style="color:var(--fn)">F</span>sized</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div><div class="sb-sub"><a class="sl" href="Hamt.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
 <a class="sl" href="Hamt.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Hamt.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -564,25 +610,161 @@
 <a class="sl" href="Hamt.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
 <a class="sl" href="Hamt.html#fn-fold"><span class="sb-kind" style="color:var(--fn)">F</span>fold</a>
 <a class="sl" href="Hamt.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Html.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Html.html">Html</a></div><div class="sb-sub"><a class="sl" href="Html.html#type-Safe"><span class="sb-kind" style="color:var(--ty)">T</span>Safe</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Handle.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Handle.html">Handle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Html.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Html.html">Html</a></div><div class="sb-sub"><a class="sl" href="Html.html#type-Safe"><span class="sb-kind" style="color:var(--ty)">T</span>Safe</a>
+<a class="sl" href="Html.html#fn-escape"><span class="sb-kind" style="color:var(--fn)">F</span>escape</a>
+<a class="sl" href="Html.html#fn-raw"><span class="sb-kind" style="color:var(--fn)">F</span>raw</a>
+<a class="sl" href="Html.html#fn-safe_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>safe_to_string</a>
+<a class="sl" href="Html.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
+<a class="sl" href="Html.html#fn-join"><span class="sb-kind" style="color:var(--fn)">F</span>join</a>
+<a class="sl" href="Html.html#fn-escape_attr"><span class="sb-kind" style="color:var(--fn)">F</span>escape_attr</a>
+<a class="sl" href="Html.html#fn-tag"><span class="sb-kind" style="color:var(--fn)">F</span>tag</a>
+<a class="sl" href="Html.html#fn-render_partial"><span class="sb-kind" style="color:var(--fn)">F</span>render_partial</a>
+<a class="sl" href="Html.html#fn-render_collection"><span class="sb-kind" style="color:var(--fn)">F</span>render_collection</a>
+<a class="sl" href="Html.html#fn-layout"><span class="sb-kind" style="color:var(--fn)">F</span>layout</a>
+<a class="sl" href="Html.html#fn-content_hash"><span class="sb-kind" style="color:var(--fn)">F</span>content_hash</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Http.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Http.html">Http</a></div><div class="sb-sub"><a class="sl" href="Http.html#type-Method"><span class="sb-kind" style="color:var(--ty)">T</span>Method</a>
 <a class="sl" href="Http.html#type-Scheme"><span class="sb-kind" style="color:var(--ty)">T</span>Scheme</a>
 <a class="sl" href="Http.html#type-Status"><span class="sb-kind" style="color:var(--ty)">T</span>Status</a>
 <a class="sl" href="Http.html#type-Header"><span class="sb-kind" style="color:var(--ty)">T</span>Header</a>
 <a class="sl" href="Http.html#type-UrlError"><span class="sb-kind" style="color:var(--ty)">T</span>UrlError</a>
 <a class="sl" href="Http.html#type-Request"><span class="sb-kind" style="color:var(--ty)">T</span>Request</a>
-<a class="sl" href="Http.html#type-Response"><span class="sb-kind" style="color:var(--ty)">T</span>Response</a></div></div>
+<a class="sl" href="Http.html#type-Response"><span class="sb-kind" style="color:var(--ty)">T</span>Response</a>
+<a class="sl" href="Http.html#fn-method_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>method_to_string</a>
+<a class="sl" href="Http.html#fn-status_code"><span class="sb-kind" style="color:var(--fn)">F</span>status_code</a>
+<a class="sl" href="Http.html#fn-status_ok"><span class="sb-kind" style="color:var(--fn)">F</span>status_ok</a>
+<a class="sl" href="Http.html#fn-status_created"><span class="sb-kind" style="color:var(--fn)">F</span>status_created</a>
+<a class="sl" href="Http.html#fn-status_no_content"><span class="sb-kind" style="color:var(--fn)">F</span>status_no_content</a>
+<a class="sl" href="Http.html#fn-status_moved"><span class="sb-kind" style="color:var(--fn)">F</span>status_moved</a>
+<a class="sl" href="Http.html#fn-status_found"><span class="sb-kind" style="color:var(--fn)">F</span>status_found</a>
+<a class="sl" href="Http.html#fn-status_bad_request"><span class="sb-kind" style="color:var(--fn)">F</span>status_bad_request</a>
+<a class="sl" href="Http.html#fn-status_unauthorized"><span class="sb-kind" style="color:var(--fn)">F</span>status_unauthorized</a>
+<a class="sl" href="Http.html#fn-status_forbidden"><span class="sb-kind" style="color:var(--fn)">F</span>status_forbidden</a>
+<a class="sl" href="Http.html#fn-status_not_found"><span class="sb-kind" style="color:var(--fn)">F</span>status_not_found</a>
+<a class="sl" href="Http.html#fn-status_server_error"><span class="sb-kind" style="color:var(--fn)">F</span>status_server_error</a>
+<a class="sl" href="Http.html#fn-is_informational"><span class="sb-kind" style="color:var(--fn)">F</span>is_informational</a>
+<a class="sl" href="Http.html#fn-is_success"><span class="sb-kind" style="color:var(--fn)">F</span>is_success</a>
+<a class="sl" href="Http.html#fn-is_redirect"><span class="sb-kind" style="color:var(--fn)">F</span>is_redirect</a>
+<a class="sl" href="Http.html#fn-is_client_error"><span class="sb-kind" style="color:var(--fn)">F</span>is_client_error</a>
+<a class="sl" href="Http.html#fn-is_server_error"><span class="sb-kind" style="color:var(--fn)">F</span>is_server_error</a>
+<a class="sl" href="Http.html#fn-method"><span class="sb-kind" style="color:var(--fn)">F</span>method</a>
+<a class="sl" href="Http.html#fn-scheme"><span class="sb-kind" style="color:var(--fn)">F</span>scheme</a>
+<a class="sl" href="Http.html#fn-host"><span class="sb-kind" style="color:var(--fn)">F</span>host</a>
+<a class="sl" href="Http.html#fn-port"><span class="sb-kind" style="color:var(--fn)">F</span>port</a>
+<a class="sl" href="Http.html#fn-path"><span class="sb-kind" style="color:var(--fn)">F</span>path</a>
+<a class="sl" href="Http.html#fn-query"><span class="sb-kind" style="color:var(--fn)">F</span>query</a>
+<a class="sl" href="Http.html#fn-headers"><span class="sb-kind" style="color:var(--fn)">F</span>headers</a>
+<a class="sl" href="Http.html#fn-body"><span class="sb-kind" style="color:var(--fn)">F</span>body</a>
+<a class="sl" href="Http.html#fn-set_method"><span class="sb-kind" style="color:var(--fn)">F</span>set_method</a>
+<a class="sl" href="Http.html#fn-set_scheme"><span class="sb-kind" style="color:var(--fn)">F</span>set_scheme</a>
+<a class="sl" href="Http.html#fn-set_host"><span class="sb-kind" style="color:var(--fn)">F</span>set_host</a>
+<a class="sl" href="Http.html#fn-set_port"><span class="sb-kind" style="color:var(--fn)">F</span>set_port</a>
+<a class="sl" href="Http.html#fn-set_path"><span class="sb-kind" style="color:var(--fn)">F</span>set_path</a>
+<a class="sl" href="Http.html#fn-set_body"><span class="sb-kind" style="color:var(--fn)">F</span>set_body</a>
+<a class="sl" href="Http.html#fn-set_header"><span class="sb-kind" style="color:var(--fn)">F</span>set_header</a>
+<a class="sl" href="Http.html#fn-response_status"><span class="sb-kind" style="color:var(--fn)">F</span>response_status</a>
+<a class="sl" href="Http.html#fn-response_headers"><span class="sb-kind" style="color:var(--fn)">F</span>response_headers</a>
+<a class="sl" href="Http.html#fn-response_body"><span class="sb-kind" style="color:var(--fn)">F</span>response_body</a>
+<a class="sl" href="Http.html#fn-response_status_code"><span class="sb-kind" style="color:var(--fn)">F</span>response_status_code</a>
+<a class="sl" href="Http.html#fn-response_is_success"><span class="sb-kind" style="color:var(--fn)">F</span>response_is_success</a>
+<a class="sl" href="Http.html#fn-response_is_redirect"><span class="sb-kind" style="color:var(--fn)">F</span>response_is_redirect</a>
+<a class="sl" href="Http.html#fn-get_header"><span class="sb-kind" style="color:var(--fn)">F</span>get_header</a>
+<a class="sl" href="Http.html#fn-get_request_header"><span class="sb-kind" style="color:var(--fn)">F</span>get_request_header</a>
+<a class="sl" href="Http.html#fn-parse_url"><span class="sb-kind" style="color:var(--fn)">F</span>parse_url</a>
+<a class="sl" href="Http.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="Http.html#fn-post"><span class="sb-kind" style="color:var(--fn)">F</span>post</a>
+<a class="sl" href="Http.html#fn-put"><span class="sb-kind" style="color:var(--fn)">F</span>put</a>
+<a class="sl" href="Http.html#fn-patch"><span class="sb-kind" style="color:var(--fn)">F</span>patch</a>
+<a class="sl" href="Http.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
+<a class="sl" href="Http.html#fn-head"><span class="sb-kind" style="color:var(--fn)">F</span>head</a>
+<a class="sl" href="Http.html#fn-options"><span class="sb-kind" style="color:var(--fn)">F</span>options</a>
+<a class="sl" href="Http.html#fn-encode_query"><span class="sb-kind" style="color:var(--fn)">F</span>encode_query</a>
+<a class="sl" href="Http.html#fn-set_query"><span class="sb-kind" style="color:var(--fn)">F</span>set_query</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="HttpClient.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HttpClient.html">HttpClient</a></div><div class="sb-sub"><a class="sl" href="HttpClient.html#type-TransportError"><span class="sb-kind" style="color:var(--ty)">T</span>TransportError</a>
 <a class="sl" href="HttpClient.html#type-HttpError"><span class="sb-kind" style="color:var(--ty)">T</span>HttpError</a>
 <a class="sl" href="HttpClient.html#type-RequestStepEntry"><span class="sb-kind" style="color:var(--ty)">T</span>RequestStepEntry</a>
 <a class="sl" href="HttpClient.html#type-ResponseStepEntry"><span class="sb-kind" style="color:var(--ty)">T</span>ResponseStepEntry</a>
 <a class="sl" href="HttpClient.html#type-ErrorRecovery"><span class="sb-kind" style="color:var(--ty)">T</span>ErrorRecovery</a>
 <a class="sl" href="HttpClient.html#type-ErrorStepEntry"><span class="sb-kind" style="color:var(--ty)">T</span>ErrorStepEntry</a>
-<a class="sl" href="HttpClient.html#type-Client"><span class="sb-kind" style="color:var(--ty)">T</span>Client</a></div></div>
+<a class="sl" href="HttpClient.html#type-Client"><span class="sb-kind" style="color:var(--ty)">T</span>Client</a>
+<a class="sl" href="HttpClient.html#fn-new_client"><span class="sb-kind" style="color:var(--fn)">F</span>new_client</a>
+<a class="sl" href="HttpClient.html#fn-append_to_list"><span class="sb-kind" style="color:var(--fn)">F</span>append_to_list</a>
+<a class="sl" href="HttpClient.html#fn-add_request_step"><span class="sb-kind" style="color:var(--fn)">F</span>add_request_step</a>
+<a class="sl" href="HttpClient.html#fn-add_response_step"><span class="sb-kind" style="color:var(--fn)">F</span>add_response_step</a>
+<a class="sl" href="HttpClient.html#fn-add_error_step"><span class="sb-kind" style="color:var(--fn)">F</span>add_error_step</a>
+<a class="sl" href="HttpClient.html#fn-with_redirects"><span class="sb-kind" style="color:var(--fn)">F</span>with_redirects</a>
+<a class="sl" href="HttpClient.html#fn-with_retry"><span class="sb-kind" style="color:var(--fn)">F</span>with_retry</a>
+<a class="sl" href="HttpClient.html#fn-list_steps"><span class="sb-kind" style="color:var(--fn)">F</span>list_steps</a>
+<a class="sl" href="HttpClient.html#fn-run_request_steps"><span class="sb-kind" style="color:var(--fn)">F</span>run_request_steps</a>
+<a class="sl" href="HttpClient.html#fn-run_response_steps"><span class="sb-kind" style="color:var(--fn)">F</span>run_response_steps</a>
+<a class="sl" href="HttpClient.html#fn-run_error_steps"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_steps</a>
+<a class="sl" href="HttpClient.html#fn-transport_with_retry"><span class="sb-kind" style="color:var(--fn)">F</span>transport_with_retry</a>
+<a class="sl" href="HttpClient.html#fn-reconnect_and_retry"><span class="sb-kind" style="color:var(--fn)">F</span>reconnect_and_retry</a>
+<a class="sl" href="HttpClient.html#fn-transport_keepalive"><span class="sb-kind" style="color:var(--fn)">F</span>transport_keepalive</a>
+<a class="sl" href="HttpClient.html#fn-hc_is_sensitive_header_name"><span class="sb-kind" style="color:var(--fn)">F</span>hc_is_sensitive_header_name</a>
+<a class="sl" href="HttpClient.html#fn-hc_strip_sensitive_headers"><span class="sb-kind" style="color:var(--fn)">F</span>hc_strip_sensitive_headers</a>
+<a class="sl" href="HttpClient.html#fn-hc_effective_port"><span class="sb-kind" style="color:var(--fn)">F</span>hc_effective_port</a>
+<a class="sl" href="HttpClient.html#fn-hc_same_origin"><span class="sb-kind" style="color:var(--fn)">F</span>hc_same_origin</a>
+<a class="sl" href="HttpClient.html#fn-handle_redirects"><span class="sb-kind" style="color:var(--fn)">F</span>handle_redirects</a>
+<a class="sl" href="HttpClient.html#fn-run_on_fd"><span class="sb-kind" style="color:var(--fn)">F</span>run_on_fd</a>
+<a class="sl" href="HttpClient.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="HttpClient.html#fn-with_connection"><span class="sb-kind" style="color:var(--fn)">F</span>with_connection</a>
+<a class="sl" href="HttpClient.html#fn-stream_get"><span class="sb-kind" style="color:var(--fn)">F</span>stream_get</a>
+<a class="sl" href="HttpClient.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="HttpClient.html#fn-post"><span class="sb-kind" style="color:var(--fn)">F</span>post</a>
+<a class="sl" href="HttpClient.html#fn-put_request"><span class="sb-kind" style="color:var(--fn)">F</span>put_request</a>
+<a class="sl" href="HttpClient.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
+<a class="sl" href="HttpClient.html#fn-step_default_headers"><span class="sb-kind" style="color:var(--fn)">F</span>step_default_headers</a>
+<a class="sl" href="HttpClient.html#fn-step_bearer_auth"><span class="sb-kind" style="color:var(--fn)">F</span>step_bearer_auth</a>
+<a class="sl" href="HttpClient.html#fn-step_basic_auth"><span class="sb-kind" style="color:var(--fn)">F</span>step_basic_auth</a>
+<a class="sl" href="HttpClient.html#fn-step_base_url"><span class="sb-kind" style="color:var(--fn)">F</span>step_base_url</a>
+<a class="sl" href="HttpClient.html#fn-step_content_type"><span class="sb-kind" style="color:var(--fn)">F</span>step_content_type</a>
+<a class="sl" href="HttpClient.html#fn-step_raise_on_error"><span class="sb-kind" style="color:var(--fn)">F</span>step_raise_on_error</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="HttpServer.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HttpServer.html">HttpServer</a></div><div class="sb-sub"><a class="sl" href="HttpServer.html#type-Upgrade"><span class="sb-kind" style="color:var(--ty)">T</span>Upgrade</a>
 <a class="sl" href="HttpServer.html#type-Conn"><span class="sb-kind" style="color:var(--ty)">T</span>Conn</a>
-<a class="sl" href="HttpServer.html#type-Server"><span class="sb-kind" style="color:var(--ty)">T</span>Server</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="HttpTransport.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HttpTransport.html">HttpTransport</a></div><div class="sb-sub"><a class="sl" href="HttpTransport.html#type-TransportError"><span class="sb-kind" style="color:var(--ty)">T</span>TransportError</a></div></div>
+<a class="sl" href="HttpServer.html#type-Server"><span class="sb-kind" style="color:var(--ty)">T</span>Server</a>
+<a class="sl" href="HttpServer.html#fn-method"><span class="sb-kind" style="color:var(--fn)">F</span>method</a>
+<a class="sl" href="HttpServer.html#fn-method_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>method_to_string</a>
+<a class="sl" href="HttpServer.html#fn-path"><span class="sb-kind" style="color:var(--fn)">F</span>path</a>
+<a class="sl" href="HttpServer.html#fn-path_info"><span class="sb-kind" style="color:var(--fn)">F</span>path_info</a>
+<a class="sl" href="HttpServer.html#fn-query_string"><span class="sb-kind" style="color:var(--fn)">F</span>query_string</a>
+<a class="sl" href="HttpServer.html#fn-req_headers"><span class="sb-kind" style="color:var(--fn)">F</span>req_headers</a>
+<a class="sl" href="HttpServer.html#fn-req_body"><span class="sb-kind" style="color:var(--fn)">F</span>req_body</a>
+<a class="sl" href="HttpServer.html#fn-status"><span class="sb-kind" style="color:var(--fn)">F</span>status</a>
+<a class="sl" href="HttpServer.html#fn-resp_headers"><span class="sb-kind" style="color:var(--fn)">F</span>resp_headers</a>
+<a class="sl" href="HttpServer.html#fn-resp_body"><span class="sb-kind" style="color:var(--fn)">F</span>resp_body</a>
+<a class="sl" href="HttpServer.html#fn-halted"><span class="sb-kind" style="color:var(--fn)">F</span>halted</a>
+<a class="sl" href="HttpServer.html#fn-assigns"><span class="sb-kind" style="color:var(--fn)">F</span>assigns</a>
+<a class="sl" href="HttpServer.html#fn-conn_upgrade"><span class="sb-kind" style="color:var(--fn)">F</span>conn_upgrade</a>
+<a class="sl" href="HttpServer.html#fn-fd"><span class="sb-kind" style="color:var(--fn)">F</span>fd</a>
+<a class="sl" href="HttpServer.html#fn-peer_addr"><span class="sb-kind" style="color:var(--fn)">F</span>peer_addr</a>
+<a class="sl" href="HttpServer.html#fn-get_req_header"><span class="sb-kind" style="color:var(--fn)">F</span>get_req_header</a>
+<a class="sl" href="HttpServer.html#fn-get_resp_header"><span class="sb-kind" style="color:var(--fn)">F</span>get_resp_header</a>
+<a class="sl" href="HttpServer.html#fn-get_assign"><span class="sb-kind" style="color:var(--fn)">F</span>get_assign</a>
+<a class="sl" href="HttpServer.html#fn-put_resp_header"><span class="sb-kind" style="color:var(--fn)">F</span>put_resp_header</a>
+<a class="sl" href="HttpServer.html#fn-assign"><span class="sb-kind" style="color:var(--fn)">F</span>assign</a>
+<a class="sl" href="HttpServer.html#fn-send_resp"><span class="sb-kind" style="color:var(--fn)">F</span>send_resp</a>
+<a class="sl" href="HttpServer.html#fn-halt"><span class="sb-kind" style="color:var(--fn)">F</span>halt</a>
+<a class="sl" href="HttpServer.html#fn-text"><span class="sb-kind" style="color:var(--fn)">F</span>text</a>
+<a class="sl" href="HttpServer.html#fn-json"><span class="sb-kind" style="color:var(--fn)">F</span>json</a>
+<a class="sl" href="HttpServer.html#fn-html"><span class="sb-kind" style="color:var(--fn)">F</span>html</a>
+<a class="sl" href="HttpServer.html#fn-redirect"><span class="sb-kind" style="color:var(--fn)">F</span>redirect</a>
+<a class="sl" href="HttpServer.html#fn-run_pipeline"><span class="sb-kind" style="color:var(--fn)">F</span>run_pipeline</a>
+<a class="sl" href="HttpServer.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="HttpServer.html#fn-plug"><span class="sb-kind" style="color:var(--fn)">F</span>plug</a>
+<a class="sl" href="HttpServer.html#fn-max_connections"><span class="sb-kind" style="color:var(--fn)">F</span>max_connections</a>
+<a class="sl" href="HttpServer.html#fn-idle_timeout"><span class="sb-kind" style="color:var(--fn)">F</span>idle_timeout</a>
+<a class="sl" href="HttpServer.html#fn-listen"><span class="sb-kind" style="color:var(--fn)">F</span>listen</a>
+<a class="sl" href="HttpServer.html#fn-spawn_n"><span class="sb-kind" style="color:var(--fn)">F</span>spawn_n</a>
+<a class="sl" href="HttpServer.html#fn-wait_for"><span class="sb-kind" style="color:var(--fn)">F</span>wait_for</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpTransport.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="HttpTransport.html">HttpTransport</a></div><div class="sb-sub"><a class="sl" href="HttpTransport.html#type-TransportError"><span class="sb-kind" style="color:var(--ty)">T</span>TransportError</a>
+<a class="sl" href="HttpTransport.html#fn-connect"><span class="sb-kind" style="color:var(--fn)">F</span>connect</a>
+<a class="sl" href="HttpTransport.html#fn-request_on"><span class="sb-kind" style="color:var(--fn)">F</span>request_on</a>
+<a class="sl" href="HttpTransport.html#fn-stream_request_on"><span class="sb-kind" style="color:var(--fn)">F</span>stream_request_on</a>
+<a class="sl" href="HttpTransport.html#fn-stream_chunked_body"><span class="sb-kind" style="color:var(--fn)">F</span>stream_chunked_body</a>
+<a class="sl" href="HttpTransport.html#fn-stream_fixed_body"><span class="sb-kind" style="color:var(--fn)">F</span>stream_fixed_body</a>
+<a class="sl" href="HttpTransport.html#fn-request"><span class="sb-kind" style="color:var(--fn)">F</span>request</a>
+<a class="sl" href="HttpTransport.html#fn-simple_get"><span class="sb-kind" style="color:var(--fn)">F</span>simple_get</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="IO.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="IO.html">IO</a></div><div class="sb-sub"><a class="sl" href="IO.html#fn-write"><span class="sb-kind" style="color:var(--fn)">F</span>write</a>
 <a class="sl" href="IO.html#fn-puts"><span class="sb-kind" style="color:var(--fn)">F</span>puts</a>
 <a class="sl" href="IO.html#fn-warn"><span class="sb-kind" style="color:var(--fn)">F</span>warn</a>
@@ -590,7 +772,17 @@
 <a class="sl" href="IO.html#fn-gets"><span class="sb-kind" style="color:var(--fn)">F</span>gets</a>
 <a class="sl" href="IO.html#fn-inspect"><span class="sb-kind" style="color:var(--fn)">F</span>inspect</a>
 <a class="sl" href="IO.html#fn-iodata_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>iodata_to_string</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="IOList.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="IOList.html">IOList</a></div><div class="sb-sub"><a class="sl" href="IOList.html#type-IOList"><span class="sb-kind" style="color:var(--ty)">T</span>IOList</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="IOList.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="IOList.html">IOList</a></div><div class="sb-sub"><a class="sl" href="IOList.html#type-IOList"><span class="sb-kind" style="color:var(--ty)">T</span>IOList</a>
+<a class="sl" href="IOList.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
+<a class="sl" href="IOList.html#fn-from_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_string</a>
+<a class="sl" href="IOList.html#fn-append"><span class="sb-kind" style="color:var(--fn)">F</span>append</a>
+<a class="sl" href="IOList.html#fn-prepend"><span class="sb-kind" style="color:var(--fn)">F</span>prepend</a>
+<a class="sl" href="IOList.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
+<a class="sl" href="IOList.html#fn-from_strings"><span class="sb-kind" style="color:var(--fn)">F</span>from_strings</a>
+<a class="sl" href="IOList.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="IOList.html#fn-byte_size"><span class="sb-kind" style="color:var(--fn)">F</span>byte_size</a>
+<a class="sl" href="IOList.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
+<a class="sl" href="IOList.html#fn-hash"><span class="sb-kind" style="color:var(--fn)">F</span>hash</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Iterable.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Iterable.html">Iterable</a></div><div class="sb-sub"><a class="sl" href="Iterable.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a>
 <a class="sl" href="Iterable.html#fn-flat_map"><span class="sb-kind" style="color:var(--fn)">F</span>flat_map</a>
 <a class="sl" href="Iterable.html#fn-filter"><span class="sb-kind" style="color:var(--fn)">F</span>filter</a>
@@ -604,10 +796,13 @@
 <a class="sl" href="Iterable.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a>
 <a class="sl" href="Iterable.html#fn-enumerate"><span class="sb-kind" style="color:var(--fn)">F</span>enumerate</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Json.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Json.html">Json</a></div><div class="sb-sub"><a class="sl" href="Json.html#type-JsonValue"><span class="sb-kind" style="color:var(--ty)">T</span>JsonValue</a>
+<a class="sl" href="Json.html#type-JsonPath"><span class="sb-kind" style="color:var(--ty)">T</span>JsonPath</a>
 <a class="sl" href="Json.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Json.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
 <a class="sl" href="Json.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Json.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
+<a class="sl" href="Json.html#fn-get_at"><span class="sb-kind" style="color:var(--fn)">F</span>get_at</a>
+<a class="sl" href="Json.html#fn-get_path"><span class="sb-kind" style="color:var(--fn)">F</span>get_path</a>
 <a class="sl" href="Json.html#fn-encode_null"><span class="sb-kind" style="color:var(--fn)">F</span>encode_null</a>
 <a class="sl" href="Json.html#fn-encode_bool"><span class="sb-kind" style="color:var(--fn)">F</span>encode_bool</a>
 <a class="sl" href="Json.html#fn-encode_number"><span class="sb-kind" style="color:var(--fn)">F</span>encode_number</a>
@@ -635,6 +830,10 @@
 <a class="sl" href="List.html#fn-each"><span class="sb-kind" style="color:var(--fn)">F</span>each</a>
 <a class="sl" href="List.html#fn-flat_map"><span class="sb-kind" style="color:var(--fn)">F</span>flat_map</a>
 <a class="sl" href="List.html#fn-filter"><span class="sb-kind" style="color:var(--fn)">F</span>filter</a>
+<a class="sl" href="List.html#fn-pmap"><span class="sb-kind" style="color:var(--fn)">F</span>pmap</a>
+<a class="sl" href="List.html#fn-pmap_n"><span class="sb-kind" style="color:var(--fn)">F</span>pmap_n</a>
+<a class="sl" href="List.html#fn-pfilter"><span class="sb-kind" style="color:var(--fn)">F</span>pfilter</a>
+<a class="sl" href="List.html#fn-preduce"><span class="sb-kind" style="color:var(--fn)">F</span>preduce</a>
 <a class="sl" href="List.html#fn-filter_map"><span class="sb-kind" style="color:var(--fn)">F</span>filter_map</a>
 <a class="sl" href="List.html#fn-fold_left"><span class="sb-kind" style="color:var(--fn)">F</span>fold_left</a>
 <a class="sl" href="List.html#fn-fold_right"><span class="sb-kind" style="color:var(--fn)">F</span>fold_right</a>
@@ -665,6 +864,16 @@
 <a class="sl" href="List.html#fn-member"><span class="sb-kind" style="color:var(--fn)">F</span>member</a>
 <a class="sl" href="List.html#fn-dedup"><span class="sb-kind" style="color:var(--fn)">F</span>dedup</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Logger.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Logger.html">Logger</a></div><div class="sb-sub"><a class="sl" href="Logger.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
+<a class="sl" href="Logger.html#type-LogValue"><span class="sb-kind" style="color:var(--ty)">T</span>LogValue</a>
+<a class="sl" href="Logger.html#type-LogField"><span class="sb-kind" style="color:var(--ty)">T</span>LogField</a>
+<a class="sl" href="Logger.html#type-LogEntry"><span class="sb-kind" style="color:var(--ty)">T</span>LogEntry</a>
+<a class="sl" href="Logger.html#type-Appender"><span class="sb-kind" style="color:var(--ty)">T</span>Appender</a>
+<a class="sl" href="Logger.html#fn-s"><span class="sb-kind" style="color:var(--fn)">F</span>s</a>
+<a class="sl" href="Logger.html#fn-i"><span class="sb-kind" style="color:var(--fn)">F</span>i</a>
+<a class="sl" href="Logger.html#fn-f"><span class="sb-kind" style="color:var(--fn)">F</span>f</a>
+<a class="sl" href="Logger.html#fn-b"><span class="sb-kind" style="color:var(--fn)">F</span>b</a>
+<a class="sl" href="Logger.html#fn-a"><span class="sb-kind" style="color:var(--fn)">F</span>a</a>
+<a class="sl" href="Logger.html#fn-nul"><span class="sb-kind" style="color:var(--fn)">F</span>nul</a>
 <a class="sl" href="Logger.html#fn-level_to_int"><span class="sb-kind" style="color:var(--fn)">F</span>level_to_int</a>
 <a class="sl" href="Logger.html#fn-level_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>level_to_string</a>
 <a class="sl" href="Logger.html#fn-int_to_level"><span class="sb-kind" style="color:var(--fn)">F</span>int_to_level</a>
@@ -677,16 +886,50 @@
 <a class="sl" href="Logger.html#fn-get_level"><span class="sb-kind" style="color:var(--fn)">F</span>get_level</a>
 <a class="sl" href="Logger.html#fn-with_context"><span class="sb-kind" style="color:var(--fn)">F</span>with_context</a>
 <a class="sl" href="Logger.html#fn-clear_context"><span class="sb-kind" style="color:var(--fn)">F</span>clear_context</a>
+<a class="sl" href="Logger.html#fn-with_field"><span class="sb-kind" style="color:var(--fn)">F</span>with_field</a>
+<a class="sl" href="Logger.html#fn-with_fields"><span class="sb-kind" style="color:var(--fn)">F</span>with_fields</a>
+<a class="sl" href="Logger.html#fn-current_fields"><span class="sb-kind" style="color:var(--fn)">F</span>current_fields</a>
+<a class="sl" href="Logger.html#fn-field_count"><span class="sb-kind" style="color:var(--fn)">F</span>field_count</a>
+<a class="sl" href="Logger.html#fn-with_scope"><span class="sb-kind" style="color:var(--fn)">F</span>with_scope</a>
+<a class="sl" href="Logger.html#fn-set_module_level"><span class="sb-kind" style="color:var(--fn)">F</span>set_module_level</a>
+<a class="sl" href="Logger.html#fn-clear_module_level"><span class="sb-kind" style="color:var(--fn)">F</span>clear_module_level</a>
+<a class="sl" href="Logger.html#fn-level_for"><span class="sb-kind" style="color:var(--fn)">F</span>level_for</a>
+<a class="sl" href="Logger.html#fn-entry_level"><span class="sb-kind" style="color:var(--fn)">F</span>entry_level</a>
+<a class="sl" href="Logger.html#fn-entry_message"><span class="sb-kind" style="color:var(--fn)">F</span>entry_message</a>
+<a class="sl" href="Logger.html#fn-entry_ts_ms"><span class="sb-kind" style="color:var(--fn)">F</span>entry_ts_ms</a>
+<a class="sl" href="Logger.html#fn-entry_source"><span class="sb-kind" style="color:var(--fn)">F</span>entry_source</a>
+<a class="sl" href="Logger.html#fn-entry_fields"><span class="sb-kind" style="color:var(--fn)">F</span>entry_fields</a>
+<a class="sl" href="Logger.html#fn-add_appender"><span class="sb-kind" style="color:var(--fn)">F</span>add_appender</a>
+<a class="sl" href="Logger.html#fn-remove_appender"><span class="sb-kind" style="color:var(--fn)">F</span>remove_appender</a>
+<a class="sl" href="Logger.html#fn-clear_appenders"><span class="sb-kind" style="color:var(--fn)">F</span>clear_appenders</a>
+<a class="sl" href="Logger.html#fn-list_appenders"><span class="sb-kind" style="color:var(--fn)">F</span>list_appenders</a>
+<a class="sl" href="Logger.html#fn-format_text"><span class="sb-kind" style="color:var(--fn)">F</span>format_text</a>
+<a class="sl" href="Logger.html#fn-format_logfmt"><span class="sb-kind" style="color:var(--fn)">F</span>format_logfmt</a>
+<a class="sl" href="Logger.html#fn-format_json"><span class="sb-kind" style="color:var(--fn)">F</span>format_json</a>
+<a class="sl" href="Logger.html#fn-appender_stderr"><span class="sb-kind" style="color:var(--fn)">F</span>appender_stderr</a>
+<a class="sl" href="Logger.html#fn-appender_stdout"><span class="sb-kind" style="color:var(--fn)">F</span>appender_stdout</a>
+<a class="sl" href="Logger.html#fn-appender_file"><span class="sb-kind" style="color:var(--fn)">F</span>appender_file</a>
+<a class="sl" href="Logger.html#fn-appender_callback"><span class="sb-kind" style="color:var(--fn)">F</span>appender_callback</a>
 <a class="sl" href="Logger.html#fn-debug"><span class="sb-kind" style="color:var(--fn)">F</span>debug</a>
 <a class="sl" href="Logger.html#fn-info"><span class="sb-kind" style="color:var(--fn)">F</span>info</a>
 <a class="sl" href="Logger.html#fn-warn"><span class="sb-kind" style="color:var(--fn)">F</span>warn</a>
 <a class="sl" href="Logger.html#fn-error"><span class="sb-kind" style="color:var(--fn)">F</span>error</a>
 <a class="sl" href="Logger.html#fn-log"><span class="sb-kind" style="color:var(--fn)">F</span>log</a>
-<a class="sl" href="Logger.html#fn-log_with"><span class="sb-kind" style="color:var(--fn)">F</span>log_with</a></div></div>
+<a class="sl" href="Logger.html#fn-log_with"><span class="sb-kind" style="color:var(--fn)">F</span>log_with</a>
+<a class="sl" href="Logger.html#fn-log_in"><span class="sb-kind" style="color:var(--fn)">F</span>log_in</a>
+<a class="sl" href="Logger.html#fn-with_trace_context"><span class="sb-kind" style="color:var(--fn)">F</span>with_trace_context</a>
+<a class="sl" href="Logger.html#fn-current_trace_id"><span class="sb-kind" style="color:var(--fn)">F</span>current_trace_id</a>
+<a class="sl" href="Logger.html#fn-current_span_id"><span class="sb-kind" style="color:var(--fn)">F</span>current_span_id</a>
+<a class="sl" href="Logger.html#fn-current_parent_span_id"><span class="sb-kind" style="color:var(--fn)">F</span>current_parent_span_id</a>
+<a class="sl" href="Logger.html#fn-with_span"><span class="sb-kind" style="color:var(--fn)">F</span>with_span</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Map.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Map.html">Map</a></div><div class="sb-sub"><a class="sl" href="Map.html#type-Map"><span class="sb-kind" style="color:var(--ty)">T</span>Map</a>
 <a class="sl" href="Map.html#type-HEntry"><span class="sb-kind" style="color:var(--ty)">T</span>HEntry</a>
 <a class="sl" href="Map.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Map.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
+<a class="sl" href="Map.html#fn-int_cmp"><span class="sb-kind" style="color:var(--fn)">F</span>int_cmp</a>
+<a class="sl" href="Map.html#fn-str_cmp"><span class="sb-kind" style="color:var(--fn)">F</span>str_cmp</a>
+<a class="sl" href="Map.html#fn-from_list_string"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_string</a>
+<a class="sl" href="Map.html#fn-from_list_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_list_int</a>
 <a class="sl" href="Map.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="Map.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
 <a class="sl" href="Map.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -736,7 +979,30 @@
 <a class="sl" href="Math.html#fn-ceil"><span class="sb-kind" style="color:var(--fn)">F</span>ceil</a>
 <a class="sl" href="Math.html#fn-round"><span class="sb-kind" style="color:var(--fn)">F</span>round</a>
 <a class="sl" href="Math.html#fn-truncate"><span class="sb-kind" style="color:var(--fn)">F</span>truncate</a>
-<a class="sl" href="Math.html#fn-lerp"><span class="sb-kind" style="color:var(--fn)">F</span>lerp</a></div></div>
+<a class="sl" href="Math.html#fn-lerp"><span class="sb-kind" style="color:var(--fn)">F</span>lerp</a>
+<a class="sl" href="Math.html#fn-checked_div"><span class="sb-kind" style="color:var(--fn)">F</span>checked_div</a>
+<a class="sl" href="Math.html#fn-checked_mod"><span class="sb-kind" style="color:var(--fn)">F</span>checked_mod</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div><div class="sb-sub"><a class="sl" href="Merkle.html#type-MerkleTree"><span class="sb-kind" style="color:var(--ty)">T</span>MerkleTree</a>
+<a class="sl" href="Merkle.html#fn-leaf"><span class="sb-kind" style="color:var(--fn)">F</span>leaf</a>
+<a class="sl" href="Merkle.html#fn-branch"><span class="sb-kind" style="color:var(--fn)">F</span>branch</a>
+<a class="sl" href="Merkle.html#fn-root_hash"><span class="sb-kind" style="color:var(--fn)">F</span>root_hash</a>
+<a class="sl" href="Merkle.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a>
+<a class="sl" href="Merkle.html#fn-diff"><span class="sb-kind" style="color:var(--fn)">F</span>diff</a>
+<a class="sl" href="Merkle.html#fn-leaves"><span class="sb-kind" style="color:var(--fn)">F</span>leaves</a>
+<a class="sl" href="Merkle.html#fn-leaf_hashes"><span class="sb-kind" style="color:var(--fn)">F</span>leaf_hashes</a>
+<a class="sl" href="Merkle.html#fn-contains_hash"><span class="sb-kind" style="color:var(--fn)">F</span>contains_hash</a>
+<a class="sl" href="Merkle.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div><div class="sb-sub"><a class="sl" href="Msgpack.html#type-Value"><span class="sb-kind" style="color:var(--ty)">T</span>Value</a>
+<a class="sl" href="Msgpack.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
+<a class="sl" href="Msgpack.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
+<a class="sl" href="Msgpack.html#fn-decode_all"><span class="sb-kind" style="color:var(--fn)">F</span>decode_all</a>
+<a class="sl" href="Msgpack.html#fn-null"><span class="sb-kind" style="color:var(--fn)">F</span>null</a>
+<a class="sl" href="Msgpack.html#fn-bool"><span class="sb-kind" style="color:var(--fn)">F</span>bool</a>
+<a class="sl" href="Msgpack.html#fn-int"><span class="sb-kind" style="color:var(--fn)">F</span>int</a>
+<a class="sl" href="Msgpack.html#fn-str"><span class="sb-kind" style="color:var(--fn)">F</span>str</a>
+<a class="sl" href="Msgpack.html#fn-bin"><span class="sb-kind" style="color:var(--fn)">F</span>bin</a>
+<a class="sl" href="Msgpack.html#fn-array"><span class="sb-kind" style="color:var(--fn)">F</span>array</a>
+<a class="sl" href="Msgpack.html#fn-map"><span class="sb-kind" style="color:var(--fn)">F</span>map</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div><div class="sb-sub"><a class="sl" href="NativeArray.html#fn-make_int"><span class="sb-kind" style="color:var(--fn)">F</span>make_int</a>
 <a class="sl" href="NativeArray.html#fn-length_int"><span class="sb-kind" style="color:var(--fn)">F</span>length_int</a>
 <a class="sl" href="NativeArray.html#fn-get_int"><span class="sb-kind" style="color:var(--fn)">F</span>get_int</a>
@@ -839,6 +1105,8 @@
 <a class="sl" href="Prelude.html#fn-compose"><span class="sb-kind" style="color:var(--fn)">F</span>compose</a>
 <a class="sl" href="Prelude.html#fn-flip"><span class="sb-kind" style="color:var(--fn)">F</span>flip</a>
 <a class="sl" href="Prelude.html#fn-const"><span class="sb-kind" style="color:var(--fn)">F</span>const</a>
+<a class="sl" href="Prelude.html#fn-println"><span class="sb-kind" style="color:var(--fn)">F</span>println</a>
+<a class="sl" href="Prelude.html#fn-str"><span class="sb-kind" style="color:var(--fn)">F</span>str</a>
 <a class="sl" href="Prelude.html#fn-debug"><span class="sb-kind" style="color:var(--fn)">F</span>debug</a>
 <a class="sl" href="Prelude.html#fn-inspect"><span class="sb-kind" style="color:var(--fn)">F</span>inspect</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Presence.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Presence.html">Presence</a></div><div class="sb-sub"><a class="sl" href="Presence.html#type-PresenceMeta"><span class="sb-kind" style="color:var(--ty)">T</span>PresenceMeta</a>
@@ -873,6 +1141,7 @@
 <a class="sl" href="Process.html#fn-pid"><span class="sb-kind" style="color:var(--fn)">F</span>pid</a>
 <a class="sl" href="Process.html#fn-spawn_async"><span class="sb-kind" style="color:var(--fn)">F</span>spawn_async</a>
 <a class="sl" href="Process.html#fn-read_line"><span class="sb-kind" style="color:var(--fn)">F</span>read_line</a>
+<a class="sl" href="Process.html#fn-write"><span class="sb-kind" style="color:var(--fn)">F</span>write</a>
 <a class="sl" href="Process.html#fn-kill"><span class="sb-kind" style="color:var(--fn)">F</span>kill</a>
 <a class="sl" href="Process.html#fn-wait_proc"><span class="sb-kind" style="color:var(--fn)">F</span>wait_proc</a>
 <a class="sl" href="Process.html#fn-exit_code"><span class="sb-kind" style="color:var(--fn)">F</span>exit_code</a>
@@ -911,7 +1180,13 @@
 <a class="sl" href="Random.html#fn-range"><span class="sb-kind" style="color:var(--fn)">F</span>range</a>
 <a class="sl" href="Random.html#fn-int"><span class="sb-kind" style="color:var(--fn)">F</span>int</a>
 <a class="sl" href="Random.html#fn-shuffle"><span class="sb-kind" style="color:var(--fn)">F</span>shuffle</a>
-<a class="sl" href="Random.html#fn-sample"><span class="sb-kind" style="color:var(--fn)">F</span>sample</a></div></div>
+<a class="sl" href="Random.html#fn-sample"><span class="sb-kind" style="color:var(--fn)">F</span>sample</a>
+<a class="sl" href="Random.html#fn-standard_normal"><span class="sb-kind" style="color:var(--fn)">F</span>standard_normal</a>
+<a class="sl" href="Random.html#fn-normal"><span class="sb-kind" style="color:var(--fn)">F</span>normal</a>
+<a class="sl" href="Random.html#fn-exponential"><span class="sb-kind" style="color:var(--fn)">F</span>exponential</a>
+<a class="sl" href="Random.html#fn-bernoulli"><span class="sb-kind" style="color:var(--fn)">F</span>bernoulli</a>
+<a class="sl" href="Random.html#fn-choice_weighted"><span class="sb-kind" style="color:var(--fn)">F</span>choice_weighted</a>
+<a class="sl" href="Random.html#fn-choice"><span class="sb-kind" style="color:var(--fn)">F</span>choice</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Range.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Range.html">Range</a></div><div class="sb-sub"><a class="sl" href="Range.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Range.html#fn-new_step"><span class="sb-kind" style="color:var(--fn)">F</span>new_step</a>
 <a class="sl" href="Range.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a>
@@ -932,7 +1207,10 @@
 <a class="sl" href="Regex.html#type-RegexQuant"><span class="sb-kind" style="color:var(--ty)">T</span>RegexQuant</a>
 <a class="sl" href="Regex.html#type-RegexItem"><span class="sb-kind" style="color:var(--ty)">T</span>RegexItem</a>
 <a class="sl" href="Regex.html#type-RegexPattern"><span class="sb-kind" style="color:var(--ty)">T</span>RegexPattern</a>
+<a class="sl" href="Regex.html#type-RegexOpts"><span class="sb-kind" style="color:var(--ty)">T</span>RegexOpts</a>
+<a class="sl" href="Regex.html#fn-default_opts"><span class="sb-kind" style="color:var(--fn)">F</span>default_opts</a>
 <a class="sl" href="Regex.html#fn-matches"><span class="sb-kind" style="color:var(--fn)">F</span>matches</a>
+<a class="sl" href="Regex.html#fn-matches_opts"><span class="sb-kind" style="color:var(--fn)">F</span>matches_opts</a>
 <a class="sl" href="Regex.html#fn-find"><span class="sb-kind" style="color:var(--fn)">F</span>find</a>
 <a class="sl" href="Regex.html#fn-find_all"><span class="sb-kind" style="color:var(--fn)">F</span>find_all</a>
 <a class="sl" href="Regex.html#fn-replace"><span class="sb-kind" style="color:var(--fn)">F</span>replace</a>
@@ -968,6 +1246,14 @@
 <a class="sl" href="Seq.html#fn-fold_while"><span class="sb-kind" style="color:var(--fn)">F</span>fold_while</a>
 <a class="sl" href="Seq.html#fn-each"><span class="sb-kind" style="color:var(--fn)">F</span>each</a>
 <a class="sl" href="Seq.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
+<a class="sl" href="Seq.html#fn-from_string_lines"><span class="sb-kind" style="color:var(--fn)">F</span>from_string_lines</a>
+<a class="sl" href="Seq.html#fn-from_file_lines"><span class="sb-kind" style="color:var(--fn)">F</span>from_file_lines</a>
+<a class="sl" href="Seq.html#fn-from_file_chunks"><span class="sb-kind" style="color:var(--fn)">F</span>from_file_chunks</a>
+<a class="sl" href="Seq.html#fn-repeat"><span class="sb-kind" style="color:var(--fn)">F</span>repeat</a>
+<a class="sl" href="Seq.html#fn-iterate"><span class="sb-kind" style="color:var(--fn)">F</span>iterate</a>
+<a class="sl" href="Seq.html#fn-cycle"><span class="sb-kind" style="color:var(--fn)">F</span>cycle</a>
+<a class="sl" href="Seq.html#fn-batched"><span class="sb-kind" style="color:var(--fn)">F</span>batched</a>
+<a class="sl" href="Seq.html#fn-unfold_until"><span class="sb-kind" style="color:var(--fn)">F</span>unfold_until</a>
 <a class="sl" href="Seq.html#fn-find"><span class="sb-kind" style="color:var(--fn)">F</span>find</a>
 <a class="sl" href="Seq.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
 <a class="sl" href="Seq.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a></div></div>
@@ -988,7 +1274,18 @@
 <a class="sl" href="Set.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
 <a class="sl" href="Set.html#fn-fold"><span class="sb-kind" style="color:var(--fn)">F</span>fold</a>
 <a class="sl" href="Set.html#fn-eq"><span class="sb-kind" style="color:var(--fn)">F</span>eq</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Sigil.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Sigil.html">Sigil</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Sigil.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Sigil.html">Sigil</a></div><div class="sb-sub"><a class="sl" href="Sigil.html#fn-h"><span class="sb-kind" style="color:var(--fn)">F</span>h</a>
+<a class="sl" href="Sigil.html#fn-toml"><span class="sb-kind" style="color:var(--fn)">F</span>toml</a>
+<a class="sl" href="Sigil.html#fn-xml"><span class="sb-kind" style="color:var(--fn)">F</span>xml</a>
+<a class="sl" href="Sigil.html#fn-yaml"><span class="sb-kind" style="color:var(--fn)">F</span>yaml</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Socket.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Socket.html">Socket</a></div><div class="sb-sub"><a class="sl" href="Socket.html#type-SocketError"><span class="sb-kind" style="color:var(--ty)">T</span>SocketError</a>
+<a class="sl" href="Socket.html#fn-error_message"><span class="sb-kind" style="color:var(--fn)">F</span>error_message</a>
+<a class="sl" href="Socket.html#fn-connect"><span class="sb-kind" style="color:var(--fn)">F</span>connect</a>
+<a class="sl" href="Socket.html#fn-write"><span class="sb-kind" style="color:var(--fn)">F</span>write</a>
+<a class="sl" href="Socket.html#fn-recv"><span class="sb-kind" style="color:var(--fn)">F</span>recv</a>
+<a class="sl" href="Socket.html#fn-recv_timeout"><span class="sb-kind" style="color:var(--fn)">F</span>recv_timeout</a>
+<a class="sl" href="Socket.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
+<a class="sl" href="Socket.html#fn-with_connection"><span class="sb-kind" style="color:var(--fn)">F</span>with_connection</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Sort.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Sort.html">Sort</a></div><div class="sb-sub"><a class="sl" href="Sort.html#type-Heap"><span class="sb-kind" style="color:var(--ty)">T</span>Heap</a>
 <a class="sl" href="Sort.html#fn-reverse_list"><span class="sb-kind" style="color:var(--fn)">F</span>reverse_list</a>
 <a class="sl" href="Sort.html#fn-append_list"><span class="sb-kind" style="color:var(--fn)">F</span>append_list</a>
@@ -997,7 +1294,8 @@
 <a class="sl" href="Sort.html#fn-insertion_sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>insertion_sort_by</a>
 <a class="sl" href="Sort.html#fn-timsort_by"><span class="sb-kind" style="color:var(--fn)">F</span>timsort_by</a>
 <a class="sl" href="Sort.html#fn-heapsort_by"><span class="sb-kind" style="color:var(--fn)">F</span>heapsort_by</a>
-<a class="sl" href="Sort.html#fn-introsort_by"><span class="sb-kind" style="color:var(--fn)">F</span>introsort_by</a></div></div>
+<a class="sl" href="Sort.html#fn-introsort_by"><span class="sb-kind" style="color:var(--fn)">F</span>introsort_by</a>
+<a class="sl" href="Sort.html#fn-sort"><span class="sb-kind" style="color:var(--fn)">F</span>sort</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SortedSet.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SortedSet.html">SortedSet</a></div><div class="sb-sub"><a class="sl" href="SortedSet.html#type-Tree"><span class="sb-kind" style="color:var(--ty)">T</span>Tree</a>
 <a class="sl" href="SortedSet.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="SortedSet.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
@@ -1014,13 +1312,20 @@
 <a class="sl" href="SortedSet.html#fn-fold"><span class="sb-kind" style="color:var(--fn)">F</span>fold</a>
 <a class="sl" href="SortedSet.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="SortedSet.html#fn-subset"><span class="sb-kind" style="color:var(--fn)">F</span>subset</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Stats.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Stats.html">Stats</a></div><div class="sb-sub"><a class="sl" href="Stats.html#fn-sum"><span class="sb-kind" style="color:var(--fn)">F</span>sum</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Stats.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Stats.html">Stats</a></div><div class="sb-sub"><a class="sl" href="Stats.html#type-QuantileMethod"><span class="sb-kind" style="color:var(--ty)">T</span>QuantileMethod</a>
+<a class="sl" href="Stats.html#fn-sum"><span class="sb-kind" style="color:var(--fn)">F</span>sum</a>
 <a class="sl" href="Stats.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
 <a class="sl" href="Stats.html#fn-mean"><span class="sb-kind" style="color:var(--fn)">F</span>mean</a>
 <a class="sl" href="Stats.html#fn-min_val"><span class="sb-kind" style="color:var(--fn)">F</span>min_val</a>
 <a class="sl" href="Stats.html#fn-max_val"><span class="sb-kind" style="color:var(--fn)">F</span>max_val</a>
 <a class="sl" href="Stats.html#fn-percentile"><span class="sb-kind" style="color:var(--fn)">F</span>percentile</a>
 <a class="sl" href="Stats.html#fn-median"><span class="sb-kind" style="color:var(--fn)">F</span>median</a>
+<a class="sl" href="Stats.html#fn-quantile"><span class="sb-kind" style="color:var(--fn)">F</span>quantile</a>
+<a class="sl" href="Stats.html#fn-quantile_default"><span class="sb-kind" style="color:var(--fn)">F</span>quantile_default</a>
+<a class="sl" href="Stats.html#fn-quantiles"><span class="sb-kind" style="color:var(--fn)">F</span>quantiles</a>
+<a class="sl" href="Stats.html#fn-iqr"><span class="sb-kind" style="color:var(--fn)">F</span>iqr</a>
+<a class="sl" href="Stats.html#fn-iqr_default"><span class="sb-kind" style="color:var(--fn)">F</span>iqr_default</a>
+<a class="sl" href="Stats.html#fn-five_number_summary"><span class="sb-kind" style="color:var(--fn)">F</span>five_number_summary</a>
 <a class="sl" href="Stats.html#fn-variance"><span class="sb-kind" style="color:var(--fn)">F</span>variance</a>
 <a class="sl" href="Stats.html#fn-variance_pop"><span class="sb-kind" style="color:var(--fn)">F</span>variance_pop</a>
 <a class="sl" href="Stats.html#fn-std_dev"><span class="sb-kind" style="color:var(--fn)">F</span>std_dev</a>
@@ -1034,7 +1339,38 @@
 <a class="sl" href="Stats.html#fn-std_dev_safe"><span class="sb-kind" style="color:var(--fn)">F</span>std_dev_safe</a>
 <a class="sl" href="Stats.html#fn-min_safe"><span class="sb-kind" style="color:var(--fn)">F</span>min_safe</a>
 <a class="sl" href="Stats.html#fn-max_safe"><span class="sb-kind" style="color:var(--fn)">F</span>max_safe</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="String.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="String.html">String</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="String.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="String.html">String</a></div><div class="sb-sub"><a class="sl" href="String.html#fn-byte_size"><span class="sb-kind" style="color:var(--fn)">F</span>byte_size</a>
+<a class="sl" href="String.html#fn-slice_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>slice_bytes</a>
+<a class="sl" href="String.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
+<a class="sl" href="String.html#fn-contains"><span class="sb-kind" style="color:var(--fn)">F</span>contains</a>
+<a class="sl" href="String.html#fn-starts_with"><span class="sb-kind" style="color:var(--fn)">F</span>starts_with</a>
+<a class="sl" href="String.html#fn-ends_with"><span class="sb-kind" style="color:var(--fn)">F</span>ends_with</a>
+<a class="sl" href="String.html#fn-concat"><span class="sb-kind" style="color:var(--fn)">F</span>concat</a>
+<a class="sl" href="String.html#fn-replace"><span class="sb-kind" style="color:var(--fn)">F</span>replace</a>
+<a class="sl" href="String.html#fn-replace_all"><span class="sb-kind" style="color:var(--fn)">F</span>replace_all</a>
+<a class="sl" href="String.html#fn-split"><span class="sb-kind" style="color:var(--fn)">F</span>split</a>
+<a class="sl" href="String.html#fn-split_first"><span class="sb-kind" style="color:var(--fn)">F</span>split_first</a>
+<a class="sl" href="String.html#fn-join"><span class="sb-kind" style="color:var(--fn)">F</span>join</a>
+<a class="sl" href="String.html#fn-trim"><span class="sb-kind" style="color:var(--fn)">F</span>trim</a>
+<a class="sl" href="String.html#fn-trim_start"><span class="sb-kind" style="color:var(--fn)">F</span>trim_start</a>
+<a class="sl" href="String.html#fn-trim_end"><span class="sb-kind" style="color:var(--fn)">F</span>trim_end</a>
+<a class="sl" href="String.html#fn-to_uppercase"><span class="sb-kind" style="color:var(--fn)">F</span>to_uppercase</a>
+<a class="sl" href="String.html#fn-to_lowercase"><span class="sb-kind" style="color:var(--fn)">F</span>to_lowercase</a>
+<a class="sl" href="String.html#fn-repeat"><span class="sb-kind" style="color:var(--fn)">F</span>repeat</a>
+<a class="sl" href="String.html#fn-reverse"><span class="sb-kind" style="color:var(--fn)">F</span>reverse</a>
+<a class="sl" href="String.html#fn-pad_left"><span class="sb-kind" style="color:var(--fn)">F</span>pad_left</a>
+<a class="sl" href="String.html#fn-pad_right"><span class="sb-kind" style="color:var(--fn)">F</span>pad_right</a>
+<a class="sl" href="String.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
+<a class="sl" href="String.html#fn-codepoint_count"><span class="sb-kind" style="color:var(--fn)">F</span>codepoint_count</a>
+<a class="sl" href="String.html#fn-grapheme_count"><span class="sb-kind" style="color:var(--fn)">F</span>grapheme_count</a>
+<a class="sl" href="String.html#fn-index_of"><span class="sb-kind" style="color:var(--fn)">F</span>index_of</a>
+<a class="sl" href="String.html#fn-to_int"><span class="sb-kind" style="color:var(--fn)">F</span>to_int</a>
+<a class="sl" href="String.html#fn-to_float"><span class="sb-kind" style="color:var(--fn)">F</span>to_float</a>
+<a class="sl" href="String.html#fn-from_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_int</a>
+<a class="sl" href="String.html#fn-from_float"><span class="sb-kind" style="color:var(--fn)">F</span>from_float</a>
+<a class="sl" href="String.html#fn-last_index_of"><span class="sb-kind" style="color:var(--fn)">F</span>last_index_of</a>
+<a class="sl" href="String.html#fn-from_codepoint"><span class="sb-kind" style="color:var(--fn)">F</span>from_codepoint</a>
+<a class="sl" href="String.html#fn-to_codepoints"><span class="sb-kind" style="color:var(--fn)">F</span>to_codepoints</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="System.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="System.html">System</a></div><div class="sb-sub"><a class="sl" href="System.html#type-ProcessResult"><span class="sb-kind" style="color:var(--ty)">T</span>ProcessResult</a>
 <a class="sl" href="System.html#fn-os"><span class="sb-kind" style="color:var(--fn)">F</span>os</a>
 <a class="sl" href="System.html#fn-arch"><span class="sb-kind" style="color:var(--fn)">F</span>arch</a>
@@ -1059,13 +1395,64 @@
 <a class="sl" href="Task.html#fn-await_many"><span class="sb-kind" style="color:var(--fn)">F</span>await_many</a>
 <a class="sl" href="Task.html#fn-await_many_ms"><span class="sb-kind" style="color:var(--fn)">F</span>await_many_ms</a>
 <a class="sl" href="Task.html#fn-async_stream"><span class="sb-kind" style="color:var(--fn)">F</span>async_stream</a>
-<a class="sl" href="Task.html#fn-async_stream_n"><span class="sb-kind" style="color:var(--fn)">F</span>async_stream_n</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Test.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Test.html">Test</a></div></div>
+<a class="sl" href="Task.html#fn-async_stream_n"><span class="sb-kind" style="color:var(--fn)">F</span>async_stream_n</a>
+<a class="sl" href="Task.html#fn-race"><span class="sb-kind" style="color:var(--fn)">F</span>race</a>
+<a class="sl" href="Task.html#fn-any"><span class="sb-kind" style="color:var(--fn)">F</span>any</a>
+<a class="sl" href="Task.html#fn-all_settled"><span class="sb-kind" style="color:var(--fn)">F</span>all_settled</a>
+<a class="sl" href="Task.html#fn-scope"><span class="sb-kind" style="color:var(--fn)">F</span>scope</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Test.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Test.html">Test</a></div><div class="sb-sub"><a class="sl" href="Test.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
+<a class="sl" href="Test.html#fn-assert_true"><span class="sb-kind" style="color:var(--fn)">F</span>assert_true</a>
+<a class="sl" href="Test.html#fn-assert_false"><span class="sb-kind" style="color:var(--fn)">F</span>assert_false</a>
+<a class="sl" href="Test.html#fn-assert_eq_int"><span class="sb-kind" style="color:var(--fn)">F</span>assert_eq_int</a>
+<a class="sl" href="Test.html#fn-assert_eq_str"><span class="sb-kind" style="color:var(--fn)">F</span>assert_eq_str</a>
+<a class="sl" href="Test.html#fn-assert_eq_bool"><span class="sb-kind" style="color:var(--fn)">F</span>assert_eq_bool</a>
+<a class="sl" href="Test.html#fn-assert_some"><span class="sb-kind" style="color:var(--fn)">F</span>assert_some</a>
+<a class="sl" href="Test.html#fn-assert_none"><span class="sb-kind" style="color:var(--fn)">F</span>assert_none</a>
+<a class="sl" href="Test.html#fn-assert_ok"><span class="sb-kind" style="color:var(--fn)">F</span>assert_ok</a>
+<a class="sl" href="Test.html#fn-assert_err"><span class="sb-kind" style="color:var(--fn)">F</span>assert_err</a>
+<a class="sl" href="Test.html#fn-assert_eq"><span class="sb-kind" style="color:var(--fn)">F</span>assert_eq</a>
+<a class="sl" href="Test.html#fn-assert_ne"><span class="sb-kind" style="color:var(--fn)">F</span>assert_ne</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Tls.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Tls.html">Tls</a></div><div class="sb-sub"><a class="sl" href="Tls.html#type-TlsVersion"><span class="sb-kind" style="color:var(--ty)">T</span>TlsVersion</a>
 <a class="sl" href="Tls.html#type-TlsError"><span class="sb-kind" style="color:var(--ty)">T</span>TlsError</a>
 <a class="sl" href="Tls.html#type-TlsConfig"><span class="sb-kind" style="color:var(--ty)">T</span>TlsConfig</a>
 <a class="sl" href="Tls.html#type-TlsCtx"><span class="sb-kind" style="color:var(--ty)">T</span>TlsCtx</a>
-<a class="sl" href="Tls.html#type-TlsConn"><span class="sb-kind" style="color:var(--ty)">T</span>TlsConn</a></div></div>
+<a class="sl" href="Tls.html#type-TlsConn"><span class="sb-kind" style="color:var(--ty)">T</span>TlsConn</a>
+<a class="sl" href="Tls.html#fn-cert_file"><span class="sb-kind" style="color:var(--fn)">F</span>cert_file</a>
+<a class="sl" href="Tls.html#fn-key_file"><span class="sb-kind" style="color:var(--fn)">F</span>key_file</a>
+<a class="sl" href="Tls.html#fn-ca_file"><span class="sb-kind" style="color:var(--fn)">F</span>ca_file</a>
+<a class="sl" href="Tls.html#fn-alpn"><span class="sb-kind" style="color:var(--fn)">F</span>alpn</a>
+<a class="sl" href="Tls.html#fn-min_version"><span class="sb-kind" style="color:var(--fn)">F</span>min_version</a>
+<a class="sl" href="Tls.html#fn-verify_peer"><span class="sb-kind" style="color:var(--fn)">F</span>verify_peer</a>
+<a class="sl" href="Tls.html#fn-default_client_config"><span class="sb-kind" style="color:var(--fn)">F</span>default_client_config</a>
+<a class="sl" href="Tls.html#fn-h2_client_config"><span class="sb-kind" style="color:var(--fn)">F</span>h2_client_config</a>
+<a class="sl" href="Tls.html#fn-server_config"><span class="sb-kind" style="color:var(--fn)">F</span>server_config</a>
+<a class="sl" href="Tls.html#fn-version_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>version_to_string</a>
+<a class="sl" href="Tls.html#fn-version_to_int"><span class="sb-kind" style="color:var(--fn)">F</span>version_to_int</a>
+<a class="sl" href="Tls.html#fn-client_ctx"><span class="sb-kind" style="color:var(--fn)">F</span>client_ctx</a>
+<a class="sl" href="Tls.html#fn-server_ctx"><span class="sb-kind" style="color:var(--fn)">F</span>server_ctx</a>
+<a class="sl" href="Tls.html#fn-connect"><span class="sb-kind" style="color:var(--fn)">F</span>connect</a>
+<a class="sl" href="Tls.html#fn-accept"><span class="sb-kind" style="color:var(--fn)">F</span>accept</a>
+<a class="sl" href="Tls.html#fn-read"><span class="sb-kind" style="color:var(--fn)">F</span>read</a>
+<a class="sl" href="Tls.html#fn-write"><span class="sb-kind" style="color:var(--fn)">F</span>write</a>
+<a class="sl" href="Tls.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
+<a class="sl" href="Tls.html#fn-ctx_free"><span class="sb-kind" style="color:var(--fn)">F</span>ctx_free</a>
+<a class="sl" href="Tls.html#fn-negotiated_alpn"><span class="sb-kind" style="color:var(--fn)">F</span>negotiated_alpn</a>
+<a class="sl" href="Tls.html#fn-peer_cn"><span class="sb-kind" style="color:var(--fn)">F</span>peer_cn</a>
+<a class="sl" href="Tls.html#fn-https_get"><span class="sb-kind" style="color:var(--fn)">F</span>https_get</a>
+<a class="sl" href="Tls.html#fn-error_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>error_to_string</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Toml.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Toml.html">Toml</a></div><div class="sb-sub"><a class="sl" href="Toml.html#type-TomlValue"><span class="sb-kind" style="color:var(--ty)">T</span>TomlValue</a>
+<a class="sl" href="Toml.html#type-TomlError"><span class="sb-kind" style="color:var(--ty)">T</span>TomlError</a>
+<a class="sl" href="Toml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="Toml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
+<a class="sl" href="Toml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Toml.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="Toml.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
+<a class="sl" href="Toml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
+<a class="sl" href="Toml.html#fn-get_int"><span class="sb-kind" style="color:var(--fn)">F</span>get_int</a>
+<a class="sl" href="Toml.html#fn-get_float"><span class="sb-kind" style="color:var(--fn)">F</span>get_float</a>
+<a class="sl" href="Toml.html#fn-get_bool"><span class="sb-kind" style="color:var(--fn)">F</span>get_bool</a>
+<a class="sl" href="Toml.html#fn-get_table"><span class="sb-kind" style="color:var(--fn)">F</span>get_table</a>
+<a class="sl" href="Toml.html#fn-get_array"><span class="sb-kind" style="color:var(--fn)">F</span>get_array</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Tuple.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Tuple.html">Tuple</a></div><div class="sb-sub"><a class="sl" href="Tuple.html#fn-first"><span class="sb-kind" style="color:var(--fn)">F</span>first</a>
 <a class="sl" href="Tuple.html#fn-second"><span class="sb-kind" style="color:var(--fn)">F</span>second</a>
 <a class="sl" href="Tuple.html#fn-swap"><span class="sb-kind" style="color:var(--fn)">F</span>swap</a>
@@ -1078,34 +1465,46 @@
 <a class="sl" href="Tuple.html#fn-both"><span class="sb-kind" style="color:var(--fn)">F</span>both</a>
 <a class="sl" href="Tuple.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a>
 <a class="sl" href="Tuple.html#fn-unzip"><span class="sb-kind" style="color:var(--fn)">F</span>unzip</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="URI.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="URI.html">URI</a></div><div class="sb-sub"><a class="sl" href="URI.html#type-URI"><span class="sb-kind" style="color:var(--ty)">T</span>URI</a>
-<a class="sl" href="URI.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
-<a class="sl" href="URI.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
-<a class="sl" href="URI.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
-<a class="sl" href="URI.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
-<a class="sl" href="URI.html#fn-encode_query"><span class="sb-kind" style="color:var(--fn)">F</span>encode_query</a>
-<a class="sl" href="URI.html#fn-decode_query"><span class="sb-kind" style="color:var(--fn)">F</span>decode_query</a>
-<a class="sl" href="URI.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
-<a class="sl" href="URI.html#fn-scheme"><span class="sb-kind" style="color:var(--fn)">F</span>scheme</a>
-<a class="sl" href="URI.html#fn-host"><span class="sb-kind" style="color:var(--fn)">F</span>host</a>
-<a class="sl" href="URI.html#fn-port"><span class="sb-kind" style="color:var(--fn)">F</span>port</a>
-<a class="sl" href="URI.html#fn-path"><span class="sb-kind" style="color:var(--fn)">F</span>path</a>
-<a class="sl" href="URI.html#fn-query"><span class="sb-kind" style="color:var(--fn)">F</span>query</a>
-<a class="sl" href="URI.html#fn-fragment"><span class="sb-kind" style="color:var(--fn)">F</span>fragment</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="UUID.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="UUID.html">UUID</a></div><div class="sb-sub"><a class="sl" href="UUID.html#type-UUID"><span class="sb-kind" style="color:var(--ty)">T</span>UUID</a>
 <a class="sl" href="UUID.html#fn-v4"><span class="sb-kind" style="color:var(--fn)">F</span>v4</a>
+<a class="sl" href="UUID.html#fn-v7"><span class="sb-kind" style="color:var(--fn)">F</span>v7</a>
+<a class="sl" href="UUID.html#fn-v7_at"><span class="sb-kind" style="color:var(--fn)">F</span>v7_at</a>
+<a class="sl" href="UUID.html#fn-timestamp_ms"><span class="sb-kind" style="color:var(--fn)">F</span>timestamp_ms</a>
 <a class="sl" href="UUID.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="UUID.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
 <a class="sl" href="UUID.html#fn-nil"><span class="sb-kind" style="color:var(--fn)">F</span>nil</a>
 <a class="sl" href="UUID.html#fn-v5"><span class="sb-kind" style="color:var(--fn)">F</span>v5</a>
 <a class="sl" href="UUID.html#fn-version"><span class="sb-kind" style="color:var(--fn)">F</span>version</a>
 <a class="sl" href="UUID.html#fn-is_valid"><span class="sb-kind" style="color:var(--fn)">F</span>is_valid</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Uri.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Uri.html">Uri</a></div><div class="sb-sub"><a class="sl" href="Uri.html#type-URI"><span class="sb-kind" style="color:var(--ty)">T</span>URI</a>
+<a class="sl" href="Uri.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="Uri.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Uri.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
+<a class="sl" href="Uri.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
+<a class="sl" href="Uri.html#fn-encode_query"><span class="sb-kind" style="color:var(--fn)">F</span>encode_query</a>
+<a class="sl" href="Uri.html#fn-decode_query"><span class="sb-kind" style="color:var(--fn)">F</span>decode_query</a>
+<a class="sl" href="Uri.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="Uri.html#fn-merge_strict"><span class="sb-kind" style="color:var(--fn)">F</span>merge_strict</a>
+<a class="sl" href="Uri.html#fn-scheme"><span class="sb-kind" style="color:var(--fn)">F</span>scheme</a>
+<a class="sl" href="Uri.html#fn-host"><span class="sb-kind" style="color:var(--fn)">F</span>host</a>
+<a class="sl" href="Uri.html#fn-port"><span class="sb-kind" style="color:var(--fn)">F</span>port</a>
+<a class="sl" href="Uri.html#fn-path"><span class="sb-kind" style="color:var(--fn)">F</span>path</a>
+<a class="sl" href="Uri.html#fn-query"><span class="sb-kind" style="color:var(--fn)">F</span>query</a>
+<a class="sl" href="Uri.html#fn-fragment"><span class="sb-kind" style="color:var(--fn)">F</span>fragment</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div><div class="sb-sub"><a class="sl" href="Vault.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="Vault.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
+<a class="sl" href="Vault.html#fn-put"><span class="sb-kind" style="color:var(--fn)">F</span>put</a>
+<a class="sl" href="Vault.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
+<a class="sl" href="Vault.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
 <a class="sl" href="Vault.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
 <a class="sl" href="Vault.html#fn-set_ttl"><span class="sb-kind" style="color:var(--fn)">F</span>set_ttl</a>
 <a class="sl" href="Vault.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
 <a class="sl" href="Vault.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="Vault.html#fn-update"><span class="sb-kind" style="color:var(--fn)">F</span>update</a>
+<a class="sl" href="Vault.html#fn-put_new"><span class="sb-kind" style="color:var(--fn)">F</span>put_new</a>
+<a class="sl" href="Vault.html#fn-put_new_ttl"><span class="sb-kind" style="color:var(--fn)">F</span>put_new_ttl</a>
+<a class="sl" href="Vault.html#fn-incr"><span class="sb-kind" style="color:var(--fn)">F</span>incr</a>
+<a class="sl" href="Vault.html#fn-push_capped"><span class="sb-kind" style="color:var(--fn)">F</span>push_capped</a>
 <a class="sl" href="Vault.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a>
 <a class="sl" href="Vault.html#fn-get_or"><span class="sb-kind" style="color:var(--fn)">F</span>get_or</a>
 <a class="sl" href="Vault.html#fn-whereis"><span class="sb-kind" style="color:var(--fn)">F</span>whereis</a>
@@ -1115,9 +1514,63 @@
 <a class="sl" href="Vault.html#fn-ns_set"><span class="sb-kind" style="color:var(--fn)">F</span>ns_set</a>
 <a class="sl" href="Vault.html#fn-ns_get"><span class="sb-kind" style="color:var(--fn)">F</span>ns_get</a>
 <a class="sl" href="Vault.html#fn-ns_drop"><span class="sb-kind" style="color:var(--fn)">F</span>ns_drop</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="VectorClock.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="VectorClock.html">VectorClock</a></div><div class="sb-sub"><a class="sl" href="VectorClock.html#type-VectorClock"><span class="sb-kind" style="color:var(--ty)">T</span>VectorClock</a>
+<a class="sl" href="VectorClock.html#type-ClockOrder"><span class="sb-kind" style="color:var(--ty)">T</span>ClockOrder</a>
+<a class="sl" href="VectorClock.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="VectorClock.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="VectorClock.html#fn-increment"><span class="sb-kind" style="color:var(--fn)">F</span>increment</a>
+<a class="sl" href="VectorClock.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="VectorClock.html#fn-compare"><span class="sb-kind" style="color:var(--fn)">F</span>compare</a>
+<a class="sl" href="VectorClock.html#fn-happens_before"><span class="sb-kind" style="color:var(--fn)">F</span>happens_before</a>
+<a class="sl" href="VectorClock.html#fn-concurrent"><span class="sb-kind" style="color:var(--fn)">F</span>concurrent</a>
+<a class="sl" href="VectorClock.html#fn-advance"><span class="sb-kind" style="color:var(--fn)">F</span>advance</a>
+<a class="sl" href="VectorClock.html#fn-entries"><span class="sb-kind" style="color:var(--fn)">F</span>entries</a>
+<a class="sl" href="VectorClock.html#fn-sum"><span class="sb-kind" style="color:var(--fn)">F</span>sum</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div><div class="sb-sub"><a class="sl" href="WebSocket.html#type-WsFrame"><span class="sb-kind" style="color:var(--ty)">T</span>WsFrame</a>
 <a class="sl" href="WebSocket.html#type-WsSocket"><span class="sb-kind" style="color:var(--ty)">T</span>WsSocket</a>
 <a class="sl" href="WebSocket.html#type-SelectResult"><span class="sb-kind" style="color:var(--ty)">T</span>SelectResult</a>
 <a class="sl" href="WebSocket.html#type-Header"><span class="sb-kind" style="color:var(--ty)">T</span>Header</a>
 <a class="sl" href="WebSocket.html#type-Upgrade"><span class="sb-kind" style="color:var(--ty)">T</span>Upgrade</a>
-<a class="sl" href="WebSocket.html#type-Conn"><span class="sb-kind" style="color:var(--ty)">T</span>Conn</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>CorrelationId</span></nav><h1>CorrelationId</h1><div class="mdoc"><p>CorrelationId module: request correlation ID middleware for Bastion.</p><p>Assigns a unique correlation ID to every incoming request.  The ID is either taken from the incoming X-Request-ID header (if present and at most 200 bytes) or generated fresh as a UUID v4.</p><p>The ID is stored in conn.assigns[&amp;quot;request_id&amp;quot;] and echoed back in the X-Request-ID response header.  It is also injected into the Logger context so that every subsequent log call in the request lifecycle includes the ID automatically — no manual threading required.</p><p>Typical pipeline:</p><p>conn |&amp;gt; CorrelationId.assign() |&amp;gt; Session.load(:cookie) |&amp;gt; MyApp.Router.route()</p><p>After assign(), all Logger calls in this request process include: request_id=&amp;lt;uuid&amp;gt;</p><p>Structured logging with metadata:</p><p>Logger.log_with(Logger.Info, &amp;quot;user signed in&amp;quot;, [(&amp;quot;user_id&amp;quot;, uid)]) -- emits: [INFO] user signed in {request_id=..., user_id=42}</p><p>Clearing the correlation ID context (e.g., at request end):</p><p>CorrelationId.clear()</p></div></main></div><script>function getTheme(){var t=localStorage.getItem('march-doc-theme');if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}function applyTheme(t){document.documentElement.setAttribute('data-theme',t);var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';localStorage.setItem('march-doc-theme',t);applyTheme(t);}applyTheme(getTheme());function openSearch(){document.getElementById('search-overlay').classList.add('open');var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}function closeSearch(){document.getElementById('search-overlay').classList.remove('open');var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}document.addEventListener('DOMContentLoaded',function(){document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){if(e.target.classList.contains('anchor-link'))return;var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});var path=window.location.pathname;document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});document.querySelectorAll('.ib pre').forEach(function(pre){var wrap=document.createElement('div');wrap.className='pre-wrap';pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';btn.addEventListener('click',function(e){e.stopPropagation();var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;navigator.clipboard.writeText(text).then(function(){btn.textContent='Copied!';btn.classList.add('copied');setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});wrap.appendChild(btn);});if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}if(e.key==='Escape')closeSearch();});});var SI=null;fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;}).catch(function(){});function ld(a,b){if(!a.length)return b.length;if(!b.length)return a.length;var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];for(var j=0;j<=a.length;j++)m[0][j]=j;for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);}return m[b.length][a.length];}function fs(q,t){if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();if(tl===ql)return 10000;if(tl.indexOf(ql)===0)return 5000-tl.length;var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}return 0;}function scoreEntry(q,e){return Math.max(fs(q,e.n)*4,fs(q,e.s)*2,fs(q,e.m)*2,fs(q,e.d));}function renderSR(results){var el=document.getElementById('sr');if(!el)return;if(!results.length){el.className='';el.innerHTML='';return;}el.className='open';var h='';for(var i=0;i<results.length;i++){var e=results[i].entry,k=e.k,href=e.m+'.html';if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);var kc='sr-'+k;h+='<a class="sr-item" href="'+href+'">'+'<span class="sr-kind '+kc+'">'+k+'</span>'+'<span class="sr-name">'+esc(e.n)+'</span>'+'<span class="sr-mod">'+esc(e.m)+'</span></a>';if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';if(i<results.length-1)h+='<div class="sr-sep"></div>';}el.innerHTML=h;}function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}var si=document.getElementById('search-input');if(si)si.addEventListener('input',function(){var q=this.value.trim();if(!q||!SI){renderSR([]);return;}var results=[];for(var i=0;i<SI.length;i++){var sc=scoreEntry(q,SI[i]);if(sc>0)results.push({entry:SI[i],score:sc});}results.sort(function(a,b){return b.score-a.score;});renderSR(results.slice(0,25));});</script></body></html>
+<a class="sl" href="WebSocket.html#type-Conn"><span class="sb-kind" style="color:var(--ty)">T</span>Conn</a>
+<a class="sl" href="WebSocket.html#fn-upgrade"><span class="sb-kind" style="color:var(--fn)">F</span>upgrade</a>
+<a class="sl" href="WebSocket.html#fn-recv"><span class="sb-kind" style="color:var(--fn)">F</span>recv</a>
+<a class="sl" href="WebSocket.html#fn-send_frame"><span class="sb-kind" style="color:var(--fn)">F</span>send_frame</a>
+<a class="sl" href="WebSocket.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
+<a class="sl" href="WebSocket.html#fn-select"><span class="sb-kind" style="color:var(--fn)">F</span>select</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div><div class="sb-sub"><a class="sl" href="Xml.html#type-XmlNode"><span class="sb-kind" style="color:var(--ty)">T</span>XmlNode</a>
+<a class="sl" href="Xml.html#type-XmlDoc"><span class="sb-kind" style="color:var(--ty)">T</span>XmlDoc</a>
+<a class="sl" href="Xml.html#type-XmlError"><span class="sb-kind" style="color:var(--ty)">T</span>XmlError</a>
+<a class="sl" href="Xml.html#type-XmlFrame"><span class="sb-kind" style="color:var(--ty)">T</span>XmlFrame</a>
+<a class="sl" href="Xml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="Xml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
+<a class="sl" href="Xml.html#fn-root"><span class="sb-kind" style="color:var(--fn)">F</span>root</a>
+<a class="sl" href="Xml.html#fn-tag"><span class="sb-kind" style="color:var(--fn)">F</span>tag</a>
+<a class="sl" href="Xml.html#fn-text"><span class="sb-kind" style="color:var(--fn)">F</span>text</a>
+<a class="sl" href="Xml.html#fn-attr"><span class="sb-kind" style="color:var(--fn)">F</span>attr</a>
+<a class="sl" href="Xml.html#fn-children"><span class="sb-kind" style="color:var(--fn)">F</span>children</a>
+<a class="sl" href="Xml.html#fn-elements"><span class="sb-kind" style="color:var(--fn)">F</span>elements</a>
+<a class="sl" href="Xml.html#fn-find"><span class="sb-kind" style="color:var(--fn)">F</span>find</a>
+<a class="sl" href="Xml.html#fn-find_all"><span class="sb-kind" style="color:var(--fn)">F</span>find_all</a>
+<a class="sl" href="Xml.html#fn-elem"><span class="sb-kind" style="color:var(--fn)">F</span>elem</a>
+<a class="sl" href="Xml.html#fn-text_node"><span class="sb-kind" style="color:var(--fn)">F</span>text_node</a>
+<a class="sl" href="Xml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a>
+<a class="sl" href="Xml.html#fn-to_string_pretty"><span class="sb-kind" style="color:var(--fn)">F</span>to_string_pretty</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div><div class="sb-sub"><a class="sl" href="Yaml.html#type-YamlValue"><span class="sb-kind" style="color:var(--ty)">T</span>YamlValue</a>
+<a class="sl" href="Yaml.html#type-YamlError"><span class="sb-kind" style="color:var(--ty)">T</span>YamlError</a>
+<a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
+<a class="sl" href="Yaml.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
+<a class="sl" href="Yaml.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
+<a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
+<a class="sl" href="Yaml.html#fn-get_int"><span class="sb-kind" style="color:var(--fn)">F</span>get_int</a>
+<a class="sl" href="Yaml.html#fn-get_bool"><span class="sb-kind" style="color:var(--fn)">F</span>get_bool</a>
+<a class="sl" href="Yaml.html#fn-get_seq"><span class="sb-kind" style="color:var(--fn)">F</span>get_seq</a>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Merkle</span></nav><h1>Merkle</h1><div class="mdoc"><p>Merkle: content-addressed hash tree.</p><p>Each leaf stores a value and the SHA-256 hash of its byte representation. Each branch stores the SHA-256 hash of (left_hash ++ right_hash). The root hash summarises the entire tree; comparing root hashes detects any difference in O(1), while diff() localises changes in O(k log n) by recursing only into subtrees whose hashes differ.</p><p>build/3 constructs a balanced tree from a list of items in O(n). The caller supplies a <code>to_bytes : a -&gt; String</code> function for leaf hashing.</p></div><h2>Types</h2><div class="item" id="type-MerkleTree"><div class="ih"><span class="badge bty">type</span><span class="name">MerkleTree</span><span class="sig"><a href="#type-MerkleTree">MerkleTree</a>(a) = MLeaf(String, a) | MBranch(String, <a href="#type-MerkleTree">MerkleTree</a>(a), <a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#type-MerkleTree" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-leaf"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf</span><span class="sig">leaf(x : a, to_bytes : a -&gt; String) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-leaf" title="Link">#</a></div><div class="ib"><p>Construct a leaf, hashing the value with to_bytes.</p></div></div>
+<div class="item" id="fn-branch"><div class="ih"><span class="badge bfn">fn</span><span class="name">branch</span><span class="sig">branch(l : <a href="#type-MerkleTree">MerkleTree</a>(a), r : <a href="#type-MerkleTree">MerkleTree</a>(a)) : <a href="#type-MerkleTree">MerkleTree</a>(a)</span><a class="anchor-link" href="#fn-branch" title="Link">#</a></div><div class="ib"><p>Construct a branch, hashing the concatenation of the children's root hashes.</p></div></div>
+<div class="item" id="fn-root_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">root_hash</span><span class="sig">root_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : String</span><a class="anchor-link" href="#fn-root_hash" title="Link">#</a></div><div class="ib"><p>Return the hash stored at the root of the tree.</p></div></div>
+<div class="item" id="fn-build"><div class="ih"><span class="badge bfn">fn</span><span class="name">build</span><span class="sig">build(items : List(a), to_bytes : a -&gt; String) : Option(<a href="#type-MerkleTree">MerkleTree</a>(a))</span><a class="anchor-link" href="#fn-build" title="Link">#</a></div><div class="ib"><p>Build a balanced Merkle tree from a non-empty list. Returns None for an empty list.</p></div></div>
+<div class="item" id="fn-diff"><div class="ih"><span class="badge bfn">fn</span><span class="name">diff</span><span class="sig">diff(t1 : <a href="#type-MerkleTree">MerkleTree</a>(a), t2 : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-diff" title="Link">#</a></div><div class="ib"><p>Return the leaf hashes that differ between two trees with the same structure.</p></div></div>
+<div class="item" id="fn-leaves"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaves</span><span class="sig">leaves(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(a)</span><a class="anchor-link" href="#fn-leaves" title="Link">#</a></div><div class="ib"><p>Collect all values stored at the leaves, left to right.</p></div></div>
+<div class="item" id="fn-leaf_hashes"><div class="ih"><span class="badge bfn">fn</span><span class="name">leaf_hashes</span><span class="sig">leaf_hashes(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : List(String)</span><a class="anchor-link" href="#fn-leaf_hashes" title="Link">#</a></div><div class="ib"><p>Collect all leaf hashes, left to right.</p></div></div>
+<div class="item" id="fn-contains_hash"><div class="ih"><span class="badge bfn">fn</span><span class="name">contains_hash</span><span class="sig">contains_hash(t : <a href="#type-MerkleTree">MerkleTree</a>(a), h : String) : Bool</span><a class="anchor-link" href="#fn-contains_hash" title="Link">#</a></div><div class="ib"><p>True when the tree contains a leaf whose hash equals h.</p></div></div>
+<div class="item" id="fn-size"><div class="ih"><span class="badge bfn">fn</span><span class="name">size</span><span class="sig">size(t : <a href="#type-MerkleTree">MerkleTree</a>(a)) : Int</span><a class="anchor-link" href="#fn-size" title="Link">#</a></div><div class="ib"><p>Number of leaves in the tree.</p></div></div></main></div><script>function getTheme(){var t=localStorage.getItem('march-doc-theme');if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}function applyTheme(t){document.documentElement.setAttribute('data-theme',t);var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';localStorage.setItem('march-doc-theme',t);applyTheme(t);}applyTheme(getTheme());function openSearch(){document.getElementById('search-overlay').classList.add('open');var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}function closeSearch(){document.getElementById('search-overlay').classList.remove('open');var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}document.addEventListener('DOMContentLoaded',function(){document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){if(e.target.classList.contains('anchor-link'))return;var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});var path=window.location.pathname;document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});document.querySelectorAll('.ib pre').forEach(function(pre){var wrap=document.createElement('div');wrap.className='pre-wrap';pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';btn.addEventListener('click',function(e){e.stopPropagation();var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;navigator.clipboard.writeText(text).then(function(){btn.textContent='Copied!';btn.classList.add('copied');setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});wrap.appendChild(btn);});if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}document.addEventListener('keydown',function(e){if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}if(e.key==='Escape')closeSearch();});});var SI=null;fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;}).catch(function(){});function ld(a,b){if(!a.length)return b.length;if(!b.length)return a.length;var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];for(var j=0;j<=a.length;j++)m[0][j]=j;for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);}return m[b.length][a.length];}function fs(q,t){if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();if(tl===ql)return 10000;if(tl.indexOf(ql)===0)return 5000-tl.length;var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}return 0;}function scoreEntry(q,e){return Math.max(fs(q,e.n)*4,fs(q,e.s)*2,fs(q,e.m)*2,fs(q,e.d));}function renderSR(results){var el=document.getElementById('sr');if(!el)return;if(!results.length){el.className='';el.innerHTML='';return;}el.className='open';var h='';for(var i=0;i<results.length;i++){var e=results[i].entry,k=e.k,href=e.m+'.html';if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);var kc='sr-'+k;h+='<a class="sr-item" href="'+href+'">'+'<span class="sr-kind '+kc+'">'+k+'</span>'+'<span class="sr-name">'+esc(e.n)+'</span>'+'<span class="sr-mod">'+esc(e.m)+'</span></a>';if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';if(i<results.length-1)h+='<div class="sr-sep"></div>';}el.innerHTML=h;}function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}var si=document.getElementById('search-input');if(si)si.addEventListener('input',function(){var q=this.value.trim();if(!q||!SI){renderSR([]);return;}var results=[];for(var i=0;i<SI.length;i++){var sc=scoreEntry(q,SI[i]);if(sc>0)results.push({entry:SI[i],score:sc});}results.sort(function(a,b){return b.score-a.score;});renderSR(results.slice(0,25));});</script></body></html>

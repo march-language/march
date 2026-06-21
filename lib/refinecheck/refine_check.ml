@@ -266,6 +266,96 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
                   (if cx = "" then "" else Printf.sprintf " (counterexample: %s)" cx))
            | _ -> ())))
 
+(* ── Postconditions: a function's return value must satisfy its return
+   refinement.  We check each *tail* expression (a return position) under the
+   path/scope reaching it, with the same definite-failure soundness stance. ── *)
+
+let return_refine (fd : A.fn_def) : (string * A.expr) option =
+  match fd.A.fn_ret_ty with
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred)
+  | _ -> None
+
+(* Return-position expressions of a body, each with the path reaching it. *)
+let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
+  match e with
+  | A.EBlock (es, _) -> (match List.rev es with last :: _ -> tails path last | [] -> [ (path, e) ])
+  | A.EIf (c, t, el, _) -> tails ((c, false) :: path) t @ tails ((c, true) :: path) el
+  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails ((c, false) :: path) b) arms
+  | A.EMatch (_, branches, _) ->
+    List.concat_map
+      (fun (br : A.branch) ->
+        let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
+        tails p br.A.branch_body)
+      branches
+  | _ -> [ (path, e) ]
+
+(* Facts true throughout the body: each refined param contributes its predicate. *)
+let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list =
+  List.fold_left
+    (fun (ds, asm) (name, (b, q)) ->
+      let c = Smt.Const name in
+      let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+      let ds = (name, Smt.SInt) :: ds in
+      match smt_of ~resolve_var:rv ~resolve_len:(fun _ -> None) q with
+      | Some qa -> (ds, qa :: asm)
+      | None -> (ds, asm))
+    ([], []) sc
+
+let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.expr)
+    ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
+  let base_decls, base_assume = scope_facts sc in
+  let decls = ref base_decls and assume = ref base_assume in
+  let var_const name = decls := (name, Smt.SInt) :: !decls; Some (Smt.Const name) in
+  let resolve_len name =
+    let c = Smt.Const ("len$" ^ name) in
+    decls := ("len$" ^ name, Smt.SInt) :: !decls;
+    assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+    Some c
+  in
+  (* The returned value, reflected (variables become their constants). *)
+  match smt_of ~resolve_var:var_const ~resolve_len tail_e with
+  | None -> ()
+  | Some tail_term ->
+    let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
+    List.iter
+      (fun (cond, negated) ->
+        match smt_of ~resolve_var ~resolve_len cond with
+        | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
+        | None -> ())
+      path;
+    (match smt_of ~resolve_var ~resolve_len ret_pred with
+     | None -> ()
+     | Some goal ->
+       let decls =
+         List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
+       in
+       let vc = { Smt.decls; assumptions = !assume; goal } in
+       (match Refine.discharge ~root vc with
+        | Refine.Verified -> ()
+        | _ -> (
+            match Refine.discharge ~root { vc with Smt.goal = Smt.Not goal } with
+            | Refine.Verified ->
+              ignore tail_e;
+              Err.error errctx ~span
+                (Printf.sprintf
+                   "refinement violation: return value cannot satisfy postcondition `%s`"
+                   (pred_str ret_pred))
+            | _ -> ())))
+
+let check_fn_post ~root errctx (fd : A.fn_def) : unit =
+  match return_refine fd with
+  | None -> ()
+  | Some (binder, ret_pred) ->
+    List.iter
+      (fun (c : A.fn_clause) ->
+        let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+        let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+        List.iter
+          (check_post ~root errctx ~span:c.A.fc_span sc binder ret_pred)
+          (tails base c.A.fc_body))
+      fd.A.fn_clauses
+
 (* ── Walk expressions, threading the refined-local scope and path context ── *)
 let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scope)
     (e : A.expr) : unit =
@@ -316,6 +406,7 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
 let visit_fn ~root errctx (tbl : sigs) (fd : A.fn_def) : unit =
+  check_fn_post ~root errctx fd;
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
@@ -336,4 +427,6 @@ let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
   let tbl : sigs = Hashtbl.create 64 in
   collect_sigs tbl "" m.A.mod_decls;
-  if Hashtbl.length tbl > 0 then visit_decls ~root errctx tbl m.A.mod_decls
+  (* Always walk: a function may have a refined *return* (postcondition) even
+     with no refined parameters, so it won't appear in [tbl]. *)
+  visit_decls ~root errctx tbl m.A.mod_decls
