@@ -236,7 +236,7 @@
 (test
  (name test_hot_reload)
  (modules test_hot_reload)
- (libraries march_tir alcotest))
+ (libraries march_tir march_ast alcotest))
 
 (test
  (name test_refine)
