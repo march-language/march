@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 57 modules, ~12400 lines
+├── stdlib/                  # 62 modules, ~12400 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -279,6 +279,12 @@ march/
         ├── test_regression.exe       # 8 tests (Cargo/Hex/npm regressions)
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
+
+## Current State (as of 2026-06-21, Distributed algorithms stdlib — Deque, VectorClock, Merkle, CRDT, ConsistentHash)
+
+- **Five new stdlib modules** for distributed systems primitives. `stdlib/deque.march`: functional double-ended queue (banker's deque, O(1) size). `stdlib/vector_clock.march`: causal ordering (`Before | After | Concurrent | Equal`), happens-before, merge, advance. `stdlib/merkle.march`: SHA-256 content-addressed tree with tail-recursive `diff` (work-list). `stdlib/crdt.march`: four CRDTs nested as `CRDT.GCounter` / `CRDT.PNCounter` / `CRDT.LWWRegister` / `CRDT.ORSet`. `stdlib/consistent_hash.march`: sorted virtual-node ring with SHA-256 replica placement.
+- **Test suites**: 5 new test files in `test/stdlib/` registered in `test_stdlib_march.ml`. `crypto.march` added to `all_stdlib_decls` (required by Merkle + ConsistentHash for `Crypto.sha256`). All pass. Design spec: `specs/2026-06-20-distributed-algorithms-design.md`.
+- **Test counts**: compiler 293, eval 224, stdlib 783 (unchanged — new modules tested via `test_stdlib_march.exe`).
 
 ## Current State (as of 2026-06-20, External Function Interface — Phase 5: forge build integration)
 

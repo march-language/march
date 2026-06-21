@@ -1,0 +1,119 @@
+-- ConsistentHash: consistent hashing ring for distributed load balancing.
+--
+-- Virtual nodes (replicas) are distributed evenly across the hash ring.
+-- Each physical node `n` gets `replicas` virtual nodes inserted at
+-- SHA-256(name ++ "#" ++ i) for i in 0..replicas-1.
+--
+-- Lookup: hash the key, walk the sorted ring to find the first virtual node
+-- whose position >= the key's hash; wrap around to the first node if none.
+--
+-- The internal ring is a sorted List((Hash, node)) — O(replicas) per add/remove,
+-- O(replicas) per lookup. Suitable for small-to-medium cluster sizes.
+
+mod ConsistentHash do
+
+  -- (sorted_ring, name_map, replicas)
+  -- sorted_ring: List((hash_str, node)) sorted by hash string
+  -- name_map: Map(String, a) name -> node (for removal)
+  -- replicas: virtual nodes per physical node
+  ptype HashRing(a) = HashRing(List((String, a)), Map(String, a), Int)
+
+  doc "Create an empty ring with the given virtual node count per physical node."
+  fn new(replicas : Int) : HashRing(a) do
+    HashRing(Nil, Map.empty(), replicas)
+  end
+
+  doc "Add a named node to the ring, inserting `replicas` virtual nodes."
+  fn add(ring : HashRing(a), name : String, node : a) : HashRing(a) do
+    match ring do
+    HashRing(lst, nodes, replicas) ->
+      let new_nodes = Map.insert(nodes, name, node, Map.str_cmp)
+      let new_lst = add_replicas(lst, name, node, replicas, 0)
+      HashRing(new_lst, new_nodes, replicas)
+    end
+  end
+
+  pfn add_replicas(lst : List((String, a)), name : String, node : a, replicas : Int, i : Int) : List((String, a)) do
+    if i >= replicas do lst
+    else
+      let h = Crypto.sha256(name ++ "#" ++ int_to_string(i))
+      add_replicas(ring_insert(lst, h, node), name, node, replicas, i + 1)
+    end
+  end
+
+  pfn ring_insert(lst : List((String, a)), h : String, node : a) : List((String, a)) do
+    match lst do
+    Nil -> Cons((h, node), Nil)
+    Cons((hd, nd), rest) ->
+      if h < hd do Cons((h, node), lst)
+      else Cons((hd, nd), ring_insert(rest, h, node))
+      end
+    end
+  end
+
+  doc "Remove a named node and all its virtual nodes from the ring."
+  fn remove(ring : HashRing(a), name : String) : HashRing(a) do
+    match ring do
+    HashRing(lst, nodes, replicas) ->
+      let hashes = List.map(List.range(0, replicas), fn i ->
+        Crypto.sha256(name ++ "#" ++ int_to_string(i)))
+      let new_lst = List.filter(lst, fn pair ->
+        let (h, _) = pair
+        not(List.any(hashes, fn hr -> hr == h)))
+      let new_nodes = Map.remove(nodes, name, Map.str_cmp)
+      HashRing(new_lst, new_nodes, replicas)
+    end
+  end
+
+  doc "Find the node responsible for key. Returns None only when the ring is empty."
+  fn get(ring : HashRing(a), key : String) : Option(a) do
+    match ring do
+    HashRing(lst, _, _) ->
+      let h = Crypto.sha256(key)
+      successor(lst, h)
+    end
+  end
+
+  pfn successor(lst : List((String, a)), target : String) : Option(a) do
+    match lst do
+    Nil -> None
+    Cons((h, nd), rest) ->
+      if h >= target do Some(nd)
+      else
+        match successor(rest, target) do
+        Some(x) -> Some(x)
+        None    -> Some(nd)  -- wrap around: first element
+        end
+      end
+    end
+  end
+
+  doc "All distinct physical node values (in ring insertion order of their first virtual node)."
+  fn nodes(ring : HashRing(a)) : List(a) do
+    match ring do
+    HashRing(_, name_map, _) -> Map.values(name_map)
+    end
+  end
+
+  doc "All registered node names."
+  fn node_names(ring : HashRing(a)) : List(String) do
+    match ring do
+    HashRing(_, name_map, _) -> Map.keys(name_map)
+    end
+  end
+
+  doc "True when the ring has no nodes."
+  fn is_empty(ring : HashRing(a)) : Bool do
+    match ring do
+    HashRing(_, name_map, _) -> Map.is_empty(name_map)
+    end
+  end
+
+  doc "Number of distinct physical nodes."
+  fn size(ring : HashRing(a)) : Int do
+    match ring do
+    HashRing(_, name_map, _) -> Map.size(name_map)
+    end
+  end
+
+end

@@ -1,0 +1,220 @@
+mod TestDeque do
+
+  describe "empty" do
+
+    test "is_empty on empty" do
+      assert (Deque.is_empty(Deque.empty()))
+    end
+
+    test "size of empty is 0" do
+      assert (Deque.size(Deque.empty()) == 0)
+    end
+
+    test "to_list of empty is []" do
+      assert (Deque.to_list(Deque.empty()) == Nil)
+    end
+
+    test "peek_front on empty is None" do
+      assert (Deque.peek_front(Deque.empty()) == None)
+    end
+
+    test "peek_back on empty is None" do
+      assert (Deque.peek_back(Deque.empty()) == None)
+    end
+
+    test "pop_front on empty returns None" do
+      let (v, _) = Deque.pop_front(Deque.empty())
+      assert (v == None)
+    end
+
+    test "pop_back on empty returns None" do
+      let (_, v) = Deque.pop_back(Deque.empty())
+      assert (v == None)
+    end
+
+  end
+
+  describe "singleton" do
+
+    test "singleton is not empty" do
+      assert (not(Deque.is_empty(Deque.singleton(1))))
+    end
+
+    test "singleton has size 1" do
+      assert (Deque.size(Deque.singleton(99)) == 1)
+    end
+
+    test "singleton peek_front" do
+      assert (Deque.peek_front(Deque.singleton(7)) == Some(7))
+    end
+
+    test "singleton peek_back" do
+      assert (Deque.peek_back(Deque.singleton(7)) == Some(7))
+    end
+
+    test "singleton to_list" do
+      assert (Deque.to_list(Deque.singleton(5)) == Cons(5, Nil))
+    end
+
+  end
+
+  describe "push_front / push_back" do
+
+    test "push_front increases size" do
+      let d = Deque.push_front(Deque.empty(), 1)
+      assert (Deque.size(d) == 1)
+    end
+
+    test "push_back increases size" do
+      let d = Deque.push_back(Deque.empty(), 1)
+      assert (Deque.size(d) == 1)
+    end
+
+    test "push_front peek_front returns last-pushed" do
+      let d = Deque.push_front(Deque.push_front(Deque.empty(), 1), 2)
+      assert (Deque.peek_front(d) == Some(2))
+    end
+
+    test "push_back peek_back returns last-pushed" do
+      let d = Deque.push_back(Deque.push_back(Deque.empty(), 1), 2)
+      assert (Deque.peek_back(d) == Some(2))
+    end
+
+    test "push_back then peek_front gives first element" do
+      let d = Deque.push_back(Deque.push_back(Deque.empty(), 10), 20)
+      assert (Deque.peek_front(d) == Some(10))
+    end
+
+    test "push_front then peek_back gives first element pushed" do
+      let d = Deque.push_front(Deque.push_front(Deque.empty(), 10), 20)
+      assert (Deque.peek_back(d) == Some(10))
+    end
+
+  end
+
+  describe "pop_front" do
+
+    test "pop_front returns front element" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let (v, _) = Deque.pop_front(d)
+      assert (v == Some(1))
+    end
+
+    test "pop_front remainder has one fewer element" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let (_, rest) = Deque.pop_front(d)
+      assert (Deque.size(rest) == 2)
+    end
+
+    test "sequential pop_front gives elements in order" do
+      let d = Deque.from_list(Cons(10, Cons(20, Cons(30, Nil))))
+      let (v1, d1) = Deque.pop_front(d)
+      let (v2, d2) = Deque.pop_front(d1)
+      let (v3, _) = Deque.pop_front(d2)
+      assert (v1 == Some(10))
+      assert (v2 == Some(20))
+      assert (v3 == Some(30))
+    end
+
+  end
+
+  describe "pop_back" do
+
+    test "pop_back returns back element" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let (_, v) = Deque.pop_back(d)
+      assert (v == Some(3))
+    end
+
+    test "sequential pop_back gives elements in reverse order" do
+      let d = Deque.from_list(Cons(10, Cons(20, Cons(30, Nil))))
+      let (d1, v1) = Deque.pop_back(d)
+      let (d2, v2) = Deque.pop_back(d1)
+      let (_, v3) = Deque.pop_back(d2)
+      assert (v1 == Some(30))
+      assert (v2 == Some(20))
+      assert (v3 == Some(10))
+    end
+
+  end
+
+  describe "from_list / to_list" do
+
+    test "roundtrip empty" do
+      assert (Deque.to_list(Deque.from_list(Nil)) == Nil)
+    end
+
+    test "roundtrip single" do
+      let xs = Cons(42, Nil)
+      assert (Deque.to_list(Deque.from_list(xs)) == xs)
+    end
+
+    test "roundtrip three elements" do
+      let xs = Cons(1, Cons(2, Cons(3, Nil)))
+      assert (Deque.to_list(Deque.from_list(xs)) == xs)
+    end
+
+    test "size matches list length" do
+      let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+      assert (Deque.size(Deque.from_list(xs)) == 5)
+    end
+
+  end
+
+  describe "concat" do
+
+    test "concat empty with empty" do
+      let d = Deque.concat(Deque.empty(), Deque.empty())
+      assert (Deque.is_empty(d))
+    end
+
+    test "concat non-empty with empty" do
+      let d1 = Deque.from_list(Cons(1, Cons(2, Nil)))
+      let d = Deque.concat(d1, Deque.empty())
+      assert (Deque.to_list(d) == Cons(1, Cons(2, Nil)))
+    end
+
+    test "concat empty with non-empty" do
+      let d2 = Deque.from_list(Cons(3, Cons(4, Nil)))
+      let d = Deque.concat(Deque.empty(), d2)
+      assert (Deque.to_list(d) == Cons(3, Cons(4, Nil)))
+    end
+
+    test "concat two non-empty" do
+      let d1 = Deque.from_list(Cons(1, Cons(2, Nil)))
+      let d2 = Deque.from_list(Cons(3, Cons(4, Nil)))
+      let d = Deque.concat(d1, d2)
+      assert (Deque.to_list(d) == Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+    end
+
+    test "concat preserves total size" do
+      let d1 = Deque.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let d2 = Deque.from_list(Cons(4, Cons(5, Nil)))
+      assert (Deque.size(Deque.concat(d1, d2)) == 5)
+    end
+
+  end
+
+  describe "map and filter" do
+
+    test "map doubles each element" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let d2 = Deque.map(d, fn x -> x * 2)
+      assert (Deque.to_list(d2) == Cons(2, Cons(4, Cons(6, Nil))))
+    end
+
+    test "filter keeps evens" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+      let d2 = Deque.filter(d, fn x -> x % 2 == 0)
+      assert (Deque.to_list(d2) == Cons(2, Cons(4, Nil)))
+    end
+
+    test "fold_left sums elements" do
+      let d = Deque.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+      let s = Deque.fold_left(d, 0, fn (acc, x) -> acc + x)
+      assert (s == 10)
+    end
+
+  end
+
+end

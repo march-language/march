@@ -1,0 +1,117 @@
+-- Merkle: content-addressed hash tree.
+--
+-- Each leaf stores a value and the SHA-256 hash of its byte representation.
+-- Each branch stores the SHA-256 hash of (left_hash ++ right_hash).
+-- The root hash summarises the entire tree; comparing root hashes detects
+-- any difference in O(1), while diff() localises changes in O(k log n)
+-- by recursing only into subtrees whose hashes differ.
+--
+-- build/3 constructs a balanced tree from a list of items in O(n).
+-- The caller supplies a `to_bytes : a -> String` function for leaf hashing.
+
+mod Merkle do
+
+  -- A node: MLeaf(sha256_hex, value) or MBranch(sha256_hex, left, right).
+  type MerkleTree(a) = MLeaf(String, a) | MBranch(String, MerkleTree(a), MerkleTree(a))
+
+  doc "Construct a leaf, hashing the value with to_bytes."
+  fn leaf(x : a, to_bytes : a -> String) : MerkleTree(a) do
+    MLeaf(Crypto.sha256(to_bytes(x)), x)
+  end
+
+  doc "Construct a branch, hashing the concatenation of the children's root hashes."
+  fn branch(l : MerkleTree(a), r : MerkleTree(a)) : MerkleTree(a) do
+    MBranch(Crypto.sha256(root_hash(l) ++ root_hash(r)), l, r)
+  end
+
+  doc "Return the hash stored at the root of the tree."
+  fn root_hash(t : MerkleTree(a)) : String do
+    match t do
+    MLeaf(h, _)      -> h
+    MBranch(h, _, _) -> h
+    end
+  end
+
+  doc "Build a balanced Merkle tree from a non-empty list. Returns None for an empty list."
+  fn build(items : List(a), to_bytes : a -> String) : Option(MerkleTree(a)) do
+    match items do
+    Nil -> None
+    _   ->
+      let leaves = List.map(items, fn x -> leaf(x, to_bytes))
+      Some(build_layer(leaves))
+    end
+  end
+
+  pfn build_layer(nodes : List(MerkleTree(a))) : MerkleTree(a) do
+    match nodes do
+    Cons(t, Nil) -> t
+    _            -> build_layer(pair_up(nodes))
+    end
+  end
+
+  pfn pair_up(nodes : List(MerkleTree(a))) : List(MerkleTree(a)) do
+    match nodes do
+    Nil                       -> Nil
+    Cons(t, Nil)              -> Cons(t, Nil)
+    Cons(l, Cons(r, rest))    -> Cons(branch(l, r), pair_up(rest))
+    end
+  end
+
+  doc "Return the leaf hashes that differ between two trees with the same structure."
+  fn diff(t1 : MerkleTree(a), t2 : MerkleTree(a)) : List(String) do
+    diff_work(Cons((t1, t2), Nil), Nil)
+  end
+
+  pfn diff_work(work : List((MerkleTree(a), MerkleTree(a))), acc : List(String)) : List(String) do
+    match work do
+    Nil -> List.reverse(acc)
+    Cons((t1, t2), rest) ->
+      if root_hash(t1) == root_hash(t2) do
+        diff_work(rest, acc)
+      else
+        match (t1, t2) do
+        (MLeaf(h, _), _)                         -> diff_work(rest, Cons(h, acc))
+        (MBranch(h, _, _), MLeaf(_, _))          -> diff_work(rest, Cons(h, acc))
+        (MBranch(_, l1, r1), MBranch(_, l2, r2)) ->
+          diff_work(Cons((l1, l2), Cons((r1, r2), rest)), acc)
+        end
+      end
+    end
+  end
+
+  doc "Collect all values stored at the leaves, left to right."
+  fn leaves(t : MerkleTree(a)) : List(a) do
+    match t do
+    MLeaf(_, x)      -> Cons(x, Nil)
+    MBranch(_, l, r) -> List.append(leaves(l), leaves(r))
+    end
+  end
+
+  doc "Collect all leaf hashes, left to right."
+  fn leaf_hashes(t : MerkleTree(a)) : List(String) do
+    match t do
+    MLeaf(h, _)      -> Cons(h, Nil)
+    MBranch(_, l, r) -> List.append(leaf_hashes(l), leaf_hashes(r))
+    end
+  end
+
+  doc "True when the tree contains a leaf whose hash equals h."
+  fn contains_hash(t : MerkleTree(a), h : String) : Bool do
+    match t do
+    MLeaf(lh, _)     -> lh == h
+    MBranch(bh, l, r) ->
+      if bh == h do true
+      else contains_hash(l, h) || contains_hash(r, h)
+      end
+    end
+  end
+
+  doc "Number of leaves in the tree."
+  fn size(t : MerkleTree(a)) : Int do
+    match t do
+    MLeaf(_, _)      -> 1
+    MBranch(_, l, r) -> size(l) + size(r)
+    end
+  end
+
+end

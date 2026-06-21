@@ -1,0 +1,144 @@
+mod TestVectorClock do
+
+  describe "new" do
+
+    test "new clock has sum 0" do
+      assert (VectorClock.sum(VectorClock.new()) == 0)
+    end
+
+    test "get on empty clock returns 0" do
+      assert (VectorClock.get(VectorClock.new(), "alice") == 0)
+    end
+
+  end
+
+  describe "increment" do
+
+    test "increment creates slot" do
+      let vc = VectorClock.increment(VectorClock.new(), "alice")
+      assert (VectorClock.get(vc, "alice") == 1)
+    end
+
+    test "increment twice" do
+      let vc = VectorClock.increment(VectorClock.increment(VectorClock.new(), "alice"), "alice")
+      assert (VectorClock.get(vc, "alice") == 2)
+    end
+
+    test "increment different actors" do
+      let vc = VectorClock.increment(VectorClock.increment(VectorClock.new(), "alice"), "bob")
+      assert (VectorClock.get(vc, "alice") == 1)
+      assert (VectorClock.get(vc, "bob") == 1)
+    end
+
+    test "sum increases" do
+      let vc = VectorClock.increment(VectorClock.increment(VectorClock.new(), "a"), "b")
+      assert (VectorClock.sum(vc) == 2)
+    end
+
+  end
+
+  describe "compare" do
+
+    test "two empty clocks are Equal" do
+      let vc = VectorClock.new()
+      assert (VectorClock.compare(vc, vc) == Equal)
+    end
+
+    test "empty happens before incremented" do
+      let a = VectorClock.new()
+      let b = VectorClock.increment(VectorClock.new(), "alice")
+      assert (VectorClock.compare(a, b) == Before)
+    end
+
+    test "incremented happens after empty" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.new()
+      assert (VectorClock.compare(a, b) == After)
+    end
+
+    test "concurrent clocks" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "bob")
+      assert (VectorClock.compare(a, b) == Concurrent)
+    end
+
+    test "happens_before convenience" do
+      let a = VectorClock.new()
+      let b = VectorClock.increment(VectorClock.new(), "x")
+      assert (VectorClock.happens_before(a, b))
+    end
+
+    test "not happens_before for concurrent" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "bob")
+      assert (not(VectorClock.happens_before(a, b)))
+    end
+
+    test "causal chain" do
+      let vc0 = VectorClock.new()
+      let vc1 = VectorClock.increment(vc0, "alice")
+      let vc2 = VectorClock.increment(vc1, "alice")
+      assert (VectorClock.happens_before(vc0, vc1))
+      assert (VectorClock.happens_before(vc1, vc2))
+      assert (VectorClock.happens_before(vc0, vc2))
+    end
+
+  end
+
+  describe "merge" do
+
+    test "merge with empty is identity" do
+      let vc = VectorClock.increment(VectorClock.new(), "alice")
+      let merged = VectorClock.merge(vc, VectorClock.new())
+      assert (VectorClock.get(merged, "alice") == 1)
+    end
+
+    test "merge takes max per slot" do
+      let a = VectorClock.increment(VectorClock.increment(VectorClock.new(), "alice"), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "alice")
+      let merged = VectorClock.merge(a, b)
+      assert (VectorClock.get(merged, "alice") == 2)
+    end
+
+    test "merge unions slots" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "bob")
+      let merged = VectorClock.merge(a, b)
+      assert (VectorClock.get(merged, "alice") == 1)
+      assert (VectorClock.get(merged, "bob") == 1)
+    end
+
+    test "merge is commutative (same value)" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "bob")
+      let m1 = VectorClock.merge(a, b)
+      let m2 = VectorClock.merge(b, a)
+      assert (VectorClock.sum(m1) == VectorClock.sum(m2))
+    end
+
+    test "merge makes concurrent clocks dominate each other" do
+      let a = VectorClock.increment(VectorClock.new(), "alice")
+      let b = VectorClock.increment(VectorClock.new(), "bob")
+      let merged = VectorClock.merge(a, b)
+      assert (VectorClock.compare(a, merged) == Before)
+      assert (VectorClock.compare(b, merged) == Before)
+    end
+
+  end
+
+  describe "advance" do
+
+    test "advance sets slot if higher" do
+      let vc = VectorClock.advance(VectorClock.new(), "alice", 5)
+      assert (VectorClock.get(vc, "alice") == 5)
+    end
+
+    test "advance is no-op if not higher" do
+      let vc = VectorClock.increment(VectorClock.increment(VectorClock.new(), "alice"), "alice")
+      let vc2 = VectorClock.advance(vc, "alice", 1)
+      assert (VectorClock.get(vc2, "alice") == 2)
+    end
+
+  end
+
+end

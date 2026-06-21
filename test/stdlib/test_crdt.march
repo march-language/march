@@ -1,0 +1,193 @@
+mod TestCrdt do
+
+  describe "GCounter" do
+
+    test "new counter has value 0" do
+      assert (CRDT.GCounter.value(CRDT.GCounter.new()) == 0)
+    end
+
+    test "increment increases value" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.new(), "a")
+      assert (CRDT.GCounter.value(c) == 1)
+    end
+
+    test "increment twice" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.increment(CRDT.GCounter.new(), "a"), "a")
+      assert (CRDT.GCounter.value(c) == 2)
+    end
+
+    test "two actors sum" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.increment(CRDT.GCounter.new(), "a"), "b")
+      assert (CRDT.GCounter.value(c) == 2)
+    end
+
+    test "merge takes component-wise max" do
+      let a = CRDT.GCounter.increment(CRDT.GCounter.increment(CRDT.GCounter.new(), "x"), "x")
+      let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "x")
+      let m = CRDT.GCounter.merge(a, b)
+      assert (CRDT.GCounter.value(m) == 2)
+    end
+
+    test "merge is commutative" do
+      let a = CRDT.GCounter.increment(CRDT.GCounter.new(), "alice")
+      let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "bob")
+      let m1 = CRDT.GCounter.merge(a, b)
+      let m2 = CRDT.GCounter.merge(b, a)
+      assert (CRDT.GCounter.value(m1) == CRDT.GCounter.value(m2))
+    end
+
+    test "merge is idempotent" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.new(), "a")
+      let m = CRDT.GCounter.merge(c, c)
+      assert (CRDT.GCounter.value(m) == 1)
+    end
+
+    test "merge unions slots" do
+      let a = CRDT.GCounter.increment(CRDT.GCounter.new(), "alice")
+      let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "bob")
+      let m = CRDT.GCounter.merge(a, b)
+      assert (CRDT.GCounter.value(m) == 2)
+    end
+
+    test "equal reflexive" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.new(), "a")
+      assert (CRDT.GCounter.equal(c, c))
+    end
+
+    test "equal after merge with self" do
+      let c = CRDT.GCounter.increment(CRDT.GCounter.new(), "a")
+      assert (CRDT.GCounter.equal(c, CRDT.GCounter.merge(c, c)))
+    end
+
+    test "add by amount" do
+      let c = CRDT.GCounter.add(CRDT.GCounter.new(), "a", 5)
+      assert (CRDT.GCounter.value(c) == 5)
+    end
+
+  end
+
+  describe "PNCounter" do
+
+    test "new counter has value 0" do
+      assert (CRDT.PNCounter.value(CRDT.PNCounter.new()) == 0)
+    end
+
+    test "increment increases value" do
+      let c = CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a")
+      assert (CRDT.PNCounter.value(c) == 1)
+    end
+
+    test "decrement decreases value" do
+      let c = CRDT.PNCounter.decrement(CRDT.PNCounter.new(), "a")
+      assert (CRDT.PNCounter.value(c) == 0 - 1)
+    end
+
+    test "increment then decrement" do
+      let c = CRDT.PNCounter.decrement(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"), "a")
+      assert (CRDT.PNCounter.value(c) == 0)
+    end
+
+    test "merge two PNCounters" do
+      let a = CRDT.PNCounter.increment(CRDT.PNCounter.new(), "alice")
+      let b = CRDT.PNCounter.increment(CRDT.PNCounter.new(), "bob")
+      let m = CRDT.PNCounter.merge(a, b)
+      assert (CRDT.PNCounter.value(m) == 2)
+    end
+
+    test "merge preserves decrement" do
+      let a = CRDT.PNCounter.decrement(CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a"), "a")
+      let b = CRDT.PNCounter.increment(CRDT.PNCounter.new(), "b")
+      let m = CRDT.PNCounter.merge(a, b)
+      assert (CRDT.PNCounter.value(m) == 1)
+    end
+
+    test "merge is idempotent" do
+      let c = CRDT.PNCounter.increment(CRDT.PNCounter.new(), "a")
+      assert (CRDT.PNCounter.equal(c, CRDT.PNCounter.merge(c, c)))
+    end
+
+  end
+
+  describe "LWWRegister" do
+
+    test "get returns initial value" do
+      let vc = VectorClock.new()
+      let r = CRDT.LWWRegister.new("hello", vc)
+      assert (CRDT.LWWRegister.get(r) == "hello")
+    end
+
+    test "set updates value" do
+      let vc = VectorClock.new()
+      let r = CRDT.LWWRegister.new("hello", vc)
+      let r2 = CRDT.LWWRegister.set(r, "world", "actor1")
+      assert (CRDT.LWWRegister.get(r2) == "world")
+    end
+
+    test "set advances clock" do
+      let vc = VectorClock.new()
+      let r = CRDT.LWWRegister.new("v0", vc)
+      let r2 = CRDT.LWWRegister.set(r, "v1", "actor1")
+      assert (VectorClock.get(CRDT.LWWRegister.clock(r2), "actor1") == 1)
+    end
+
+    test "merge keeps later value" do
+      let vc = VectorClock.new()
+      let r0 = CRDT.LWWRegister.new("initial", vc)
+      let r1 = CRDT.LWWRegister.set(r0, "v1", "actor1")
+      let m = CRDT.LWWRegister.merge(r0, r1)
+      assert (CRDT.LWWRegister.get(m) == "v1")
+    end
+
+    test "merge with self is identity" do
+      let r = CRDT.LWWRegister.new("x", VectorClock.new())
+      let m = CRDT.LWWRegister.merge(r, r)
+      assert (CRDT.LWWRegister.get(m) == "x")
+    end
+
+  end
+
+  describe "ORSet" do
+
+    test "new set is empty" do
+      assert (CRDT.ORSet.size(CRDT.ORSet.new()) == 0)
+    end
+
+    test "add then contains" do
+      let s = CRDT.ORSet.add(CRDT.ORSet.new(), "apple", fn x -> x, "tag1")
+      assert (CRDT.ORSet.contains(s, "apple", fn x -> x))
+    end
+
+    test "add then remove then not contains" do
+      let s = CRDT.ORSet.add(CRDT.ORSet.new(), "apple", fn x -> x, "tag1")
+      let s2 = CRDT.ORSet.remove(s, "apple", fn x -> x)
+      assert (not(CRDT.ORSet.contains(s2, "apple", fn x -> x)))
+    end
+
+    test "elements returns added items" do
+      let s = CRDT.ORSet.add(CRDT.ORSet.add(CRDT.ORSet.new(), "a", fn x -> x, "t1"), "b", fn x -> x, "t2")
+      let elems = CRDT.ORSet.elements(s)
+      assert (List.length(elems) == 2)
+    end
+
+    test "merge unions elements" do
+      let s1 = CRDT.ORSet.add(CRDT.ORSet.new(), "a", fn x -> x, "t1")
+      let s2 = CRDT.ORSet.add(CRDT.ORSet.new(), "b", fn x -> x, "t2")
+      let m = CRDT.ORSet.merge(s1, s2)
+      assert (CRDT.ORSet.contains(m, "a", fn x -> x))
+      assert (CRDT.ORSet.contains(m, "b", fn x -> x))
+    end
+
+    test "merge is idempotent" do
+      let s = CRDT.ORSet.add(CRDT.ORSet.new(), "a", fn x -> x, "t1")
+      let m = CRDT.ORSet.merge(s, s)
+      assert (CRDT.ORSet.contains(m, "a", fn x -> x))
+    end
+
+    test "size counts elements" do
+      let s = CRDT.ORSet.add(CRDT.ORSet.add(CRDT.ORSet.new(), "x", fn x -> x, "t1"), "y", fn x -> x, "t2")
+      assert (CRDT.ORSet.size(s) == 2)
+    end
+
+  end
+
+end
