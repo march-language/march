@@ -166,9 +166,46 @@ let post_suite =
              (post
                 "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end"))) ]
 
+(* P1c: `assert(p)` acts as an assume — it extends the path context. *)
+let assume_suite =
+  [ gated "assert establishes a fact for a later call" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do\n\
+                \    assert(i >= 0)\n\
+                \    take_n(i)\n\
+                \  end")));
+
+    gated "a contradicting assert makes the later call definitely violate" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do\n\
+                \    assert(i < 0)\n\
+                \    take_n(i)\n\
+                \  end"))) ]
+
+(* P1a: a bare name defined (with a refinement) in two modules is ambiguous, so a
+   bare call to it is conservatively skipped — never checked against the wrong
+   predicate. *)
+let collision_suite =
+  [ gated "ambiguous bare call across modules is skipped (no false positive)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod Root do\n\
+             \  mod A do fn foo(n : {Int | _ >= 100}) : Int do n end end\n\
+             \  mod B do\n\
+             \    fn foo(n : {Int | _ >= 0}) : Int do n end\n\
+             \    fn use_it() : Int do foo(5) end\n\
+             \  end\n\
+              end\n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
       ("bounds-a2", a2_suite);
       ("path-sensitivity", path_suite);
-      ("postconditions", post_suite) ]
+      ("postconditions", post_suite);
+      ("assume-p1c", assume_suite);
+      ("collision-p1a", collision_suite) ]
