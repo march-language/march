@@ -11,6 +11,13 @@ type config = {
   excludes   : string list;   (** module prefixes to force-exclude (win over includes) *)
 }
 
+(** The owning module of a (possibly qualified) top-level name: everything
+    before the last dot, or "" for a bare name like "main". *)
+let module_of_name (n : string) : string =
+  match String.rindex_opt n '.' with
+  | Some i -> String.sub n 0 i
+  | None   -> ""
+
 (** A config with no overrides for the given app prefix.
     [app_prefix] is expected to be a non-empty module name (March module names
     start with an uppercase letter); an empty prefix means "no app code is

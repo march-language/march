@@ -210,12 +210,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   rec_shape_globals = Hashtbl.create 16;
 }
 
-(* The owning module of a (possibly qualified) top-level name: everything
-   before the last dot, or "" for a bare name like "main". *)
-let module_of_name (n : string) : string =
-  match String.rindex_opt n '.' with
-  | Some i -> String.sub n 0 i
-  | None   -> ""
+(* Shared with the inliner; single source of truth in Hot_reload. *)
+let module_of_name = Hot_reload.module_of_name
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
 

@@ -166,6 +166,31 @@ let test_no_flag_keeps_direct_call () =
   check "direct call to MyApp.B preserved" true
     (contains ir "call i64 @MyApp.B(")
 
+(* ── inliner no-inline guard for boundary edges ───────────────────────────── *)
+
+let a_body_after_inline (cfg : HR.config option) : Tir.expr =
+  March_tir.Inline.boundary_config := cfg;
+  let changed = ref false in
+  let result = March_tir.Inline.run ~changed (two_boundary_module ()) in
+  March_tir.Inline.boundary_config := None;  (* reset shared state *)
+  let a = List.find (fun fd -> fd.Tir.fn_name = "MyApp.A") result.Tir.tm_fns in
+  a.Tir.fn_body
+
+let a_still_calls_b (body : Tir.expr) : bool =
+  match body with
+  | Tir.EApp (f, _) -> f.Tir.v_name = "MyApp.B"
+  | _ -> false
+
+let test_inliner_skips_boundary_callee () =
+  (* With a boundary config, B (reloadable) must NOT be inlined into A. *)
+  check "A still calls B under hot-reload" true
+    (a_still_calls_b (a_body_after_inline (Some (HR.default_config "MyApp"))))
+
+let test_inliner_inlines_without_boundary () =
+  (* Without a config, B is a normal candidate and IS inlined into A. *)
+  check "A no longer calls B (inlined) when flag off" false
+    (a_still_calls_b (a_body_after_inline None))
+
 let () =
   Alcotest.run "hot_reload" [
     ("boundary", [
@@ -188,6 +213,10 @@ let () =
     ("llvm_emit", [
       Alcotest.test_case "hot_reload emits dispatch call"    `Quick test_hot_reload_emits_dispatch_call;
       Alcotest.test_case "no flag keeps direct call"         `Quick test_no_flag_keeps_direct_call;
+    ]);
+    ("inline_guard", [
+      Alcotest.test_case "boundary callee not inlined"       `Quick test_inliner_skips_boundary_callee;
+      Alcotest.test_case "inlined when flag off"             `Quick test_inliner_inlines_without_boundary;
     ]);
     ("name_table", [
       Alcotest.test_case "ids assigned in sorted order"  `Quick test_ids_assigned_in_sorted_order;

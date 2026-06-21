@@ -29,7 +29,11 @@ let named_passes = [
   "dce",         Dce.run;
 ]
 
-let run ?(snap = fun _label _m -> ()) (m : Tir.tir_module) : Tir.tir_module =
+let run ?(snap = fun _label _m -> ()) ?(hot_reload = None)
+    (m : Tir.tir_module) : Tir.tir_module =
+  (* Hot Code Reload: keep boundary functions out of the inliner for this run
+     so their call sites survive to codegen as dispatch-table edges. *)
+  Inline.boundary_config := hot_reload;
   let changed = ref false in
   let apply iter p =
     changed := false;
