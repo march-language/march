@@ -1,0 +1,199 @@
+mod TestSwimDriver do
+
+  pfn swim_cfg() : Swim.Config do
+    Swim.config(200, 2000, 3)
+  end
+
+  -- Two members: "a@h" (us) and "b@h" (peer).
+  pfn two_members() : Members do
+    let ms = Membership.observe(Membership.empty(), Membership.alive("a@h", 1))
+    Membership.observe(ms, Membership.alive("b@h", 1))
+  end
+
+  pfn driver_a() : SwimDriver.State do
+    SwimDriver.make("a@h", 1, two_members(), swim_cfg(), 1000, 42)
+  end
+
+  -- ── period boundary ───────────────────────────────────────────────────────
+
+  describe "SwimDriver.step — period boundary" do
+
+    test "first step (now > period_end=0) begins a probe and emits SendPing" do
+      let s = driver_a()
+      let result = SwimDriver.step(s, 100, Nil)
+      let acts = match result do (_, a) -> a end
+      let pings = List.filter(acts, fn act ->
+        match act do SendPing(_) -> true | _ -> false end)
+      assert (List.length(pings) == 1)
+    end
+
+    test "period_end is advanced by period_ms after the first step" do
+      let s = driver_a()
+      let result = SwimDriver.step(s, 100, Nil)
+      let s2 = match result do (st, _) -> st end
+      assert (s2.period_end == 1100)
+    end
+
+    test "mid-period step emits no actions when probe is fresh" do
+      let s = driver_a()
+      let r1 = SwimDriver.step(s, 100, Nil)
+      let s2 = match r1 do (st, _) -> st end
+      -- now=200, sent_at=100, ack_timeout=200: 100 < 200 → not overdue
+      let r2 = SwimDriver.step(s2, 200, Nil)
+      let acts = match r2 do (_, a) -> a end
+      assert (acts == Nil)
+    end
+
+    test "step with only self alive emits no SendPing" do
+      let solo = Membership.observe(Membership.empty(), Membership.alive("a@h", 1))
+      let s = SwimDriver.make("a@h", 1, solo, swim_cfg(), 1000, 42)
+      let result = SwimDriver.step(s, 100, Nil)
+      let acts = match result do (_, a) -> a end
+      let pings = List.filter(acts, fn act ->
+        match act do SendPing(_) -> true | _ -> false end)
+      assert (pings == Nil)
+    end
+
+  end
+
+  -- ── event processing ──────────────────────────────────────────────────────
+
+  describe "SwimDriver.step — event processing" do
+
+    test "PingAck event marks the in-flight probe as acked" do
+      let s = driver_a()
+      let r1 = SwimDriver.step(s, 100, Nil)
+      let s2 = match r1 do (st, _) -> st end
+      -- Feed PingAck for the target (must be "b@h" in a 2-node cluster)
+      let target = match s2.swim.probe do Some(p) -> p.target | None -> "?" end
+      let r2 = SwimDriver.step(s2, 200, Cons(PingAck(target), Nil))
+      let s3 = match r2 do (st, _) -> st end
+      assert (match s3.swim.probe do Some(p) -> p.acked | None -> false end)
+    end
+
+    test "PingAck for a non-target is ignored" do
+      let s = driver_a()
+      let r1 = SwimDriver.step(s, 100, Nil)
+      let s2 = match r1 do (st, _) -> st end
+      let r2 = SwimDriver.step(s2, 200, Cons(PingAck("nobody@h"), Nil))
+      let s3 = match r2 do (st, _) -> st end
+      assert (match s3.swim.probe do Some(p) -> p.acked == false | None -> true end)
+    end
+
+    test "GossipFrame folds into member view" do
+      let s = driver_a()
+      let gossip = Membership.suspect("b@h", 1)
+      let result = SwimDriver.step(s, 100, Cons(GossipFrame(gossip), Nil))
+      let s2 = match result do (st, _) -> st end
+      assert (match Membership.get(s2.swim.members, "b@h") do
+        Some(m) -> match m.status do Suspect -> true | _ -> false end
+        None    -> false
+      end)
+    end
+
+    test "PeerDown marks node Dead and emits a Gossip action" do
+      let s = driver_a()
+      let result = SwimDriver.step(s, 100, Cons(PeerDown("b@h"), Nil))
+      let s2 = match result do (st, _) -> st end
+      let acts = match result do (_, a) -> a end
+      let gossips = List.filter(acts, fn act ->
+        match act do Gossip(_) -> true | _ -> false end)
+      assert (List.length(gossips) >= 1)
+      assert (match Membership.get(s2.swim.members, "b@h") do
+        Some(m) -> match m.status do Dead -> true | _ -> false end
+        None    -> false
+      end)
+    end
+
+    test "PeerDown uses current incarnation so Dead supersedes Alive" do
+      let s = driver_a()
+      -- b@h has incarnation 1 (from two_members())
+      let result = SwimDriver.step(s, 100, Cons(PeerDown("b@h"), Nil))
+      let s2 = match result do (st, _) -> st end
+      assert (match Membership.get(s2.swim.members, "b@h") do
+        Some(m) -> m.incarnation == 1
+        None    -> false
+      end)
+    end
+
+  end
+
+  -- ── indirect escalation ───────────────────────────────────────────────────
+
+  describe "SwimDriver.step — indirect escalation" do
+
+    test "ack_timeout elapsed emits SendPingReq when helpers exist" do
+      -- 3 nodes so there is one helper available
+      let ms = Membership.observe(two_members(), Membership.alive("c@h", 1))
+      let s = SwimDriver.make("a@h", 1, ms, swim_cfg(), 1000, 42)
+      let r1 = SwimDriver.step(s, 100, Nil)
+      let s2 = match r1 do (st, _) -> st end
+      -- now=300: 300-100=200 >= ack_timeout=200 → overdue
+      let r2 = SwimDriver.step(s2, 300, Nil)
+      let acts = match r2 do (_, a) -> a end
+      let reqs = List.filter(acts, fn act ->
+        match act do SendPingReq(_, _) -> true | _ -> false end)
+      assert (List.length(reqs) >= 1)
+    end
+
+    test "escalation does not repeat once indirect_sent is true" do
+      let ms = Membership.observe(two_members(), Membership.alive("c@h", 1))
+      let s = SwimDriver.make("a@h", 1, ms, swim_cfg(), 1000, 42)
+      let r1 = SwimDriver.step(s, 100, Nil)
+      let s2 = match r1 do (st, _) -> st end
+      let r2 = SwimDriver.step(s2, 300, Nil)  -- escalates
+      let s3 = match r2 do (st, _) -> st end
+      let r3 = SwimDriver.step(s3, 400, Nil)  -- already escalated
+      let acts = match r3 do (_, a) -> a end
+      let reqs = List.filter(acts, fn act ->
+        match act do SendPingReq(_, _) -> true | _ -> false end)
+      assert (reqs == Nil)
+    end
+
+  end
+
+  -- ── wire codec ────────────────────────────────────────────────────────────
+
+  describe "SwimDriver wire codec" do
+
+    test "SwimPing round-trips" do
+      let enc = SwimDriver.encode_msg(SwimPing("a@h"))
+      assert (SwimDriver.decode_msg(enc) == Ok(SwimPing("a@h")))
+    end
+
+    test "SwimPingAck round-trips" do
+      let enc = SwimDriver.encode_msg(SwimPingAck("b@h"))
+      assert (SwimDriver.decode_msg(enc) == Ok(SwimPingAck("b@h")))
+    end
+
+    test "SwimPingReq round-trips" do
+      let enc = SwimDriver.encode_msg(SwimPingReq("req@h", "tgt@h"))
+      assert (SwimDriver.decode_msg(enc) == Ok(SwimPingReq("req@h", "tgt@h")))
+    end
+
+    test "SwimGossip round-trips for each status" do
+      let enc_a = SwimDriver.encode_msg(SwimGossip("n@h", Alive,   2))
+      let enc_s = SwimDriver.encode_msg(SwimGossip("n@h", Suspect, 3))
+      let enc_d = SwimDriver.encode_msg(SwimGossip("n@h", Dead,    4))
+      assert (SwimDriver.decode_msg(enc_a) == Ok(SwimGossip("n@h", Alive,   2)))
+      assert (SwimDriver.decode_msg(enc_s) == Ok(SwimGossip("n@h", Suspect, 3)))
+      assert (SwimDriver.decode_msg(enc_d) == Ok(SwimGossip("n@h", Dead,    4)))
+    end
+
+    test "malformed bytes yield Err" do
+      assert (match SwimDriver.decode_msg(Cons(0, Nil)) do
+        Err(_) -> true | Ok(_) -> false
+      end)
+    end
+
+    test "msg_to_event maps PingAck and Gossip to events, ignores Ping/PingReq" do
+      assert (SwimDriver.msg_to_event(SwimPingAck("b@h")) == Some(PingAck("b@h")))
+      assert (SwimDriver.msg_to_event(SwimPing("a@h"))    == None)
+      assert (SwimDriver.msg_to_event(SwimPingReq("r@h", "t@h")) == None)
+      assert (SwimDriver.msg_to_event(SwimGossip("b@h", Suspect, 5)) ==
+              Some(GossipFrame({ node_id: "b@h", status: Suspect, incarnation: 5 })))
+    end
+
+  end
+
+end

@@ -1,0 +1,328 @@
+-- SwimDriver: runtime I/O glue for the pure Swim state machine (P2 L3).
+--
+-- Owns the RNG and period timer so the transport layer just calls
+-- step(state, now, events) each tick. The driver picks probe targets and
+-- indirect helpers randomly, advances the Swim FSM, and returns the Actions
+-- the transport must perform (send ping, send ping-req, gossip). The
+-- transport reads frames, decodes them into Events, and calls step again.
+--
+-- Wire protocol (Msgpack array, first element is the tag):
+--   0 SwimPing(sender_id)
+--   1 SwimPingAck(sender_id)
+--   2 SwimPingReq(requester_id, target_id)
+--   3 SwimGossip(node_id, status_int, incarnation)
+--     status_int: 0=Alive, 1=Suspect, 2=Dead
+--
+-- Period lifecycle (period_ms ≈ 1000–5000 ms is typical):
+--   1. step() at period boundary: end prior probe → expire suspects →
+--      refute if suspected → begin new period (pick random target).
+--   2. step() mid-period: if ack_timeout has elapsed and probe is unacked,
+--      escalate to k-way indirect ping-req.
+--   3. Transport delivers PingAck events when acks arrive; GossipFrame events
+--      when gossip frames are decoded; PeerDown events on socket close.
+mod SwimDriver do
+
+  type State = {
+    swim       : Swim.State,
+    rng        : Random.Rng,
+    period_ms  : Int,
+    period_end : Int     -- unix_time_ms when the current period expires (0 = not started)
+  }
+
+  -- Events delivered from the transport layer each tick.
+  type Event =
+      PingAck(String)              -- received a PingAck from this node_id
+    | GossipFrame(Member)          -- received and decoded a gossip member update
+    | PeerDown(String)             -- transport confirmed this peer's socket closed
+
+  -- Wire messages.
+  type WireMsg =
+      SwimPing(String)             -- sender_id
+    | SwimPingAck(String)          -- sender_id
+    | SwimPingReq(String, String)  -- requester_id, target_id
+    | SwimGossip(String, MemberStatus, Int)  -- node_id, status, incarnation
+
+  fn make(me : String, incarnation : Int, members : Members, swim_cfg : Swim.Config,
+          period_ms : Int, seed : Int) : State do
+    { swim: Swim.make(me, incarnation, members, swim_cfg),
+      rng:  Random.seed(seed),
+      period_ms: period_ms,
+      period_end: 0 }
+  end
+
+  -- ── target / helper selection ─────────────────────────────────────────────
+
+  pfn alive_others(s : State) : List(String) do
+    let alive = Membership.alive_members(s.swim.members)
+    let others = List.filter(alive, fn m -> m.node_id != s.swim.me)
+    List.map(others, fn m -> m.node_id)
+  end
+
+  pfn pick_target(s : State) : (State, Option(String)) do
+    let candidates = alive_others(s)
+    match candidates do
+      Nil ->
+        let out = (s, None)
+        out
+      _ ->
+        let choice = Random.choice(s.rng, candidates)
+        let node_id = match choice do (n, _) -> n end
+        let rng2 = match choice do (_, r) -> r end
+        let out = ({ s with rng: rng2 }, Some(node_id))
+        out
+    end
+  end
+
+  pfn pick_helpers(s : State, target : String, k : Int) : (State, List(String)) do
+    let candidates = List.filter(alive_others(s), fn id -> id != target)
+    let n = List.length(candidates)
+    let take = if k < n do k else n end
+    let drawn = Random.sample(s.rng, candidates, take)
+    let chosen = match drawn do (c, _) -> c end
+    let rng2 = match drawn do (_, r) -> r end
+    let out = ({ s with rng: rng2 }, chosen)
+    out
+  end
+
+  -- ── event processing ──────────────────────────────────────────────────────
+
+  pfn apply_event(swim : Swim.State, ev : Event) : (Swim.State, List(Swim.Action)) do
+    match ev do
+      PingAck(node_id) ->
+        (Swim.on_ack(swim, node_id), Nil)
+      GossipFrame(member) ->
+        (Swim.on_gossip(swim, member), Nil)
+      PeerDown(node_id) ->
+        -- Definitive failure: skip Suspect, go straight to Dead at current incarnation
+        -- so the verdict supersedes any prior Alive/Suspect for the same incarnation.
+        let current_inc = match Membership.get(swim.members, node_id) do
+          Some(m) -> m.incarnation
+          None    -> 0
+        end
+        let dead_m = Membership.dead(node_id, current_inc)
+        let swim2 = Swim.on_gossip(swim, dead_m)
+        let out = (swim2, Cons(Gossip(dead_m), Nil))
+        out
+    end
+  end
+
+  pfn apply_events(swim : Swim.State, evs : List(Event)) : (Swim.State, List(Swim.Action)) do
+    List.fold_left(evs, (swim, Nil), fn (acc, ev) ->
+      match acc do
+        (sw, acts) ->
+          match apply_event(sw, ev) do
+            (sw2, new_acts) -> (sw2, List.append(acts, new_acts))
+          end
+      end)
+  end
+
+  -- ── main step ─────────────────────────────────────────────────────────────
+
+  -- Advance the driver one tick.
+  -- [now]    = unix_time_ms
+  -- [events] = transport events since the last call
+  -- Returns the updated state and the list of Actions to execute.
+  fn step(s : State, now : Int, events : List(Event)) : (State, List(Swim.Action)) do
+    -- 1. Fold in transport events.
+    let ev_out = apply_events(s.swim, events)
+    let swim1 = match ev_out do (sw, _) -> sw end
+    let ev_acts = match ev_out do (_, a) -> a end
+
+    -- 2. Period boundary?
+    if now >= s.period_end do
+      -- End the outgoing probe period (may Suspect the target).
+      let ep_out = Swim.end_period(swim1, now)
+      let swim2 = match ep_out do (sw, _) -> sw end
+      let end_acts = match ep_out do (_, a) -> a end
+
+      -- Promote expired Suspects to Dead.
+      let ex_out = Swim.expire_suspects(swim2, now)
+      let swim3 = match ex_out do (sw, _) -> sw end
+      let exp_acts = match ex_out do (_, a) -> a end
+
+      -- Refute if we ourselves are suspected or dead.
+      let rf_out = Swim.refute(swim3)
+      let swim4 = match rf_out do (sw, _) -> sw end
+      let rf_act = match rf_out do
+        (_, opt) ->
+          match opt do
+            None    -> Nil
+            Some(a) -> Cons(a, Nil)
+          end
+      end
+
+      -- Begin a new probe period: pick a random alive peer.
+      let tgt_out = pick_target({ s with swim: swim4 })
+      let s_with_rng = match tgt_out do (st, _) -> st end
+      let tgt_opt = match tgt_out do (_, t) -> t end
+
+      match tgt_opt do
+        None ->
+          -- No alive peers to probe; just roll the period timer.
+          let s2 = { s_with_rng with swim: swim4, period_end: now + s.period_ms }
+          let all_acts = List.append(ev_acts,
+                           List.append(end_acts,
+                             List.append(exp_acts, rf_act)))
+          let out = (s2, all_acts)
+          out
+        Some(target) ->
+          let bp_out = Swim.begin_period(swim4, now, target)
+          let swim5 = match bp_out do (sw, _) -> sw end
+          let bp_act = match bp_out do (_, a) -> Cons(a, Nil) end
+          let s2 = { s_with_rng with swim: swim5, period_end: now + s.period_ms }
+          let all_acts = List.append(ev_acts,
+                           List.append(end_acts,
+                             List.append(exp_acts,
+                               List.append(rf_act, bp_act))))
+          let out = (s2, all_acts)
+          out
+      end
+
+    else
+      -- Mid-period: escalate to indirect if the direct ping is overdue.
+      let k = s.swim.config.indirect_k
+      let cur_target = match s.swim.probe do
+        None    -> ""
+        Some(p) -> p.target
+      end
+      let h_out = pick_helpers({ s with swim: swim1 }, cur_target, k)
+      let s_rng2 = match h_out do (st, _) -> st end
+      let helpers = match h_out do (_, h) -> h end
+      let esc_out = Swim.escalate_indirect(swim1, now, helpers)
+      let swim2 = match esc_out do (sw, _) -> sw end
+      let esc_acts = match esc_out do (_, a) -> a end
+      let s2 = { s_rng2 with swim: swim2 }
+      let all_acts = List.append(ev_acts, esc_acts)
+      let out = (s2, all_acts)
+      out
+    end
+  end
+
+  -- ── wire codec ────────────────────────────────────────────────────────────
+
+  pfn status_to_int(s : MemberStatus) : Int do
+    match s do
+      Alive   -> 0
+      Suspect -> 1
+      Dead    -> 2
+    end
+  end
+
+  pfn int_to_status(n : Int) : Result(MemberStatus, String) do
+    match n do
+      0 -> Ok(Alive)
+      1 -> Ok(Suspect)
+      2 -> Ok(Dead)
+      _ -> Err("swim_driver: bad status int " ++ String.of_int(n))
+    end
+  end
+
+  fn encode_msg(msg : WireMsg) : List(Int) do
+    match msg do
+      SwimPing(sender) ->
+        Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(0), Cons(Msgpack.str(sender), Nil))))
+      SwimPingAck(sender) ->
+        Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.str(sender), Nil))))
+      SwimPingReq(requester, target) ->
+        Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(2),
+            Cons(Msgpack.str(requester),
+            Cons(Msgpack.str(target), Nil)))))
+      SwimGossip(node_id, status, incarnation) ->
+        Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(3),
+            Cons(Msgpack.str(node_id),
+            Cons(Msgpack.int(status_to_int(status)),
+            Cons(Msgpack.int(incarnation), Nil))))))
+    end
+  end
+
+  fn decode_msg(bytes : List(Int)) : Result(WireMsg, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(tag), rest)) ->
+            match tag do
+              0 ->
+                match rest do
+                  Cons(Msgpack.Str(sender), Nil) -> Ok(SwimPing(sender))
+                  _ -> Err("swim_driver: bad SwimPing frame")
+                end
+              1 ->
+                match rest do
+                  Cons(Msgpack.Str(sender), Nil) -> Ok(SwimPingAck(sender))
+                  _ -> Err("swim_driver: bad SwimPingAck frame")
+                end
+              2 ->
+                match rest do
+                  Cons(Msgpack.Str(req), Cons(Msgpack.Str(tgt), Nil)) ->
+                    Ok(SwimPingReq(req, tgt))
+                  _ -> Err("swim_driver: bad SwimPingReq frame")
+                end
+              3 ->
+                match rest do
+                  Cons(Msgpack.Str(nid),
+                    Cons(Msgpack.Int(st),
+                    Cons(Msgpack.Int(inc), Nil))) ->
+                      match int_to_status(st) do
+                        Ok(status) -> Ok(SwimGossip(nid, status, inc))
+                        Err(e)     -> Err(e)
+                      end
+                  _ -> Err("swim_driver: bad SwimGossip frame")
+                end
+              _ -> Err("swim_driver: unknown tag " ++ String.of_int(tag))
+            end
+          _ -> Err("swim_driver: expected Msgpack array")
+        end
+    end
+  end
+
+  -- Decode a wire message into a driver Event (None for messages the transport
+  -- responder handles directly, e.g. SwimPing → send SwimPingAck back).
+  fn msg_to_event(msg : WireMsg) : Option(Event) do
+    match msg do
+      SwimPingAck(sender)            -> Some(PingAck(sender))
+      SwimGossip(node_id, status, incarnation) ->
+        Some(GossipFrame({ node_id: node_id, status: status, incarnation: incarnation }))
+      _ -> None
+    end
+  end
+
+  -- ── transport dispatch (requires I/O; not eval-testable) ─────────────────
+
+  pfn send_to_peer(peers : PeerRegistry.Registry, node_id : String, bytes : List(Int)) : () do
+    match PeerRegistry.lookup(peers, node_id) do
+      None -> ()
+      Some(peer) ->
+        match NetKernel.send_frame(peer.fd, bytes) do
+          Ok(_) -> ()
+          Err(_) -> ()
+        end
+    end
+  end
+
+  -- Execute one Swim.Action by sending the appropriate wire message(s).
+  fn dispatch(action : Swim.Action, peers : PeerRegistry.Registry, my_id : String) : () do
+    match action do
+      SendPing(target_id) ->
+        send_to_peer(peers, target_id, encode_msg(SwimPing(my_id)))
+      SendPingReq(helper_id, target_id) ->
+        send_to_peer(peers, helper_id, encode_msg(SwimPingReq(my_id, target_id)))
+      Gossip(member) ->
+        let ps = PeerRegistry.peers(peers)
+        let encoded = encode_msg(SwimGossip(member.node_id, member.status, member.incarnation))
+        List.fold_left(ps, (), fn (_, p) ->
+          send_to_peer(peers, p.node_id, encoded))
+    end
+  end
+
+  -- Dispatch a list of actions.
+  fn dispatch_all(actions : List(Swim.Action), peers : PeerRegistry.Registry, my_id : String) : () do
+    List.fold_left(actions, (), fn (_, action) ->
+      dispatch(action, peers, my_id))
+  end
+
+end

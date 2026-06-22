@@ -151,6 +151,7 @@ let all_stdlib_decls =
     "cluster_conn.march";
     "membership.march";
     "swim.march";
+    "swim_driver.march";
     "global_registry.march";
     "global_pid.march";
     "remote_call.march";
@@ -329,6 +330,10 @@ let () =
     ("swim", [
       Alcotest.test_case "Swim module"
         `Quick (run_stdlib_test "test_swim.march" "TestSwim");
+    ]);
+    ("swim_driver", [
+      Alcotest.test_case "SwimDriver module"
+        `Quick (run_stdlib_test "test_swim_driver.march" "TestSwimDriver");
     ]);
     ("global_registry", [
       Alcotest.test_case "GlobalRegistry module"
