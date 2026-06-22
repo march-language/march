@@ -386,4 +386,5 @@ Types
 
 - [Pattern Matching](pattern-matching.md) — destructuring all these types
 - [Linear Types](linear-types.md) — ownership and resource safety
+- [Refinement Types](refinement-types.md) — types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
 - [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
