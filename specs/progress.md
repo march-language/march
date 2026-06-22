@@ -282,18 +282,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-06-21, Distributed OTP — P1 net-kernel feature-complete)
+## Current State (as of 2026-06-21, Distributed OTP — P1 net-kernel: client/transport done, server-accept blocked)
 
-- **Distributed OTP P1 (transport + net-kernel) — L1+L2 complete.** Seven new stdlib modules compose into an authenticated peer connection:
+- **Distributed OTP P1 (transport + net-kernel).** Six new stdlib modules compose the client side of an authenticated peer connection:
   - `net_frame.march` — `NetFrame`: length-prefixed wire framing (partial-read safe).
   - `node_identity.march` — `NodeIdentity`: `{name, NodeId=sha256(pubkey), incarnation}` + MessagePack codec.
   - `cluster_auth.march` — `ClusterAuth`: shared-secret HMAC challenge/response (`prove`/`verify`).
   - `handshake.march` — `Handshake`: `Hello` greeting codec + `authenticate` decision (proof must bind to the nonce we issued).
-  - `net_kernel.march` — `NetKernel`: byte bridge (`List(Int)`↔Socket `String`) + framed `send_frame`/`recv_frame` (buffered, partial-read safe) + symmetric authenticated `handshake` over a socket + `fresh_nonce`.
+  - `net_kernel.march` — `NetKernel`: byte bridge (`List(Int)`↔Socket `String`) + framed `send_frame`/`recv_frame` (buffered, partial-read safe) + symmetric authenticated `handshake` over a socket (client side: `Socket.connect`/`write`/`recv`, all available) + `fresh_nonce`.
   - `peer_registry.march` — `PeerRegistry`: one-connection-per-peer table keyed by NodeId (re-add replaces).
-  - `cluster_conn.march` — `ClusterConn`: the connect/`tcp_accept` lifecycle that runs the handshake and registers the peer.
-  - **Verification:** all pure logic is unit-tested via the eval harness (5 new `test_stdlib_march` cases: net_frame, node_identity, cluster_auth, handshake, net_kernel, peer_registry → suite 30→37, 0 failures). The socket I/O (`NetKernel.send/recv/handshake`, `ClusterConn.connect/accept`) is runtime-exercised — the eval harness doesn't run sockets/scheduler (same convention as `ChannelServer`); it composes only unit-tested logic. Spec: `specs/2026-06-21-distributed-otp-design.md`.
-  - **Follow-ups:** a loopback integration test for the socket handshake; constant-time proof comparison in `ClusterAuth` (`Crypto.ct_eq` exists). **Next:** L3 membership (SWIM failure detection + CRDT member set) on top of the net-kernel, then load-aware dispatch (L6).
+  - **Verification:** all pure logic is unit-tested via the eval harness (`test_stdlib_march` 30→37, 0 failures: net_frame, node_identity, cluster_auth, handshake, net_kernel byte bridge, peer_registry). The socket I/O (`NetKernel.send/recv/handshake`) is runtime-exercised — the eval harness doesn't run sockets/scheduler (same convention as `ChannelServer`); it composes only unit-tested logic over the available `Socket.*` API. Spec: `specs/2026-06-21-distributed-otp-design.md`.
+  - **BLOCKED — server-accept side + loopback test.** A `ClusterConn` connect/accept lifecycle was attempted and **reverted**: there is no March binding for `tcp_listen`/`tcp_accept` (the runtime has `march_tcp_listen/accept`, and `Llvm_emit` maps them, but the *typechecker* has no `tcp_listen` name — `http_server` accepts via the high-level `http_server_listen` C builtin instead). So the server-accept side can't be written in pure March, and a real loopback handshake test can't be built, until a raw TCP-accept primitive is exposed to March. Separately, whole-stdlib flat typecheck via `MARCH_LIB_PATH=stdlib` currently cascades (a `Char`-type migration: `char.march` `is_alpha(c:Char)` passes a `Char` to the `String`-typed `char_to_int` builtin) — stdlib is validated per-file via forge, not flat-loaded.
+  - **Next:** expose `tcp_listen`/`tcp_accept` (or a higher-level accept) to March → finish the connect/accept lifecycle + a forge-based loopback test; constant-time proof compare in `ClusterAuth` (`Crypto.ct_eq` exists); then L3 membership (SWIM + CRDT) and load-aware dispatch (L6).
 
 ## Current State (as of 2026-06-21, Distributed OTP — P1 kickoff + Hot Code Reload Phase 2 runnable)
 
