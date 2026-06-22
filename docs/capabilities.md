@@ -42,7 +42,7 @@ IO
 │   ├── IO.NetConnect   — outbound TCP, WebSocket
 │   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
 │   │   └── IO.Database — database connections (declaration-only; child of NetConnect)
-│   └── IO.NetListen    — bind + listen on a port
+│   └── IO.NetListen    — bind + listen on a port (tcp_listen, tcp_accept)
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock, monotonic time
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)

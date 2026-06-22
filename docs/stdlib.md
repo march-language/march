@@ -561,6 +561,156 @@ URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 
 ---
 
+## Dom (JS only)
+
+`dom.march` — Browser DOM bindings for `--target js` builds. Auto-loaded; no import needed.
+
+```elixir
+-- Query
+Dom.find("my-id")              -- Option(Dom.Node)
+Dom.query("#nav")              -- Option(Dom.Node)
+Dom.query_all(".item")         -- List(Dom.Node)
+Dom.body()                     -- Dom.Node
+
+-- Construction
+Dom.create("div")              -- Dom.Node
+Dom.text("hello")              -- Dom.Node
+Dom.clone(el)                  -- Dom.Node
+
+-- Tree
+Dom.append(parent, child)
+Dom.prepend(parent, child)
+Dom.remove(el)
+Dom.replace(old, new)
+
+-- Content
+Dom.set_text(el, "hello")
+Dom.set_html(el, "<b>bold</b>")
+Dom.get_text(el)               -- String
+Dom.get_html(el)               -- String
+
+-- Attributes and style
+Dom.set_attr(el, "data-x", "1")
+Dom.get_attr(el, "data-x")    -- Option(String)
+Dom.remove_attr(el, "data-x")
+Dom.add_class(el, "active")
+Dom.remove_class(el, "active")
+Dom.toggle_class(el, "open")
+Dom.set_style(el, "color", "red")
+
+-- Events
+Dom.on(el, "click", fn ev -> ...)
+Dom.on_keydown(el, fn ev -> ...)
+Dom.dispatch(el, "custom-event")
+Dom.prevent_default(ev)
+Dom.stop_propagation(ev)
+```
+
+`Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
+
+---
+
+## Distributed OTP (cluster networking)
+
+These modules implement the distributed-OTP transport layer (P1). They are stdlib modules loaded on demand via the module registry; no `forge.toml` dependency needed.
+
+### NodeIdentity
+
+`node_identity.march` — A node's stable identity for the cluster.
+
+```elixir
+type Identity = { name : String, node_id : String, incarnation : Int }
+
+NodeIdentity.make("worker@host", pubkey, 0)
+-- { name = "worker@host", node_id = sha256(pubkey), incarnation = 0 }
+
+NodeIdentity.encode(id)        -- List(Int)  (MessagePack bytes)
+NodeIdentity.decode(bytes)     -- Result(Identity, String)
+```
+
+### NetFrame
+
+`net_frame.march` — Length-prefixed framing over TCP.
+
+```elixir
+NetFrame.encode(payload)       -- List(Int)  (4-byte header + payload)
+NetFrame.decode(buf)           -- Option((List(Int), List(Int)))
+```
+
+### ClusterAuth
+
+`cluster_auth.march` — Shared-secret HMAC challenge/response.
+
+```elixir
+ClusterAuth.prove(secret, nonce)         -- String (HMAC-SHA256 hex)
+ClusterAuth.verify(secret, nonce, proof) -- Bool
+```
+
+### Handshake
+
+`handshake.march` — Pure authenticated handshake protocol (no I/O).
+
+```elixir
+Handshake.make_hello(identity, nonce)    -- Handshake.Hello
+Handshake.encode_hello(hello)            -- List(Int)
+Handshake.decode_hello(bytes)            -- Result(Hello, String)
+Handshake.authenticate(secret, our_nonce, peer, peer_proof)
+-- Result(NodeIdentity.Identity, String)
+```
+
+### PeerRegistry
+
+`peer_registry.march` — One-connection-per-peer table.
+
+```elixir
+type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int }
+type Registry = Registry(Map(String, Peer))
+
+PeerRegistry.empty()
+PeerRegistry.add(reg, peer)           -- Registry
+PeerRegistry.lookup(reg, node_id)     -- Option(Peer)
+PeerRegistry.remove(reg, node_id)     -- Registry
+PeerRegistry.peers(reg)               -- List(Peer)
+```
+
+### NetKernel
+
+`net_kernel.march` — TCP socket transport for the net-kernel (framing + handshake).
+
+```elixir
+NetKernel.fresh_nonce()               -- String (random hex)
+NetKernel.send_frame(fd, payload)     -- Result((), String)
+NetKernel.recv_frame(fd, buf)         -- Result((List(Int), List(Int)), String)
+NetKernel.handshake(fd, my_id, secret, my_nonce)
+-- Result(NodeIdentity.Identity, String)
+```
+
+### ClusterConn
+
+`cluster_conn.march` — Connection lifecycle: dial or accept, handshake, register.
+
+Requires `needs IO.NetListen` (for `tcp_listen`/`tcp_accept` builtins).
+
+```elixir
+ClusterConn.listen(port)
+-- Result(Int, String)  -- listen_fd
+
+ClusterConn.connect_to_peer(reg, host, port, my_id, secret)
+-- Result((PeerRegistry.Registry, PeerRegistry.Peer), String)
+
+ClusterConn.accept_one(reg, listen_fd, my_id, secret)
+-- Result((PeerRegistry.Registry, PeerRegistry.Peer), String)
+```
+
+`tcp_listen` and `tcp_accept` are builtins in the `IO.NetListen` capability group:
+
+```elixir
+tcp_listen(port)       : Result(Int, String)  -- bind + listen, return fd
+tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
+```
+
+---
+
 ## Module Quick Reference
 
 | Module | Lines | Purpose |
@@ -599,6 +749,16 @@ URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 | `Decimal` | — | Exact decimal arithmetic |
 | `CSV` | 100 | CSV parsing |
 | `Datetime` | — | Date and time |
+
+| `Dom` | — | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
+
+| `NodeIdentity` | — | Cluster node identity (name, node\_id, incarnation) |
+| `NetFrame` | — | Length-prefixed TCP framing |
+| `ClusterAuth` | — | HMAC shared-secret challenge/response |
+| `Handshake` | — | Pure authenticated handshake protocol |
+| `PeerRegistry` | — | One-connection-per-peer table |
+| `NetKernel` | — | TCP framing + handshake transport |
+| `ClusterConn` | — | Dial/accept + handshake + register lifecycle |
 
 | `Gen` | — | Property test generators (Hedgehog-style) |
 | `Check` | — | Property test runner with shrinking |

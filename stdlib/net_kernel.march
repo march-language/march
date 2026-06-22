@@ -42,7 +42,7 @@ mod NetKernel do
         match Socket.recv(fd, 4096) do
           Err(e) -> Err(Socket.error_message(e))
           Ok(chunk) ->
-            if String.length(chunk) == 0 do
+            if String.is_empty(chunk) do
               Err("net-kernel: connection closed mid-frame")
             else
               recv_frame(fd, List.append(buf, str_to_bytes(chunk)))

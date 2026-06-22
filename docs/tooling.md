@@ -100,6 +100,48 @@ In a workspace, build a single member:
 forge build -p my_lib
 ```
 
+### JavaScript Backend
+
+March compiles to ES modules with `--target js`. The output is a self-contained `.mjs` file that runs in Node.js or any modern browser:
+
+```sh
+# Compile to ES module
+march --target js -o dist/app.mjs src/app.march
+
+# Copy the runtime alongside the output (default; omit --no-copy-runtime)
+march --target js -o dist/app.mjs src/app.march
+# → dist/app.mjs + dist/march_runtime.mjs + dist/march_dom.mjs
+
+# Run with Node
+node dist/app.mjs
+
+# Skip runtime copy (e.g. build tool manages it)
+march --target js --no-copy-runtime -o dist/app.mjs src/app.march
+```
+
+The JS backend auto-loads `dom.march` from stdlib, so `Dom.*` functions are available without any extra imports in JS builds:
+
+```elixir
+mod Counter do
+  fn main() : Unit do
+    match Dom.find("counter") do
+      None    -> ()
+      Some(el) ->
+        Dom.set_text(el, "0")
+        Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
+    end
+  end
+end
+```
+
+In HTML, import the output as an ES module:
+
+```html
+<script type="module" src="dist/app.mjs"></script>
+```
+
+The `Dom` module is JS-only — calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
+
 ### Checking Types
 
 `forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
