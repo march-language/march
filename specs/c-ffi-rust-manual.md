@@ -1,16 +1,14 @@
-# Binding Rust to March today (the manual C-ABI path)
+# Binding Rust to March — the manual C-ABI path (fallback)
 
-**Status:** proven & reproducible (2026-06-20). This is the *manual* path — no
-`#[march]` macro, no `forge` cargo integration. It works **today** on the
-shipped C FFI (Phases 1–7) because Rust speaks the C ABI natively via
-`extern "C"`. The ergonomic `march` crate (derive macros, `ResourceArc`,
-panic-catching) is future work; see `specs/c-ffi-gaps.md` and the design spec
-§15–16.
+**Status:** proven & reproducible (2026-06-20). This is the *fallback* path for
+zero-extra-crate bindings — no `march` Rust crate needed. For new projects, use
+the ergonomic `march` crate instead: `#[march]`, `#[derive(Encoder, Decoder)]`,
+`ConsumeResourceArc`, and auto-`cargo build` via `[ffi.rust]` in `forge.toml`.
+See `specs/c-ffi-rust-layer.md` for that path.
 
-This is exactly how Rustler works for the BEAM: the NIF interface is a C ABI
-(`erl_nif.h`); Rustler binds it from Rust and generates the `extern "C"` glue.
-Here `runtime/march_ffi.h` is the `erl_nif.h` analog, and you write the glue by
-hand (until the macro layer exists).
+This manual path works because Rust speaks the C ABI natively via `extern "C"`.
+It is the same relationship as Rustler on the BEAM: `runtime/march_ffi.h` is the
+`erl_nif.h` analog, and here you write the `extern "C"` glue by hand.
 
 ## The principle
 
@@ -150,6 +148,7 @@ returns a fresh one — all through the C ABI, with the same type scope as C.
 - **`panic = "abort"`** (or `catch_unwind` at each boundary) — never unwind
   across `extern "C"`.
 
-The future `march` crate (proc-macro `#[march]`, `Encoder`/`Decoder`,
-`ResourceArc`, auto-generated `extern` blocks, `forge add-rust`) automates all
-of the boilerplate above. Until then, this path is fully functional.
+The `march` crate (`specs/c-ffi-rust-layer.md`) automates all of the boilerplate
+above — `#[march]`, `#[derive(Encoder/Decoder)]`, `ResourceArc`,
+`ConsumeResourceArc`, and `forge ffi add-rust` scaffolding. Use this manual path
+when you want zero extra dependencies or need a single simple function.

@@ -138,9 +138,11 @@ march_value march_encode_Point(Point_c p);
 ```
 
 Record/variant **fields** of `Option(T)`/`Result(T,E)` (with `Int`/`Bool`/
-`String`/`Bytes` payloads) get their own typed mirrors too (`Option_Int_c`,
-`Result_Int_String_c`, …) so nested optionals decode into `o.maybe.is_some`
-rather than a raw `march_value`.
+`String`/`Bytes`/`Float`/`Unit` payloads, and nested record/variant types) get
+their own typed mirrors too (`Option_Int_c`, `Result_Int_String_c`, …) so nested
+optionals decode into `o.maybe.is_some` rather than a raw `march_value`.
+`List(T)` fields are emitted as malloc-owned C arrays (`List_T_c` with
+`data`/`len`), with generated decode/encode that traverse the March spine.
 
 ---
 
@@ -177,36 +179,70 @@ march::init!("demo", [parse]);             // generates the March extern block
 `forge ffi add-rust <name>` scaffolds a binding crate (a cargo `staticlib`
 depending on `march`, plus the `gen_extern` helper).
 
+- **`ConsumeResourceArc<T>`** is the ownership-transfer variant of `ResourceArc`:
+  `FromMarch` skips `march_dup` (March transfers its reference), and `Drop` calls
+  `march_drop`. Use it for `consume h` parameters where the binding takes ownership.
+- **`Option<f64>`** uses the fully-boxed representation (`march_some_boxed`/
+  `march_none_boxed`) so that `0.0` doesn't alias `None`; the macro handles this
+  automatically.
+
 ---
 
 ## Building & linking
 
-List the C shim sources (and any extra link flags) under `[ffi]` in
-`forge.toml`; `forge build` compiles and links them. A Rust binding links its
-built `.a`:
+List C shim sources and link flags under `[ffi]` in `forge.toml`; `forge build`
+compiles and links them:
 
 ```toml
 [ffi]
-sources = ["native/demo.c"]              # C shims
-link    = ["native/demo-binding/target/release/libdemo.a", "-lz"]
+sources = ["native/demo.c"]    # C shims compiled by forge
+link    = ["-lz"]              # extra linker flags
 ```
 
-Editing a shim invalidates the content-addressed binary cache, so a rebuild
-relinks automatically. (Under the bare compiler the flags are `--ffi-c` /
-`--ffi-link`.)
+For a Rust binding, `[ffi.rust]` triggers `cargo build --release` automatically
+and passes the resulting `.a` to the linker — no manual build step needed:
+
+```toml
+[ffi.rust]
+crate = "native/demo_binding"  # path to the Cargo project
+lib   = "demo_binding"         # [lib] name (default: basename of crate)
+```
+
+Editing a shim or any Rust source invalidates the content-addressed binary cache,
+so a rebuild relinks automatically. (Under the bare compiler the flags are
+`--ffi-c` / `--ffi-link`.)
 
 ---
 
-## Limitations
+## Interpreter mode
 
-- **Interpreter mode is primitives-only.** Running `march file.march` (no
-  `--compile`) supports `Int`/`Bool` arguments and `Int`/`Bool`/`Float` returns
-  via a fixed-arity trampoline; strings, heap values, records, and resources
-  require compiled mode (`--compile`, or `forge build`/`forge run`). The compiler
-  reports a clear "run with `--compile`" error otherwise.
-- **No native→March callbacks (upcalls)** yet — bindings can't call back into
-  March closures.
-- `blocking` spawns a fresh OS thread per call (no pool).
+Running `march file.march` (no `--compile`) now supports the **full marshal
+layer**: `Int`/`Bool`/`Float` args, `String`/`Bytes` args (heap-allocated for the
+call duration), `Option(T)`/`Result(T,E)` returns, `raises` externs, and
+variant/record args and returns. Project-specific C shims (from `[ffi] sources`
+in `forge.toml`) are compiled to a shared library on first use and loaded
+automatically — no `--compile` required.
+
+The one interpreter gap is **closures/upcalls as arguments**: if a binding takes
+a function-typed parameter (`fn(Int) -> Int`), the interpreter reports a clear
+error and asks you to run with `--compile`. Compiled mode has no such limit.
+
+## Native→March callbacks (upcalls)
+
+C bindings can call back into March closures via `march_call(closure, nargs,
+args)` in `march_ffi.h`. A binding that receives a function-typed argument calls
+it as a plain function pointer. Args use the **native slot representation** (raw
+`int64_t` for `Int`, not `march_make_int`); the return is the generic tagged word
+(`march_get_int` to unpack an `Int`). Verified in `test/native/ffi_upcall`.
+
+## Remaining limitations
+
+- `blocking` spawns a fresh OS thread per call (no pool; fine for occasional long
+  calls, not for high-frequency ones).
+- Recursive and generic record/variant types have no generated codec — they fall
+  back to raw `march_value` passthrough.
+- `forge ffi import <header.h>` (C header → draft `extern` block) is not yet
+  implemented; it needs a C-header parser (libclang).
 
 The full ABI is documented in `runtime/march_ffi.h`; the design rationale lives
 in `specs/2026-06-19-c-ffi-abi-design.md` and the Rust layer in
