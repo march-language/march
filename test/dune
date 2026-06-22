@@ -1115,3 +1115,151 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_raise.expected native_ffi_raise.out)))
+
+; ── JS backend end-to-end tests ──────────────────────────────────────────────
+; Copy march_runtime.mjs once; each JS test compiles with --no-copy-runtime
+; so dune owns the runtime target and the compiler doesn't shadow it.
+(rule
+ (targets march_runtime.mjs)
+ (deps (file ../runtime/march_runtime.mjs))
+ (action (copy ../runtime/march_runtime.mjs march_runtime.mjs)))
+
+(rule
+ (targets js_atom_ctor_field.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/atom_ctor_field.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_atom_ctor_field.mjs native/atom_ctor_field.march)))
+
+(rule
+ (targets js_atom_ctor_field.out)
+ (deps js_atom_ctor_field.mjs march_runtime.mjs)
+ (action (with-stdout-to js_atom_ctor_field.out (run node js_atom_ctor_field.mjs))))
+
+(rule (alias runtest) (action (diff native/atom_ctor_field.expected js_atom_ctor_field.out)))
+
+(rule
+ (targets js_closure_bool_field.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/closure_bool_field.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_closure_bool_field.mjs native/closure_bool_field.march)))
+
+(rule
+ (targets js_closure_bool_field.out)
+ (deps js_closure_bool_field.mjs march_runtime.mjs)
+ (action (with-stdout-to js_closure_bool_field.out (run node js_closure_bool_field.mjs))))
+
+(rule (alias runtest) (action (diff native/closure_bool_field.expected js_closure_bool_field.out)))
+
+(rule
+ (targets js_default_args_nested.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/default_args_nested.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_default_args_nested.mjs native/default_args_nested.march)))
+
+(rule
+ (targets js_default_args_nested.out)
+ (deps js_default_args_nested.mjs march_runtime.mjs)
+ (action (with-stdout-to js_default_args_nested.out (run node js_default_args_nested.mjs))))
+
+(rule (alias runtest) (action (diff native/default_args_nested.expected js_default_args_nested.out)))
+
+(rule
+ (targets js_iface_method_collision.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/iface_method_collision.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_iface_method_collision.mjs native/iface_method_collision.march)))
+
+(rule
+ (targets js_iface_method_collision.out)
+ (deps js_iface_method_collision.mjs march_runtime.mjs)
+ (action (with-stdout-to js_iface_method_collision.out (run node js_iface_method_collision.mjs))))
+
+(rule (alias runtest) (action (diff native/iface_method_collision.expected js_iface_method_collision.out)))
+
+(rule
+ (targets js_let_tuple_destructure.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/let_tuple_destructure.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_tuple_destructure.mjs native/let_tuple_destructure.march)))
+
+(rule
+ (targets js_let_tuple_destructure.out)
+ (deps js_let_tuple_destructure.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_tuple_destructure.out (run node js_let_tuple_destructure.mjs))))
+
+(rule (alias runtest) (action (diff native/let_tuple_destructure.expected js_let_tuple_destructure.out)))
+
+(rule
+ (targets js_newtype_counter.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/newtype_counter.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_newtype_counter.mjs native/newtype_counter.march)))
+
+(rule
+ (targets js_newtype_counter.out)
+ (deps js_newtype_counter.mjs march_runtime.mjs)
+ (action (with-stdout-to js_newtype_counter.out (run node js_newtype_counter.mjs))))
+
+(rule (alias runtest) (action (diff native/newtype_counter.expected js_newtype_counter.out)))
+
+(rule
+ (targets js_option_niche.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/option_niche.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_option_niche.mjs native/option_niche.march)))
+
+(rule
+ (targets js_option_niche.out)
+ (deps js_option_niche.mjs march_runtime.mjs)
+ (action (with-stdout-to js_option_niche.out (run node js_option_niche.mjs))))
+
+(rule (alias runtest) (action (diff native/option_niche.expected js_option_niche.out)))
+
+(rule
+ (targets js_qualified_ctor_pattern.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/qualified_ctor_pattern.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_qualified_ctor_pattern.mjs native/qualified_ctor_pattern.march)))
+
+(rule
+ (targets js_qualified_ctor_pattern.out)
+ (deps js_qualified_ctor_pattern.mjs march_runtime.mjs)
+ (action (with-stdout-to js_qualified_ctor_pattern.out (run node js_qualified_ctor_pattern.mjs))))
+
+(rule (alias runtest) (action (diff native/qualified_ctor_pattern.expected js_qualified_ctor_pattern.out)))
+
+(rule
+ (targets js_tuple_scalar_fields.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/tuple_scalar_fields.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_tuple_scalar_fields.mjs native/tuple_scalar_fields.march)))
+
+(rule
+ (targets js_tuple_scalar_fields.out)
+ (deps js_tuple_scalar_fields.mjs march_runtime.mjs)
+ (action (with-stdout-to js_tuple_scalar_fields.out (run node js_tuple_scalar_fields.mjs))))
+
+(rule (alias runtest) (action (diff native/tuple_scalar_fields.expected js_tuple_scalar_fields.out)))
+
+(rule
+ (targets js_zero_arg_closure_default.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/zero_arg_closure_default.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_zero_arg_closure_default.mjs native/zero_arg_closure_default.march)))
+
+(rule
+ (targets js_zero_arg_closure_default.out)
+ (deps js_zero_arg_closure_default.mjs march_runtime.mjs)
+ (action (with-stdout-to js_zero_arg_closure_default.out (run node js_zero_arg_closure_default.mjs))))
+
+(rule (alias runtest) (action (diff native/zero_arg_closure_default.expected js_zero_arg_closure_default.out)))
