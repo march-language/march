@@ -1,0 +1,19 @@
+-- FFI Gap 2: native→March upcalls from the interpreter.
+-- The C binding receives a March closure and calls back into it via march_call.
+-- In interpreter mode, march_call routes through the registered OCaml callback
+-- rather than dereferencing a compiled closure's C function pointer.
+-- Uses the same ffi_apply1 / ffi_count_matching symbols as the compiled test.
+mod Test do
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn apply1(f: (Int) -> Int, x: Int): Int = "ffi_apply1"
+    fn count_matching(pred: (Int) -> Bool, n: Int): Int = "ffi_count_matching"
+  end
+
+  fn main() : Unit do
+    println(int_to_string(apply1(fn n -> n * 2, 21)))
+    println(int_to_string(count_matching(fn n -> n % 2 == 0, 10)))
+  end
+end
