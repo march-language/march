@@ -1,0 +1,45 @@
+mod TestNetKernel do
+
+  describe "NetKernel byte bridge" do
+
+    test "str_to_bytes / bytes_to_str round-trip" do
+      let s = "hello, net-kernel"
+      assert (NetKernel.bytes_to_str(NetKernel.str_to_bytes(s)) == s)
+    end
+
+    test "str_to_bytes yields byte values 0..255" do
+      -- "AB" -> [65, 66]
+      assert (NetKernel.str_to_bytes("AB") == Cons(65, Cons(66, Nil)))
+    end
+
+  end
+
+  describe "NetKernel.to_wire (frame + render for the socket)" do
+
+    test "wire bytes decode back to the original payload via NetFrame" do
+      let payload = Cons(7, Cons(8, Cons(9, Nil)))
+      let wire = NetKernel.to_wire(payload)
+      -- the receiver turns the socket string back into bytes and de-frames it
+      assert (NetFrame.decode(NetKernel.str_to_bytes(wire)) == Some((payload, Nil)))
+    end
+
+  end
+
+  describe "NetKernel full handshake-message round-trip (pure path)" do
+
+    test "a framed Hello survives wire encode + decode" do
+      let id = NodeIdentity.make("alice@host", "alice-pubkey", 1)
+      let h = Handshake.make_hello(id, "nonce-xyz")
+      -- sender: encode_hello -> to_wire (frame+string)
+      let wire = NetKernel.to_wire(Handshake.encode_hello(h))
+      -- receiver: string -> bytes -> de-frame -> decode_hello
+      match NetFrame.decode(NetKernel.str_to_bytes(wire)) do
+        Some((hbytes, _rest)) ->
+          assert (Handshake.decode_hello(hbytes) == Ok(h))
+        None -> assert false
+      end
+    end
+
+  end
+
+end

@@ -146,6 +146,7 @@ let all_stdlib_decls =
     "node_identity.march";
     "cluster_auth.march";
     "handshake.march";
+    "net_kernel.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -312,6 +313,10 @@ let () =
     ("handshake", [
       Alcotest.test_case "Handshake module"
         `Quick (run_stdlib_test "test_handshake.march" "TestHandshake");
+    ]);
+    ("net_kernel", [
+      Alcotest.test_case "NetKernel module"
+        `Quick (run_stdlib_test "test_net_kernel.march" "TestNetKernel");
     ]);
     ("vector_clock", [
       Alcotest.test_case "VectorClock module"
