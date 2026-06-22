@@ -148,6 +148,7 @@ let all_stdlib_decls =
     "handshake.march";
     "net_kernel.march";
     "peer_registry.march";
+    "cluster_conn.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
