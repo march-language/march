@@ -14,18 +14,18 @@ let watched_files root =
   (if Sys.file_exists toml then [ toml ] else [])
   @ List.concat_map from_dir [ "lib"; "src"; "test"; "config" ]
 
-let run_action ~action ~filter =
+let run_action ~action ~filter ?target () =
   let label, result =
     match action with
     | "test" -> "test", Result.map (fun () -> ()) (Cmd_test.run ~filter ())
-    | "run"  -> "run",  Cmd_run.run ()
-    | _      -> "build", Result.map (fun _ -> ()) (Cmd_build.build ~release:false ())
+    | "run"  -> "run",  Cmd_run.run ~compiled:true ?target ()
+    | _      -> "build", Result.map (fun _ -> ()) (Cmd_build.build ~release:false ?target ())
   in
   (match result with
    | Ok ()   -> Printf.printf "  \xe2\x9c\x93 %s ok\n%!" label
    | Error e -> Printf.printf "  \xe2\x9c\x97 %s failed: %s\n%!" label e)
 
-let run ~action ~interval ~clear () =
+let run ~action ~interval ~clear ?target () =
   match Project.load () with
   | Error e -> Error e
   | Ok proj ->
@@ -34,7 +34,7 @@ let run ~action ~interval ~clear () =
     let once () =
       if clear then print_string "\027[2J\027[H";
       Printf.printf "[forge watch] running %s ...\n%!" action;
-      run_action ~action ~filter:"";
+      run_action ~action ~filter:"" ?target ();
     in
     Printf.printf "[forge watch] watching %s; press Ctrl-C to stop\n%!" root;
     once ();   (* run once up front *)
