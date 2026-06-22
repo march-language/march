@@ -37,7 +37,7 @@ Both prevent **duplicating** (using twice). Linear additionally prevents **disca
 
 A linear type must be used exactly once:
 
-```elixir
+```march
 fn consume(linear h : Handle) : () do
   -- h must be used here — the compiler tracks this
   close(h)
@@ -46,7 +46,7 @@ end
 
 If you forget to use a linear value, the compiler reports an error:
 
-```elixir
+```march
 fn bad(linear h : Handle) : () do
   ()    -- error: linear value `h` must be used
 end
@@ -54,7 +54,7 @@ end
 
 If you try to use it twice:
 
-```elixir
+```march
 fn also_bad(linear h : Handle) : () do
   close(h)
   close(h)   -- error: linear value `h` used more than once
@@ -63,7 +63,7 @@ end
 
 ### Linear Let Bindings
 
-```elixir
+```march
 fn read_file(path : String) : String do
   linear let handle : Handle = open_file(path)
   let content = read_all(handle)     -- consumes handle
@@ -79,7 +79,7 @@ The `linear let` annotation tells the compiler this binding has linear semantics
 
 An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection):
 
-```elixir
+```march
 fn maybe_connect(affine cap : NetworkCap) : () do
   -- OK to drop cap without using it
   if should_connect do
@@ -97,7 +97,7 @@ The key property: you still cannot use an affine value twice.
 
 Individual fields of a record can be linear:
 
-```elixir
+```march
 type Resource = {
   linear fd   : FileDesc,
   metadata    : String
@@ -122,7 +122,7 @@ Session types use binary typed channels — the two endpoints have **dual** type
 
 Define a protocol:
 
-```elixir
+```march
 protocol Transfer do
   Client -> Server : Request(String)
   Server -> Client : Response(Int)
@@ -131,7 +131,7 @@ end
 
 Using a session channel:
 
-```elixir
+```march
 fn client_side(send_ch : Send(String), recv_ch : Recv(Int)) do
   linear let s = send_ch
   linear let r = recv_ch
@@ -149,7 +149,7 @@ The channel handles are linear — each `send`/`recv` operation consumes the old
 
 Capabilities (see [capabilities.march](../examples/capabilities.march)) use linear types to ensure a capability token cannot be forged or duplicated:
 
-```elixir
+```march
 fn read_secret(linear cap : Cap(Vault)) : String do
   Vault.read(cap, "secret_key")
   -- cap is consumed; caller must obtain a new one for further operations
@@ -158,7 +158,7 @@ end
 
 Capability narrowing attenuates a capability to a sub-capability:
 
-```elixir
+```march
 fn restricted_op(cap : Cap(IO)) : () do
   let console_cap = cap_narrow(cap)   -- Cap(IO) -> Cap(IO.Console)
   greet(console_cap, "Alice")
@@ -171,7 +171,7 @@ end
 
 When calling C code, raw pointers are typed as `linear Ptr(a)`:
 
-```elixir
+```march
 extern "libc": Cap(LibC) do
   fn malloc(n : Int) : linear Ptr(a)
   fn free(linear ptr : Ptr(a)) : ()

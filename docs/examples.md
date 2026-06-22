@@ -23,7 +23,7 @@ dune exec march -- examples/<name>.march
 
 Functions, let bindings, recursion, and `|>` pipes with the List stdlib. A good first program.
 
-```elixir
+```march
 fn greet(name : String) : String do
   "Hello, " ++ name ++ "!"
 end
@@ -44,7 +44,7 @@ end
 
 Comprehensive pattern matching: literals, custom ADTs, `Option`/`Result`, nested patterns, and multi-head function definitions.
 
-```elixir
+```march
 type Shape = Circle(Int) | Rect(Int, Int) | Triangle(Int, Int)
 
 fn area(s : Shape) : Int do
@@ -71,7 +71,7 @@ end
 
 A custom integer list type built with recursive ADTs. Implements `length`, `sum`, `product`, `max`, `reverse`, `append`, and `range` from scratch — a clean exercise in pattern matching and recursion.
 
-```elixir
+```march
 type IntList = INil | ICons(Int, IntList)
 
 fn sum(INil)         : Int do 0 end
@@ -88,7 +88,7 @@ fn rev_acc(ICons(x, xs), acc) do rev_acc(xs, ICons(x, acc)) end
 
 Module organisation in one file: qualified access, two-level nesting, and private functions (`pfn`).
 
-```elixir
+```march
 -- Qualified access
 let a = MathUtils.square(4)
 
@@ -110,7 +110,7 @@ end
 
 Spawning actors, sending messages, handling death gracefully, and observing state transitions.
 
-```elixir
+```march
 actor Counter do
   state { value : Int }
   init  { value = 0 }
@@ -134,7 +134,7 @@ send(c, Probe("after increment"))
 
 Lightweight tasks: spawn, await, chained results, and fan-out patterns using the Collatz sequence as a stand-in for CPU-bound work.
 
-```elixir
+```march
 -- Two independent tasks, combined on await
 fn two_tasks() : Int do
   let t1 = task_spawn(fn x -> collatz(27, 0))
@@ -149,7 +149,7 @@ end
 
 Recursive divide-and-conquer parallelism. Forks at a midpoint, spawns tasks for each half, and joins results. Demonstrates the canonical pattern for tree-structured parallel work.
 
-```elixir
+```march
 fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
   if hi - lo <= threshold do sum_range(lo, hi)
   else do
@@ -169,7 +169,7 @@ end
 
 All three restart strategies in one file: `one_for_one`, `one_for_all`, and `rest_for_one`. Each is demonstrated with a concrete crash scenario so you can observe which siblings are restarted.
 
-```elixir
+```march
 -- one_for_one: only the crashed child restarts
 actor OneForOneSup do
   state { wa : Int, wb : Int }
@@ -208,7 +208,7 @@ Actor monitoring and `Down` messages. Shows how to watch for actor death, handle
 
 Resource cleanup with user-defined `Drop` implementations. Resources registered via `own()` are released in reverse acquisition order when their actor crashes — the RAII pattern for actors.
 
-```elixir
+```march
 impl Drop(DbConnection) do
   fn drop(conn) do
     match conn do
@@ -231,7 +231,7 @@ own(pid, FileHandle("/var/log/worker.log"))
 
 The smallest possible HTTP server: 18 lines, one route, plain text response.
 
-```elixir
+```march
 fn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
   (:get, Nil) -> conn |> HttpServer.text(200, "Hello from compiled March!")
@@ -252,7 +252,7 @@ end
 
 Three streaming patterns: print chunks as they arrive, byte counting without buffering, and large chunked transfer encoding. Uses `HttpClient.stream_get` with an `on_chunk` callback.
 
-```elixir
+```march
 fn print_chunk(chunk) do
   print("[chunk " ++ int_to_string(string_length(chunk)) ++ " bytes]")
   print(chunk)
@@ -288,7 +288,7 @@ An actor-backed HTTP API. A `Counter` actor holds state; HTTP routes `GET /count
 
 WebSocket server on port 9877. Handles `TextFrame`, `BinaryFrame`, `Ping`/`Pong`, and `Close` in a recursive loop.
 
-```elixir
+```march
 fn handle_frame(conn, frame) do
   match frame do
   TextFrame(msg)   -> WsServer.send_text(conn, "echo: " ++ msg)
@@ -307,7 +307,7 @@ end
 
 Descriptive and bivariate statistics using the `Stats` module on plain `List(Float)` values.
 
-```elixir
+```march
 -- Weekly temperatures
 let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
 
@@ -330,7 +330,7 @@ Also shows `covariance`, `correlation`, `mode`, and the safe `Result`-returning 
 
 Tabular data pipelines with the `DataFrame` module. Uses an employee dataset throughout.
 
-```elixir
+```march
 -- Construct from typed columns
 let df = DataFrame.from_columns([
   StrCol("name",   typed_array_from_list(["Alice", "Bob", "Charlie"])),
@@ -374,7 +374,7 @@ Four CSV parsing patterns from the stdlib: streaming rows, eager read, header-ba
 
 Three file reading patterns: full file into a string, lines into a list, and lazy line streaming with `File.with_lines` and `Seq.take`.
 
-```elixir
+```march
 -- Lazy: only reads lines as needed
 File.with_lines("data.txt", fn lines ->
   let first10 = Seq.take(lines, 10) |> Seq.to_list()
@@ -390,7 +390,7 @@ File.with_lines("data.txt", fn lines ->
 
 The capability security model. Shows `needs IO` declarations, `Cap(IO.Console)` and `Cap(IO.Network)` in function signatures, capability narrowing with `cap_narrow`, and higher-order capability passing.
 
-```elixir
+```march
 needs IO
 
 -- Pure functions need no capability

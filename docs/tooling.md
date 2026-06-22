@@ -121,7 +121,7 @@ march --target js --no-copy-runtime -o dist/app.mjs src/app.march
 
 The JS backend auto-loads `dom.march` from stdlib, so `Dom.*` functions are available without any extra imports in JS builds:
 
-```elixir
+```march
 mod Counter do
   fn main() : Unit do
     match Dom.find("counter") do
@@ -687,7 +687,7 @@ Alternatively, the compiled `march.dylib` can be installed directly into Zed's e
 
 Place a `dbg()` breakpoint anywhere in your code:
 
-```elixir
+```march
 fn process(items : List(Int)) : Int do
   let filtered = List.filter(items, fn x -> x > 0)
   dbg()    -- breakpoint: REPL opens here

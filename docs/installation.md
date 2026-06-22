@@ -175,7 +175,7 @@ _build/default/
 
 Create `hello.march`:
 
-```elixir
+```march
 mod Hello do
   fn main() do
     println("Hello, March!")

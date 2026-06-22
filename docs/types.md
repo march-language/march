@@ -30,7 +30,7 @@ Annotations are optional everywhere except:
 - Recursive functions where inference would loop
 - When you want explicit documentation
 
-```elixir
+```march
 fn add(x : Int, y : Int) : Int do
   x + y
 end
@@ -40,7 +40,7 @@ fn add(x, y) do x + y end
 ```
 
 Parameter and return annotations use `:`:
-```elixir
+```march
 let count : Int = 0
 fn process(data : List(String)) : Option(Int) do ... end
 ```
@@ -53,7 +53,7 @@ fn process(data : List(String)) : Option(Int) do ... end
 
 Variants declare a type with multiple possible shapes. No leading `|` on the first case:
 
-```elixir
+```march
 type Color = Red | Green | Blue
 
 type Shape =
@@ -64,7 +64,7 @@ type Shape =
 
 Constructors are capitalized. They can carry zero or more fields:
 
-```elixir
+```march
 type Expr =
   | Num(Int)
   | Add(Expr, Expr)
@@ -74,7 +74,7 @@ type Expr =
 
 Use constructors by applying them like functions:
 
-```elixir
+```march
 let c = Circle(3.14)
 let r = Rect(4.0, 6.0)
 let e = Add(Num(1), Mul(Num(2), Num(3)))
@@ -84,14 +84,14 @@ let e = Add(Num(1), Mul(Num(2), Num(3)))
 
 Records have named fields:
 
-```elixir
+```march
 type Point = { x : Float, y : Float }
 type User  = { name : String, age : Int, email : String }
 ```
 
 Create, access, and update:
 
-```elixir
+```march
 let p = { x = 1.0, y = 2.0 }
 let moved = { p with x = 5.0 }
 let dist = p.x +. p.y
@@ -99,7 +99,7 @@ let dist = p.x +. p.y
 
 Records and variants can be combined — a variant constructor can carry a record:
 
-```elixir
+```march
 type Config =
   | Default
   | Custom({ host : String, port : Int, debug : Bool })
@@ -111,7 +111,7 @@ type Config =
 
 Type parameters are lowercase:
 
-```elixir
+```march
 type Option(a) = None | Some(a)
 type Result(a, e) = Ok(a) | Err(e)
 type Pair(a, b) = Pair(a, b)
@@ -120,7 +120,7 @@ type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
 
 Use the same lowercase letters in function signatures to refer to type parameters:
 
-```elixir
+```march
 fn identity(x : a) : a do x end
 
 fn map_option(opt : Option(a), f : a -> b) : Option(b) do
@@ -133,7 +133,7 @@ end
 
 The compiler infers type parameter instantiations at call sites:
 
-```elixir
+```march
 map_option(Some(42), fn x -> x * 2)  -- Option(Int)
 map_option(Some("hi"), String.length) -- Option(Int)
 ```
@@ -144,7 +144,7 @@ map_option(Some("hi"), String.length) -- Option(Int)
 
 Give a type a shorter name:
 
-```elixir
+```march
 type Name = String
 type Age  = Int
 type DB   = Map(String, List(Int))
@@ -158,13 +158,13 @@ Type aliases are structural — `Name` and `String` are interchangeable.
 
 `Option(a)` represents a value that may or may not be present:
 
-```elixir
+```march
 type Option(a) = None | Some(a)
 ```
 
 Standard pattern:
 
-```elixir
+```march
 fn safe_head(xs : List(a)) : Option(a) do
   match xs do
     Nil        -> None
@@ -175,14 +175,14 @@ end
 
 Stdlib helpers (from prelude, always in scope):
 
-```elixir
+```march
 unwrap(Some(42))           -- 42 (panics if None)
 unwrap_or(None, 0)         -- 0
 ```
 
 From `Option` module:
 
-```elixir
+```march
 Option.map(Some(5), fn x -> x + 1)  -- Some(6)
 Option.and_then(opt, fn x -> ...)   -- flatMap
 Option.unwrap_or_else(opt, fn () -> compute_default())
@@ -196,13 +196,13 @@ Option.is_none(opt)
 
 `Result(a, e)` represents either success or failure:
 
-```elixir
+```march
 type Result(a, e) = Ok(a) | Err(e)
 ```
 
 Functions that can fail return `Result`:
 
-```elixir
+```march
 fn parse_int(s : String) : Result(Int, String) do
   -- returns Ok(n) or Err("not a valid integer")
   parse_int_builtin(s)
@@ -211,7 +211,7 @@ end
 
 Chain multiple fallible operations with `let?` (propagates `Err` automatically):
 
-```elixir
+```march
 fn run(input : String) : Result(String, String) do
   let? n    = parse_int(input)
   let? user = fetch_user(n)
@@ -221,7 +221,7 @@ end
 
 Use `with` when you need custom `else` handling or mixed `Option`/`Result` chains:
 
-```elixir
+```march
 with Ok(n)    <- parse_int(input),
      Ok(user) <- fetch_user(n) do
   display(user)
@@ -232,7 +232,7 @@ end
 
 Stdlib helpers:
 
-```elixir
+```march
 Result.map(Ok(5), fn x -> x + 1)     -- Ok(6)
 Result.map_err(Err("x"), String.upcase)
 Result.and_then(res, fn v -> ...)      -- flatMap
@@ -248,7 +248,7 @@ Result.is_err(res)
 
 Tuples are anonymous ordered products:
 
-```elixir
+```march
 let pair : (Int, String) = (1, "hello")
 let triple : (Int, Float, Bool) = (1, 2.0, true)
 let unit : () = ()
@@ -256,7 +256,7 @@ let unit : () = ()
 
 Destructure with `let` or pattern matching:
 
-```elixir
+```march
 let (a, b) = pair
 match triple do
   (n, f, b) -> ...
@@ -269,13 +269,13 @@ end
 
 `List(a)` is a singly-linked cons list:
 
-```elixir
+```march
 type List(a) = Nil | Cons(a, List(a))
 ```
 
 List literals desugar to `Cons` chains:
 
-```elixir
+```march
 [1, 2, 3]   -- Cons(1, Cons(2, Cons(3, Nil)))
 []          -- Nil
 ```
@@ -286,7 +286,7 @@ List literals desugar to `Cons` chains:
 
 Function types are written with `->`, right-associative:
 
-```elixir
+```march
 Int -> Bool          -- takes Int, returns Bool
 Int -> Int -> Int    -- curried: takes Int, returns (Int -> Int)
 (Int, Int) -> Int    -- takes a pair
@@ -294,7 +294,7 @@ Int -> Int -> Int    -- curried: takes Int, returns (Int -> Int)
 
 Higher-order functions:
 
-```elixir
+```march
 fn apply(f : Int -> Int, x : Int) : Int do f(x) end
 fn compose(f : b -> c, g : a -> b) : a -> c do
   fn x -> f(g(x))
@@ -307,7 +307,7 @@ end
 
 Types from modules are accessed with `.`:
 
-```elixir
+```march
 Http.Request
 Map.Entry(String, Int)
 ```
@@ -318,20 +318,20 @@ Map.Entry(String, Int)
 
 March supports `Nat` in type parameters for compile-time dimension checking:
 
-```elixir
+```march
 type Vector(n, a) = Vector(Array(a))
 type Matrix(m, n, a) = Matrix(Array(Array(a)))
 ```
 
 Arithmetic on type-level naturals:
 
-```elixir
+```march
 type Doubled(n, a) = Array(n * 2, a)
 ```
 
 This enables functions like `zip` that guarantee equal-length inputs:
 
-```elixir
+```march
 fn zip_vectors(v1 : Vector(n, a), v2 : Vector(n, b)) : Vector(n, (a, b)) do
   -- compiler verifies n is the same for both inputs
   ...
@@ -340,11 +340,116 @@ end
 
 ---
 
+## Dependent Types
+
+A **dependent type** is a type that depends on a *value* — not just on other
+types. March has two flavours, each with different trade-offs.
+
+### Refinement Types — value predicates
+
+A **refinement type** `{T | predicate}` constrains what values a type can hold.
+The predicate is checked by an SMT solver (Z3) at compile time — so a whole
+class of bugs (negative sizes, out-of-bounds indices, division by zero) becomes
+a compile error instead of a runtime panic.
+
+```march
+-- Precondition: callers must pass a positive chunk size
+fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do ... end
+
+-- Postcondition: this function promises a non-negative count
+fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+
+chunks([1,2,3,4,5], 0)   -- compile error: 0 can never be > 0
+chunks([1,2,3,4,5], 2)   -- ok
+```
+
+Checking follows **definite-failure semantics**: a diagnostic is emitted only
+when the predicate can *never* hold — never for unknown or possibly-valid
+values. This means no false positives, but also no proof obligation: if the
+solver can't decide, it stays silent.
+
+```march
+fn f(n : Int) : Int do
+  chunks(data, n)    -- skipped: n could be positive, compiler doesn't know
+end
+```
+
+Refinements support **path sensitivity** — a guard you write becomes an
+assumption the solver can use:
+
+```march
+fn safe_chunks(xs : List(a), n : Int) : List(List(a)) do
+  if n > 0 do
+    chunks(xs, n)    -- ok: the guard established n > 0
+  else
+    [xs]
+  end
+end
+```
+
+For predicates over data structures, define a **`@[measure]`** — a total,
+terminating function the solver axiomatises structurally:
+
+```march
+@[measure]
+fn size(t : Tree(a)) : Int do
+  match t do
+    Leaf          -> 0
+    Node(l, _, r) -> 1 + size(l) + size(r)
+  end
+end
+
+fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
+```
+
+See the [Refinement Types guide](refinement-types.md) for the full syntax,
+measure soundness gate, `--no-measure-axioms` flag, and limitations.
+
+### Type-Level Naturals — dimension constraints
+
+`Nat` in a type parameter threads a *compile-time* natural number through the
+type, making shape mismatches impossible to express:
+
+```march
+type Vector(n, a) = Vector(Array(a))
+
+fn zip_vectors(v1 : Vector(n, a), v2 : Vector(n, b)) : Vector(n, (a, b)) do
+  -- the compiler verifies both arguments have the same length n
+  ...
+end
+```
+
+Arithmetic on naturals is supported at the type level:
+
+```march
+type Doubled(n, a) = Array(n * 2, a)
+```
+
+This is resolved entirely during type inference — no Z3 involved. It is
+appropriate for **structural shape constraints** (array lengths, matrix
+dimensions) where the relationship is fixed at the call site. Refinements are
+appropriate for **value-range constraints** (non-negative, bounded, non-zero)
+where the relationship is a predicate you want to check against a concrete
+argument.
+
+### Choosing between the two
+
+| | Refinement types | Type-level naturals |
+|---|---|---|
+| Constraint kind | Value predicates (`>= 0`, `!= 0`, `< len(xs)`) | Shape/dimension equality |
+| Base types | `Int`, `Bool` | `Nat` (non-negative integer) |
+| Solver | Z3 SMT (optional) | Type inference (always) |
+| False positives | None (definite-failure only) | None |
+| HOF / dynamic dispatch | Not checked | Checked |
+| Incomplete by design? | Yes | No |
+
+---
+
 ## Opaque Types
 
 Hide a type's representation while keeping the name usable in signatures:
 
-```elixir
+```march
 mod Token do
   opaque type Token = Token(String)
 
@@ -359,7 +464,7 @@ Outside `Token`, callers can use `Token` as a type but cannot construct or patte
 
 For completely hidden types, use `ptype`:
 
-```elixir
+```march
 ptype Internal = Foo | Bar(Int)
 -- Both the type name and constructors are private
 ```
@@ -377,6 +482,9 @@ Types
 ├── Function types: T -> U
 ├── Tuple types: (T, U, V)
 ├── Linear/affine: linear T, affine T
+├── Dependent types
+│   ├── Refinement types: {Int | _ >= 0}, {Int | _ != 0}
+│   └── Type-level naturals: Vector(n, a), Matrix(m, n, a)
 └── Stdlib: List(a), Option(a), Result(a,e), Map(k,v), ...
 ```
 

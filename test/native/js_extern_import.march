@@ -1,0 +1,22 @@
+-- Regression: extern "node:..." imports from JS modules via ES import syntax.
+-- Tests explicit = "sym" aliasing AND implicit (march name = JS name) imports.
+mod JsExternImport do
+  needs IO.Foreign
+
+  -- Explicit symbol: march name differs from JS export → `import { basename as js_path_basename }`
+  extern "node:path" : Cap(IO.Foreign) do
+    fn js_path_basename(path: String) : String = "basename"
+    fn js_path_extname(path: String)  : String = "extname"
+  end
+
+  -- Implicit: march name == JS export → `import { dirname }` (no alias needed)
+  extern "node:path" : Cap(IO.Foreign) do
+    fn dirname(path: String) : String
+  end
+
+  fn main() : Unit do
+    println(js_path_basename("/a/b/hello.march"))
+    println(js_path_extname("/a/b/hello.march"))
+    println(dirname("/a/b/hello.march"))
+  end
+end

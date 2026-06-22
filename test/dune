@@ -1133,6 +1133,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_raise.expected native_ffi_raise.out)))
 
+; ── FFI native→March upcalls: a binding receives March closures as function-
+; ── typed extern params and calls back into them via march_call (apply-fn at
+; ── closure field 0). apply1 invokes f(x); count_matching runs a predicate.
+(rule
+ (targets native_ffi_upcall native_ffi_upcall.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/ffi_upcall.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_ffi_upcall native/ffi_upcall.march)
+   (with-stdout-to native_ffi_upcall.out (system "./native_ffi_upcall")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_upcall.expected native_ffi_upcall.out)))
+
 ; ── JS backend end-to-end tests ──────────────────────────────────────────────
 ; Copy march_runtime.mjs once; each JS test compiles with --no-copy-runtime
 ; so dune owns the runtime target and the compiler doesn't shadow it.
@@ -1295,6 +1320,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_dom_available.out (run node js_dom_available.mjs))))
 
 (rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))
+
+; js_extern_import — verifies extern "node:..." imports via ES import syntax
+(rule
+ (targets js_extern_import.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_extern_import.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_extern_import.mjs native/js_extern_import.march)))
+
+(rule
+ (targets js_extern_import.out)
+ (deps js_extern_import.mjs march_runtime.mjs)
+ (action (with-stdout-to js_extern_import.out (run node js_extern_import.mjs))))
+
+(rule (alias runtest) (action (diff native/js_extern_import.expected js_extern_import.out)))
+
 ; ── FFI Float in generic slots: raises Result(Float,_) Ok payload, and
 ; ── Option(Float)/Option(Unit) returns via march_some_boxed / march_none_boxed.
 (rule

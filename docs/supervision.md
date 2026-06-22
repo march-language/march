@@ -27,7 +27,7 @@ The result is a tree of processes where failures are isolated and recovery is au
 
 Any actor can supervise children by adding a `supervise` block:
 
-```elixir
+```march
 actor AppSupervisor do
   state { counter : Int, logger : Int }
   init  { counter = 0, logger = 0 }
@@ -56,7 +56,7 @@ When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns
 
 Only the crashed child is restarted. Other children continue running.
 
-```elixir
+```march
 supervise do
   strategy one_for_one
   max_restarts 3 within 60
@@ -73,7 +73,7 @@ Use `one_for_one` when children are independent.
 
 When any child crashes, **all** children are stopped and restarted.
 
-```elixir
+```march
 supervise do
   strategy one_for_all
   max_restarts 2 within 30
@@ -90,7 +90,7 @@ Use `one_for_all` when children are tightly coupled and must be in sync.
 
 When a child crashes, it and all children **started after it** are restarted. Children started before it are left alone.
 
-```elixir
+```march
 supervise do
   strategy rest_for_one
   max_restarts 5 within 60
@@ -110,7 +110,7 @@ Use `rest_for_one` when later children depend on earlier ones.
 
 Adapted from [examples/supervision_basic.march](../examples/supervision_basic.march):
 
-```elixir
+```march
 mod BasicSupervision do
 
   actor Counter do
@@ -192,7 +192,7 @@ end
 
 If a child crashes too frequently, the supervisor gives up and crashes itself, escalating the fault to its own supervisor:
 
-```elixir
+```march
 supervise do
   strategy one_for_one
   max_restarts 3 within 60  -- 3 restarts in 60 seconds → supervisor crashes
@@ -222,7 +222,7 @@ rest_for_one:       ↻   ↻   ok    (W1 and later restart)
 
 Supervisors can supervise other supervisors, forming a tree:
 
-```elixir
+```march
 actor TopSupervisor do
   state { web_sup : Int, db_sup : Int }
   init  { web_sup = 0, db_sup = 0 }
@@ -267,7 +267,7 @@ A crash in the Web tier doesn't affect the DB tier. A crash in the DB tier escal
 
 The `app` declaration is a shorthand for defining the top-level supervisor:
 
-```elixir
+```march
 mod MyService do
   actor Worker do
     state { n : Int }

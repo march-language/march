@@ -13,7 +13,7 @@ Interfaces (typeclasses) provide ad-hoc polymorphism — the ability to write co
 
 ## Defining an Interface
 
-```elixir
+```march
 interface Show(a) do
   fn show : a -> String
 end
@@ -25,7 +25,7 @@ An interface declares one or more function signatures that implementing types mu
 
 Interfaces can provide default implementations that types inherit unless overridden:
 
-```elixir
+```march
 interface Eq(a) do
   fn eq  : a -> a -> Bool
   fn neq : a -> a -> Bool do
@@ -38,7 +38,7 @@ Any type implementing `Eq` automatically gets `neq` for free. It only needs to i
 
 ### Superinterfaces
 
-```elixir
+```march
 interface Ord(a) requires Eq(a) do
   fn cmp : a -> a -> Int
   fn lt  : a -> a -> Bool do fn x y -> cmp(x, y) < 0 end
@@ -56,7 +56,7 @@ end
 
 Use `impl Interface(Type) do ... end`:
 
-```elixir
+```march
 type Color = Red | Green | Blue
 
 impl Show(Color) do
@@ -89,7 +89,7 @@ Now you can call `show(Red)` or `eq(Red, Blue)` and the dispatch is resolved by 
 
 Implement an interface for a generic type with constraints:
 
-```elixir
+```march
 -- Show for List(a) when a has Show
 impl Show(List(a)) when Show(a) do
   fn show(xs) do
@@ -118,7 +118,7 @@ The compiler picks the right implementation at call sites based on the concrete 
 
 Constrain type parameters with `when`:
 
-```elixir
+```march
 fn print_all(xs : List(a)) : () when Show(a) do
   List.iter(xs, fn x -> println(show(x)))
 end
@@ -135,7 +135,7 @@ end
 
 Multiple constraints:
 
-```elixir
+```march
 fn sort_and_show(xs : List(a)) : String when Ord(a), Show(a) do
   let sorted = sort(xs)
   show(sorted)
@@ -148,7 +148,7 @@ end
 
 ### `Eq(a)` — Equality
 
-```elixir
+```march
 interface Eq(a) do
   fn eq  : a -> a -> Bool
   fn neq : a -> a -> Bool do fn x y -> !eq(x, y) end
@@ -156,7 +156,7 @@ end
 ```
 
 Usage:
-```elixir
+```march
 eq(42, 42)         -- true
 eq("hi", "bye")    -- false
 neq(1, 2)          -- true
@@ -164,7 +164,7 @@ neq(1, 2)          -- true
 
 ### `Ord(a)` — Ordering
 
-```elixir
+```march
 interface Ord(a) requires Eq(a) do
   fn cmp : a -> a -> Int   -- negative = less, 0 = equal, positive = greater
   fn lt  : a -> a -> Bool
@@ -175,7 +175,7 @@ end
 ```
 
 Usage:
-```elixir
+```march
 cmp(1, 2)    -- -1
 cmp(2, 2)    -- 0
 cmp(3, 2)    -- 1
@@ -184,14 +184,14 @@ lt(1, 2)     -- true
 
 ### `Show(a)` — String Representation
 
-```elixir
+```march
 interface Show(a) do
   fn show : a -> String
 end
 ```
 
 Usage:
-```elixir
+```march
 show(42)      -- "42"
 show(true)    -- "true"
 show([1,2,3]) -- "[1, 2, 3]"  (if List has Show)
@@ -199,7 +199,7 @@ show([1,2,3]) -- "[1, 2, 3]"  (if List has Show)
 
 ### `Hash(a)` — Hashing
 
-```elixir
+```march
 interface Hash(a) do
   fn hash : a -> Int
 end
@@ -213,7 +213,7 @@ Required for keys in `Map` and elements in `Set`.
 
 For types with straightforward structure, `derive` generates implementations automatically:
 
-```elixir
+```march
 type Point = { x : Float, y : Float }
 derive Eq, Show for Point
 
@@ -229,7 +229,7 @@ After `derive Eq for Point`, you can use `eq` on `Point` values.
 - **`Show`** — pretty-printed representation
 - **`Hash`** — consistent hash based on structure
 
-```elixir
+```march
 type User = { name : String, age : Int, role : String }
 derive Eq, Ord, Show, Hash for User
 
@@ -243,7 +243,7 @@ lt(u1, u2)     -- depends on lexicographic field order
 
 Multiple types in one `derive`:
 
-```elixir
+```march
 derive Json, Eq for MyType
 derive Show for Color
 ```
@@ -252,7 +252,7 @@ derive Show for Color
 
 ## A Complete Example: Implementing a Container
 
-```elixir
+```march
 mod MyStack do
 
   type Stack(a) = Stack(List(a))
