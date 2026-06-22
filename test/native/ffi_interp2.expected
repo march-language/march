@@ -1,0 +1,13 @@
+5
+0
+Some(7)
+None
+75
+12
+30
+Ok(7)
+Err(nan)
+Ok(3)
+Err(bad int)
+Ok(2.5)
+Err(div by zero)

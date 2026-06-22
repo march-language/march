@@ -1018,6 +1018,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_interp.expected native_ffi_interp.out)))
 
+; ── FFI interpreter marshal layer: String/Float/Option/Result/raises/variant/record.
+(rule
+ (targets native_ffi_interp2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/ffi_interp2.march))
+ (action
+  (with-stdout-to native_ffi_interp2.out
+    (run %{exe:../bin/main.exe} native/ffi_interp2.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_interp2.expected native_ffi_interp2.out)))
+
 ; ── FFI Phase 6: a `blocking` extern dispatches on an OS thread (offload).
 (rule
  (targets native_ffi_blocking native_ffi_blocking.out)

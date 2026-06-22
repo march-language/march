@@ -13,6 +13,6 @@
  (libraries march_ast march_modules march_scheduler march_coverage march_doctest unix digestif)
  (foreign_stubs
   (language c)
-  (names compress_stubs eval_ffi_stubs)
+  (names compress_stubs eval_ffi_stubs ffi_marshal)
   (flags (:standard (:include compress_cflags.sexp))))
  (c_library_flags (:include compress_libs.sexp)))
