@@ -64,18 +64,26 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   in-process C FFI. The Rust `#[march]` layer (future) will `catch_unwind` →
   `march_raise` (the `raises` ABI is the exact hook).
 
-## Interpreter (Phase 4 scope)
+## Interpreter
 
-- **Interpreter FFI is primitives-only.** Under `march file.march` (tree-walking,
-  no `--compile`): **Int/Bool arguments and Int/Bool/Float returns** only, via a
-  fixed-arity GP-register trampoline (no libffi). Unsupported interpreter-side,
-  with a clear *"run with `--compile`"* error:
-  - **Float as an *argument*** — the trampoline passes args in GP registers; FP
-    args need FP registers (would need libffi or per-signature stubs).
-  - **String/Bytes, Option/Result, records, resources** — the interpreter's
-    value representation (`VInt`/`VString`/…) differs from the compiled heap
-    layout, so there's no marshalling for them yet.
-  - Arity is capped at 6 arguments (trampoline cases).
+- **Interpreter FFI marshal layer — DONE (2026-06-22).** Under `march file.march`
+  (tree-walking, no `--compile`), the full type-directed marshal layer is now in
+  place. Supported: Int/Bool (raw GP), Float args (FP register bank via mixed
+  `dyncall_fi`/`dyncall_fd` trampolines), String/Bytes (heap-allocated via
+  `march_str_new`/`march_bytes_new`, dropped after call), `Option(T)` /
+  `Result(T,E)` (niche + boxed representations), `raises` externs (malloc'd
+  `march_env` sentinel prepended as GP arg), variant args/returns (tag + field
+  slots), record args/returns (shape-descriptor-keyed). `ffi_type_decl_tbl` maps
+  type name → type_def for marshal-layer lookup. `lib/eval/ffi_marshal.c` +
+  `ffi_marshal.ml` provide OCaml C stubs (lazy-init from `RTLD_DEFAULT` after the
+  runtime `.so` is `RTLD_GLOBAL`-loaded). `test/native/ffi_interp2` verifies
+  end-to-end. GP arg arity cap raised to 8 (was 6). Remaining interpreter gap:
+  - **Closures/upcalls as arguments** (`TyArrow` param types) still fall back to
+    `--compile`. Re-entering the interpreter from C would need a thread-safe
+    re-entrant eval path.
+  - **User [ffi] shims** (from forge.toml `sources = [...]`) are compiled-mode
+    only — the interpreter dlopens the runtime `.so`, not project-specific shim
+    `.so`s.
   Compiled mode and the JIT have none of these limits.
 
 ## Scheduler
