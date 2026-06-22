@@ -282,6 +282,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, Refinement types — measure axioms M-a + M-b)
+
+- **Refinement measures reason structurally (M-a + M-b).** A `@[measure]` over an ADT is now *axiomatised* in SMT, not just reflected symbolically: the ADT is modelled with `declare-datatypes`, the measure as an uninterpreted function, and each `match` arm as a `:pattern`-triggered recursion-equation axiom — so the solver computes measure values from structure (`size(Node(Leaf,x,Leaf)) = 1`, `length([10,20]) = 2`), catching out-of-bounds indices that need the measure's defining equations. The built-in `List(a)` is modelled (`Nil | Cons`), so list measures axiomatise like user ADTs; datatype sorts live in a private `M_` namespace so no ADT name collides with a z3-reserved sort. A **hard soundness gate** makes `@[measure]` a compile error when the function is not a total, terminating, pure mathematical function (effectful, divergent, non-exhaustive, divide-by-zero, or non-structurally-recursive) — because axiomatising a broken measure would let the solver prove anything; a sound-but-unaxiomatisable measure still falls back silently to symbolic. 3s solver timeout keeps hard quantified queries `unknown` → definite-failure skip (never hang, never unsound). 40 tests in `test/test_refinecheck.ml`. Remaining: M-c (cross-measure / mutual recursion), M-d (relational postconditions), perf measurement. Spec: `specs/2026-06-21-measure-axioms-design.md`.
+
 ## Current State (as of 2026-06-21, Distributed OTP — P1 net-kernel: client/transport done, server-accept blocked)
 
 - **Distributed OTP P1 (transport + net-kernel).** Six new stdlib modules compose the client side of an authenticated peer connection:
