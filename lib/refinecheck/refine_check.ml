@@ -24,7 +24,6 @@ type rparam = { idx : int; binder : string; pred : A.expr }
 
 (* A function's signature: parameter names by position + its refined params. *)
 type fn_sig = { param_names : string list; refined : rparam list }
-type sigs = (string, fn_sig) Hashtbl.t
 
 let binder_name : A.name option -> string = function
   | None -> "_"
@@ -588,43 +587,96 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
   in
   { param_names; refined }
 
-(* Gather every refined function as (bare_name, qualified_name option, sig). *)
-let collect_sig_list (decls : A.decl list) : (string * string option * fn_sig) list =
-  let acc = ref [] in
+(* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
+   mapping to Some sig when it carries a refinement, None when it does not.
+   Recording NON-refined defs too is essential for correct lexical resolution: a
+   bare call that resolves to a non-refined sibling must NOT fall through to a
+   refined function of the same name in an enclosing module — that would check
+   the wrong predicate (a false positive). *)
+let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
+  let tbl = Hashtbl.create 128 in
   let rec go prefix decls =
     List.iter
       (function
         | A.DFn (fd, _) ->
+          let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
           let sg =
-            match fd.A.fn_clauses with
-            | c :: _ -> sig_of_clause c
-            | [] -> { param_names = []; refined = [] }
+            match fd.A.fn_clauses with c :: _ -> sig_of_clause c | [] -> { param_names = []; refined = [] }
           in
-          if sg.refined <> [] then
-            let q = if prefix = "" then None else Some (prefix ^ "." ^ fd.A.fn_name.A.txt) in
-            acc := (fd.A.fn_name.A.txt, q, sg) :: !acc
+          Hashtbl.replace tbl key (if sg.refined <> [] then Some sg else None)
         | A.DMod (name, _, ds, _) ->
           go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
         | _ -> ())
       decls
   in
   go "" decls;
-  !acc
-
-(* Build the lookup table.  Qualified names are always registered (unique).  A
-   bare name is registered ONLY when a single definition uses it — colliding
-   bare names across modules are dropped, so an ambiguous bare call is
-   conservatively skipped rather than checked against the wrong predicate. *)
-let build_table (lst : (string * string option * fn_sig) list) : sigs =
-  let tbl : sigs = Hashtbl.create 64 in
-  List.iter (fun (_, q, sg) -> match q with Some qn -> Hashtbl.replace tbl qn sg | None -> ()) lst;
-  let counts = Hashtbl.create 64 in
-  List.iter
-    (fun (b, _, _) ->
-      Hashtbl.replace counts b (1 + (try Hashtbl.find counts b with Not_found -> 0)))
-    lst;
-  List.iter (fun (b, _, sg) -> if Hashtbl.find counts b = 1 then Hashtbl.replace tbl b sg) lst;
   tbl
+
+(* ── Use/alias-aware call resolution ───────────────────────────────────────
+   Resolve a call name the way the typechecker does: a bare name binds to the
+   nearest enclosing module that defines it (lexical scope, with shadowing); an
+   alias-qualified name (`alias X.Y as P` → `P.foo`) expands to the original; a
+   `use`-imported bare name binds to the exporting module.  This replaces the
+   previous "qualified key OR globally-unique bare name" matching, which dropped
+   sibling calls on any cross-module name collision and never resolved aliased or
+   `use`-imported names. *)
+let dotted (path : A.name list) : string = String.concat "." (List.map (fun n -> n.A.txt) path)
+
+type rctx = {
+  modpath : string;                       (* enclosing module prefix, "" at top *)
+  aliases : (string * string) list;       (* (alias short, original dotted prefix) *)
+  uses : (string * A.use_selector) list;  (* (exporting module dotted, selector) *)
+}
+
+let rctx0 = { modpath = ""; aliases = []; uses = [] }
+
+(* Enclosing-module prefixes of [mp], innermost first: "A.B" -> ["A.B"; "A"; ""]. *)
+let modpath_prefixes (mp : string) : string list =
+  let segs = if mp = "" then [] else String.split_on_char '.' mp in
+  let n = List.length segs in
+  List.init (n + 1) (fun i -> String.concat "." (List.filteri (fun j _ -> j < n - i) segs))
+
+(* Resolve a call name to a definition:
+     Some (Some sig) -> a refined function (check it)
+     Some None       -> a real but non-refined function (skip — no predicate)
+     None            -> unresolved / external (skip)
+   Only Some (Some sig) leads to a check, so a wrong resolution can at worst
+   *skip* — it can never check against the wrong predicate. *)
+let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
+  : fn_sig option option =
+  let lookup k = Hashtbl.find_opt defs k in
+  let qualify p n = if p = "" then n else p ^ "." ^ n in
+  (* 1. Lexical scope: the nearest enclosing module that defines [fname] wins
+        (shadowing any same-named function further out). *)
+  match List.find_map (fun p -> lookup (qualify p fname)) (modpath_prefixes ctx.modpath) with
+  | Some r -> Some r
+  | None ->
+    (* 2. Alias-qualified `P.rest` with `alias X.Y as P` -> `X.Y.rest`. *)
+    let aliased =
+      match String.index_opt fname '.' with
+      | Some i ->
+        let head = String.sub fname 0 i in
+        let rest = String.sub fname (i + 1) (String.length fname - i - 1) in
+        (match List.assoc_opt head ctx.aliases with Some orig -> lookup (orig ^ "." ^ rest) | None -> None)
+      | None -> None
+    in
+    (match aliased with
+     | Some r -> Some r
+     | None ->
+       (* 3. `use`-imported bare name. *)
+       if String.contains fname '.' then None
+       else
+         List.find_map
+           (fun (m, sel) ->
+             let imported =
+               match sel with
+               | A.UseAll -> true
+               | A.UseNames ns -> List.exists (fun (n : A.name) -> n.A.txt = fname) ns
+               | A.UseExcept ns -> not (List.exists (fun (n : A.name) -> n.A.txt = fname) ns)
+               | A.UseSingle -> false
+             in
+             if imported then lookup (qualify m fname) else None)
+           ctx.uses)
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
 let reflect_scalar (sc : scope) (actual : A.expr)
@@ -874,16 +926,16 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
       fd.A.fn_clauses
 
 (* ── Walk expressions, threading the refined-local scope and path context ── *)
-let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scope)
+let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
     (e : A.expr) : unit =
-  let go = visit ~root errctx tbl path sc in
-  let go_path p = visit ~root errctx tbl p sc in
+  let go = visit ~root errctx defs ctx path sc in
+  let go_path p = visit ~root errctx defs ctx p sc in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
-    (match Hashtbl.find_opt tbl fname with
-     | Some sg ->
+    (match resolve_call ctx defs fname with
+     | Some (Some sg) ->
        List.iter (fun rp -> check_call ~root errctx ~span:sp sg args path rp sc) sg.refined
-     | None -> ());
+     | _ -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
@@ -894,7 +946,7 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
     ignore
       (List.fold_left
          (fun (path, sc) e ->
-           visit ~root errctx tbl path sc e;
+           visit ~root errctx defs ctx path sc e;
            let path' =
              match e with A.EAssert (p, _) -> (p, false) :: path | _ -> path
            in
@@ -903,9 +955,9 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
          (path, sc) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
-    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
   | A.ELetFn (_, ps, _, body, _) ->
-    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter
@@ -929,20 +981,33 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
-let visit_fn ~root errctx (tbl : sigs) (fd : A.fn_def) : unit =
+let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
   check_fn_post ~root errctx fd;
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx tbl path sc c.A.fc_body)
+      visit ~root errctx defs ctx path sc c.A.fc_body)
     fd.A.fn_clauses
 
-let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =
+let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
+  (* Gather this scope's aliases/uses first so every function in the module sees
+     them (matches lexical, module-wide visibility; inner modules inherit). *)
+  let ctx =
+    List.fold_left
+      (fun ctx d ->
+        match d with
+        | A.DAlias (ad, _) -> { ctx with aliases = (ad.A.alias_name.A.txt, dotted ad.A.alias_path) :: ctx.aliases }
+        | A.DUse (ud, _) -> { ctx with uses = (dotted ud.A.use_path, ud.A.use_sel) :: ctx.uses }
+        | _ -> ctx)
+      ctx decls
+  in
   List.iter
     (function
-      | A.DFn (fd, _) -> visit_fn ~root errctx tbl fd
-      | A.DMod (_, _, ds, _) -> visit_decls ~root errctx tbl ds
+      | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+      | A.DMod (name, _, ds, _) ->
+        let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+        visit_decls ~root errctx defs { ctx with modpath } ds
       | _ -> ())
     decls
 
@@ -998,7 +1063,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
           (measure_gate_errors fd))
       mfns
   end;
-  let tbl = build_table (collect_sig_list m.A.mod_decls) in
+  let defs = collect_all_defs m.A.mod_decls in
   (* Always walk: a function may have a refined *return* (postcondition) even
-     with no refined parameters, so it won't appear in [tbl]. *)
-  visit_decls ~root errctx tbl m.A.mod_decls
+     with no refined parameters, so it won't appear in [defs]. *)
+  visit_decls ~root errctx defs rctx0 m.A.mod_decls
