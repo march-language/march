@@ -1,0 +1,91 @@
+mod TestGlobalRegistry do
+
+  -- A VectorClock bumped n times by [aid], for building causal orderings.
+  pfn clk(aid : String, n : Int) : VectorClock do
+    if n <= 0 do
+      VectorClock.new()
+    else
+      VectorClock.increment(clk(aid, n - 1), aid)
+    end
+  end
+
+  describe "GlobalRegistry.register / lookup" do
+
+    test "a registered name resolves to its (node, pid)" do
+      let r = GlobalRegistry.register(GlobalRegistry.empty(), "worker", "n1", 7, clk("n1", 1))
+      assert (GlobalRegistry.lookup(r, "worker") == Some(("n1", 7)))
+      assert (GlobalRegistry.size(r) == 1)
+    end
+
+    test "an unknown name resolves to None" do
+      assert (GlobalRegistry.lookup(GlobalRegistry.empty(), "ghost") == None)
+    end
+
+  end
+
+  describe "GlobalRegistry.unregister" do
+
+    test "a newer-clock unregister tombstones the binding" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "worker", "n1", 7, clk("n1", 1))
+      let r2 = GlobalRegistry.unregister(r1, "worker", clk("n1", 2))
+      assert (GlobalRegistry.lookup(r2, "worker") == None)
+      assert (GlobalRegistry.size(r2) == 0)
+    end
+
+    test "unregistering an unknown name is a no-op" do
+      let r = GlobalRegistry.unregister(GlobalRegistry.empty(), "ghost", clk("n1", 1))
+      assert (GlobalRegistry.size(r) == 0)
+    end
+
+  end
+
+  describe "GlobalRegistry causal resolution" do
+
+    test "a causally-newer rebind overrides the old binding" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "lead", "n1", 1, clk("n1", 1))
+      let r2 = GlobalRegistry.register(r1, "lead", "n1", 2, clk("n1", 2))
+      assert (GlobalRegistry.lookup(r2, "lead") == Some(("n1", 2)))
+    end
+
+    test "a stale (causally-older) register is ignored" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "lead", "n1", 2, clk("n1", 2))
+      let r2 = GlobalRegistry.register(r1, "lead", "n1", 1, clk("n1", 1))
+      assert (GlobalRegistry.lookup(r2, "lead") == Some(("n1", 2)))
+    end
+
+  end
+
+  describe "GlobalRegistry.merge (CRDT join)" do
+
+    test "concurrent same-name registrations converge deterministically" do
+      -- n1 and n2 both claim "svc" concurrently (independent clocks).
+      let a = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let b = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n2", 2, clk("n2", 1))
+      -- tiebreak: higher node_id ("n2") wins, in BOTH merge orders
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(a, b), "svc") == Some(("n2", 2)))
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(b, a), "svc") == Some(("n2", 2)))
+    end
+
+    test "is idempotent" do
+      let a = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(a, a), "svc") == Some(("n1", 1)))
+      assert (GlobalRegistry.size(GlobalRegistry.merge(a, a)) == 1)
+    end
+
+    test "unions distinct names" do
+      let a = GlobalRegistry.register(GlobalRegistry.empty(), "x", "n1", 1, clk("n1", 1))
+      let b = GlobalRegistry.register(GlobalRegistry.empty(), "y", "n2", 2, clk("n2", 1))
+      assert (GlobalRegistry.size(GlobalRegistry.merge(a, b)) == 2)
+    end
+
+    test "a causally-newer unregister wins on merge (removal converges)" do
+      let a = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let b = GlobalRegistry.unregister(a, "svc", clk("n1", 2))
+      -- merging the older add back in must not resurrect the binding
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(b, a), "svc") == None)
+      assert (GlobalRegistry.lookup(GlobalRegistry.merge(a, b), "svc") == None)
+    end
+
+  end
+
+end

@@ -1,0 +1,115 @@
+-- GlobalRegistry: the cluster-wide name registry as a composite CRDT (P1 L5).
+--
+-- Maps a name -> the (node, pid) that holds it, gossip-replicated. Each binding
+-- carries a VectorClock that causally orders updates to *that name*, plus a
+-- presence bit so an unregister converges like an LWW-element-set removal
+-- (tombstones merge by the same rule rather than vanishing). Per-name conflict
+-- resolution:
+--   * causally newer (VectorClock After)  -> the newer binding wins;
+--   * causally older (Before) / Equal      -> keep the existing (idempotent);
+--   * Concurrent (a genuine conflict)       -> a deterministic tiebreak on
+--     (node_id, pid) so every replica converges to the same winner.
+-- That makes `merge` associative/commutative/idempotent — the CRDT join the
+-- generic gossip/anti-entropy loop uses (Merkle anti-entropy at this layer,
+-- since the registry can hold many names; see the design spec).
+mod GlobalRegistry do
+
+  -- A name binding. `present = false` is a tombstone left by `unregister`.
+  type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool }
+
+  -- name -> Entry.
+  type Names = Names(Map(String, Entry))
+
+  fn empty() : Names do Names(Map.empty()) end
+
+  -- Concurrent-update tiebreak: a total, deterministic order on bindings so
+  -- replicas that saw the updates in different orders still converge. Higher
+  -- node_id wins; ties broken by higher pid (>= keeps it idempotent on equals).
+  pfn tiebreak(b : Entry, a : Entry) : Bool do
+    if b.node_id == a.node_id do
+      b.pid >= a.pid
+    else
+      b.node_id > a.node_id
+    end
+  end
+
+  -- Does binding [b] win over [a] for the same name?
+  pfn wins(b : Entry, a : Entry) : Bool do
+    match VectorClock.compare(b.clock, a.clock) do
+      After      -> true
+      Before     -> false
+      Equal      -> true
+      Concurrent -> tiebreak(b, a)
+    end
+  end
+
+  -- Fold one binding into the registry, keeping the winner for that name.
+  fn observe(reg : Names, name : String, entry : Entry) : Names do
+    match reg do
+      Names(m) ->
+        let winner = match Map.get(m, name, Map.str_cmp) do
+          None -> entry
+          Some(existing) -> if wins(entry, existing) do entry else existing end
+        end
+        Names(Map.insert(m, name, winner, Map.str_cmp))
+    end
+  end
+
+  -- Register [name] -> (node_id, pid) at [clock] (the registrant's VectorClock
+  -- after bumping its own entry). Wins only if causally newer / tiebreak.
+  fn register(reg : Names, name : String, node_id : String, pid : Int, clock : VectorClock) : Names do
+    observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true })
+  end
+
+  -- Unregister [name] at [clock]: a tombstone update carrying the prior binding
+  -- (so concurrent register/unregister tiebreak deterministically). No-op if the
+  -- name is unknown.
+  fn unregister(reg : Names, name : String, clock : VectorClock) : Names do
+    match reg do
+      Names(m) ->
+        match Map.get(m, name, Map.str_cmp) do
+          None -> reg
+          Some(existing) -> observe(reg, name, { existing with clock: clock, present: false })
+        end
+    end
+  end
+
+  -- The (node_id, pid) currently bound to [name], or None (absent or tombstoned).
+  fn lookup(reg : Names, name : String) : Option((String, Int)) do
+    match reg do
+      Names(m) ->
+        match Map.get(m, name, Map.str_cmp) do
+          None    -> None
+          Some(e) -> if e.present do Some((e.node_id, e.pid)) else None end
+        end
+    end
+  end
+
+  fn contains(reg : Names, name : String) : Bool do
+    match lookup(reg, name) do
+      Some(_) -> true
+      None    -> false
+    end
+  end
+
+  -- The names with a present (non-tombstoned) binding.
+  fn names(reg : Names) : List(String) do
+    match reg do
+      Names(m) ->
+        let kept = List.filter(Map.entries(m), fn (kv) ->
+          match kv do (_n, e) -> e.present end)
+        List.map(kept, fn (kv) -> match kv do (n, _e) -> n end)
+    end
+  end
+
+  -- Count of present bindings (tombstones excluded).
+  fn size(reg : Names) : Int do List.length(names(reg)) end
+
+  -- CRDT join: observe every binding of [b] into [a].
+  fn merge(a : Names, b : Names) : Names do
+    match b do
+      Names(mb) -> Map.fold(mb, a, fn (acc, name, entry) -> observe(acc, name, entry))
+    end
+  end
+
+end
