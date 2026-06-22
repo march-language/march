@@ -65,12 +65,19 @@ let codec_candidates (decls : Ast.decl list) : (string * Ast.type_def) list =
       Some (n.Ast.txt, td)
     | _ -> None) decls
 
+(* All type constructor names reachable in a type expression (incl. type args).
+   This ensures Option(Point) pulls in Point for topo ordering. *)
+let rec referenced_ty (t : Ast.ty) : string list =
+  match t with
+  | Ast.TyCon ({ Ast.txt = name; _ }, args) -> name :: List.concat_map referenced_ty args
+  | _ -> []
+
 (* Type names referenced by a record's fields / a variant's ctor args. *)
 let referenced (td : Ast.type_def) : string list =
   match td with
-  | Ast.TDRecord fields -> List.filter_map (fun f -> con_name f.Ast.fld_ty) fields
+  | Ast.TDRecord fields -> List.concat_map (fun f -> referenced_ty f.Ast.fld_ty) fields
   | Ast.TDVariant vars  ->
-    List.concat_map (fun (v : Ast.variant) -> List.filter_map con_name v.Ast.var_args) vars
+    List.concat_map (fun (v : Ast.variant) -> List.concat_map referenced_ty v.Ast.var_args) vars
   | Ast.TDAlias _ -> []
 
 (* Drop candidates that are part of a cycle (T reachable from itself). *)
@@ -98,11 +105,12 @@ let acyclic_codecs (cands : (string * Ast.type_def) list)
 
 let is_codec tbl t = match con_name t with Some n -> List.mem_assoc n tbl | None -> false
 
-(* A "leaf" payload usable inside a fully-typed Option/Result *field* codec: its
-   mangled name, mirror-struct C type, and generic (tagged-slot) decode/encode.
-   Limited to primitives + String/Bytes so the synthetic Option_T/Result_T_E
-   codecs depend only on leaves (no inter-codec ordering); Float/Unit/List and
-   nested record/variant payloads fall back to the raw march_value passthrough. *)
+(* A "leaf" payload usable inside Option/Result field codecs: mangled name,
+   mirror-struct C type, and tagged-slot decode/encode functions.  Float and Unit
+   are included here for use in Result(Float,E) fields (where the payload lives
+   in field 0 of a boxed Result cell, so march_get_float(field) is correct).
+   Option(Float) and Option(Unit) are handled specially in gen_opt_res because
+   they need boxed/mixed semantics rather than the standard niche path. *)
 let leaf_payload (t : Ast.ty)
   : (string * string * (string -> string) * (string -> string)) option =
   match con_name t with
@@ -112,6 +120,12 @@ let leaf_payload (t : Ast.ty)
   | Some "Bool"   -> Some ("Bool", "int64_t",
       (fun s -> Printf.sprintf "march_get_bool(%s)" s),
       (fun v -> Printf.sprintf "march_make_bool((int)(%s))" v))
+  | Some "Float"  -> Some ("Float", "double",
+      (fun s -> Printf.sprintf "march_get_float(%s)" s),
+      (fun v -> Printf.sprintf "march_make_float(%s)" v))
+  | Some "Unit"   -> Some ("Unit", "int32_t",
+      (fun _ -> "0"),
+      (fun _ -> "0"))
   | Some "String" -> Some ("String", "march_slice",
       (fun s -> Printf.sprintf "march_str_borrow(%s)" s),
       (fun v -> Printf.sprintf "march_str_new(%s.ptr, %s.len)" v v))
@@ -122,22 +136,49 @@ let leaf_payload (t : Ast.ty)
 
 type opt_res = OROption of Ast.ty | ORResult of Ast.ty * Ast.ty
 
-(* Recognize an Option(T)/Result(T,E) field whose payloads are supported leaves;
-   returns (mangled codec-type name, structure) for codec generation. *)
-let opt_res_of (t : Ast.ty) : (string * opt_res) option =
+(* Recognize an Option(T)/Result(T,E) field whose payloads are supported leaves
+   or codec types (when tbl is provided); returns (mangled name, structure). *)
+let opt_res_of ?(tbl = []) (t : Ast.ty) : (string * opt_res) option =
+  let name_of ty =
+    match leaf_payload ty with
+    | Some (m,_,_,_) -> Some m
+    | None ->
+      match con_name ty with
+      | Some n when List.mem_assoc n tbl -> Some n
+      | _ -> None in
   match t with
   | Ast.TyCon ({ Ast.txt = "Option"; _ }, [p]) ->
-    (match leaf_payload p with Some (m,_,_,_) -> Some ("Option_" ^ m, OROption p) | None -> None)
+    (match name_of p with Some m -> Some ("Option_" ^ m, OROption p) | None -> None)
   | Ast.TyCon ({ Ast.txt = "Result"; _ }, [a; e]) ->
-    (match leaf_payload a, leaf_payload e with
-     | Some (ma,_,_,_), Some (me,_,_,_) -> Some (Printf.sprintf "Result_%s_%s" ma me, ORResult (a, e))
+    (match name_of a, name_of e with
+     | Some ma, Some me -> Some (Printf.sprintf "Result_%s_%s" ma me, ORResult (a, e))
      | _ -> None)
+  | _ -> None
+
+(* Element type of a List(T) field: leaf or codec. Returns
+   (mangled_elem_name, C_elem_type, decode_slot_expr, encode_val_expr). *)
+let list_elem_of tbl (t : Ast.ty)
+  : (string * string * (string -> string) * (string -> string)) option =
+  match t with
+  | Ast.TyCon ({ Ast.txt = "List"; _ }, [elem]) ->
+    (match leaf_payload elem with
+     | Some x -> Some x
+     | None ->
+       (match con_name elem with
+        | Some n when List.mem_assoc n tbl ->
+          Some (n, n ^ "_c",
+            (fun s -> Printf.sprintf "march_decode_%s(%s)" n s),
+            (fun v -> Printf.sprintf "march_encode_%s(%s)" n v))
+        | _ -> None))
   | _ -> None
 
 (* C type of a record/ctor field in the mirror struct. *)
 let field_c_type tbl (t : Ast.ty) : string =
-  match opt_res_of t with
+  match opt_res_of ~tbl t with
   | Some (nm, _) -> nm ^ "_c"
+  | None ->
+  match list_elem_of tbl t with
+  | Some (m, _, _, _) -> "List_" ^ m ^ "_c"
   | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> "int64_t"
@@ -148,8 +189,11 @@ let field_c_type tbl (t : Ast.ty) : string =
 
 (* Read a slot value into its mirror-struct representation. *)
 let decode_expr tbl (t : Ast.ty) (slot : string) : string =
-  match opt_res_of t with
+  match opt_res_of ~tbl t with
   | Some (nm, _) -> Printf.sprintf "march_decode_%s(%s)" nm slot
+  | None ->
+  match list_elem_of tbl t with
+  | Some (m, _, _, _) -> Printf.sprintf "march_decode_List_%s(%s)" m slot
   | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> slot
@@ -160,8 +204,11 @@ let decode_expr tbl (t : Ast.ty) (slot : string) : string =
 
 (* Build a slot value from a mirror-struct field. *)
 let encode_expr tbl (t : Ast.ty) (fld : string) : string =
-  match opt_res_of t with
+  match opt_res_of ~tbl t with
   | Some (nm, _) -> Printf.sprintf "march_encode_%s(%s)" nm fld
+  | None ->
+  match list_elem_of tbl t with
+  | Some (m, _, _, _) -> Printf.sprintf "march_encode_List_%s(%s)" m fld
   | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> fld
@@ -272,24 +319,78 @@ let gen_variant tbl (name : string) (vars : Ast.variant list) (b : Buffer.t) =
   Buffer.add_string b "    return march_make_variant(o.tag, 0, (const march_value *)0);\n}\n"
 
 (* Mirror struct + decode + encode for one synthetic Option(T)/Result(T,E) codec.
-   Option niche: None=0, Some(x)=x (the payload in tagged/generic form).
+   Option niche (default): None=0, Some(x)=x in tagged/generic form.
+   Option(Float): fully boxed (0.0 aliases None=0); Option(Unit): mixed (niche None, boxed Some).
+   Option(nested codec type): niche — heap ptr is always non-zero.
    Result boxed: Ok=tag 0 / Err=tag 1, payload at field 0 (tagged/generic). *)
-let gen_opt_res ((nm, kind) : string * opt_res) (b : Buffer.t) =
+let gen_opt_res tbl ((nm, kind) : string * opt_res) (b : Buffer.t) =
+  let get_codec ty =
+    match leaf_payload ty with
+    | Some x -> x
+    | None ->
+      (match con_name ty with
+       | Some n when List.mem_assoc n tbl ->
+         (n, n ^ "_c",
+          (fun s -> Printf.sprintf "march_decode_%s(%s)" n s),
+          (fun v -> Printf.sprintf "march_encode_%s(%s)" n v))
+       | _ -> failwith ("gen_opt_res: unsupported payload type")) in
   match kind with
   | OROption p ->
-    let (_, cty, dec, enc) = Option.get (leaf_payload p) in
-    Buffer.add_string b (Printf.sprintf
-      "typedef struct { int32_t is_some; %s value; } %s_c;\n" cty nm);
-    Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" nm nm);
-    Buffer.add_string b (Printf.sprintf
-      "    %s_c o;\n    if (v == 0) o.is_some = 0;\n    else { o.is_some = 1; o.value = %s; }\n    return o;\n}\n"
-      nm (dec "v"));
-    Buffer.add_string b (Printf.sprintf "static march_value march_encode_%s(%s_c o) {\n" nm nm);
-    Buffer.add_string b (Printf.sprintf
-      "    if (!o.is_some) return march_none();\n    return march_some(%s);\n}\n" (enc "o.value"))
+    (match con_name p with
+     | Some "Float" ->
+       (* Fully boxed: 0.0 aliases None=0 in the niche, so both arms are heap cells *)
+       Buffer.add_string b (Printf.sprintf
+         "typedef struct { int32_t is_some; double value; } %s_c;\n" nm);
+       Buffer.add_string b (Printf.sprintf
+         "static %s_c march_decode_%s(march_value v) {\n    %s_c o;\n\
+         \    if (march_variant_tag(v) == 0) o.is_some = 0;\n\
+         \    else { o.is_some = 1; o.value = march_get_float(march_variant_field(v, 0)); }\n\
+         \    return o;\n}\n" nm nm nm);
+       Buffer.add_string b (Printf.sprintf
+         "static march_value march_encode_%s(%s_c o) {\n\
+         \    if (!o.is_some) return march_none_boxed();\n\
+         \    return march_some_boxed(march_make_float(o.value));\n}\n" nm nm)
+     | Some "Unit" ->
+       (* Mixed: None=niche 0, Some(())=boxed heap cell; no value field *)
+       Buffer.add_string b (Printf.sprintf
+         "typedef struct { int32_t is_some; } %s_c;\n" nm);
+       Buffer.add_string b (Printf.sprintf
+         "static %s_c march_decode_%s(march_value v) {\n    %s_c o;\n\
+         \    o.is_some = (v != 0);\n    return o;\n}\n" nm nm nm);
+       Buffer.add_string b (Printf.sprintf
+         "static march_value march_encode_%s(%s_c o) {\n\
+         \    if (!o.is_some) return march_none();\n\
+         \    return march_some_boxed(0);  /* Unit Some is boxed */\n}\n" nm nm)
+     | Some n when List.mem_assoc n tbl ->
+       (* Nested codec type: heap pointer — niche is safe (non-zero = Some(T)) *)
+       Buffer.add_string b (Printf.sprintf
+         "typedef struct { int32_t is_some; %s_c value; } %s_c;\n" n nm);
+       Buffer.add_string b (Printf.sprintf
+         "static %s_c march_decode_%s(march_value v) {\n    %s_c o;\n\
+         \    if (v == 0) { o.is_some = 0; }\n\
+         \    else { o.is_some = 1; o.value = march_decode_%s(v); }\n\
+         \    return o;\n}\n" nm nm nm n);
+       Buffer.add_string b (Printf.sprintf
+         "static march_value march_encode_%s(%s_c o) {\n\
+         \    if (!o.is_some) return march_none();\n\
+         \    return march_some(march_encode_%s(o.value));\n}\n" nm nm n)
+     | _ ->
+       (* Niche path: None=0, Some(x)=x in tagged generic form *)
+       let (_, cty, dec, enc) = get_codec p in
+       Buffer.add_string b (Printf.sprintf
+         "typedef struct { int32_t is_some; %s value; } %s_c;\n" cty nm);
+       Buffer.add_string b (Printf.sprintf
+         "static %s_c march_decode_%s(march_value v) {\n    %s_c o;\n\
+         \    if (v == 0) o.is_some = 0;\n\
+         \    else { o.is_some = 1; o.value = %s; }\n    return o;\n}\n"
+         nm nm nm (dec "v"));
+       Buffer.add_string b (Printf.sprintf
+         "static march_value march_encode_%s(%s_c o) {\n\
+         \    if (!o.is_some) return march_none();\n\
+         \    return march_some(%s);\n}\n" nm nm (enc "o.value")))
   | ORResult (a, e) ->
-    let (_, cta, deca, enca) = Option.get (leaf_payload a) in
-    let (_, cte, dece, ence) = Option.get (leaf_payload e) in
+    let (_, cta, deca, enca) = get_codec a in
+    let (_, cte, dece, ence) = get_codec e in
     Buffer.add_string b (Printf.sprintf
       "typedef struct { int32_t is_ok; %s ok; %s err; } %s_c;\n" cta cte nm);
     Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" nm nm);
@@ -302,11 +403,36 @@ let gen_opt_res ((nm, kind) : string * opt_res) (b : Buffer.t) =
       "    if (o.is_ok) return march_ok(%s);\n    return march_err(%s);\n}\n"
       (enca "o.ok") (ence "o.err"))
 
-(* Distinct supported Option/Result field types across the emitted record/variant
-   codecs (for the synthetic-codec block emitted ahead of them). *)
-let collect_opt_res (records : (string * Ast.type_def) list) : (string * opt_res) list =
+(* Mirror struct + decode + encode for one synthetic List(T) codec.
+   The decoded struct is malloc-owned; the caller must free items. *)
+let gen_list tbl (elem_ty : Ast.ty) (b : Buffer.t) =
+  match list_elem_of tbl (Ast.TyCon ({ Ast.txt = "List"; Ast.span = Ast.dummy_span }, [elem_ty])) with
+  | None -> ()
+  | Some (m, cty, dec, enc) ->
+    let nm = "List_" ^ m in
+    Buffer.add_string b (Printf.sprintf
+      "/* %s_c: malloc-owned array; caller must free items. */\n" nm);
+    Buffer.add_string b (Printf.sprintf
+      "typedef struct { %s *items; int32_t length; } %s_c;\n" cty nm);
+    Buffer.add_string b (Printf.sprintf
+      "static %s_c march_decode_%s(march_value v) {\n    %s_c o;\n\
+      \    o.length = march_list_length(v);\n\
+      \    o.items = o.length ? (%s *)malloc(o.length * sizeof(%s)) : 0;\n\
+      \    for (int32_t i = 0; i < o.length; i++) {\n\
+      \        o.items[i] = %s;\n\
+      \        v = march_variant_field(v, 1);\n    }\n    return o;\n}\n"
+      nm nm nm cty cty (dec "march_variant_field(v, 0)"));
+    Buffer.add_string b (Printf.sprintf
+      "static march_value march_encode_%s(%s_c o) {\n\
+      \    march_value tail = march_list_nil();\n\
+      \    for (int32_t i = o.length - 1; i >= 0; i--)\n\
+      \        tail = march_list_cons(%s, tail);\n\
+      \    return tail;\n}\n" nm nm (enc "o.items[i]"))
+
+(* Collect opt-res and list codecs that need emitting for a given type_def. *)
+let collect_opt_res tbl (records : (string * Ast.type_def) list) : (string * opt_res) list =
   let seen = Hashtbl.create 16 and order = ref [] in
-  let add t = match opt_res_of t with
+  let add t = match opt_res_of ~tbl t with
     | Some (nm, k) -> if not (Hashtbl.mem seen nm) then (Hashtbl.replace seen nm (); order := (nm, k) :: !order)
     | None -> () in
   List.iter (fun (_, td) -> match td with
@@ -428,23 +554,55 @@ let gen_c (decls : Ast.decl list) : string =
     |> List.filter_map con_name
     |> List.filter (fun n -> List.mem_assoc n tbl) in
   let needed = topo_order tbl extern_type_names in
+  (* Detect whether any List field codecs will be emitted (need stdlib.h). *)
+  let needs_stdlib =
+    List.exists (fun (_, td) -> match td with
+      | Ast.TDRecord fs  -> List.exists (fun f -> list_elem_of tbl f.Ast.fld_ty <> None) fs
+      | Ast.TDVariant vs -> List.exists (fun v -> List.exists (fun a -> list_elem_of tbl a <> None) v.Ast.var_args) vs
+      | _ -> false) tbl in
   let b = Buffer.create 1024 in
   Buffer.add_string b
     "/* Generated by `forge ffi gen-c` — fill in the TODOs, then list this file\n\
     \   under [ffi] sources in forge.toml. */\n\
-     #include \"march_ffi.h\"\n#include <stdint.h>\n\n";
+     #include \"march_ffi.h\"\n#include <stdint.h>\n";
+  if needs_stdlib then Buffer.add_string b "#include <stdlib.h>\n";
+  Buffer.add_char b '\n';
   if needed <> [] then begin
     Buffer.add_string b "/* ── Generated codecs (record/variant <-> repr-C mirror) ── */\n";
-    (* Synthetic Option(T)/Result(T,E) field codecs first — record/variant mirror
-       structs reference them by value. They depend only on leaf payloads. *)
-    let emitted = List.filter_map (fun n -> match List.assoc_opt n tbl with
-      | Some td -> Some (n, td) | None -> None) needed in
-    List.iter (fun or_ty -> gen_opt_res or_ty b; Buffer.add_char b '\n')
-      (collect_opt_res emitted);
+    (* Emit opt-res and list codecs interleaved with their record/variant types
+       in topo order, so a nested type (e.g. Point_c) is always defined before
+       any synthetic codec that references it (e.g. Option_Point_c). *)
+    let emitted_or  = Hashtbl.create 8 in
+    let emitted_lst = Hashtbl.create 8 in
+    let emit_deps_for_td td =
+      let field_types = match td with
+        | Ast.TDRecord fs  -> List.map (fun f -> f.Ast.fld_ty) fs
+        | Ast.TDVariant vs -> List.concat_map (fun v -> v.Ast.var_args) vs
+        | _ -> [] in
+      List.iter (fun ft ->
+        (* opt-res synthetic codec for this field, if any *)
+        (match opt_res_of ~tbl ft with
+         | Some (nm, k) when not (Hashtbl.mem emitted_or nm) ->
+           gen_opt_res tbl (nm, k) b; Buffer.add_char b '\n';
+           Hashtbl.replace emitted_or nm ()
+         | _ -> ());
+        (* list codec for this field, if any *)
+        (match list_elem_of tbl ft with
+         | Some (m, _, _, _) when not (Hashtbl.mem emitted_lst m) ->
+           (match ft with
+            | Ast.TyCon (_, [elem]) -> gen_list tbl elem b; Buffer.add_char b '\n'
+            | _ -> ());
+           Hashtbl.replace emitted_lst m ()
+         | _ -> ())
+      ) field_types in
     List.iter (fun n -> match List.assoc_opt n tbl with
-      | Some (Ast.TDRecord fs)  -> gen_record tbl n fs b; Buffer.add_char b '\n'
-      | Some (Ast.TDVariant vs) -> gen_variant tbl n vs b; Buffer.add_char b '\n'
-      | _ -> ()) needed
+      | Some td ->
+        emit_deps_for_td td;
+        (match td with
+         | Ast.TDRecord fs  -> gen_record tbl n fs b; Buffer.add_char b '\n'
+         | Ast.TDVariant vs -> gen_variant tbl n vs b; Buffer.add_char b '\n'
+         | _ -> ())
+      | None -> ()) needed
   end;
   List.iter (function
     | Ast.DExtern (edef, _) ->

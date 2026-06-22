@@ -16,19 +16,21 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   mirror structs + `march_decode_T`/`march_encode_T` so the author works with
   plain C structs, never touching slots (`test/native/ffi_codec`, spec §6.4).
   Remaining sub-gaps:
-  - **Field kinds.** The generated mirror fully types `Int`/`Bool` (raw
-    `int64_t`), `Float` (`double`), `String`/`Bytes` (`march_slice`), nested
-    records/variants, and now **`Option(T)`/`Result(T,E)` fields** whose payloads
-    are leaf types (Int/Bool/String/Bytes) — emitted as `Option_T_c` /
-    `Result_T_E_c` mirror structs with niche/boxed decode-encode
-    (`test/native/ffi_optres`). Still passed through as raw `march_value`:
-    `Option`/`Result` fields with **Float/Unit/List/nested** payloads, and
-    `resource`/`List` fields (author uses `march_some`/`ok`/`err` /
-    `march_resource_get` + accessors).
+  - **Field kinds — DONE for all leaf types, Options, Results, Lists, and nested
+    codecs.** The generated mirror fully types `Int`/`Bool` (raw `int64_t`),
+    `Float` (`double`), `String`/`Bytes` (`march_slice`), nested records/variants,
+    `Option(T)`/`Result(T,E)` fields with any supported payload (including
+    `Float`/`Unit` via boxed codecs — `Option_Float_c` fully boxed,
+    `Option_Unit_c` mixed niche — and nested record/variant types via niche-safe
+    heap-ptr path), and `List(T)` fields as malloc-owned C arrays (`List_T_c`
+    with decode via `march_list_length` + spine traversal, encode via reverse-loop
+    `march_list_cons`). Topo ordering recurses into type args so `Option(Point)`
+    emits `Point_c` before `Option_Point_c`. `march_list_nil`/`cons`/`length`/`nth`
+    added to the ABI. Verified: `test/native/ffi_optres`, `test/native/ffi_codec2`.
+    Still passed through as raw `march_value`: `resource` fields.
   - **Recursive types** (reachable from themselves) and **generic** record/
     variant types get no generated codec — a by-value mirror can't represent
     them; they fall back to the `march_value` passthrough.
-  - **No List-copy** (§6.6): `List(T)` ⇄ C array+length is unbuilt.
   - **Rust `#[derive(Encoder/Decoder)]`** — the Rust analog of these codecs — is
     the next follow-on; it reuses this exact ABI.
 - **`Option(Float)` / `Option(Unit)` returns — DONE** via `march_some_boxed` /
@@ -140,9 +142,12 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   borrow/net-zero mode ships; consume would leak a ref), auto cargo build +
   extern-block generation inside `forge build` (manual today), publishing the
   `march` crate (path-only), and `[[ffi.rust]]`. The OCaml layer is still future.
-- **No native→March callbacks (upcalls).** Bindings cannot call back into March
-  closures. Would need `march_call(env, fn, args…)` and passing closures across
-  the boundary as resources (spec §19). Future.
+- **Native→March upcalls — DONE.** `march_call(closure, nargs, args)` in the
+  ABI — bindings receive March closures as function-typed extern params and call
+  back into them. Args use NATIVE SLOT REP (raw machine int for Int, NOT
+  `march_make_int`); return is the generic tagged word (`march_get_int` to
+  unpack). Verified: `ffi_apply1`/`ffi_count_matching` → `test/native/ffi_upcall`
+  → 42/5.
 
 ## Unrelated pre-existing (not FFI)
 
