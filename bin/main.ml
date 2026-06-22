@@ -111,7 +111,6 @@ let stdlib_file_list = [
   "string.march";
   "iolist.march";
   "html.march";
-  "dom.march";
   "sigil.march";
   "http.march";
   "http_transport.march";
@@ -452,6 +451,7 @@ let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
 let pmap_threshold = ref 1024    (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
+let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march_runtime.mjs *)
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
    versioned dispatch table so their functions can be hot-swapped at runtime. *)
 let hot_reload_prefix = ref None
@@ -1250,27 +1250,30 @@ let compile filename =
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;
-          (* Copy runtime .mjs files alongside the output so imports work *)
-          let out_dir = Filename.dirname out_bin in
-          let copy_runtime name =
-            let dest = Filename.concat out_dir name in
-            let candidates = [
-              Filename.concat "runtime" name;
-              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../runtime" name);
-              Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../../runtime" name);
-            ] in
-            match List.find_opt Sys.file_exists candidates with
-            | Some src ->
-              let ic = open_in src in
-              let content = really_input_string ic (in_channel_length ic) in
-              close_in ic;
-              let oc2 = open_out dest in
-              output_string oc2 content;
-              close_out oc2
-            | None -> Printf.eprintf "march: warning: cannot find %s\n" name
-          in
-          copy_runtime "march_runtime.mjs";
-          copy_runtime "march_dom.mjs";
+          (* Copy runtime .mjs files alongside the output so imports work,
+             unless --no-copy-runtime is given (e.g. when dune manages them) *)
+          if not !no_copy_runtime then begin
+            let out_dir = Filename.dirname out_bin in
+            let copy_runtime name =
+              let dest = Filename.concat out_dir name in
+              let candidates = [
+                Filename.concat "runtime" name;
+                Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../runtime" name);
+                Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../../runtime" name);
+              ] in
+              match List.find_opt Sys.file_exists candidates with
+              | Some src ->
+                let ic = open_in src in
+                let content = really_input_string ic (in_channel_length ic) in
+                close_in ic;
+                let oc2 = open_out dest in
+                output_string oc2 content;
+                close_out oc2
+              | None -> Printf.eprintf "march: warning: cannot find %s\n" name
+            in
+            copy_runtime "march_runtime.mjs";
+            copy_runtime "march_dom.mjs"
+          end;
           Printf.eprintf "compiled %s\n" out_bin
         end else begin
         (* CAS: check for a cached binary before running clang *)
@@ -1994,6 +1997,7 @@ let () =
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
+    ("--no-copy-runtime", Arg.Set no_copy_runtime, " (JS) Skip auto-copy of march_runtime.mjs / march_dom.mjs (for build tools that manage them)");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
