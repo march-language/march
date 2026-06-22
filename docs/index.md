@@ -208,6 +208,7 @@ end
 | [Actors](actors.md) | Spawn, send, receive, linking, monitoring |
 | [Supervision](supervision.md) | Supervision trees, restart strategies |
 | [Interfaces](interfaces.md) | `interface`, `impl`, `derive` |
+| [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
 | [Standard Library](stdlib.md) | List, Map, String, Option, Result, and more |
 | [REPL](repl.md) | Interactive session guide |
 | [Tooling](tooling.md) | LSP, Zed, forge build tool |
