@@ -74,6 +74,32 @@ fn counter_value(c: ResourceArc<Counter>) -> i64 {
     c.get().n
 }
 
-// ── Slice 4: the binding manifest ───────────────────────────────────────────
+// ── Slice 5: Option(Float) — fully-boxed ABI ────────────────────────────────
 
-march::init!("demo", [add, shout, parse, boom, translate, area, counter_new, counter_value]);
+/// Return Some(f) if f > 0.0, else None — exercises the boxed Option<f64> path.
+#[march]
+fn maybe_float(f: f64) -> Option<f64> {
+    if f > 0.0 { Some(f) } else { None }
+}
+
+/// Accept an Option<f64> — exercises boxed Option<f64> decode.
+#[march]
+fn unwrap_float_or(v: Option<f64>, default: f64) -> f64 {
+    v.unwrap_or(default)
+}
+
+// ── Slice 6: ConsumeResourceArc — take ownership of a resource ──────────────
+
+/// Consume a Counter resource and return its value. Declared `consume c` in
+/// the March extern block — March transfers the reference, Rust drops it.
+#[march]
+fn counter_finish(c: march::ConsumeResourceArc<Counter>) -> i64 {
+    // Read the stored value; Drop will call march_drop when this fn returns.
+    c.get().n
+}
+
+// ── Slice 7: the binding manifest ───────────────────────────────────────────
+
+march::init!("demo", [add, shout, parse, boom, translate, area,
+    counter_new, counter_value, counter_finish,
+    maybe_float, unwrap_float_or]);

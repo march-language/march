@@ -1,14 +1,17 @@
-//! `ResourceArc<T>` — an `Arc`-like handle to a native Rust value living behind
-//! a March opaque `resource` (§4.8). March manages the reference count; when it
-//! drops the last reference the registered destructor runs `Drop` on the `T`.
+//! `ResourceArc<T>` and `ConsumeResourceArc<T>` — handles to a native Rust
+//! value living behind a March opaque `resource` (§4.8). March manages the
+//! reference count; when it drops the last reference the registered destructor
+//! runs `Drop` on the `T`.
 //!
 //! Ownership notes:
 //!   * `ResourceArc::new(t)` mints an owned handle (rc = 1).
 //!   * Returning it (`to_march`) transfers that reference to March.
-//!   * Receiving one as a by-value parameter borrows it for the call: the shim
-//!     `march_dup`s on entry and `march_drop`s on `Drop`, a net-zero that never
-//!     corrupts March's count regardless of borrow/consume. (A consume mode that
-//!     frees from Rust is a documented follow-up.)
+//!   * **Borrow** (`ResourceArc<T>` param): the shim `march_dup`s on entry and
+//!     `march_drop`s on `Drop` — a net-zero that never corrupts March's count.
+//!     The generated extern block uses the default (borrow) ownership.
+//!   * **Consume** (`ConsumeResourceArc<T>` param): March transfers its own
+//!     reference — the shim does NOT `march_dup`. The Rust side calls
+//!     `march_drop` in `Drop`. The generated extern block uses `consume h`.
 
 use crate::sys::*;
 use crate::value::{FromMarch, ToMarch};
@@ -75,6 +78,50 @@ impl<T: 'static> FromMarch for ResourceArc<T> {
 
 impl<T: 'static> Drop for ResourceArc<T> {
     fn drop(&mut self) {
+        unsafe { march_drop(self.v) };
+    }
+}
+
+// ── ConsumeResourceArc<T> ────────────────────────────────────────────────────
+
+/// A **consuming** handle to a native `T` behind a March resource.
+///
+/// Use this as a parameter type when the March caller uses `consume h`:
+/// March does NOT increment the reference count before the call, so Rust
+/// receives the existing reference and must `march_drop` it when done (which
+/// `Drop` does automatically).  The generated extern block emits `consume h`
+/// for this parameter.
+///
+/// This type can only appear as a **parameter** — it cannot be returned (use
+/// [`ResourceArc`] to mint a new resource and return it).
+pub struct ConsumeResourceArc<T: 'static> {
+    v: march_value,
+    _pd: PhantomData<T>,
+}
+
+impl<T: 'static> ConsumeResourceArc<T> {
+    /// Borrow the native `T` for the duration of the call.
+    pub fn get(&self) -> &T {
+        let tid = type_id_for::<T>();
+        unsafe { &*(march_resource_get(self.v, tid) as *const T) }
+    }
+
+    /// The underlying March value word (advanced use).
+    pub fn as_value(&self) -> march_value {
+        self.v
+    }
+}
+
+impl<T: 'static> FromMarch for ConsumeResourceArc<T> {
+    fn from_march(v: march_value) -> Self {
+        // Do NOT march_dup: March transferred ownership to us.
+        ConsumeResourceArc { v, _pd: PhantomData }
+    }
+}
+
+impl<T: 'static> Drop for ConsumeResourceArc<T> {
+    fn drop(&mut self) {
+        // Release the reference we received from March.
         unsafe { march_drop(self.v) };
     }
 }

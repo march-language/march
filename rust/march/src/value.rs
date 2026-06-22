@@ -141,6 +141,39 @@ impl<T: FromMarch> FromMarch for Option<T> {
     }
 }
 
+// ── Option(Float): fully-boxed ABI (not niche) ──────────────────────────────
+//
+// `Option(Float)` uses heap cells for BOTH Some and None:
+//   Some(f) → `march_some_boxed(march_make_float(f))` (tag 1 cell)
+//   None    → `march_none_boxed()`                    (tag 0 cell)
+// The niche form (`march_some`/`march_none`) aliases `None=0` with `Some(0.0)`,
+// so it cannot be used.  Matched by `march_variant_tag`, not a null-check.
+//
+// The `#[march]` and `#[derive(Encoder/Decoder)]` macros call these helpers
+// when they detect `Option<f64>` (a concrete type, not the generic `Option<T>`
+// path, which uses the niche form above).
+
+/// Encode `Option<f64>` using the fully-boxed ABI.
+#[doc(hidden)]
+pub fn encode_option_f64(v: Option<f64>) -> march_value {
+    match v {
+        Some(f) => unsafe { march_some_boxed(march_make_float(f)) },
+        None => unsafe { march_none_boxed() },
+    }
+}
+
+/// Decode `Option<f64>` from the fully-boxed ABI (tag 0 = None, tag 1 = Some).
+#[doc(hidden)]
+pub fn decode_option_f64(v: march_value) -> Option<f64> {
+    unsafe {
+        if march_variant_tag(v) == 0 {
+            None
+        } else {
+            Some(march_get_float(march_variant_field(v, 0)))
+        }
+    }
+}
+
 // ── Result (boxed: Ok=tag 0, Err=tag 1) ─────────────────────────────────────
 
 impl<T: ToMarch, E: ToMarch> ToMarch for Result<T, E> {

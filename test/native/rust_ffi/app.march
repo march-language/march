@@ -15,11 +15,20 @@ mod App do
     fn area(s: Shape): Int = "area"
     fn counter_new(start: Int): Counter = "counter_new"
     fn counter_value(c: Counter): Int = "counter_value"
+    fn counter_finish(consume c: Counter): Int = "counter_finish"
+    fn maybe_float(f: Float): Option(Float) = "maybe_float"
+    fn unwrap_float_or(v: Option(Float), default: Float): Float = "unwrap_float_or"
   end
   fn shown(r: Result(Int, String)) : String do
     match r do
       Ok(n) -> int_to_string(n)
       Err(e) -> e
+    end
+  end
+  fn shown_opt_float(v: Option(Float)) : String do
+    match v do
+      Some(f) -> float_to_string(f)
+      None -> "none"
     end
   end
   fn main() : Unit do
@@ -34,5 +43,13 @@ mod App do
     println(int_to_string(area(Rect(4, 6))))        -- 24
     let c = counter_new(41)
     println(int_to_string(counter_value(c)))        -- 41
+    -- ConsumeResourceArc: take ownership of a fresh counter
+    let c2 = counter_new(99)
+    println(int_to_string(counter_finish(c2)))       -- 99
+    -- Option(Float) round-trip via fully-boxed ABI
+    println(shown_opt_float(maybe_float(3.14)))     -- 3.14
+    println(shown_opt_float(maybe_float(-1.0)))     -- none
+    println(float_to_string(unwrap_float_or(maybe_float(2.5), 0.0)))   -- 2.5
+    println(float_to_string(unwrap_float_or(maybe_float(-1.0), 9.9)))  -- 9.9
   end
 end
