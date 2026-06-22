@@ -1,0 +1,195 @@
+-- RemoteCall: the L4 remote-procedure-call safety core (P1 L4).
+--
+-- A remote function reference is {module, name, sig_hash, impl_hash}, stamped at
+-- compile time for a function the author has *enrolled* as a remote target.
+-- `Node.call` frames {fref, msgpack(args), reply_to, deadline} over the
+-- net-kernel; the remote runs a CAS admission check before invoking:
+--   * sig_hash mismatch  -> Reject(TypeMismatch)  — incompatible signature, a
+--     hard type error; never invoke.
+--   * impl_hash mismatch -> Reject(VersionSkew)   — same type, different body;
+--     the peer could (P6) ship the matching body, otherwise reject.
+--   * both match          -> Accept               — invoke the local native copy.
+-- Failure isolation: deadline expiry, netsplit, or a remote crash come back as a
+-- CallError (DeadlineExceeded / NoConnection / RemoteExit), never a hang.
+--
+-- This module is the *pure* core: the reference, the wire protocol (MessagePack
+-- codecs for request/reply, framable inside a NetFrame), the error taxonomy, and
+-- the admission decision. The enroll/stub/registry runtime mechanism (the actual
+-- function-by-identity dispatch) and the socket transport are separate layers.
+mod RemoteCall do
+
+  -- A compile-time-stamped reference to an enrolled remote target. sig_hash pins
+  -- the (argument, return) TYPE; impl_hash pins the compiled body (a Merkle root
+  -- over the call graph + type usage, from the CAS).
+  type RemoteRef = { module_name : String, fn_name : String, sig_hash : String, impl_hash : String }
+
+  -- Why a remote call could not return its target's result.
+  type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew
+
+  -- The CAS admission decision for an inbound call against the local target.
+  type Verdict = Accept | Reject(CallError)
+
+  -- A call result: the MessagePack-encoded return value, or a failure.
+  type ReplyResult = Returned(List(Int)) | Failed(CallError)
+
+  -- A framed call. `args` is the MessagePack-encoded argument tuple; `reply_to`
+  -- is the caller's global Pid; `deadline` is an absolute time (ms) after which
+  -- the caller stops waiting; `correlation` matches a reply to its request.
+  type CallRequest = { fref : RemoteRef, args : List(Int), reply_to : Pid, deadline : Int, correlation : Int }
+
+  type CallReply = { correlation : Int, result : ReplyResult }
+
+  -- ── Constructors ──────────────────────────────────────────────────────────
+
+  fn remote_ref(module_name : String, fn_name : String, sig_hash : String, impl_hash : String) : RemoteRef do
+    { module_name: module_name, fn_name: fn_name, sig_hash: sig_hash, impl_hash: impl_hash }
+  end
+
+  fn request(fref : RemoteRef, args : List(Int), reply_to : Pid, deadline : Int, correlation : Int) : CallRequest do
+    { fref: fref, args: args, reply_to: reply_to, deadline: deadline, correlation: correlation }
+  end
+
+  fn ok_reply(correlation : Int, payload : List(Int)) : CallReply do
+    { correlation: correlation, result: Returned(payload) }
+  end
+
+  fn err_reply(correlation : Int, e : CallError) : CallReply do
+    { correlation: correlation, result: Failed(e) }
+  end
+
+  -- ── The safety core ───────────────────────────────────────────────────────
+
+  -- CAS admission: does the inbound ref agree with the local target's hashes?
+  fn verify(local_sig : String, local_impl : String, fref : RemoteRef) : Verdict do
+    if fref.sig_hash != local_sig do
+      Reject(TypeMismatch)
+    else
+      if fref.impl_hash != local_impl do
+        Reject(VersionSkew)
+      else
+        Accept
+      end
+    end
+  end
+
+  fn is_accept(v : Verdict) : Bool do
+    match v do
+      Accept    -> true
+      Reject(_) -> false
+    end
+  end
+
+  fn error_message(e : CallError) : String do
+    match e do
+      DeadlineExceeded -> "deadline exceeded"
+      NoConnection     -> "no connection to peer"
+      RemoteExit(s)    -> "remote process exited: " ++ s
+      TypeMismatch     -> "signature mismatch (incompatible types)"
+      VersionSkew      -> "implementation mismatch (version skew)"
+    end
+  end
+
+  -- ── MessagePack wire codecs (framable inside a NetFrame) ──────────────────
+
+  pfn ref_to_value(r : RemoteRef) do
+    Msgpack.array(
+      Cons(Msgpack.str(r.module_name),
+      Cons(Msgpack.str(r.fn_name),
+      Cons(Msgpack.str(r.sig_hash),
+      Cons(Msgpack.str(r.impl_hash), Nil)))))
+  end
+
+  pfn ref_of_value(v) : Result(RemoteRef, String) do
+    match v do
+      Msgpack.Array(Cons(Msgpack.Str(m),
+                    Cons(Msgpack.Str(f),
+                    Cons(Msgpack.Str(sh),
+                    Cons(Msgpack.Str(ih), Nil))))) ->
+        Ok({ module_name: m, fn_name: f, sig_hash: sh, impl_hash: ih })
+      _ -> Err("RemoteCall: malformed RemoteRef")
+    end
+  end
+
+  pfn error_to_value(e : CallError) do
+    match e do
+      DeadlineExceeded -> Msgpack.array(Cons(Msgpack.int(0), Nil))
+      NoConnection     -> Msgpack.array(Cons(Msgpack.int(1), Nil))
+      RemoteExit(s)    -> Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.str(s), Nil)))
+      TypeMismatch     -> Msgpack.array(Cons(Msgpack.int(3), Nil))
+      VersionSkew      -> Msgpack.array(Cons(Msgpack.int(4), Nil))
+    end
+  end
+
+  pfn error_of_value(v) : Result(CallError, String) do
+    match v do
+      Msgpack.Array(Cons(Msgpack.Int(0), Nil)) -> Ok(DeadlineExceeded)
+      Msgpack.Array(Cons(Msgpack.Int(1), Nil)) -> Ok(NoConnection)
+      Msgpack.Array(Cons(Msgpack.Int(2), Cons(Msgpack.Str(s), Nil))) -> Ok(RemoteExit(s))
+      Msgpack.Array(Cons(Msgpack.Int(3), Nil)) -> Ok(TypeMismatch)
+      Msgpack.Array(Cons(Msgpack.Int(4), Nil)) -> Ok(VersionSkew)
+      _ -> Err("RemoteCall: malformed CallError")
+    end
+  end
+
+  fn encode_request(req : CallRequest) : List(Int) do
+    Msgpack.encode(Msgpack.array(
+      Cons(ref_to_value(req.fref),
+      Cons(Msgpack.bin(req.args),
+      Cons(GlobalPid.to_value(req.reply_to),
+      Cons(Msgpack.int(req.deadline),
+      Cons(Msgpack.int(req.correlation), Nil)))))))
+  end
+
+  fn decode_request(bytes : List(Int)) : Result(CallRequest, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v)  ->
+        match v do
+          Msgpack.Array(Cons(rv,
+                        Cons(Msgpack.Bin(args),
+                        Cons(pv,
+                        Cons(Msgpack.Int(dl),
+                        Cons(Msgpack.Int(corr), Nil)))))) ->
+            match ref_of_value(rv) do
+              Err(e) -> Err(e)
+              Ok(fref) ->
+                match GlobalPid.of_value(pv) do
+                  Err(e)  -> Err(e)
+                  Ok(pid) -> Ok({ fref: fref, args: args, reply_to: pid, deadline: dl, correlation: corr })
+                end
+            end
+          _ -> Err("RemoteCall: malformed CallRequest")
+        end
+    end
+  end
+
+  fn encode_reply(rep : CallReply) : List(Int) do
+    let rv = match rep.result do
+      Returned(payload) -> Msgpack.array(Cons(Msgpack.int(0), Cons(Msgpack.bin(payload), Nil)))
+      Failed(e)         -> Msgpack.array(Cons(Msgpack.int(1), Cons(error_to_value(e), Nil)))
+    end
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(rep.correlation), Cons(rv, Nil))))
+  end
+
+  fn decode_reply(bytes : List(Int)) : Result(CallReply, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v)  ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(corr), Cons(rv, Nil))) ->
+            match rv do
+              Msgpack.Array(Cons(Msgpack.Int(0), Cons(Msgpack.Bin(payload), Nil))) ->
+                Ok({ correlation: corr, result: Returned(payload) })
+              Msgpack.Array(Cons(Msgpack.Int(1), Cons(ev, Nil))) ->
+                match error_of_value(ev) do
+                  Err(e)  -> Err(e)
+                  Ok(ce)  -> Ok({ correlation: corr, result: Failed(ce) })
+                end
+              _ -> Err("RemoteCall: malformed CallReply result")
+            end
+          _ -> Err("RemoteCall: malformed CallReply")
+        end
+    end
+  end
+
+end

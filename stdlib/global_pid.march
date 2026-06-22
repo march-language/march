@@ -1,0 +1,51 @@
+-- GlobalPid: a serializable, cluster-wide process handle (P1 L4 prerequisite).
+--
+-- Location-transparent `send`/`cast`/`call` need a process identity that
+-- survives the wire. A global Pid is {NodeId, local_pid, creation}: the owning
+-- node, the node-local scheduler pid (the runtime's integer PID), and a creation
+-- counter that distinguishes a *restarted* node's reused local pids from the
+-- originals (so a stale Pid from before a restart is detectably stale). It
+-- round-trips through MessagePack to ride inside a NetFrame.
+mod GlobalPid do
+
+  type Pid = { node_id : String, local_pid : Int, creation : Int }
+
+  fn make(node_id : String, local_pid : Int, creation : Int) : Pid do
+    { node_id: node_id, local_pid: local_pid, creation: creation }
+  end
+
+  fn eq(a : Pid, b : Pid) : Bool do
+    a.node_id == b.node_id && a.local_pid == b.local_pid && a.creation == b.creation
+  end
+
+  -- A MessagePack Value (a 3-element array), for nesting inside larger records.
+  -- (Unannotated returns/params: the Msgpack `Value` type collides in the global
+  -- namespace and a qualified `Msgpack.Value` annotation won't unify, so the
+  -- value type is left to inference — same convention as NodeIdentity.)
+  fn to_value(p : Pid) do
+    Msgpack.array(
+      Cons(Msgpack.str(p.node_id),
+      Cons(Msgpack.int(p.local_pid),
+      Cons(Msgpack.int(p.creation), Nil))))
+  end
+
+  fn of_value(v) : Result(Pid, String) do
+    match v do
+      Msgpack.Array(Cons(Msgpack.Str(nid),
+                    Cons(Msgpack.Int(lp),
+                    Cons(Msgpack.Int(cr), Nil)))) ->
+        Ok({ node_id: nid, local_pid: lp, creation: cr })
+      _ -> Err("GlobalPid: malformed pid")
+    end
+  end
+
+  fn encode(p : Pid) : List(Int) do Msgpack.encode(to_value(p)) end
+
+  fn decode(bytes : List(Int)) : Result(Pid, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v)  -> of_value(v)
+    end
+  end
+
+end
