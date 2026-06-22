@@ -254,13 +254,15 @@ let is_js_module lib =
 
 (** How an extern should be called on the JS target. *)
 type js_extern_kind =
-  | JsModuleSync     (* import { sym } from "spec" — plain synchronous call *)
-  | JsModuleBlocking (* same, but the result must be await-ed (Chunk A) *)
-  | JsModuleRaises   (* same, but errors become Err via try/catch (Chunk B) *)
-  | CBacked          (* non-JS-module lib name — unsupported on JS target (Chunk C) *)
+  | JsModuleSync            (* import { sym } from "spec" — plain synchronous call *)
+  | JsModuleBlocking        (* same, but the result must be await-ed (Chunk A) *)
+  | JsModuleRaises          (* same, but errors become Err via try/catch (Chunk B) *)
+  | JsModuleBlockingRaises  (* await + try/catch → Ok/Err (Chunks A+B combined) *)
+  | CBacked                 (* non-JS-module lib name — unsupported on JS target (Chunk C) *)
 
 let classify_js_extern (ed : Tir.extern_decl) : js_extern_kind =
   if not (is_js_module ed.Tir.ed_lib_name) then CBacked
+  else if ed.Tir.ed_blocking && ed.Tir.ed_raises then JsModuleBlockingRaises
   else if ed.Tir.ed_blocking then JsModuleBlocking
   else if ed.Tir.ed_raises   then JsModuleRaises
   else JsModuleSync
@@ -305,7 +307,12 @@ let emit_extern_call (ctx : ctx) (ed : Tir.extern_decl) (args : Tir.atom list) :
      warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
      emit ctx ("(() => { try { return { $: \"Ok\", _0: " ^ march_name ^ "(");
      List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
-     emit ctx ") }; } catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; } })()")
+     emit ctx ") }; } catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; } })()"
+   | JsModuleBlockingRaises ->
+     warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
+     emit ctx ("(await (async () => { try { return { $: \"Ok\", _0: (await " ^ march_name ^ "(");
+     List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+     emit ctx ")) }; } catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; } })()")
 
 (* ── Async colouring analysis (Chunk A) ──────────────────────────── *)
 
@@ -353,7 +360,9 @@ let compute_async_fns (ctx : ctx) (fns : Tir.fn_def list) : unit =
     let called = Option.value (Hashtbl.find_opt fn_calls fn.fn_name) ~default:[] in
     if List.exists (fun callee ->
          match Hashtbl.find_opt ctx.extern_fns callee with
-         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | Some ed -> (match classify_js_extern ed with
+                       | JsModuleBlocking | JsModuleBlockingRaises -> true
+                       | _ -> false)
          | None -> false) called
     then Hashtbl.replace ctx.async_fns fn.fn_name ()
   ) fns;
@@ -566,13 +575,24 @@ and emit_val_impl ctx expr =
   | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ ->
     emit ctx "undefined"
 
-  (* Complex forms in value position: wrap in IIFE *)
+  (* Complex forms in value position: wrap in IIFE.
+     When the body contains async calls, use an async IIFE + await so that
+     the resolved value (not a Promise) is what the expression produces. *)
   | Tir.ECase _ | Tir.ELet _ | Tir.ELetRec _ | Tir.ESeq _ ->
-    emit ctx "(() => {\n";
+    let has_async = List.exists (fun name ->
+      match Hashtbl.find_opt ctx.extern_fns name with
+      | Some ed -> (match classify_js_extern ed with
+                    | JsModuleBlocking | JsModuleBlockingRaises -> true
+                    | _ -> false)
+      | None -> Hashtbl.mem ctx.async_fns name)
+      (calls_in_expr expr) in
+    if has_async then emit ctx "(await (async () => {\n"
+    else emit ctx "(() => {\n";
     ctx.indent <- ctx.indent + 1;
     emit_stmts ctx expr;
     ctx.indent <- ctx.indent - 1;
-    emit_indent ctx; emit ctx "})()"
+    if has_async then (emit_indent ctx; emit ctx "})())")
+    else (emit_indent ctx; emit ctx "})()")
 
   | Tir.ECallPtr (f, args) ->
     (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
@@ -581,11 +601,15 @@ and emit_val_impl ctx expr =
     let is_async_call = match f with
       | Tir.AVar v ->
         (match Hashtbl.find_opt ctx.extern_fns v.Tir.v_name with
-         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | Some ed -> (match classify_js_extern ed with
+                       | JsModuleBlocking | JsModuleBlockingRaises -> true
+                       | _ -> false)
          | None -> Hashtbl.mem ctx.async_fns v.Tir.v_name)
       | Tir.ADefRef d ->
         (match Hashtbl.find_opt ctx.extern_fns d.Tir.did_name with
-         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | Some ed -> (match classify_js_extern ed with
+                       | JsModuleBlocking | JsModuleBlockingRaises -> true
+                       | _ -> false)
          | None -> Hashtbl.mem ctx.async_fns d.Tir.did_name)
       | _ -> false
     in
@@ -924,6 +948,13 @@ let emit_extern_clo_str (ed : Tir.extern_decl) : string =
          try { return { $: \"Ok\", _0: %s(%s) }; }\n  \
          catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; }\n} };\n"
       march_name plist march_name plist
+  | JsModuleBlockingRaises ->
+    warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
+    Printf.sprintf
+      "const %s$clo = { _0: async ($_, %s) => {\n  \
+         try { return { $: \"Ok\", _0: (await %s(%s)) }; }\n  \
+         catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; }\n} };\n"
+      march_name plist march_name plist
 
 (** Emit extern bridges for [eds].  Returns (imports_str, consts_str):
     - imports_str: ES import statements for JS-module externs (goes before const decls)
@@ -1087,7 +1118,9 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
   (* Chunk B: __js_err_to helper — emitted only when at least one raises extern is used *)
   let raises_helper =
-    if List.exists (fun ed -> classify_js_extern ed = JsModuleRaises) used_ed then
+    if List.exists (fun ed -> match classify_js_extern ed with
+                               | JsModuleRaises | JsModuleBlockingRaises -> true
+                               | _ -> false) used_ed then
       "const __js_err_to = (e) => String(e?.message ?? e);\n\n"
     else ""
   in

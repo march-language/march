@@ -1,0 +1,22 @@
+-- Regression: a `blocking raises` extern is both await-ed and wrapped in Ok/Err.
+-- Helper: test/native/js_ffi_blocking_raises_helper.mjs exports asyncParsePos.
+mod JsFfiBlockingRaises do
+  needs IO.Foreign
+  needs IO.Foreign.Blocking
+
+  extern "./js_ffi_blocking_raises_helper.mjs" : Cap(IO.Foreign) do
+    blocking raises fn asyncParsePos(s: String) : Result(Int, String)
+  end
+
+  fn shown(r: Result(Int, String)) : String do
+    match r do
+      Ok(n)  -> int_to_string(n)
+      Err(e) -> "error: " ++ e
+    end
+  end
+
+  fn main() : Unit do
+    println(shown(asyncParsePos("7")))
+    println(shown(asyncParsePos("-1")))
+  end
+end

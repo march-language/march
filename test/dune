@@ -1460,6 +1460,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_ffi_cbacked.expected js_ffi_cbacked.err)))
 
+; js_ffi_blocking_raises — both flags set: await + try/catch → Ok/Err
+(rule
+ (targets js_ffi_blocking_raises_helper.mjs)
+ (deps (file native/js_ffi_blocking_raises_helper.mjs))
+ (action (copy native/js_ffi_blocking_raises_helper.mjs js_ffi_blocking_raises_helper.mjs)))
+
+(rule
+ (targets js_ffi_blocking_raises.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_ffi_blocking_raises.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_ffi_blocking_raises.mjs native/js_ffi_blocking_raises.march)))
+
+(rule
+ (targets js_ffi_blocking_raises.out)
+ (deps js_ffi_blocking_raises.mjs js_ffi_blocking_raises_helper.mjs march_runtime.mjs)
+ (action (with-stdout-to js_ffi_blocking_raises.out (run node js_ffi_blocking_raises.mjs))))
+
+(rule (alias runtest) (action (diff native/js_ffi_blocking_raises.expected js_ffi_blocking_raises.out)))
+
 ; ── FFI Float in generic slots: raises Result(Float,_) Ok payload, and
 ; ── Option(Float)/Option(Unit) returns via march_some_boxed / march_none_boxed.
 (rule
