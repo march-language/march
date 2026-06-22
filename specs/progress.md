@@ -282,6 +282,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-22, Distributed OTP — L4 RPC dispatcher)
+
+- **L4 RPC receive-side dispatcher + caller-side logic (`node_rpc.march`, `NodeRpc`).** The pure orchestration between the net-kernel transport and a node's enrolled targets — increment 2 of L4, completing the RPC *logic* end-to-end (only the compiler-emitted enroll/stub registry and the live socket send/recv remain).
+  - **Responder.** `Target = {sig_hash, impl_hash, invoke : List(Int) -> Result(List(Int), String)}` models one enrolled target (the `invoke` stub decodes MessagePack args, runs the body, encodes the result; `Err` models a crash/exit). `Targets` is a `name → Target` table — **injected here**, modelling exactly what the compiler-emitted enroll/stub mechanism must provide. `handle_request(targets, req) : CallReply` looks the target up by identity → runs `RemoteCall.verify` admission → invokes or maps the failure: no target → `NoTarget`, sig/impl mismatch → `TypeMismatch`/`VersionSkew`, a body crash → `RemoteExit(reason)`, success → `Returned`. `handle_frame` decodes an inbound request frame and dispatches (malformed frame → no reply).
+  - **Caller.** `interpret` (reply → `Result(payload, CallError)`), `matches` (correlate a reply to its request — replies on one connection interleave), and the failure-isolation decisions `timed_out(now, deadline)` + `peer_down_error()` (→ `NoConnection` when the failure detector declares the node dead).
+  - Added `NoTarget` to `RemoteCall.CallError` (additive: taxonomy + codec + message). 12 TDD asserts (`test_node_rpc.march`) with a real add/boom invoker stub: invoke-and-return, sig-mismatch-not-invoked, version-skew, unknown-target, crash→RemoteExit, frame round-trip + malformed→None, interpret Ok/Err, correlation match, deadline + peer-down. Pure + eval-tested (`test_stdlib_march` 43→44). (Parser gotcha: `sig`/`impl` are reserved keywords — renamed the test's hash params.)
+  - **Next (final L4 increment):** the **enroll/stub/registry runtime mechanism** — a function-by-identity registry in `runtime/`, compiler-emitted marshalling stubs that populate a real `Targets`-equivalent, DCE pinning, and a `remote_ref` builtin (Compiler Touchpoint 1); then wire `handle_frame` to the live net-kernel socket for an end-to-end loopback call.
+
 ## Current State (as of 2026-06-22, Distributed OTP — L4 remote-call safety core)
 
 - **L4 remote-procedure-call safety core — two pure modules (`global_pid.march`, `remote_call.march`).** The first increment of the headline RPC layer: the wire protocol + CAS admission decision, with the enroll/stub/registry runtime mechanism and the socket transport left to follow-on increments.

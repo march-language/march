@@ -1,0 +1,94 @@
+-- NodeRpc: the receive-side RPC dispatcher + caller-side reply logic (P1 L4).
+--
+-- The pure orchestration that sits between the net-kernel transport and a node's
+-- enrolled targets. The responder decodes nothing here (it works on an already-
+-- decoded CallRequest): it looks the target up by identity, runs the CAS
+-- admission check (RemoteCall.verify), invokes the local marshalling stub, and
+-- builds the CallReply to frame back. The caller side interprets a reply and
+-- makes the failure-isolation decisions (deadline expiry, peer-down).
+--
+-- The target table is *injected* here. In the full system the compiler-emitted
+-- enroll/stub mechanism (a function-by-identity registry + marshalling stubs)
+-- populates it; modelling it as an injected `Targets` keeps this layer pure and
+-- unit-testable and pins down exactly what that mechanism must provide:
+-- per target, its (sig_hash, impl_hash) and an `invoke : args-bytes -> result-bytes`
+-- stub (Err models a crash/exit inside the target body).
+mod NodeRpc do
+
+  -- A locally-enrolled remote target: CAS identity + marshalling invoker.
+  type Target = {
+    sig_hash : String,
+    impl_hash : String,
+    invoke : List(Int) -> Result(List(Int), String)
+  }
+
+  -- name (module.fn) -> Target.
+  type Targets = Targets(Map(String, Target))
+
+  fn empty() : Targets do Targets(Map.empty()) end
+
+  pfn target_key(module_name : String, fn_name : String) : String do
+    module_name ++ "." ++ fn_name
+  end
+
+  fn enroll(t : Targets, module_name : String, fn_name : String, target : Target) : Targets do
+    match t do
+      Targets(m) -> Targets(Map.insert(m, target_key(module_name, fn_name), target, Map.str_cmp))
+    end
+  end
+
+  -- ── Responder side ────────────────────────────────────────────────────────
+
+  -- Run an inbound request against the local target table and produce the reply
+  -- to frame back. No target -> NoTarget; CAS mismatch -> TypeMismatch/VersionSkew;
+  -- a crash inside the target body -> RemoteExit.
+  fn handle_request(t : Targets, req : CallRequest) : CallReply do
+    match t do
+      Targets(m) ->
+        match Map.get(m, target_key(req.fref.module_name, req.fref.fn_name), Map.str_cmp) do
+          None -> RemoteCall.err_reply(req.correlation, NoTarget)
+          Some(target) ->
+            match RemoteCall.verify(target.sig_hash, target.impl_hash, req.fref) do
+              Reject(e) -> RemoteCall.err_reply(req.correlation, e)
+              Accept ->
+                match target.invoke(req.args) do
+                  Ok(payload) -> RemoteCall.ok_reply(req.correlation, payload)
+                  Err(reason) -> RemoteCall.err_reply(req.correlation, RemoteExit(reason))
+                end
+            end
+        end
+    end
+  end
+
+  -- Decode an inbound request frame and dispatch it; a malformed frame yields no
+  -- reply (the sender framed garbage — nothing well-formed to answer to).
+  fn handle_frame(t : Targets, bytes : List(Int)) : Option(CallReply) do
+    match RemoteCall.decode_request(bytes) do
+      Err(_)  -> None
+      Ok(req) -> Some(handle_request(t, req))
+    end
+  end
+
+  -- ── Caller side ───────────────────────────────────────────────────────────
+
+  -- Does this reply answer this request? (replies on one connection interleave)
+  fn matches(req : CallRequest, reply : CallReply) : Bool do
+    req.correlation == reply.correlation
+  end
+
+  -- Interpret a reply into the caller's Result.
+  fn interpret(reply : CallReply) : Result(List(Int), CallError) do
+    match reply.result do
+      Returned(payload) -> Ok(payload)
+      Failed(e)         -> Err(e)
+    end
+  end
+
+  -- Failure isolation: has the deadline passed with no reply yet?
+  fn timed_out(now : Int, deadline : Int) : Bool do now >= deadline end
+
+  -- The error a caller synthesizes when the failure detector has declared the
+  -- target's node dead (a pending call cannot complete).
+  fn peer_down_error() : CallError do NoConnection end
+
+end

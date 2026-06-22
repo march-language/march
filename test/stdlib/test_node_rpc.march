@@ -1,0 +1,104 @@
+mod TestNodeRpc do
+
+  -- A marshalling stub: decode a MessagePack [a, b], return encode(a + b).
+  pfn add_invoke(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v)  ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(a), Cons(Msgpack.Int(b), Nil))) ->
+            Ok(Msgpack.encode(Msgpack.int(a + b)))
+          _ -> Err("add: bad args")
+        end
+    end
+  end
+
+  -- A stub that always crashes (models a panic/exit inside the target body).
+  pfn boom_invoke(args : List(Int)) : Result(List(Int), String) do
+    Err("kaboom")
+  end
+
+  pfn args_2(a : Int, b : Int) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(a), Cons(Msgpack.int(b), Nil))))
+  end
+
+  -- Table enrolling Math.add (sig-1/impl-1) and Math.boom.
+  pfn table() : NodeRpc.Targets do
+    let add_t  = { sig_hash: "sig-1", impl_hash: "impl-1", invoke: add_invoke }
+    let boom_t = { sig_hash: "sig-b", impl_hash: "impl-b", invoke: boom_invoke }
+    let t1 = NodeRpc.enroll(NodeRpc.empty(), "Math", "add", add_t)
+    NodeRpc.enroll(t1, "Math", "boom", boom_t)
+  end
+
+  pfn req_for(module_name : String, fn_name : String, sg : String, im : String, a : Int, b : Int) : RemoteCall.CallRequest do
+    let pid  = GlobalPid.make("n1", 1, 1)
+    let fref = RemoteCall.remote_ref(module_name, fn_name, sg, im)
+    RemoteCall.request(fref, args_2(a, b), pid, 1000, 9)
+  end
+
+  describe "NodeRpc.handle_request — responder" do
+
+    test "invokes a matching target and returns the encoded result" do
+      let reply = NodeRpc.handle_request(table(), req_for("Math", "add", "sig-1", "impl-1", 2, 3))
+      assert (reply == RemoteCall.ok_reply(9, Msgpack.encode(Msgpack.int(5))))
+    end
+
+    test "a signature mismatch is rejected as TypeMismatch, target not invoked" do
+      let reply = NodeRpc.handle_request(table(), req_for("Math", "add", "WRONG", "impl-1", 2, 3))
+      assert (reply == RemoteCall.err_reply(9, TypeMismatch))
+    end
+
+    test "a body mismatch is rejected as VersionSkew" do
+      let reply = NodeRpc.handle_request(table(), req_for("Math", "add", "sig-1", "WRONG", 2, 3))
+      assert (reply == RemoteCall.err_reply(9, VersionSkew))
+    end
+
+    test "an unknown target yields NoTarget" do
+      let reply = NodeRpc.handle_request(table(), req_for("Math", "nope", "sig-1", "impl-1", 2, 3))
+      assert (reply == RemoteCall.err_reply(9, NoTarget))
+    end
+
+    test "a crash inside the target body comes back as RemoteExit" do
+      let reply = NodeRpc.handle_request(table(), req_for("Math", "boom", "sig-b", "impl-b", 2, 3))
+      assert (reply == RemoteCall.err_reply(9, RemoteExit("kaboom")))
+    end
+
+  end
+
+  describe "NodeRpc.handle_frame — decode + dispatch" do
+
+    test "a well-formed request frame round-trips to a reply" do
+      let req   = req_for("Math", "add", "sig-1", "impl-1", 4, 5)
+      let frame = RemoteCall.encode_request(req)
+      assert (NodeRpc.handle_frame(table(), frame) == Some(RemoteCall.ok_reply(9, Msgpack.encode(Msgpack.int(9)))))
+    end
+
+    test "a malformed frame yields no reply" do
+      assert (NodeRpc.handle_frame(table(), Cons(1, Cons(2, Nil))) == None)
+    end
+
+  end
+
+  describe "NodeRpc — caller side" do
+
+    test "interpret maps Returned to Ok and Failed to Err" do
+      let payload = Msgpack.encode(Msgpack.int(5))
+      assert (NodeRpc.interpret(RemoteCall.ok_reply(9, payload)) == Ok(payload))
+      assert (NodeRpc.interpret(RemoteCall.err_reply(9, NoConnection)) == Err(NoConnection))
+    end
+
+    test "matches a reply to its request by correlation" do
+      let req = req_for("Math", "add", "sig-1", "impl-1", 1, 1)
+      assert (NodeRpc.matches(req, RemoteCall.ok_reply(9, Nil)) == true)
+      assert (NodeRpc.matches(req, RemoteCall.ok_reply(8, Nil)) == false)
+    end
+
+    test "failure isolation — deadline and peer-down" do
+      assert (NodeRpc.timed_out(1000, 1000) == true)
+      assert (NodeRpc.timed_out(999, 1000) == false)
+      assert (NodeRpc.peer_down_error() == NoConnection)
+    end
+
+  end
+
+end

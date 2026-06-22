@@ -23,8 +23,9 @@ mod RemoteCall do
   -- over the call graph + type usage, from the CAS).
   type RemoteRef = { module_name : String, fn_name : String, sig_hash : String, impl_hash : String }
 
-  -- Why a remote call could not return its target's result.
-  type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew
+  -- Why a remote call could not return its target's result. `NoTarget` = the
+  -- peer has no function enrolled under this reference (wrong node / not enrolled).
+  type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew | NoTarget
 
   -- The CAS admission decision for an inbound call against the local target.
   type Verdict = Accept | Reject(CallError)
@@ -86,6 +87,7 @@ mod RemoteCall do
       RemoteExit(s)    -> "remote process exited: " ++ s
       TypeMismatch     -> "signature mismatch (incompatible types)"
       VersionSkew      -> "implementation mismatch (version skew)"
+      NoTarget         -> "no such enrolled target"
     end
   end
 
@@ -117,6 +119,7 @@ mod RemoteCall do
       RemoteExit(s)    -> Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.str(s), Nil)))
       TypeMismatch     -> Msgpack.array(Cons(Msgpack.int(3), Nil))
       VersionSkew      -> Msgpack.array(Cons(Msgpack.int(4), Nil))
+      NoTarget         -> Msgpack.array(Cons(Msgpack.int(5), Nil))
     end
   end
 
@@ -127,6 +130,7 @@ mod RemoteCall do
       Msgpack.Array(Cons(Msgpack.Int(2), Cons(Msgpack.Str(s), Nil))) -> Ok(RemoteExit(s))
       Msgpack.Array(Cons(Msgpack.Int(3), Nil)) -> Ok(TypeMismatch)
       Msgpack.Array(Cons(Msgpack.Int(4), Nil)) -> Ok(VersionSkew)
+      Msgpack.Array(Cons(Msgpack.Int(5), Nil)) -> Ok(NoTarget)
       _ -> Err("RemoteCall: malformed CallError")
     end
   end

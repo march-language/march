@@ -154,6 +154,7 @@ let all_stdlib_decls =
     "global_registry.march";
     "global_pid.march";
     "remote_call.march";
+    "node_rpc.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -340,6 +341,10 @@ let () =
     ("remote_call", [
       Alcotest.test_case "RemoteCall module"
         `Quick (run_stdlib_test "test_remote_call.march" "TestRemoteCall");
+    ]);
+    ("node_rpc", [
+      Alcotest.test_case "NodeRpc module"
+        `Quick (run_stdlib_test "test_node_rpc.march" "TestNodeRpc");
     ]);
     ("net_kernel", [
       Alcotest.test_case "NetKernel module"
