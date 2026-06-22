@@ -7,6 +7,7 @@
 -- automatically into every --compile binary.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   extern "rt" : Cap(Ffi) do
     fn live_allocs(): Int = "march_live_allocs"
     fn slen(s: String): Int = "ffi_test_slen"

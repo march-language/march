@@ -1,0 +1,143 @@
+-- Base64 module: standard, URL-safe, and MIME Base64 encoding/decoding.
+--
+-- This module wraps the runtime's base64_encode/base64_decode builtins and
+-- adds URL-safe (RFC 4648 §5) and MIME (RFC 2045) variants.
+--
+-- Standard Base64 uses the alphabet A–Z a–z 0–9 + / with = padding.
+-- URL-safe Base64 replaces + with - and / with _ and omits padding.
+-- MIME Base64 wraps lines at 76 characters with CRLF line endings.
+--
+-- All decode functions return Ok(Bytes) on success, Err(:invalid) on bad input.
+
+mod Base64 do
+
+-- ── Private helpers ───────────────────────────────────────────────────────
+
+pfn rev_list(xs) do
+  fn go(lst, acc) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- Replace + → - and / → _ and strip trailing padding characters.
+pfn to_url_alphabet(s) do
+  let s1 = string_replace_all(s, "+", "-")
+  let s2 = string_replace_all(s1, "/", "_")
+  fn strip_pad(t) do
+    let len = string_byte_length(t)
+    if len > 0 && string_slice(t, len - 1, 1) == "=" do
+      strip_pad(string_slice(t, 0, len - 1))
+    else t end
+  end
+  strip_pad(s2)
+end
+
+-- Replace - → + and _ → / and add = padding to a multiple of 4.
+pfn from_url_alphabet(s) do
+  let s1 = string_replace_all(s, "-", "+")
+  let s2 = string_replace_all(s1, "_", "/")
+  let len = string_byte_length(s2)
+  let rem = len % 4
+  if rem == 0 do s2
+  else if rem == 2 do s2 ++ "=="
+  else if rem == 3 do s2 ++ "="
+  else s2 end end end
+end
+
+-- Split a Base64 string into MIME lines of at most 76 chars, joined with CRLF.
+pfn to_mime_lines(s) do
+  let len = string_byte_length(s)
+  fn go(pos, acc) do
+    if pos >= len do
+      fn join_parts(parts, result) do
+        match parts do
+        Nil -> result
+        Cons(p, rest) ->
+          if string_is_empty(result) do join_parts(rest, p)
+          else join_parts(rest, result ++ "\r\n" ++ p) end
+        end
+      end
+      join_parts(rev_list(acc), "")
+    else do
+      let chunk = string_slice(s, pos, 76)
+      go(pos + 76, Cons(chunk, acc))
+    end
+    end
+  end
+  go(0, Nil)
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────
+
+doc """
+Encode a Bytes value as standard Base64 (RFC 4648 §4, with = padding).
+
+    let b = Bytes.from_string("Hello")
+    Base64.encode(b)  -- "SGVsbG8="
+"""
+fn encode(data) do
+  base64_encode(data)
+end
+
+doc """
+Decode a standard Base64 string to Bytes.
+
+Returns `Ok(Bytes)` on success or `Err(:invalid)` if the input is not
+valid Base64 (wrong length, bad characters, or bad padding).
+
+    Base64.decode("SGVsbG8=")   -- Ok(Bytes for "Hello")
+    Base64.decode("!!")         -- Err(:invalid)
+"""
+fn decode(s) do
+  match base64_decode(s) do
+  Ok(b)  -> Ok(b)
+  Err(_) -> Err(:invalid)
+  end
+end
+
+doc """
+Encode a Bytes value as URL-safe Base64 (RFC 4648 §5).
+
+Uses - and _ instead of + and /, and omits trailing = padding.
+The result is safe to embed in URLs and filenames without escaping.
+
+    let b = Bytes.from_string("Hello")
+    Base64.url_encode(b)  -- "SGVsbG8"
+"""
+fn url_encode(data) do
+  to_url_alphabet(base64_encode(data))
+end
+
+doc """
+Decode a URL-safe Base64 string (- and _, no padding) to Bytes.
+
+Padding is added automatically before decoding.
+
+    Base64.url_decode("SGVsbG8")  -- Ok(Bytes for "Hello")
+    Base64.url_decode("!!")       -- Err(:invalid)
+"""
+fn url_decode(s) do
+  match base64_decode(from_url_alphabet(s)) do
+  Ok(b)  -> Ok(b)
+  Err(_) -> Err(:invalid)
+  end
+end
+
+doc """
+Encode a Bytes value as MIME Base64 (RFC 2045).
+
+Lines are at most 76 characters long, separated by CRLF (\\r\\n).
+Suitable for encoding binary attachments in email or multipart bodies.
+
+    Base64.mime_encode(Bytes.from_string("Hello World"))
+    -- "SGVsbG8gV29ybGQ="   (fits in one line for short inputs)
+"""
+fn mime_encode(data) do
+  to_mime_lines(base64_encode(data))
+end
+
+end

@@ -2,6 +2,7 @@
 -- Ok/Err built on the C side via march_ok / march_err. Both arms round-trip.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   extern "rt" : Cap(Ffi) do
     fn parse(s: String): Result(Int, String) = "ffi_test_parse"
   end

@@ -1,0 +1,397 @@
+-- actor_stress.march: exercises edges of the actor + task runtime.
+-- Run with:  dune exec march -- test/apps/actor_stress.march
+
+mod ActorStress do
+
+  -- ── Actor 1: Counter with inc / dec / clear / print ──────────────────
+
+  actor Counter do
+    state { value : Int }
+    init { value = 0 }
+
+    on Inc(n : Int) do
+      { state with value = state.value + n }
+    end
+
+    on Dec(n : Int) do
+      { state with value = state.value - n }
+    end
+
+    on Clear() do
+      { state with value = 0 }
+    end
+
+    on Print() do
+      println("counter=" ++ int_to_string(state.value))
+      state
+    end
+  end
+
+  -- ── Actor 2: Stack — push / pop / top / len ────────────────────────
+  -- Tests actors with List(Int) state.
+
+  actor Stack do
+    state { items : List(Int) }
+    init { items = [] }
+
+    on Push(n : Int) do
+      { state with items = Cons(n, state.items) }
+    end
+
+    on Pop() do
+      match state.items do
+        Nil         -> state
+        Cons(_, rest) -> { state with items = rest }
+      end
+    end
+
+    on Top() do
+      match state.items do
+        Nil         -> println("stack=empty")
+        Cons(x, _)  -> println("stack.top=" ++ int_to_string(x))
+      end
+      state
+    end
+
+    on Len() do
+      println("stack.size=" ++ int_to_string(List.length(state.items)))
+      state
+    end
+  end
+
+  -- ── Actor 3: Collector — accumulates Result messages ─────────────────
+
+  actor Collector do
+    state { total : Int, count : Int }
+    init { total = 0, count = 0 }
+
+    on Accum(n : Int) do
+      { total = state.total + n, count = state.count + 1 }
+    end
+
+    on Summary() do
+      println("collected count=" ++ int_to_string(state.count)
+              ++ " total=" ++ int_to_string(state.total))
+      state
+    end
+  end
+
+  -- ── Actor 3b: Waiter — uses receive() inside a handler ──────────────────
+  -- The handler for Query(n) calls receive() to pull an Answer(m) from the
+  -- mailbox, then prints n+m.  Both messages are pre-queued before the
+  -- scheduler runs, so receive() finds Answer waiting.
+
+  actor Waiter do
+    state { dummy : Int }
+    init { dummy = 0 }
+
+    on Query(n : Int) do
+      let m = receive()
+      match m do
+        Answer(v) ->
+          println("query+answer=" ++ int_to_string(n + v))
+        _ ->
+          println("waiter: unexpected message")
+      end
+      state
+    end
+
+    -- Answer is consumed by receive() in the Query handler, so this
+    -- handler only fires if Answer arrives without a preceding Query.
+    on Answer(_v : Int) do
+      println("waiter: stray answer")
+      state
+    end
+  end
+
+  -- ── Actor 4: Relay — echo each message, track hop count ───────────────
+
+  actor Relay do
+    state { hops : Int }
+    init { hops = 0 }
+
+    on Say(msg : String) do
+      println("relay: " ++ msg)
+      { state with hops = state.hops + 1 }
+    end
+
+    on Stats() do
+      println("relay hops=" ++ int_to_string(state.hops))
+      state
+    end
+  end
+
+  -- ── Helpers ────────────────────────────────────────────────────────────
+
+  pfn section(name : String) : Unit do
+    println("")
+    println("=== " ++ name ++ " ===")
+  end
+
+  -- ── Test: Counter operations ───────────────────────────────────────────
+
+  pfn test_counter() : Unit do
+    section("counter")
+    let c = spawn(Counter)
+    send(c, Inc(10))
+    send(c, Inc(5))
+    send(c, Dec(3))
+    send(c, Print())        -- expect 12
+    send(c, Clear())
+    send(c, Print())        -- expect 0
+    send(c, Inc(100))
+    send(c, Dec(1))
+    send(c, Dec(1))
+    send(c, Print())        -- expect 98
+    -- Negative values
+    send(c, Clear())
+    send(c, Dec(7))
+    send(c, Print())        -- expect -7
+  end
+
+  -- ── Test: Stack edge cases ─────────────────────────────────────────────
+
+  pfn test_stack() : Unit do
+    section("stack")
+    let s = spawn(Stack)
+    -- Pop from empty stack (should be a no-op)
+    send(s, Pop())
+    send(s, Top())          -- expect empty
+    send(s, Len())          -- expect 0
+    -- Push several
+    send(s, Push(1))
+    send(s, Push(2))
+    send(s, Push(3))
+    send(s, Top())          -- expect 3 (LIFO)
+    send(s, Len())          -- expect 3
+    -- Pop all + one extra
+    send(s, Pop())
+    send(s, Pop())
+    send(s, Pop())
+    send(s, Pop())          -- pop from empty again (no-op)
+    send(s, Len())          -- expect 0
+    -- Repush after drain
+    send(s, Push(42))
+    send(s, Top())          -- expect 42
+  end
+
+  -- ── Test: Many actors, interleaved sends ──────────────────────────────
+
+  pfn test_many_counters() : Unit do
+    section("many counters")
+    let c1 = spawn(Counter)
+    let c2 = spawn(Counter)
+    let c3 = spawn(Counter)
+    send(c1, Inc(1))
+    send(c2, Inc(2))
+    send(c3, Inc(3))
+    send(c1, Inc(10))
+    send(c2, Inc(20))
+    send(c3, Inc(30))
+    send(c1, Print())       -- expect 11
+    send(c2, Print())       -- expect 22
+    send(c3, Print())       -- expect 33
+  end
+
+  -- ── Test: Relay actor echo burst ──────────────────────────────────────
+
+  pfn test_relay() : Unit do
+    section("relay")
+    let r = spawn(Relay)
+    send(r, Say("hello"))
+    send(r, Say("world"))
+    send(r, Say("foo"))
+    send(r, Stats())        -- expect hops=3
+  end
+
+  -- ── Test: Collector fed from task results ─────────────────────────────
+
+  pfn test_collector() : Unit do
+    section("collector")
+    let col = spawn(Collector)
+    let squares = Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n)
+    List.each(squares, fn r ->
+      match r do
+        Ok(n)  -> send(col, Accum(n))
+        Err(_) -> ()
+      end
+    )
+    send(col, Summary())    -- expect count=5 total=55
+  end
+
+  -- ── Test: Task.async + Task.await ─────────────────────────────────────
+
+  pfn test_tasks_basic() : Unit do
+    section("tasks: basic")
+    let t = Task.async(fn () -> 6 * 7)
+    match Task.await(t) do
+      Ok(n)  -> println("6*7=" ++ int_to_string(n))    -- expect 42
+      Err(e) -> println("error: " ++ e)
+    end
+  end
+
+  -- ── Test: Task.await_many ─────────────────────────────────────────────
+
+  pfn test_tasks_many() : Unit do
+    section("tasks: await_many")
+    let t1 = Task.async(fn () -> 10)
+    let t2 = Task.async(fn () -> 20)
+    let t3 = Task.async(fn () -> 30)
+    let results = Task.await_many([t1, t2, t3])
+    let total = List.fold_left(results, 0, fn (acc, r) ->
+      match r do
+        Ok(n)  -> acc + n
+        Err(_) -> acc
+      end
+    )
+    println("sum=" ++ int_to_string(total))             -- expect 60
+  end
+
+  -- ── Test: Task.race ───────────────────────────────────────────────────
+
+  pfn test_tasks_race() : Unit do
+    section("tasks: race")
+    let ta = Task.async(fn () -> 100)
+    let tb = Task.async(fn () -> 200)
+    let tc = Task.async(fn () -> 300)
+    match Task.race([ta, tb, tc]) do
+      Ok(n)  -> println("winner=" ++ int_to_string(n)) -- expect 100
+      Err(e) -> println("race err: " ++ e)
+    end
+    -- Empty race
+    match Task.race([]) do
+      Ok(_)  -> println("empty race: unexpected ok")
+      Err(e) -> println("empty race err: " ++ e)       -- expect "race: empty task list"
+    end
+  end
+
+  -- ── Test: Task.any ────────────────────────────────────────────────────
+
+  pfn test_tasks_any() : Unit do
+    section("tasks: any")
+    let t1 = Task.async(fn () -> 55)
+    let t2 = Task.async(fn () -> 66)
+    match Task.any([t1, t2]) do
+      Ok(n)  -> println("any=" ++ int_to_string(n))    -- expect 55
+      Err(_) -> println("any: all failed")
+    end
+    -- Empty any
+    match Task.any([]) do
+      Ok(_)  -> println("empty any: unexpected ok")
+      Err(_) -> println("empty any: all failed ok")    -- expect this
+    end
+  end
+
+  -- ── Test: Task.async_stream (parallel map) ────────────────────────────
+
+  pfn test_tasks_stream() : Unit do
+    section("tasks: async_stream")
+    let squares = Task.async_stream([1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                                    fn n -> n * n)
+    let total = List.fold_left(squares, 0, fn (acc, r) ->
+      match r do
+        Ok(n)  -> acc + n
+        Err(_) -> acc
+      end
+    )
+    -- 1+4+9+16+25+36+49+64+81+100 = 385
+    println("sum_squares=" ++ int_to_string(total))
+  end
+
+  -- ── Test: Message FIFO ordering ────────────────────────────────────────
+
+  pfn test_message_order() : Unit do
+    section("message order")
+    let s = spawn(Stack)
+    -- Push 1..5; Stack is LIFO so top changes with each push.
+    -- Messages must be processed in FIFO order for Len to be correct.
+    send(s, Push(1))
+    send(s, Push(2))
+    send(s, Push(3))
+    send(s, Push(4))
+    send(s, Push(5))
+    send(s, Top())          -- expect 5 (last pushed)
+    send(s, Pop())
+    send(s, Pop())
+    send(s, Top())          -- expect 3
+    send(s, Len())          -- expect 3
+  end
+
+  -- ── Test: receive() inside a handler ──────────────────────────────────
+  -- Queue both messages before the scheduler runs.
+  -- receive() in the Query handler pops the Answer from the mailbox.
+
+  pfn test_receive_in_handler() : Unit do
+    section("receive() in handler")
+    let w = spawn(Waiter)
+    -- Query(3) goes first; Answer(9) is already in the mailbox when receive() is called.
+    send(w, Query(3))
+    send(w, Answer(9))
+    -- expect "query+answer=12"
+  end
+
+  -- ── Test: task_spawn_with_cancel ──────────────────────────────────────
+
+  pfn test_spawn_with_cancel() : Unit do
+    section("spawn with cancel")
+    let tok = task_cancel_token_new()
+    -- Task completes normally (not cancelled before it runs)
+    let t = task_spawn_with_cancel(fn _ -> 77, tok)
+    match task_await(t) do
+      Ok(n)  -> println("spawn_with_cancel ok=" ++ int_to_string(n))  -- expect 77
+      Err(e) -> println("spawn_with_cancel err=" ++ e)
+    end
+    -- Cancel the token, spawn another task; expect cancellation result
+    task_cancel(tok)
+    let t2 = task_spawn_with_cancel(fn _ -> 88, tok)
+    match task_await(t2) do
+      Ok(n)  -> println("cancelled task ok=" ++ int_to_string(n))
+      Err(e) -> println("cancelled task err=" ++ e)
+    end
+  end
+
+  -- ── Test: Cancel token lifecycle ──────────────────────────────────────
+
+  pfn test_cancel() : Unit do
+    section("cancel token")
+    let tok = task_cancel_token_new()
+    println("before cancel=" ++ bool_to_string(task_is_cancelled(tok)))  -- false
+    task_cancel(tok)
+    println("after cancel=" ++ bool_to_string(task_is_cancelled(tok)))   -- true
+  end
+
+  -- ── Test: Large message volume ─────────────────────────────────────────
+
+  pfn test_bulk() : Unit do
+    section("bulk messages")
+    let c = spawn(Counter)
+    -- Send 100 Inc(1) messages; final value should be 100.
+    -- List.range(0, 100) is exclusive at the top: [0..99] = 100 elements.
+    let ns = List.range(0, 100)
+    List.each(ns, fn _ -> send(c, Inc(1)))
+    send(c, Print())        -- expect 100
+  end
+
+  -- ── Entry point ───────────────────────────────────────────────────────
+
+  fn main() : Unit do
+    test_counter()
+    test_stack()
+    test_many_counters()
+    test_relay()
+    test_collector()
+    test_tasks_basic()
+    test_tasks_many()
+    test_tasks_race()
+    test_tasks_any()
+    test_tasks_stream()
+    test_message_order()
+    test_receive_in_handler()
+    test_spawn_with_cancel()
+    test_cancel()
+    test_bulk()
+    println("")
+    println("done")
+  end
+
+end

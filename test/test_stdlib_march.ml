@@ -148,7 +148,6 @@ let all_stdlib_decls =
     "handshake.march";
     "net_kernel.march";
     "peer_registry.march";
-    "cluster_conn.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -343,5 +342,9 @@ let () =
     ("list_parallel", [
       Alcotest.test_case "List parallel ops"
         `Quick (run_stdlib_test "test_list_parallel.march" "TestListParallel");
+    ]);
+    ("list", [
+      Alcotest.test_case "List module"
+        `Quick (run_stdlib_test "test_list.march" "TestList");
     ]);
   ]

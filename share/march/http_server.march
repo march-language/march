@@ -1,0 +1,312 @@
+-- HttpServer module: server-side HTTP types and pipeline runner.
+--
+-- Built on top of Http (for Method, Header types) and WebSocket modules.
+-- Provides the Conn type, pipeline composition, and server startup.
+--
+-- Usage:
+--   HttpServer.new(4000)
+--   |> HttpServer.max_connections(500)
+--   |> HttpServer.idle_timeout(30)
+--   |> HttpServer.plug(logger)
+--   |> HttpServer.plug(router)
+--   |> HttpServer.listen()
+
+mod HttpServer do
+
+  -- Upgrade type for WebSocket connections
+  type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
+
+  -- The Conn type: holds everything about a request-response cycle.
+  -- Modeled on Plug.Conn from Elixir.
+  -- The method field is an Atom (e.g. :get, :post) — interned i64 hash,
+  -- allocation-free and safe for pattern matching in compiled mode.
+  type Conn = Conn(
+    Int,                    -- fd (TCP socket)
+    Atom,                   -- request method (:get, :post, :put, etc.)
+    String,                 -- request path (raw, e.g. "/users/42")
+    List(String),           -- path_info (split on "/", empty filtered)
+    String,                 -- query_string (raw, e.g. "page=1&limit=10")
+    List(Header),           -- request headers
+    String,                 -- request body
+    Int,                    -- response status (0 = not yet set)
+    List(Header),           -- response headers
+    String,                 -- response body
+    Bool,                   -- halted? (true after send_resp)
+    List((String, String)), -- assigns (user-defined key-value store)
+    Upgrade                 -- websocket upgrade (NoUpgrade by default)
+  )
+
+  -- Conn accessors
+
+  fn method(conn) do
+    match conn do
+    Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m
+    end
+  end
+
+  -- Convert a method atom to its string name (for logging, responses, etc.)
+  -- Atoms use lowercase: :get, :post, :put, :patch, :delete, :head, :options
+  fn method_to_string(m) do
+    if m == :get do "GET"
+    else if m == :post do "POST"
+    else if m == :put do "PUT"
+    else if m == :patch do "PATCH"
+    else if m == :delete do "DELETE"
+    else if m == :head do "HEAD"
+    else if m == :options do "OPTIONS"
+    else if m == :trace do "TRACE"
+    else if m == :connect do "CONNECT"
+    else "UNKNOWN" end end end end end end end end end
+  end
+
+  fn path(conn) do
+    match conn do
+    Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p
+    end
+  end
+
+  fn path_info(conn) do
+    match conn do
+    Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi
+    end
+  end
+
+  fn query_string(conn) do
+    match conn do
+    Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs
+    end
+  end
+
+  fn req_headers(conn) do
+    match conn do
+    Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh
+    end
+  end
+
+  fn req_body(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb
+    end
+  end
+
+  fn status(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s
+    end
+  end
+
+  fn resp_headers(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh
+    end
+  end
+
+  fn resp_body(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb
+    end
+  end
+
+  fn halted(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h
+    end
+  end
+
+  fn assigns(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a
+    end
+  end
+
+  fn conn_upgrade(conn) do
+    match conn do
+    Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u
+    end
+  end
+
+  fn fd(conn) do
+    match conn do
+    Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f
+    end
+  end
+
+  -- Header lookup (case-insensitive) on request headers
+  fn get_req_header(conn, name) do
+    let lower_name = string_to_lowercase(name)
+    fn find(hs) do
+      match hs do
+      Nil -> None
+      Cons(Header(n, v), rest) -> do
+        if string_to_lowercase(n) == lower_name do Some(v)
+        else find(rest) end
+      end
+      end
+    end
+    find(req_headers(conn))
+  end
+
+  -- Header lookup (case-insensitive) on response headers
+  fn get_resp_header(conn, name) do
+    let lower_name = string_to_lowercase(name)
+    fn find(hs) do
+      match hs do
+      Nil -> None
+      Cons(Header(n, v), rest) -> do
+        if string_to_lowercase(n) == lower_name do Some(v)
+        else find(rest) end
+      end
+      end
+    end
+    find(resp_headers(conn))
+  end
+
+  -- Assign lookup
+  fn get_assign(conn, key) do
+    fn find(pairs) do
+      match pairs do
+      Nil -> None
+      Cons((k, v), rest) -> do
+        if k == key do Some(v)
+        else find(rest) end
+      end
+      end
+    end
+    find(assigns(conn))
+  end
+
+  -- Conn transforms
+
+  fn put_resp_header(conn, name, value) do
+    match conn do
+    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+      Conn(fd, m, p, pi, qs, rh, rb, s, Cons(Header(name, value), rhs), rbody, h, a, u)
+    end
+  end
+
+  fn assign(conn, key, value) do
+    match conn do
+    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+      Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, Cons((key, value), a), u)
+    end
+  end
+
+  -- Set response status + body and mark halted.
+  -- This is the primary way to "respond".
+  fn send_resp(conn, resp_status, body) do
+    match conn do
+    Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, _, a, u) ->
+      Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
+    end
+  end
+
+  -- Mark as halted without setting a response.
+  fn halt(conn) do
+    match conn do
+    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
+      Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, true, a, u)
+    end
+  end
+
+  -- Convenience response helpers
+
+  fn text(conn, resp_status, body) do
+    conn
+    |> put_resp_header("content-type", "text/plain; charset=utf-8")
+    |> send_resp(resp_status, body)
+  end
+
+  fn json(conn, resp_status, body) do
+    conn
+    |> put_resp_header("content-type", "application/json")
+    |> send_resp(resp_status, body)
+  end
+
+  fn html(conn, resp_status, body) do
+    conn
+    |> put_resp_header("content-type", "text/html; charset=utf-8")
+    |> send_resp(resp_status, body)
+  end
+
+  fn redirect(conn, url) do
+    conn
+    |> put_resp_header("location", url)
+    |> send_resp(302, "")
+  end
+
+  -- Pipeline execution: run a list of plugs in order.
+  -- Stops at the first halted conn.
+  fn run_pipeline(conn, plugs) do
+    match plugs do
+    Nil -> conn
+    Cons(f, rest) -> do
+      if halted(conn) do conn
+      else run_pipeline(f(conn), rest) end
+    end
+    end
+  end
+
+  -- Server config type
+  type Server = Server(
+    Int,                 -- port
+    List(Conn -> Conn),  -- pipeline (list of plugs)
+    Int,                 -- max_connections (default 1000)
+    Int                  -- idle_timeout_secs (default 60)
+  )
+
+  fn new(port) do
+    Server(port, Nil, 1000, 60)
+  end
+
+  fn plug(server, p) do
+    match server do
+    Server(port, plugs, mc, it) ->
+      Server(port, List.append(plugs, Cons(p, Nil)), mc, it)
+    end
+  end
+
+  fn max_connections(server, n) do
+    match server do
+    Server(port, plugs, _, it) -> Server(port, plugs, n, it)
+    end
+  end
+
+  fn idle_timeout(server, secs) do
+    match server do
+    Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
+    end
+  end
+
+  -- Start the server. Blocks forever.
+  -- Extracts config and calls the C runtime http_server_listen builtin.
+  fn listen(server) do
+    match server do
+    Server(port, plugs, mc, it) -> do
+      -- Build a server config heap object for the C runtime:
+      -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
+      -- The pipeline is passed separately.
+      -- For now, we pass the pipeline as a function that runs run_pipeline.
+      let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
+      http_server_listen(port, mc, it, pipeline_fn)
+    end
+    end
+  end
+
+  -- Start the server in a forked subprocess that handles exactly n requests
+  -- then exits. Returns a handle (child PID) that can be passed to wait_for.
+  -- A readiness pipe ensures the parent does not race ahead of the child's bind.
+  fn spawn_n(server, n) do
+    match server do
+    Server(port, plugs, mc, it) -> do
+      let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
+      http_server_spawn_n(port, n, mc, it, pipeline_fn)
+    end
+    end
+  end
+
+  -- Wait for a server handle (child PID) returned by spawn_n to exit.
+  fn wait_for(handle) do
+    http_server_wait(handle)
+  end
+
+end

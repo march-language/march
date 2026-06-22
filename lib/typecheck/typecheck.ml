@@ -930,6 +930,8 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.Mut",        Some "IO");
   ("IO.Telemetry",  Some "IO");
   ("IO.NetConnect.TLS", Some "IO.NetConnect");
+  ("IO.Foreign",         Some "IO");
+  ("IO.Foreign.Blocking", Some "IO.Foreign");
 ]
 
 (** Maps builtin function names to the IO capability they require.
@@ -4898,6 +4900,19 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
     ) [] all
   in
+  (* Extern-implied caps: any DExtern → needs IO.Foreign; any blocking extern fn → needs IO.Foreign.Blocking *)
+  let extern_cap_uses : (string * Ast.span) list =
+    List.concat_map (function
+      | Ast.DExtern (edef, sp) ->
+        let base = [("IO.Foreign", sp)] in
+        let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
+        if has_blocking then base @ [("IO.Foreign.Blocking", sp)] else base
+      | _ -> []
+    ) decls
+    |> List.fold_left (fun acc (cap_name, sp) ->
+      if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
+    ) []
+  in
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
@@ -4945,6 +4960,19 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
           MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
           MPText " to the module body." ])
   ) body_cap_uses;
+  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
+  List.iter (fun (cap_path, sp) ->
+    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+    if not covered then
+      Err.warning env.errors ~span:sp
+        (render_parts [
+          MPText "extern block in "; MPCode mod_name.txt;
+          MPText " requires "; cap cap_path;
+          MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
+          MPCode ("needs " ^ cap_path); MPText ".";
+          MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
+          MPText " to the module body." ])
+  ) extern_cap_uses;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
     let need_sp =
@@ -4957,7 +4985,8 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       find_span decls
     in
     let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
-              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses in
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses in
     if not used then
       Err.warning env.errors ~span:need_sp
         (render_parts [

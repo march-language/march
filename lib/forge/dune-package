@@ -1,0 +1,8 @@
+(lang dune 3.21)
+(name forge)
+(version 0.1.0)
+(sections
+ (lib /Users/80197052/code/march/lib/forge)
+ (bin /Users/80197052/code/march/bin)
+ (doc /Users/80197052/code/march/doc/forge))
+(files (lib (META dune-package opam)) (bin (forge)) (doc (README.md)))

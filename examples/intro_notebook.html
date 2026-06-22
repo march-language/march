@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Introduction to March</title>
+<style>
+:root{--accent:#7c3aed;--code-bg:#1e1e2e;--code-fg:#cdd6f4;--out-bg:#f8fafc;--out-bd:#e2e8f0;--err-bg:#fef2f2;--err-fg:#dc2626;--err-bd:#fca5a5;--cell-bd:#e2e8f0;--val-fg:#0550ae}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#fff;color:#1a1a2e;max-width:920px;margin:0 auto;padding:48px 24px 80px;line-height:1.65}
+header{margin-bottom:48px;padding-bottom:20px;border-bottom:3px solid var(--accent)}
+header h1{font-size:30px;color:var(--accent);font-weight:700}
+header .meta{font-size:13px;color:#6b7280;margin-top:6px}
+.cell{margin:24px 0}
+.cell-md{padding:4px 0}
+.cell-md h1{font-size:26px;margin:20px 0 10px;font-weight:700}
+.cell-md h2{font-size:20px;margin:16px 0 8px;font-weight:600}
+.cell-md h3{font-size:16px;margin:14px 0 6px;font-weight:600}
+.cell-md p{margin:8px 0;color:#374151}
+.cell-md ul{margin:8px 0 8px 24px}
+.cell-md li{margin:3px 0;color:#374151}
+.cell-md hr{border:none;border-top:1px solid #e5e7eb;margin:16px 0}
+.cell-md code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;background:#f3f4f6;padding:2px 5px;border-radius:4px;color:#9333ea}
+.cell-md strong{font-weight:600}
+.cell-md em{font-style:italic}
+.code-wrap{border:1px solid var(--cell-bd);border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.cell-label{font-size:11px;font-family:'JetBrains Mono',monospace;color:#9ca3af;background:#f9fafb;padding:5px 14px;border-bottom:1px solid var(--cell-bd);letter-spacing:.03em}
+.code-src{background:var(--code-bg);color:var(--code-fg);font-family:'JetBrains Mono','Fira Code',monospace;font-size:13.5px;line-height:1.6;padding:18px 20px;overflow-x:auto;white-space:pre;tab-size:2}
+.cell-out{background:var(--out-bg);border-top:1px solid var(--out-bd);padding:12px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#1f2937}
+.cell-err{background:var(--err-bg);border-top:2px solid var(--err-bd);padding:12px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--err-fg);white-space:pre-wrap}
+footer{margin-top:72px;padding-top:20px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;text-align:center}
+</style></head>
+<body>
+<header>
+<h1>Introduction to March</h1>
+<div class="meta">Evaluated generated &middot; forge notebook &middot; March</div>
+</header>
+<main>
+<div class="cell cell-md">
+<h1>Introduction to March</h1><p>Welcome to this interactive March notebook. Code cells below are evaluated in sequence, with bindings carrying forward between cells.</p><h2>Basic Expressions</h2><p>Let's start with some simple values and printing.</p>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [1]</div>
+<pre class="code-src">let greeting = &quot;Hello, March notebooks!&quot;
+print(greeting)</pre>
+<div class="cell-out">Hello, March notebooks!</div>
+</div>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [2]</div>
+<pre class="code-src">let x = 42
+let y = x * 2 + 1
+print(to_string(y))</pre>
+<div class="cell-out">85</div>
+</div>
+</div>
+<div class="cell cell-md">
+<h2>Working with Lists</h2><p>March has built-in list support with a rich standard library.</p>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [3]</div>
+<pre class="code-src">let nums = [1, 2, 3, 4, 5]
+let doubled = List.map(nums, fn n -&gt; n * 2)
+print(to_string(doubled))</pre>
+<div class="cell-out">[2, 4, 6, 8, 10]</div>
+</div>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [4]</div>
+<pre class="code-src">let total = List.fold_left(0, nums, fn (acc, n) -&gt; acc + n)
+print(to_string(total))</pre>
+<div class="cell-out">15</div>
+</div>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [5]</div>
+<pre class="code-src">let evens = List.filter(nums, fn n -&gt; n % 2 == 0)
+print(to_string(evens))</pre>
+<div class="cell-out">[2, 4]</div>
+</div>
+</div>
+<div class="cell cell-md">
+<h2>Functions</h2><p>You can define functions in code cells and use them in later cells.</p>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [6]</div>
+<pre class="code-src">fn square(n) do
+  n * n
+end
+
+fn sum_of_squares(lst) do
+  let mapped = List.map(lst, fn n -&gt; square(n))
+  List.fold_left(0, mapped, fn (acc, n) -&gt; acc + n)
+end</pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [7]</div>
+<pre class="code-src">let result = sum_of_squares([1, 2, 3, 4, 5])
+print(to_string(result))</pre>
+<div class="cell-out">55</div>
+</div>
+</div>
+<div class="cell cell-md">
+<h2>Pattern Matching</h2><p>March supports expressive pattern matching with guards using <code>when</code>.</p>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [8]</div>
+<pre class="code-src">fn classify(n) do
+  match n do
+    0 -&gt; &quot;zero&quot;
+    n when n &lt; 0 -&gt; &quot;negative&quot;
+    _ -&gt; &quot;positive&quot;
+  end
+end
+
+print(classify(-5))
+print(classify(0))
+print(classify(42))</pre>
+<div class="cell-out">negativezeropositive</div>
+</div>
+</div>
+<div class="cell cell-md">
+<h2>String Operations</h2>
+</div>
+<div class="cell">
+<div class="code-wrap">
+<div class="cell-label">In [9]</div>
+<pre class="code-src">let words = [&quot;march&quot;, &quot;notebooks&quot;, &quot;are&quot;, &quot;great&quot;]
+let sentence = String.join(words, &quot; &quot;)
+print(sentence)</pre>
+<div class="cell-out">march notebooks are great</div>
+</div>
+</div>
+<div class="cell cell-md">
+<hr><p>*This notebook was generated with <code>forge notebook</code>.*</p>
+</div>
+</main>
+<footer>Generated by <strong>forge notebook</strong> &middot; generated</footer>
+</body>
+</html>

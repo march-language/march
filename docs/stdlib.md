@@ -48,7 +48,7 @@ const(x)                      -- fn _ -> x
 
 ## List
 
-`list.march` — 508 lines. The standard singly-linked list.
+`list.march` — the standard singly-linked list.
 
 ```elixir
 -- Construction
@@ -108,7 +108,38 @@ List.drop([1, 2, 3, 4], 2)            -- [3, 4]
 List.take_while([1, 2, 3, 4], fn x -> x < 3)   -- [1, 2]
 List.drop_while([1, 2, 3, 4], fn x -> x < 3)   -- [3, 4]
 Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
+
+-- Parallel (real multi-core parallelism in compiled code; the supplied
+-- function MUST be safe to run concurrently)
+List.pmap([1, 2, 3], fn x -> x * 2)              -- [2, 4, 6]  (parallel map)
+List.pmap_n(urls, fn u -> fetch(u), 8)           -- parallel map, ≤8 tasks at once
+List.pfilter([1, 2, 3, 4], fn x -> x % 2 == 0)  -- [2, 4]     (parallel filter)
+List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b)  -- 10  (combine MUST be associative)
 ```
+
+The parallel operations are order-preserving and return exactly what their
+sequential counterparts (`map`/`filter`/`fold_left`) do. Below a configurable
+cutoff they fall back to the sequential version (no task-spawn overhead); above
+it the list is split into chunks, one task per chunk, run on the multithreaded
+scheduler. Real CPU parallelism happens in **compiled** code — the interpreter
+runs the tasks eagerly on one thread (correct, but sequential).
+
+- The cutoff is `pmap_threshold()` (default **1024**), set at compile time with
+  `--pmap-threshold=N` (forge passes it through via `MARCH_PMAP_THRESHOLD`).
+- `pmap_n` caps concurrency explicitly — use it when each element does heavy
+  work (few elements, expensive per-element) so the size heuristic doesn't apply.
+- `preduce` is a **tree reduction**: `combine` must be associative
+  (`combine(combine(x, y), z) == combine(x, combine(y, z))`) with `identity` as
+  its unit. Sum, product, max, min, string concat, set union qualify;
+  subtraction and average do not. The compiler cannot check this — it's the
+  caller's contract.
+
+> **Tip:** the LSP flags a pure `List.map`/`List.filter` as a `pmap`/`pfilter`
+> candidate with a one-click "Convert to `List.pmap`" quick-fix.
+
+See the [Parallel Collections guide]({{ site.baseurl }}/docs/parallel-collections/)
+for how chunking works, the `--pmap-threshold` flag, when to parallelize, and the
+editor-driven detection.
 
 ---
 

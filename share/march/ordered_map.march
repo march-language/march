@@ -1,0 +1,311 @@
+-- OrderedMap module: AVL tree-based sorted map.
+--
+-- Keys are ordered by a user-supplied comparator function:
+--   cmp(a, b) < 0  means a < b
+--   cmp(a, b) = 0  means a = b
+--   cmp(a, b) > 0  means a > b
+--
+-- The map itself is a record holding the comparator and the tree root.
+-- Type: %{cmp: (k,k)->Int, tree: Tree(k,v)}
+
+mod OrderedMap do
+
+-- Internal AVL tree: Leaf | Node(left, key, value, right, height)
+type Tree(k, v) = Leaf | Node(Tree(k, v), k, v, Tree(k, v), Int)
+
+-- ---- Internal helpers ----
+
+pfn height(t : Tree(k, v)) : Int do
+  match t do
+  Leaf -> 0
+  Node(_, _, _, _, h) -> h
+  end
+end
+
+pfn make_node(l : Tree(k, v), k : k, v : v, r : Tree(k, v)) : Tree(k, v) do
+  let lh = height(l)
+  let rh = height(r)
+  let h = if lh > rh do lh + 1 else rh + 1 end
+  Node(l, k, v, r, h)
+end
+
+pfn balance_factor(t : Tree(k, v)) : Int do
+  match t do
+  Leaf -> 0
+  Node(l, _, _, r, _) -> height(l) - height(r)
+  end
+end
+
+pfn rotate_right(t : Tree(k, v)) : Tree(k, v) do
+  match t do
+  Node(Node(ll, lk, lv, lr, _), k, v, r, _) ->
+    let new_r = make_node(lr, k, v, r)
+    make_node(ll, lk, lv, new_r)
+  _ -> t
+  end
+end
+
+pfn rotate_left(t : Tree(k, v)) : Tree(k, v) do
+  match t do
+  Node(l, k, v, Node(rl, rk, rv, rr, _), _) ->
+    let new_l = make_node(l, k, v, rl)
+    make_node(new_l, rk, rv, rr)
+  _ -> t
+  end
+end
+
+pfn balance(t : Tree(k, v)) : Tree(k, v) do
+  match t do
+  Leaf -> Leaf
+  Node(l, k, v, r, _) ->
+    let bf = height(l) - height(r)
+    if bf > 1 do
+      if balance_factor(l) < 0 do
+        rotate_right(make_node(rotate_left(l), k, v, r))
+      else
+        rotate_right(t)
+      end
+    else
+      if bf < -1 do
+        if balance_factor(r) > 0 do
+          rotate_left(make_node(l, k, v, rotate_right(r)))
+        else
+          rotate_left(t)
+        end
+      else
+        make_node(l, k, v, r)
+      end
+    end
+  end
+end
+
+pfn tree_insert(t : Tree(k, v), cmp : (k, k) -> Int, key : k, val : v) : Tree(k, v) do
+  match t do
+  Leaf -> Node(Leaf, key, val, Leaf, 1)
+  Node(l, k, v2, r, _) ->
+    let c = cmp(key, k)
+    if c < 0 do
+      balance(make_node(tree_insert(l, cmp, key, val), k, v2, r))
+    else
+      if c > 0 do
+        balance(make_node(l, k, v2, tree_insert(r, cmp, key, val)))
+      else
+        make_node(l, key, val, r)
+      end
+    end
+  end
+end
+
+pfn tree_get(t : Tree(k, v), cmp : (k, k) -> Int, key : k) : Option(v) do
+  match t do
+  Leaf -> None
+  Node(l, k, v, r, _) ->
+    let c = cmp(key, k)
+    if c < 0 do
+      tree_get(l, cmp, key)
+    else
+      if c > 0 do
+        tree_get(r, cmp, key)
+      else
+        Some(v)
+      end
+    end
+  end
+end
+
+pfn tree_min(t : Tree(k, v)) : Option((k, v)) do
+  match t do
+  Leaf -> None
+  Node(Leaf, k, v, _, _) -> Some((k, v))
+  Node(l, _, _, _, _) -> tree_min(l)
+  end
+end
+
+pfn tree_delete_min(t : Tree(k, v)) : Tree(k, v) do
+  match t do
+  Leaf -> Leaf
+  Node(Leaf, _, _, r, _) -> r
+  Node(l, k, v, r, _) -> balance(make_node(tree_delete_min(l), k, v, r))
+  end
+end
+
+pfn tree_delete(t : Tree(k, v), cmp : (k, k) -> Int, key : k) : Tree(k, v) do
+  match t do
+  Leaf -> Leaf
+  Node(l, k, v, r, _) ->
+    let c = cmp(key, k)
+    if c < 0 do
+      balance(make_node(tree_delete(l, cmp, key), k, v, r))
+    else
+      if c > 0 do
+        balance(make_node(l, k, v, tree_delete(r, cmp, key)))
+      else
+        match tree_min(r) do
+        None -> l
+        Some((rk, rv)) -> balance(make_node(l, rk, rv, tree_delete_min(r)))
+        end
+      end
+    end
+  end
+end
+
+pfn tree_to_list(t : Tree(k, v), acc : List((k, v))) : List((k, v)) do
+  match t do
+  Leaf -> acc
+  Node(l, k, v, r, _) ->
+    tree_to_list(l, Cons((k, v), tree_to_list(r, acc)))
+  end
+end
+
+pfn tree_size(t : Tree(k, v)) : Int do
+  match t do
+  Leaf -> 0
+  Node(l, _, _, r, _) -> 1 + tree_size(l) + tree_size(r)
+  end
+end
+
+pfn tree_fold(t : Tree(k, v), acc : b, f : (b, k, v) -> b) : b do
+  match t do
+  Leaf -> acc
+  Node(l, k, v, r, _) ->
+    let acc2 = tree_fold(l, acc, f)
+    let acc3 = f(acc2, k, v)
+    tree_fold(r, acc3, f)
+  end
+end
+
+pfn tree_map(t : Tree(k, v), f : (k, v) -> w) : Tree(k, w) do
+  match t do
+  Leaf -> Leaf
+  Node(l, k, v, r, h) -> Node(tree_map(l, f), k, f(k, v), tree_map(r, f), h)
+  end
+end
+
+pfn tree_filter(t : Tree(k, v), cmp : (k, k) -> Int, f : (k, v) -> Bool) : Tree(k, v) do
+  match t do
+  Leaf -> Leaf
+  Node(l, k, v, r, _) ->
+    let l2 = tree_filter(l, cmp, f)
+    let r2 = tree_filter(r, cmp, f)
+    if f(k, v) do
+      balance(make_node(l2, k, v, r2))
+    else
+      match tree_min(r2) do
+      None -> l2
+      Some((rk, rv)) -> balance(make_node(l2, rk, rv, tree_delete_min(r2)))
+      end
+    end
+  end
+end
+
+pfn tree_max(t : Tree(k, v)) : Option((k, v)) do
+  match t do
+  Leaf -> None
+  Node(_, k, v, Leaf, _) -> Some((k, v))
+  Node(_, _, _, r, _) -> tree_max(r)
+  end
+end
+
+-- ---- Public API ----
+
+doc "Creates a new empty ordered map with the given comparator."
+fn new(cmp : (k, k) -> Int) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  %{cmp: cmp, tree: Leaf}
+end
+
+doc "Inserts or updates key k with value v in map m."
+fn put(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, v : v) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  %{cmp: m.cmp, tree: tree_insert(m.tree, m.cmp, k, v)}
+end
+
+doc "Looks up key k in map m. Returns Some(v) or None."
+fn get(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Option(v) do
+  tree_get(m.tree, m.cmp, k)
+end
+
+doc "Deletes key k from map m. No-op if key not present."
+fn delete(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  %{cmp: m.cmp, tree: tree_delete(m.tree, m.cmp, k)}
+end
+
+doc "Returns true if key k is present in map m."
+fn member(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k) : Bool do
+  match tree_get(m.tree, m.cmp, k) do
+  Some(_) -> true
+  None -> false
+  end
+end
+
+doc "Returns an in-order list of all keys."
+fn keys(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(k) do
+  List.map(tree_to_list(m.tree, Nil), fn (k, _) -> k)
+end
+
+doc "Returns an in-order list of all values."
+fn values(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List(v) do
+  List.map(tree_to_list(m.tree, Nil), fn (_, v) -> v)
+end
+
+doc "Returns an in-order list of (key, value) pairs."
+fn to_list(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : List((k, v)) do
+  tree_to_list(m.tree, Nil)
+end
+
+doc "Builds a map from a list of (key, value) pairs."
+fn from_list(pairs : List((k, v)), cmp : (k, k) -> Int) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  List.fold_left(pairs, new(cmp), fn m -> fn (k, v) -> put(m, k, v))
+end
+
+doc "Returns the number of entries in the map."
+fn size(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Int do
+  tree_size(m.tree)
+end
+
+doc "Returns the smallest key, or None if empty."
+fn min_key(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
+  match tree_min(m.tree) do
+  Some((k, _)) -> Some(k)
+  None -> None
+  end
+end
+
+doc "Returns the largest key, or None if empty."
+fn max_key(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Option(k) do
+  match tree_max(m.tree) do
+  Some((k, _)) -> Some(k)
+  None -> None
+  end
+end
+
+doc "Folds over the map in key order: f(acc, key, value) -> acc."
+fn fold(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, acc : b, f : (b, k, v) -> b) : b do
+  tree_fold(m.tree, acc, f)
+end
+
+doc "Maps f over all values, preserving keys and order."
+fn map(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> w) : %{cmp: (k, k) -> Int, tree: Tree(k, w)} do
+  %{cmp: m.cmp, tree: tree_map(m.tree, f)}
+end
+
+doc "Returns a new map containing only entries where f(k, v) is true."
+fn filter(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, f : (k, v) -> Bool) : %{cmp: (k, k) -> Int, tree: Tree(k, v)} do
+  %{cmp: m.cmp, tree: tree_filter(m.tree, m.cmp, f)}
+end
+
+doc "Returns true if the map is empty."
+fn is_empty(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}) : Bool do
+  match m.tree do
+  Leaf -> true
+  _ -> false
+  end
+end
+
+doc "Returns the value for key k, or default if not present."
+fn get_or(m : %{cmp: (k, k) -> Int, tree: Tree(k, v)}, k : k, default : v) : v do
+  match tree_get(m.tree, m.cmp, k) do
+  Some(v) -> v
+  None -> default
+  end
+end
+
+end

@@ -4,6 +4,7 @@
 -- field-accesses the C-built record — proving aggregates round-trip in.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   type Shape = Circle(Int) | Rect(Int, Int)
   type Point = { x : Int, y : Int }
   extern "rt" : Cap(Ffi) do
