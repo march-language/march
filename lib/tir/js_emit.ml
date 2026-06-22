@@ -243,6 +243,12 @@ let literal_tag_js br_tag =
 
 (* ── JS-module detection + extern classification ─────────────────── *)
 
+(* Map built-in March runtime lib names to their JS module paths.
+   These are shipped alongside march_runtime.mjs and imported automatically. *)
+let js_runtime_module_path = function
+  | "dom" -> Some "./march_dom.mjs"
+  | _     -> None
+
 (** True when the library name is a JS module specifier (not a C lib name).
     JS specifiers start with a scheme, relative path, or scoped npm prefix. *)
 let is_js_module lib =
@@ -251,6 +257,7 @@ let is_js_module lib =
   has_prefix "./" || has_prefix "../"
   || has_prefix "npm:" || has_prefix "jsr:"
   || has_prefix "node:" || has_prefix "https://" || has_prefix "http://"
+  || Option.is_some (js_runtime_module_path lib)
 
 (** How an extern should be called on the JS target. *)
 type js_extern_kind =
@@ -977,12 +984,16 @@ let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string * stri
       | None -> Hashtbl.add by_lib key (ref [(ed.ed_march_name, ed.ed_js_sym)])
     ) js_externs;
     Hashtbl.iter (fun lib pairs ->
+      let import_path = match js_runtime_module_path lib with
+        | Some p -> p
+        | None   -> lib
+      in
       let specs = List.map (fun (march_name, js_sym) ->
         if march_name = js_sym then js_sym
         else js_sym ^ " as " ^ mangle march_name
       ) !pairs in
       imp (Printf.sprintf "import { %s } from %s;\n"
-             (String.concat ", " specs) (js_string_lit lib))
+             (String.concat ", " specs) (js_string_lit import_path))
     ) by_lib;
     if js_externs <> [] then imp "\n";
 
