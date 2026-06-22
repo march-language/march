@@ -22,6 +22,7 @@
 #include <caml/memory.h>
 #include <caml/fail.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <dlfcn.h>
 
 CAMLprim value march_eval_dlopen(value path) {
@@ -112,6 +113,23 @@ static double dyncall_fd(void *fn, const int64_t *ia, int ni, const double *fa, 
             caml_failwith("march_eval dyncall_fd: unsupported (ni,nf) — file a bug");
             return 0.0;
     }
+}
+
+/* ── Gap 1: load a user shim .so into the interpreter's symbol space ──────
+ * Opens [path] with RTLD_NOW | RTLD_GLOBAL so that subsequent dlsym calls
+ * (including those from the already-loaded runtime .so) can see the symbols.
+ * Mirrors march_eval_dlopen above but is a separate entry point so OCaml can
+ * call it by name from a different code path (eval.ml ffi_extra_so loader). */
+CAMLprim value march_eval_dlopen_extra(value path) {
+    CAMLparam1(path);
+    void *h = dlopen(String_val(path), RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "march FFI: failed to dlopen shim '%s': %s",
+                 String_val(path), dlerror());
+        caml_failwith(buf);
+    }
+    CAMLreturn(Val_unit);
 }
 
 /* args : int64 array (boxed), n : int. Returns the int64 / double result. */

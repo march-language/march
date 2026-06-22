@@ -1,0 +1,6 @@
+extern rt:ffi_apply1 — interpreter FFI cannot marshal the argument or return types of this binding (closures/upcalls not yet supported). Run with --compile.
+
+Stack trace (most recent call first):
+  [0] apply1()                 test/native/ffi_interp_upcall.march:16
+
+note: set MARCH_BACKTRACE=full for all frames including stdlib

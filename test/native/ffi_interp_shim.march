@@ -1,0 +1,19 @@
+-- FFI Gap 1: user shim .so loaded by the interpreter.
+-- The C functions live in test/native/ffi_shim.c (not in the runtime).
+-- The dune rule compiles ffi_shim.c to a .so and passes it via --ffi-so.
+mod Test do
+  needs Ffi
+  needs IO.Foreign
+
+  extern "shim" : Cap(Ffi) do
+    fn shim_add(a: Int, b: Int): Int = "shim_add"
+    fn shim_mul(a: Int, b: Int): Int = "shim_mul"
+    fn shim_strlen(s: String): Int = "shim_strlen"
+  end
+
+  fn main() : Unit do
+    println(int_to_string(shim_add(3, 4)))
+    println(int_to_string(shim_mul(6, 7)))
+    println(int_to_string(shim_strlen("hello")))
+  end
+end

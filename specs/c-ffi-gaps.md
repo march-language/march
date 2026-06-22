@@ -78,12 +78,25 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   `ffi_marshal.ml` provide OCaml C stubs (lazy-init from `RTLD_DEFAULT` after the
   runtime `.so` is `RTLD_GLOBAL`-loaded). `test/native/ffi_interp2` verifies
   end-to-end. GP arg arity cap raised to 8 (was 6). Remaining interpreter gap:
-  - **Closures/upcalls as arguments** (`TyArrow` param types) still fall back to
-    `--compile`. Re-entering the interpreter from C would need a thread-safe
-    re-entrant eval path.
-  - **User [ffi] shims** (from forge.toml `sources = [...]`) are compiled-mode
-    only — the interpreter dlopens the runtime `.so`, not project-specific shim
-    `.so`s.
+  - **User [ffi] shims — DONE (2026-06-22, Gap 1).** The interpreter now compiles
+    `[ffi] sources = [...]` from forge.toml (passed as `--ffi-c` flags) into a
+    content-addressed temp `.so` at `~/.cache/march/march_ffi_shim_<hash>.so` and
+    dlopens it via `march_eval_dlopen_extra` (with `RTLD_GLOBAL` so runtime symbols
+    are visible to the shim).  Symbol lookup falls back to `RTLD_DEFAULT` after the
+    runtime handle, so both runtime and shim symbols are found.  A `--ffi-so <path>`
+    CLI flag lets callers pass a pre-compiled `.so` directly.  On macOS, `-undefined
+    dynamic_lookup` is passed to the shim compile so runtime symbols are resolved
+    lazily at dlopen time.  Verified by `test/native/ffi_interp_shim`.
+  - **Closures/upcalls as arguments** (`TyArrow` param types) emit a clean
+    actionable error: "interpreter FFI cannot marshal … closures/upcalls not yet
+    supported. Run with --compile." rather than crashing or producing wrong results.
+    The fundamental limitation: the compiled path's `march_call` reads a C function
+    pointer at a fixed offset in the closure heap object; the interpreter's
+    `VClosure` values have no such pointer.  Full upcall support would require
+    JIT-allocated trampolines (libffi closures or mmap'd machine code) to create
+    real C function pointers for OCaml closures — out of scope for this phase.
+    Verified: `test/native/ffi_interp_upcall.march` demonstrates the clean error
+    (`test/native/ffi_interp_upcall.expected`).
   Compiled mode and the JIT have none of these limits.
 
 ## Scheduler
