@@ -7,7 +7,19 @@ permalink: /docs/capabilities/
 
 # Capabilities
 
-March has a two-layer capability system that enforces *what your code is allowed to do* at compile time, with no runtime overhead.
+March makes side effects **visible in your types**. A module that reads files, opens network connections, or writes to shared mutable state must declare those effects — and the compiler verifies every claim, transitively, at compile time with no runtime overhead.
+
+## Why this matters
+
+Most languages treat side effects as invisible. A function call might read environment variables, spawn threads, or make network requests, and none of that appears in its type. Three problems follow:
+
+**Accidental effects.** A utility function you thought was pure turns out to call a logger, which opens a file handle, which fails in a sandbox. You find out at runtime, not at the call site.
+
+**Unclear contracts.** A function's signature tells you what data flows in and out, but not what it *does to the world*. That knowledge lives in the implementation, the docs (if they exist), or institutional memory.
+
+**Audit scope.** In a large codebase it becomes hard to answer "does this library ever write files?" or "which modules talk to the network?" without reading everything.
+
+March's capability system addresses all three. A module that needs to read files must declare `needs IO.FileRead`. A function that must remain pure declares nothing — and the compiler verifies it stays that way. Effects flow upward through the call graph automatically: if your code calls something effectful, the compiler tells you to acknowledge it.
 
 ---
 
@@ -61,6 +73,43 @@ fn restricted(cap : Cap(IO)) : () do
   Server.listen(net_cap, 8080)
 end
 ```
+
+`cap_narrow` is free — it reinterprets the type at compile time only.
+
+### Choosing the right level
+
+Use the **narrowest capability that accurately describes what the code actually does**. Narrower declarations make more precise claims, and the compiler verifies them.
+
+| What the code does | Declare |
+|--------------------|---------|
+| No external state, no I/O | *(nothing — pure functions need no `needs`)* |
+| Print to stdout/stderr | `needs IO.Console` |
+| Read files or directories | `needs IO.FileRead` |
+| Write, delete, or rename files | `needs IO.FileWrite` |
+| Read **and** write files | `needs IO.FileSystem` |
+| Outbound TCP or WebSocket | `needs IO.NetConnect` |
+| Outbound HTTPS only — no plaintext TCP | `needs IO.NetConnect.TLS` |
+| Accept inbound connections | `needs IO.NetListen` |
+| Vault tables (shared mutable state) | `needs IO.Mut` |
+| Spawn green tasks | `needs IO.Spawn` |
+| Wall clock or sleep | `needs IO.Clock` |
+| Random number generation | `needs IO.Random` |
+| Environment variables, child processes | `needs IO.Process` |
+| Calling C via `extern` | `needs IO.Foreign` |
+| Blocking C calls (OS threads) | `needs IO.Foreign` + `needs IO.Foreign.Blocking` |
+| Application entry point or top-level composition | `needs IO` |
+
+**In libraries, prefer narrow caps.** A library that only reads files should declare `needs IO.FileRead`, not `needs IO`. Callers can hand it a read-only view, statically proving the library cannot secretly write.
+
+**In entry points, `needs IO` is fine.** Top-level application modules that compose everything don't need to obsess over narrowing. The interesting claims live in the libraries being called.
+
+### When not to declare IO caps
+
+**Pure functions need nothing.** If a function computes a hash, parses JSON, sorts a list, or formats a string, write no `needs`. The *absence* of `needs` is the documentation — it tells a reader (and the compiler) that no external state is involved.
+
+**Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
+
+**Don't use capabilities for pure concepts.** A function that validates an email address or checks a regex needs no `needs` — capabilities exist for external state. Pure computation is already proven pure by having no declaration.
 
 ### IO.Mut — shared mutable state
 
@@ -159,6 +208,54 @@ end
 
 ---
 
+## Putting it together
+
+Here's how capability declarations compose across a small web application:
+
+```march
+mod Config do
+  needs IO.FileRead          -- reads one config file, nothing else
+
+  fn load(path : String) : Config do ... end
+end
+
+mod Metrics do
+  needs IO.Telemetry         -- semantic annotation: this module emits telemetry
+
+  fn record(event : String, duration : Int) : () do ... end
+end
+
+mod Api do
+  needs IO.NetListen         -- binds a port
+  needs IO.NetConnect.TLS    -- makes outbound HTTPS calls only (no plaintext)
+  needs IO.Mut               -- session vault
+
+  fn start(io : Cap(IO.NetListen), tls : Cap(IO.NetConnect.TLS),
+           mut : Cap(IO.Mut)) : () do
+    let session = Session.new(mut)
+    HttpServer.new()
+    |> HttpServer.plug(fn conn -> handle(conn, tls, session))
+    |> HttpServer.run(io, 8080)
+  end
+end
+
+mod Main do
+  needs IO
+
+  fn main() : () do
+    let config  = Config.load("/etc/myapp/config.toml")
+    let io_cap  : Cap(IO.NetListen)      = cap_narrow(root_cap())
+    let tls_cap : Cap(IO.NetConnect.TLS) = cap_narrow(root_cap())
+    let mut_cap : Cap(IO.Mut)            = cap_narrow(root_cap())
+    Api.start(io_cap, tls_cap, mut_cap)
+  end
+end
+```
+
+Reading each module's `needs` list answers "what does this module do to the world?" without opening the implementation. `Config` is provably read-only. `Api` can neither read files nor use plaintext TCP. The compiler verifies every claim: if `Config.load` ever called a network function, the build would fail until `needs IO.NetConnect` was added.
+
+---
+
 ## Phase 2a: Proof capability tokens (`proof cap`)
 
 Proof caps enforce **sequencing** — that a specific initialization step has run before dependent code is called.
@@ -224,7 +321,7 @@ end
 
 ### Good use cases for proof caps
 
-Proof caps suit **ambient, payload-independent facts** — things that are true about the system rather than a specific value:
+Proof caps suit **ambient, payload-independent facts** — things that are true about the system state, not about a specific value:
 
 | Proof cap | Meaning |
 |-----------|---------|
@@ -233,9 +330,11 @@ Proof caps suit **ambient, payload-independent facts** — things that are true 
 | `Cap(App.Initialized)` | Application startup has completed |
 | `Cap(Config.Loaded)` | Configuration has been validated |
 
+The key test: **is there a single, well-defined place in the codebase that produces this capability?** If yes, a proof cap works. If the initialization is diffuse, conditional, or happens in multiple places, a proof cap will feel awkward — use a runtime flag instead.
+
 ### When *not* to use proof caps
 
-If the proof must be tied to a specific value ("this `String` has been sanitized"), use an **opaque refined type** instead:
+**Don't use proof caps for per-value facts.** If the proof must be tied to a specific value ("this `String` has been sanitized"), use an **opaque refined type** instead:
 
 ```march
 mod Sanitize do
@@ -253,7 +352,9 @@ mod Sanitize do
 end
 ```
 
-A detached `Cap(Sanitized)` would prove "some string was sanitized" without binding it to the specific string you're about to render. The opaque type approach ties proof and data together.
+A detached `Cap(Sanitized)` would prove "some string was sanitized" without binding it to the specific string you're about to render. The opaque type approach ties proof and data together — you physically cannot pass an unsanitized string to `render`.
+
+**Don't use proof caps when there's no single mint point.** If the initialization logic is spread across multiple code paths, the cap becomes meaningless. The value of unforgeability comes from there being one clear entry point that does the work.
 
 ---
 
@@ -513,3 +614,18 @@ end
 
 The cap gates permission at compile time; the function field provides swappable
 behaviour at runtime. No new mechanism required — ordinary first-class functions.
+
+---
+
+## Quick decision guide
+
+| I want to… | Use |
+|------------|-----|
+| Prove a module never touches the network | Declare only non-network caps; absence enforced at compile time |
+| Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
+| Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
+| Guarantee migrations run before any query | `proof cap Migrated` in `mod Db` |
+| Prove a specific string has been sanitized | Opaque refined type (`ptype`), not a proof cap |
+| Track that a file handle is open vs closed | `always_linear type` + `transitions` (typestate) |
+| Exclude allocation/IO from a realtime callback | `Tagged(DSP, Realtime)` |
+| Thread many caps without adding parameters | Bundle into a capability-parameterized env record |
