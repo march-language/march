@@ -906,10 +906,15 @@ const negate_int      = { _0: ($_, x) => -x };
 const negate_float    = { _0: ($_, x) => -x };
 |}
 
+(** Raised by [emit_module] when used C-backed externs are compiled with [--target js].
+    Each string in the list is a formatted diagnostic for one offending extern. *)
+exception Js_emit_error of string list
+
 (** Emit a TIR module as an ES module string.
     Returns [(js_content, source_map_json option)].
     [fn_lines] maps TIR function names to 1-indexed source lines (from the AST).
-    [source_file] is the path to the originating .march file (for source maps). *)
+    [source_file] is the path to the originating .march file (for source maps).
+    Raises [Js_emit_error] when used C-backed externs are present (Chunk C). *)
 let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string * string option =
   let ctx = create_ctx ~fn_lines () in
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
@@ -930,6 +935,21 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   let used_ed = List.filter (fun (ed : Tir.extern_decl) ->
     Hashtbl.mem ctx.used_externs ed.ed_march_name
   ) m.Tir.tm_externs in
+  (* Chunk C: reject used C-backed externs — they have no JS implementation *)
+  let bad_externs = List.filter (fun ed -> classify_js_extern ed = CBacked) used_ed in
+  if bad_externs <> [] then begin
+    let msgs = List.map (fun (ed : Tir.extern_decl) ->
+      Printf.sprintf
+        "error: extern \"%s\" function `%s` cannot be called on the JavaScript target.\n\
+         The JS backend supports only JS-module externs:\n\
+           extern \"node:fs\"   extern \"npm:lodash\"   extern \"./local.mjs\"\n\
+         `%s` is bound to the C symbol `%s`, which has no JS runtime\n\
+         implementation. To call it from JS, wrap it in a JS module, or build a\n\
+         native/wasm target."
+        ed.Tir.ed_lib_name ed.Tir.ed_march_name ed.Tir.ed_march_name ed.Tir.ed_c_name
+    ) bad_externs in
+    raise (Js_emit_error msgs)
+  end;
   let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
   (* Runtime-dependent builtin wrappers need these in the import regardless of
      whether the compiled code already uses them directly. *)

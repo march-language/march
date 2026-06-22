@@ -1279,7 +1279,10 @@ let compile filename =
             collect_fn_lines "" user_ast.March_ast.Ast.mod_decls
           in
           let (js, map_opt) =
-            March_tir.Js_emit.emit_module ~source_file:filename ~fn_lines tir_for_js
+            (try March_tir.Js_emit.emit_module ~source_file:filename ~fn_lines tir_for_js
+             with March_tir.Js_emit.Js_emit_error msgs ->
+               List.iter (fun msg -> Printf.eprintf "%s\n" msg) msgs;
+               exit 1)
           in
           (* Write source map if available, and append sourceMappingURL to JS *)
           let map_name = Filename.basename out_bin ^ ".map" in
