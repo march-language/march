@@ -223,7 +223,7 @@ mod Crypto do
 
       Crypto.random_bytes(16)  -- Bytes value with 16 random bytes
   """
-  fn random_bytes(n) do
+  fn random_bytes(n : {Int | _ >= 0}) do
     stdlib_random_bytes(n)
   end
 
@@ -232,7 +232,7 @@ mod Crypto do
 
       Crypto.random_hex(16)  -- 32-character lowercase hex string
   """
-  fn random_hex(n) do
+  fn random_hex(n : {Int | _ >= 0}) do
     bytes_to_hex(random_bytes(n))
   end
 
