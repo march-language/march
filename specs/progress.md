@@ -282,6 +282,19 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, Distributed OTP — P1 net-kernel feature-complete)
+
+- **Distributed OTP P1 (transport + net-kernel) — L1+L2 complete.** Seven new stdlib modules compose into an authenticated peer connection:
+  - `net_frame.march` — `NetFrame`: length-prefixed wire framing (partial-read safe).
+  - `node_identity.march` — `NodeIdentity`: `{name, NodeId=sha256(pubkey), incarnation}` + MessagePack codec.
+  - `cluster_auth.march` — `ClusterAuth`: shared-secret HMAC challenge/response (`prove`/`verify`).
+  - `handshake.march` — `Handshake`: `Hello` greeting codec + `authenticate` decision (proof must bind to the nonce we issued).
+  - `net_kernel.march` — `NetKernel`: byte bridge (`List(Int)`↔Socket `String`) + framed `send_frame`/`recv_frame` (buffered, partial-read safe) + symmetric authenticated `handshake` over a socket + `fresh_nonce`.
+  - `peer_registry.march` — `PeerRegistry`: one-connection-per-peer table keyed by NodeId (re-add replaces).
+  - `cluster_conn.march` — `ClusterConn`: the connect/`tcp_accept` lifecycle that runs the handshake and registers the peer.
+  - **Verification:** all pure logic is unit-tested via the eval harness (5 new `test_stdlib_march` cases: net_frame, node_identity, cluster_auth, handshake, net_kernel, peer_registry → suite 30→37, 0 failures). The socket I/O (`NetKernel.send/recv/handshake`, `ClusterConn.connect/accept`) is runtime-exercised — the eval harness doesn't run sockets/scheduler (same convention as `ChannelServer`); it composes only unit-tested logic. Spec: `specs/2026-06-21-distributed-otp-design.md`.
+  - **Follow-ups:** a loopback integration test for the socket handshake; constant-time proof comparison in `ClusterAuth` (`Crypto.ct_eq` exists). **Next:** L3 membership (SWIM failure detection + CRDT member set) on top of the net-kernel, then load-aware dispatch (L6).
+
 ## Current State (as of 2026-06-21, Distributed OTP — P1 kickoff + Hot Code Reload Phase 2 runnable)
 
 - **Hot Code Reload Phase 2 — runnable end-to-end.** The versioned-dispatch mechanism works: boundary classification + NAME_ID interning + `needs_dispatch` (`lib/tir/hot_reload.ml`), the C dispatch table (`runtime/march_dispatch.{c,h}`, per-version ring + refcounts), `Llvm_emit` dispatch-call emission, `@main` startup registration (`march_dispatch_init`/`publish`), the inliner no-inline guard (`Inline.boundary_config` via `Opt.run ?hot_reload`), runtime link, and a `--hot-reload <Prefix>` compiler flag. Verified: a nested-module program (`Core.a`→recursive `Core.b`) built with `--hot-reload Core` emits init/publish/enter/leave, the boundary fns survive the inliner, and the binary runs behavior-identically to the plain build. Regression-clean (compiler 296, codegen 320). Spec: `specs/hot-code-reload.md`. Follow-ups in flight: automated e2e test + real impl_hashes in `publish`.
