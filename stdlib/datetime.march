@@ -357,7 +357,7 @@ mod DateTime do
   `offset_seconds` is positive east of UTC, negative west.  Panics if
   the offset is outside ±14 hours (the widest real-world legal range).
   """
-  fn fixed_zone(name : String, offset_seconds : Int) : Tz do
+  fn fixed_zone(name : String, offset_seconds : {Int | _ >= -50400 && _ <= 50400}) : Tz do
     if offset_seconds > 50400 || offset_seconds < -50400 do
       panic("DateTime.fixed_zone: offset out of range (±14h): "
             ++ int_to_string(offset_seconds))
@@ -381,7 +381,7 @@ mod DateTime do
   pass `(5, 30)`; for UTC−03:30 pass `(-3, 30)` (minutes always
   positive, sign comes from `hours`).  Name is auto-derived.
   """
-  fn fixed_zone_hm(hours : Int, minutes : Int) : Tz do
+  fn fixed_zone_hm(hours : Int, minutes : {Int | _ >= 0 && _ < 60}) : Tz do
     if minutes < 0 || minutes >= 60 do
       panic("DateTime.fixed_zone_hm: minutes must be in [0, 60)")
     else do
