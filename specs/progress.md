@@ -282,6 +282,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-21, Cap(IO.Foreign) — FFI meta-capability)
+
+- **`IO.Foreign`** and **`IO.Foreign.Blocking`** added to `io_cap_hierarchy`. Wired via a new `extern_cap_uses` list in `check_module_needs` (Check 1c): any `DExtern` node implies `IO.Foreign`; a `DExtern` with any `ef_blocking = true` function also implies `IO.Foreign.Blocking`. Warning-severity (not error), consistent with body-scan enforcement for other caps. `IO.Foreign` subsumes `IO.Foreign.Blocking` via the normal hierarchy (parent covers child).
+- **4 new compiler tests** in `cap_body_enforce` (300 total): missing warns, declared suppresses, parent `IO` umbrella, blocking sub-cap warns when neither `IO.Foreign` nor `IO.Foreign.Blocking` is declared.
+- **All 9 `test/native/ffi_*.march` test files** annotated with `needs IO.Foreign` (and `ffi_blocking.march` also with `needs IO.Foreign.Blocking`).
+- **`docs/capabilities.md`** updated: IO.Foreign added to hierarchy tree, new §IO.Foreign section with code examples.
+
 ## Current State (as of 2026-06-21, Distributed OTP — P1 net-kernel: client/transport done, server-accept blocked)
 
 - **Distributed OTP P1 (transport + net-kernel).** Six new stdlib modules compose the client side of an authenticated peer connection:

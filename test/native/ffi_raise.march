@@ -3,6 +3,7 @@
 -- compiler-emitted wrapper materializes Ok(payload) / Err(e). Both arms match.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   extern "rt" : Cap(Ffi) do
     raises fn parse(s: String): Result(Int, String) = "ffi_raise_parse"
   end
