@@ -13,7 +13,7 @@ Pattern matching in March is exhaustive, nested, and deeply integrated with the 
 
 ## Basic Match
 
-```elixir
+```march
 match expr do
   Pattern1 -> result1
   Pattern2 -> result2
@@ -29,14 +29,14 @@ The `_` wildcard matches anything and discards the value.
 
 ### Wildcards and Variables
 
-```elixir
+```march
 _                   -- match anything, discard
 x                   -- match anything, bind to x
 ```
 
 ### Literal Patterns
 
-```elixir
+```march
 match n do
   0 -> "zero"
   1 -> "one"
@@ -57,7 +57,7 @@ end
 
 ### Constructor Patterns
 
-```elixir
+```march
 type Shape = Circle(Float) | Rect(Float, Float)
 
 match shape do
@@ -68,7 +68,7 @@ end
 
 Nullary constructors match with no parens:
 
-```elixir
+```march
 match color do
   Red   -> 0xFF0000
   Green -> 0x00FF00
@@ -78,7 +78,7 @@ end
 
 ### Option and Result
 
-```elixir
+```march
 match opt do
   None    -> "nothing"
   Some(v) -> "got: " ++ to_string(v)
@@ -92,7 +92,7 @@ end
 
 ### Tuple Patterns
 
-```elixir
+```march
 match pair do
   (0, _) -> "starts with zero"
   (_, 0) -> "ends with zero"
@@ -102,7 +102,7 @@ end
 
 ### List Patterns
 
-```elixir
+```march
 match xs do
   []           -> "empty"
   [x]          -> "one: " ++ to_string(x)
@@ -116,7 +116,7 @@ end
 
 ### Record Patterns
 
-```elixir
+```march
 type Point = { x : Float, y : Float }
 
 match p do
@@ -128,7 +128,7 @@ end
 
 ### Atom Patterns
 
-```elixir
+```march
 match status do
   :ok      -> "success"
   :error   -> "failure"
@@ -140,7 +140,7 @@ end
 
 When multiple modules define constructors with the same name, qualify them:
 
-```elixir
+```march
 match x do
   Http.Ok(resp)  -> handle_http(resp)
   Json.Ok(data)  -> handle_json(data)
@@ -150,7 +150,7 @@ end
 
 ### Negative Integer Patterns
 
-```elixir
+```march
 match n do
   -1 -> "minus one"
   0  -> "zero"
@@ -165,7 +165,7 @@ end
 
 Guards add a boolean condition to a pattern arm with `when`:
 
-```elixir
+```march
 match n do
   x when x < 0   -> "negative"
   x when x == 0  -> "zero"
@@ -176,7 +176,7 @@ end
 
 Guards on function heads work the same way:
 
-```elixir
+```march
 fn classify(n) when n < 0   do "negative" end
 fn classify(n) when n == 0  do "zero" end
 fn classify(n)              do "positive" end
@@ -188,7 +188,7 @@ fn classify(n)              do "positive" end
 
 The compiler verifies that every possible value is matched. If you miss a case, you get a compile-time error:
 
-```elixir
+```march
 type Color = Red | Green | Blue
 
 -- compile error: pattern match not exhaustive — missing case: Blue
@@ -200,7 +200,7 @@ end
 
 Add a wildcard or the missing case to fix it:
 
-```elixir
+```march
 match color do
   Red   -> "red"
   Green -> "green"
@@ -216,7 +216,7 @@ Exhaustiveness extends to nested patterns. The compiler understands which combin
 
 Patterns can be nested arbitrarily deep:
 
-```elixir
+```march
 type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
 
 fn depth(t : Tree(a)) : Int do
@@ -230,7 +230,7 @@ end
 
 Nested Option:
 
-```elixir
+```march
 match (opt_a, opt_b) do
   (Some(a), Some(b)) -> a + b
   (Some(a), None)    -> a
@@ -245,7 +245,7 @@ end
 
 Match arms support multiple expressions — any number of `let` bindings followed by a final expression:
 
-```elixir
+```march
 match result do
   Ok(data) ->
     let trimmed = String.trim(data)
@@ -260,7 +260,7 @@ end
 
 A `do ... end` wrapper also works for clarity:
 
-```elixir
+```march
 match xs do
   Cons(h, t) -> do
     let doubled = h * 2
@@ -276,7 +276,7 @@ end
 
 When you just need multiple boolean conditions, use `match` without a scrutinee:
 
-```elixir
+```march
 match do
   score >= 90 -> "A"
   score >= 80 -> "B"
@@ -294,7 +294,7 @@ This is equivalent to a chain of `if/else` but reads more cleanly.
 
 `with` is for chaining `Result`/`Option` bindings without nesting:
 
-```elixir
+```march
 with Ok(user)    <- authenticate(credentials),
      Ok(profile) <- fetch_profile(user.id),
      Ok(data)    <- load_data(profile.key) do
@@ -314,7 +314,7 @@ Each `<-` binding: if the expression matches the pattern, execution continues wi
 
 Patterns work directly in `let`:
 
-```elixir
+```march
 let (a, b) = some_pair()
 let Some(x) = might_be_some()    -- panics if None
 let Cons(h, t) = nonempty_list
@@ -322,7 +322,7 @@ let Cons(h, t) = nonempty_list
 
 And in function parameters:
 
-```elixir
+```march
 fn fst((a, _)) do a end
 fn snd((_, b)) do b end
 
@@ -337,7 +337,7 @@ end
 
 Consecutive `fn` declarations with the same name and compatible arities are merged into a single function. The compiler dispatches to the first matching clause:
 
-```elixir
+```march
 fn fact(0) do 1 end
 fn fact(n) do n * fact(n - 1) end
 

@@ -25,7 +25,7 @@ Write code that reads like Elixir. Get compile-time guarantees that your message
 
 March's concurrency model is the actor model — share-nothing, message-passing processes, just like Elixir. Actors are first-class: spawn them, link them, monitor them, and organize them into supervision trees that automatically restart failed processes.
 
-```elixir
+```march
 actor Counter do
   state { count : Int }
   init  { count = 0 }
@@ -49,7 +49,7 @@ The type system enforces actor isolation — you cannot accidentally share mutab
 
 March can verify at compile time that two actors follow a compatible communication protocol — including that neither side will deadlock. If your protocol says the server sends a response after receiving a request, the compiler checks both sides agree.
 
-```elixir
+```march
 -- Protocol: client sends a query, server replies with a result
 session Search do
   client -> server : Query(String)
@@ -63,7 +63,7 @@ Mismatched message patterns and deadlocks become compile errors, not runtime sur
 
 March uses **Perceus reference counting** — deterministic memory management with no stop-the-world GC pauses. But the real story is **FBIP (Functional But In-Place)**: when a value has exactly one owner, March rewrites it in-place instead of freeing and reallocating. Recursive tree transformations, list maps, and structural recursion patterns run with **zero heap allocations** after the initial build.
 
-```elixir
+```march
 -- This runs with zero allocations on each recursive call (FBIP fires automatically)
 fn inc_leaves(t : Tree) : Tree do
   match t do
@@ -87,7 +87,7 @@ March wins not because C is slow, but because FBIP eliminates 200M allocator cal
 
 March tracks ownership at the type level. Mark a type as `linear` and the compiler guarantees it is used exactly once — no leaks, no double-frees, no "I thought this was already closed" bugs. File handles, socket connections, and database transactions get static guarantees without a runtime cost.
 
-```elixir
+```march
 linear type FileHandle = FileHandle(Int)
 
 fn write_and_close(f : FileHandle, content : String) : Unit do
@@ -114,7 +114,7 @@ forge interactive      # launch the REPL
 
 ## A taste of March
 
-```elixir
+```march
 mod Chat do
 
 type Message = Join(String) | Leave(String) | Say(String, String)

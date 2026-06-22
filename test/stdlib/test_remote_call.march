@@ -1,0 +1,60 @@
+mod TestRemoteCall do
+
+  pfn fref() : RemoteCall.RemoteRef do
+    RemoteCall.remote_ref("Math", "add", "sig-1", "impl-1")
+  end
+
+  describe "RemoteCall.verify (CAS admission)" do
+
+    test "matching sig + impl is accepted" do
+      assert (RemoteCall.verify("sig-1", "impl-1", fref()) == Accept)
+      assert (RemoteCall.is_accept(RemoteCall.verify("sig-1", "impl-1", fref())) == true)
+    end
+
+    test "a signature mismatch is a hard type error" do
+      assert (RemoteCall.verify("other", "impl-1", fref()) == Reject(TypeMismatch))
+    end
+
+    test "a same-signature body mismatch is version skew" do
+      assert (RemoteCall.verify("sig-1", "other", fref()) == Reject(VersionSkew))
+      assert (RemoteCall.is_accept(RemoteCall.verify("sig-1", "other", fref())) == false)
+    end
+
+  end
+
+  describe "RemoteCall request codec" do
+
+    test "a call request round-trips (nested ref + pid)" do
+      let pid = GlobalPid.make("n2", 42, 3)
+      let req = RemoteCall.request(fref(), Cons(1, Cons(2, Nil)), pid, 1000, 7)
+      assert (RemoteCall.decode_request(RemoteCall.encode_request(req)) == Ok(req))
+    end
+
+  end
+
+  describe "RemoteCall reply codec" do
+
+    test "a returned result round-trips" do
+      let rep = RemoteCall.ok_reply(7, Cons(9, Cons(8, Nil)))
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(rep)) == Ok(rep))
+    end
+
+    test "a failure result round-trips, carrying the error" do
+      let rep = RemoteCall.err_reply(7, RemoteExit("boom"))
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(rep)) == Ok(rep))
+    end
+
+    test "each CallError kind survives the round-trip" do
+      let r1 = RemoteCall.err_reply(1, DeadlineExceeded)
+      let r2 = RemoteCall.err_reply(2, NoConnection)
+      let r3 = RemoteCall.err_reply(3, TypeMismatch)
+      let r4 = RemoteCall.err_reply(4, VersionSkew)
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(r1)) == Ok(r1))
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(r2)) == Ok(r2))
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(r3)) == Ok(r3))
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(r4)) == Ok(r4))
+    end
+
+  end
+
+end

@@ -1,0 +1,30 @@
+mod TestGlobalPid do
+
+  describe "GlobalPid.eq" do
+
+    test "equal pids compare equal, differing creation differs" do
+      let p = GlobalPid.make("node-a", 5, 1)
+      assert (GlobalPid.eq(p, GlobalPid.make("node-a", 5, 1)) == true)
+      assert (GlobalPid.eq(p, GlobalPid.make("node-a", 5, 2)) == false)
+      assert (GlobalPid.eq(p, GlobalPid.make("node-b", 5, 1)) == false)
+    end
+
+  end
+
+  describe "GlobalPid encode/decode" do
+
+    test "round-trips through MessagePack" do
+      let p = GlobalPid.make("worker@host", 42, 3)
+      assert (GlobalPid.decode(GlobalPid.encode(p)) == Ok(p))
+    end
+
+    test "decoding garbage is an Err" do
+      match GlobalPid.decode(Cons(1, Cons(2, Nil))) do
+        Err(_) -> assert (true)
+        Ok(_)  -> assert (false)
+      end
+    end
+
+  end
+
+end

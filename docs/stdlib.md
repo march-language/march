@@ -21,7 +21,7 @@ All stdlib modules are available without any import statement — use qualified 
 
 The `Prelude` module is automatically imported into every March program. These names are always in scope:
 
-```elixir
+```march
 -- Diverging
 panic("invariant violated")   -- terminates with an error
 todo("not yet implemented")   -- typechecks as any type
@@ -50,7 +50,7 @@ const(x)                      -- fn _ -> x
 
 `list.march` — the standard singly-linked list.
 
-```elixir
+```march
 -- Construction
 List.empty()                         -- []
 List.singleton(42)                   -- [42]
@@ -147,7 +147,7 @@ editor-driven detection.
 
 `string.march` — String operations.
 
-```elixir
+```march
 String.length("hello")              -- 5
 String.concat(["a", "b", "c"])      -- "abc"
 String.join(["a", "b", "c"], ", ")  -- "a, b, c"
@@ -178,7 +178,7 @@ String.chars("hi")                  -- ["h", "i"]
 Map operations that need key identity take an explicit comparator:
 `cmp : k -> k -> Bool` where `cmp(a)(b) = true` means `a < b`.
 
-```elixir
+```march
 let cmp = fn a -> fn b -> a < b   -- comparator for String keys
 
 -- Construction
@@ -219,7 +219,7 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 `set.march` — HAMT-backed persistent set.
 
-```elixir
+```march
 let s = Set.from_list([1, 2, 3, 4, 5])
 Set.member(3, s)           -- true
 Set.insert(6, s)           -- {1,2,3,4,5,6}
@@ -238,7 +238,7 @@ Set.filter(s, fn x -> x % 2 == 0)  -- {2, 4}
 
 `option.march` — `Option(a) = None | Some(a)`.
 
-```elixir
+```march
 Option.map(Some(5), fn x -> x + 1)     -- Some(6)
 Option.map(None, fn x -> x + 1)        -- None
 Option.and_then(Some(5), fn x -> if x > 3 do Some(x) else None end)
@@ -260,7 +260,7 @@ Option.filter(Some(2), fn x -> x > 3)  -- None
 
 `result.march` — `Result(a, e) = Ok(a) | Err(e)`.
 
-```elixir
+```march
 Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
 Result.map(Err("oops"), fn x -> x + 1) -- Err("oops")
 Result.map_err(Err("x"), String.upcase) -- Err("X")
@@ -276,7 +276,7 @@ Result.to_option(Err("e"))            -- None
 
 For lightweight error propagation in chains, use the `let?` binding instead of `Result.and_then`:
 
-```elixir
+```march
 -- with Result.and_then
 Result.and_then(parse_int(s), fn n -> Result.and_then(fetch(n), fn v -> Ok(v + 1)))
 
@@ -294,7 +294,7 @@ end
 
 `io.march` — Explicit I/O operations.
 
-```elixir
+```march
 IO.puts("Hello, World!")         -- print with newline
 IO.write("no newline")           -- print without newline
 IO.warn("warning message")       -- print to stderr
@@ -311,7 +311,7 @@ The `println` and `print` builtins are also always available.
 
 `math.march` — Mathematical functions.
 
-```elixir
+```march
 Math.abs(-5)          -- 5
 Math.abs_f(-3.14)     -- 3.14
 Math.min(3, 5)        -- 3
@@ -340,7 +340,7 @@ Math.is_nan(0.0 /. 0.0)   -- true
 
 `crypto.march` — Cryptographic primitives.
 
-```elixir
+```march
 Crypto.sha256("hello")              -- hex string
 Crypto.sha512("hello")              -- hex string
 Crypto.hmac_sha256(key, message)    -- hex string
@@ -358,7 +358,7 @@ Crypto.pbkdf2_sha256(password, salt, iterations, key_len)  -- derived key
 
 `uuid.march` — UUID generation and parsing.
 
-```elixir
+```march
 UUID.v4()                     -- generate a random UUID string
 UUID.v5(namespace, name)      -- deterministic UUID from namespace+name
 UUID.parse("550e8400-...")    -- Option(UUID)
@@ -374,7 +374,7 @@ UUID.nil()                    -- "00000000-0000-0000-0000-000000000000"
 
 `json.march` — JSON encoding and decoding.
 
-```elixir
+```march
 type JsonValue =
   | JNull
   | JBool(Bool)
@@ -396,7 +396,7 @@ JSON.get(obj, "key")                  -- Option(JsonValue)
 
 `http_client.march` — Make HTTP requests.
 
-```elixir
+```march
 let resp = Http.get("https://api.example.com/data")
 let resp = Http.post("https://api.example.com/data", body)
 let resp = Http.request({
@@ -421,7 +421,7 @@ end
 
 `file.march`, `dir.march`, `path.march`:
 
-```elixir
+```march
 -- File I/O (Result-based)
 File.read("data.txt")              -- Result(String, String)
 File.write("out.txt", "content")   -- Result((), String)
@@ -450,7 +450,7 @@ Path.is_absolute("/usr/bin")       -- true
 
 `system.march` — OS and runtime information.
 
-```elixir
+```march
 System.os()                -- "macos" | "linux" | "windows"
 System.arch()              -- "x86_64" | "arm64"
 System.cpu_count()         -- number of logical CPUs
@@ -470,7 +470,7 @@ System.cmd("ls", ["-la"])  -- Result(String, String)
 
 `logger.march` — Structured logging.
 
-```elixir
+```march
 Logger.info("server started")
 Logger.warn("connection retry")
 Logger.error("database unreachable")
@@ -488,7 +488,7 @@ Logger.with_context(fn () ->
 
 `vault.march` — Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
 
-```elixir
+```march
 Vault.put("counter", 0)
 Vault.get("counter")          -- Option(a)
 Vault.update("counter", fn n -> n + 1)
@@ -503,7 +503,7 @@ Vault.all()                   -- List((String, a))
 
 `enum.march` — Elixir-inspired lazy enumeration over any `Iterable`.
 
-```elixir
+```march
 Enum.map(items, fn x -> x * 2)
 Enum.filter(items, fn x -> x > 0)
 Enum.fold(items, 0, fn acc x -> acc + x)
@@ -530,7 +530,7 @@ Enum.max_by(items, fn x -> x.score)
 
 `duration.march` — Time-span arithmetic.
 
-```elixir
+```march
 let d = Duration.seconds(30)
 let h = Duration.hours(2)
 let w = Duration.weeks(1)
@@ -549,7 +549,7 @@ Duration.milliseconds(d)   -- 30000
 
 `uri.march` — URI parsing and construction.
 
-```elixir
+```march
 URI.parse("https://example.com/path?k=v")
 -- Result({ scheme, host, port, path, query, fragment })
 
@@ -565,7 +565,7 @@ URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 
 `dom.march` — Browser DOM bindings for `--target js` builds. Auto-loaded; no import needed.
 
-```elixir
+```march
 -- Query
 Dom.find("my-id")              -- Option(Dom.Node)
 Dom.query("#nav")              -- Option(Dom.Node)
@@ -618,7 +618,7 @@ These modules implement the distributed-OTP transport layer (P1). They are stdli
 
 `node_identity.march` — A node's stable identity for the cluster.
 
-```elixir
+```march
 type Identity = { name : String, node_id : String, incarnation : Int }
 
 NodeIdentity.make("worker@host", pubkey, 0)
@@ -632,7 +632,7 @@ NodeIdentity.decode(bytes)     -- Result(Identity, String)
 
 `net_frame.march` — Length-prefixed framing over TCP.
 
-```elixir
+```march
 NetFrame.encode(payload)       -- List(Int)  (4-byte header + payload)
 NetFrame.decode(buf)           -- Option((List(Int), List(Int)))
 ```
@@ -641,7 +641,7 @@ NetFrame.decode(buf)           -- Option((List(Int), List(Int)))
 
 `cluster_auth.march` — Shared-secret HMAC challenge/response.
 
-```elixir
+```march
 ClusterAuth.prove(secret, nonce)         -- String (HMAC-SHA256 hex)
 ClusterAuth.verify(secret, nonce, proof) -- Bool
 ```
@@ -650,7 +650,7 @@ ClusterAuth.verify(secret, nonce, proof) -- Bool
 
 `handshake.march` — Pure authenticated handshake protocol (no I/O).
 
-```elixir
+```march
 Handshake.make_hello(identity, nonce)    -- Handshake.Hello
 Handshake.encode_hello(hello)            -- List(Int)
 Handshake.decode_hello(bytes)            -- Result(Hello, String)
@@ -662,7 +662,7 @@ Handshake.authenticate(secret, our_nonce, peer, peer_proof)
 
 `peer_registry.march` — One-connection-per-peer table.
 
-```elixir
+```march
 type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int }
 type Registry = Registry(Map(String, Peer))
 
@@ -677,7 +677,7 @@ PeerRegistry.peers(reg)               -- List(Peer)
 
 `net_kernel.march` — TCP socket transport for the net-kernel (framing + handshake).
 
-```elixir
+```march
 NetKernel.fresh_nonce()               -- String (random hex)
 NetKernel.send_frame(fd, payload)     -- Result((), String)
 NetKernel.recv_frame(fd, buf)         -- Result((List(Int), List(Int)), String)
@@ -691,7 +691,7 @@ NetKernel.handshake(fd, my_id, secret, my_nonce)
 
 Requires `needs IO.NetListen` (for `tcp_listen`/`tcp_accept` builtins).
 
-```elixir
+```march
 ClusterConn.listen(port)
 -- Result(Int, String)  -- listen_fd
 
@@ -704,7 +704,7 @@ ClusterConn.accept_one(reg, listen_fd, my_id, secret)
 
 `tcp_listen` and `tcp_accept` are builtins in the `IO.NetListen` capability group:
 
-```elixir
+```march
 tcp_listen(port)       : Result(Int, String)  -- bind + listen, return fd
 tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 ```

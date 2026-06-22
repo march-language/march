@@ -83,6 +83,8 @@ type type_def =
 type extern_decl = {
   ed_march_name : string;     (* name as used in March source *)
   ed_c_name     : string;     (* C symbol name *)
+  ed_lib_name   : string;     (* library / JS module specifier from `extern "..."` *)
+  ed_js_sym     : string;     (* JS export name: explicit @"sym" or march name (no lib_ prefix) *)
   ed_params     : ty list;    (* parameter types *)
   ed_consumed   : bool list;  (* per-param: true if `consume` (ownership to callee) *)
   ed_blocking   : bool;       (* `blocking`: dispatch on an OS thread, yield the green thread *)

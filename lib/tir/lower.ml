@@ -2163,8 +2163,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                     let c_name = match ef.ef_symbol with
                       | Some s -> s
                       | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+                    let js_sym = match ef.ef_symbol with
+                      | Some s -> s
+                      | None   -> ef.ef_name.txt in
                     externs := { Tir.ed_march_name = ef.ef_name.txt;
                                  ed_c_name = c_name;
+                                 ed_lib_name = edef.ext_lib_name;
+                                 ed_js_sym = js_sym;
                                  ed_params = params;
                                  ed_consumed = ef.ef_param_consumed;
                                  ed_blocking = ef.ef_blocking;
@@ -2182,8 +2187,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             let c_name = match ef.ef_symbol with
               | Some s -> s
               | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+            let js_sym = match ef.ef_symbol with
+              | Some s -> s
+              | None   -> ef.ef_name.txt in
             externs := { Tir.ed_march_name = ef.ef_name.txt;
                          ed_c_name = c_name;
+                         ed_lib_name = edef.ext_lib_name;
+                         ed_js_sym = js_sym;
                          ed_params = params;
                          ed_consumed = ef.ef_param_consumed;
                          ed_blocking = ef.ef_blocking;

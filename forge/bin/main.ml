@@ -148,7 +148,13 @@ let build_cmd =
     Arg.(value & flag & info ["frozen"; "locked"]
            ~doc:"Fail (don't re-resolve) if forge.lock is out of date with forge.toml.")
   in
-  let run r d f pkg =
+  let target =
+    Arg.(value & opt (some string) None &
+         info ["target"] ~docv:"TARGET"
+           ~doc:"Compilation target: native (default), js, wasm32-unknown-unknown, wasm64-wasi, wasm32-wasi. \
+                 Use $(b,js) to emit an ES module (.mjs) for browsers and Node.js.")
+  in
+  let run r d f pkg tgt =
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
     | Some root when root = cwd ->
@@ -156,23 +162,23 @@ let build_cmd =
       if members <> [] then
         (match Workspace.run_for_members ~root ~members ~package:pkg
                  (fun () ->
-                    match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+                    match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
                     | Ok binary -> Printf.printf "built: %s\n%!" binary; Ok ()
                     | Error m   -> Error m) with
          | Ok ()   -> ()
          | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
       else begin
-        match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+        match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
         | Ok binary -> Printf.printf "built: %s\n%!" binary
         | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
       end
     | _ ->
-      match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f () with
+      match Cmd_build.build ~release:r ~dump_phases:d ~frozen:f ?target:tgt () with
       | Ok binary -> Printf.printf "built: %s\n%!" binary
       | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
-    Term.(const run $ release $ dump_phases $ frozen $ workspace_package_flag)
+    Term.(const run $ release $ dump_phases $ frozen $ workspace_package_flag $ target)
 
 (* ----------------------------------------------------------------- forge check *)
 
@@ -197,9 +203,15 @@ let run_cmd =
     Arg.(value & flag & info ["compiled"]
            ~doc:"Compile via the LLVM pipeline first, then execute the resulting binary")
   in
-  let run d c = handle (Cmd_run.run ~dump_phases:d ~compiled:c ()) in
+  let target =
+    Arg.(value & opt (some string) None &
+         info ["target"] ~docv:"TARGET"
+           ~doc:"Compilation target when using $(b,--compiled): native (default) or js. \
+                 With $(b,js), builds an .mjs module then runs it with node.")
+  in
+  let run d c tgt = handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ()) in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project")
-    Term.(const run $ dump_phases $ compiled)
+    Term.(const run $ dump_phases $ compiled $ target)
 
 (* ------------------------------------------------------------------ forge test *)
 

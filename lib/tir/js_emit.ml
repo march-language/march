@@ -25,6 +25,10 @@ type ctx = {
   param_names  : (string, unit) Hashtbl.t;
   (* local parameter names in the current function — excluded from $clo suffix
      to avoid false positives when a parameter shadows a module function *)
+  extern_fns   : (string, Tir.extern_decl) Hashtbl.t;
+  (* extern march_name → decl; populated before emission for call-site tracking *)
+  used_externs : (string, unit) Hashtbl.t;
+  (* extern march names that actually appear in emitted code; drives lazy bridge emit *)
 }
 
 let create_ctx () = {
@@ -33,6 +37,8 @@ let create_ctx () = {
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
   param_names  = Hashtbl.create 8;
+  extern_fns   = Hashtbl.create 8;
+  used_externs = Hashtbl.create 8;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -121,17 +127,26 @@ let emit_atom_raw ctx = function
 
 (* Standard atom emission: user-defined function names use their $clo wrapper
    so that ECallPtr dispatch (f._0(f, args)) works when they're first-class.
-   Both AVar and ADefRef can hold a module-level function reference — check fn_names. *)
+   Both AVar and ADefRef can hold a module-level function reference — check fn_names.
+   Extern function names also get the $clo suffix and are tracked as used. *)
 let emit_atom ctx = function
   | Tir.AVar v ->
     let n = mangle v.Tir.v_name in
-    if Hashtbl.mem ctx.fn_names v.Tir.v_name
+    if Hashtbl.mem ctx.extern_fns v.Tir.v_name
+       && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
+    then begin
+      Hashtbl.replace ctx.used_externs v.Tir.v_name ();
+      emit ctx (n ^ "$clo")
+    end else if Hashtbl.mem ctx.fn_names v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
     then emit ctx (n ^ "$clo")
     else emit ctx n
   | Tir.ADefRef d ->
     let n = mangle d.Tir.did_name in
-    if Hashtbl.mem ctx.fn_names d.Tir.did_name then
+    if Hashtbl.mem ctx.extern_fns d.Tir.did_name then begin
+      Hashtbl.replace ctx.used_externs d.Tir.did_name ();
+      emit ctx (n ^ "$clo")
+    end else if Hashtbl.mem ctx.fn_names d.Tir.did_name then
       emit ctx (n ^ "$clo")
     else
       emit ctx n
@@ -329,8 +344,10 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
-      (* General call *)
+      (* General call — track extern usage for lazy bridge emission *)
       | _, _ ->
+        if Hashtbl.mem ctx.extern_fns name then
+          Hashtbl.replace ctx.used_externs name ();
         emit ctx (mangle name ^ "(");
         List.iteri (fun i a ->
           if i > 0 then emit ctx ", "; emit_atom ctx a) args;
@@ -709,6 +726,79 @@ let emit_eq_fn ctx (td : Tir.type_def) =
     emitl ctx "}\n"
   | Tir.TDClosure _ -> ()
 
+(* ── Extern bridge emission ──────────────────────────────────────── *)
+
+(** True when the library name is a JS module specifier (not a C lib name).
+    JS specifiers start with a scheme, relative path, or scoped npm prefix. *)
+let is_js_module lib =
+  let has_prefix p = String.length lib >= String.length p
+                     && String.sub lib 0 (String.length p) = p in
+  has_prefix "./" || has_prefix "../"
+  || has_prefix "npm:" || has_prefix "jsr:"
+  || has_prefix "node:" || has_prefix "https://" || has_prefix "http://"
+
+(** Emit JS import statements and bridge definitions for all externs in [eds].
+    Returns a string to prepend to the module output (before function bodies). *)
+let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string =
+  if eds = [] then ""
+  else begin
+    let buf = Buffer.create 256 in
+    let out s = Buffer.add_string buf s in
+
+    (* ── JS module imports ──────────────────────────────────────────── *)
+    (* Group externs by lib name for ES import statements. *)
+    let js_externs = List.filter (fun ed -> is_js_module ed.Tir.ed_lib_name) eds in
+    (* Collect (lib_name, [(march_name, js_sym)]) groups *)
+    let by_lib : (string, (string * string) list ref) Hashtbl.t = Hashtbl.create 4 in
+    List.iter (fun (ed : Tir.extern_decl) ->
+      let key = ed.ed_lib_name in
+      match Hashtbl.find_opt by_lib key with
+      | Some lst -> lst := (ed.ed_march_name, ed.ed_js_sym) :: !lst
+      | None -> Hashtbl.add by_lib key (ref [(ed.ed_march_name, ed.ed_js_sym)])
+    ) js_externs;
+    Hashtbl.iter (fun lib pairs ->
+      (* Build the import specifier list: `sym as march_name` when they differ *)
+      let specs = List.map (fun (march_name, js_sym) ->
+        if march_name = js_sym then js_sym
+        else js_sym ^ " as " ^ mangle march_name
+      ) !pairs in
+      out (Printf.sprintf "import { %s } from %s;\n"
+             (String.concat ", " specs) (js_string_lit lib))
+    ) by_lib;
+    if js_externs <> [] then out "\n";
+
+    (* ── Runtime-backed externs (non-JS-module lib names) ───────────── *)
+    (* For these, ed_c_name is the underlying symbol (often a march_ runtime fn).
+       Emit a const alias and register the symbol as a runtime import if march_-prefixed. *)
+    let rt_externs = List.filter (fun ed -> not (is_js_module ed.Tir.ed_lib_name)) eds in
+    List.iter (fun (ed : Tir.extern_decl) ->
+      let march_name = mangle ed.ed_march_name in
+      let c_sym = ed.ed_c_name in
+      (* If the underlying symbol looks like a march runtime function, import it. *)
+      let march_prefix = "march_" in
+      let is_runtime = String.length c_sym >= String.length march_prefix
+                       && String.sub c_sym 0 (String.length march_prefix) = march_prefix in
+      if is_runtime then use_runtime ctx c_sym;
+      (* Emit alias only when march name differs from the underlying symbol. *)
+      if march_name <> c_sym then
+        out (Printf.sprintf "const %s = %s;\n" march_name c_sym)
+    ) rt_externs;
+    if rt_externs <> [] then out "\n";
+
+    (* ── $clo wrappers for first-class use of extern fns ────────────── *)
+    List.iter (fun (ed : Tir.extern_decl) ->
+      let march_name = mangle ed.ed_march_name in
+      let nparams = List.length ed.ed_params in
+      let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
+      let plist = String.concat ", " pnames in
+      out (Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
+             march_name plist march_name plist)
+    ) eds;
+    if eds <> [] then out "\n";
+
+    Buffer.contents buf
+  end
+
 (* ── Module emission ─────────────────────────────────────────────── *)
 
 (* Closure-protocol wrappers for builtins used as first-class values.
@@ -729,13 +819,23 @@ const negate_float    = { _0: ($_, x) => -x };
 
 let emit_module (m : Tir.tir_module) : string =
   let ctx = create_ctx () in
-  (* Pre-register all function names so emit_atom can emit $clo versions *)
+  (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
   List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
+  (* Register externs separately for lazy tracking (not in fn_names to avoid
+     emitting $clo suffixes for extern call sites that don't need them) *)
+  List.iter (fun (ed : Tir.extern_decl) ->
+    Hashtbl.replace ctx.extern_fns ed.ed_march_name ed
+  ) m.Tir.tm_externs;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
-  (* Top-level functions *)
+  (* Top-level functions — populates used_externs via call-site tracking *)
   List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
   let fns_js = Buffer.contents ctx.buf in
+  (* Emit extern bridges only for externs actually referenced in the emitted code *)
+  let used_ed = List.filter (fun (ed : Tir.extern_decl) ->
+    Hashtbl.mem ctx.used_externs ed.ed_march_name
+  ) m.Tir.tm_externs in
+  let extern_js = emit_extern_bridges ctx used_ed in
   (* Runtime-dependent builtin wrappers need these in the import regardless of
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
@@ -765,4 +865,4 @@ let emit_module (m : Tir.tir_module) : string =
       Buffer.add_string export_buf
         (Printf.sprintf "export { %s };\n" (mangle name))
   ) m.Tir.tm_exports;
-  imports ^ builtin_wrappers ^ runtime_wrappers ^ fns_js ^ Buffer.contents export_buf
+  imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_js ^ fns_js ^ Buffer.contents export_buf

@@ -152,6 +152,8 @@ let all_stdlib_decls =
     "membership.march";
     "swim.march";
     "global_registry.march";
+    "global_pid.march";
+    "remote_call.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -330,6 +332,14 @@ let () =
     ("global_registry", [
       Alcotest.test_case "GlobalRegistry module"
         `Quick (run_stdlib_test "test_global_registry.march" "TestGlobalRegistry");
+    ]);
+    ("global_pid", [
+      Alcotest.test_case "GlobalPid module"
+        `Quick (run_stdlib_test "test_global_pid.march" "TestGlobalPid");
+    ]);
+    ("remote_call", [
+      Alcotest.test_case "RemoteCall module"
+        `Quick (run_stdlib_test "test_remote_call.march" "TestRemoteCall");
     ]);
     ("net_kernel", [
       Alcotest.test_case "NetKernel module"

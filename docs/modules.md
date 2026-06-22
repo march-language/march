@@ -15,7 +15,7 @@ March has an Elixir-inspired module system. Modules are the primary unit of code
 
 Every March file begins with a `mod` declaration:
 
-```elixir
+```march
 mod MyApp do
   -- definitions here
 end
@@ -23,7 +23,7 @@ end
 
 Modules can be dotted for hierarchical organization:
 
-```elixir
+```march
 mod MyApp.Router do
   -- router logic
 end
@@ -35,7 +35,7 @@ end
 
 Modules can also be nested inline:
 
-```elixir
+```march
 mod Outer do
   mod Inner do
     fn greet() do println("from Inner") end
@@ -53,7 +53,7 @@ end
 
 By default, all definitions are **public** (accessible from outside the module). To make something private, use `pfn` for functions or `ptype` for types:
 
-```elixir
+```march
 mod Passwords do
   -- Public API:
   fn verify(plain : String, stored : String) : Bool do
@@ -71,7 +71,7 @@ end
 
 For types that should expose the name but hide the constructors, use `opaque`:
 
-```elixir
+```march
 mod Token do
   opaque type Token = Token(String)
 
@@ -93,7 +93,7 @@ end
 
 Call functions or access types from another module using `.`:
 
-```elixir
+```march
 mod Math do
   fn square(n : Int) : Int do n * n end
   fn cube(n : Int) : Int do n * n * n end
@@ -110,7 +110,7 @@ end
 
 Nested module access chains:
 
-```elixir
+```march
 MyApp.Router.dispatch(conn, request)
 ```
 
@@ -120,7 +120,7 @@ MyApp.Router.dispatch(conn, request)
 
 `import` brings names from a module into the current scope. It works like Elixir's `import`:
 
-```elixir
+```march
 -- Import all public names from MathUtils:
 import MathUtils
 
@@ -133,20 +133,20 @@ end
 
 Import only specific names:
 
-```elixir
+```march
 import MathUtils, only: [square, cube]
 import String, only: [length, split, upcase]
 ```
 
 Import everything except specific names:
 
-```elixir
+```march
 import String, except: [dangerous_fn]
 ```
 
 Dotted import with brace selector:
 
-```elixir
+```march
 import String.{length, split}
 import MyApp.Utils.{format, parse}
 ```
@@ -159,7 +159,7 @@ import MyApp.Utils.{format, parse}
 
 `use` is the other import mechanism. It brings names into scope but is more explicit about source:
 
-```elixir
+```march
 use List.*                    -- import all from List
 use List.{map, filter}        -- import specific names
 use List.map                  -- import single name
@@ -174,7 +174,7 @@ The difference between `use` and `import` is primarily stylistic — `import` is
 
 `alias` gives a module a shorter name for the rest of the scope:
 
-```elixir
+```march
 alias Very.Long.Module.Name as Short
 
 fn demo() do
@@ -184,13 +184,13 @@ end
 
 Elixir-style comma form:
 
-```elixir
+```march
 alias Very.Long.Module.Name, as: Short
 ```
 
 Auto-alias to last segment:
 
-```elixir
+```march
 alias MyApp.Data.Repository
 -- Now Repository is available as the alias
 ```
@@ -203,7 +203,7 @@ Aliases are useful when a module name is long or conflicts with another name in 
 
 From [examples/modules.march](../examples/modules.march):
 
-```elixir
+```march
 mod Example do
 
   mod MathUtils do
@@ -259,7 +259,7 @@ end
 
 A `sig` declaration defines an abstract interface for a module — a named signature separate from the implementation:
 
-```elixir
+```march
 sig Collection do
   type Elem
   fn insert : Elem -> List(Elem) -> List(Elem)
@@ -298,7 +298,7 @@ Module names map to file paths by convention: `MyApp.Router` → `my_app/router.
 
 `let` at module level defines a constant accessible throughout the module and (if public) from outside:
 
-```elixir
+```march
 mod Config do
   let version   = "1.0.0"
   let max_items = 1000
