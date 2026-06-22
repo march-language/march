@@ -1,0 +1,91 @@
+-- NetKernel: the socket-level transport for distributed OTP (P1).
+--
+-- Bridges the pure protocol layer (NetFrame / NodeIdentity / ClusterAuth /
+-- Handshake, all over List(Int) bytes) to real TCP sockets (Socket, over
+-- String). It frames messages, reads complete frames off a byte stream
+-- (partial-read safe), and runs the authenticated handshake that gates a peer
+-- into the cluster.
+--
+-- The pure bridge (to_wire / str_to_bytes / bytes_to_str) is unit-tested; the
+-- socket handshake is runtime-exercised (sockets/scheduler are not run by the
+-- eval-based stdlib test harness, matching ChannelServer's convention).
+mod NetKernel do
+
+  -- ── byte bridge: List(Int) bytes <-> Socket String ─────────────────────────
+
+  fn str_to_bytes(s : String) : List(Int) do Bytes.to_list(Bytes.from_string(s)) end
+  fn bytes_to_str(b : List(Int)) : String do Bytes.to_string(Bytes.from_list(b)) end
+
+  -- Frame [payload] and render it as the String the socket layer sends.
+  fn to_wire(payload : List(Int)) : String do
+    bytes_to_str(NetFrame.encode(payload))
+  end
+
+  -- A fresh random nonce for a handshake challenge.
+  fn fresh_nonce() : String do Crypto.random_hex(16) end
+
+  -- ── framed socket I/O ──────────────────────────────────────────────────────
+
+  fn send_frame(fd : Int, payload : List(Int)) : Result((), String) do
+    match Socket.write(fd, to_wire(payload)) do
+      Ok(_) -> Ok(())
+      Err(e) -> Err(Socket.error_message(e))
+    end
+  end
+
+  -- Read one complete frame off [fd], starting from already-buffered [buf].
+  -- Returns (payload, leftover_bytes); None-from-decode means read more.
+  fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
+    match NetFrame.decode(buf) do
+      Some(result) -> Ok(result)
+      None ->
+        match Socket.recv(fd, 4096) do
+          Err(e) -> Err(Socket.error_message(e))
+          Ok(chunk) ->
+            if String.length(chunk) == 0 do
+              Err("net-kernel: connection closed mid-frame")
+            else
+              recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
+            end
+        end
+    end
+  end
+
+  -- ── symmetric authenticated handshake ──────────────────────────────────────
+  -- Both peers run the same sequence: send hello, recv hello, send proof bound
+  -- to the peer's nonce, recv proof, authenticate (peer's proof must bind to
+  -- the nonce WE issued). Returns the authenticated peer identity or a reason.
+  fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
+               my_nonce : String) : Result(NodeIdentity.Identity, String) do
+    let hello = Handshake.encode_hello(Handshake.make_hello(my_id, my_nonce))
+    match send_frame(fd, hello) do
+      Err(e) -> Err(e)
+      Ok(_) ->
+        match recv_frame(fd, Nil) do
+          Err(e) -> Err(e)
+          Ok(r1) ->
+            match r1 do
+              (hbytes, buf1) ->
+                match Handshake.decode_hello(hbytes) do
+                  Err(e) -> Err(e)
+                  Ok(peer) ->
+                    match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                      Err(e) -> Err(e)
+                      Ok(_) ->
+                        match recv_frame(fd, buf1) do
+                          Err(e) -> Err(e)
+                          Ok(r2) ->
+                            match r2 do
+                              (pbytes, _buf2) ->
+                                Handshake.authenticate(secret, my_nonce, peer,
+                                                       bytes_to_str(pbytes))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+  end
+
+end

@@ -145,6 +145,10 @@ let all_stdlib_decls =
     "net_frame.march";
     "node_identity.march";
     "cluster_auth.march";
+    "handshake.march";
+    "net_kernel.march";
+    "peer_registry.march";
+    "cluster_conn.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -307,6 +311,18 @@ let () =
     ("cluster_auth", [
       Alcotest.test_case "ClusterAuth module"
         `Quick (run_stdlib_test "test_cluster_auth.march" "TestClusterAuth");
+    ]);
+    ("handshake", [
+      Alcotest.test_case "Handshake module"
+        `Quick (run_stdlib_test "test_handshake.march" "TestHandshake");
+    ]);
+    ("net_kernel", [
+      Alcotest.test_case "NetKernel module"
+        `Quick (run_stdlib_test "test_net_kernel.march" "TestNetKernel");
+    ]);
+    ("peer_registry", [
+      Alcotest.test_case "PeerRegistry module"
+        `Quick (run_stdlib_test "test_peer_registry.march" "TestPeerRegistry");
     ]);
     ("vector_clock", [
       Alcotest.test_case "VectorClock module"
