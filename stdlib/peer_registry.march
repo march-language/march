@@ -1,0 +1,42 @@
+-- PeerRegistry: the net-kernel's one-connection-per-peer table.
+--
+-- After a successful handshake, a peer is registered under its NodeId along
+-- with the socket fd of its connection. Re-registering the same NodeId
+-- replaces the prior entry (the newer connection wins) — so there is at most
+-- one live connection per peer, the invariant the L2 net-kernel maintains.
+mod PeerRegistry do
+
+  type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int }
+
+  type Registry = Registry(Map(String, Peer))
+
+  fn empty() : Registry do Registry(Map.empty()) end
+
+  fn size(reg : Registry) : Int do
+    match reg do Registry(m) -> Map.size(m) end
+  end
+
+  -- Register [peer], replacing any existing entry for the same NodeId.
+  fn add(reg : Registry, peer : Peer) : Registry do
+    match reg do
+      Registry(m) -> Registry(Map.insert(m, peer.node_id, peer, Map.str_cmp))
+    end
+  end
+
+  fn lookup(reg : Registry, node_id : String) : Option(Peer) do
+    match reg do Registry(m) -> Map.get(m, node_id, Map.str_cmp) end
+  end
+
+  fn contains(reg : Registry, node_id : String) : Bool do
+    match reg do Registry(m) -> Map.contains_key(m, node_id, Map.str_cmp) end
+  end
+
+  fn remove(reg : Registry, node_id : String) : Registry do
+    match reg do Registry(m) -> Registry(Map.remove(m, node_id, Map.str_cmp)) end
+  end
+
+  fn peers(reg : Registry) : List(Peer) do
+    match reg do Registry(m) -> Map.values(m) end
+  end
+
+end
