@@ -340,6 +340,111 @@ end
 
 ---
 
+## Dependent Types
+
+A **dependent type** is a type that depends on a *value* — not just on other
+types. March has two flavours, each with different trade-offs.
+
+### Refinement Types — value predicates
+
+A **refinement type** `{T | predicate}` constrains what values a type can hold.
+The predicate is checked by an SMT solver (Z3) at compile time — so a whole
+class of bugs (negative sizes, out-of-bounds indices, division by zero) becomes
+a compile error instead of a runtime panic.
+
+```march
+-- Precondition: callers must pass a positive chunk size
+fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do ... end
+
+-- Postcondition: this function promises a non-negative count
+fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+
+chunks([1,2,3,4,5], 0)   -- compile error: 0 can never be > 0
+chunks([1,2,3,4,5], 2)   -- ok
+```
+
+Checking follows **definite-failure semantics**: a diagnostic is emitted only
+when the predicate can *never* hold — never for unknown or possibly-valid
+values. This means no false positives, but also no proof obligation: if the
+solver can't decide, it stays silent.
+
+```march
+fn f(n : Int) : Int do
+  chunks(data, n)    -- skipped: n could be positive, compiler doesn't know
+end
+```
+
+Refinements support **path sensitivity** — a guard you write becomes an
+assumption the solver can use:
+
+```march
+fn safe_chunks(xs : List(a), n : Int) : List(List(a)) do
+  if n > 0 do
+    chunks(xs, n)    -- ok: the guard established n > 0
+  else
+    [xs]
+  end
+end
+```
+
+For predicates over data structures, define a **`@[measure]`** — a total,
+terminating function the solver axiomatises structurally:
+
+```march
+@[measure]
+fn size(t : Tree(a)) : Int do
+  match t do
+    Leaf          -> 0
+    Node(l, _, r) -> 1 + size(l) + size(r)
+  end
+end
+
+fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
+```
+
+See the [Refinement Types guide](refinement-types.md) for the full syntax,
+measure soundness gate, `--no-measure-axioms` flag, and limitations.
+
+### Type-Level Naturals — dimension constraints
+
+`Nat` in a type parameter threads a *compile-time* natural number through the
+type, making shape mismatches impossible to express:
+
+```march
+type Vector(n, a) = Vector(Array(a))
+
+fn zip_vectors(v1 : Vector(n, a), v2 : Vector(n, b)) : Vector(n, (a, b)) do
+  -- the compiler verifies both arguments have the same length n
+  ...
+end
+```
+
+Arithmetic on naturals is supported at the type level:
+
+```march
+type Doubled(n, a) = Array(n * 2, a)
+```
+
+This is resolved entirely during type inference — no Z3 involved. It is
+appropriate for **structural shape constraints** (array lengths, matrix
+dimensions) where the relationship is fixed at the call site. Refinements are
+appropriate for **value-range constraints** (non-negative, bounded, non-zero)
+where the relationship is a predicate you want to check against a concrete
+argument.
+
+### Choosing between the two
+
+| | Refinement types | Type-level naturals |
+|---|---|---|
+| Constraint kind | Value predicates (`>= 0`, `!= 0`, `< len(xs)`) | Shape/dimension equality |
+| Base types | `Int`, `Bool` | `Nat` (non-negative integer) |
+| Solver | Z3 SMT (optional) | Type inference (always) |
+| False positives | None (definite-failure only) | None |
+| HOF / dynamic dispatch | Not checked | Checked |
+| Incomplete by design? | Yes | No |
+
+---
+
 ## Opaque Types
 
 Hide a type's representation while keeping the name usable in signatures:
@@ -377,6 +482,9 @@ Types
 ├── Function types: T -> U
 ├── Tuple types: (T, U, V)
 ├── Linear/affine: linear T, affine T
+├── Dependent types
+│   ├── Refinement types: {Int | _ >= 0}, {Int | _ != 0}
+│   └── Type-level naturals: Vector(n, a), Matrix(m, n, a)
 └── Stdlib: List(a), Option(a), Result(a,e), Map(k,v), ...
 ```
 
