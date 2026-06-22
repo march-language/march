@@ -4039,6 +4039,26 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  (* tcp_listen(port) → listening fd (SO_REUSEADDR, backlog 128), or -1. *)
+  ; ("tcp_listen", VBuiltin ("tcp_listen", function
+        | [VInt port] ->
+          (try
+             let open Unix in
+             let fd = socket PF_INET SOCK_STREAM 0 in
+             setsockopt fd SO_REUSEADDR true;
+             bind fd (ADDR_INET (inet_addr_any, port));
+             listen fd 128;
+             VInt (Obj.magic fd : int)
+           with _ -> VInt (-1))
+        | _ -> eval_error "tcp_listen(port)"))
+  (* tcp_accept(listen_fd) → accepted client fd, or -1. Blocks until a peer. *)
+  ; ("tcp_accept", VBuiltin ("tcp_accept", function
+        | [VInt fd] ->
+          (try
+             let (client, _addr) = Unix.accept (Obj.magic fd : Unix.file_descr) in
+             VInt (Obj.magic client : int)
+           with _ -> VInt (-1))
+        | _ -> eval_error "tcp_accept(listen_fd)"))
   (* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
      Returns "" when the fd is not a connected INET socket.  IPv4-mapped
      IPv6 addresses (::ffff:1.2.3.4) are normalized to plain IPv4. *)

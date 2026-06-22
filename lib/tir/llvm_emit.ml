@@ -698,8 +698,10 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_write"               -> Some Tir.TUnit
   | "process_kill_proc"           -> Some Tir.TUnit
   | "process_wait_proc"           -> Some Tir.TInt
-  (* TCP/network builtins *)
-  | "tcp_listen" | "tcp_accept"  -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  (* TCP/network builtins.
+     tcp_listen/tcp_accept return a raw int fd (-1 on error) — march_tcp_listen/
+     accept return int64, not a tagged Result (unlike tcp_connect). *)
+  | "tcp_listen" | "tcp_accept"  -> Some Tir.TInt
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "tcp_close"                   -> Some Tir.TUnit

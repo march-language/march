@@ -969,6 +969,8 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
+  ("tcp_listen",            "IO.NetConnect");
+  ("tcp_accept",            "IO.NetConnect");
   ("ws_recv",               "IO.NetConnect");
   ("ws_send",               "IO.NetConnect");
   ("ws_select",             "IO.NetConnect");
@@ -1457,6 +1459,11 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* tcp_listen(port) → listening fd, or -1 on error; tcp_accept(listen_fd) →
+       client fd, or -1 on error. Raw int fds matching the C runtime
+       (march_tcp_listen/accept return int64); -1 sentinel rather than Result. *)
+    ("tcp_listen",              Mono (TArrow (t_int, t_int)));
+    ("tcp_accept",              Mono (TArrow (t_int, t_int)));
     (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
     ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
     ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));
