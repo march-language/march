@@ -1,0 +1,14 @@
+-- Negative test: a C-backed extern compiled with --target js must produce a
+-- clear compile error (not a silent ReferenceError at load time).
+mod JsFfiCbacked do
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn dbl(n: Int) : Int = "ffi_test_dbl"
+  end
+
+  fn main() : Unit do
+    println(int_to_string(dbl(21)))
+  end
+end

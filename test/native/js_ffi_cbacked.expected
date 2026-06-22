@@ -1,0 +1,6 @@
+error: extern "rt" function `dbl` cannot be called on the JavaScript target.
+The JS backend supports only JS-module externs:
+extern "node:fs"   extern "npm:lodash"   extern "./local.mjs"
+`dbl` is bound to the C symbol `ffi_test_dbl`, which has no JS runtime
+implementation. To call it from JS, wrap it in a JS module, or build a
+native/wasm target.
