@@ -38,8 +38,8 @@ type value =
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
   | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
-  | VForeign of string * string * March_ast.Ast.ty list * March_ast.Ast.ty
-        (** FFI extern: (lib_name, symbol_name, param_types, return_type).
+  | VForeign of string * string * bool * March_ast.Ast.ty list * March_ast.Ast.ty
+        (** FFI extern: (lib_name, symbol_name, raises, param_types, return_type).
             The types drive interpreter-side marshalling for the dynamic
             (dlopen+trampoline) call path. *)
   | VMultiarity of (int * value) list   (** Arity-dispatched fn: [(arity, closure)] sorted ascending *)
@@ -255,6 +255,11 @@ let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
     Populated when [eval_decl] processes [DType] nodes with [TDRecord].
     Used by Json derive dispatch to identify record types at runtime. *)
 let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(** Type name → type definition mapping for FFI marshalling.
+    Populated when [eval_decl] processes [DType] nodes.
+    Used by ffi_marshal_field/unmarshal to look up record fields and ctor args. *)
+let ffi_type_decl_tbl : (string, March_ast.Ast.type_def) Hashtbl.t = Hashtbl.create 16
 
 (** Protocol → sorted role list mapping.
     Populated when [eval_decl] processes [DProtocol] nodes.
@@ -924,7 +929,7 @@ let rec value_to_string v =
     Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
   | VMChan me ->
     Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
-  | VForeign (lib, sym, _, _) ->
+  | VForeign (lib, sym, _, _, _) ->
     Printf.sprintf "<foreign:%s:%s>" lib sym
   | VMultiarity variants ->
     let arities = List.map (fun (a, _) -> string_of_int a) variants in
@@ -1138,6 +1143,8 @@ external _ffi_dlopen    : string -> nativeint = "march_eval_dlopen"
 external _ffi_dlsym     : nativeint -> string -> nativeint = "march_eval_dlsym"
 external _ffi_dyncall_i : nativeint -> int64 array -> int -> int64 = "march_eval_dyncall_i"
 external _ffi_dyncall_d : nativeint -> int64 array -> int -> float = "march_eval_dyncall_d"
+external _ffi_dyncall_fi : nativeint -> int64 array -> int -> float array -> int -> int64 = "march_eval_dyncall_fi"
+external _ffi_dyncall_fd : nativeint -> int64 array -> int -> float array -> int -> float = "march_eval_dyncall_fd"
 
 (** Thunk returning the path to the runtime .so holding FFI symbols; set by the
     driver (bin/main.ml).  Called lazily on the first extern call so non-FFI
@@ -1170,32 +1177,233 @@ let _ffi_get_handle () : nativeint =
     end;
     _ffi_handle := Some h; h
 
-(** Dynamically call a primitive extern.  Returns None if the binding uses types
-    the interpreter cannot marshal (caller then reports a clear error). *)
+(* ------------------------------------------------------------------ *)
+(* FFI Marshal Layer — see specs/plans/2026-06-22-ffi-interpreter-full.md *)
+(* ------------------------------------------------------------------ *)
+
+(* Shape descriptor "name:k;…" sorted by field name; must match forge's logic. *)
+let ffi_shape_desc (fields : field list) : string =
+  let sorted = List.sort (fun a b -> String.compare a.fld_name.txt b.fld_name.txt) fields in
+  String.concat "" (List.map (fun f ->
+    let k = match f.fld_ty with
+      | TyCon ({txt = "Int"|"Bool"|"Unit"|"Atom"; _}, []) -> 'i'
+      | TyCon ({txt = "Float"; _}, []) -> 'f'
+      | TyVar _ -> 'g'
+      | _ -> 'p'
+    in
+    Printf.sprintf "%s:%c;" f.fld_name.txt k) sorted)
+
+(* Option(Float)/Option(Unit) payloads are boxed (niche would alias None=0). *)
+let ffi_payload_is_boxed = function
+  | TyCon ({txt = "Float"|"Unit"; _}, []) -> true
+  | _ -> false
+
+(* Helper: find index of an item in a list (returns -1 if not found). *)
+let list_index pred lst =
+  let rec go i = function [] -> -1 | x :: r -> if pred x then i else go (i+1) r
+  in go 0 lst
+
+(* Marshal: interpreter value → int64 march_value.
+   int_enc=`Raw: Int/Bool as plain machine int (record/variant field slots, top-level).
+   int_enc=`Tagged: Int/Bool as tagged word via make_int (Option/Result payloads). *)
+let rec ffi_marshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (v : value) : int64 =
+  match ty, v with
+  | TyCon ({txt = "Int"|"Char"; _}, []), VInt n ->
+    let n64 = Int64.of_int n in
+    if int_enc = `Tagged then Ffi_marshal.make_int n64 else n64
+  | TyCon ({txt = "Bool"; _}, []), VBool b ->
+    let n = if b then 1L else 0L in
+    if int_enc = `Tagged then Ffi_marshal.make_int n else n
+  | TyCon ({txt = "Float"; _}, []), VFloat f ->
+    Ffi_marshal.make_float f
+  | TyCon ({txt = "Float"; _}, []), VInt n ->
+    Ffi_marshal.make_float (Float.of_int n)
+  | TyCon ({txt = "Unit"; _}, []), (VUnit | VTuple []) ->
+    0L   (* Unit payload inside boxed Some: sentinel 0 *)
+  | TyCon ({txt = "String"; _}, []), VString s ->
+    Ffi_marshal.str_new s
+  | TyCon ({txt = "Bytes"; _}, []), VString s ->
+    Ffi_marshal.bytes_new s
+  | TyCon ({txt = "Option"; _}, [p_ty]), VCon ("None", []) ->
+    if ffi_payload_is_boxed p_ty then Ffi_marshal.none_boxed () else Ffi_marshal.none ()
+  | TyCon ({txt = "Option"; _}, [p_ty]), VCon ("Some", [x]) ->
+    let pv = ffi_marshal_payload p_ty x in
+    if ffi_payload_is_boxed p_ty then Ffi_marshal.some_boxed pv else Ffi_marshal.some pv
+  | TyCon ({txt = "Result"; _}, [a_ty; _]), VCon ("Ok", [x]) ->
+    Ffi_marshal.ok (ffi_marshal_payload a_ty x)
+  | TyCon ({txt = "Result"; _}, [_; e_ty]), VCon ("Err", [x]) ->
+    Ffi_marshal.err (ffi_marshal_payload e_ty x)
+  | TyCon ({txt = tname; _}, _), VRecord fields ->
+    (match Hashtbl.find_opt ffi_type_decl_tbl tname with
+     | Some (TDRecord fdecls) ->
+       let sorted = List.sort
+         (fun a b -> String.compare a.fld_name.txt b.fld_name.txt) fdecls in
+       let slots = Array.of_list (List.map (fun fdecl ->
+         let v = try List.assoc fdecl.fld_name.txt fields
+                 with Not_found ->
+                   eval_error "FFI marshal: missing field '%s' in %s" fdecl.fld_name.txt tname in
+         ffi_marshal_field fdecl.fld_ty v) sorted) in
+       Ffi_marshal.make_record (ffi_shape_desc fdecls) slots
+     | _ ->
+       eval_error "FFI marshal: %s is not a known record type (use --compile for complex types)" tname)
+  | TyCon ({txt = tname; _}, _), VCon (ctor, args) ->
+    (match Hashtbl.find_opt ffi_type_decl_tbl tname with
+     | Some (TDVariant vars) ->
+       let tag = list_index (fun v -> v.var_name.txt = ctor) vars in
+       if tag < 0 then eval_error "FFI marshal: unknown constructor %s in %s" ctor tname;
+       let var = List.nth vars tag in
+       if List.length var.var_args <> List.length args then
+         eval_error "FFI marshal: ctor %s arity mismatch" ctor;
+       let slots = Array.of_list (List.map2 ffi_marshal_field var.var_args args) in
+       Ffi_marshal.make_variant tag slots
+     | _ ->
+       eval_error "FFI marshal: %s is not a known variant type (use --compile for complex types)" tname)
+  | _ ->
+    eval_error "FFI marshal: cannot marshal %s across FFI boundary (run with --compile)" (show_ty ty)
+
+and ffi_marshal_field ty v = ffi_marshal_iv `Raw ty v
+and ffi_marshal_payload ty v = ffi_marshal_iv `Tagged ty v
+
+(* Unmarshal: int64 march_value → interpreter value. *)
+let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : value =
+  match ty with
+  | TyCon ({txt = "Int"|"Char"; _}, []) ->
+    VInt (Int64.to_int (if int_enc = `Tagged then Ffi_marshal.get_int mv else mv))
+  | TyCon ({txt = "Bool"; _}, []) ->
+    VBool ((if int_enc = `Tagged then Ffi_marshal.get_int mv else mv) <> 0L)
+  | TyCon ({txt = "Float"; _}, []) ->
+    VFloat (Ffi_marshal.get_float mv)
+  | TyCon ({txt = "Unit"; _}, []) ->
+    VUnit
+  | TyCon ({txt = "String"; _}, []) ->
+    VString (Ffi_marshal.str_borrow_copy mv)
+  | TyCon ({txt = "Bytes"; _}, []) ->
+    VString (Ffi_marshal.bytes_borrow_copy mv)
+  | TyCon ({txt = "Option"; _}, [p_ty]) ->
+    if ffi_payload_is_boxed p_ty then begin
+      (* None_boxed = tag 0, Some_boxed = tag 1 *)
+      if Ffi_marshal.variant_tag mv = 0 then VCon ("None", [])
+      else VCon ("Some", [ffi_unmarshal_payload p_ty (Ffi_marshal.variant_field mv 0)])
+    end else begin
+      if mv = 0L then VCon ("None", [])
+      else VCon ("Some", [ffi_unmarshal_payload p_ty mv])  (* niche: Some value = the payload *)
+    end
+  | TyCon ({txt = "Result"; _}, [a_ty; e_ty]) ->
+    if Ffi_marshal.variant_tag mv = 0
+    then VCon ("Ok",  [ffi_unmarshal_payload a_ty (Ffi_marshal.variant_field mv 0)])
+    else VCon ("Err", [ffi_unmarshal_payload e_ty (Ffi_marshal.variant_field mv 0)])
+  | TyCon ({txt = tname; _}, _) ->
+    (match Hashtbl.find_opt ffi_type_decl_tbl tname with
+     | Some (TDRecord fdecls) ->
+       let sorted = List.sort
+         (fun a b -> String.compare a.fld_name.txt b.fld_name.txt) fdecls in
+       let fields = List.mapi (fun i fdecl ->
+         (fdecl.fld_name.txt, ffi_unmarshal_field fdecl.fld_ty (Ffi_marshal.record_field mv i)))
+         sorted in
+       VRecord fields
+     | Some (TDVariant vars) ->
+       let tag = Ffi_marshal.variant_tag mv in
+       let var = (try List.nth vars tag
+                  with Failure _ ->
+                    eval_error "FFI unmarshal: variant tag %d out of range for %s" tag tname) in
+       let args = List.mapi (fun i arg_ty ->
+         ffi_unmarshal_field arg_ty (Ffi_marshal.variant_field mv i))
+         var.var_args in
+       VCon (var.var_name.txt, args)
+     | _ ->
+       eval_error "FFI unmarshal: unknown type %s (run with --compile)" tname)
+  | _ ->
+    eval_error "FFI unmarshal: cannot unmarshal %s from FFI boundary (run with --compile)" (show_ty ty)
+
+and ffi_unmarshal_field ty mv = ffi_unmarshal_iv `Raw ty mv
+and ffi_unmarshal_payload ty mv = ffi_unmarshal_iv `Tagged ty mv
+
+(** Dynamically call an extern.  Returns None if the binding uses unsupported
+    types (upcalls/closures); otherwise calls the function and returns the
+    result as a March [value]. *)
 let dynamic_ffi_call (lib : string) (sym : string)
-    (ret_ty : March_ast.Ast.ty) (args : value list) : value option =
-  let to_i64 = function
-    | VInt n  -> Some (Int64.of_int n)
-    | VBool b -> Some (if b then 1L else 0L)
-    | _       -> None   (* Float/heap args unsupported via the GP-register trampoline *)
+    (param_tys : ty list) (ret_ty : ty) (ef_raises : bool)
+    (args : value list) : value option =
+  (* Load the runtime .so first — marshal calls lazy-init from RTLD_DEFAULT,
+     which only works once the .so is loaded with RTLD_GLOBAL. *)
+  let h = _ffi_get_handle () in
+  Ffi_marshal.reset ();   (* invalidate pointer cache if a new .so was just loaded *)
+  (* Classify each arg as GP (int64) or FP (float) based on its static type. *)
+  let classify_arg ty v : [`GP of int64 | `FP of float | `Err] =
+    match ty with
+    | TyCon ({txt = "Float"; _}, []) ->
+      (match v with VFloat f -> `FP f | VInt n -> `FP (Float.of_int n) | _ -> `Err)
+    | TyArrow _ -> `Err   (* closures/upcalls not yet supported in interpreter *)
+    | _ ->
+      (try `GP (ffi_marshal_field ty v)
+       with Eval_error _ -> `Err)
   in
-  match List.map to_i64 args with
-  | margs when List.for_all (fun o -> o <> None) margs ->
-    let arr = Array.of_list (List.map Option.get margs) in
-    let n = Array.length arr in
-    let fnptr = _ffi_dlsym (_ffi_get_handle ()) sym in
+  let classified = List.map2 classify_arg param_tys args in
+  if List.exists (fun c -> c = `Err) classified then None
+  else begin
+    let fnptr = _ffi_dlsym h sym in
     if fnptr = 0n then
       eval_error "extern %s:%s — symbol not found for interpreter FFI \
                   (build the runtime, or run with --compile)" lib sym;
-    (match ret_ty with
-     | March_ast.Ast.TyCon ({ txt = ("Int" | "Char"); _ }, []) ->
-       Some (VInt (Int64.to_int (_ffi_dyncall_i fnptr arr n)))
-     | March_ast.Ast.TyCon ({ txt = "Bool"; _ }, []) ->
-       Some (VBool (_ffi_dyncall_i fnptr arr n <> 0L))
-     | March_ast.Ast.TyCon ({ txt = "Float"; _ }, []) ->
-       Some (VFloat (_ffi_dyncall_d fnptr arr n))
-     | _ -> None)   (* non-primitive return: caller falls back to an error *)
-  | _ -> None        (* a non-primitive argument *)
+    (* Optionally prepend a raises-env pointer as the first GP arg. *)
+    let env_ptr = if ef_raises then Some (Ffi_marshal.alloc_env ()) else None in
+    let gp_prefix = match env_ptr with
+      | Some p -> [Ffi_marshal.env_ptr_i64 p] | None -> [] in
+    let gp_args = Array.of_list (gp_prefix @
+      List.filter_map (function `GP i -> Some i | _ -> None) classified) in
+    let fp_args = Array.of_list (
+      List.filter_map (function `FP f -> Some f | _ -> None) classified) in
+    let ni = Array.length gp_args in
+    let nf = Array.length fp_args in
+    (* Determine the actual C return type:
+       - `raises fn f(...): Result(Float,E)` → C returns double (bare Ok payload)
+       - `fn f(...): Float`                  → C returns double
+       - everything else                     → C returns int64_t *)
+    let c_ret_is_float = match ret_ty with
+      | TyCon ({txt = "Float"; _}, []) -> true
+      | TyCon ({txt = "Result"; _}, [TyCon ({txt = "Float"; _}, []); _]) when ef_raises -> true
+      | _ -> false
+    in
+    let result =
+      if c_ret_is_float then begin
+        let f = if nf = 0 then _ffi_dyncall_d fnptr gp_args ni
+                else _ffi_dyncall_fd fnptr gp_args ni fp_args nf in
+        (match env_ptr with
+         | None -> Some (VFloat f)
+         | Some p ->
+           let v = if Ffi_marshal.env_raised p then
+             let e_ty = (match ret_ty with TyCon({txt="Result";_},[_;e]) -> e | _ -> ret_ty) in
+             let ev = ffi_unmarshal_payload e_ty (Ffi_marshal.env_err p) in
+             VCon ("Err", [ev])
+           else VCon ("Ok", [VFloat f]) in
+           Ffi_marshal.free_env p;
+           Some v)
+      end else begin
+        let raw = if nf = 0 then _ffi_dyncall_i fnptr gp_args ni
+                  else _ffi_dyncall_fi fnptr gp_args ni fp_args nf in
+        let v =
+          match env_ptr with
+          | None -> ffi_unmarshal_field ret_ty raw
+          | Some p ->
+            let v = if Ffi_marshal.env_raised p then
+              let e_ty = (match ret_ty with TyCon({txt="Result";_},[_;e]) -> e | _ -> ret_ty) in
+              let ev = ffi_unmarshal_payload e_ty (Ffi_marshal.env_err p) in
+              VCon ("Err", [ev])
+            else
+              let ok_ty = (match ret_ty with TyCon({txt="Result";_},[a;_]) -> a | _ -> ret_ty) in
+              VCon ("Ok", [ffi_unmarshal_field ok_ty raw]) in
+            Ffi_marshal.free_env p;
+            v
+        in
+        Some v
+      end
+    in
+    (* Drop all heap args we built during marshalling. *)
+    List.iter (function
+      | `GP i when Ffi_marshal.is_heap i -> Ffi_marshal.drop i
+      | _ -> ()) classified;
+    result
+  end
 
 (** Spawn a fresh child actor instance (for supervisor restarts).
     [crashed_pid] is the pid of the actor being replaced; its epoch is
@@ -6460,20 +6668,19 @@ and apply_inner (fn_val : value) (args : value list) : value =
 
   | VBuiltin (_, f) -> f args
 
-  | VForeign (lib, sym, _param_tys, ret_ty) ->
+  | VForeign (lib, sym, ef_raises, param_tys, ret_ty) ->
     (* 1. Static OCaml stub (libm/libc math etc.). Keyed by both the C symbol
           and the bare extern name so `= "sym"` and default bindings both hit. *)
     (match Hashtbl.find_opt foreign_stubs (lib, sym) with
      | Some f -> f args
      | None ->
-       (* 2. Dynamic primitive call (dlopen + trampoline). *)
-       (match dynamic_ffi_call lib sym ret_ty args with
+       (* 2. Dynamic call via marshal layer (dlopen + typed trampoline). *)
+       (match dynamic_ffi_call lib sym param_tys ret_ty ef_raises args with
         | Some v -> v
         | None ->
-          eval_error "extern %s:%s — interpreter FFI supports only Int/Bool \
-                      arguments and Int/Bool/Float returns; this binding uses \
-                      strings/floats-as-args/records/resources. Run with \
-                      --compile (or add an OCaml stub to foreign_stubs)." lib sym))
+          eval_error "extern %s:%s — interpreter FFI cannot marshal the argument \
+                      or return types of this binding (closures/upcalls not yet \
+                      supported). Run with --compile." lib sym))
 
   | VMultiarity variants ->
     let n = List.length args in
@@ -7009,7 +7216,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear logger_module_levels;
   Hashtbl.clear vault_registry;
   Hashtbl.clear vault_name_registry;
-  vault_next_id := 0
+  vault_next_id := 0;
+  Hashtbl.clear ffi_type_decl_tbl
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -7644,6 +7852,11 @@ let rec eval_decl (env : env) (d : decl) : env =
        let key = String.concat "," (List.sort String.compare field_names) in
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
+    (* Also register in ffi_type_decl_tbl so the FFI marshal layer can look up
+       field/ctor types for record and variant arguments. *)
+    (match td with
+     | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
+     | _ -> ());
     env
 
   | DActor (_, name, def, _) ->
@@ -7846,6 +8059,9 @@ let rec eval_decl (env : env) (d : decl) : env =
        let key = String.concat "," (List.sort String.compare field_names) in
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
+    (match td with
+     | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
+     | _ -> ());
     env
 
   | DExtern (edef, _sp) ->
@@ -7856,7 +8072,7 @@ let rec eval_decl (env : env) (d : decl) : env =
         | Some s -> s
         | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
       let param_tys = List.map snd ef.ef_params in
-      let stub = VForeign (edef.ext_lib_name, sym, param_tys, ef.ef_ret_ty) in
+      let stub = VForeign (edef.ext_lib_name, sym, ef.ef_raises, param_tys, ef.ef_ret_ty) in
       (ef.ef_name.txt, stub) :: env'
     ) env edef.ext_fns
 
@@ -8137,6 +8353,9 @@ let eval_module_env (m : module_) : env =
          let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
          let key = String.concat "," (List.sort String.compare field_names) in
          Hashtbl.replace record_type_tbl key name.txt
+       | _ -> ());
+      (match td with
+       | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
        | _ -> ());
       make_recursive_env rest env
 

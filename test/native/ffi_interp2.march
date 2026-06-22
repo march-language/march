@@ -1,0 +1,78 @@
+-- FFI interpreter marshal layer regression: exercises the typed marshal
+-- layer for String, Float, Option, Result, raises, variant, and record
+-- args/returns from the tree-walking interpreter (no --compile).
+-- All C shims live in runtime/march_ffi.c.
+mod Test do
+  needs Ffi
+  needs IO.Foreign
+
+  type Shape = Circle(Int) | Rect(Int, Int)
+  type Point = { x: Int, y: Int }
+
+  extern "m" : Cap(Ffi) do
+    -- String argument (borrows)
+    fn slen(s: String): Int = "ffi_test_slen"
+    -- Option(Int) return
+    fn test_maybe(n: Int): Option(Int) = "ffi_test_maybe"
+    -- Variant arg and return
+    fn mk_circle(r: Int): Shape = "ffi_test_mk_circle"
+    fn mk_rect(w: Int, h: Int): Shape = "ffi_test_mk_rect"
+    fn shape_area(s: Shape): Int = "ffi_test_shape_area"
+    -- Record arg and return
+    fn mk_point(x: Int, y: Int): Point = "ffi_test_mk_point"
+    fn point_sum(p: Point): Int = "ffi_test_point_sum"
+    -- Result return (direct, no env)
+    fn test_parse(s: String): Result(Int, String) = "ffi_test_parse"
+    -- raises: env-routed error
+    raises fn raise_parse(s: String): Result(Int, String) = "ffi_raise_parse"
+    -- Float argument and return via raises
+    raises fn raise_fdiv(a: Float, b: Float): Result(Float, String) = "ffi_raise_fdiv"
+  end
+
+  fn show_opt(o: Option(Int)): String do
+    match o do
+      Some(n) -> "Some(" ++ int_to_string(n) ++ ")"
+      None -> "None"
+    end
+  end
+
+  fn show_res_int(r: Result(Int, String)): String do
+    match r do
+      Ok(n) -> "Ok(" ++ int_to_string(n) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  fn show_res_float(r: Result(Float, String)): String do
+    match r do
+      Ok(f) -> "Ok(" ++ float_to_string(f) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  fn main() : Unit do
+    -- String arg
+    println(int_to_string(slen("hello")))
+    println(int_to_string(slen("")))
+    -- Option(Int)
+    println(show_opt(test_maybe(7)))
+    println(show_opt(test_maybe(-1)))
+    -- Variant round-trip
+    let c = mk_circle(5)
+    let r = mk_rect(3, 4)
+    println(int_to_string(shape_area(c)))
+    println(int_to_string(shape_area(r)))
+    -- Record round-trip
+    let p = mk_point(10, 20)
+    println(int_to_string(point_sum(p)))
+    -- Result (direct)
+    println(show_res_int(test_parse("7")))
+    println(show_res_int(test_parse("x")))
+    -- raises parse
+    println(show_res_int(raise_parse("3")))
+    println(show_res_int(raise_parse("?")))
+    -- raises fdiv
+    println(show_res_float(raise_fdiv(10.0, 4.0)))
+    println(show_res_float(raise_fdiv(1.0, 0.0)))
+  end
+end
