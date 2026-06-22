@@ -238,6 +238,42 @@ let literal_tag_js br_tag =
     js_string_lit inner
   | _ -> js_string_lit br_tag  (* atom tags (":name"), ADT ctor tags, etc. *)
 
+(* ── JS-module detection + extern classification ─────────────────── *)
+
+(** True when the library name is a JS module specifier (not a C lib name).
+    JS specifiers start with a scheme, relative path, or scoped npm prefix. *)
+let is_js_module lib =
+  let has_prefix p = String.length lib >= String.length p
+                     && String.sub lib 0 (String.length p) = p in
+  has_prefix "./" || has_prefix "../"
+  || has_prefix "npm:" || has_prefix "jsr:"
+  || has_prefix "node:" || has_prefix "https://" || has_prefix "http://"
+
+(** How an extern should be called on the JS target. *)
+type js_extern_kind =
+  | JsModuleSync     (* import { sym } from "spec" — plain synchronous call *)
+  | JsModuleBlocking (* same, but the result must be await-ed (Chunk A) *)
+  | JsModuleRaises   (* same, but errors become Err via try/catch (Chunk B) *)
+  | CBacked          (* non-JS-module lib name — unsupported on JS target (Chunk C) *)
+
+let classify_js_extern (ed : Tir.extern_decl) : js_extern_kind =
+  if not (is_js_module ed.Tir.ed_lib_name) then CBacked
+  else if ed.Tir.ed_blocking then JsModuleBlocking
+  else if ed.Tir.ed_raises   then JsModuleRaises
+  else JsModuleSync
+
+(** Emit the call expression for a direct extern call site.
+    Marks the extern as used. Chunk 0: all kinds emit a plain synchronous call;
+    Chunks A/B will add their own arms to this dispatch. *)
+let emit_extern_call (ctx : ctx) (ed : Tir.extern_decl) (args : Tir.atom list) : unit =
+  let march_name = mangle ed.ed_march_name in
+  Hashtbl.replace ctx.used_externs ed.ed_march_name ();
+  (match classify_js_extern ed with
+   | JsModuleSync | JsModuleBlocking | JsModuleRaises | CBacked ->
+     emit ctx (march_name ^ "(");
+     List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+     emit ctx ")")
+
 (* ── Forward declarations ────────────────────────────────────────── *)
 
 let rec emit_val  ctx expr = emit_val_impl  ctx expr
@@ -355,14 +391,15 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
-      (* General call — track extern usage for lazy bridge emission *)
+      (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
-        if Hashtbl.mem ctx.extern_fns name then
-          Hashtbl.replace ctx.used_externs name ();
-        emit ctx (mangle name ^ "(");
-        List.iteri (fun i a ->
-          if i > 0 then emit ctx ", "; emit_atom ctx a) args;
-        emit ctx ")"
+        (match Hashtbl.find_opt ctx.extern_fns name with
+         | Some ed -> emit_extern_call ctx ed args
+         | None ->
+           emit ctx (mangle name ^ "(");
+           List.iteri (fun i a ->
+             if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+           emit ctx ")")
       end
     end
 
@@ -744,14 +781,17 @@ let emit_eq_fn ctx (td : Tir.type_def) =
 
 (* ── Extern bridge emission ──────────────────────────────────────── *)
 
-(** True when the library name is a JS module specifier (not a C lib name).
-    JS specifiers start with a scheme, relative path, or scoped npm prefix. *)
-let is_js_module lib =
-  let has_prefix p = String.length lib >= String.length p
-                     && String.sub lib 0 (String.length p) = p in
-  has_prefix "./" || has_prefix "../"
-  || has_prefix "npm:" || has_prefix "jsr:"
-  || has_prefix "node:" || has_prefix "https://" || has_prefix "http://"
+(** Build the $clo wrapper string for a single extern.
+    Chunk 0: all kinds emit a plain synchronous arrow; Chunks A/B add their arms. *)
+let emit_extern_clo_str (ed : Tir.extern_decl) : string =
+  let march_name = mangle ed.ed_march_name in
+  let nparams = List.length ed.ed_params in
+  let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
+  let plist = String.concat ", " pnames in
+  match classify_js_extern ed with
+  | JsModuleSync | JsModuleBlocking | JsModuleRaises | CBacked ->
+    Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
+      march_name plist march_name plist
 
 (** Emit extern bridges for [eds].  Returns (imports_str, consts_str):
     - imports_str: ES import statements for JS-module externs (goes before const decls)
@@ -798,14 +838,7 @@ let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string * stri
     if rt_externs <> [] then cst "\n";
 
     (* ── $clo wrappers for first-class use of extern fns ────────────── *)
-    List.iter (fun (ed : Tir.extern_decl) ->
-      let march_name = mangle ed.ed_march_name in
-      let nparams = List.length ed.ed_params in
-      let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
-      let plist = String.concat ", " pnames in
-      cst (Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
-             march_name plist march_name plist)
-    ) eds;
+    List.iter (fun ed -> cst (emit_extern_clo_str ed)) eds;
     if eds <> [] then cst "\n";
 
     (Buffer.contents imp_buf, Buffer.contents cst_buf)
