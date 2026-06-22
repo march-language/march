@@ -85,12 +85,12 @@ A `@[measure]` failing any of these is a **compile error**, not a silently-unaxi
 
 ## 7. Phasing
 
-1. **M-a — lists only.** `declare-datatypes` for `List`, `declare-fun`, base + cons axioms with triggers. Target: prove `len(Cons(h,t)) = len(t)+1` and concrete-structure equalities; ship behind `--measure-axioms`.
-2. **M-b — general ADTs + the totality/termination/purity gate** (§4) as a hard error for `@[measure]`.
-3. **M-c — measures calling measures**, ordering, mutual recursion.
+1. ✅ **M-a — quantified recursion-equation axioms (SHIPPED 2026-06-21).** `declare-datatypes` + `declare-fun` + `:pattern`-triggered base/recursive axioms, with a 3s solver timeout (`unknown` → definite-failure skip). The implementation generalised past "lists only" directly to **user ADTs** (the `Tree`/`size` case), element types opaque. Enabled by default but **soundness-gated**: a measure is axiomatised only when its body is `match param do Ctor(vars) -> … end`, the arms cover every constructor, and every recursive call is structural — else it stays symbolic. Scope: direct-match single-arg measures.
+2. ✅ **M-b — built-in `List` + the totality/termination/purity gate (SHIPPED 2026-06-21).** (a) The built-in `List(a)` is modelled (`Nil | Cons(a, List(a))`), completing the "lists" target M-a deferred, so user list measures (`length`) axiomatise like user ADTs. Datatype sort names moved to a private `M_` namespace so no ADT name collides with a z3-reserved sort (`List`, `Array`, `Seq`, …). Axiom bodies restricted to **self-recursion only** (calls to other measures / `len` would emit undeclared symbols — deferred to M-c). (b) The **hard soundness gate** (§4): a `@[measure]` that is effectful (`spawn`/`send`/`dbg`/`assert`), divergent (`panic`/`todo`/`exit`), non-total (a `/`/`%` that can divide by zero, or a non-exhaustive `match` on its ADT param), or not structurally recursive is now a **compile error** — not a silent fallback. A sound-but-unaxiomatisable measure (multi-arg, element-inspecting, `let`-bodied) is *not* an error: it still falls back to a sound symbolic reflection (only the three soundness properties are gated). Implemented as a syntactic pass in `lib/refinecheck/refine_check.ml` (`measure_gate_errors`).
+3. **M-c — measures calling measures**, ordering, mutual recursion, mutually-recursive datatypes (lift the self-recursion-only restriction from M-b).
 4. **M-d — relational postconditions** (`size(insert(t,x)) == size(t)+1`) where provable by E-matching; document where a user lemma is still required.
 
-Each phase keeps the definite-failure soundness stance; the gate (§4) lands no later than M-b and **before** any axiom is enabled by default.
+Each phase keeps the definite-failure soundness stance; the gate (§4) landed with M-b, and axioms are enabled by default only because the gate guarantees no inconsistent axiom set is emitted.
 
 ## 8. Risks / decision criteria
 
