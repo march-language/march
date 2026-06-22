@@ -1,0 +1,88 @@
+-- Membership: SWIM-style cluster membership with a CRDT member view (P1 L3).
+--
+-- Each node is tracked as { status, incarnation }. A node refutes a false
+-- suspicion/death by incrementing its own incarnation and re-announcing Alive,
+-- so the merge rule is: higher incarnation wins; at the same incarnation the
+-- more-severe status wins (Dead > Suspect > Alive). That order makes `merge`
+-- a lexicographic max over (incarnation, severity) — associative, commutative,
+-- and idempotent — so gossiped member views converge regardless of order
+-- (the anti-entropy CRDT join for the small member set; no Merkle needed).
+--
+-- This is the pure membership state + merge + transitions; the SWIM probe loop
+-- (direct/indirect ping, suspicion timers) drives it from the runtime layer.
+mod Membership do
+
+  type Status = Alive | Suspect | Dead
+
+  type Member = { node_id : String, status : Status, incarnation : Int }
+
+  type Members = Members(Map(String, Member))
+
+  pfn severity(s : Status) : Int do
+    match s do
+      Alive   -> 0
+      Suspect -> 1
+      Dead    -> 2
+    end
+  end
+
+  -- Observation constructors.
+  fn alive(node_id : String, incarnation : Int) : Member do
+    { node_id: node_id, status: Alive, incarnation: incarnation }
+  end
+  fn suspect(node_id : String, incarnation : Int) : Member do
+    { node_id: node_id, status: Suspect, incarnation: incarnation }
+  end
+  fn dead(node_id : String, incarnation : Int) : Member do
+    { node_id: node_id, status: Dead, incarnation: incarnation }
+  end
+
+  fn empty() : Members do Members(Map.empty()) end
+  fn size(ms : Members) : Int do match ms do Members(m) -> Map.size(m) end end
+  fn get(ms : Members, node_id : String) : Option(Member) do
+    match ms do Members(m) -> Map.get(m, node_id, Map.str_cmp) end
+  end
+  fn members(ms : Members) : List(Member) do
+    match ms do Members(m) -> Map.values(m) end
+  end
+
+  -- Does observation [b] win over [a] for the same node? Lexicographic max
+  -- over (incarnation, severity): higher incarnation wins; ties broken by the
+  -- more-severe status (Dead > Suspect > Alive). >= on a tie keeps the merge
+  -- idempotent (b == a still "wins", harmlessly).
+  pfn supersedes(b : Member, a : Member) : Bool do
+    if b.incarnation == a.incarnation do
+      severity(b.status) >= severity(a.status)
+    else
+      b.incarnation > a.incarnation
+    end
+  end
+
+  -- Fold one observation into the view, keeping the winner for that NodeId.
+  fn observe(ms : Members, obs : Member) : Members do
+    match ms do
+      Members(m) ->
+        let winner = match Map.get(m, obs.node_id, Map.str_cmp) do
+          None -> obs
+          Some(existing) -> if supersedes(obs, existing) do obs else existing end
+        end
+        Members(Map.insert(m, obs.node_id, winner, Map.str_cmp))
+    end
+  end
+
+  -- CRDT join of two member views: observe every member of [b] into [a].
+  fn merge(a : Members, b : Members) : Members do
+    match b do
+      Members(mb) -> Map.fold(mb, a, fn (acc, _k, member) -> observe(acc, member))
+    end
+  end
+
+  fn alive_members(ms : Members) : List(Member) do
+    List.filter(members(ms), fn m ->
+      match m.status do
+        Alive -> true
+        _     -> false
+      end)
+  end
+
+end

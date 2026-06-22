@@ -1,0 +1,103 @@
+mod TestMembership do
+
+  pfn status_of(ms : Membership.Members, id : String) : Membership.Status do
+    match Membership.get(ms, id) do
+      Some(m) -> m.status
+      None -> Membership.Dead   -- unreachable in these tests
+    end
+  end
+
+  pfn inc_of(ms : Membership.Members, id : String) : Int do
+    match Membership.get(ms, id) do
+      Some(m) -> m.incarnation
+      None -> -1
+    end
+  end
+
+  describe "Membership.observe" do
+
+    test "records a new member" do
+      let ms = Membership.observe(Membership.empty(), Membership.alive("a", 1))
+      assert (Membership.size(ms) == 1)
+      assert (Membership.get(ms, "a") == Some(Membership.alive("a", 1)))
+    end
+
+    test "higher incarnation wins (refutation)" do
+      -- a is suspected at inc 1, then refutes with alive at inc 2
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.suspect("a", 1)),
+                 Membership.alive("a", 2))
+      assert (status_of(ms, "a") == Alive)
+      assert (inc_of(ms, "a") == 2)
+    end
+
+    test "stale lower-incarnation observation is ignored" do
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.alive("a", 5)),
+                 Membership.suspect("a", 3))
+      assert (status_of(ms, "a") == Alive)
+      assert (inc_of(ms, "a") == 5)
+    end
+
+    test "same incarnation: Suspect beats Alive" do
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.alive("a", 4)),
+                 Membership.suspect("a", 4))
+      assert (status_of(ms, "a") == Suspect)
+    end
+
+    test "same incarnation: Dead beats Suspect" do
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.suspect("a", 4)),
+                 Membership.dead("a", 4))
+      assert (status_of(ms, "a") == Dead)
+    end
+
+    test "restarted node (higher incarnation) overrides Dead" do
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.dead("a", 2)),
+                 Membership.alive("a", 3))
+      assert (status_of(ms, "a") == Alive)
+      assert (inc_of(ms, "a") == 3)
+    end
+
+  end
+
+  describe "Membership.merge (CRDT join)" do
+
+    test "is commutative on conflicting views" do
+      let a = Membership.observe(Membership.empty(), Membership.alive("x", 2))
+      let b = Membership.observe(Membership.empty(), Membership.suspect("x", 1))
+      -- both orders converge to the higher-incarnation winner
+      assert (status_of(Membership.merge(a, b), "x") == Alive)
+      assert (status_of(Membership.merge(b, a), "x") == Alive)
+    end
+
+    test "is idempotent" do
+      let a = Membership.observe(
+                Membership.observe(Membership.empty(), Membership.alive("x", 1)),
+                Membership.suspect("y", 2))
+      assert (Membership.size(Membership.merge(a, a)) == 2)
+      assert (status_of(Membership.merge(a, a), "y") == Suspect)
+    end
+
+    test "unions distinct members" do
+      let a = Membership.observe(Membership.empty(), Membership.alive("x", 1))
+      let b = Membership.observe(Membership.empty(), Membership.alive("y", 1))
+      assert (Membership.size(Membership.merge(a, b)) == 2)
+    end
+
+  end
+
+  describe "Membership.alive_members" do
+
+    test "returns only Alive members" do
+      let ms = Membership.observe(
+                 Membership.observe(Membership.empty(), Membership.alive("x", 1)),
+                 Membership.dead("y", 1))
+      assert (List.length(Membership.alive_members(ms)) == 1)
+    end
+
+  end
+
+end
