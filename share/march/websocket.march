@@ -1,0 +1,62 @@
+-- WebSocket module: types and API for WebSocket connections.
+--
+-- WebSocket connections are upgraded from HTTP via WebSocket.upgrade(conn, handler).
+-- The handler is a function WsSocket -> Unit that uses tail recursion and
+-- pattern matching on received frames.
+
+mod WebSocket do
+
+  type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
+
+  type WsSocket = WsSocket(Int)
+
+  type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
+
+  -- These mirror types from Http/HttpServer (no imports in March).
+  -- Method field uses Atom (:get, :post, etc.) matching HttpServer.Conn.
+  type Header = Header(String, String)
+  type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
+  type Conn = Conn(
+    Int, Atom, String, List(String), String,
+    List(Header), String, Int, List(Header), String,
+    Bool, List((String, String)), Upgrade
+  )
+
+  -- Upgrade a conn to websocket. Handler is called after handshake.
+  -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
+  fn upgrade(conn, handler) do
+    match conn do
+    Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
+      Conn(fd, m, p, pi, qs, rh, rb, 101, Nil, "", true, assigns,
+           WebSocketUpgrade(handler))
+    end
+  end
+
+  -- Receive a frame (blocks until one arrives)
+  fn recv(socket) do
+    match socket do
+    WsSocket(fd) -> ws_recv(fd)
+    end
+  end
+
+  -- Send a frame
+  fn send_frame(socket, frame) do
+    match socket do
+    WsSocket(fd) -> ws_send(fd, frame)
+    end
+  end
+
+  -- Send a close frame
+  fn close(socket, code, reason) do
+    send_frame(socket, Close(code, reason))
+  end
+
+  -- Multiplex: wait on socket OR actor mailbox OR timeout.
+  -- Returns WsData(frame), ActorMsg, or Timeout.
+  fn select(socket, timeout_ms) do
+    match socket do
+    WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
+    end
+  end
+
+end

@@ -142,6 +142,22 @@ march_value march_some(march_value v) { return v; }
 march_value march_ok(march_value v)   { return mk_cell1(0, v); }
 march_value march_err(march_value e)  { return mk_cell1(1, e); }
 
+/* Boxed Some, for Option(Float)/Option(Unit) and any non-niche-eligible payload:
+ * the compiler stores these as a heap Some cell (tag 1, payload at offset 16),
+ * NOT the niche form, because a 0-bit payload (0.0 / unit) would alias None=0.
+ * None stays 0 (march_none) even for these.  For a Float payload pass
+ * march_make_float(f); the bits land at offset 16 where March reads them back. */
+march_value march_some_boxed(march_value payload) { return mk_cell1(1, payload); }
+
+/* Boxed None, paired with march_some_boxed: when Some is boxed (Float/Unit
+ * payloads), the WHOLE Option is matched by reading the cell tag, so None must
+ * also be a heap cell (tag 0, no fields) rather than the niche 0. */
+march_value march_none_boxed(void) {
+    void *p = march_alloc(16);
+    ((march_hdr *)p)->tag = 0;
+    return march_from_ptr(p);
+}
+
 /* ── Resources ───────────────────────────────────────────────────────────────
  * Type registry: a small fixed table of (name, dtor) indexed by type id.
  * Idempotent registration by name.  Resource cell layout (40 bytes):
@@ -335,4 +351,26 @@ int64_t ffi_raise_parse(march_env *env, march_value s) {
         return v.ptr[0] - '0';                  /* bare Int Ok payload */
     march_raise(env, march_str_new((const uint8_t *)"bad int", 7));
     return 0;
+}
+
+/* `raises` with a Float Ok payload: a / b, or raise on b == 0. The bare return
+ * is a double; the wrapper boxes it into Ok via march_make_float. */
+double ffi_raise_fdiv(march_env *env, double a, double b) {
+    if (b == 0.0) {
+        march_raise(env, march_str_new((const uint8_t *)"div by zero", 11));
+        return 0.0;
+    }
+    return a / b;
+}
+
+/* Option(Float): Some(x/2) for x >= 0, else None. Uses the boxed-Some path
+ * (a Float payload can't use the niche form). */
+march_value ffi_maybe_half(double x) {
+    if (x < 0.0) return march_none_boxed();
+    return march_some_boxed(march_make_float(x / 2.0));
+}
+
+/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche. */
+march_value ffi_maybe_unit(int64_t flag) {
+    return flag ? march_some_boxed(0) : march_none();  /* Unit Option matches by null-check */
 }

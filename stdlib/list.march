@@ -437,7 +437,7 @@ mod List do
   end
 
   doc "Like fold_left but returns a list of all intermediate accumulator values."
-  fn scan_left(xs : List(a), acc : b, f : (b, a) -> b) : List(b) do
+  fn scan_left(xs : List(a), acc : b, f : b -> a -> b) : List(b) do
     fn go(a : b, lst : List(a), result : List(b)) : List(b) do
       match lst do
       Nil        -> reverse(Cons(a, result))

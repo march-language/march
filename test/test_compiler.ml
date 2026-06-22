@@ -3780,6 +3780,48 @@ let test_refined_param_typechecks_as_base () =
   Alcotest.(check bool) "bare typechecks cleanly" false
     (Test_helpers.has_errors (Test_helpers.typecheck bare))
 
+(* IO.Foreign tests — extern blocks imply IO.Foreign meta-capability *)
+let test_cap_body_missing_foreign () =
+  let ctx = typecheck {|mod Bindings do
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "extern block without needs IO.Foreign: warn" true
+    (has_warning_with ctx "IO.Foreign")
+
+let test_cap_body_foreign_ok () =
+  let ctx = typecheck {|mod Bindings do
+    needs IO.Foreign
+    needs IO.FileSystem
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "extern block with needs IO.Foreign: no warn" false
+    (has_warning_with ctx "IO.Foreign")
+
+let test_cap_body_foreign_parent_ok () =
+  let ctx = typecheck {|mod Bindings do
+    needs IO
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO umbrella covers IO.Foreign: no warn" false
+    (has_warning_with ctx "IO.Foreign")
+
+let test_cap_body_foreign_blocking () =
+  (* No needs at all: blocking extern warns for both IO.Foreign and IO.Foreign.Blocking *)
+  let ctx = typecheck {|mod Bindings do
+    needs IO.FileSystem
+    extern "libc": Cap(IO.FileSystem) do
+      blocking fn slow_read(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
+    (has_warning_with ctx "IO.Foreign.Blocking")
+
 let test_record_type_still_parses () =
   (* Disambiguation regression: record types must not be misparsed as refinements. *)
   let m =
@@ -4171,6 +4213,10 @@ let compiler_suites =
           Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
           Alcotest.test_case "needs IO.Telemetry: valid declaration"       `Quick test_cap_body_telemetry_decl_ok;
+          Alcotest.test_case "extern block missing IO.Foreign: warn"       `Quick test_cap_body_missing_foreign;
+          Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
+          Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
+          Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
         ] );
   ]
 

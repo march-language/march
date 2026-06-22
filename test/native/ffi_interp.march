@@ -3,6 +3,7 @@
 -- trampoline. ffi_test_dbl lives in runtime/march_ffi.c.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   extern "m" : Cap(Ffi) do
     fn dbl(n: Int): Int = "ffi_test_dbl"
   end

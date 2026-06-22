@@ -302,6 +302,43 @@ type Arr(n) = Array(n * 2)
 
 ---
 
+## Refinement Types
+
+A base type plus a predicate, checked by an SMT solver (Z3) at compile time.
+`_` is the value being refined; the predicate is `Int`/`Bool` linear arithmetic.
+
+```march
+{Int | _ >= 0}                     -- a non-negative Int
+{Int | _ != 0}                     -- a non-zero Int
+{v : Int | v >= 0 && v < 100}      -- named binder form
+```
+
+Used as parameter (precondition) or return (postcondition) types:
+
+```march
+fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
+fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+```
+
+A `@[measure]` function (total, terminating, pure) may be used in predicates:
+
+```march
+@[measure]
+fn size(t : Tree(a)) : Int do
+  match t do
+    Leaf          -> 0
+    Node(l, x, r) -> 1 + size(l) + size(r)
+  end
+end
+```
+
+Checking is definite-failure (flags only what can *never* hold — no false
+positives) and runs only when `z3` is on `PATH`. See the
+[Refinement Types guide](docs/refinement-types.md) for the full story and
+limitations (`Int`/`Bool` only, no `Float` value-refinements, direct calls only).
+
+---
+
 ## Patterns
 
 ```march

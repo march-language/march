@@ -2,6 +2,7 @@
 -- niche representation (None=0, Some(x)=x), not a tagged heap cell.
 mod Test do
   needs Ffi
+  needs IO.Foreign
   extern "rt" : Cap(Ffi) do
     fn maybe(n: Int): Option(Int) = "ffi_test_maybe"
   end

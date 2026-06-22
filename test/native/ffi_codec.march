@@ -4,6 +4,7 @@
 -- the realistic post-`forge ffi gen-c` artifact (codecs + filled-in shims).
 mod Test do
   needs Ffi
+  needs IO.Foreign
   type Point = { x : Int, y : Int }
   type Shape = Circle(Int) | Rect(Int, Int)
   extern "codec" : Cap(Ffi) do

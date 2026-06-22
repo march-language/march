@@ -4,6 +4,7 @@
 -- NOT also drop it (that was a double-free / RC underflow before `consume`).
 mod Test do
   needs Ffi
+  needs IO.Foreign
   resource Acc
   extern "rt" : Cap(Ffi) do
     fn live_allocs(): Int = "march_live_allocs"

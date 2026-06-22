@@ -1,6 +1,6 @@
 mod TestMembership do
 
-  pfn status_of(ms : Membership.Members, id : String) : Membership.Status do
+  pfn status_of(ms : Membership.Members, id : String) : Membership.MemberStatus do
     match Membership.get(ms, id) do
       Some(m) -> m.status
       None -> Membership.Dead   -- unreachable in these tests

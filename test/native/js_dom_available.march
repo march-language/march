@@ -1,0 +1,15 @@
+-- Regression: Dom module must be auto-loaded for --target js builds.
+-- dom.march is JS-only and excluded from native/JIT stdlib precompile.
+-- This typechecks Dom.body() usage without calling it at runtime.
+mod JsDomAvailable do
+  needs Ffi
+
+  fn dom_smoke() : Unit do
+    let _ = Dom.body()
+    ()
+  end
+
+  fn main() : Unit do
+    println("dom available")
+  end
+end

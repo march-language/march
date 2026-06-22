@@ -1,0 +1,174 @@
+-- throughput.march: measures multi-core task throughput.
+--
+-- Uses trial-division prime counting as a pure CPU-bound kernel
+-- (no allocation, no I/O), which scales linearly with cores.
+--
+-- Compile and run for real multi-core results:
+--
+--   dune build && \
+--   ./_build/default/bin/main.exe --compile \
+--     -o /tmp/throughput test/apps/throughput.march && \
+--   /tmp/throughput
+--
+-- In the interpreter, all tasks run single-threaded (cooperative scheduler),
+-- so parallel sections show no speedup — that is expected.
+-- The compiled binary uses the M:N green-thread scheduler (4 OS worker
+-- threads by default, MARCH_NUM_SCHEDULERS), giving near-linear speedup
+-- for embarrassingly parallel CPU work.
+--
+-- March if-else syntax note: each `else if` is a nested `if` expression,
+-- so an n-level chain needs n closing `end` tokens stacked at the bottom.
+
+mod Throughput do
+
+  -- ── CPU kernel ────────────────────────────────────────────────────────
+  -- Wheel-2-3 trial division: only test candidates of the form 6k±1.
+  -- Two module-level helpers to avoid nested-do ambiguity.
+
+  -- trial_div(n, d): true if n has no divisor in {d, d+2, d+8, d+12, ...}
+  pfn trial_div(n : Int, d : Int) : Bool do
+    if d * d > n do true
+    else if n % d == 0 do false
+    else if n % (d + 2) == 0 do false
+    else trial_div(n, d + 6)
+    end end end          -- 3 ifs → 3 ends
+  end
+
+  pfn is_prime(n : Int) : Bool do
+    if n < 2 do false
+    else if n < 4 do true
+    else if n % 2 == 0 do false
+    else if n % 3 == 0 do false
+    else trial_div(n, 5)
+    end end end end      -- 4 ifs → 4 ends
+  end
+
+  -- Count primes in [lo, hi] inclusive.
+  pfn count_primes_go(hi : Int, n : Int, acc : Int) : Int do
+    if n > hi do acc
+    else count_primes_go(hi, n + 1,
+                         if is_prime(n) do acc + 1 else acc end)
+    end
+  end
+
+  pfn count_range(lo : Int, hi : Int) : Int do
+    count_primes_go(hi, lo, 0)
+  end
+
+  -- ── Benchmark harness ────────────────────────────────────────────────
+
+  pfn timed(label : String, f) : Int do
+    let t0 = System.monotonic_time()
+    let result = f()
+    let elapsed = System.monotonic_time() - t0
+    println(label ++ ": " ++ int_to_string(result) ++ " primes  "
+            ++ int_to_string(elapsed) ++ "ms")
+    elapsed
+  end
+
+  -- ── Sequential run ───────────────────────────────────────────────────
+
+  pfn seq_run(limit : Int) : Int do
+    count_range(2, limit)
+  end
+
+  -- ── Parallel run: n_tasks tasks, each covering a contiguous chunk ────
+  -- Chunk i covers [2 + i*chunk, 2 + (i+1)*chunk - 1].
+  -- Last task extends to exactly `limit` so nothing is missed.
+
+  pfn par_run(limit : Int, n_tasks : Int) : Int do
+    let chunk = (limit - 2 + n_tasks - 1) / n_tasks
+    let tasks = List.map(List.range(0, n_tasks), fn i ->
+      let lo = 2 + i * chunk
+      let hi = if i == n_tasks - 1 do limit else lo + chunk - 1 end
+      Task.async(fn () -> count_range(lo, hi))
+    )
+    let results = Task.await_many(tasks)
+    List.fold_left(results, 0, fn (acc, r) ->
+      match r do
+        Ok(n)  -> acc + n
+        Err(_) -> acc
+      end
+    )
+  end
+
+  -- ── Speedup reporter ─────────────────────────────────────────────────
+  -- Fixed-point: multiplies by 100 before dividing to preserve two decimals.
+
+  pfn frac2(n : Int) : String do
+    if n < 10 do "0" ++ int_to_string(n)
+    else int_to_string(n)
+    end
+  end
+
+  pfn report_speedup(label : String, seq_ms : Int, par_ms : Int) : Unit do
+    let ratio = if par_ms == 0 do 9999 else seq_ms * 100 / par_ms end
+    println("  " ++ label ++ " speedup: "
+            ++ int_to_string(ratio / 100) ++ "." ++ frac2(ratio % 100) ++ "x")
+  end
+
+  -- ── Correctness check ────────────────────────────────────────────────
+
+  pfn check_correct(limit : Int, n_tasks : Int) : Unit do
+    let seq_ans = seq_run(limit)
+    let par_ans = par_run(limit, n_tasks)
+    if seq_ans == par_ans do
+      println("  par" ++ int_to_string(n_tasks) ++ " OK: "
+              ++ int_to_string(seq_ans) ++ " primes up to "
+              ++ int_to_string(limit))
+    else
+      println("  MISMATCH par" ++ int_to_string(n_tasks)
+              ++ ": seq=" ++ int_to_string(seq_ans)
+              ++ " par=" ++ int_to_string(par_ans))
+    end
+  end
+
+  -- ── Main ─────────────────────────────────────────────────────────────
+
+  fn main() : Unit do
+    let ncpu  = System.cpu_count()
+    -- Timing limit: default 2M for compiled binary, 3000 for interpreter.
+    -- Compiled:    MARCH_LIMIT=2000000 ./throughput  (or just run -- default is 2M)
+    -- Interpreter: dune exec march -- throughput.march  (uses 3000 for speed)
+    --
+    -- The interpreter runs tasks single-threaded, so "parallel" timings will
+    -- match sequential — that is expected and correct.
+    let limit =
+      match System.env("MARCH_LIMIT") do
+        Some(s) -> match string_to_int(s) do Some(n) -> n | None -> 2000000 end
+        None    -> 2000000
+      end
+    -- Correctness is checked on a much smaller range so the interpreter finishes quickly.
+    let small = 3000
+
+    println("march throughput benchmark")
+    println("CPUs available : " ++ int_to_string(ncpu))
+    println("Worker threads : 4 (MARCH_NUM_SCHEDULERS default)")
+    println("Work            : count primes <= " ++ int_to_string(limit))
+    println("  (interpreter is single-threaded; use the compiled binary for speedup)")
+    println("")
+
+    -- Warmup: get caches/branch-predictor settled (tiny in interpreter mode)
+    let _ = seq_run(small)
+
+    println("--- timing (primes up to " ++ int_to_string(limit) ++ ") ---")
+    let seq_ms = timed("seq  (1 task) ", fn () -> seq_run(limit))
+    let p2_ms  = timed("par  (2 tasks)", fn () -> par_run(limit, 2))
+    let p4_ms  = timed("par  (4 tasks)", fn () -> par_run(limit, 4))
+    let pN_ms  = timed("par  (" ++ int_to_string(ncpu) ++ " tasks)",
+                       fn () -> par_run(limit, ncpu))
+    println("")
+
+    println("--- speedup vs sequential ---")
+    report_speedup("2 tasks", seq_ms, p2_ms)
+    report_speedup("4 tasks", seq_ms, p4_ms)
+    report_speedup("N tasks", seq_ms, pN_ms)
+    println("")
+
+    println("--- correctness (primes up to " ++ int_to_string(small) ++ ") ---")
+    check_correct(small, 2)
+    check_correct(small, 4)
+    check_correct(small, ncpu)
+  end
+
+end

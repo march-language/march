@@ -618,6 +618,11 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
     | ExType arity ->
       if StrMap.mem qname env.types then env
       else { env with types = StrMap.add qname arity env.types }
+    | ExRecord (arity, field_decls) ->
+      let env1 = if StrMap.mem qname env.types then env
+                 else { env with types = StrMap.add qname arity env.types } in
+      let param_names = List.init arity (fun i -> Printf.sprintf "$t%d" i) in
+      { env1 with records = StrMap.add qname (param_names, field_decls) env1.records }
     | ExCtor (parent_type, _ctor_arity) ->
       begin
         (* Find the parent type's param names from the module's type exports *)
@@ -930,6 +935,8 @@ let io_cap_hierarchy : (string * string option) list = [
   ("IO.Mut",        Some "IO");
   ("IO.Telemetry",  Some "IO");
   ("IO.NetConnect.TLS", Some "IO.NetConnect");
+  ("IO.Foreign",         Some "IO");
+  ("IO.Foreign.Blocking", Some "IO.Foreign");
 ]
 
 (** Maps builtin function names to the IO capability they require.
@@ -969,14 +976,14 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("tcp_listen",            "IO.NetConnect");
-  ("tcp_accept",            "IO.NetConnect");
   ("ws_recv",               "IO.NetConnect");
   ("ws_send",               "IO.NetConnect");
   ("ws_select",             "IO.NetConnect");
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
+  ("tcp_listen",            "IO.NetListen");
+  ("tcp_accept",            "IO.NetListen");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -1455,15 +1462,14 @@ let builtin_bindings : (string * scheme) list =
     ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
     (* TCP/HTTP transport builtins *)
+    (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)
+    ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
+    (* tcp_accept(listen_fd): blocks until a client connects, returns Ok(client_fd) or Err *)
+    ("tcp_accept",              Mono (TArrow (t_int, t_result t_int t_string)));
     ("tcp_connect",             poly1 (fun e -> TArrow (t_string, TArrow (t_int, t_result t_int e))));
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
-    (* tcp_listen(port) → listening fd, or -1 on error; tcp_accept(listen_fd) →
-       client fd, or -1 on error. Raw int fds matching the C runtime
-       (march_tcp_listen/accept return int64); -1 sentinel rather than Result. *)
-    ("tcp_listen",              Mono (TArrow (t_int, t_int)));
-    ("tcp_accept",              Mono (TArrow (t_int, t_int)));
     (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
     ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
     ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));
@@ -2147,10 +2153,42 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        tvars := saved;
        TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
      | _ ->
-       (* Normalize built-in unit/bool so surface annotations unify with internal reps *)
-       match name.txt with
-       | "Unit" -> t_unit
-       | _ -> TCon (name.txt, args')))
+       (* For qualified names not in env.records, check the module registry for
+          ExRecord entries. This handles record types in modules loaded lazily
+          (not pre-registered via stdlib_file_list) so cross-module field access
+          and structural unification work correctly without env threading. *)
+       let registry_record =
+         match split_qualified name.txt with
+         | None -> None
+         | Some (mod_name, member) ->
+           let open March_modules.Module_registry in
+           (match ensure_loaded mod_name with
+            | None -> None
+            | Some exports ->
+              List.fold_left (fun acc entry ->
+                match acc with
+                | Some _ -> acc
+                | None ->
+                  (match entry.ex_kind with
+                   | ExRecord (arity, fields) when entry.ex_name = member ->
+                     let params = List.init arity
+                       (fun i -> Printf.sprintf "$t%d" i) in
+                     Some (params, fields)
+                   | _ -> None)
+              ) None exports.me_entries)
+       in
+       (match registry_record with
+        | Some (params, field_decls) when List.length params = List.length args' ->
+          let saved = !tvars in
+          List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
+          let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
+          tvars := saved;
+          TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
+        | _ ->
+          (* Normalize built-in unit/bool so surface annotations unify with internal reps *)
+          match name.txt with
+          | "Unit" -> t_unit
+          | _ -> TCon (name.txt, args'))))
 
   | Ast.TyVar name ->
     (match List.assoc_opt name.txt !tvars with
@@ -2252,12 +2290,38 @@ let instantiate_ctor env (ci : ctor_info) : ty list * ty =
   (arg_tys, result_ty)
 
 (** Try to expand a [TCon] of a named record type to [TRecord].
-    Returns the [TRecord] type if the name is a known record def, else [None]. *)
+    Returns the [TRecord] type if the name is a known record def, else [None].
+    Falls back to the module registry for cross-module record types that were
+    loaded lazily (not pre-registered in env.records via stdlib_file_list). *)
 let expand_record env ty =
   match repr ty with
   | TRecord _ as t -> Some t
   | TCon (name, args) ->
-    (match StrMap.find_opt name env.records with
+    let record_info =
+      match StrMap.find_opt name env.records with
+      | Some _ as r -> r
+      | None ->
+        (* Qualified type like "NodeIdentity.Identity": check registry for ExRecord *)
+        (match split_qualified name with
+         | None -> None
+         | Some (mod_name, member) ->
+           let open March_modules.Module_registry in
+           match ensure_loaded mod_name with
+           | None -> None
+           | Some exports ->
+             List.fold_left (fun acc entry ->
+               match acc with
+               | Some _ -> acc
+               | None ->
+                 match entry.ex_kind with
+                 | ExRecord (arity, fields) when entry.ex_name = member ->
+                   let params = List.init arity (fun i ->
+                     Printf.sprintf "$t%d" i) in
+                   Some (params, fields)
+                 | _ -> None
+             ) None exports.me_entries)
+    in
+    (match record_info with
      | Some (params, field_decls) when List.length params = List.length args ->
        let tvars = ref (List.combine params args) in
        let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
@@ -4905,6 +4969,19 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
     ) [] all
   in
+  (* Extern-implied caps: any DExtern → needs IO.Foreign; any blocking extern fn → needs IO.Foreign.Blocking *)
+  let extern_cap_uses : (string * Ast.span) list =
+    List.concat_map (function
+      | Ast.DExtern (edef, sp) ->
+        let base = [("IO.Foreign", sp)] in
+        let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
+        if has_blocking then base @ [("IO.Foreign.Blocking", sp)] else base
+      | _ -> []
+    ) decls
+    |> List.fold_left (fun acc (cap_name, sp) ->
+      if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
+    ) []
+  in
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
@@ -4952,6 +5029,19 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
           MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
           MPText " to the module body." ])
   ) body_cap_uses;
+  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
+  List.iter (fun (cap_path, sp) ->
+    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+    if not covered then
+      Err.warning env.errors ~span:sp
+        (render_parts [
+          MPText "extern block in "; MPCode mod_name.txt;
+          MPText " requires "; cap cap_path;
+          MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
+          MPCode ("needs " ^ cap_path); MPText ".";
+          MPBreak; MPText "hint: add "; MPCode ("needs " ^ cap_path);
+          MPText " to the module body." ])
+  ) extern_cap_uses;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
     let need_sp =
@@ -4964,7 +5054,8 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       find_span decls
     in
     let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
-              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses in
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses in
     if not used then
       Err.warning env.errors ~span:need_sp
         (render_parts [

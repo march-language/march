@@ -48,7 +48,9 @@ IO
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
-└── IO.Telemetry        — telemetry/observability emission (declaration-only)
+├── IO.Telemetry        — telemetry/observability emission (declaration-only)
+└── IO.Foreign          — calling unverified C (extern blocks)
+    └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
 ```
 
 A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability:
@@ -109,6 +111,39 @@ end
 ```
 
 Applications that import `Metrics` will see `IO.Telemetry` in their transitive `needs` set, making observability a visible architectural concern.
+
+### IO.Foreign — calling unverified C
+
+`IO.Foreign` is a meta-capability that must be declared by any module containing an `extern` block. Unlike other IO caps, it is not triggered by specific builtin calls — it is triggered by the **presence of an `extern` block itself**, because C code can bypass every March type guarantee regardless of the declared `Cap(X)`.
+
+Declaring `needs IO.Foreign` makes FFI usage grep-auditable: any module that reaches outside the type system is visible in its `needs` set.
+
+```march
+mod Bindings do
+  needs IO.Foreign
+  needs IO.FileSystem  -- the specific cap the C code uses
+
+  extern "libc": Cap(IO.FileSystem) do
+    fn read(fd : Int, buf : String, n : Int) : Int
+  end
+end
+```
+
+The `blocking` modifier on an extern function spawns an OS thread for the call. This is a distinct and stronger side effect than `IO.Spawn` (which spawns green tasks). A module with blocking externs should also declare `needs IO.Foreign.Blocking`:
+
+```march
+mod Bindings do
+  needs IO.Foreign
+  needs IO.Foreign.Blocking
+  needs IO.FileSystem
+
+  extern "libc": Cap(IO.FileSystem) do
+    blocking fn slow_read(fd : Int) : Int
+  end
+end
+```
+
+`needs IO.Foreign` subsumes `needs IO.Foreign.Blocking` (parent covers child), so `needs IO.Foreign` alone suppresses both warnings if you prefer a coarser declaration.
 
 ### `extern` blocks
 

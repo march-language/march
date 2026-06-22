@@ -12,13 +12,13 @@
 -- (direct/indirect ping, suspicion timers) drives it from the runtime layer.
 mod Membership do
 
-  type Status = Alive | Suspect | Dead
+  type MemberStatus = Alive | Suspect | Dead
 
-  type Member = { node_id : String, status : Status, incarnation : Int }
+  type Member = { node_id : String, status : MemberStatus, incarnation : Int }
 
   type Members = Members(Map(String, Member))
 
-  pfn severity(s : Status) : Int do
+  pfn severity(s : MemberStatus) : Int do
     match s do
       Alive   -> 0
       Suspect -> 1

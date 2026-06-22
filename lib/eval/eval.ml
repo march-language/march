@@ -1145,6 +1145,9 @@ external _ffi_dyncall_d : nativeint -> int64 array -> int -> float = "march_eval
     already-loaded libs (RTLD_DEFAULT). *)
 let ffi_runtime_so : (unit -> string option) ref = ref (fun () -> None)
 let _ffi_handle : nativeint option ref = ref None
+(* The FFI ABI version this build expects; must equal MARCH_FFI_ABI_VERSION in
+   runtime/march_ffi.h.  Verified against the dlopened runtime at load time. *)
+let _ffi_abi_expected = 1
 let _ffi_get_handle () : nativeint =
   match !_ffi_handle with
   | Some h -> h
@@ -1152,6 +1155,19 @@ let _ffi_get_handle () : nativeint =
     let h = match !ffi_runtime_so () with
       | Some path when path <> "" -> _ffi_dlopen path
       | _ -> 0n  (* RTLD_DEFAULT *) in
+    (* ABI handshake (spec §4.1): a dlopened runtime must report a matching ABI
+       version, so a stale/foreign .so is rejected with a clear message rather
+       than corrupting at a later call. *)
+    if h <> 0n then begin
+      let vp = _ffi_dlsym h "march_ffi_abi_version" in
+      if vp <> 0n then begin
+        let v = Int64.to_int (_ffi_dyncall_i vp [||] 0) in
+        if v <> _ffi_abi_expected then
+          eval_error "FFI ABI version mismatch: the loaded runtime reports ABI \
+                      v%d but this build expects v%d — rebuild the runtime/bindings"
+            v _ffi_abi_expected
+      end
+    end;
     _ffi_handle := Some h; h
 
 (** Dynamically call a primitive extern.  Returns None if the binding uses types
@@ -4039,25 +4055,27 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
-  (* tcp_listen(port) → listening fd (SO_REUSEADDR, backlog 128), or -1. *)
   ; ("tcp_listen", VBuiltin ("tcp_listen", function
         | [VInt port] ->
           (try
              let open Unix in
-             let fd = socket PF_INET SOCK_STREAM 0 in
-             setsockopt fd SO_REUSEADDR true;
-             bind fd (ADDR_INET (inet_addr_any, port));
-             listen fd 128;
-             VInt (Obj.magic fd : int)
-           with _ -> VInt (-1))
+             let sock = socket PF_INET SOCK_STREAM 0 in
+             setsockopt sock SO_REUSEADDR true;
+             bind sock (ADDR_INET (inet_addr_any, port));
+             listen sock 1024;
+             VCon ("Ok", [VInt (Obj.magic sock : int)])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "tcp_listen(port)"))
-  (* tcp_accept(listen_fd) → accepted client fd, or -1. Blocks until a peer. *)
   ; ("tcp_accept", VBuiltin ("tcp_accept", function
-        | [VInt fd] ->
+        | [VInt listen_fd] ->
           (try
-             let (client, _addr) = Unix.accept (Obj.magic fd : Unix.file_descr) in
-             VInt (Obj.magic client : int)
-           with _ -> VInt (-1))
+             let open Unix in
+             let sock = (Obj.magic listen_fd : file_descr) in
+             let (client_fd, _addr) = accept sock in
+             VCon ("Ok", [VInt (Obj.magic client_fd : int)])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "tcp_accept(listen_fd)"))
   (* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
      Returns "" when the fd is not a connected INET socket.  IPv4-mapped

@@ -12,13 +12,14 @@
 -- (Type annotations are omitted so the qualified `PeerRegistry.Registry`/`Peer`
 -- type paths are resolved by inference against the bare definitions.)
 mod ClusterConn do
-
-  needs IO.NetConnect
+  needs IO.NetListen
 
   -- Open a listening socket on [port]; returns the fd, or Err on failure.
   fn listen(port : Int) : Result(Int, String) do
-    let fd = tcp_listen(port)
-    if fd < 0 do Err("net-kernel: listen failed") else Ok(fd) end
+    match tcp_listen(port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) -> Err(e)
+    end
   end
 
   -- Close [fd], propagate the handshake outcome into the registry.
@@ -44,11 +45,10 @@ mod ClusterConn do
 
   -- Accept one inbound connection on [listen_fd], handshake, register.
   fn accept_one(reg, listen_fd, my_id, secret) do
-    let fd = tcp_accept(listen_fd)
-    if fd < 0 do
-      Err("net-kernel: accept failed")
-    else
-      finish(reg, fd, NetKernel.handshake(fd, my_id, secret, NetKernel.fresh_nonce()))
+    match tcp_accept(listen_fd) do
+      Err(e) -> Err(e)
+      Ok(fd) ->
+        finish(reg, fd, NetKernel.handshake(fd, my_id, secret, NetKernel.fresh_nonce()))
     end
   end
 

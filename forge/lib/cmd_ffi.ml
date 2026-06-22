@@ -311,7 +311,15 @@ let gen_fn tbl (lib : string) (consumed : bool list) (ef : Ast.extern_fn) : stri
    | Some "Unit"   -> ()
    | Some "Result" -> Buffer.add_string b
        "    return march_err(march_str_new((const uint8_t *)\"not implemented\", 15));  /* or march_ok(v) */\n"
-   | Some "Option" -> Buffer.add_string b "    return march_none();  /* or march_some(v) */\n"
+   | Some "Option" ->
+     (* Float/Unit payloads can't use the niche form (a 0-bit payload aliases
+        None=0): Float uses a fully boxed Option; Unit uses boxed Some + niche None. *)
+     (match (match ef.Ast.ef_ret_ty with Ast.TyCon (_, [p]) -> con_name p | _ -> None) with
+      | Some "Float" -> Buffer.add_string b
+          "    return march_none_boxed();  /* or march_some_boxed(march_make_float(x)) — Float Option is boxed */\n"
+      | Some "Unit" -> Buffer.add_string b
+          "    return march_none();  /* or march_some_boxed(0) — Unit Some is boxed, None is 0 */\n"
+      | _ -> Buffer.add_string b "    return march_none();  /* or march_some(v) */\n")
    | _ when is_string_ty ef.Ast.ef_ret_ty -> Buffer.add_string b
        "    return march_str_new((const uint8_t *)\"\", 0);\n"
    | Some "Float"  -> Buffer.add_string b "    return 0.0;\n"

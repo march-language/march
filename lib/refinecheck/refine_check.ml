@@ -24,7 +24,6 @@ type rparam = { idx : int; binder : string; pred : A.expr }
 
 (* A function's signature: parameter names by position + its refined params. *)
 type fn_sig = { param_names : string list; refined : rparam list }
-type sigs = (string, fn_sig) Hashtbl.t
 
 let binder_name : A.name option -> string = function
   | None -> "_"
@@ -87,26 +86,43 @@ let measure_preamble : string ref = ref ""
    renamed. *)
 let adt_sort_name (march_name : string) : string = "M_" ^ march_name
 
-let smt_sort_of_field (self : string) (t : A.ty) : Smt.sort =
+(* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
+   registered ADT (self or another — so cross-ADT measure calls are well-sorted,
+   M-c) its datatype sort, everything else (type params, unmodelled types) the
+   opaque `Elem`.  Requires every ADT name already registered in [adt_ctors] —
+   hence the two-pass registration (names, then field sorts). *)
+let smt_sort_of_field (t : A.ty) : Smt.sort =
   match t with
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
-  | A.TyCon ({ A.txt; _ }, _) when txt = self -> Smt.SData (adt_sort_name self)
+  | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
+    Smt.SData (adt_sort_name txt)
   | _ -> Smt.SData "Elem"
 
-let rec register_adts (decls : A.decl list) : unit =
+(* Pass 1: register every ADT's constructor list (keyed by sort name). *)
+let rec register_adt_names (decls : A.decl list) : unit =
   List.iter
     (function
       | A.DType (_, name, _, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, name, _, A.TDVariant variants, _) ->
         Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
-          (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
+          (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants)
+      | A.DMod (_, _, ds, _) -> register_adt_names ds
+      | _ -> ())
+    decls
+
+(* Pass 2: register each constructor's field sorts (needs all names from pass 1). *)
+let rec register_field_sorts (decls : A.decl list) : unit =
+  List.iter
+    (function
+      | A.DType (_, _, _, A.TDVariant variants, _)
+      | A.DAlwaysLinearType (_, _, _, A.TDVariant variants, _) ->
         List.iter
           (fun (v : A.variant) ->
             Hashtbl.replace ctor_field_sorts v.A.var_name.A.txt
-              (List.map (smt_sort_of_field name.A.txt) v.A.var_args))
+              (List.map smt_sort_of_field v.A.var_args))
           variants
-      | A.DMod (_, _, ds, _) -> register_adts ds
+      | A.DMod (_, _, ds, _) -> register_field_sorts ds
       | _ -> ())
     decls
 
@@ -154,19 +170,20 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
   | _ -> None
 
 (* Translate a measure arm body to SMT (function-app encoding): patvars -> Const,
-   recursive measure calls m(v) -> (m v) where v MUST be a bound patvar
-   (structural recursion — the soundness gate).  None => untranslatable. *)
-let rec smt_of_axiom_body ~self (bound : string list) (e : A.expr) : Smt.term option =
-  let r = smt_of_axiom_body ~self bound in
+   a measure call m(v) -> (m v) where m is the measure itself OR another
+   axiomatisable measure ([allowed]) and v MUST be a bound patvar (a structurally
+   smaller value).  Requiring a structural argument on EVERY measure call (self
+   or cross — M-c) keeps the whole, possibly mutually-recursive, measure system
+   structurally decreasing, hence total: axiomatising it is sound.  `len` and
+   non-axiomatised measures are not [allowed], so an arm calling one stays
+   untranslatable (symbolic fallback).  None => untranslatable. *)
+let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Smt.term option =
+  let r = smt_of_axiom_body ~self ~allowed bound in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.EVar { A.txt; _ } when List.mem txt bound -> Some (Smt.Const txt)
-  (* Only SELF-recursive calls on a structural component are axiomatised.  Calls
-     to OTHER measures (and to `len`) are deferred to M-c: their function symbols
-     are not declared in this preamble, so emitting `(m v)` for them would be
-     ill-formed SMT — better to leave the arm untranslatable (symbolic fallback). *)
   | A.EApp (A.EVar { A.txt = m; _ }, [ A.EVar { A.txt = v; _ } ], _)
-    when m = self && List.mem v bound ->
+    when (m = self || allowed m) && List.mem v bound ->
     Some (Smt.App (m, [ Smt.Const v ]))
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) ->
     (match r a, r b with Some x, Some y -> Some (Smt.Add (x, y)) | _ -> None)
@@ -176,82 +193,141 @@ let rec smt_of_axiom_body ~self (bound : string list) (e : A.expr) : Smt.term op
     Option.map (fun y -> Smt.MulLit (k, y)) (r b)
   | _ -> None
 
-let datatype_decl (adt : string) : string =
-  let ctors = try Hashtbl.find adt_ctors adt with Not_found -> [] in
-  let ctor_decl c =
-    let sorts = try Hashtbl.find ctor_field_sorts c with Not_found -> [] in
-    if sorts = [] then Printf.sprintf "(%s)" c
-    else
-      Printf.sprintf "(%s %s)" c
-        (String.concat " "
-           (List.mapi
-              (fun i s -> Printf.sprintf "(%s_%d %s)" c i (Smt.string_of_sort s))
-              sorts))
+(* All ADT sorts reachable from [seeds] through constructor fields, so a single
+   `declare-datatypes` covers every sort an axiom mentions (handles cross-ADT
+   references and mutually-recursive datatypes). *)
+let adt_closure (seeds : string list) : string list =
+  let seen = Hashtbl.create 16 in
+  let rec visit a =
+    if not (Hashtbl.mem seen a) then begin
+      Hashtbl.replace seen a ();
+      List.iter
+        (fun c ->
+          List.iter
+            (function Smt.SData s when s <> "Elem" -> visit s | _ -> ())
+            (try Hashtbl.find ctor_field_sorts c with Not_found -> []))
+        (try Hashtbl.find adt_ctors a with Not_found -> [])
+    end
   in
-  Printf.sprintf "(declare-datatypes ((%s 0)) ((%s)))" adt
-    (String.concat " " (List.map ctor_decl ctors))
+  List.iter visit seeds;
+  Hashtbl.fold (fun a () acc -> a :: acc) seen []
 
-(* Build the global measure-axiom preamble; populates [axiom_measures]. *)
+let ctor_decl (c : string) : string =
+  let sorts = try Hashtbl.find ctor_field_sorts c with Not_found -> [] in
+  if sorts = [] then Printf.sprintf "(%s)" c
+  else
+    Printf.sprintf "(%s %s)" c
+      (String.concat " "
+         (List.mapi (fun i s -> Printf.sprintf "(%s_%d %s)" c i (Smt.string_of_sort s)) sorts))
+
+(* One `declare-datatypes` declaring all [adts] sorts together (mutual recursion
+   among them resolves within the single command). *)
+let datatype_decls (adts : string list) : string =
+  if adts = [] then ""
+  else
+    let sort_decls = String.concat " " (List.map (fun a -> Printf.sprintf "(%s 0)" a) adts) in
+    let bodies =
+      String.concat " "
+        (List.map
+           (fun a ->
+             Printf.sprintf "(%s)"
+               (String.concat " " (List.map ctor_decl (try Hashtbl.find adt_ctors a with Not_found -> []))))
+           adts)
+    in
+    Printf.sprintf "(declare-datatypes (%s) (%s))" sort_decls bodies
+
+(* The recursion-equation axiom for one arm of [name] (None if untranslatable). *)
+let arm_axiom ~allowed (name : string) ((ctor, vars, body) : string * string list * A.expr) : string option =
+  match smt_of_axiom_body ~self:name ~allowed vars body with
+  | None -> None
+  | Some bsmt ->
+    let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+    if List.length vars <> List.length sorts then None
+    else
+      let lhs =
+        if vars = [] then Printf.sprintf "(%s %s)" name ctor
+        else Printf.sprintf "(%s (%s %s))" name ctor (String.concat " " vars)
+      in
+      if vars = [] then Some (Printf.sprintf "(assert (= %s %s))" lhs (Smt.render bsmt))
+      else
+        let bound =
+          List.map2 (fun v s -> Printf.sprintf "(%s %s)" v (Smt.string_of_sort s)) vars sorts
+        in
+        Some
+          (Printf.sprintf "(assert (forall (%s) (! (= %s %s) :pattern (%s))))"
+             (String.concat " " bound) lhs (Smt.render bsmt) lhs)
+
+(* Build the global measure-axiom preamble; populates [axiom_measures].
+
+   A measure is axiomatised iff (a) its body is an exhaustive `match` on its ADT
+   parameter (shape + totality) and (b) every arm translates — which, since a
+   cross-measure call is only translatable when its callee is itself
+   axiomatisable (M-c), is a mutual dependency.  We resolve it with a greatest
+   fixpoint: start with every shape-OK measure as a candidate and drop any whose
+   arms fail to translate against the current candidate set, until stable.  All
+   `declare-fun`s are emitted before any axiom so cross-measure (incl. mutually
+   recursive) references resolve. *)
 let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
   Hashtbl.reset axiom_measures;
-  let buf = Buffer.create 256 in
-  let used_adts = Hashtbl.create 8 in
-  List.iter
-    (fun (name, fd) ->
-      match measure_param_adt fd, fd.A.fn_clauses with
-      | None, _ | _, [] -> ()
-      | Some (param, adt), c :: _ -> (
+  (* shape-OK measures: (name, param-ADT, arms), exhaustive match on the param. *)
+  let shaped =
+    List.filter_map
+      (fun (name, fd) ->
+        match measure_param_adt fd, fd.A.fn_clauses with
+        | Some (param, adt), c :: _ -> (
           match measure_arms param c.A.fc_body with
-          | None -> ()
           | Some arms ->
-            (* Totality gate: the match must cover every constructor of the ADT. *)
             let covered = List.sort compare (List.map (fun (c, _, _) -> c) arms) in
             let all = List.sort compare (try Hashtbl.find adt_ctors adt with Not_found -> []) in
-            (* Translate every arm; structural recursion is enforced in smt_of_axiom_body. *)
-            let axioms =
-              List.map
-                (fun (ctor, vars, body) ->
-                  match smt_of_axiom_body ~self:name vars body with
-                  | None -> None
-                  | Some bsmt ->
-                    let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
-                    if List.length vars <> List.length sorts then None
-                    else
-                      let lhs =
-                        if vars = [] then Printf.sprintf "(%s %s)" name ctor
-                        else Printf.sprintf "(%s (%s %s))" name ctor (String.concat " " vars)
-                      in
-                      if vars = [] then Some (Printf.sprintf "(assert (= %s %s))" lhs (Smt.render bsmt))
-                      else
-                        let bound =
-                          List.map2 (fun v s -> Printf.sprintf "(%s %s)" v (Smt.string_of_sort s)) vars sorts
-                        in
-                        Some
-                          (Printf.sprintf
-                             "(assert (forall (%s) (! (= %s %s) :pattern (%s))))"
-                             (String.concat " " bound) lhs (Smt.render bsmt) lhs))
-                arms
-            in
-            if covered = all && all <> [] && not (List.exists (( = ) None) axioms) then begin
-              Hashtbl.replace axiom_measures name adt;
-              Hashtbl.replace used_adts adt ();
-              Buffer.add_string buf (Printf.sprintf "(declare-fun %s (%s) Int)\n" name adt);
-              if is_nonneg_measure name then
-                Buffer.add_string buf
-                  (Printf.sprintf
-                     "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
-                     adt name name);
-              List.iter (function Some s -> Buffer.add_string buf (s ^ "\n") | None -> ()) axioms
-            end))
-    mdefs;
-  if Hashtbl.length axiom_measures > 0 then begin
-    let dts =
-      Hashtbl.fold (fun adt () acc -> datatype_decl adt :: acc) used_adts []
-      |> String.concat "\n"
-    in
+            if covered = all && all <> [] then Some (name, adt, arms) else None
+          | None -> None)
+        | _ -> None)
+      mdefs
+  in
+  let translates allowed (name, _, arms) =
+    List.for_all (fun arm -> arm_axiom ~allowed name arm <> None) arms
+  in
+  let candidates = ref (List.map (fun (n, _, _) -> n) shaped) in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter
+      (fun ((name, _, _) as s) ->
+        if List.mem name !candidates && not (translates (fun m -> List.mem m !candidates) s)
+        then begin
+          candidates := List.filter (( <> ) name) !candidates;
+          changed := true
+        end)
+      shaped
+  done;
+  let allowed m = List.mem m !candidates in
+  let axiomatized = List.filter (fun (n, _, _) -> allowed n) shaped in
+  List.iter (fun (name, adt, _) -> Hashtbl.replace axiom_measures name adt) axiomatized;
+  if axiomatized = [] then measure_preamble := ""
+  else begin
+    let buf = Buffer.create 256 in
+    (* declare-funs first … *)
+    List.iter
+      (fun (name, adt, _) -> Buffer.add_string buf (Printf.sprintf "(declare-fun %s (%s) Int)\n" name adt))
+      axiomatized;
+    (* … then non-negativity axioms … *)
+    List.iter
+      (fun (name, adt, _) ->
+        if is_nonneg_measure name then
+          Buffer.add_string buf
+            (Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n"
+               adt name name))
+      axiomatized;
+    (* … then the recursion-equation axioms. *)
+    List.iter
+      (fun (name, _, arms) ->
+        List.iter
+          (fun arm -> match arm_axiom ~allowed name arm with Some s -> Buffer.add_string buf (s ^ "\n") | None -> ())
+          arms)
+      axiomatized;
+    let dts = datatype_decls (adt_closure (List.map (fun (_, adt, _) -> adt) axiomatized)) in
     measure_preamble := "(declare-sort Elem 0)\n" ^ dts ^ "\n" ^ Buffer.contents buf
   end
-  else measure_preamble := ""
 
 (* The built-in `List(a)` modelled as an ADT so user measures over lists are
    axiomatised exactly like user ADTs: `Nil | Cons(a, List(a))`, element opaque
@@ -511,43 +587,96 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
   in
   { param_names; refined }
 
-(* Gather every refined function as (bare_name, qualified_name option, sig). *)
-let collect_sig_list (decls : A.decl list) : (string * string option * fn_sig) list =
-  let acc = ref [] in
+(* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
+   mapping to Some sig when it carries a refinement, None when it does not.
+   Recording NON-refined defs too is essential for correct lexical resolution: a
+   bare call that resolves to a non-refined sibling must NOT fall through to a
+   refined function of the same name in an enclosing module — that would check
+   the wrong predicate (a false positive). *)
+let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
+  let tbl = Hashtbl.create 128 in
   let rec go prefix decls =
     List.iter
       (function
         | A.DFn (fd, _) ->
+          let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
           let sg =
-            match fd.A.fn_clauses with
-            | c :: _ -> sig_of_clause c
-            | [] -> { param_names = []; refined = [] }
+            match fd.A.fn_clauses with c :: _ -> sig_of_clause c | [] -> { param_names = []; refined = [] }
           in
-          if sg.refined <> [] then
-            let q = if prefix = "" then None else Some (prefix ^ "." ^ fd.A.fn_name.A.txt) in
-            acc := (fd.A.fn_name.A.txt, q, sg) :: !acc
+          Hashtbl.replace tbl key (if sg.refined <> [] then Some sg else None)
         | A.DMod (name, _, ds, _) ->
           go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
         | _ -> ())
       decls
   in
   go "" decls;
-  !acc
-
-(* Build the lookup table.  Qualified names are always registered (unique).  A
-   bare name is registered ONLY when a single definition uses it — colliding
-   bare names across modules are dropped, so an ambiguous bare call is
-   conservatively skipped rather than checked against the wrong predicate. *)
-let build_table (lst : (string * string option * fn_sig) list) : sigs =
-  let tbl : sigs = Hashtbl.create 64 in
-  List.iter (fun (_, q, sg) -> match q with Some qn -> Hashtbl.replace tbl qn sg | None -> ()) lst;
-  let counts = Hashtbl.create 64 in
-  List.iter
-    (fun (b, _, _) ->
-      Hashtbl.replace counts b (1 + (try Hashtbl.find counts b with Not_found -> 0)))
-    lst;
-  List.iter (fun (b, _, sg) -> if Hashtbl.find counts b = 1 then Hashtbl.replace tbl b sg) lst;
   tbl
+
+(* ── Use/alias-aware call resolution ───────────────────────────────────────
+   Resolve a call name the way the typechecker does: a bare name binds to the
+   nearest enclosing module that defines it (lexical scope, with shadowing); an
+   alias-qualified name (`alias X.Y as P` → `P.foo`) expands to the original; a
+   `use`-imported bare name binds to the exporting module.  This replaces the
+   previous "qualified key OR globally-unique bare name" matching, which dropped
+   sibling calls on any cross-module name collision and never resolved aliased or
+   `use`-imported names. *)
+let dotted (path : A.name list) : string = String.concat "." (List.map (fun n -> n.A.txt) path)
+
+type rctx = {
+  modpath : string;                       (* enclosing module prefix, "" at top *)
+  aliases : (string * string) list;       (* (alias short, original dotted prefix) *)
+  uses : (string * A.use_selector) list;  (* (exporting module dotted, selector) *)
+}
+
+let rctx0 = { modpath = ""; aliases = []; uses = [] }
+
+(* Enclosing-module prefixes of [mp], innermost first: "A.B" -> ["A.B"; "A"; ""]. *)
+let modpath_prefixes (mp : string) : string list =
+  let segs = if mp = "" then [] else String.split_on_char '.' mp in
+  let n = List.length segs in
+  List.init (n + 1) (fun i -> String.concat "." (List.filteri (fun j _ -> j < n - i) segs))
+
+(* Resolve a call name to a definition:
+     Some (Some sig) -> a refined function (check it)
+     Some None       -> a real but non-refined function (skip — no predicate)
+     None            -> unresolved / external (skip)
+   Only Some (Some sig) leads to a check, so a wrong resolution can at worst
+   *skip* — it can never check against the wrong predicate. *)
+let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
+  : fn_sig option option =
+  let lookup k = Hashtbl.find_opt defs k in
+  let qualify p n = if p = "" then n else p ^ "." ^ n in
+  (* 1. Lexical scope: the nearest enclosing module that defines [fname] wins
+        (shadowing any same-named function further out). *)
+  match List.find_map (fun p -> lookup (qualify p fname)) (modpath_prefixes ctx.modpath) with
+  | Some r -> Some r
+  | None ->
+    (* 2. Alias-qualified `P.rest` with `alias X.Y as P` -> `X.Y.rest`. *)
+    let aliased =
+      match String.index_opt fname '.' with
+      | Some i ->
+        let head = String.sub fname 0 i in
+        let rest = String.sub fname (i + 1) (String.length fname - i - 1) in
+        (match List.assoc_opt head ctx.aliases with Some orig -> lookup (orig ^ "." ^ rest) | None -> None)
+      | None -> None
+    in
+    (match aliased with
+     | Some r -> Some r
+     | None ->
+       (* 3. `use`-imported bare name. *)
+       if String.contains fname '.' then None
+       else
+         List.find_map
+           (fun (m, sel) ->
+             let imported =
+               match sel with
+               | A.UseAll -> true
+               | A.UseNames ns -> List.exists (fun (n : A.name) -> n.A.txt = fname) ns
+               | A.UseExcept ns -> not (List.exists (fun (n : A.name) -> n.A.txt = fname) ns)
+               | A.UseSingle -> false
+             in
+             if imported then lookup (qualify m fname) else None)
+           ctx.uses)
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
 let reflect_scalar (sc : scope) (actual : A.expr)
@@ -590,6 +719,10 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
   | None -> ()
   | Some self_actual ->
     let decls = ref [] and assume = ref [] in
+    (* Attach the (expensive) datatype/quantifier preamble ONLY to VCs that
+       actually reference an axiomatised measure; a plain Int/Bool VC pays no
+       axiom cost.  Set when [resolve_measure] reflects an axiom measure. *)
+    let uses_axiom = ref false in
     let absorb = function
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
@@ -644,6 +777,7 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
     in
     let resolve_measure m name =
       if is_axiom_measure m then (
+        uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
         match actual_of_name name with
         | None ->
@@ -676,6 +810,7 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
            [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
+       let preamble = if !uses_axiom then !measure_preamble else "" in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail
           (e.g. a symbolic, unknown length), that is unprovable either way and
@@ -684,10 +819,10 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
           - discharge(goal=G) Verified  => G always holds        => pass
           - else discharge(goal=¬G) Verified => G never holds     => violation
           - otherwise (G depends on unknowns / solver unsure)     => skip *)
-       (match Refine.discharge ~root ~preamble:!measure_preamble vc with
+       (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> ()
         | first ->
-          (match Refine.discharge ~root ~preamble:!measure_preamble { vc with Smt.goal = Smt.Not goal } with
+          (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
              Err.error errctx ~span
                (Printf.sprintf
@@ -761,10 +896,13 @@ let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.e
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
-       (match Refine.discharge ~root ~preamble:!measure_preamble vc with
+       (* Postconditions reflect measures only symbolically (`m$name` Int
+          constants), never as datatype terms, so the axiom preamble is unused
+          here — omit it to avoid the datatype/quantifier setup cost. *)
+       (match Refine.discharge ~root ~preamble:"" vc with
         | Refine.Verified -> ()
         | first -> (
-            match Refine.discharge ~root ~preamble:!measure_preamble { vc with Smt.goal = Smt.Not goal } with
+            match Refine.discharge ~root ~preamble:"" { vc with Smt.goal = Smt.Not goal } with
             | Refine.Verified ->
               ignore tail_e;
               Err.error errctx ~span
@@ -788,16 +926,16 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
       fd.A.fn_clauses
 
 (* ── Walk expressions, threading the refined-local scope and path context ── *)
-let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scope)
+let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
     (e : A.expr) : unit =
-  let go = visit ~root errctx tbl path sc in
-  let go_path p = visit ~root errctx tbl p sc in
+  let go = visit ~root errctx defs ctx path sc in
+  let go_path p = visit ~root errctx defs ctx p sc in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
-    (match Hashtbl.find_opt tbl fname with
-     | Some sg ->
+    (match resolve_call ctx defs fname with
+     | Some (Some sg) ->
        List.iter (fun rp -> check_call ~root errctx ~span:sp sg args path rp sc) sg.refined
-     | None -> ());
+     | _ -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
@@ -808,7 +946,7 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
     ignore
       (List.fold_left
          (fun (path, sc) e ->
-           visit ~root errctx tbl path sc e;
+           visit ~root errctx defs ctx path sc e;
            let path' =
              match e with A.EAssert (p, _) -> (p, false) :: path | _ -> path
            in
@@ -817,9 +955,9 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
          (path, sc) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
-    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
   | A.ELetFn (_, ps, _, body, _) ->
-    visit ~root errctx tbl path (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter
@@ -843,20 +981,33 @@ let rec visit ~root errctx (tbl : sigs) (path : (A.expr * bool) list) (sc : scop
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
-let visit_fn ~root errctx (tbl : sigs) (fd : A.fn_def) : unit =
+let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
   check_fn_post ~root errctx fd;
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx tbl path sc c.A.fc_body)
+      visit ~root errctx defs ctx path sc c.A.fc_body)
     fd.A.fn_clauses
 
-let rec visit_decls ~root errctx (tbl : sigs) (decls : A.decl list) : unit =
+let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
+  (* Gather this scope's aliases/uses first so every function in the module sees
+     them (matches lexical, module-wide visibility; inner modules inherit). *)
+  let ctx =
+    List.fold_left
+      (fun ctx d ->
+        match d with
+        | A.DAlias (ad, _) -> { ctx with aliases = (ad.A.alias_name.A.txt, dotted ad.A.alias_path) :: ctx.aliases }
+        | A.DUse (ud, _) -> { ctx with uses = (dotted ud.A.use_path, ud.A.use_sel) :: ctx.uses }
+        | _ -> ctx)
+      ctx decls
+  in
   List.iter
     (function
-      | A.DFn (fd, _) -> visit_fn ~root errctx tbl fd
-      | A.DMod (_, _, ds, _) -> visit_decls ~root errctx tbl ds
+      | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+      | A.DMod (name, _, ds, _) ->
+        let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+        visit_decls ~root errctx defs { ctx with modpath } ds
       | _ -> ())
     decls
 
@@ -871,7 +1022,15 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
       | _ -> [])
     decls
 
-let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
+(* [measure_axioms] (default true) gates the whole measure-axiom machinery —
+   datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
+   gate exists to keep those axioms sound, so with axioms off it has no purpose).
+   With it off, measures reflect purely symbolically (the pre-M-a behaviour:
+   sound, no quantifiers, no datatype theory), an escape hatch for the per-query
+   cost of quantified/datatype reasoning.  It changes only diagnostics, never the
+   compiled artifact, so it is not part of the CAS cache key. *)
+let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.ctx)
+    (m : A.module_) : unit =
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending
@@ -885,21 +1044,26 @@ let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : un
       [] mfns;
   Hashtbl.reset adt_ctors;
   Hashtbl.reset ctor_field_sorts;
-  register_builtin_adts ();
-  register_adts m.A.mod_decls;
-  build_measure_preamble mfns;
-  (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
-     function, else its axioms would be unsound.  Emit a hard error per
-     violation (filtered to user files by the caller, like every diagnostic). *)
-  List.iter
-    (fun (_name, fd) ->
-      List.iter
-        (fun msg ->
-          Err.error errctx ~span:fd.A.fn_name.A.span
-            (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
-        (measure_gate_errors fd))
-    mfns;
-  let tbl = build_table (collect_sig_list m.A.mod_decls) in
+  Hashtbl.reset axiom_measures;
+  measure_preamble := "";
+  if measure_axioms then begin
+    register_builtin_adts ();
+    register_adt_names m.A.mod_decls;
+    register_field_sorts m.A.mod_decls;
+    build_measure_preamble mfns;
+    (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
+       function, else its axioms would be unsound.  Emit a hard error per
+       violation (filtered to user files by the caller, like every diagnostic). *)
+    List.iter
+      (fun (_name, fd) ->
+        List.iter
+          (fun msg ->
+            Err.error errctx ~span:fd.A.fn_name.A.span
+              (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
+          (measure_gate_errors fd))
+      mfns
+  end;
+  let defs = collect_all_defs m.A.mod_decls in
   (* Always walk: a function may have a refined *return* (postcondition) even
-     with no refined parameters, so it won't appear in [tbl]. *)
-  visit_decls ~root errctx tbl m.A.mod_decls
+     with no refined parameters, so it won't appear in [defs]. *)
+  visit_decls ~root errctx defs rctx0 m.A.mod_decls

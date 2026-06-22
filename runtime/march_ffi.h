@@ -89,7 +89,14 @@ march_value march_make_record(const char *desc, int32_t nfields, const march_val
 
 /* ── Option / Result constructors (each takes ownership of its payload) ──────*/
 march_value march_none(void);           /* Option None  (tag 0) */
-march_value march_some(march_value v);  /* Option Some  (tag 1) */
+march_value march_some(march_value v);  /* Option Some  (niche: Some(x)=x) */
+/* Boxed Some for Option(Float)/Option(Unit) (non-niche payloads): a heap Some
+ * cell whose payload would otherwise alias None=0.  Pass march_make_float(f) for
+ * a Float payload; None still uses march_none(). */
+march_value march_some_boxed(march_value payload);
+/* Boxed None, paired with march_some_boxed (Float/Unit Options are matched by
+ * cell tag, so None must be a heap cell too — not the niche 0). */
+march_value march_none_boxed(void);
 march_value march_ok(march_value v);    /* Result Ok    (tag 0) */
 march_value march_err(march_value e);   /* Result Err   (tag 1) */
 

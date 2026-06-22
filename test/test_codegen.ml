@@ -4584,15 +4584,19 @@ let test_cap_unused_needs_warning () =
     (March_errors.Errors.has_diagnostics ctx)
 
 (* An extern block's Cap(X) counts as USING X, so `needs X` + an extern block
-   must NOT trigger the "declared but not used" warning. *)
+   must NOT trigger the "declared but not used" warning.  An extern block ALSO
+   implies `IO.Foreign` (the FFI meta-capability), so a clean module declares
+   both — matching the `needs Ffi` + `needs IO.Foreign` pattern in the
+   `test/native/ffi_*.march` fixtures. *)
 let test_cap_extern_block_counts_as_use () =
   let ctx = typecheck {|mod Test do
     needs Ffi
+    needs IO.Foreign
     extern "m" : Cap(Ffi) do
       fn dbl(n : Int) : Int = "ffi_test_dbl"
     end
   end|} in
-  Alcotest.(check bool) "extern Cap(Ffi) satisfies needs Ffi: no diagnostics" false
+  Alcotest.(check bool) "extern Cap(Ffi) + needs IO.Foreign: no diagnostics" false
     (March_errors.Errors.has_diagnostics ctx)
 
 (* Cap(IO) as supertype covers Cap(IO.Network) usage *)

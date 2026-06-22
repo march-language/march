@@ -1,0 +1,16 @@
+# /Users/80197052/.opam/march/bin/dune build --build-dir=/Users/80197052/code/march/_build_wt
+# OCAMLPARAM: unset
+# Shared cache: enabled-except-user-rules
+# Shared cache location: /Users/80197052/.cache/dune/db
+# Workspace root: /Users/80197052/code/march
+# Auto-detected concurrency: 14
+# Dune context:
+#  { name = "default"
+#  ; kind = "default"
+#  ; profile = Dev
+#  ; merlin = true
+#  ; fdo_target_exe = None
+#  ; build_dir = In_build_dir "default"
+#  ; instrument_with = []
+#  }
+$ /Users/80197052/.opam/march/bin/ocamlc.opt -config > /var/folders/p0/dk44pb6x0_l92yynp567xps00000gp/T/dune_1874e6_output

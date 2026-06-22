@@ -18,6 +18,14 @@ let has_refine_error src =
   March_refinecheck.Refine_check.check_module ctx (parse src);
   March_errors.Errors.has_errors ctx
 
+(* Same, but DESUGARED first — required for qualified calls (`M.f(x)`), which the
+   parser produces as `EField` and desugar flattens to a single dotted `EVar`,
+   exactly as the compiler feeds refine_check in production. *)
+let has_refine_error_d src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
+  March_errors.Errors.has_errors ctx
+
 let gated name f =
   Alcotest.test_case name `Quick (fun () ->
       if z3_available () then f ()
@@ -373,6 +381,143 @@ let list_axiom_suite =
         Alcotest.(check bool) "no error" false
           (has_refine_error (list_prog "  fn f() : Int do nth([10, 20], 1) end"))) ]
 
+(* M-c: cross-measure calls + mutual recursion over mutually-recursive datatypes.
+   `tsize`/`fsize` are defined over `RTree`/`RForest` (each references the other),
+   call each other on structural substructures, and are axiomatised together in a
+   single declare-datatypes — so `tsize(RNode(5, FEmpty)) = 1` is computed. *)
+let mutual_prog body =
+  Printf.sprintf
+    "mod M do\n\
+    \  type RTree = RNode(Int, RForest)\n\
+    \  type RForest = FEmpty | FCons(RTree, RForest)\n\
+    \  @[measure]\n\
+    \  fn tsize(t : RTree) : Int do\n\
+    \    match t do\n\
+    \      RNode(x, f) -> 1 + fsize(f)\n\
+    \    end\n\
+    \  end\n\
+    \  @[measure]\n\
+    \  fn fsize(f : RForest) : Int do\n\
+    \    match f do\n\
+    \      FEmpty -> 0\n\
+    \      FCons(t, rest) -> tsize(t) + fsize(rest)\n\
+    \    end\n\
+    \  end\n\
+    \  fn tget(t : RTree, i : {Int | _ >= 0 && _ < tsize(t)}) : Int do tget(t, i) end\n\
+     %s\n\
+     end\n"
+    body
+
+let mutual_suite =
+  [ gated "mutually-recursive measures compute tsize(RNode(5,FEmpty))=1: index 1 out of bounds" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (mutual_prog "  fn f() : Int do tget(RNode(5, FEmpty), 1) end")));
+
+    gated "mutually-recursive measures: index 0 is in bounds" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (mutual_prog "  fn f() : Int do tget(RNode(5, FEmpty), 0) end")));
+
+    gated "deeper structure: tsize(RNode(_,FCons(RNode(_,FEmpty),FEmpty)))=2, index 2 out of bounds" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (mutual_prog
+                "  fn f() : Int do tget(RNode(7, FCons(RNode(8, FEmpty), FEmpty)), 2) end"))) ]
+
+(* Flag-gating: with --no-measure-axioms, measures are purely symbolic, so a
+   violation that is only detectable from the measure's recursion equations
+   (a concrete-structure bound) is conservatively skipped instead of caught. *)
+let has_refine_error_no_axioms src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~measure_axioms:false ctx (parse src);
+  March_errors.Errors.has_errors ctx
+
+let flag_suite =
+  [ gated "axioms ON (default): concrete-structure out-of-bounds is caught" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (axiom_prog "  fn f(x : Int) : Int do get(Node(Leaf, x, Leaf), 5) end")));
+
+    gated "--no-measure-axioms: the same violation is skipped (symbolic measure)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_no_axioms
+             (axiom_prog "  fn f(x : Int) : Int do get(Node(Leaf, x, Leaf), 5) end")));
+
+    Alcotest.test_case "--no-measure-axioms disables the soundness gate" `Quick (fun () ->
+        (* a non-exhaustive measure is a hard error with axioms on, skipped with them off *)
+        let prog =
+          "mod M do\n\
+          \  type Color = Red | Green | Blue\n\
+          \  @[measure]\n\
+          \  fn rank(c : Color) : Int do\n\
+          \    match c do\n\
+          \      Red -> 0\n\
+          \      Green -> 1\n\
+          \    end\n\
+          \  end\n\
+           end\n"
+        in
+        Alcotest.(check bool) "gate on" true (has_refine_error prog);
+        Alcotest.(check bool) "gate off" false (has_refine_error_no_axioms prog)) ]
+
+(* Use/alias-aware call resolution: a call name resolves the way the typechecker
+   resolves it (lexical module scope + alias + use), not by fragile string
+   matching.  This both CATCHES violations the old skip-on-collision missed and
+   stays free of false positives via correct shadowing. *)
+let resolution_suite =
+  [ gated "sibling call on a name collision is now resolved + checked (violation caught)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d {|mod Root do
+  mod A do fn foo(n : {Int | _ >= 100}) : Int do n end end
+  mod B do
+    fn foo(n : {Int | _ >= 0}) : Int do n end
+    fn use_it() : Int do foo(-5) end
+  end
+end|}));
+
+    gated "sibling resolves to the LOCAL definition, not the colliding one (no false positive)" (fun () ->
+        (* foo(5) in Root.B must check `_ >= 0` (Root.B.foo), not `_ >= 100` (Root.A.foo) *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|mod Root do
+  mod A do fn foo(n : {Int | _ >= 100}) : Int do n end end
+  mod B do
+    fn foo(n : {Int | _ >= 0}) : Int do n end
+    fn use_it() : Int do foo(5) end
+  end
+end|}));
+
+    gated "alias-qualified call is resolved + checked" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d {|mod Root do
+  mod Lib do
+    mod Inner do fn take_pos(n : {Int | _ >= 0}) : Int do n end end
+  end
+  mod App do
+    alias Lib.Inner as I
+    fn use_it() : Int do I.take_pos(-1) end
+  end
+end|}));
+
+    gated "use-imported call is resolved + checked" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d {|mod Root do
+  mod Lib do fn take_pos(n : {Int | _ >= 0}) : Int do n end end
+  mod App do
+    use Lib.{take_pos}
+    fn use_it() : Int do take_pos(-1) end
+  end
+end|}));
+
+    gated "a non-refined sibling shadows an outer refined function (no false positive)" (fun () ->
+        (* helper(-5) resolves to Root.Inner.helper (non-refined), NOT Root.helper *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|mod Root do
+  fn helper(n : {Int | _ >= 0}) : Int do n end
+  mod Inner do
+    fn helper(n : Int) : Int do n end
+    fn use_it() : Int do helper(-5) end
+  end
+end|})) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -384,4 +529,7 @@ let () =
       ("measures-p1b", measure_suite);
       ("axioms-ma", axiom_suite);
       ("gate-mb", gate_suite);
-      ("list-axioms-mb", list_axiom_suite) ]
+      ("list-axioms-mb", list_axiom_suite);
+      ("mutual-mc", mutual_suite);
+      ("flag-gating", flag_suite);
+      ("resolution", resolution_suite) ]

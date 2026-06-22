@@ -1,0 +1,246 @@
+-- IOList module: lazy, tree-structured string builder.
+--
+-- IOList represents a sequence of string segments as a tree, deferring
+-- concatenation until the list is flushed to IO.  This avoids O(n²)
+-- copying when building large strings from many small pieces.
+--
+-- Usage pattern:
+--   let buf = IOList.append(IOList.from_string("Hello, "), IOList.from_string("world!"))
+--   println(IOList.to_string(buf))   -- "Hello, world!"
+--
+-- The key invariant: IOList is *lazy*.  Use it as an accumulator and only
+-- call `to_string` or write to IO at the very end.
+
+mod IOList do
+
+  -- Internal representation:
+  --   Empty            — zero bytes
+  --   Str(s)           — a single String segment
+  --   Segments(xs)     — a list of IOList nodes (children)
+  --
+  -- There is intentionally no binary Concat node.  Building chains of
+  -- Segments avoids deep left-spine trees that would overflow the stack
+  -- when flattening.
+  type IOList = Empty | Str(String) | Segments(List(IOList))
+
+  -- -----------------------------------------------------------------------
+  -- Public API
+  -- -----------------------------------------------------------------------
+
+  doc """
+  The empty IOList — contains no bytes.
+
+      IOList.to_string(IOList.empty())  -- ""
+
+  Cost: O(1).
+  """
+  fn empty() : IOList do
+    Empty
+  end
+
+  doc """
+  Wrap a `String` as an IOList leaf node.
+
+      IOList.to_string(IOList.from_string("hello"))  -- "hello"
+
+  No copy is made; the IOList holds a reference to the original string.
+  Cost: O(1).
+  """
+  fn from_string(s : String) : IOList do
+    if string_is_empty(s) do Empty else Str(s) end
+  end
+
+  doc """
+  Append two IOLists, returning a new IOList that represents their concatenation.
+  Neither argument is modified.
+
+      IOList.to_string(IOList.append(IOList.from_string("foo"), IOList.from_string("bar")))
+        -- "foobar"
+
+  Internally, Empty nodes are dropped.  No bytes are copied until `to_string`.
+
+  Cost: O(1) — no flattening until `to_string`.
+  """
+  fn append(a : IOList, b : IOList) : IOList do
+    match a do
+    Empty -> b
+    _ ->
+      match b do
+      Empty -> a
+      _ -> Segments(Cons(a, Cons(b, Nil)))
+      end
+    end
+  end
+
+  doc """
+  Prepend a `String` to an IOList.
+
+      IOList.to_string(IOList.prepend("Hello, ", IOList.from_string("world!")))
+        -- "Hello, world!"
+
+  Cost: O(1).
+  """
+  fn prepend(s : String, iol : IOList) : IOList do
+    append(from_string(s), iol)
+  end
+
+  doc """
+  Append a `String` to an IOList.
+
+      let buf = IOList.push(IOList.from_string("Hello"), ", world!")
+      IOList.to_string(buf)  -- "Hello, world!"
+
+  Cost: O(1).
+  """
+  fn push(iol : IOList, s : String) : IOList do
+    append(iol, from_string(s))
+  end
+
+  doc """
+  Build an IOList from a `List(String)` by wrapping all elements as leaves.
+
+      IOList.to_string(IOList.from_strings(Cons("a", Cons("b", Cons("c", Nil)))))
+        -- "abc"
+
+  Cost: O(n) where n is the length of the list.
+  """
+  fn from_strings(xs : List(String)) : IOList do
+    fn map_strings(ys : List(String)) : List(IOList) do
+      match ys do
+      Nil        -> Nil
+      Cons(s, t) -> Cons(Str(s), map_strings(t))
+      end
+    end
+    match xs do
+    Nil -> Empty
+    _   -> Segments(map_strings(xs))
+    end
+  end
+
+  doc """
+  Flatten an IOList into a single `String` by collecting all leaf segments
+  and concatenating them.
+
+      IOList.to_string(IOList.empty())                    -- ""
+      IOList.to_string(IOList.from_string("hello"))       -- "hello"
+
+  This is the only function that allocates a full concatenated string.
+  Call it once at the end, not on every append.
+
+  Cost: O(total bytes across all segments).
+  """
+  fn to_string(iol : IOList) : String do
+    -- list_append: concatenate two List(String) in forward order.
+    -- Must be defined before collect_list which calls it.
+    fn list_append(a : List(String), b : List(String)) : List(String) do
+      match a do
+      Nil        -> b
+      Cons(h, t) -> Cons(h, list_append(t, b))
+      end
+    end
+    -- collect_list: flatten a List(IOList) to a forward List(String).
+    -- Defined before collect so collect can call it.
+    fn collect_list(nodes : List(IOList)) : List(String) do
+      match nodes do
+      Nil        -> Nil
+      Cons(h, t) -> do
+        let parts = match h do
+          Empty        -> Nil
+          Str(s)       -> Cons(s, Nil)
+          Segments(ys) -> collect_list(ys)
+          end
+        list_append(parts, collect_list(t))
+      end
+      end
+    end
+    -- collect: flatten one IOList node to a List(String).
+    fn collect(node : IOList) : List(String) do
+      match node do
+      Empty        -> Nil
+      Str(s)       -> Cons(s, Nil)
+      Segments(xs) -> collect_list(xs)
+      end
+    end
+    string_join(collect(iol), "")
+  end
+
+  doc """
+  Compute the total byte size of all segments in the IOList without
+  flattening to a string.
+
+      IOList.byte_size(IOList.from_string("hello"))  -- 5
+      IOList.byte_size(IOList.empty())               -- 0
+
+  Cost: O(number of nodes in the tree).
+  """
+  fn byte_size(iol : IOList) : Int do
+    fn size_list(nodes : List(IOList)) : Int do
+      match nodes do
+      Nil        -> 0
+      Cons(h, t) -> do
+        let hs = match h do
+          Empty        -> 0
+          Str(s)       -> string_byte_length(s)
+          Segments(ys) -> size_list(ys)
+          end
+        hs + size_list(t)
+      end
+      end
+    end
+    match iol do
+    Empty        -> 0
+    Str(s)       -> string_byte_length(s)
+    Segments(xs) -> size_list(xs)
+    end
+  end
+
+  doc """
+  Return `true` if the IOList contains no bytes.
+
+      IOList.is_empty(IOList.empty())            -- true
+      IOList.is_empty(IOList.from_string(""))    -- true
+      IOList.is_empty(IOList.from_string("x"))   -- false
+
+  Cost: O(1) for `Empty` and `Str`; O(n) for `Segments`.
+  """
+  fn is_empty(iol : IOList) : Bool do
+    fn all_empty_list(nodes : List(IOList)) : Bool do
+      match nodes do
+      Nil        -> true
+      Cons(h, t) -> do
+        let he = match h do
+          Empty        -> true
+          Str(s)       -> string_is_empty(s)
+          Segments(ys) -> all_empty_list(ys)
+          end
+        he && all_empty_list(t)
+      end
+      end
+    end
+    match iol do
+    Empty        -> true
+    Str(s)       -> string_is_empty(s)
+    Segments(xs) -> all_empty_list(xs)
+    end
+  end
+
+  doc """
+  Compute a FNV-1a 64-bit content hash over the IOList segments without
+  first flattening to a single string.  Returns a 16-character lowercase
+  hex string suitable for use as an ETag value.
+
+      IOList.hash(IOList.from_string("hello"))   -- some hex string
+      IOList.hash(IOList.empty())                -- "cbf29ce484222325"
+
+  The hash walks the IOList tree in order, hashing each `Str` segment's
+  bytes as encountered.  The result is identical to hashing the fully
+  flattened string.
+
+  Suitable for ETag generation and fragment cache keying.
+  Cost: O(total bytes across all segments).
+  """
+  fn hash(iol : IOList) : String do
+    iolist_hash_fnv1a(iol)
+  end
+
+end

@@ -349,4 +349,8 @@ let () =
       Alcotest.test_case "List parallel ops"
         `Quick (run_stdlib_test "test_list_parallel.march" "TestListParallel");
     ]);
+    ("list", [
+      Alcotest.test_case "List module"
+        `Quick (run_stdlib_test "test_list.march" "TestList");
+    ]);
   ]

@@ -210,5 +210,6 @@ For example, a session channel must be completed (linear — you can't just drop
 ## Next Steps
 
 - [Type System](types.md) — the broader type system context
+- [Refinement Types](refinement-types.md) — the other compile-time safety layer: value predicates checked by an SMT solver
 - [Actors](actors.md) — how linear types interact with actor message passing
 - [Pattern Matching](pattern-matching.md) — destructuring linear values
