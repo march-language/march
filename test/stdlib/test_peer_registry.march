@@ -1,0 +1,48 @@
+mod TestPeerRegistry do
+
+  pfn mk_peer(name : String, n : Int) : PeerRegistry.Peer do
+    let id = NodeIdentity.make(name, name ++ "-key", n)
+    { node_id: id.node_id, identity: id, fd: n }
+  end
+
+  describe "PeerRegistry" do
+
+    test "empty registry has no peers" do
+      let r = PeerRegistry.empty()
+      assert (PeerRegistry.size(r) == 0)
+      assert (PeerRegistry.lookup(r, "nobody") == None)
+    end
+
+    test "add then lookup returns the peer" do
+      let p = mk_peer("alice@host", 1)
+      let r = PeerRegistry.add(PeerRegistry.empty(), p)
+      assert (PeerRegistry.size(r) == 1)
+      assert (PeerRegistry.lookup(r, p.node_id) == Some(p))
+      assert (PeerRegistry.contains(r, p.node_id))
+    end
+
+    test "one connection per peer — re-add same NodeId replaces" do
+      let p1 = mk_peer("alice@host", 1)
+      let p2 = { node_id: p1.node_id, identity: p1.identity, fd: 99 }
+      let r = PeerRegistry.add(PeerRegistry.add(PeerRegistry.empty(), p1), p2)
+      assert (PeerRegistry.size(r) == 1)
+      assert (PeerRegistry.lookup(r, p1.node_id) == Some(p2))
+    end
+
+    test "remove drops the peer" do
+      let p = mk_peer("alice@host", 1)
+      let r = PeerRegistry.remove(PeerRegistry.add(PeerRegistry.empty(), p), p.node_id)
+      assert (PeerRegistry.size(r) == 0)
+      assert (not(PeerRegistry.contains(r, p.node_id)))
+    end
+
+    test "distinct peers coexist" do
+      let r = PeerRegistry.add(
+                PeerRegistry.add(PeerRegistry.empty(), mk_peer("a@host", 1)),
+                mk_peer("b@host", 2))
+      assert (PeerRegistry.size(r) == 2)
+    end
+
+  end
+
+end
