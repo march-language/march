@@ -4055,6 +4055,28 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  ; ("tcp_listen", VBuiltin ("tcp_listen", function
+        | [VInt port] ->
+          (try
+             let open Unix in
+             let sock = socket PF_INET SOCK_STREAM 0 in
+             setsockopt sock SO_REUSEADDR true;
+             bind sock (ADDR_INET (inet_addr_any, port));
+             listen sock 1024;
+             VCon ("Ok", [VInt (Obj.magic sock : int)])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "tcp_listen(port)"))
+  ; ("tcp_accept", VBuiltin ("tcp_accept", function
+        | [VInt listen_fd] ->
+          (try
+             let open Unix in
+             let sock = (Obj.magic listen_fd : file_descr) in
+             let (client_fd, _addr) = accept sock in
+             VCon ("Ok", [VInt (Obj.magic client_fd : int)])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "tcp_accept(listen_fd)"))
   (* tcp_peer_addr(fd) → String: numeric IP of the connected peer.
      Returns "" when the fd is not a connected INET socket.  IPv4-mapped
      IPv6 addresses (::ffff:1.2.3.4) are normalized to plain IPv4. *)
