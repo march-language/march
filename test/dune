@@ -1352,3 +1352,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_optres.expected native_ffi_optres.out)))
+
+; ── FFI codec completeness: Option(Float)/Option(Unit) boxed codecs, List(Int)
+; ── C-array codec — the three gen-c gaps closed in the codec-completeness pass.
+(rule
+ (targets native_ffi_codec2 native_ffi_codec2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/ffi_codec2.march) (file native/ffi_codec2.c))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --ffi-c native/ffi_codec2.c
+        -o native_ffi_codec2 native/ffi_codec2.march)
+   (with-stdout-to native_ffi_codec2.out (system "./native_ffi_codec2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_codec2.expected native_ffi_codec2.out)))
