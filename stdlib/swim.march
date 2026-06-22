@@ -1,0 +1,185 @@
+-- Swim: the SWIM failure-detection probe loop over a Membership CRDT (P1 L3).
+--
+-- This is the *pure* protocol state machine: each transition takes the current
+-- state + the clock + any injected randomness (the member to probe, the helper
+-- set) and returns the next state plus the I/O Actions the runtime layer must
+-- perform (send a ping, ask for an indirect ping, gossip a status change). The
+-- socket/timer glue that picks random members, sends frames, and fires timers
+-- lives in the runtime layer (same split as NetKernel/ClusterConn) — keeping the
+-- detection logic deterministic and unit-testable.
+--
+-- One protocol period probes one target:
+--   1. begin_period(target)        -> SendPing(target)         (direct ping)
+--   2. no ack by ack_timeout_ms    -> SendPingReq(h, target)…  (k-way indirect)
+--   3. no ack by period end        -> mark Suspect + Gossip, arm suspect timer
+--   4. suspect timer expires       -> mark Dead + Gossip
+-- A node refutes a false suspicion by bumping its own incarnation and
+-- re-announcing Alive (incarnation-ordered CRDT merge in Membership).
+mod Swim do
+
+  -- Protocol tunables (durations in ms). suspect_timeout_ms must exceed the
+  -- worst-case GC/scheduler pause or a paused-but-healthy node is evicted.
+  type Config = { ack_timeout_ms : Int, suspect_timeout_ms : Int, indirect_k : Int }
+
+  -- The in-flight probe for the current protocol period.
+  type Probe = { target : String, sent_at : Int, indirect_sent : Bool, acked : Bool }
+
+  type State = {
+    me : String,
+    incarnation : Int,
+    members : Members,
+    config : Config,
+    probe : Option(Probe),
+    suspect_deadlines : Map(String, Int)
+  }
+
+  -- What the runtime I/O layer must perform this transition.
+  type Action =
+      SendPing(String)                -- direct ping to a node
+    | SendPingReq(String, String)     -- ask helper (1st) to ping target (2nd)
+    | Gossip(Member)                  -- disseminate a member status update
+
+  fn config(ack_timeout_ms : Int, suspect_timeout_ms : Int, indirect_k : Int) : Config do
+    { ack_timeout_ms: ack_timeout_ms, suspect_timeout_ms: suspect_timeout_ms, indirect_k: indirect_k }
+  end
+
+  fn make(me : String, incarnation : Int, members : Members, config : Config) : State do
+    { me: me, incarnation: incarnation, members: members, config: config,
+      probe: None, suspect_deadlines: Map.empty() }
+  end
+
+  -- Current incarnation recorded for [id], or 0 if we have never seen it.
+  pfn incarnation_of(s : State, id : String) : Int do
+    match Membership.get(s.members, id) do
+      Some(m) -> m.incarnation
+      None    -> 0
+    end
+  end
+
+  -- Begin a protocol period: directly ping [target] (a random Alive member the
+  -- caller injects). Replaces any in-flight probe.
+  fn begin_period(s : State, now : Int, target : String) : (State, Action) do
+    let p = { target: target, sent_at: now, indirect_sent: false, acked: false }
+    let out = ({ s with probe: Some(p) }, SendPing(target))
+    out
+  end
+
+  -- Record an ack for [from]; clears the in-flight probe iff it matches.
+  fn on_ack(s : State, from : String) : State do
+    match s.probe do
+      None -> s
+      Some(p) ->
+        if p.target == from do
+          { s with probe: Some({ p with acked: true }) }
+        else
+          s
+        end
+    end
+  end
+
+  -- Is the direct ping overdue (sent, unacked, past ack_timeout_ms)?
+  pfn ack_overdue(s : State, now : Int) : Bool do
+    match s.probe do
+      None -> false
+      Some(p) -> if p.acked do false else now - p.sent_at >= s.config.ack_timeout_ms end
+    end
+  end
+
+  -- Escalate an overdue direct ping to k-way indirect ping-req via [helpers]
+  -- (random Alive members != target, injected by the caller). Emits one
+  -- SendPingReq per helper and marks the probe so it escalates only once.
+  fn escalate_indirect(s : State, now : Int, helpers : List(String)) : (State, List(Action)) do
+    match s.probe do
+      None -> (s, Nil)
+      Some(p) ->
+        if p.indirect_sent do
+          (s, Nil)
+        else
+          if ack_overdue(s, now) do
+            let reqs = List.map(helpers, fn h -> SendPingReq(h, p.target))
+            let out = ({ s with probe: Some({ p with indirect_sent: true }) }, reqs)
+            out
+          else
+            (s, Nil)
+          end
+        end
+    end
+  end
+
+  -- End the protocol period. If the probe was never acked, mark its target
+  -- Suspect at the target's current incarnation, arm the suspect→dead timer, and
+  -- gossip the Suspect. Always clears the probe for the next period.
+  fn end_period(s : State, now : Int) : (State, List(Action)) do
+    match s.probe do
+      None -> (s, Nil)
+      Some(p) ->
+        if p.acked do
+          ({ s with probe: None }, Nil)
+        else
+          let m = Membership.suspect(p.target, incarnation_of(s, p.target))
+          let members2 = Membership.observe(s.members, m)
+          let deadline = now + s.config.suspect_timeout_ms
+          let dl2 = Map.insert(s.suspect_deadlines, p.target, deadline, Map.str_cmp)
+          let out = ({ s with probe: None, members: members2, suspect_deadlines: dl2 },
+                     Cons(Gossip(m), Nil))
+          out
+        end
+    end
+  end
+
+  -- Promote every Suspect whose suspect timer has expired (deadline <= now) to
+  -- Dead, gossiping each. Returns the updated state and the Dead gossips.
+  fn expire_suspects(s : State, now : Int) : (State, List(Action)) do
+    let entries = Map.entries(s.suspect_deadlines)
+    let expired = List.filter(entries, fn (kv) ->
+      match kv do (_id, deadline) -> deadline <= now end)
+    List.fold_left(expired, (s, Nil), fn (acc, kv) ->
+      match acc do
+        (st, acts) ->
+          match kv do
+            (id, _deadline) ->
+              let m = Membership.dead(id, incarnation_of(st, id))
+              let members2 = Membership.observe(st.members, m)
+              let dl2 = Map.remove(st.suspect_deadlines, id, Map.str_cmp)
+              let out = ({ st with members: members2, suspect_deadlines: dl2 },
+                         List.append(acts, Cons(Gossip(m), Nil)))
+              out
+          end
+      end)
+  end
+
+  -- Fold a gossiped member update into our view. A higher-incarnation Alive
+  -- refutes a local Suspect/Dead — when the winner is Alive again, cancel its
+  -- pending suspect timer.
+  fn on_gossip(s : State, member : Member) : State do
+    let members2 = Membership.observe(s.members, member)
+    let s2 = { s with members: members2 }
+    match Membership.get(members2, member.node_id) do
+      Some(w) ->
+        match w.status do
+          Alive -> { s2 with suspect_deadlines: Map.remove(s2.suspect_deadlines, member.node_id, Map.str_cmp) }
+          _     -> s2
+        end
+      None -> s2
+    end
+  end
+
+  -- If we have been suspected or declared dead in our own view, refute by
+  -- bumping our incarnation above the accusation and re-announcing Alive.
+  fn refute(s : State) : (State, Option(Action)) do
+    match Membership.get(s.members, s.me) do
+      None -> (s, None)
+      Some(m) ->
+        match m.status do
+          Alive -> (s, None)
+          _ ->
+            let next = (if m.incarnation > s.incarnation do m.incarnation else s.incarnation end) + 1
+            let alive_me = Membership.alive(s.me, next)
+            let out = ({ s with incarnation: next, members: Membership.observe(s.members, alive_me) },
+                       Some(Gossip(alive_me)))
+            out
+        end
+    end
+  end
+
+end

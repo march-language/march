@@ -150,6 +150,7 @@ let all_stdlib_decls =
     "peer_registry.march";
     "cluster_conn.march";
     "membership.march";
+    "swim.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -320,6 +321,10 @@ let () =
     ("membership", [
       Alcotest.test_case "Membership module"
         `Quick (run_stdlib_test "test_membership.march" "TestMembership");
+    ]);
+    ("swim", [
+      Alcotest.test_case "Swim module"
+        `Quick (run_stdlib_test "test_swim.march" "TestSwim");
     ]);
     ("net_kernel", [
       Alcotest.test_case "NetKernel module"

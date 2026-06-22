@@ -1,0 +1,160 @@
+mod TestSwim do
+
+  -- A 3-member view (self + a + b), all Alive at incarnation 1.
+  -- Config: ack timeout 100ms, suspect→dead 1000ms, k=2 indirect helpers.
+  pfn mk(me : String) : Swim.State do
+    let cfg = Swim.config(100, 1000, 2)
+    let m1 = Membership.observe(Membership.empty(), Membership.alive("self", 1))
+    let m2 = Membership.observe(m1, Membership.alive("a", 1))
+    let m3 = Membership.observe(m2, Membership.alive("b", 1))
+    Swim.make(me, 1, m3, cfg)
+  end
+
+  pfn status_of(s : Swim.State, id : String) : Membership.MemberStatus do
+    match Membership.get(s.members, id) do
+      Some(m) -> m.status
+      None    -> Membership.Alive
+    end
+  end
+
+  describe "Swim.begin_period" do
+
+    test "directly pings the chosen target" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (_s2, action) -> assert (action == SendPing("a"))
+      end
+    end
+
+  end
+
+  describe "Swim.escalate_indirect" do
+
+    test "fans out a ping-req to each helper once the ack is overdue" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.escalate_indirect(s1, 150, Cons("b", Nil)) do
+            (_s2, actions) -> assert (actions == Cons(SendPingReq("b", "a"), Nil))
+          end
+      end
+    end
+
+    test "stays quiet while the ack is still within timeout" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.escalate_indirect(s1, 50, Cons("b", Nil)) do
+            (_s2, actions) -> assert (actions == Nil)
+          end
+      end
+    end
+
+  end
+
+  describe "Swim.end_period" do
+
+    test "an acked probe leaves the target Alive and gossips nothing" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(Swim.on_ack(s1, "a"), 200) do
+            (s2, actions) ->
+              assert (actions == Nil)
+              assert (status_of(s2, "a") == Alive)
+          end
+      end
+    end
+
+    test "a mismatched ack does not save the target" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(Swim.on_ack(s1, "b"), 200) do
+            (s2, _) -> assert (status_of(s2, "a") == Suspect)
+          end
+      end
+    end
+
+    test "an unacked probe marks Suspect and gossips it" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(s1, 200) do
+            (s2, actions) ->
+              assert (status_of(s2, "a") == Suspect)
+              assert (actions == Cons(Gossip(Membership.suspect("a", 1)), Nil))
+          end
+      end
+    end
+
+  end
+
+  describe "Swim.expire_suspects" do
+
+    test "promotes Suspect to Dead once the suspect timer elapses" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(s1, 200) do
+            (s2, _) ->
+              -- deadline = 200 + 1000 = 1200
+              match Swim.expire_suspects(s2, 1300) do
+                (s3, actions) ->
+                  assert (status_of(s3, "a") == Dead)
+                  assert (actions == Cons(Gossip(Membership.dead("a", 1)), Nil))
+              end
+          end
+      end
+    end
+
+    test "leaves a Suspect alone before its timer elapses" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(s1, 200) do
+            (s2, _) ->
+              match Swim.expire_suspects(s2, 500) do
+                (s3, actions) ->
+                  assert (status_of(s3, "a") == Suspect)
+                  assert (actions == Nil)
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "Swim.on_gossip" do
+
+    test "a higher-incarnation Alive refutes a Suspect and cancels its timer" do
+      match Swim.begin_period(mk("self"), 0, "a") do
+        (s1, _) ->
+          match Swim.end_period(s1, 200) do
+            (s2, _) ->
+              let s3 = Swim.on_gossip(s2, Membership.alive("a", 2))
+              assert (status_of(s3, "a") == Alive)
+              -- timer cancelled: expiring past the old deadline does nothing
+              match Swim.expire_suspects(s3, 1300) do
+                (s4, _) -> assert (status_of(s4, "a") == Alive)
+              end
+          end
+      end
+    end
+
+  end
+
+  describe "Swim.refute" do
+
+    test "bumps our incarnation and re-announces Alive when suspected" do
+      let s = mk("self")
+      let suspected = { s with members: Membership.observe(s.members, Membership.suspect("self", 1)) }
+      match Swim.refute(suspected) do
+        (s2, action) ->
+          assert (status_of(s2, "self") == Alive)
+          assert (s2.incarnation == 2)
+          assert (action == Some(Gossip(Membership.alive("self", 2))))
+      end
+    end
+
+    test "does nothing when we are already Alive" do
+      match Swim.refute(mk("self")) do
+        (_s2, action) -> assert (action == None)
+      end
+    end
+
+  end
+
+end
