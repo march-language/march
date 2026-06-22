@@ -1,0 +1,40 @@
+-- FFI fully-typed Option/Result codec *fields*: a record whose fields are
+-- Option(Int), Option(String), Result(Int,String). The C binding decodes/encodes
+-- them as typed structs (Option_Int_c / Option_String_c / Result_Int_String_c),
+-- not raw march_value. make() builds a Box in C; classify() decodes one built in
+-- March. ffi_optres.c is the filled-in `forge ffi gen-c` artifact.
+mod Test do
+  needs Ffi
+  type Box = { tag : Int, maybe : Option(Int), name : Option(String), res : Result(Int, String) }
+  extern "c" : Cap(Ffi) do
+    fn make(tag: Int): Box = "ffi_optres_make"
+    fn classify(b: Box): String = "ffi_optres_classify"
+  end
+  fn opt_int(o: Option(Int)) : String do
+    match o do
+      Some(n) -> int_to_string(n)
+      None -> "none"
+    end
+  end
+  fn opt_str(o: Option(String)) : String do
+    match o do
+      Some(s) -> s
+      None -> "noname"
+    end
+  end
+  fn res_int(r: Result(Int, String)) : String do
+    match r do
+      Ok(n) -> int_to_string(n)
+      Err(e) -> e
+    end
+  end
+  fn main() : Unit do
+    let b = make(7)                       -- C-built Box, typed Option/Result fields
+    println(int_to_string(b.tag))         -- 7
+    println(opt_int(b.maybe))             -- 42
+    println(opt_str(b.name))              -- hi
+    println(res_int(b.res))               -- 100
+    -- classify() decodes a March-built Box (None / Some(String) / Err(String)):
+    println(classify({ tag: 1, maybe: None, name: Some("x"), res: Err("bad") }))   -- none/x/err:bad
+  end
+end

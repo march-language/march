@@ -98,8 +98,47 @@ let acyclic_codecs (cands : (string * Ast.type_def) list)
 
 let is_codec tbl t = match con_name t with Some n -> List.mem_assoc n tbl | None -> false
 
+(* A "leaf" payload usable inside a fully-typed Option/Result *field* codec: its
+   mangled name, mirror-struct C type, and generic (tagged-slot) decode/encode.
+   Limited to primitives + String/Bytes so the synthetic Option_T/Result_T_E
+   codecs depend only on leaves (no inter-codec ordering); Float/Unit/List and
+   nested record/variant payloads fall back to the raw march_value passthrough. *)
+let leaf_payload (t : Ast.ty)
+  : (string * string * (string -> string) * (string -> string)) option =
+  match con_name t with
+  | Some "Int"    -> Some ("Int", "int64_t",
+      (fun s -> Printf.sprintf "march_get_int(%s)" s),
+      (fun v -> Printf.sprintf "march_make_int(%s)" v))
+  | Some "Bool"   -> Some ("Bool", "int64_t",
+      (fun s -> Printf.sprintf "march_get_bool(%s)" s),
+      (fun v -> Printf.sprintf "march_make_bool((int)(%s))" v))
+  | Some "String" -> Some ("String", "march_slice",
+      (fun s -> Printf.sprintf "march_str_borrow(%s)" s),
+      (fun v -> Printf.sprintf "march_str_new(%s.ptr, %s.len)" v v))
+  | Some "Bytes"  -> Some ("Bytes", "march_slice",
+      (fun s -> Printf.sprintf "march_bytes_borrow(%s)" s),
+      (fun v -> Printf.sprintf "march_bytes_new(%s.ptr, %s.len)" v v))
+  | _ -> None
+
+type opt_res = OROption of Ast.ty | ORResult of Ast.ty * Ast.ty
+
+(* Recognize an Option(T)/Result(T,E) field whose payloads are supported leaves;
+   returns (mangled codec-type name, structure) for codec generation. *)
+let opt_res_of (t : Ast.ty) : (string * opt_res) option =
+  match t with
+  | Ast.TyCon ({ Ast.txt = "Option"; _ }, [p]) ->
+    (match leaf_payload p with Some (m,_,_,_) -> Some ("Option_" ^ m, OROption p) | None -> None)
+  | Ast.TyCon ({ Ast.txt = "Result"; _ }, [a; e]) ->
+    (match leaf_payload a, leaf_payload e with
+     | Some (ma,_,_,_), Some (me,_,_,_) -> Some (Printf.sprintf "Result_%s_%s" ma me, ORResult (a, e))
+     | _ -> None)
+  | _ -> None
+
 (* C type of a record/ctor field in the mirror struct. *)
 let field_c_type tbl (t : Ast.ty) : string =
+  match opt_res_of t with
+  | Some (nm, _) -> nm ^ "_c"
+  | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> "int64_t"
   | Some "Float"            -> "double"
@@ -109,6 +148,9 @@ let field_c_type tbl (t : Ast.ty) : string =
 
 (* Read a slot value into its mirror-struct representation. *)
 let decode_expr tbl (t : Ast.ty) (slot : string) : string =
+  match opt_res_of t with
+  | Some (nm, _) -> Printf.sprintf "march_decode_%s(%s)" nm slot
+  | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> slot
   | Some "Float"            -> Printf.sprintf "march_get_float(%s)" slot
@@ -118,6 +160,9 @@ let decode_expr tbl (t : Ast.ty) (slot : string) : string =
 
 (* Build a slot value from a mirror-struct field. *)
 let encode_expr tbl (t : Ast.ty) (fld : string) : string =
+  match opt_res_of t with
+  | Some (nm, _) -> Printf.sprintf "march_encode_%s(%s)" nm fld
+  | None ->
   match con_name t with
   | Some ("Int" | "Bool")   -> fld
   | Some "Float"            -> Printf.sprintf "march_make_float(%s)" fld
@@ -225,6 +270,50 @@ let gen_variant tbl (name : string) (vars : Ast.variant list) (b : Buffer.t) =
     Buffer.add_string b "    }\n"
   end;
   Buffer.add_string b "    return march_make_variant(o.tag, 0, (const march_value *)0);\n}\n"
+
+(* Mirror struct + decode + encode for one synthetic Option(T)/Result(T,E) codec.
+   Option niche: None=0, Some(x)=x (the payload in tagged/generic form).
+   Result boxed: Ok=tag 0 / Err=tag 1, payload at field 0 (tagged/generic). *)
+let gen_opt_res ((nm, kind) : string * opt_res) (b : Buffer.t) =
+  match kind with
+  | OROption p ->
+    let (_, cty, dec, enc) = Option.get (leaf_payload p) in
+    Buffer.add_string b (Printf.sprintf
+      "typedef struct { int32_t is_some; %s value; } %s_c;\n" cty nm);
+    Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" nm nm);
+    Buffer.add_string b (Printf.sprintf
+      "    %s_c o;\n    if (v == 0) o.is_some = 0;\n    else { o.is_some = 1; o.value = %s; }\n    return o;\n}\n"
+      nm (dec "v"));
+    Buffer.add_string b (Printf.sprintf "static march_value march_encode_%s(%s_c o) {\n" nm nm);
+    Buffer.add_string b (Printf.sprintf
+      "    if (!o.is_some) return march_none();\n    return march_some(%s);\n}\n" (enc "o.value"))
+  | ORResult (a, e) ->
+    let (_, cta, deca, enca) = Option.get (leaf_payload a) in
+    let (_, cte, dece, ence) = Option.get (leaf_payload e) in
+    Buffer.add_string b (Printf.sprintf
+      "typedef struct { int32_t is_ok; %s ok; %s err; } %s_c;\n" cta cte nm);
+    Buffer.add_string b (Printf.sprintf "static %s_c march_decode_%s(march_value v) {\n" nm nm);
+    Buffer.add_string b (Printf.sprintf
+      "    %s_c o;\n    if (march_variant_tag(v) == 0) { o.is_ok = 1; o.ok = %s; }\n\
+      \    else { o.is_ok = 0; o.err = %s; }\n    return o;\n}\n"
+      nm (deca "march_variant_field(v, 0)") (dece "march_variant_field(v, 0)"));
+    Buffer.add_string b (Printf.sprintf "static march_value march_encode_%s(%s_c o) {\n" nm nm);
+    Buffer.add_string b (Printf.sprintf
+      "    if (o.is_ok) return march_ok(%s);\n    return march_err(%s);\n}\n"
+      (enca "o.ok") (ence "o.err"))
+
+(* Distinct supported Option/Result field types across the emitted record/variant
+   codecs (for the synthetic-codec block emitted ahead of them). *)
+let collect_opt_res (records : (string * Ast.type_def) list) : (string * opt_res) list =
+  let seen = Hashtbl.create 16 and order = ref [] in
+  let add t = match opt_res_of t with
+    | Some (nm, k) -> if not (Hashtbl.mem seen nm) then (Hashtbl.replace seen nm (); order := (nm, k) :: !order)
+    | None -> () in
+  List.iter (fun (_, td) -> match td with
+    | Ast.TDRecord fs  -> List.iter (fun (f : Ast.field) -> add f.Ast.fld_ty) fs
+    | Ast.TDVariant vs -> List.iter (fun (v : Ast.variant) -> List.iter add v.Ast.var_args) vs
+    | Ast.TDAlias _ -> ()) records;
+  List.rev !order
 
 (* Topologically order [needed] so a nested type is defined before its user. *)
 let topo_order (tbl : (string * Ast.type_def) list) (needed : string list) : string list =
@@ -346,6 +435,12 @@ let gen_c (decls : Ast.decl list) : string =
      #include \"march_ffi.h\"\n#include <stdint.h>\n\n";
   if needed <> [] then begin
     Buffer.add_string b "/* ── Generated codecs (record/variant <-> repr-C mirror) ── */\n";
+    (* Synthetic Option(T)/Result(T,E) field codecs first — record/variant mirror
+       structs reference them by value. They depend only on leaf payloads. *)
+    let emitted = List.filter_map (fun n -> match List.assoc_opt n tbl with
+      | Some td -> Some (n, td) | None -> None) needed in
+    List.iter (fun or_ty -> gen_opt_res or_ty b; Buffer.add_char b '\n')
+      (collect_opt_res emitted);
     List.iter (fun n -> match List.assoc_opt n tbl with
       | Some (Ast.TDRecord fs)  -> gen_record tbl n fs b; Buffer.add_char b '\n'
       | Some (Ast.TDVariant vs) -> gen_variant tbl n vs b; Buffer.add_char b '\n'

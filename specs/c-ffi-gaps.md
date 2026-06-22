@@ -16,12 +16,15 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   mirror structs + `march_decode_T`/`march_encode_T` so the author works with
   plain C structs, never touching slots (`test/native/ffi_codec`, spec §6.4).
   Remaining sub-gaps:
-  - **Field kinds beyond the typed set are passed through as raw `march_value`.**
-    The generated mirror fully types `Int`/`Bool` (raw `int64_t`), `Float`
-    (`double`), `String`/`Bytes` (`march_slice`), and nested records/variants;
-    `Option`/`Result`/`resource`/`List` fields are exposed as the raw
-    `march_value` (author uses `march_some`/`ok`/`err`/`march_resource_get` +
-    accessors). Fully-typed `Option`/`Result` field decoding is future.
+  - **Field kinds.** The generated mirror fully types `Int`/`Bool` (raw
+    `int64_t`), `Float` (`double`), `String`/`Bytes` (`march_slice`), nested
+    records/variants, and now **`Option(T)`/`Result(T,E)` fields** whose payloads
+    are leaf types (Int/Bool/String/Bytes) — emitted as `Option_T_c` /
+    `Result_T_E_c` mirror structs with niche/boxed decode-encode
+    (`test/native/ffi_optres`). Still passed through as raw `march_value`:
+    `Option`/`Result` fields with **Float/Unit/List/nested** payloads, and
+    `resource`/`List` fields (author uses `march_some`/`ok`/`err` /
+    `march_resource_get` + accessors).
   - **Recursive types** (reachable from themselves) and **generic** record/
     variant types get no generated codec — a by-value mirror can't represent
     them; they fall back to the `march_value` passthrough.

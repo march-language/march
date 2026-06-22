@@ -764,6 +764,40 @@ let test_ffi_gen_c_codecs () =
   Alcotest.(check bool) "shim decodes codec param" true (contains "march_decode_Labeled(l_v)");
   Alcotest.(check bool) "shim encodes codec return" true (contains "return march_encode_Point(result)")
 
+let test_ffi_gen_c_optres_fields () =
+  let dir = Filename.temp_file "march_ffi_optres" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let mfile = Filename.concat dir "o.march" in
+  let oc = open_out mfile in
+  output_string oc
+    "mod O do\n\
+    \  needs Ffi\n\
+    \  type Box = { tag : Int, maybe : Option(Int), res : Result(Int, String) }\n\
+    \  extern \"demo\" : Cap(Ffi) do\n\
+    \    fn mk(): Box = \"demo_mk\"\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let cfile = Filename.concat dir "out.c" in
+  (match Cmd_ffi.run ~file:mfile ~out:(Some cfile) with
+   | Error e -> Alcotest.failf "gen-c failed: %s" e
+   | Ok () -> ());
+  let ic = open_in cfile in
+  let body = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let contains sub =
+    let n = String.length sub and h = String.length body in
+    let rec go i = i + n <= h && (String.sub body i n = sub || go (i+1)) in go 0 in
+  (* synthetic Option/Result field codecs *)
+  Alcotest.(check bool) "Option(Int) mirror" true (contains "} Option_Int_c;");
+  Alcotest.(check bool) "Option(Int) niche decode" true (contains "if (v == 0) o.is_some = 0;");
+  Alcotest.(check bool) "Result mirror" true (contains "} Result_Int_String_c;");
+  Alcotest.(check bool) "Result boxed decode" true (contains "march_variant_tag(v) == 0");
+  (* the record's mirror uses the typed field codecs, not raw march_value *)
+  Alcotest.(check bool) "record field typed" true (contains "Option_Int_c maybe;");
+  Alcotest.(check bool) "record decodes via field codec" true
+    (contains "march_decode_Result_Int_String(march_record_field")
+
 let test_ffi_gen_c_raises () =
   let dir = Filename.temp_file "march_ffi_raises" "" in
   Sys.remove dir; Unix.mkdir dir 0o755;
@@ -938,6 +972,7 @@ let () =
     "ffi", [
       Alcotest.test_case "gen-c: extern block -> C skeleton" `Quick test_ffi_gen_c;
       Alcotest.test_case "gen-c: record/variant codecs"      `Quick test_ffi_gen_c_codecs;
+      Alcotest.test_case "gen-c: Option/Result field codecs"  `Quick test_ffi_gen_c_optres_fields;
       Alcotest.test_case "gen-c: raises (env-routed errors)" `Quick test_ffi_gen_c_raises;
       Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
