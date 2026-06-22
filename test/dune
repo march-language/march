@@ -97,6 +97,23 @@
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
 
+; ── Distributed-OTP function-by-identity registry unit test ──────────────
+(rule
+ (targets test_remote_registry_runner)
+ (deps    test_remote_registry.c
+          ../runtime/march_remote_registry.c
+          ../runtime/march_remote_registry.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_remote_registry.c ../runtime/march_remote_registry.c
+               -lpthread)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_remote_registry_runner))
+ (action  (run ./test_remote_registry_runner)))
+
 ; ── FFI ABI unit test (links the real runtime for genuine alloc/RC/gauge) ─
 (rule
  (targets test_ffi_runner)

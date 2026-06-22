@@ -332,6 +332,7 @@ let ensure_runtime_so () =
           (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+      ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
     let tls_c = Filename.concat runtime_dir "march_tls.c" in
@@ -1452,6 +1453,7 @@ let compile filename =
                   (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
               ^ (opt_file2 (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
               ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
             in
