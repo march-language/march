@@ -1,0 +1,20 @@
+-- Regression: a `blocking` extern is `await`ed on the JS target, and the
+-- async colour propagates virally through the call chain to main().
+-- Helper: test/native/js_ffi_async_helper.mjs exports an async `delayAdd`.
+mod JsFfiAsync do
+  needs IO.Foreign
+  needs IO.Foreign.Blocking
+
+  extern "./js_ffi_async_helper.mjs" : Cap(IO.Foreign) do
+    blocking fn delayAdd(a: Int, b: Int) : Int
+  end
+
+  fn compute(x: Int) : Int do
+    delayAdd(x, 10)
+  end
+
+  fn main() : Unit do
+    let r = compute(32)
+    println(int_to_string(r))
+  end
+end

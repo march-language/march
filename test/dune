@@ -1358,6 +1358,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_extern_import.expected js_extern_import.out)))
 
+; js_ffi_async — verifies `blocking` externs emit `async function` + `await` on JS target
+(rule
+ (targets js_ffi_async_helper.mjs)
+ (deps (file native/js_ffi_async_helper.mjs))
+ (action (copy native/js_ffi_async_helper.mjs js_ffi_async_helper.mjs)))
+
+(rule
+ (targets js_ffi_async.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_ffi_async.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_ffi_async.mjs native/js_ffi_async.march)))
+
+(rule
+ (targets js_ffi_async.out)
+ (deps js_ffi_async.mjs js_ffi_async_helper.mjs march_runtime.mjs)
+ (action (with-stdout-to js_ffi_async.out (run node js_ffi_async.mjs))))
+
+(rule (alias runtest) (action (diff native/js_ffi_async.expected js_ffi_async.out)))
+
 ; ── FFI Float in generic slots: raises Result(Float,_) Ok payload, and
 ; ── Option(Float)/Option(Unit) returns via march_some_boxed / march_none_boxed.
 (rule

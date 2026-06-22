@@ -30,6 +30,8 @@ type ctx = {
   (* extern march_name → decl; populated before emission for call-site tracking *)
   used_externs : (string, unit) Hashtbl.t;
   (* extern march names that actually appear in emitted code; drives lazy bridge emit *)
+  async_fns    : (string, unit) Hashtbl.t;
+  (* user function names that must be emitted as `async function` (Chunk A) *)
   fn_lines     : (string, int) Hashtbl.t;
   (* fn_name → 1-indexed source line; looked up when recording source map segments *)
   segments     : (int * int) list ref;
@@ -45,6 +47,7 @@ let create_ctx ?(fn_lines=[]) () = {
   param_names  = Hashtbl.create 8;
   extern_fns   = Hashtbl.create 8;
   used_externs = Hashtbl.create 8;
+  async_fns    = Hashtbl.create 8;
   fn_lines     = (let t = Hashtbl.create 16 in
                   List.iter (fun (n, l) -> Hashtbl.replace t n l) fn_lines; t);
   segments     = ref [];
@@ -290,15 +293,84 @@ let emit_extern_call (ctx : ctx) (ed : Tir.extern_decl) (args : Tir.atom list) :
   let march_name = mangle ed.ed_march_name in
   Hashtbl.replace ctx.used_externs ed.ed_march_name ();
   (match classify_js_extern ed with
-   | JsModuleSync | JsModuleBlocking | CBacked ->
+   | JsModuleSync | CBacked ->
      emit ctx (march_name ^ "(");
      List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
      emit ctx ")"
+   | JsModuleBlocking ->
+     emit ctx ("(await " ^ march_name ^ "(");
+     List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+     emit ctx "))"
    | JsModuleRaises ->
      warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
      emit ctx ("(() => { try { return { $: \"Ok\", _0: " ^ march_name ^ "(");
      List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
      emit ctx ") }; } catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; } })()")
+
+(* ── Async colouring analysis (Chunk A) ──────────────────────────── *)
+
+(** Collect the set of fn/extern names referenced in a TIR expression.
+    Tracks both EApp (direct calls) and ECallPtr (closure dispatch, which is
+    how extern calls reach the emitter after defunctionalization). *)
+let rec calls_in_expr = function
+  | Tir.EApp (f, args) ->
+    f.Tir.v_name :: List.concat_map calls_in_atom args
+  | Tir.ELet (_, e, body) -> calls_in_expr e @ calls_in_expr body
+  | Tir.ELetRec (fns, body) ->
+    List.concat_map (fun (fn : Tir.fn_def) -> calls_in_expr fn.fn_body) fns
+    @ calls_in_expr body
+  | Tir.ESeq (e1, e2) -> calls_in_expr e1 @ calls_in_expr e2
+  | Tir.ECase (_, brs, def) ->
+    List.concat_map (fun (br : Tir.branch) -> calls_in_expr br.Tir.br_body) brs
+    @ (match def with Some d -> calls_in_expr d | None -> [])
+  | Tir.ECallPtr (f, args) ->
+    calls_in_atom f @ List.concat_map calls_in_atom args
+  | Tir.EAlloc (_, fields) -> List.concat_map calls_in_atom fields
+  | Tir.EUpdate (a, fields) ->
+    calls_in_atom a @ List.concat_map (fun (_, fa) -> calls_in_atom fa) fields
+  | Tir.EAtom a -> calls_in_atom a
+  | Tir.EField (a, _) -> calls_in_atom a
+  | Tir.ETuple atoms -> List.concat_map calls_in_atom atoms
+  | Tir.ERecord fields -> List.concat_map (fun (_, a) -> calls_in_atom a) fields
+  | _ -> []
+and calls_in_atom = function
+  | Tir.AVar v    -> [v.Tir.v_name]
+  | Tir.ADefRef d -> [d.Tir.did_name]
+  | Tir.ALit _    -> []
+
+(** Populate ctx.async_fns via seed + fixpoint over tm_fns.
+    Seed: a fn is async if it directly calls a JsModuleBlocking extern.
+    Fixpoint: a fn is async if it calls any already-async fn.
+    Must run BEFORE emit_fn_decl to guarantee async_fns is complete. *)
+let compute_async_fns (ctx : ctx) (fns : Tir.fn_def list) : unit =
+  (* Build per-fn call set *)
+  let fn_calls : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (fn : Tir.fn_def) ->
+    Hashtbl.replace fn_calls fn.fn_name (calls_in_expr fn.fn_body)
+  ) fns;
+  (* Seed: fns that directly call a blocking extern *)
+  List.iter (fun (fn : Tir.fn_def) ->
+    let called = Option.value (Hashtbl.find_opt fn_calls fn.fn_name) ~default:[] in
+    if List.exists (fun callee ->
+         match Hashtbl.find_opt ctx.extern_fns callee with
+         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | None -> false) called
+    then Hashtbl.replace ctx.async_fns fn.fn_name ()
+  ) fns;
+  (* Fixpoint: propagate async through the call graph *)
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun (fn : Tir.fn_def) ->
+      if not (Hashtbl.mem ctx.async_fns fn.fn_name) then begin
+        let called = Option.value (Hashtbl.find_opt fn_calls fn.fn_name) ~default:[] in
+        if List.exists (Hashtbl.mem ctx.async_fns) called then begin
+          Hashtbl.replace ctx.async_fns fn.fn_name ();
+          changed := true
+        end
+      end
+    ) fns
+  done
 
 (* ── Forward declarations ────────────────────────────────────────── *)
 
@@ -422,10 +494,12 @@ and emit_val_impl ctx expr =
         (match Hashtbl.find_opt ctx.extern_fns name with
          | Some ed -> emit_extern_call ctx ed args
          | None ->
+           let is_async_callee = Hashtbl.mem ctx.async_fns name in
+           if is_async_callee then emit ctx "(await ";
            emit ctx (mangle name ^ "(");
            List.iteri (fun i a ->
              if i > 0 then emit ctx ", "; emit_atom ctx a) args;
-           emit ctx ")")
+           if is_async_callee then emit ctx "))" else emit ctx ")")
       end
     end
 
@@ -502,12 +576,25 @@ and emit_val_impl ctx expr =
 
   | Tir.ECallPtr (f, args) ->
     (* Post-Defun closure dispatch: closure struct has apply fn at ._0.
-       Apply fn ABI: apply(clo, args...) — pass closure as first argument. *)
+       Apply fn ABI: apply(clo, args...) — pass closure as first argument.
+       Await if callee is a blocking extern or an async user fn. *)
+    let is_async_call = match f with
+      | Tir.AVar v ->
+        (match Hashtbl.find_opt ctx.extern_fns v.Tir.v_name with
+         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | None -> Hashtbl.mem ctx.async_fns v.Tir.v_name)
+      | Tir.ADefRef d ->
+        (match Hashtbl.find_opt ctx.extern_fns d.Tir.did_name with
+         | Some ed -> classify_js_extern ed = JsModuleBlocking
+         | None -> Hashtbl.mem ctx.async_fns d.Tir.did_name)
+      | _ -> false
+    in
+    if is_async_call then emit ctx "(await ";
     emit_atom ctx f;
     emit ctx "._0(";
     emit_atom ctx f;
     List.iter (fun a -> emit ctx ", "; emit_atom ctx a) args;
-    emit ctx ")"
+    if is_async_call then emit ctx "))" else emit ctx ")"
 
 (* ── Statement emission ──────────────────────────────────────────── *)
 
@@ -720,12 +807,14 @@ and emit_case_impl ctx result_var expr =
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   let fname = mangle fn.Tir.fn_name in
+  let is_async = Hashtbl.mem ctx.async_fns fn.Tir.fn_name in
   (* Record source map segment: current output line → source line for this fn *)
   (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
    | Some src_line when src_line > 0 ->
      ctx.segments := (ctx.line, src_line - 1) :: !(ctx.segments)
    | _ -> ());
   emit_indent ctx;
+  if is_async then emit ctx "async ";
   emit ctx ("function " ^ fname ^ "(");
   List.iteri (fun i p ->
     if i > 0 then emit ctx ", ";
@@ -741,9 +830,13 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   emit ctx "}\n";
   (* Closure-protocol wrapper: allows this function to be used as a first-class
      value via ECallPtr dispatch (f._0(f, args)).
-     $_ is the closure self-pointer (unused since top-level fns have no free vars). *)
+     $_ is the closure self-pointer (unused since top-level fns have no free vars).
+     Async fns get an async arrow so the $clo call also propagates the Promise. *)
   emit_indent ctx;
-  emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
+  if is_async then
+    emit ctx ("const " ^ fname ^ "$clo = { _0: async ($_")
+  else
+    emit ctx ("const " ^ fname ^ "$clo = { _0: ($_");
   List.iter (fun p -> emit ctx (", " ^ mangle p.Tir.v_name)) fn.Tir.fn_params;
   emit ctx (") => " ^ fname ^ "(");
   List.iteri (fun i p ->
@@ -818,8 +911,11 @@ let emit_extern_clo_str (ed : Tir.extern_decl) : string =
   let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
   let plist = String.concat ", " pnames in
   match classify_js_extern ed with
-  | JsModuleSync | JsModuleBlocking | CBacked ->
+  | JsModuleSync | CBacked ->
     Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
+      march_name plist march_name plist
+  | JsModuleBlocking ->
+    Printf.sprintf "const %s$clo = { _0: async ($_, %s) => (await %s(%s)) };\n"
       march_name plist march_name plist
   | JsModuleRaises ->
     warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
@@ -962,6 +1058,8 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   ) m.Tir.tm_externs;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
+  (* Async analysis: must run after extern_fns is populated, before any fn emission *)
+  compute_async_fns ctx m.Tir.tm_fns;
   (* Top-level functions — populates used_externs via call-site tracking
      and records (output_line, source_line) segments for source maps *)
   List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
@@ -1017,7 +1115,10 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
   if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
-    Buffer.add_string export_buf "main();\n"
+    if Hashtbl.mem ctx.async_fns "main" then
+      Buffer.add_string export_buf "await main();\n"
+    else
+      Buffer.add_string export_buf "main();\n"
   end;
   List.iter (fun name ->
     if name <> "main" then
