@@ -321,6 +321,70 @@ let run_preprocessors ~proj ~src_dir ~gen_dir =
     !count
   end
 
+(** Write package.json and run npm install for [js_deps] declared in forge.toml.
+    Called before JS compilation so imported npm packages are available.
+    No-op when js_deps is empty. *)
+let ensure_js_deps ~root (proj : Project.project) =
+  if proj.Project.js_deps = [] then Ok ()
+  else begin
+    let pkg_path = Filename.concat root "package.json" in
+    (* Build the deps JSON object. *)
+    let deps_json =
+      String.concat ",\n    "
+        (List.map (fun (name, ver) ->
+           Printf.sprintf {|"%s": "%s"|} name ver
+         ) proj.Project.js_deps)
+    in
+    (* Read existing package.json or start with a minimal skeleton. *)
+    let existing =
+      if Sys.file_exists pkg_path then
+        try let ic = open_in pkg_path in
+            let n = in_channel_length ic in
+            let s = Bytes.create n in
+            really_input ic s 0 n; close_in ic; Bytes.to_string s
+        with _ -> ""
+      else ""
+    in
+    (* Only write if the deps section would change.
+       Simple heuristic: check if every declared dep appears verbatim in the file. *)
+    let needs_write =
+      not (List.for_all (fun (name, ver) ->
+        let needle = Printf.sprintf {|"%s": "%s"|} name ver in
+        let len = String.length existing - String.length needle in
+        let found = ref false in
+        for i = 0 to len do
+          if String.sub existing i (String.length needle) = needle then found := true
+        done;
+        !found
+      ) proj.Project.js_deps)
+    in
+    if needs_write then begin
+      let pkg_name = proj.Project.name in
+      let pkg_version = proj.Project.version in
+      let json =
+        Printf.sprintf {|{
+  "name": "%s",
+  "version": "%s",
+  "type": "module",
+  "dependencies": {
+    %s
+  }
+}
+|} pkg_name pkg_version deps_json
+      in
+      (try
+        let oc = open_out pkg_path in
+        output_string oc json; close_out oc;
+        Printf.printf "  [js_deps] wrote package.json\n%!"
+       with Sys_error msg ->
+         Printf.eprintf "  [js_deps] warning: could not write package.json: %s\n%!" msg)
+    end;
+    Printf.printf "  [js_deps] npm install...\n%!";
+    let rc = Sys.command (Printf.sprintf "cd %s && npm install --silent 2>&1" (Filename.quote root)) in
+    if rc = 0 then Ok ()
+    else Error (Printf.sprintf "npm install failed (exit %d)" rc)
+  end
+
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
   match Project.load () with
   | Error msg -> Error msg
@@ -424,6 +488,13 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           in
           let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
           let ffi_flags = ffi_flags_of ~root:proj.Project.root proj in
+          (* Install npm packages declared in [js_deps] before JS compilation. *)
+          (match target with
+           | Some ("js" | "javascript") ->
+             (match ensure_js_deps ~root:proj.Project.root proj with
+              | Error e -> Printf.eprintf "  [js_deps] warning: %s\n%!" e
+              | Ok () -> ())
+           | _ -> ());
           let rc = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry_path in
           if rc = 0 then begin
             do_islands ();

@@ -654,9 +654,15 @@ let watch_cmd =
   let clear =
     Arg.(value & flag & info ["clear"] ~doc:"Clear the screen before each run.")
   in
-  let run a i c = handle (Cmd_watch.run ~action:a ~interval:i ~clear:c ()) in
+  let target =
+    Arg.(value & opt (some string) None &
+         info ["target"] ~docv:"TARGET"
+           ~doc:"Compilation target: native (default), js, wasm32-unknown-unknown. \
+                 Use $(b,js) to rebuild an ES module (.mjs) on each change.")
+  in
+  let run a i c tgt = handle (Cmd_watch.run ~action:a ~interval:i ~clear:c ?target:tgt ()) in
   Cmd.v (Cmd.info "watch" ~doc:"Rebuild/retest/rerun on source changes")
-    Term.(const run $ action $ interval $ clear)
+    Term.(const run $ action $ interval $ clear $ target)
 
 (* ---------------------------------------------------------- forge licenses *)
 

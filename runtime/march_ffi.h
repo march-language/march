@@ -87,6 +87,15 @@ march_value march_record_field(march_value v, int32_t i);
 march_value march_make_variant(int32_t tag, int32_t nfields, const march_value *fields);
 march_value march_make_record(const char *desc, int32_t nfields, const march_value *fields);
 
+/* ── List (Nil | Cons(T, List(T))) ───────────────────────────────────────────
+ * March lists are singly-linked: Nil = variant tag 0 (no fields), Cons =
+ * variant tag 1 (field 0 = head, field 1 = tail).  Use march_list_length
+ * + march_list_nth only for small lists; prefer a single-pass scan otherwise. */
+march_value march_list_nil(void);
+march_value march_list_cons(march_value head, march_value tail);
+int32_t     march_list_length(march_value v);   /* O(n) spine traversal */
+march_value march_list_nth(march_value v, int32_t i); /* O(i) */
+
 /* ── Option / Result constructors (each takes ownership of its payload) ──────*/
 march_value march_none(void);           /* Option None  (tag 0) */
 march_value march_some(march_value v);  /* Option Some  (niche: Some(x)=x) */

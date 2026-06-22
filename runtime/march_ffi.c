@@ -137,6 +137,24 @@ march_value march_make_record(const char *desc, int32_t nfields, const march_val
     return march_from_ptr(p);
 }
 
+/* ── List (Nil | Cons(head, tail)) ──────────────────────────────────────────*/
+march_value march_list_nil(void) {
+    return march_make_variant(0, 0, (const march_value *)0);
+}
+march_value march_list_cons(march_value head, march_value tail) {
+    march_value f[2] = { head, tail };
+    return march_make_variant(1, 2, f);
+}
+int32_t march_list_length(march_value v) {
+    int32_t n = 0;
+    while (march_variant_tag(v) == 1) { v = march_variant_field(v, 1); n++; }
+    return n;
+}
+march_value march_list_nth(march_value v, int32_t i) {
+    while (i-- > 0) v = march_variant_field(v, 1);
+    return march_variant_field(v, 0);
+}
+
 march_value march_none(void)          { return 0; }
 march_value march_some(march_value v) { return v; }
 march_value march_ok(march_value v)   { return mk_cell1(0, v); }

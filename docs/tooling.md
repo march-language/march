@@ -142,6 +142,39 @@ In HTML, import the output as an ES module:
 
 The `Dom` module is JS-only — calling DOM functions in a native build is a compile-time error at the capability level, but a runtime panic if you bypass the type system with FFI.
 
+#### forge build and watch with --target js
+
+`forge build` and `forge watch` both accept `--target js`:
+
+```sh
+forge build --target js          # compile → .march/build/debug/<name>.mjs
+forge watch --target js          # rebuild on change
+forge watch run --target js      # rebuild + re-run with node on change
+```
+
+#### JS FFI: calling npm packages
+
+Import any npm package via an `extern` block. Use the bare npm package name (no `npm:` prefix — Node.js resolves those directly):
+
+```march
+mod App do
+  needs IO.Foreign
+  extern "lodash" : Cap(IO.Foreign) do
+    fn chunk(arr: List(String), size: Int) : List(List(String)) = "chunk"
+  end
+end
+```
+
+Declare npm dependencies in forge.toml under `[js_deps]`. `forge build --target js` will write a `package.json` and run `npm install` automatically:
+
+```toml
+[js_deps]
+lodash = "^4.17.21"
+react  = "^18.3.0"
+```
+
+The generated `package.json` sets `"type": "module"` so your `.mjs` output loads cleanly. For Deno or Bun, use their native specifiers (`npm:lodash`, `jsr:@std/path`) directly in the `extern` lib name — no `[js_deps]` needed since those runtimes fetch packages on demand.
+
 ### Checking Types
 
 `forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
@@ -204,12 +237,15 @@ missing_doc          = "off"
 `forge watch` reruns a command whenever a source file changes. It never exits on failure — it reports and keeps watching. Press Ctrl-C to stop.
 
 ```sh
-forge watch            # rebuild on change (default)
-forge watch test       # rerun tests on change
-forge watch run        # rerun the app on change
+forge watch                     # rebuild on change (default)
+forge watch test                # rerun tests on change
+forge watch run                 # rerun the app on change
 
-forge watch --clear    # clear the screen before each run
-forge watch --interval 500   # poll every 500 ms (default: 300 ms)
+forge watch --target js         # rebuild .mjs on change
+forge watch run --target js     # rebuild + re-run with node on change
+
+forge watch --clear             # clear the screen before each run
+forge watch --interval 500      # poll every 500 ms (default: 300 ms)
 ```
 
 ### Formatting
