@@ -15,7 +15,7 @@ mod Range do
   end
 
   doc "Creates a range with an explicit step. Step must be non-zero."
-  fn new_step(start : Int, stop : Int, step : Int) : {start: Int, stop: Int, step: Int} do
+  fn new_step(start : Int, stop : Int, step : {Int | _ != 0}) : {start: Int, stop: Int, step: Int} do
     if step == 0 do
       panic("Range.new_step: step must be non-zero")
     else

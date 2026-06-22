@@ -157,7 +157,7 @@ mod Seq do
     end
   end
 
-  fn batch(seq, n) do
+  fn batch(seq, n : {Int | _ > 0}) do
     -- Group elements into lists of size n.
     fn step_batch(triple, x, f) do
       let (a, buf, count) = triple

@@ -358,7 +358,7 @@ mod Enum do
 
       chunk_every([1,2,3,4,5], 2)  -- [[1,2], [3,4], [5]]
   """
-  fn chunk_every(xs : List(a), n : Int) : List(List(a)) do
+  fn chunk_every(xs : List(a), n : {Int | _ > 0}) : List(List(a)) do
     fn go(lst : List(a), cur : List(a), cur_sz : Int, acc : List(List(a))) : List(List(a)) do
       match lst do
       Nil ->
