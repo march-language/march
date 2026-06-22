@@ -125,6 +125,20 @@ void       *march_resource_get(march_value v, int32_t type_id);
 int64_t march_run_blocking_i(void *fn, const int64_t *args, int n);
 double  march_run_blocking_d(void *fn, const int64_t *args, int n);
 
+/* ── Native → March upcalls ───────────────────────────────────────────────────
+ * Invoke a March closure value (received as an extern parameter of a function
+ * type) from a binding: reads the closure's apply-fn pointer and calls it.
+ * Up to 5 arguments. The closure/args are borrowed — March owns them across the
+ * call.
+ *
+ * Representation (asymmetric — match each by static type):
+ *   - ARGUMENTS use the NATIVE slot rep, exactly like variant/record fields:
+ *     Int/Bool = a RAW machine int (NOT march_make_int), Float = raw IEEE-754
+ *     bits (march_make_float), String/Bytes/heap = the value word itself.
+ *   - The RESULT is the GENERIC tagged word: read Int with march_get_int, Bool
+ *     with march_get_bool, Float with march_get_float, heap/String verbatim. */
+march_value march_call(march_value closure, int32_t nargs, const march_value *args);
+
 /* ── Reference counting (tag-aware) ──────────────────────────────────────────
  * Safe to call on Int/Bool/heap value words: tagged words are a no-op, heap
  * words adjust the refcount.  NEVER call on a Float word — its bit pattern may

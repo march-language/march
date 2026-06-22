@@ -1,0 +1,17 @@
+-- FFI native→March upcalls: a binding receives a March closure as a
+-- function-typed extern parameter and calls back into it via march_call.
+-- `apply1` invokes f(x) once; `count_matching` calls the predicate over
+-- [1..n] — proving closures cross the boundary as march_values whose
+-- apply-fn lives at field 0.
+mod Test do
+  needs Ffi
+  needs IO.Foreign
+  extern "rt" : Cap(Ffi) do
+    fn apply1(f: (Int) -> Int, x: Int): Int = "ffi_apply1"
+    fn count_matching(pred: (Int) -> Bool, n: Int): Int = "ffi_count_matching"
+  end
+  fn main() : Unit do
+    println(int_to_string(apply1(fn n -> n * 2, 21)))          -- f(21) = 42
+    println(int_to_string(count_matching(fn n -> n % 2 == 0, 10)))  -- evens in 1..10 = 5
+  end
+end
