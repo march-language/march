@@ -291,6 +291,88 @@ let axiom_suite =
              (axiom_prog
                 "  fn f(x : Int, y : Int) : Int do get(Node(Node(Leaf, x, Leaf), y, Leaf), 2) end"))) ]
 
+(* M-b: the @[measure] soundness gate.  A measure that is not total, terminating
+   and pure is a HARD compile error (the gate is z3-independent — purely
+   syntactic — so these run ungated). *)
+let case name expect src =
+  Alcotest.test_case name `Quick (fun () ->
+      Alcotest.(check bool) "gate" expect (has_refine_error src))
+
+let gate_suite =
+  [ case "effectful measure (calls panic) is rejected" true
+      "mod M do\n\
+      \  type Nat = Zero | Succ(Nat)\n\
+      \  @[measure]\n\
+      \  fn sz(n : Nat) : Int do\n\
+      \    match n do\n\
+      \      Zero -> panic(\"no\")\n\
+      \      Succ(m) -> 1 + sz(m)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+
+    case "non-exhaustive measure is rejected" true
+      "mod M do\n\
+      \  type Color = Red | Green | Blue\n\
+      \  @[measure]\n\
+      \  fn rank(c : Color) : Int do\n\
+      \    match c do\n\
+      \      Red -> 0\n\
+      \      Green -> 1\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+
+    case "non-structural recursion is rejected" true
+      "mod M do\n\
+      \  type Nat = Zero | Succ(Nat)\n\
+      \  @[measure]\n\
+      \  fn bad(n : Nat) : Int do\n\
+      \    match n do\n\
+      \      Zero -> 0\n\
+      \      Succ(m) -> 1 + bad(n)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+
+    case "a total, terminating, pure measure passes the gate" false
+      "mod M do\n\
+      \  type Nat = Zero | Succ(Nat)\n\
+      \  @[measure]\n\
+      \  fn sz(n : Nat) : Int do\n\
+      \    match n do\n\
+      \      Zero -> 0\n\
+      \      Succ(m) -> 1 + sz(m)\n\
+      \    end\n\
+      \  end\n\
+       end\n" ]
+
+(* M-b: the built-in List(a) is axiomatised, so a user `length` measure computes
+   list lengths structurally — `length([10,20]) = 2`. *)
+let list_prog body =
+  Printf.sprintf
+    "mod M do\n\
+    \  @[measure]\n\
+    \  fn length(xs : List(a)) : Int do\n\
+    \    match xs do\n\
+    \      Nil -> 0\n\
+    \      Cons(h, t) -> 1 + length(t)\n\
+    \    end\n\
+    \  end\n\
+    \  fn nth(xs : List(a), i : {Int | _ >= 0 && _ < length(xs)}) : a do nth(xs, i) end\n\
+     %s\n\
+     end\n"
+    body
+
+let list_axiom_suite =
+  [ gated "list axioms compute length([10,20])=2: index 5 is out of bounds" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (list_prog "  fn f() : Int do nth([10, 20], 5) end")));
+
+    gated "list axioms compute length([10,20])=2: index 1 is in bounds" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (list_prog "  fn f() : Int do nth([10, 20], 1) end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -300,4 +382,6 @@ let () =
       ("assume-p1c", assume_suite);
       ("collision-p1a", collision_suite);
       ("measures-p1b", measure_suite);
-      ("axioms-ma", axiom_suite) ]
+      ("axioms-ma", axiom_suite);
+      ("gate-mb", gate_suite);
+      ("list-axioms-mb", list_axiom_suite) ]

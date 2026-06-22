@@ -80,11 +80,18 @@ let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
 let is_axiom_measure m = Hashtbl.mem axiom_measures m
 let measure_preamble : string ref = ref ""
 
+(* SMT sort name for a March ADT.  z3 reserves several sort names (`List`,
+   `Array`, `Seq`, `Set`, …); keeping our datatype sorts in a private `M_`
+   namespace guarantees no user/builtin ADT name collides with a reserved one.
+   [adt_ctors] / [SData] are keyed by this safe name; constructors are not
+   renamed. *)
+let adt_sort_name (march_name : string) : string = "M_" ^ march_name
+
 let smt_sort_of_field (self : string) (t : A.ty) : Smt.sort =
   match t with
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
-  | A.TyCon ({ A.txt; _ }, _) when txt = self -> Smt.SData self
+  | A.TyCon ({ A.txt; _ }, _) when txt = self -> Smt.SData (adt_sort_name self)
   | _ -> Smt.SData "Elem"
 
 let rec register_adts (decls : A.decl list) : unit =
@@ -92,7 +99,7 @@ let rec register_adts (decls : A.decl list) : unit =
     (function
       | A.DType (_, name, _, A.TDVariant variants, _)
       | A.DAlwaysLinearType (_, name, _, A.TDVariant variants, _) ->
-        Hashtbl.replace adt_ctors name.A.txt
+        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
           (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants);
         List.iter
           (fun (v : A.variant) ->
@@ -103,16 +110,25 @@ let rec register_adts (decls : A.decl list) : unit =
       | _ -> ())
     decls
 
-(* The single matched argument's name + its ADT, if the measure's first param is
-   a registered ADT. *)
-let measure_param_adt (fd : A.fn_def) : (string * string) option =
-  match fd.A.fn_clauses with
-  | { A.fc_params = A.FPNamed p :: _; _ } :: _ -> (
+(* The matched argument's name + its ADT, if the (first) parameter is a
+   registered ADT. *)
+let clause_param_adt (c : A.fn_clause) : (string * string) option =
+  match c.A.fc_params with
+  | A.FPNamed p :: _ -> (
       match p.A.param_ty with
-      | Some (A.TyCon (adt, _)) when Hashtbl.mem adt_ctors adt.A.txt ->
-        Some (p.A.param_name.A.txt, adt.A.txt)
+      | Some (A.TyCon (adt, _)) when Hashtbl.mem adt_ctors (adt_sort_name adt.A.txt) ->
+        Some (p.A.param_name.A.txt, adt_sort_name adt.A.txt)
       | _ -> None)
   | _ -> None
+
+(* The (first) parameter's name, whatever its type (for the termination gate). *)
+let clause_param_name (c : A.fn_clause) : string option =
+  match c.A.fc_params with
+  | (A.FPNamed p | A.FPDefault (p, _)) :: _ -> Some p.A.param_name.A.txt
+  | _ -> None
+
+let measure_param_adt (fd : A.fn_def) : (string * string) option =
+  match fd.A.fn_clauses with c :: _ -> clause_param_adt c | [] -> None
 
 let rec unblock = function
   | A.EBlock (es, sp) -> (match List.rev es with last :: _ -> unblock last | [] -> A.EBlock (es, sp))
@@ -140,13 +156,17 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
 (* Translate a measure arm body to SMT (function-app encoding): patvars -> Const,
    recursive measure calls m(v) -> (m v) where v MUST be a bound patvar
    (structural recursion — the soundness gate).  None => untranslatable. *)
-let rec smt_of_axiom_body (bound : string list) (e : A.expr) : Smt.term option =
-  let r = smt_of_axiom_body bound in
+let rec smt_of_axiom_body ~self (bound : string list) (e : A.expr) : Smt.term option =
+  let r = smt_of_axiom_body ~self bound in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.EVar { A.txt; _ } when List.mem txt bound -> Some (Smt.Const txt)
+  (* Only SELF-recursive calls on a structural component are axiomatised.  Calls
+     to OTHER measures (and to `len`) are deferred to M-c: their function symbols
+     are not declared in this preamble, so emitting `(m v)` for them would be
+     ill-formed SMT — better to leave the arm untranslatable (symbolic fallback). *)
   | A.EApp (A.EVar { A.txt = m; _ }, [ A.EVar { A.txt = v; _ } ], _)
-    when is_measure m && List.mem v bound ->
+    when m = self && List.mem v bound ->
     Some (Smt.App (m, [ Smt.Const v ]))
   | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) ->
     (match r a, r b with Some x, Some y -> Some (Smt.Add (x, y)) | _ -> None)
@@ -191,7 +211,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
             let axioms =
               List.map
                 (fun (ctor, vars, body) ->
-                  match smt_of_axiom_body vars body with
+                  match smt_of_axiom_body ~self:name vars body with
                   | None -> None
                   | Some bsmt ->
                     let sorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
@@ -232,6 +252,157 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
     measure_preamble := "(declare-sort Elem 0)\n" ^ dts ^ "\n" ^ Buffer.contents buf
   end
   else measure_preamble := ""
+
+(* The built-in `List(a)` modelled as an ADT so user measures over lists are
+   axiomatised exactly like user ADTs: `Nil | Cons(a, List(a))`, element opaque
+   (`Elem`), tail recursive (`List`).  Seeded before user types so a user-defined
+   `List` (unusual) still overrides. *)
+let register_builtin_adts () : unit =
+  Hashtbl.replace adt_ctors (adt_sort_name "List") [ "Nil"; "Cons" ];
+  Hashtbl.replace ctor_field_sorts "Nil" [];
+  Hashtbl.replace ctor_field_sorts "Cons" [ Smt.SData "Elem"; Smt.SData (adt_sort_name "List") ]
+
+(* ── M-b: the @[measure] soundness gate ─────────────────────────────────────
+   `@[measure]` is a promise that the function is a TOTAL, TERMINATING, PURE
+   mathematical function.  The axiom encoding trusts that promise: axiomatising a
+   partial / non-terminating / effectful "measure" makes the SMT context
+   inconsistent, from which the solver can prove ANYTHING — silent unsoundness,
+   the worst failure mode.  So breaking the promise is a HARD compile error, not
+   a silent fallback: a user relying on the measure in a predicate deserves to
+   know it cannot be trusted.
+
+   The checks are conservative syntactic over-approximations.  A measure that is
+   sound but merely outside the v1 axiom *encoding* fragment (multi-argument,
+   element-inspecting, `let`-bodied) is NOT an error — it falls back to a sound
+   symbolic reflection.  Only the three soundness properties are gated. *)
+
+(* Immediate sub-expressions, for a structure-agnostic traversal. *)
+let children : A.expr -> A.expr list = function
+  | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> []
+  | A.EApp (f, args, _) -> f :: args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> args
+  | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> [ b ]
+  | A.EBlock (es, _) -> es
+  | A.ELet (b, _) -> [ b.A.bind_expr ]
+  | A.EMatch (s, brs, _) ->
+    s
+    :: List.concat_map
+         (fun (br : A.branch) ->
+           (match br.A.branch_guard with Some g -> [ g ] | None -> []) @ [ br.A.branch_body ])
+         brs
+  | A.ERecord (fs, _) -> List.map snd fs
+  | A.ERecordUpdate (r, fs, _) -> r :: List.map snd fs
+  | A.EField (r, _, _) -> [ r ]
+  | A.EIf (c, t, e, _) -> [ c; t; e ]
+  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
+  | A.EPipe (a, b, _) -> [ a; b ]
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> [ e ]
+  | A.ESend (a, b, _) -> [ a; b ]
+  | A.ELetQ (_, e1, e2, _) -> [ e1; e2 ]
+
+let rec iter_all (f : A.expr -> unit) (e : A.expr) : unit =
+  f e;
+  List.iter (iter_all f) (children e)
+
+(* Variables structurally smaller than [param]: bound by a constructor pattern
+   when matching [param] (or an already-structural variable, so a nested
+   `match l do …` contributes l's components too).  Accumulated top-down. *)
+let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl.t =
+  let set = Hashtbl.create 16 in
+  let is_struct v = v = param || Hashtbl.mem set v in
+  let rec pat_vars = function
+    | A.PatVar n -> [ n.A.txt ]
+    | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) -> List.concat_map pat_vars ps
+    | A.PatAs (p, n, _) -> n.A.txt :: pat_vars p
+    | A.PatRecord (fs, _) -> List.concat_map (fun (_, p) -> pat_vars p) fs
+    | A.PatWild _ | A.PatLit _ -> []
+  in
+  iter_all
+    (fun e ->
+      match e with
+      | A.EMatch (A.EVar s, brs, _) when is_struct s.A.txt ->
+        List.iter
+          (fun (br : A.branch) ->
+            match br.A.branch_pat with
+            | A.PatCon (_, pats) ->
+              List.iter (fun v -> Hashtbl.replace set v ()) (List.concat_map pat_vars pats)
+            | _ -> ())
+          brs
+      | _ -> ())
+    body;
+  set
+
+(* Builtins that diverge or abort: a body calling one is not a total function. *)
+let measure_partial_calls =
+  [ "panic"; "panic_"; "todo"; "todo_"; "unreachable"; "unreachable_"; "exit" ]
+
+(* Gate violations of a `@[measure]`, as human-readable predicate clauses. *)
+let measure_gate_errors (fd : A.fn_def) : string list =
+  let self = fd.A.fn_name.A.txt in
+  let errs = ref [] in
+  let add m = if not (List.mem m !errs) then errs := m :: !errs in
+  List.iter
+    (fun (c : A.fn_clause) ->
+      let body = c.A.fc_body in
+      (* (1) Purity & totality of operations. *)
+      iter_all
+        (fun e ->
+          match e with
+          | A.ESpawn _ -> add "must be pure (it spawns an actor)"
+          | A.ESend _ -> add "must be pure (it sends a message)"
+          | A.EDbg _ -> add "must be pure (it uses a `dbg` expression)"
+          | A.EAssert _ -> add "must be total (an `assert` can abort)"
+          | A.EApp (A.EVar { A.txt; _ }, _, _) when List.mem txt measure_partial_calls ->
+            add (Printf.sprintf "must be total (it calls `%s`, which does not return)" txt)
+          | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ _; d ], _) -> (
+            match d with
+            | A.ELit (A.LitInt n, _) when n <> 0 -> ()
+            | _ -> add (Printf.sprintf "must be total (`%s` can divide by zero)" op))
+          | _ -> ())
+        body;
+      (* (2) Termination via structural recursion. *)
+      (match clause_param_name c with
+       | Some param ->
+         let sset = structural_subvars param body in
+         iter_all
+           (fun e ->
+             match e with
+             | A.EApp (A.EVar { A.txt; _ }, args, _) when txt = self -> (
+               match args with
+               | [ A.EVar v ] when Hashtbl.mem sset v.A.txt -> ()
+               | _ ->
+                 add
+                   "is not structurally recursive (every recursive call must be on a \
+                    component of the matched parameter)")
+             | _ -> ())
+           body
+       | None ->
+         iter_all
+           (fun e ->
+             match e with
+             | A.EApp (A.EVar { A.txt; _ }, _, _) when txt = self ->
+               add
+                 "cannot be shown to terminate (a recursive @[measure] must take an ADT \
+                  parameter and recurse on its components)"
+             | _ -> ())
+           body);
+      (* (3) Totality via an exhaustive match on the ADT parameter. *)
+      match clause_param_adt c with
+      | Some (param, adt) -> (
+        match measure_arms param body with
+        | Some arms ->
+          let covered = List.map (fun (ctor, _, _) -> ctor) arms in
+          let all = try Hashtbl.find adt_ctors adt with Not_found -> [] in
+          let missing = List.filter (fun ctor -> not (List.mem ctor covered)) all in
+          if all <> [] && missing <> [] then
+            add
+              (Printf.sprintf "must be total (its `match` does not cover %s)"
+                 (String.concat ", " missing))
+        | None -> ())
+      | None -> ())
+    fd.A.fn_clauses;
+  List.rev !errs
 
 (* ── Translate the decidable predicate fragment to an SMT term ────────────── *)
 (* [resolve_var] maps a scalar variable to its SMT term; [resolve_measure]
@@ -714,8 +885,20 @@ let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : un
       [] mfns;
   Hashtbl.reset adt_ctors;
   Hashtbl.reset ctor_field_sorts;
+  register_builtin_adts ();
   register_adts m.A.mod_decls;
   build_measure_preamble mfns;
+  (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
+     function, else its axioms would be unsound.  Emit a hard error per
+     violation (filtered to user files by the caller, like every diagnostic). *)
+  List.iter
+    (fun (_name, fd) ->
+      List.iter
+        (fun msg ->
+          Err.error errctx ~span:fd.A.fn_name.A.span
+            (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
+        (measure_gate_errors fd))
+    mfns;
   let tbl = build_table (collect_sig_list m.A.mod_decls) in
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [tbl]. *)
