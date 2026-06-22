@@ -1,7 +1,7 @@
 # Distributed OTP — Node Discovery, Distribution & Cross-Node Work
 
 **Date:** 2026-06-21
-**Status:** Draft — design approved in brainstorm, pending implementation plans per phase
+**Status:** Draft — design approved in brainstorm; **P1 (transport + net-kernel L1/L2) and L3 membership-CRDT implemented** (see `specs/progress.md` and `specs/todos.md` Done). Built as stdlib modules: `net_frame`, `node_identity`, `cluster_auth`, `handshake`, `net_kernel`, `peer_registry`, `cluster_conn`, `membership`; plus exposing `tcp_listen`/`tcp_accept` to the typechecker/eval. Pure logic eval-tested; socket I/O typecheck-clean + runtime-exercised. Remaining: SWIM probe loop, registry CRDT (L5), load-aware dispatch (L6), loopback integration test.
 **Depends on:**
 - CAS (`lib/cas/` — `cas.ml`, `pipeline.ml`, `scc.ml`, `hash.ml`, `serialize.ml`)
 - Hot Code Reloading (`specs/hot-code-reload.md`) — **shares the CAS prerequisite (HCR Part 1) and the mixed-version schema-evolution machinery (HCR Part 6)**
