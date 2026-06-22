@@ -1262,7 +1262,38 @@ let compile filename =
         (* JS target: skip LLVM/clang entirely *)
         if target = March_tir.Llvm_emit.Js then begin
           let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
-          let js = March_tir.Js_emit.emit_module tir_for_js in
+          (* Collect source lines from user AST for source map generation.
+             user_ast = desugared before stdlib injection, so only user functions. *)
+          let rec collect_fn_lines prefix = function
+            | [] -> []
+            | March_ast.Ast.DFn (def, _) :: rest ->
+              let name = prefix ^ def.fn_name.txt in
+              let line = def.fn_name.span.start_line in
+              (name, line) :: collect_fn_lines prefix rest
+            | March_ast.Ast.DMod (nm, _, sub, _) :: rest ->
+              collect_fn_lines (prefix ^ nm.txt ^ ".") sub
+              @ collect_fn_lines prefix rest
+            | _ :: rest -> collect_fn_lines prefix rest
+          in
+          let fn_lines =
+            collect_fn_lines "" user_ast.March_ast.Ast.mod_decls
+          in
+          let (js, map_opt) =
+            March_tir.Js_emit.emit_module ~source_file:filename ~fn_lines tir_for_js
+          in
+          (* Write source map if available, and append sourceMappingURL to JS *)
+          let map_name = Filename.basename out_bin ^ ".map" in
+          let js = match map_opt with
+            | None -> js
+            | Some map_json ->
+              let map_path = Filename.concat (Filename.dirname out_bin) map_name in
+              (try
+                let oc2 = open_out map_path in
+                output_string oc2 map_json;
+                close_out oc2
+               with Sys_error _ -> ());
+              js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+          in
           let oc = open_out out_bin in
           output_string oc js;
           close_out oc;

@@ -18,6 +18,7 @@
 type ctx = {
   buf          : Buffer.t;
   mutable indent : int;
+  mutable line   : int;  (* 0-indexed output line counter, updated by emit *)
   runtime_uses : (string, unit) Hashtbl.t;
   (* runtime function names referenced — imported at top of output *)
   fn_names     : (string, unit) Hashtbl.t;
@@ -29,29 +30,39 @@ type ctx = {
   (* extern march_name → decl; populated before emission for call-site tracking *)
   used_externs : (string, unit) Hashtbl.t;
   (* extern march names that actually appear in emitted code; drives lazy bridge emit *)
+  fn_lines     : (string, int) Hashtbl.t;
+  (* fn_name → 1-indexed source line; looked up when recording source map segments *)
+  segments     : (int * int) list ref;
+  (* (output_line_0indexed, source_line_0indexed) segments collected during fn emission *)
 }
 
-let create_ctx () = {
+let create_ctx ?(fn_lines=[]) () = {
   buf          = Buffer.create 4096;
   indent       = 0;
+  line         = 0;
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
   param_names  = Hashtbl.create 8;
   extern_fns   = Hashtbl.create 8;
   used_externs = Hashtbl.create 8;
+  fn_lines     = (let t = Hashtbl.create 16 in
+                  List.iter (fun (n, l) -> Hashtbl.replace t n l) fn_lines; t);
+  segments     = ref [];
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
 
 (* ── Output helpers ──────────────────────────────────────────────── *)
 
-let emit ctx s = Buffer.add_string ctx.buf s
+let emit ctx s =
+  Buffer.add_string ctx.buf s;
+  String.iter (fun c -> if c = '\n' then ctx.line <- ctx.line + 1) s
 
 let emit_indent ctx =
   for _ = 1 to ctx.indent do Buffer.add_string ctx.buf "  " done
 
 let emitl ctx s =
-  emit_indent ctx; Buffer.add_string ctx.buf s; Buffer.add_char ctx.buf '\n'
+  emit_indent ctx; Buffer.add_string ctx.buf s; emit ctx "\n"
 
 let with_indent ctx f =
   ctx.indent <- ctx.indent + 1; f (); ctx.indent <- ctx.indent - 1
@@ -646,6 +657,11 @@ and emit_case_impl ctx result_var expr =
 
 and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   let fname = mangle fn.Tir.fn_name in
+  (* Record source map segment: current output line → source line for this fn *)
+  (match Hashtbl.find_opt ctx.fn_lines fn.Tir.fn_name with
+   | Some src_line when src_line > 0 ->
+     ctx.segments := (ctx.line, src_line - 1) :: !(ctx.segments)
+   | _ -> ());
   emit_indent ctx;
   emit ctx ("function " ^ fname ^ "(");
   List.iteri (fun i p ->
@@ -737,18 +753,19 @@ let is_js_module lib =
   || has_prefix "npm:" || has_prefix "jsr:"
   || has_prefix "node:" || has_prefix "https://" || has_prefix "http://"
 
-(** Emit JS import statements and bridge definitions for all externs in [eds].
-    Returns a string to prepend to the module output (before function bodies). *)
-let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string =
-  if eds = [] then ""
+(** Emit extern bridges for [eds].  Returns (imports_str, consts_str):
+    - imports_str: ES import statements for JS-module externs (goes before const decls)
+    - consts_str:  const aliases, runtime registrations, and $clo wrappers *)
+let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string * string =
+  if eds = [] then ("", "")
   else begin
-    let buf = Buffer.create 256 in
-    let out s = Buffer.add_string buf s in
+    let imp_buf = Buffer.create 256 in
+    let cst_buf = Buffer.create 256 in
+    let imp s = Buffer.add_string imp_buf s in
+    let cst s = Buffer.add_string cst_buf s in
 
     (* ── JS module imports ──────────────────────────────────────────── *)
-    (* Group externs by lib name for ES import statements. *)
     let js_externs = List.filter (fun ed -> is_js_module ed.Tir.ed_lib_name) eds in
-    (* Collect (lib_name, [(march_name, js_sym)]) groups *)
     let by_lib : (string, (string * string) list ref) Hashtbl.t = Hashtbl.create 4 in
     List.iter (fun (ed : Tir.extern_decl) ->
       let key = ed.ed_lib_name in
@@ -757,33 +774,28 @@ let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string =
       | None -> Hashtbl.add by_lib key (ref [(ed.ed_march_name, ed.ed_js_sym)])
     ) js_externs;
     Hashtbl.iter (fun lib pairs ->
-      (* Build the import specifier list: `sym as march_name` when they differ *)
       let specs = List.map (fun (march_name, js_sym) ->
         if march_name = js_sym then js_sym
         else js_sym ^ " as " ^ mangle march_name
       ) !pairs in
-      out (Printf.sprintf "import { %s } from %s;\n"
+      imp (Printf.sprintf "import { %s } from %s;\n"
              (String.concat ", " specs) (js_string_lit lib))
     ) by_lib;
-    if js_externs <> [] then out "\n";
+    if js_externs <> [] then imp "\n";
 
     (* ── Runtime-backed externs (non-JS-module lib names) ───────────── *)
-    (* For these, ed_c_name is the underlying symbol (often a march_ runtime fn).
-       Emit a const alias and register the symbol as a runtime import if march_-prefixed. *)
     let rt_externs = List.filter (fun ed -> not (is_js_module ed.Tir.ed_lib_name)) eds in
     List.iter (fun (ed : Tir.extern_decl) ->
       let march_name = mangle ed.ed_march_name in
       let c_sym = ed.ed_c_name in
-      (* If the underlying symbol looks like a march runtime function, import it. *)
       let march_prefix = "march_" in
       let is_runtime = String.length c_sym >= String.length march_prefix
                        && String.sub c_sym 0 (String.length march_prefix) = march_prefix in
       if is_runtime then use_runtime ctx c_sym;
-      (* Emit alias only when march name differs from the underlying symbol. *)
       if march_name <> c_sym then
-        out (Printf.sprintf "const %s = %s;\n" march_name c_sym)
+        cst (Printf.sprintf "const %s = %s;\n" march_name c_sym)
     ) rt_externs;
-    if rt_externs <> [] then out "\n";
+    if rt_externs <> [] then cst "\n";
 
     (* ── $clo wrappers for first-class use of extern fns ────────────── *)
     List.iter (fun (ed : Tir.extern_decl) ->
@@ -791,12 +803,56 @@ let emit_extern_bridges (ctx : ctx) (eds : Tir.extern_decl list) : string =
       let nparams = List.length ed.ed_params in
       let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
       let plist = String.concat ", " pnames in
-      out (Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
+      cst (Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
              march_name plist march_name plist)
     ) eds;
-    if eds <> [] then out "\n";
+    if eds <> [] then cst "\n";
 
-    Buffer.contents buf
+    (Buffer.contents imp_buf, Buffer.contents cst_buf)
+  end
+
+(* ── Source map generation ───────────────────────────────────────── *)
+
+let base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+(** VLQ-encode a signed integer as base64 (source map v3 format). *)
+let vlq_encode value =
+  let buf = Buffer.create 4 in
+  let vlq = ref (if value < 0 then ((-value) lsl 1) lor 1 else value lsl 1) in
+  let continue_ = ref true in
+  while !continue_ do
+    let digit = !vlq land 0x1F in
+    vlq := !vlq lsr 5;
+    let digit = if !vlq > 0 then digit lor 0x20 else digit in
+    Buffer.add_char buf base64_chars.[digit];
+    if !vlq = 0 then continue_ := false
+  done;
+  Buffer.contents buf
+
+(** Count newlines in string s. *)
+let count_lines s =
+  String.fold_left (fun n c -> if c = '\n' then n + 1 else n) 0 s
+
+(** Build source map v3 JSON for a single-source JS file.
+    [segments] is a list of (output_line_0indexed, source_line_0indexed) pairs.
+    [preamble_lines] is the number of output lines before the first function. *)
+let build_source_map ~source_file ~segments ~preamble_lines =
+  let adjusted = List.map (fun (ol, sl) -> (ol + preamble_lines, sl)) segments in
+  let sorted = List.sort_uniq (fun (a, _) (b, _) -> compare a b) adjusted in
+  if sorted = [] then None
+  else begin
+    let max_line = List.fold_left (fun acc (ol, _) -> max acc ol) 0 sorted in
+    let segs = Array.make (max_line + 1) "" in
+    let prev_src = ref 0 in
+    List.iter (fun (out_line, src_line) ->
+      let delta = src_line - !prev_src in
+      prev_src := src_line;
+      (* Segment: col=0, src_file_delta=0, src_line_delta, src_col=0 *)
+      segs.(out_line) <- "A" ^ "A" ^ vlq_encode delta ^ "A"
+    ) sorted;
+    let mappings = String.concat ";" (Array.to_list segs) in
+    Some (Printf.sprintf "{\n  \"version\": 3,\n  \"sources\": [%s],\n  \"sourceRoot\": \"\",\n  \"names\": [],\n  \"mappings\": %s\n}\n"
+      (js_string_lit source_file) (js_string_lit mappings))
   end
 
 (* ── Module emission ─────────────────────────────────────────────── *)
@@ -817,8 +873,12 @@ const negate_int      = { _0: ($_, x) => -x };
 const negate_float    = { _0: ($_, x) => -x };
 |}
 
-let emit_module (m : Tir.tir_module) : string =
-  let ctx = create_ctx () in
+(** Emit a TIR module as an ES module string.
+    Returns [(js_content, source_map_json option)].
+    [fn_lines] maps TIR function names to 1-indexed source lines (from the AST).
+    [source_file] is the path to the originating .march file (for source maps). *)
+let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string * string option =
+  let ctx = create_ctx ~fn_lines () in
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
   List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
   (* Register externs separately for lazy tracking (not in fn_names to avoid
@@ -828,14 +888,16 @@ let emit_module (m : Tir.tir_module) : string =
   ) m.Tir.tm_externs;
   (* Equality helpers before functions (needed by EApp eq_ calls) *)
   List.iter (emit_eq_fn ctx) m.Tir.tm_types;
-  (* Top-level functions — populates used_externs via call-site tracking *)
+  (* Top-level functions — populates used_externs via call-site tracking
+     and records (output_line, source_line) segments for source maps *)
   List.iter (emit_fn_decl ctx) m.Tir.tm_fns;
   let fns_js = Buffer.contents ctx.buf in
+  let raw_segments = !(ctx.segments) in
   (* Emit extern bridges only for externs actually referenced in the emitted code *)
   let used_ed = List.filter (fun (ed : Tir.extern_decl) ->
     Hashtbl.mem ctx.used_externs ed.ed_march_name
   ) m.Tir.tm_externs in
-  let extern_js = emit_extern_bridges ctx used_ed in
+  let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
   (* Runtime-dependent builtin wrappers need these in the import regardless of
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
@@ -845,7 +907,7 @@ let emit_module (m : Tir.tir_module) : string =
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
     "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n"
   in
-  let imports =
+  let runtime_import =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
     let sorted = List.sort String.compare names in
     if sorted = [] then ""
@@ -853,6 +915,8 @@ let emit_module (m : Tir.tir_module) : string =
       "import { " ^ String.concat ", " sorted
       ^ " } from \"./march_runtime.mjs\";\n\n"
   in
+  (* Order: runtime import → extern module imports → builtin consts → extern consts → fns *)
+  let preamble = runtime_import ^ extern_imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_consts in
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
@@ -865,4 +929,12 @@ let emit_module (m : Tir.tir_module) : string =
       Buffer.add_string export_buf
         (Printf.sprintf "export { %s };\n" (mangle name))
   ) m.Tir.tm_exports;
-  imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_js ^ fns_js ^ Buffer.contents export_buf
+  let js = preamble ^ fns_js ^ Buffer.contents export_buf in
+  (* Source map: only when source_file provided and segments were recorded *)
+  let map_opt =
+    if source_file = "" || raw_segments = [] then None
+    else
+      let preamble_lines = count_lines preamble in
+      build_source_map ~source_file ~segments:raw_segments ~preamble_lines
+  in
+  (js, map_opt)
