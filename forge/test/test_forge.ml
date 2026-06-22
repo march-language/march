@@ -798,6 +798,98 @@ let test_ffi_gen_c_optres_fields () =
   Alcotest.(check bool) "record decodes via field codec" true
     (contains "march_decode_Result_Int_String(march_record_field")
 
+let mk_gen_c_output dir name src =
+  let mfile = Filename.concat dir (name ^ ".march") in
+  let oc = open_out mfile in output_string oc src; close_out oc;
+  let cfile = Filename.concat dir (name ^ ".c") in
+  (match Cmd_ffi.run ~file:mfile ~out:(Some cfile) with
+   | Error e -> Alcotest.failf "gen-c failed: %s" e | Ok () -> ());
+  let ic = open_in cfile in
+  let body = really_input_string ic (in_channel_length ic) in
+  close_in ic; body
+
+let contains_sub body sub =
+  let n = String.length sub and h = String.length body in
+  let rec go i = i + n <= h && (String.sub body i n = sub || go (i+1)) in go 0
+
+let pos_of body sub =
+  let n = String.length sub and h = String.length body in
+  let rec go i = if i + n > h then h else if String.sub body i n = sub then i else go (i+1) in go 0
+
+let test_ffi_gen_c_optres_float_unit () =
+  let dir = Filename.temp_file "march_ffi_optres_fu" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let body = mk_gen_c_output dir "t"
+    "mod T do\n\
+    \  needs Ffi\n\
+    \  type Box = { f : Option(Float), u : Option(Unit), rf : Result(Float, String) }\n\
+    \  extern \"x\" : Cap(Ffi) do\n\
+    \    fn make(): Box = \"x_make\"\n\
+    \  end\n\
+     end\n" in
+  let has s = contains_sub body s in
+  (* Option(Float): fully boxed — tag check + march_none_boxed / march_some_boxed *)
+  Alcotest.(check bool) "Option_Float mirror"       true (has "} Option_Float_c;");
+  Alcotest.(check bool) "Option_Float boxed tag"    true (has "march_variant_tag(v) == 0");
+  Alcotest.(check bool) "Option_Float none_boxed"   true (has "march_none_boxed()");
+  Alcotest.(check bool) "Option_Float some_boxed"   true (has "march_some_boxed(march_make_float");
+  (* Option(Unit): mixed — is_some only, niche None + boxed Some *)
+  Alcotest.(check bool) "Option_Unit no value field" true (has "int32_t is_some; } Option_Unit_c;");
+  Alcotest.(check bool) "Option_Unit niche decode"   true (has "o.is_some = (v != 0)");
+  Alcotest.(check bool) "Option_Unit none niche"     true (has "return march_none();");
+  Alcotest.(check bool) "Option_Unit some boxed"     true (has "march_some_boxed(0)");
+  (* Result(Float, String): ok field is double *)
+  Alcotest.(check bool) "Result_Float_String mirror" true (has "double ok;");
+  Alcotest.(check bool) "Result_Float decode"        true (has "march_get_float(march_variant_field")
+
+let test_ffi_gen_c_optres_nested () =
+  let dir = Filename.temp_file "march_ffi_optres_nested" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let body = mk_gen_c_output dir "t"
+    "mod T do\n\
+    \  needs Ffi\n\
+    \  type Point = { x : Int, y : Int }\n\
+    \  type Shape = Circle(Int) | Rect(Int, Int)\n\
+    \  type Wrap = { pt : Option(Point), sh : Result(Shape, String) }\n\
+    \  extern \"x\" : Cap(Ffi) do\n\
+    \    fn make(): Wrap = \"x_make\"\n\
+    \  end\n\
+     end\n" in
+  let has s = contains_sub body s in
+  (* Option(Point): niche, value is Point_c *)
+  Alcotest.(check bool) "Option_Point mirror"      true (has "Point_c value; } Option_Point_c;");
+  Alcotest.(check bool) "Option_Point niche decode" true (has "march_decode_Point(v)");
+  Alcotest.(check bool) "Option_Point niche encode" true (has "march_some(march_encode_Point");
+  (* Result(Shape, String): ok field is Shape_c *)
+  Alcotest.(check bool) "Result_Shape_String mirror" true (has "Shape_c ok;");
+  Alcotest.(check bool) "Result_Shape decode"        true (has "march_decode_Shape(march_variant_field");
+  (* Point_c must be defined before Option_Point_c (ordering) *)
+  Alcotest.(check bool) "Point_c before Option_Point_c" true
+    (pos_of body "} Point_c;" < pos_of body "Option_Point_c")
+
+let test_ffi_gen_c_list_fields () =
+  let dir = Filename.temp_file "march_ffi_list" "" in
+  Sys.remove dir; Unix.mkdir dir 0o755;
+  let body = mk_gen_c_output dir "t"
+    "mod T do\n\
+    \  needs Ffi\n\
+    \  type Batch = { ids : List(Int), names : List(String) }\n\
+    \  extern \"x\" : Cap(Ffi) do\n\
+    \    fn process(b: Batch): Int = \"x_process\"\n\
+    \  end\n\
+     end\n" in
+  let has s = contains_sub body s in
+  Alcotest.(check bool) "stdlib.h included"   true (has "#include <stdlib.h>");
+  Alcotest.(check bool) "List_Int mirror"     true (has "int64_t *items; int32_t length; } List_Int_c;");
+  Alcotest.(check bool) "List_Int length"     true (has "march_list_length");
+  Alcotest.(check bool) "List_Int malloc"     true (has "malloc(o.length * sizeof");
+  Alcotest.(check bool) "List_Int decode head" true (has "march_variant_field(v, 0)");
+  Alcotest.(check bool) "List_Int decode tail" true (has "march_variant_field(v, 1)");
+  Alcotest.(check bool) "List_Int encode cons" true (has "march_list_cons(");
+  Alcotest.(check bool) "List_Int encode nil"  true (has "march_list_nil()");
+  Alcotest.(check bool) "List_String mirror"   true (has "march_slice *items");
+  Alcotest.(check bool) "Batch uses List_Int_c" true (has "List_Int_c ids;")
+
 let test_ffi_gen_c_raises () =
   let dir = Filename.temp_file "march_ffi_raises" "" in
   Sys.remove dir; Unix.mkdir dir 0o755;
@@ -972,8 +1064,11 @@ let () =
     "ffi", [
       Alcotest.test_case "gen-c: extern block -> C skeleton" `Quick test_ffi_gen_c;
       Alcotest.test_case "gen-c: record/variant codecs"      `Quick test_ffi_gen_c_codecs;
-      Alcotest.test_case "gen-c: Option/Result field codecs"  `Quick test_ffi_gen_c_optres_fields;
-      Alcotest.test_case "gen-c: raises (env-routed errors)" `Quick test_ffi_gen_c_raises;
+      Alcotest.test_case "gen-c: Option/Result field codecs"       `Quick test_ffi_gen_c_optres_fields;
+      Alcotest.test_case "gen-c: Option(Float)/Option(Unit) fields" `Quick test_ffi_gen_c_optres_float_unit;
+      Alcotest.test_case "gen-c: nested codec Option/Result fields" `Quick test_ffi_gen_c_optres_nested;
+      Alcotest.test_case "gen-c: List(T) field codecs"              `Quick test_ffi_gen_c_list_fields;
+      Alcotest.test_case "gen-c: raises (env-routed errors)"        `Quick test_ffi_gen_c_raises;
       Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
     ];
