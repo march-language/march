@@ -443,6 +443,7 @@ let is_builtin_fn name =
                  "process_pid"; "process_spawn_sync"; "process_spawn_lines";
                  "process_spawn_async"; "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc";
                  (* TCP/network builtins *)
+                 "tcp_listen"; "tcp_accept";
                  "tcp_connect"; "tcp_close"; "tcp_peer_addr"; "tcp_recv_exact";
                  "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
                  "tcp_recv_chunked_frame";

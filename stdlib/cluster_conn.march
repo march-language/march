@@ -10,6 +10,7 @@
 -- It composes only already-unit-tested logic (NetKernel byte bridge + Handshake
 -- + ClusterAuth + PeerRegistry).
 mod ClusterConn do
+  needs IO.NetListen
 
   -- Open a listening socket on [port].
   fn listen(port : Int) : Result(Int, String) do

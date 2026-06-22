@@ -6,6 +6,7 @@
 type export_kind =
   | ExFn                       (** Function binding *)
   | ExType of int              (** Type constructor with arity *)
+  | ExRecord of int * (string * March_ast.Ast.ty) list  (** Record type: arity + field declarations *)
   | ExCtor of string * int     (** Data constructor: parent type name, arity *)
   | ExValue                    (** Top-level let binding *)
   | ExInterface of March_ast.Ast.interface_def  (** Interface definition (for cross-module method resolution) *)

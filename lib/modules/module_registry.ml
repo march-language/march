@@ -7,6 +7,7 @@ open March_ast.Ast
 type export_kind =
   | ExFn
   | ExType of int
+  | ExRecord of int * (string * ty) list  (** arity, [(field_name, field_ty)] *)
   | ExCtor of string * int
   | ExValue
   | ExInterface of interface_def
@@ -109,8 +110,14 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
     | DType (vis, tname, tparams, tdef, _)
     | DAlwaysLinearType (vis, tname, tparams, tdef, _) ->
       let arity = List.length tparams in
-      let type_entry = { ex_name = tname.txt; ex_kind = ExType arity;
-                         ex_public = vis = Public } in
+      let type_entry = match tdef with
+        | TDRecord fields ->
+          let field_pairs = List.map (fun (f : field) -> (f.fld_name.txt, f.fld_ty)) fields in
+          { ex_name = tname.txt; ex_kind = ExRecord (arity, field_pairs);
+            ex_public = vis = Public }
+        | _ ->
+          { ex_name = tname.txt; ex_kind = ExType arity; ex_public = vis = Public }
+      in
       let ctor_entries = match tdef with
         | TDVariant ctors ->
           List.map (fun (v : variant) ->
