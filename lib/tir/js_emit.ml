@@ -262,17 +262,43 @@ let classify_js_extern (ed : Tir.extern_decl) : js_extern_kind =
   else if ed.Tir.ed_raises   then JsModuleRaises
   else JsModuleSync
 
+(** Extract the E from Result(T, E) in an extern's declared return type.
+    For raises externs, ed_ret = Result(T, E); returns E for error marshalling. *)
+let err_payload_ty : Tir.ty -> Tir.ty = function
+  | Tir.TCon ("Result", [_; t_err]) -> t_err
+  | t -> t
+
+(** Warn at compile time when a raises extern has a non-String error type.
+    The actual marshalling is always best-effort (String(e?.message ?? e)) via
+    the __js_err_to helper; this just surfaces the limitation. *)
+let warn_err_type source_name (e_ty : Tir.ty) =
+  match e_ty with
+  | Tir.TString -> ()
+  | _ ->
+    Printf.eprintf
+      "warning: `raises` extern `%s` has non-String error type; \
+       the JS exception is coerced via String(e?.message ?? e) (best-effort). \
+       Full structured-error marshalling is not yet supported.\n"
+      source_name
+
 (** Emit the call expression for a direct extern call site.
-    Marks the extern as used. Chunk 0: all kinds emit a plain synchronous call;
-    Chunks A/B will add their own arms to this dispatch. *)
+    Marks the extern as used. Dispatches on js_extern_kind:
+    - Sync/CBacked: plain synchronous call (Chunk 0 / C)
+    - Raises: IIFE with try/catch → Ok/Err (Chunk B)
+    - Blocking: plain call for now — Chunk A adds await *)
 let emit_extern_call (ctx : ctx) (ed : Tir.extern_decl) (args : Tir.atom list) : unit =
   let march_name = mangle ed.ed_march_name in
   Hashtbl.replace ctx.used_externs ed.ed_march_name ();
   (match classify_js_extern ed with
-   | JsModuleSync | JsModuleBlocking | JsModuleRaises | CBacked ->
+   | JsModuleSync | JsModuleBlocking | CBacked ->
      emit ctx (march_name ^ "(");
      List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
-     emit ctx ")")
+     emit ctx ")"
+   | JsModuleRaises ->
+     warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
+     emit ctx ("(() => { try { return { $: \"Ok\", _0: " ^ march_name ^ "(");
+     List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+     emit ctx ") }; } catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; } })()")
 
 (* ── Forward declarations ────────────────────────────────────────── *)
 
@@ -782,15 +808,25 @@ let emit_eq_fn ctx (td : Tir.type_def) =
 (* ── Extern bridge emission ──────────────────────────────────────── *)
 
 (** Build the $clo wrapper string for a single extern.
-    Chunk 0: all kinds emit a plain synchronous arrow; Chunks A/B add their arms. *)
+    Dispatches on js_extern_kind:
+    - Sync/CBacked: plain arrow (Chunk 0)
+    - Raises: arrow with try/catch → Ok/Err (Chunk B)
+    - Blocking: plain arrow for now — Chunk A upgrades to async *)
 let emit_extern_clo_str (ed : Tir.extern_decl) : string =
   let march_name = mangle ed.ed_march_name in
   let nparams = List.length ed.ed_params in
   let pnames = List.init nparams (fun i -> Printf.sprintf "p%d" i) in
   let plist = String.concat ", " pnames in
   match classify_js_extern ed with
-  | JsModuleSync | JsModuleBlocking | JsModuleRaises | CBacked ->
+  | JsModuleSync | JsModuleBlocking | CBacked ->
     Printf.sprintf "const %s$clo = { _0: ($_, %s) => %s(%s) };\n"
+      march_name plist march_name plist
+  | JsModuleRaises ->
+    warn_err_type ed.ed_march_name (err_payload_ty ed.Tir.ed_ret);
+    Printf.sprintf
+      "const %s$clo = { _0: ($_, %s) => {\n  \
+         try { return { $: \"Ok\", _0: %s(%s) }; }\n  \
+         catch (e) { return { $: \"Err\", _0: __js_err_to(e) }; }\n} };\n"
       march_name plist march_name plist
 
 (** Emit extern bridges for [eds].  Returns (imports_str, consts_str):
@@ -951,6 +987,12 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
     raise (Js_emit_error msgs)
   end;
   let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
+  (* Chunk B: __js_err_to helper — emitted only when at least one raises extern is used *)
+  let raises_helper =
+    if List.exists (fun ed -> classify_js_extern ed = JsModuleRaises) used_ed then
+      "const __js_err_to = (e) => String(e?.message ?? e);\n\n"
+    else ""
+  in
   (* Runtime-dependent builtin wrappers need these in the import regardless of
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
@@ -968,8 +1010,8 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
       "import { " ^ String.concat ", " sorted
       ^ " } from \"./march_runtime.mjs\";\n\n"
   in
-  (* Order: runtime import → extern module imports → builtin consts → extern consts → fns *)
-  let preamble = runtime_import ^ extern_imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_consts in
+  (* Order: runtime import → extern module imports → builtin consts → extern consts → raises helper → fns *)
+  let preamble = runtime_import ^ extern_imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_consts ^ raises_helper in
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
