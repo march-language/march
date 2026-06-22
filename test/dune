@@ -1263,3 +1263,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_zero_arg_closure_default.out (run node js_zero_arg_closure_default.mjs))))
 
 (rule (alias runtest) (action (diff native/zero_arg_closure_default.expected js_zero_arg_closure_default.out)))
+
+; js_dom_available — verifies that dom.march is auto-loaded for --target js builds
+(rule
+ (targets js_dom_available.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_dom_available.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_dom_available.mjs native/js_dom_available.march)))
+
+(rule
+ (targets js_dom_available.out)
+ (deps js_dom_available.mjs march_runtime.mjs)
+ (action (with-stdout-to js_dom_available.out (run node js_dom_available.mjs))))
+
+(rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))

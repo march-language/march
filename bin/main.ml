@@ -178,13 +178,22 @@ let stdlib_file_list = [
   "handle.march";
 ]
 
+(** Stdlib modules only loaded for --target js builds.
+    These have externs with no native C symbols, so including them in native/JIT
+    builds would cause dlopen(RTLD_NOW) to fail at link time. *)
+let js_only_stdlib_file_list = ["dom.march"]
+
 (** Read all stdlib source files and compute a hash of their contents.
     Returns (stdlib_dir, source_hash, file_paths). *)
-let stdlib_source_hash () =
+let stdlib_source_hash ?(for_js=false) () =
   match find_stdlib_dir () with
   | None -> None
   | Some stdlib_dir ->
-    let paths = List.map (Filename.concat stdlib_dir) stdlib_file_list in
+    let file_list =
+      if for_js then stdlib_file_list @ js_only_stdlib_file_list
+      else stdlib_file_list
+    in
+    let paths = List.map (Filename.concat stdlib_dir) file_list in
     let buf = Buffer.create (256 * 1024) in
     List.iter (fun path ->
       try
@@ -202,8 +211,12 @@ let stdlib_source_hash () =
 (** Load all stdlib modules and return their declarations, to be
     prepended to the user module before evaluation.
     Uses a content-hash-keyed cache of parsed+desugared ASTs. *)
-let load_stdlib () =
-  match stdlib_source_hash () with
+let load_stdlib ?(for_js=false) () =
+  let file_list =
+    if for_js then stdlib_file_list @ js_only_stdlib_file_list
+    else stdlib_file_list
+  in
+  match stdlib_source_hash ~for_js () with
   | None -> []
   | Some (stdlib_dir, source_hash, _) ->
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
@@ -225,7 +238,7 @@ let load_stdlib () =
       (* Cache miss: parse all files, then cache *)
       let decls = List.concat_map (fun name ->
           load_stdlib_file (Filename.concat stdlib_dir name)
-        ) stdlib_file_list in
+        ) file_list in
       (try
         (try Unix.mkdir cache_dir 0o755
          with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
@@ -825,6 +838,7 @@ let run_fmt args =
 (* ------------------------------------------------------------------ *)
 
 let compile filename =
+  let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
     try read_file filename
     with Sys_error msg ->
@@ -848,7 +862,7 @@ let compile filename =
     else begin
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
-      (match stdlib_source_hash () with
+      (match stdlib_source_hash ~for_js:is_js_target () with
        | Some (_, h, _) -> Buffer.add_string buf h
        | None -> ());
       (* Hash every .march file the resolver will load as user code: the
@@ -984,7 +998,7 @@ let compile filename =
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
      to the external version: strip the stdlib copy so the external one is
      the sole definition. *)
-  let stdlib_decls = load_stdlib () in
+  let stdlib_decls = load_stdlib ~for_js:is_js_target () in
   let extern_mod_names =
     (* The ENTRY module's own name must shadow a same-named stdlib module
        too: its declarations live at the top level (not as a DMod in
@@ -1657,7 +1671,7 @@ let run_check_cmd files =
   if files = [] then begin
     Printf.eprintf "march check: no files specified\n"; exit 1
   end;
-  let stdlib_decls = load_stdlib () in
+  let stdlib_decls = load_stdlib ~for_js:(parse_target !target_str = March_tir.Llvm_emit.Js) () in
   (* Files pulled in by import resolution (source dir / MARCH_LIB_PATH) are
      user code too: diagnostics pointing into them must be fatal even though
      they were not listed on the command line. *)
