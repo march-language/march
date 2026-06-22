@@ -1733,6 +1733,16 @@ let builtin_bindings : (string * scheme) list =
        FNV-1a 64-bit hash over segments, returns 16-char hex string.
        Used by IOList.hash and Html.content_hash for ETag generation. *)
     ("iolist_hash_fnv1a",  Mono (TArrow (TCon ("IOList", []), t_string)));
+    (* Distributed OTP L4 — function-by-identity remote registry.
+       remote_ref_hashes(module, fn) returns (sig_hash, impl_hash) from the CAS
+       pipeline (compiled path) or deterministic FNV-1a hashes (eval path).
+       remote_register_stub(impl_hash, sig_hash, stub) enrolls a marshalling stub
+       in the C-level registry; stub type is unconstrained (poly) so the caller
+       can pass any function value. Returns 0 on success, -1 on failure.
+       remote_count() returns the number of enrolled remote targets (testing). *)
+    ("remote_ref_hashes",    Mono (TArrow (t_string, TArrow (t_string, TTuple [t_string; t_string]))));
+    ("remote_register_stub", poly1 (fun a -> TArrow (t_string, TArrow (t_string, TArrow (a, t_int)))));
+    ("remote_count",         Mono t_int);
   ]
 
 let builtin_types : (string * int) list =

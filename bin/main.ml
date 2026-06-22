@@ -1308,11 +1308,15 @@ let compile filename =
            carry real hashes instead of null. Built from the same CAS hashing
            that keys the artifact cache; only consulted when --hot-reload is on. *)
         let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (* L4 remote registry: sig_hash map for remote_ref_hashes constant folding. *)
+        let remote_sig_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
         let add_hdef (hd : March_cas.Cas.hashed_def) =
           match hd.March_cas.Cas.hd_def with
           | March_cas.Cas.FnDef fd ->
             Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
-              hd.March_cas.Cas.hd_impl_hash
+              hd.March_cas.Cas.hd_impl_hash;
+            Hashtbl.replace remote_sig_hashes fd.March_tir.Tir.fn_name
+              hd.March_cas.Cas.hd_sig_hash
           | March_cas.Cas.TypeDef _ -> ()
         in
         List.iter (function
@@ -1335,7 +1339,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:hr_impl_hashes ~remote_sig_hashes:remote_sig_hashes tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1540,21 +1544,21 @@ let compile filename =
            --hot-reload also publishes real baseline hashes (only built/used
            when --hot-reload is active). *)
         let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
-        (match hr_config () with
-         | None -> ()
-         | Some _ ->
-           let add_hdef (hd : March_cas.Cas.hashed_def) =
-             match hd.March_cas.Cas.hd_def with
-             | March_cas.Cas.FnDef fd ->
-               Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
-                 hd.March_cas.Cas.hd_impl_hash
-             | March_cas.Cas.TypeDef _ -> ()
-           in
-           List.iter (function
-             | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
-             | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
-             (March_cas.Pipeline.hash_module tir));
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes tir in
+        let remote_sig_hashes2 : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (let add_hdef (hd : March_cas.Cas.hashed_def) =
+           match hd.March_cas.Cas.hd_def with
+           | March_cas.Cas.FnDef fd ->
+             Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
+               hd.March_cas.Cas.hd_impl_hash;
+             Hashtbl.replace remote_sig_hashes2 fd.March_tir.Tir.fn_name
+               hd.March_cas.Cas.hd_sig_hash
+           | March_cas.Cas.TypeDef _ -> ()
+         in
+         List.iter (function
+           | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
+           | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
+           (March_cas.Pipeline.hash_module tir));
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:hr_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;

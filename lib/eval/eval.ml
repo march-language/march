@@ -6349,6 +6349,33 @@ let base_env : env =
           Array.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
             arr (VCon ("Nil", []))
         | _ -> eval_error "typed_array_to_list: expected TypedArray"))
+  (* ---- Distributed OTP L4 — remote registry builtins ---- *)
+  (* remote_ref_hashes(module, fn) → (sig_hash, impl_hash)
+     Eval-path: returns deterministic FNV-1a hashes of the qualified name so
+     that eval tests can exercise the full RemoteRef pipeline without the CAS
+     pipeline. The compiled path constant-folds this to the real CAS hashes. *)
+  ; ("remote_ref_hashes", VBuiltin ("remote_ref_hashes", function
+        | [VString mod_name; VString fn_name] ->
+          let fnv1a s =
+            let h = ref 0xcbf29ce484222325L in
+            String.iter (fun c ->
+              h := Int64.logxor !h (Int64.of_int (Char.code c));
+              h := Int64.mul !h 0x100000001b3L) s;
+            Printf.sprintf "%016Lx%016Lx" !h (Int64.lognot !h) in
+          let key = mod_name ^ "." ^ fn_name in
+          VTuple [VString (fnv1a (key ^ ".sig")); VString (fnv1a (key ^ ".impl"))]
+        | _ -> eval_error "remote_ref_hashes: expected (String, String)"))
+  (* remote_register_stub(impl_hash, sig_hash, stub) → Int
+     Eval-path: no-op returning 0 (stubs are not needed in the interpreter).
+     The compiled path delegates to march_remote_register via mangle_extern. *)
+  ; ("remote_register_stub", VBuiltin ("remote_register_stub", function
+        | [VString _impl; VString _sig; _stub] -> VInt 0
+        | _ -> eval_error "remote_register_stub: expected (String, String, stub)"))
+  (* remote_count() → Int  — number of enrolled remote targets.
+     Eval-path: always 0 (no C registry in the interpreter). *)
+  ; ("remote_count", VBuiltin ("remote_count", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "remote_count: no arguments expected"))
   ]
 
 (* ------------------------------------------------------------------ *)

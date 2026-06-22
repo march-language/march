@@ -126,6 +126,10 @@ type ctx = {
   mutable shape_meta : bool;
   (* Record shape descriptor → (descriptor string global, i32 id-cache global). *)
   rec_shape_globals : (string, string * string) Hashtbl.t;
+  (* Distributed OTP L4: CAS-derived hash maps for remote_ref_hashes constant folding.
+     Maps qualified fn name ("Math.add") → hex hash string. *)
+  remote_impl_hashes : (string, string) Hashtbl.t;
+  remote_sig_hashes  : (string, string) Hashtbl.t;
 }
 
 (** Compilation target. *)
@@ -213,6 +217,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   repl;
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
+  remote_impl_hashes = Hashtbl.create 0;
+  remote_sig_hashes  = Hashtbl.create 0;
 }
 
 (* Shared with the inliner; single source of truth in Hot_reload. *)
@@ -491,6 +497,8 @@ let is_builtin_fn name =
                  "vault_ns_set"; "vault_ns_get"; "vault_ns_drop";
                  (* IOList builtins *)
                  "iolist_hash_fnv1a";
+                 (* Distributed OTP L4 remote registry builtins *)
+                 "remote_ref_hashes"; "remote_register_stub"; "remote_count";
                  (* HTTP server builtins *)
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
@@ -833,6 +841,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "sys_os" | "sys_arch" | "march_version" -> Some Tir.TString
   (* UUID / identity builtins *)
   | "uuid_v4" -> Some Tir.TString
+  (* Distributed OTP L4 remote registry builtins *)
+  | "remote_register_stub" -> Some Tir.TInt
+  | "remote_count"         -> Some Tir.TInt
   (* Session-typed channel builtins (binary) *)
   | "chan_new"    -> Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])])
   | "chan_send"   -> Some (Tir.TCon ("Chan", []))
@@ -1116,6 +1127,10 @@ let mangle_extern : string -> string = function
   | "mpst_close"      -> "march_mpst_close"
   (* UUID / identity builtins *)
   | "uuid_v4"          -> "march_uuid_v4"
+  (* Distributed OTP L4 — remote registry; remote_ref_hashes is constant-folded
+     in emit_expr so it never reaches this table. *)
+  | "remote_register_stub" -> "march_remote_register"
+  | "remote_count"         -> "march_remote_count"
   (* Panic/todo/unreachable internal primitives *)
   | "panic_"       -> "march_panic_ext"
   | "todo_"        -> "march_todo_ext"
@@ -2436,6 +2451,41 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* pmap_threshold() → compile-time constant i64 from --pmap-threshold *)
   | Tir.EApp (f, []) when f.Tir.v_name = "pmap_threshold" ->
     ("i64", string_of_int ctx.pmap_threshold)
+
+  (* remote_ref_hashes(module, fn) → constant-fold to (sig_hash, impl_hash) pair.
+     Looks up the CAS-derived hashes baked into the binary at compile time.
+     Returns a heap-allocated (String, String) tuple; both strings are empty
+     when the function name was not found in the hash maps (non-CAS builds).
+     Key lookup strategy: top-level user module functions are stored without
+     the module prefix (fn_name = "fib"), while stdlib/nested module functions
+     are stored with it (fn_name = "String.from_int").  Try both forms. *)
+  | Tir.EApp (f, [mod_atom; fn_atom]) when f.Tir.v_name = "remote_ref_hashes" ->
+    let get_str_lit a = match a with
+      | Tir.ALit (March_ast.Ast.LitString s) -> s
+      | _ -> "" in
+    let mod_name = get_str_lit mod_atom in
+    let fn_name  = get_str_lit fn_atom in
+    let qualified_key = mod_name ^ "." ^ fn_name in
+    let find_h tbl =
+      match Hashtbl.find_opt tbl qualified_key with
+      | Some h -> h
+      | None   -> Option.value ~default:"" (Hashtbl.find_opt tbl fn_name)
+    in
+    let sig_h  = find_h ctx.remote_sig_hashes in
+    let impl_h = find_h ctx.remote_impl_hashes in
+    let emit_str_lit s =
+      let g = intern_string ctx s in
+      let tmp = fresh ctx "rrhsl" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+                  tmp g (String.length s));
+      tmp
+    in
+    let sg_ptr  = emit_str_lit sig_h in
+    let im_ptr  = emit_str_lit impl_h in
+    let tup = emit_heap_alloc ctx 0 2 in
+    emit_store_field ctx tup 0 "ptr" sg_ptr;
+    emit_store_field ctx tup 1 "ptr" im_ptr;
+    ("ptr", tup)
 
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
@@ -5100,6 +5150,10 @@ declare ptr  @march_sys_arch()
 declare ptr  @march_get_version()
 ; UUID / identity builtins
 declare ptr  @march_uuid_v4()
+; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)
+declare void @march_remote_init()
+declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)
+declare i64  @march_remote_count()
 ; Integer math helpers
 declare i64  @march_int_pow(i64 %base, i64 %exp)
 ; LLVM intrinsics
@@ -5318,6 +5372,8 @@ let emit_main_wrapper (buf : Buffer.t) =
 
 let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
@@ -5333,6 +5389,9 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
       |> Hot_reload.Name_table.build
   in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
+  (* Distributed OTP L4: populate CAS hash maps for remote_ref_hashes constant folding. *)
+  Hashtbl.iter (Hashtbl.replace ctx.remote_impl_hashes) remote_impl_hashes;
+  Hashtbl.iter (Hashtbl.replace ctx.remote_sig_hashes)  remote_sig_hashes;
   (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
      dispatch table and publishes each boundary function as its NATIVE baseline
      version. Each boundary fn's per-definition impl_hash (a Merkle root over its
@@ -5686,6 +5745,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
              declare void @march_spawn_main(ptr %%fn)\n\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+               call void @march_remote_init()\n\
              %s\
                call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\

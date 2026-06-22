@@ -1,0 +1,24 @@
+-- Compiled-path test for remote_ref_hashes.
+-- Verifies that the compiler embeds the real CAS hashes (64-char Blake3 hex)
+-- rather than empty or placeholder strings.
+-- fib is recursive so the inliner cannot eliminate it; CAS hashes it.
+mod TestRRH do
+
+  fn fib(n : Int) : Int do
+    if n <= 1 do n
+    else fib(n - 1) + fib(n - 2)
+    end
+  end
+
+  fn main() do
+    let result = fib(10)
+    let hashes = remote_ref_hashes("TestRRH", "fib")
+    let sg = match hashes do (s, _) -> s end
+    let im = match hashes do (_, i) -> i end
+    println(String.from_int(String.byte_size(sg)))
+    println(String.from_int(String.byte_size(im)))
+    let ok = if sg != "" && im != "" && sg != im && result == 55 do "ok" else "fail" end
+    println(ok)
+  end
+
+end

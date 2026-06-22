@@ -351,6 +351,10 @@ let () =
       Alcotest.test_case "NodeRpc module"
         `Quick (run_stdlib_test "test_node_rpc.march" "TestNodeRpc");
     ]);
+    ("remote_ref_hashes", [
+      Alcotest.test_case "remote_ref_hashes builtin"
+        `Quick (run_stdlib_test "test_remote_ref_hashes.march" "TestRemoteRefHashes");
+    ]);
     ("net_kernel", [
       Alcotest.test_case "NetKernel module"
         `Quick (run_stdlib_test "test_net_kernel.march" "TestNetKernel");
