@@ -27,6 +27,14 @@ fn is_f64(ty: &Type) -> bool {
     type_last_ident(ty).as_deref() == Some("f64")
 }
 
+/// `Option<f64>` — uses the fully-boxed ABI, not the niche form.
+fn is_option_f64(ty: &Type) -> bool {
+    if type_last_ident(ty).as_deref() != Some("Option") {
+        return false;
+    }
+    generic_args(ty).get(0).map(|a| is_f64(a)).unwrap_or(false)
+}
+
 fn is_result(ty: &Type) -> bool {
     type_last_ident(ty).as_deref() == Some("Result")
 }
@@ -56,7 +64,7 @@ fn march_type_name(ty: &Type) -> String {
         Some("Vec") => "Bytes".into(),
         Some("Result") => result_march_name(ty),
         Some("Option") => option_march_name(ty),
-        Some("ResourceArc") => generic_args(ty)
+        Some("ResourceArc") | Some("ConsumeResourceArc") => generic_args(ty)
             .get(0)
             .and_then(type_last_ident)
             .unwrap_or_else(|| "Resource".into()), // opaque resource type name
@@ -127,6 +135,10 @@ pub fn march(_attr: TokenStream, item: TokenStream) -> TokenStream {
             (quote!(::march::march_value), quote!(unsafe { ::march::borrow_str(#pname) }))
         } else if is_bytes_ref(ty) {
             (quote!(::march::march_value), quote!(unsafe { ::march::borrow_bytes(#pname) }))
+        } else if is_option_f64(ty) {
+            // Option<f64> uses the boxed ABI (not niche), so decode via the
+            // dedicated helper that reads the cell tag.
+            (quote!(::march::march_value), quote!(::march::decode_option_f64(#pname)))
         } else {
             (
                 quote!(::march::march_value),
@@ -135,8 +147,9 @@ pub fn march(_attr: TokenStream, item: TokenStream) -> TokenStream {
         };
         c_params.push(quote!(#pname: #cty));
         decode_exprs.push(decode);
-        // owned String/Vec ⇒ `consume` on the March side; borrows stay default.
-        let consume = matches!(type_last_ident(ty).as_deref(), Some("String") | Some("Vec"));
+        // owned String/Vec and consume resources ⇒ `consume` on March side.
+        let consume = matches!(type_last_ident(ty).as_deref(),
+            Some("String") | Some("Vec") | Some("ConsumeResourceArc"));
         let mname = march_type_name(ty);
         march_params.push(if consume {
             format!("consume {}: {}", pname, mname)
@@ -163,6 +176,12 @@ pub fn march(_attr: TokenStream, item: TokenStream) -> TokenStream {
             quote!(return ::march::ToMarch::to_march(__v);),
             // panic → Err(message) through the same march_value channel.
             quote!({ return ::march::__panic_to_err(__p); }),
+        ),
+        Some(t) if is_option_f64(t) => (
+            // Option<f64> must go through the boxed encode helper.
+            quote!(::march::march_value),
+            quote!(return ::march::encode_option_f64(__v);),
+            quote!({ ::march::__abort_panic(__p); }),
         ),
         Some(t) => {
             let _ = t;
@@ -290,11 +309,33 @@ fn sorted_named_fields(fields: &Fields) -> (Vec<syn::Ident>, Vec<Type>, String) 
     )
 }
 
+/// Emit an encode expression for a field value of the given Rust type.
+/// `expr` is the token stream that produces the field value.
+/// `Option<f64>` must go through the boxed helper; all others use `to_march_slot`.
+fn encode_field(ty: &Type, expr: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    if is_option_f64(ty) {
+        quote!(::march::encode_option_f64(#expr))
+    } else {
+        quote!(::march::ToMarch::to_march_slot(#expr))
+    }
+}
+
+/// Emit a decode expression for a slot value of the given Rust type.
+/// `expr` is a token stream that yields a `march_value`.
+/// `Option<f64>` must go through the boxed helper; all others use `from_march_slot`.
+fn decode_field(ty: &Type, expr: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    if is_option_f64(ty) {
+        quote!(::march::decode_option_f64(#expr))
+    } else {
+        quote!(<#ty as ::march::FromMarch>::from_march_slot(#expr))
+    }
+}
+
 fn encode_struct(s: &syn::DataStruct) -> proc_macro2::TokenStream {
-    let (idents, _tys, desc) = sorted_named_fields(&s.fields);
+    let (idents, tys, desc) = sorted_named_fields(&s.fields);
     let n = idents.len() as i32;
     let desc_bytes = syn::LitByteStr::new(desc.as_bytes(), proc_macro2::Span::call_site());
-    let stores = idents.iter().map(|id| quote!(::march::ToMarch::to_march_slot(self.#id)));
+    let stores = idents.iter().zip(tys.iter()).map(|(id, ty)| encode_field(ty, quote!(self.#id)));
     quote! {
         let __fields: [::march::march_value; #n as usize] = [ #(#stores),* ];
         unsafe {
@@ -309,8 +350,9 @@ fn decode_struct(name: &syn::Ident, s: &syn::DataStruct) -> proc_macro2::TokenSt
     let (idents, tys, _desc) = sorted_named_fields(&s.fields);
     let inits = idents.iter().zip(tys.iter()).enumerate().map(|(i, (id, ty))| {
         let i = i as i32;
-        quote!(#id: <#ty as ::march::FromMarch>::from_march_slot(
-            unsafe { ::march::sys::march_record_field(v, #i) }))
+        let raw = quote!(unsafe { ::march::sys::march_record_field(v, #i) });
+        let decoded = decode_field(ty, raw);
+        quote!(#id: #decoded)
     });
     quote! { #name { #(#inits),* } }
 }
@@ -338,7 +380,8 @@ fn encode_enum(name: &syn::Ident, e: &syn::DataEnum) -> proc_macro2::TokenStream
             Fields::Unnamed(_) => {
                 let binds: Vec<syn::Ident> =
                     (0..tys.len()).map(|i| format_ident!("f{}", i)).collect();
-                let stores = binds.iter().map(|b| quote!(::march::ToMarch::to_march_slot(#b)));
+                let stores = binds.iter().zip(tys.iter())
+                    .map(|(b, ty)| encode_field(ty, quote!(#b)));
                 quote! {
                     #name::#vname( #(#binds),* ) => {
                         let __fields: [::march::march_value; #n as usize] = [ #(#stores),* ];
@@ -349,7 +392,9 @@ fn encode_enum(name: &syn::Ident, e: &syn::DataEnum) -> proc_macro2::TokenStream
             Fields::Named(fs) => {
                 let names: Vec<syn::Ident> =
                     fs.named.iter().map(|f| f.ident.clone().unwrap()).collect();
-                let stores = names.iter().map(|nm| quote!(::march::ToMarch::to_march_slot(#nm)));
+                let ftys: Vec<Type> = fs.named.iter().map(|f| f.ty.clone()).collect();
+                let stores = names.iter().zip(ftys.iter())
+                    .map(|(nm, ty)| encode_field(ty, quote!(#nm)));
                 quote! {
                     #name::#vname { #(#names),* } => {
                         let __fields: [::march::march_value; #n as usize] = [ #(#stores),* ];
@@ -372,8 +417,8 @@ fn decode_enum(name: &syn::Ident, e: &syn::DataEnum) -> proc_macro2::TokenStream
             Fields::Unnamed(_) => {
                 let reads = tys.iter().enumerate().map(|(i, ty)| {
                     let i = i as i32;
-                    quote!(<#ty as ::march::FromMarch>::from_march_slot(
-                        unsafe { ::march::sys::march_variant_field(v, #i) }))
+                    let raw = quote!(unsafe { ::march::sys::march_variant_field(v, #i) });
+                    decode_field(ty, raw)
                 });
                 quote! { #tag => #name::#vname( #(#reads),* ) }
             }
@@ -382,8 +427,9 @@ fn decode_enum(name: &syn::Ident, e: &syn::DataEnum) -> proc_macro2::TokenStream
                     let id = f.ident.clone().unwrap();
                     let ty = &f.ty;
                     let i = i as i32;
-                    quote!(#id: <#ty as ::march::FromMarch>::from_march_slot(
-                        unsafe { ::march::sys::march_variant_field(v, #i) }))
+                    let raw = quote!(unsafe { ::march::sys::march_variant_field(v, #i) });
+                    let decoded = decode_field(ty, raw);
+                    quote!(#id: #decoded)
                 });
                 quote! { #tag => #name::#vname { #(#reads),* } }
             }

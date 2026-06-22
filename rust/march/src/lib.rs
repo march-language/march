@@ -25,9 +25,9 @@ mod resource;
 mod value;
 
 pub use error::Error;
-pub use resource::ResourceArc;
+pub use resource::{ConsumeResourceArc, ResourceArc};
 pub use sys::{march_env, march_value};
-pub use value::{borrow_bytes, borrow_str, FromMarch, ToMarch};
+pub use value::{borrow_bytes, borrow_str, decode_option_f64, encode_option_f64, FromMarch, ToMarch};
 
 /// Derive `ToMarch` (the `Encoder` half) for a struct/enum ↔ March record/variant.
 pub use march_macro::Encoder;

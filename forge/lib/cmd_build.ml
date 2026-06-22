@@ -487,7 +487,43 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
             | _ -> ""
           in
           let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
-          let ffi_flags = ffi_flags_of ~root:proj.Project.root proj in
+          (* [ffi.rust]: auto-build the Rust staticlib crate before compilation.
+             Runs `cargo build --release` in the crate directory and appends
+             the resulting archive to the --ffi-link flags.
+             An offline flag lets CI pass CARGO_NET_OFFLINE=true through the env. *)
+          let rust_link_flags =
+            match proj.Project.ffi_rust with
+            | None -> ""
+            | Some frc ->
+              let crate_dir =
+                if Filename.is_relative frc.Project.frc_path then
+                  Filename.concat proj.Project.root frc.Project.frc_path
+                else frc.Project.frc_path
+              in
+              let archive =
+                Filename.concat crate_dir
+                  (Filename.concat "target"
+                     (Filename.concat "release"
+                        ("lib" ^ frc.Project.frc_lib ^ ".a")))
+              in
+              Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
+              let rc = Sys.command
+                (Printf.sprintf "cd %s && cargo build --release 2>&1"
+                   (Filename.quote crate_dir))
+              in
+              if rc <> 0 then begin
+                Printf.eprintf "  [ffi.rust] cargo build failed (exit %d)\n%!" rc;
+                ""
+              end else if not (Sys.file_exists archive) then begin
+                Printf.eprintf
+                  "  [ffi.rust] expected archive not found: %s\n%!" archive;
+                ""
+              end else begin
+                Printf.printf "  [ffi.rust] linked %s\n%!" archive;
+                " --ffi-link " ^ Filename.quote archive
+              end
+          in
+          let ffi_flags = ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags in
           (* Install npm packages declared in [js_deps] before JS compilation. *)
           (match target with
            | Some ("js" | "javascript") ->

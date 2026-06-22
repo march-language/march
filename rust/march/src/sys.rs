@@ -52,6 +52,13 @@ extern "C" {
 
     pub fn march_none() -> march_value;
     pub fn march_some(v: march_value) -> march_value;
+    /// Boxed `Some` for `Option(Float)` / `Option(Unit)` — the payload would
+    /// alias `None=0` under the niche form, so a heap cell is used instead.
+    /// Pass `march_make_float(f)` for a Float payload.
+    pub fn march_some_boxed(payload: march_value) -> march_value;
+    /// Boxed `None` paired with `march_some_boxed`: matched by cell tag (0),
+    /// so `None` must also be a heap cell (not the niche `0`).
+    pub fn march_none_boxed() -> march_value;
     pub fn march_ok(v: march_value) -> march_value;
     pub fn march_err(e: march_value) -> march_value;
 

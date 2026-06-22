@@ -684,10 +684,12 @@ let add_rust ~name ~dir ~march_path : (unit, string) result =
      next steps:\n\
     \  1. set the `march` path in %s/Cargo.toml\n\
     \  2. write your #[march] functions in %s/src/lib.rs\n\
-    \  3. cargo build --release   (produces target/release/lib%s.a)\n\
-    \  4. cargo run --bin gen_extern  >>  your_app.march   (the extern block)\n\
-    \  5. link the .a via forge.toml:  [ffi] link = [\"%s/target/release/lib%s.a\"]\n"
-    crate_dir crate_dir crate_dir lib_ident crate_dir lib_ident;
+    \  3. cargo run --bin gen_extern  >>  your_app.march   (paste the extern block)\n\
+    \  4. add to forge.toml so `forge build` auto-runs cargo:\n\
+    \       [ffi.rust]\n\
+    \       crate = \"%s\"\n\
+    \       lib   = \"%s\"\n"
+    crate_dir crate_dir crate_dir name lib_ident;
   Ok ()
 
 let run ~file ~out : (unit, string) result =

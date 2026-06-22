@@ -32,6 +32,17 @@ type archive_task = {
   task_module  : string;  (** relative path, e.g. "forge/cmd_new.march" *)
 }
 
+(** A Rust staticlib crate auto-built by `forge build`.
+    Declared under `[ffi.rust]` in forge.toml:
+      [ffi.rust]
+      crate = "native/my_binding"   # path to the Cargo project (relative to forge.toml)
+      lib   = "my_binding"          # optional: [lib] name (default = basename of crate path)
+    The built archive is <crate>/target/release/lib<lib>.a. *)
+type ffi_rust_crate = {
+  frc_path : string;  (** relative path to the Cargo project directory *)
+  frc_lib  : string;  (** archive base name (without "lib" prefix and ".a" suffix) *)
+}
+
 type project = {
   name          : string;
   version       : string;
@@ -54,6 +65,7 @@ type project = {
   preprocessors : (string * string) list;
   ffi_sources   : string list;  (** [ffi] sources = [...]: C shim files to compile+link (relative to root) *)
   ffi_link      : string list;  (** [ffi] link = [...]: extra linker flags, e.g. "-lz" *)
+  ffi_rust      : ffi_rust_crate option;  (** [ffi.rust]: Rust staticlib crate auto-built by forge build *)
   js_deps       : (string * string) list;  (** [js_deps] name = "version": npm packages for JS target builds *)
 }
 
@@ -233,6 +245,18 @@ let load_from root =
   let ffi_section = Toml.get_section doc "ffi" in
   let ffi_sources = Toml.get_string_list ffi_section "sources" in
   let ffi_link    = Toml.get_string_list ffi_section "link" in
+  (* [ffi.rust] section: Rust staticlib crate auto-built by forge build.
+     The archive is at <crate>/target/release/lib<lib>.a.
+     `lib` defaults to the basename of the crate path if omitted. *)
+  let ffi_rust =
+    let rust_sec = Toml.get_section doc "ffi.rust" in
+    (match Toml.get_string rust_sec "crate" with
+     | None -> None
+     | Some crate_path ->
+       let lib_name = Option.value ~default:(Filename.basename crate_path)
+           (Toml.get_string rust_sec "lib") in
+       Some { frc_path = crate_path; frc_lib = lib_name })
+  in
   (* [js_deps] section: npm package dependencies for --target js builds *)
   let js_deps =
     List.filter_map (fun (k, v) ->
@@ -244,7 +268,7 @@ let load_from root =
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
     deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
-    preprocessors; ffi_sources; ffi_link; js_deps }
+    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps }
 
 let load_from_dir dir =
   try Ok (load_from dir)
