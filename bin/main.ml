@@ -444,6 +444,7 @@ let ffi_cas_tag () : string list =
     ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
   end
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
+let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false
@@ -656,7 +657,7 @@ let run_test_cmd args =
     in
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
-    March_refinecheck.Refine_check.check_module errors desugared;
+    March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -1029,7 +1030,7 @@ let compile filename =
      See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
-  March_refinecheck.Refine_check.check_module errors desugared;
+  March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
@@ -1987,6 +1988,7 @@ let () =
     ("--ffi-link",   Arg.String (fun f -> ffi_link_flags := f :: !ffi_link_flags),
                      "<flag>  Extra linker flag for FFI (e.g. -lz); repeatable");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
