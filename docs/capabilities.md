@@ -7,38 +7,71 @@ permalink: /docs/capabilities/
 
 # Capabilities
 
-March makes side effects **visible in your types**. A module that reads files, opens network connections, or writes to shared mutable state must declare those effects — and the compiler verifies every claim, transitively, at compile time with no runtime overhead.
-
-## Why this matters
-
-Most languages treat side effects as invisible. A function call might read environment variables, spawn threads, or make network requests, and none of that appears in its type. Three problems follow:
-
-**Accidental effects.** A utility function you thought was pure turns out to call a logger, which opens a file handle, which fails in a sandbox. You find out at runtime, not at the call site.
-
-**Unclear contracts.** A function's signature tells you what data flows in and out, but not what it *does to the world*. That knowledge lives in the implementation, the docs (if they exist), or institutional memory.
-
-**Audit scope.** In a large codebase it becomes hard to answer "does this library ever write files?" or "which modules talk to the network?" without reading everything.
-
-March's capability system addresses all three. A module that needs to read files must declare `needs IO.FileRead`. A function that must remain pure declares nothing — and the compiler verifies it stays that way. Effects flow upward through the call graph automatically: if your code calls something effectful, the compiler tells you to acknowledge it.
+March makes side effects **visible in your types** — zero runtime overhead, enforced at compile time. This guide explains what capabilities are, when to reach for each kind, when to leave them alone, and how they compose.
 
 ---
 
-## Phase 1: IO permission caps (`needs` / `Cap(X)`)
+## The problem they solve
 
-Every module that touches external resources declares its requirements with `needs`:
+In most languages, a function's signature tells you what data flows in and out. It says nothing about what the function *does to the world*:
+
+```python
+# Does this read a file? Call the network? Write to a database?
+# You have to read the implementation to find out.
+def compute_price(product_id: str) -> float:
+    ...
+```
+
+That invisibility causes three recurring problems:
+
+**Accidental effects.** A function you thought was pure secretly calls a logger, which opens a file, which fails in a read-only sandbox. You find out at runtime.
+
+**Unclear contracts.** "Does this library ever write files?" requires reading all the source. No amount of documentation fully substitutes for a machine-checked declaration.
+
+**Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping — unless the compiler tracks it.
+
+March's capability system addresses all three. Effects appear in the type, the compiler traces them transitively through the call graph, and the *absence* of a capability declaration is a machine-verified guarantee of purity:
+
+```march
+mod Price do
+  -- No `needs`. The compiler verifies this module is completely pure.
+  fn compute(base : Float, discount : Float) : Float do
+    base * (1.0 - discount)
+  end
+end
+```
+
+---
+
+## Which tool do I need?
+
+| Problem | Tool |
+|---------|------|
+| Control what external resources a module may touch | IO caps (`needs` / `Cap(X)`) |
+| Guarantee a function is pure | Declare nothing — absence enforces it |
+| Prove initialization ran before dependent code | Proof caps (`proof cap`) |
+| Prove a specific value has been processed | Opaque refined type (`ptype`) |
+| Track a resource's open/closed/consumed lifecycle | Typestate (`always_linear type` + `transitions`) |
+| Exclude allocation/IO from a realtime callback | Specialization tag (`Tagged(X, Realtime)`) |
+| Thread many capabilities without parameter explosion | Capability environment record |
+
+---
+
+## IO permission caps
+
+Every module that touches external resources declares `needs`:
 
 ```march
 mod Server do
   needs IO.Network
 
   fn listen(cap : Cap(IO.Network), port : Int) : () do
-    -- only reachable with a real network capability
     ...
   end
 end
 ```
 
-The compiler enforces this transitively: if your module calls `Server.listen`, you must also declare `needs IO.Network`.
+The compiler enforces this transitively. If your module calls `Server.listen`, you must also declare `needs IO.Network` — or the build fails with a clear message telling you which call requires which cap.
 
 ### Capability hierarchy
 
@@ -54,7 +87,7 @@ IO
 │   ├── IO.NetConnect   — outbound TCP, WebSocket
 │   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
 │   │   └── IO.Database — database connections (declaration-only; child of NetConnect)
-│   └── IO.NetListen    — bind + listen on a port (tcp_listen, tcp_accept)
+│   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock, monotonic time
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
@@ -65,24 +98,23 @@ IO
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
 ```
 
-A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability:
+A module that declares `needs IO` can pass `Cap(IO)` to any function that requires a narrower cap. Use `cap_narrow` to produce a sub-capability — it's free, compile-time only:
 
 ```march
-fn restricted(cap : Cap(IO)) : () do
-  let net_cap = cap_narrow(cap)  -- Cap(IO) → Cap(IO.Network)
+fn start(cap : Cap(IO)) : () do
+  let net_cap  : Cap(IO.NetListen)      = cap_narrow(cap)
+  let tls_cap  : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
   Server.listen(net_cap, 8080)
 end
 ```
 
-`cap_narrow` is free — it reinterprets the type at compile time only.
-
 ### Choosing the right level
 
-Use the **narrowest capability that accurately describes what the code actually does**. Narrower declarations make more precise claims, and the compiler verifies them.
+Use the **narrowest capability that accurately describes what the code actually does**. Narrower declarations make stronger claims; the compiler verifies them.
 
 | What the code does | Declare |
 |--------------------|---------|
-| No external state, no I/O | *(nothing — pure functions need no `needs`)* |
+| No external state, no I/O | *(nothing — pure by declaration)* |
 | Print to stdout/stderr | `needs IO.Console` |
 | Read files or directories | `needs IO.FileRead` |
 | Write, delete, or rename files | `needs IO.FileWrite` |
@@ -99,21 +131,40 @@ Use the **narrowest capability that accurately describes what the code actually 
 | Blocking C calls (OS threads) | `needs IO.Foreign` + `needs IO.Foreign.Blocking` |
 | Application entry point or top-level composition | `needs IO` |
 
-**In libraries, prefer narrow caps.** A library that only reads files should declare `needs IO.FileRead`, not `needs IO`. Callers can hand it a read-only view, statically proving the library cannot secretly write.
+**In libraries, prefer narrow caps.** A library that only reads config files should declare `needs IO.FileRead`, not `needs IO`. Callers can then hand it a read-only view, statically proving it cannot secretly write.
 
-**In entry points, `needs IO` is fine.** Top-level application modules that compose everything don't need to obsess over narrowing. The interesting claims live in the libraries being called.
+**In entry points, `needs IO` is fine.** The interesting precision lives in the libraries. Application main modules compose everything; they don't need to obsess over narrowing.
 
-### When not to declare IO caps
+### What the compiler tells you
 
-**Pure functions need nothing.** If a function computes a hash, parses JSON, sorts a list, or formats a string, write no `needs`. The *absence* of `needs` is the documentation — it tells a reader (and the compiler) that no external state is involved.
+When you call something effectful without declaring the matching cap, the compiler is specific:
+
+```
+Warning: Config.load uses IO.FileRead but mod App does not declare `needs IO.FileRead`.
+hint: add `needs IO.FileRead` to the module body.
+```
+
+There are no false positives. Follow the hint, build again. The compiler traces the full call graph so it catches transitive effects too.
+
+### When *not* to use IO caps
+
+**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is itself a machine-verified guarantee.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
 
-**Don't use capabilities for pure concepts.** A function that validates an email address or checks a regex needs no `needs` — capabilities exist for external state. Pure computation is already proven pure by having no declaration.
+**Don't use IO caps for pure domain concepts.** A function that validates an email address or checks a constraint has no business with capabilities. Capabilities exist for external state, not for logic.
+
+**Don't use capabilities for per-value guarantees.** `Cap(IO.FileRead)` proves a module is *allowed* to read files; it says nothing about whether a specific string value came from a trusted source. For per-value guarantees, use an opaque refined type.
+
+**Small scripts: just use `needs IO`.** For a 50-line script you'll run once, fine-grained capability declarations add more friction than value. Use `needs IO` at the top and move on. The value of narrow caps emerges in larger codebases with multiple contributors over time.
+
+---
+
+## Specific IO capabilities
 
 ### IO.Mut — shared mutable state
 
-`IO.Mut` covers any access to Vault tables, which are process-global shared mutable hash tables. A module that touches Vault (read or write) must declare `needs IO.Mut`:
+`IO.Mut` covers Vault tables — process-global shared mutable hash maps. A module with no `needs IO.Mut` is statically proven never to touch shared mutable state:
 
 ```march
 mod Cache do
@@ -126,17 +177,15 @@ mod Cache do
 end
 ```
 
-A module with no `needs IO.Mut` declaration is statically guaranteed never to touch shared mutable state — useful for proving that library code is side-effect-free.
+This is especially useful for library code that should have no hidden state.
 
-### IO.NetConnect.TLS — encrypted transport
+### IO.NetConnect.TLS — encrypted transport only
 
-`IO.NetConnect.TLS` is a child of `IO.NetConnect`. It covers all TLS operations: establishing sessions (`tls_connect`, `tls_accept`), reading/writing (`tls_read`, `tls_write`), and querying session metadata (`tls_peer_cn`, `tls_negotiated_alpn`).
-
-Declaring `needs IO.NetConnect.TLS` (without `IO.NetConnect`) proves the module only uses encrypted connections — no plaintext TCP. Declaring `needs IO.NetConnect` covers both plain TCP and TLS.
+`IO.NetConnect.TLS` is a child of `IO.NetConnect`. Declaring it (without `IO.NetConnect`) proves the module uses *only* encrypted connections — no plaintext TCP. Declaring `needs IO.NetConnect` covers both.
 
 ```march
 mod HttpsClient do
-  needs IO.NetConnect.TLS  -- no plaintext TCP allowed in this module
+  needs IO.NetConnect.TLS  -- plaintext TCP is statically excluded
 
   fn fetch(fd, h, host) do
     tls_connect(fd, h, host)
@@ -144,28 +193,23 @@ mod HttpsClient do
 end
 ```
 
-### IO.Telemetry — observability (declaration-only)
+### IO.Telemetry — observability annotation
 
-`IO.Telemetry` is a declaration-only capability: the compiler accepts `needs IO.Telemetry` as a semantic annotation but does not (yet) enforce it via body scanning. Use it to make telemetry emission visible in a module's surface contract:
+`IO.Telemetry` is declaration-only: the compiler accepts it as a semantic annotation but does not scan for specific builtins. Use it to make telemetry visible in a module's surface contract so callers know this module emits observability data:
 
 ```march
 mod Metrics do
   needs IO.Telemetry
 
   fn record_request(duration : Int) : () do
-    -- emit telemetry event via your telemetry module
     ...
   end
 end
 ```
 
-Applications that import `Metrics` will see `IO.Telemetry` in their transitive `needs` set, making observability a visible architectural concern.
-
 ### IO.Foreign — calling unverified C
 
-`IO.Foreign` is a meta-capability that must be declared by any module containing an `extern` block. Unlike other IO caps, it is not triggered by specific builtin calls — it is triggered by the **presence of an `extern` block itself**, because C code can bypass every March type guarantee regardless of the declared `Cap(X)`.
-
-Declaring `needs IO.Foreign` makes FFI usage grep-auditable: any module that reaches outside the type system is visible in its `needs` set.
+`IO.Foreign` is a meta-capability triggered by the **presence of an `extern` block** — not by any specific builtin call. C code bypasses every March type guarantee, so the compiler requires you to acknowledge this explicitly.
 
 ```march
 mod Bindings do
@@ -178,7 +222,7 @@ mod Bindings do
 end
 ```
 
-The `blocking` modifier on an extern function spawns an OS thread for the call. This is a distinct and stronger side effect than `IO.Spawn` (which spawns green tasks). A module with blocking externs should also declare `needs IO.Foreign.Blocking`:
+The `blocking` modifier spawns an OS thread. Declare both caps when any extern function is blocking:
 
 ```march
 mod Bindings do
@@ -192,25 +236,13 @@ mod Bindings do
 end
 ```
 
-`needs IO.Foreign` subsumes `needs IO.Foreign.Blocking` (parent covers child), so `needs IO.Foreign` alone suppresses both warnings if you prefer a coarser declaration.
-
-### `extern` blocks
-
-FFI bindings declare the capability they require:
-
-```march
-extern "libc": Cap(IO.FileSystem) do
-  fn open(path : String, flags : Int) : Int
-  fn read(fd : Int, buf : Ptr(Byte), n : Int) : Int
-  fn close(fd : Int) : ()
-end
-```
+`needs IO.Foreign` alone subsumes `IO.Foreign.Blocking` (parent covers child), so one declaration suppresses both warnings if you prefer coarser annotations.
 
 ---
 
 ## Putting it together
 
-Here's how capability declarations compose across a small web application:
+Here's how capability declarations compose across a small web application. Reading the `needs` list of each module answers "what does this module do to the world?" without opening the implementation:
 
 ```march
 mod Config do
@@ -220,21 +252,20 @@ mod Config do
 end
 
 mod Metrics do
-  needs IO.Telemetry         -- semantic annotation: this module emits telemetry
+  needs IO.Telemetry         -- makes observability a visible architectural concern
 
   fn record(event : String, duration : Int) : () do ... end
 end
 
 mod Api do
   needs IO.NetListen         -- binds a port
-  needs IO.NetConnect.TLS    -- makes outbound HTTPS calls only (no plaintext)
+  needs IO.NetConnect.TLS    -- outbound HTTPS only — no plaintext TCP
   needs IO.Mut               -- session vault
 
   fn start(io : Cap(IO.NetListen), tls : Cap(IO.NetConnect.TLS),
            mut : Cap(IO.Mut)) : () do
-    let session = Session.new(mut)
     HttpServer.new()
-    |> HttpServer.plug(fn conn -> handle(conn, tls, session))
+    |> HttpServer.plug(fn conn -> handle(conn, tls, mut))
     |> HttpServer.run(io, 8080)
   end
 end
@@ -252,60 +283,54 @@ mod Main do
 end
 ```
 
-Reading each module's `needs` list answers "what does this module do to the world?" without opening the implementation. `Config` is provably read-only. `Api` can neither read files nor use plaintext TCP. The compiler verifies every claim: if `Config.load` ever called a network function, the build would fail until `needs IO.NetConnect` was added.
+`Config` is provably read-only. `Api` cannot read files and cannot use plaintext TCP. If `Config.load` ever called a network function, the build would fail until `needs IO.NetConnect` was added — no audit needed.
 
 ---
 
-## Phase 2a: Proof capability tokens (`proof cap`)
+## Runtime behaviour
 
-Proof caps enforce **sequencing** — that a specific initialization step has run before dependent code is called.
+All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. No allocation, no indirection, no overhead. Enforcement is purely at compile time.
 
-### Declaring a proof cap
+---
 
-Only **public (`fn`) functions** in the declaring module can mint a proof cap. Private (`pfn`) functions face the same forgery restriction as external modules — they may pass a cap through, but cannot produce one from nothing. This makes the module's public API the complete minting surface.
+## Proof caps — encoding initialization order
 
-The declaring module implicitly satisfies its own `needs` for any cap it declares — no explicit `needs Db.Migrated` is needed inside `mod Db`.
+IO caps control *which resources* a module may touch. Proof caps control *when* dependent code may run. They're separate concerns.
+
+### The problem they solve
+
+Some operations must happen before others:
+
+```march
+-- What stops someone calling this before run_migrations?
+fn query(sql : String) : List(Row) do ... end
+```
+
+A proof cap makes "migrations have run" part of the type:
 
 ```march
 mod Db do
   proof cap Migrated
 
-  -- Public factory — the only way to obtain Cap(Db.Migrated)
   fn run_migrations(raw : Cap(Db.Raw)) : Cap(Db.Migrated) do
     execute_pending_migrations(raw)
     ()   -- Cap is runtime-erased; () is the actual runtime value
   end
 
-  fn start_app(m : Cap(Db.Migrated)) : () do
+  fn query(m : Cap(Db.Migrated), sql : String) : List(Row) do
     -- cannot be called without migration proof
     ...
   end
-
-  -- Private pass-through OK; private minting is not
-  pfn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end   -- fine
-  -- pfn forge() : Cap(Db.Migrated) do () end                   -- ERROR
 end
 ```
 
-`Cap(Db.Migrated)` is unforgeable:
-
+`Cap(Db.Migrated)` is **unforgeable**:
 - `cap_narrow` cannot produce it (it's not in the IO hierarchy)
 - `root_cap` cannot produce it
-- No `pfn` inside `mod Db` can produce it from nothing
-- External code that receives `Cap(Db.Migrated)` can pass it through, but cannot create one
-- The minting surface is exactly the public API of `mod Db` — auditable at a glance
+- Only public (`fn`) functions of `mod Db` can mint it — private (`pfn`) functions may pass it through but cannot create one from nothing
+- External code can pass it through, but cannot create one
 
-### Enforcement rules
-
-**Check 1 — must declare `needs`:** Any module that accepts or returns `Cap(Db.Migrated)` must declare `needs Db.Migrated` (the declaring module is automatically exempt). The error names the declaring module:
-
-```
-Cap(Db.Migrated) is a proof capability declared in module Db.
-Add `needs Db.Migrated` to module App to acknowledge this dependency.
-Only public functions of Db can mint Cap(Db.Migrated) — callers must receive it as a parameter.
-```
-
-**Check 6 — no forgery:** A function outside `Db`, or a `pfn` inside `Db`, cannot have `Cap(Db.Migrated)` in its return type unless it received that cap as a parameter:
+Any module that accepts `Cap(Db.Migrated)` must declare `needs Db.Migrated`. Forgery is a compile error:
 
 ```march
 mod App do
@@ -319,9 +344,9 @@ mod App do
 end
 ```
 
-### Good use cases for proof caps
+### When to use proof caps
 
-Proof caps suit **ambient, payload-independent facts** — things that are true about the system state, not about a specific value:
+Proof caps suit **ambient, payload-independent facts** — things true about the *system*, not about a specific value:
 
 | Proof cap | Meaning |
 |-----------|---------|
@@ -330,16 +355,15 @@ Proof caps suit **ambient, payload-independent facts** — things that are true 
 | `Cap(App.Initialized)` | Application startup has completed |
 | `Cap(Config.Loaded)` | Configuration has been validated |
 
-The key test: **is there a single, well-defined place in the codebase that produces this capability?** If yes, a proof cap works. If the initialization is diffuse, conditional, or happens in multiple places, a proof cap will feel awkward — use a runtime flag instead.
+The key test: **is there a single, well-defined place in the codebase that produces this capability?** If yes, a proof cap works cleanly. If initialization is diffuse, conditional, or happens in multiple places, a proof cap will feel awkward — use a runtime flag instead.
 
 ### When *not* to use proof caps
 
-**Don't use proof caps for per-value facts.** If the proof must be tied to a specific value ("this `String` has been sanitized"), use an **opaque refined type** instead:
+**Don't use proof caps for per-value facts.** If the guarantee must be tied to a specific value ("this `String` has been sanitized"), use an opaque refined type:
 
 ```march
 mod Sanitize do
-  -- Constructor is private — only this module can create Sanitized values
-  ptype Sanitized = Sanitized(String)
+  ptype Sanitized = Sanitized(String)   -- private constructor
 
   fn sanitize(raw : String) : Sanitized do
     Sanitized(escape_html(raw))
@@ -352,43 +376,29 @@ mod Sanitize do
 end
 ```
 
-A detached `Cap(Sanitized)` would prove "some string was sanitized" without binding it to the specific string you're about to render. The opaque type approach ties proof and data together — you physically cannot pass an unsanitized string to `render`.
+A `Cap(Sanitized)` would prove "some string was sanitized somewhere," but not that the string you're about to render *is* the one that was sanitized. The opaque type ties proof and data together — you physically cannot pass an unsanitized string to `render`.
 
-**Don't use proof caps when there's no single mint point.** If the initialization logic is spread across multiple code paths, the cap becomes meaningless. The value of unforgeability comes from there being one clear entry point that does the work.
-
----
-
-## Runtime behaviour
-
-All `Cap(X)` values — IO permission caps and proof caps alike — are **runtime-erased**. They compile to `null` in LLVM IR and to `VUnit` in the interpreter. There is no allocation, no indirection, and no overhead. The enforcement is purely at compile time.
+**Don't use proof caps when there's no single mint point.** Unforgeability is only meaningful when the minting surface is small and auditable. If the initialization is spread across many code paths, the cap gives a false sense of safety.
 
 ---
 
-## Phase 2b/2c: Typestate handles (`always_linear type` + `transitions`)
-{: #typestate-handles}
+## Typestate — tracking resource lifecycle
 
-March has first-class support for **typestate** — compile-time tracking of a
-resource's lifecycle state, encoded directly in the type.
+IO caps answer "is this module allowed to open a file?" Typestate answers "is *this specific handle* currently open or closed?"
 
 ### `Handle(R, S)` from the standard library
 
-`stdlib/handle.march` ships the canonical typestate handle:
+`stdlib/handle.march` ships a canonical typestate handle:
 
 ```march
 always_linear type Handle(r, s) = Handle(Int)
 ```
 
-The `r` parameter is a phantom *resource tag* and `s` is the current *state*.
-Because `Handle` is declared `always_linear`, every binding of it is
-automatically tracked as linear by the compiler — no `linear` annotation needed
-at call sites. Dropping a handle without consuming it, or consuming it twice,
-are both compile-time errors.
-
-A database connection modelled with `Handle`:
+The `r` parameter is a phantom *resource tag* and `s` is the current *state*. Because `Handle` is `always_linear`, dropping it without consuming it — or consuming it twice — are both compile-time errors.
 
 ```march
-tag ConnTag    -- phantom resource label
-tag Closed     -- state labels (zero-arg phantom types)
+tag ConnTag
+tag Closed
 tag Open
 
 fn connect(cap : Cap(IO.Network)) : Handle(ConnTag, Closed) do ... end
@@ -397,7 +407,7 @@ fn query(h : Handle(ConnTag, Open), sql : String) : (List(Row), Handle(ConnTag, 
 fn close(h : Handle(ConnTag, Open)) : Handle(ConnTag, Closed) do ... end
 ```
 
-The type system rejects any call in the wrong state at compile time:
+The wrong call order is a type error:
 
 ```march
 let h0 = connect(net_cap)
@@ -405,17 +415,11 @@ let h1 = query(h0, "SELECT 1")  -- ERROR: expected Handle(ConnTag, Open), got Ha
 let h2 = open(h0)               -- OK
 let (rows, h3) = query(h2, "SELECT 1")
 let h4 = close(h3)
--- h4 : Handle(ConnTag, Closed) -- must eventually be released
 ```
 
-### Declaring state-machine transitions with `transitions`
+### Declaring transitions
 
-A `transitions` block names every valid state transition for a handle type. The
-compiler checks:
-
-1. Each `via` function exists in the module and has the right signature.
-2. Functions in the same module that *look* like transitions but aren't declared
-   produce a warning with the suggested declaration text.
+A `transitions` block names every valid state transition. The compiler verifies each `via` function exists with the right signature, and warns about functions that look like transitions but aren't declared:
 
 ```march
 mod Db do
@@ -427,12 +431,7 @@ mod Db do
 end
 ```
 
-Syntax: `ResourceTag: FromState -> ToState via function_name`. Multiple arms in
-one block; one block per handle type per module.
-
 ### `always_linear type` for your own handles
-
-You can declare your own always-linear handle:
 
 ```march
 always_linear type FileHandle(s) = FileHandle(Int)
@@ -445,57 +444,36 @@ fn read_file(h : FileHandle(FileOpen)) : (String, FileHandle(FileOpen)) do ... e
 fn close_file(h : FileHandle(FileOpen)) : FileHandle(FileClosed) do ... end
 ```
 
-Any type declared `always_linear` gets the same compile-time enforcement as
-`Handle`: automatic linear promotion at every binding site (let, parameter,
-lambda parameter), and a compile error on drop or double-use.
-
 ### `tag` — zero-arg phantom label types
 
-`tag Foo` is shorthand for `type Foo = Foo`. It declares a zero-argument type
-used as a phantom label (state name or resource tag) without constructor boilerplate:
+`tag Foo` is shorthand for `type Foo = Foo` — a zero-argument phantom type for state labels and resource tags:
 
 ```march
 tag ConnTag
 tag Closed
 tag Open
--- equivalent to:
--- type ConnTag = ConnTag
--- type Closed  = Closed
--- type Open    = Open
 ```
 
-### Tooling
+### When to use typestate
 
-The LSP provides **typestate hover** — hovering any `Handle(R, S)` expression
-shows the current state and all declared transitions from it (see
-[LSP]({{ site.baseurl }}/docs/lsp/#typestate-and-capability-intelligence)).
+Use typestate when:
+- A resource has a finite, well-defined lifecycle (closed → open → consumed)
+- Calling operations in the wrong order is a programmer error worth preventing statically
+- The resource must not be dropped without being explicitly released
 
-`forge cap query` prints a project-wide capability and typestate summary (see
-[Tooling]({{ site.baseurl }}/docs/tooling/#forge-cap--capability-and-typestate-inspection)).
+Don't use it for:
+- Simple flags or booleans that change frequently at runtime — the type parameter overhead isn't worth it
+- Cases where the lifecycle state is dynamic and not known until runtime
+
+The LSP shows typestate hover — hovering any `Handle(R, S)` expression displays the current state and all declared transitions from it.
 
 ---
 
-## Phase 2c: Specialization tags (`Tagged(X, T)`)
-{: #specialization-tags}
+## Advanced patterns
 
-`Tagged(X, T)` is a two-argument phantom type constructor that annotates a
-capability with a specialization policy. The tag `T` drives compile-time
-behaviour without carrying any runtime value.
+### Specialization tags — realtime exclusion
 
-### Syntax
-
-```march
-fn dsp_callback(cap : Tagged(DSP, Realtime), buf : Buffer(Float32, 256)) : Buffer(Float32, 256)
-```
-
-`DSP` is the *tag kind* (a phantom type you declare) and `Realtime` is the
-*policy value* (another phantom type).
-
-### Realtime exclusion
-
-The key narrowing rule: a function that takes `Tagged(_, Realtime)` is in a
-**realtime context** and cannot also hold `Cap(Alloc)`, `Cap(IO)`, or
-`Cap(Panic)`. The compiler rejects mixed signatures at compile time:
+`Tagged(X, T)` annotates a capability with a policy. The key narrowing rule: a function taking `Tagged(_, Realtime)` is in a realtime context and cannot also hold `Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)`. The compiler rejects mixed signatures:
 
 ```march
 type DSP = DSP
@@ -503,48 +481,23 @@ type Realtime = Realtime
 
 -- ERROR: realtime functions cannot take Cap(IO)
 fn bad(cap : Tagged(DSP, Realtime), io : Cap(IO)) : () do () end
-```
 
-```
-Error: function `bad` takes Tagged(_, Realtime) but also takes Cap(IO).
-Realtime functions cannot hold Cap(IO) — allocation, IO, and panic are excluded
-from realtime contexts.
-```
-
-A correct realtime function signature takes only the `Tagged(DSP, Realtime)` cap:
-
-```march
+-- OK: statically proven — no allocation, no IO, no panic
 fn process(cap : Tagged(DSP, Realtime), buf : Buffer(Float32, 256)) : Buffer(Float32, 256) do
-  -- statically proven: no allocation, no IO, no panic
   ...
 end
 ```
 
-Functions tagged with a non-`Realtime` policy (e.g. `Tagged(DSP, Standard)`) are
-not restricted and may hold other capabilities alongside the tag.
-
-### Type-indexed specialization
-
-`Tagged` also covers type-indexed specialization (SIMD width, buffer sizes). In
-this case the tag is a real `TNat` or type parameter that monomorphization already
-handles for free — no new mechanism is needed:
+`Tagged` also covers type-indexed specialization (SIMD widths, buffer sizes) — monomorphization handles these for free:
 
 ```march
 fn fft(cap : Tagged(SIMD, N), buf : Buffer(Float32, N)) : Buffer(Complex32, N)
--- monomorphization produces fft_256, fft_1024, etc. for each call site
+-- monomorphization produces fft_256, fft_1024, etc.
 ```
 
----
+### Capability environment records — reducing parameter count
 
-## Phase 2d: Capability-parameterized environment records
-{: #environment-records}
-
-Instead of threading individual `Cap(X)` parameters through every function,
-bundle related capabilities into a record. Narrowing to a restricted set is
-**ordinary record construction** — the type system enforces what the callee can
-do, not by policy, but by type.
-
-### Bundling capabilities
+When many functions need the same bundle of capabilities, threading individual `Cap(X)` parameters everywhere is tedious. Bundle them into a record instead:
 
 ```march
 type RuntimeEnv = {
@@ -553,33 +506,20 @@ type RuntimeEnv = {
   net   : Cap(IO.Network)
 }
 
-fn run(env : RuntimeEnv, data : Input) : Output do
-  -- pass env.io, env.clock, env.net to callees as needed
-  ...
-end
+fn run(env : RuntimeEnv, data : Input) : Output do ... end
 ```
 
-### Narrowing via record construction
-
-Give a plugin only what it needs by constructing a smaller record:
+Narrow to a restricted set by constructing a smaller record — the type system enforces what the callee can do structurally:
 
 ```march
-type PluginEnv = {
-  clock : Cap(IO.Clock)
-}
+type PluginEnv = { clock : Cap(IO.Clock) }
 
 fn run_plugin(env : RuntimeEnv, plugin : Plugin) do
-  let restricted = { clock = env.clock }
-  plugin.run(restricted)   -- plugin's type lacks io and net fields
+  plugin.run({ clock = env.clock })  -- plugin structurally cannot use IO or network
 end
 ```
 
-The plugin structurally cannot use IO or network — not by policy, but because
-`PluginEnv` has no `io` or `net` field.
-
-### Naming convention
-
-Each env type's module should provide named narrowing functions:
+Each env module should provide named narrowing functions:
 
 ```march
 mod RuntimeEnv do
@@ -589,16 +529,14 @@ mod RuntimeEnv do
 end
 ```
 
-### Testing with function fields
+### Testing with capability environment records
 
-Since `Cap(X)` values are runtime-erased, you cannot swap them out in tests.
-Instead, pair the cap with a function field that provides swappable runtime
-behaviour:
+`Cap(X)` values are runtime-erased, so you cannot swap them in tests. Pair the cap with a function field for swappable runtime behaviour:
 
 ```march
 type LogEnv = {
-  log_cap : Cap(IO.Console),   -- erased permission gate — compile-time only
-  write   : (String) -> ()     -- runtime behaviour — swappable in tests
+  log_cap : Cap(IO.Console),  -- compile-time gate, erased at runtime
+  write   : (String) -> ()    -- runtime behaviour — swappable in tests
 }
 
 fn test_process() do
@@ -612,20 +550,18 @@ fn test_process() do
 end
 ```
 
-The cap gates permission at compile time; the function field provides swappable
-behaviour at runtime. No new mechanism required — ordinary first-class functions.
-
 ---
 
 ## Quick decision guide
 
 | I want to… | Use |
 |------------|-----|
-| Prove a module never touches the network | Declare only non-network caps; absence enforced at compile time |
-| Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
+| Prove a module never touches the network | Declare only non-network caps — compiler enforces absence |
+| Guarantee a function is completely pure | Declare no `needs` — the compiler verifies it |
 | Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
 | Guarantee migrations run before any query | `proof cap Migrated` in `mod Db` |
 | Prove a specific string has been sanitized | Opaque refined type (`ptype`), not a proof cap |
 | Track that a file handle is open vs closed | `always_linear type` + `transitions` (typestate) |
 | Exclude allocation/IO from a realtime callback | `Tagged(DSP, Realtime)` |
-| Thread many caps without adding parameters | Bundle into a capability-parameterized env record |
+| Thread many caps without adding parameters | Capability environment record |
+| Small script, just want it to work | `needs IO` — don't overthink it |
