@@ -260,6 +260,25 @@ double march_run_blocking_d(void *fn, const int64_t *args, int n) {
     return b.rd;
 }
 
+/* ── Native → March upcalls ───────────────────────────────────────────────────
+ * Invoke a March closure value (received as an extern parameter) from a binding.
+ * A closure cell holds its apply-fn pointer in field 0 (offset 16); the apply
+ * convention is apply(clo, args…).  Args are march_values (build with
+ * march_make_int / march_str_new / …); the result is a march_value (read it by
+ * the closure's known return type).  Up to 5 args (the closure ptr occupies the
+ * 6th GP-register slot).  Borrow semantics: the closure and args are not dropped
+ * here — March owns them across the call. */
+march_value march_call(march_value closure, int32_t nargs, const march_value *args) {
+    void *clo = march_as_ptr(closure);
+    void *fn  = *(void **)((char *)clo + 16);   /* field 0 = apply fn ptr */
+    if (nargs < 0) nargs = 0;
+    if (nargs > 5) march_fatal("march_call: too many arguments (max 5)");
+    int64_t a[6];
+    a[0] = (int64_t)(intptr_t)clo;              /* apply(clo, args…) */
+    for (int32_t i = 0; i < nargs; i++) a[1 + i] = (int64_t)args[i];
+    return (march_value)blk_call_i(fn, a, nargs + 1);
+}
+
 march_value march_dup(march_value v) {
     if (march_is_heap(v)) march_incrc(march_as_ptr(v));
     return v;
@@ -373,4 +392,22 @@ march_value ffi_maybe_half(double x) {
 /* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche. */
 march_value ffi_maybe_unit(int64_t flag) {
     return flag ? march_some_boxed(0) : march_none();  /* Unit Option matches by null-check */
+}
+
+/* Upcall: apply a March closure f : (Int) -> Int to x, return f(x).
+ * Args are in NATIVE slot rep (Int = raw machine int, NOT march_make_int); the
+ * result is the GENERIC tagged word (read Int with march_get_int). */
+int64_t ffi_apply1(march_value f, int64_t x) {
+    march_value arg = (march_value)x;                 /* raw Int slot */
+    return march_get_int(march_call(f, 1, &arg));     /* tagged Int result */
+}
+
+/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool. */
+int64_t ffi_count_matching(march_value pred, int64_t n) {
+    int64_t count = 0;
+    for (int64_t i = 1; i <= n; i++) {
+        march_value arg = (march_value)i;             /* raw Int slot */
+        if (march_get_bool(march_call(pred, 1, &arg))) count++;
+    }
+    return count;
 }
