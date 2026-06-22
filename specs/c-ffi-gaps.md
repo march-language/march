@@ -28,11 +28,15 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   - **No List-copy** (§6.6): `List(T)` ⇄ C array+length is unbuilt.
   - **Rust `#[derive(Encoder/Decoder)]`** — the Rust analog of these codecs — is
     the next follow-on; it reuses this exact ABI.
-- **`Option(Float)` / `Option(Unit)` returns are unsupported by the bare
-  constructors.** `march_some`/`march_none` emit the P6 *niche* form (`Some(x)=x`,
-  `None=0`), correct only for niche-eligible payloads (Int/Bool/String/heap).
-  Float/Unit Options stay boxed in the compiler and would need a kind-aware
-  boxed constructor. `Result` is unaffected (always boxed).
+- **`Option(Float)` / `Option(Unit)` returns — DONE** via `march_some_boxed` /
+  `march_none_boxed`. The bare `march_some`/`march_none` are the niche form
+  (`Some(x)=x`, `None=0`), correct only for niche-eligible payloads. A 0-bit
+  payload (`0.0` / unit) aliases `None=0`, so those use the boxed path — and the
+  compiler is asymmetric here, matched empirically: **`Option(Float)`** is fully
+  boxed (`Some`=`march_some_boxed(march_make_float(f))`, `None`=`march_none_boxed()`,
+  matched by cell tag); **`Option(Unit)`** uses boxed `Some` + niche `None`
+  (`march_some_boxed(0)` / `march_none()`, matched by null-check). `gen-c` emits
+  the right variant per payload type. Verified: `test/native/ffi_float`.
 - **No `raw` zero-copy escape hatch** (spec §7). All structured values go through
   the copy/borrow paths; there's no opt-in to hand a binding the raw
   `march_value` with author-managed RC. (Phase 8.)
@@ -45,8 +49,9 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   and the compiler-emitted call-site wrapper materializes `Ok(payload)` /
   `Err(e)` (`test/native/ffi_raise`, `gen-c` emits the `march_env*` signature).
   The self-build path (`march_ok`/`march_err` directly, no `raises`) still works.
-  Remaining sub-gaps: `Result(Float, _)` Ok payload is not yet supported (compile
-  error); `march_env` is threaded only for `raises` bindings (the spec's
+  `Result(Float, _)` Ok payloads now work too (the wrapper boxes the bare
+  `double` via `march_make_float`; `test/native/ffi_float`). Remaining sub-gap:
+  `march_env` is threaded only for `raises` bindings (the spec's
   env-for-all-allocating-bindings + `march_str_new(env, …)` is not retrofitted —
   the env-less constructors stay).
 - **Panic/longjmp safety is by convention only.** A C binding that `longjmp`s or
@@ -104,9 +109,17 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
   (§6.4), wiring shim bodies to decode params / encode returns. `forge ffi import
   <header.h>` (C header → draft `extern` + `.ffi.toml`) is still unbuilt — it
   needs a C-header parser (libclang), a heavier dependency.
-- **ABI version handshake not enforced.** `march_ffi_abi_version()` exists but
-  nothing checks it at link/dlopen time. Only meaningful once separately-built
-  binding objects exist (Phase 5).
+- **ABI version handshake — enforced at interpreter dlopen** (spec §4.1). When
+  the interpreter dlopens the runtime `.so`, it dlsyms + calls
+  `march_ffi_abi_version()` and rejects a mismatch with a clear error (a
+  stale/foreign `.so` fails loudly instead of corrupting at a later call;
+  `lib/eval/eval.ml` `_ffi_get_handle`). The **compiled path** is
+  version-consistent by construction (the runtime is compiled fresh from the
+  same `march_ffi.h` into every binary). Remaining: a *pre-built external*
+  binding (e.g. a Rust staticlib built against a different `march_ffi.h`) doesn't
+  export its own version symbol, so a compiled-path cross-version skew isn't
+  caught — would need the binding to export `__march_binding_abi_version` + a
+  startup check (low priority; no such artifacts ship yet).
 
 ## Other languages / direction
 

@@ -2034,8 +2034,10 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
       let tg = fresh ctx "oktag" in
       emit ctx (Printf.sprintf "%s = or i64 %s, 1" tg sh); tg
     | Tir.TFloat ->
-      failwith (Printf.sprintf
-        "raises extern `%s`: Result(Float, _) Ok payload is not yet supported" fname)
+      (* the bare payload is a double; the Result Ok slot holds the raw IEEE
+         bits (Result is a plain boxed ADT — no extra boxing for Float). *)
+      let bits = fresh ctx "okfbits" in
+      emit ctx (Printf.sprintf "%s = call i64 @march_make_float(double %s)" bits payload); bits
     | _ ->
       (* heap/String/record/variant: the payload word is already a value *)
       let pi = fresh ctx "okp2i" in
@@ -5455,7 +5457,8 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_raises) m.Tir.tm_externs then
     Buffer.add_string out
       "declare ptr @march_ok(i64)\n\
-       declare ptr @march_err(i64)\n";
+       declare ptr @march_err(i64)\n\
+       declare i64 @march_make_float(double)\n";
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 

@@ -97,6 +97,17 @@ int main(void) {
         march_value err = march_err(march_make_int(2));
         assert(((int32_t *)march_as_ptr(err))[2] == 1);    /* Err tag */
         march_drop(err);
+
+        /* Boxed Some/None (for Float/Unit Options): Some = heap cell tag 1 with
+         * the payload at offset 16; None = heap cell tag 0. */
+        march_value sb = march_some_boxed(march_make_float(4.5));
+        assert(march_variant_tag(sb) == 1);
+        assert(march_get_float(march_variant_field(sb, 0)) == 4.5);
+        march_drop(sb);
+
+        march_value nb = march_none_boxed();
+        assert(march_is_heap(nb) && march_variant_tag(nb) == 0);
+        march_drop(nb);
     }
 
     /* ── resources: opaque native handle with destructor on drop ───────── */
