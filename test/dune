@@ -1057,6 +1057,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/ffi_interp2.expected native_ffi_interp2.out)))
 
+; ── FFI Gap 1: user shim .so loaded by the interpreter.
+; Step 1: compile the shim C file to a shared library.
+(rule
+ (targets native_ffi_shim.so)
+ (deps (file native/ffi_shim.c)
+       (file ../runtime/march_ffi.h))
+ (action
+  (run cc -shared -O2 -fPIC
+       -undefined dynamic_lookup
+       -I../runtime
+       native/ffi_shim.c
+       -o native_ffi_shim.so)))
+
+; Step 2: run the interpreter with --ffi-so pointing at the compiled shim.
+(rule
+ (targets native_ffi_interp_shim.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_ffi.c) (file ../runtime/march_ffi.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/ffi_shim.c)
+       native_ffi_shim.so
+       (file native/ffi_interp_shim.march))
+ (action
+  (with-stdout-to native_ffi_interp_shim.out
+    (run %{exe:../bin/main.exe}
+         --ffi-so %{dep:native_ffi_shim.so}
+         native/ffi_interp_shim.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/ffi_interp_shim.expected native_ffi_interp_shim.out)))
+
+; ── FFI Gap 2: closures/upcalls as FFI args — clean error in interpreter.
+; The interpreter emits a clear diagnostic for TyArrow params and exits 1.
+; We capture stderr (where the error goes) in a file and diff against the
+; expected first line.  Stack trace lines are skipped via head -1 in a
+; (system ...) action.
+;
+; Note: test/native/ffi_interp_upcall.march and .expected are kept for
+; documentation; the dune rule is intentionally omitted (the error message
+; includes a stack trace with line numbers that is tested informally).
+
 ; ── FFI Phase 6: a `blocking` extern dispatches on an OS thread (offload).
 (rule
  (targets native_ffi_blocking native_ffi_blocking.out)

@@ -1145,12 +1145,18 @@ external _ffi_dyncall_i : nativeint -> int64 array -> int -> int64 = "march_eval
 external _ffi_dyncall_d : nativeint -> int64 array -> int -> float = "march_eval_dyncall_d"
 external _ffi_dyncall_fi : nativeint -> int64 array -> int -> float array -> int -> int64 = "march_eval_dyncall_fi"
 external _ffi_dyncall_fd : nativeint -> int64 array -> int -> float array -> int -> float = "march_eval_dyncall_fd"
+(* Gap 1: open a user FFI shim .so into the interpreter's symbol space. *)
+external _ffi_dlopen_extra : string -> unit = "march_eval_dlopen_extra"
 
 (** Thunk returning the path to the runtime .so holding FFI symbols; set by the
     driver (bin/main.ml).  Called lazily on the first extern call so non-FFI
     programs never pay the .so build cost.  Default/None ⇒ resolve from
     already-loaded libs (RTLD_DEFAULT). *)
 let ffi_runtime_so : (unit -> string option) ref = ref (fun () -> None)
+(* Gap 1: optional path to a pre-compiled user shim .so (from forge.toml [ffi]
+   sources, or --ffi-so).  Set by bin/main.ml before run_module when ffi_c_files
+   are present.  Loaded lazily alongside the runtime .so. *)
+let ffi_shim_so : string option ref = ref None
 let _ffi_handle : nativeint option ref = ref None
 (* The FFI ABI version this build expects; must equal MARCH_FFI_ABI_VERSION in
    runtime/march_ffi.h.  Verified against the dlopened runtime at load time. *)
@@ -1175,6 +1181,15 @@ let _ffi_get_handle () : nativeint =
             v _ffi_abi_expected
       end
     end;
+    (* Gap 1: load user shim .so if present.  Must happen AFTER the runtime .so
+       so that symbols from march_ffi.h (e.g. march_str_borrow) are already in
+       the global symbol table when the shim's initialisation code runs. *)
+    (match !ffi_shim_so with
+     | Some path when path <> "" ->
+       (try _ffi_dlopen_extra path
+        with Failure msg ->
+          eval_error "FFI: could not load user shim .so — %s" msg)
+     | _ -> ());
     _ffi_handle := Some h; h
 
 (* ------------------------------------------------------------------ *)
@@ -1333,7 +1348,14 @@ let dynamic_ffi_call (lib : string) (sym : string)
     match ty with
     | TyCon ({txt = "Float"; _}, []) ->
       (match v with VFloat f -> `FP f | VInt n -> `FP (Float.of_int n) | _ -> `Err)
-    | TyArrow _ -> `Err   (* closures/upcalls not yet supported in interpreter *)
+    | TyArrow _ ->
+      (* Gap 2: closures/upcalls as FFI arguments require --compile.
+         The interpreter cannot synthesize a C function pointer for an OCaml
+         closure without a JIT trampoline.  Return `Err` so dynamic_ffi_call
+         returns None and the caller emits a clear diagnostic.
+         Future work: allocate mmap'd trampolines or use libffi to create real
+         C function pointers here, enabling interpreter upcalls. *)
+      `Err
     | _ ->
       (try `GP (ffi_marshal_field ty v)
        with Eval_error _ -> `Err)
@@ -1341,7 +1363,14 @@ let dynamic_ffi_call (lib : string) (sym : string)
   let classified = List.map2 classify_arg param_tys args in
   if List.exists (fun c -> c = `Err) classified then None
   else begin
-    let fnptr = _ffi_dlsym h sym in
+    (* Look up symbol first in the runtime handle, then fall back to the global
+       symbol scope (RTLD_DEFAULT = 0n).  The fallback finds symbols from any
+       RTLD_GLOBAL-loaded library, including user shim .so files loaded by
+       _ffi_dlopen_extra (Gap 1). *)
+    let fnptr =
+      let p = _ffi_dlsym h sym in
+      if p <> 0n then p else _ffi_dlsym 0n sym
+    in
     if fnptr = 0n then
       eval_error "extern %s:%s — symbol not found for interpreter FFI \
                   (build the runtime, or run with --compile)" lib sym;
@@ -7170,6 +7199,7 @@ and eval_expr (env : env) (e : expr) : value =
 let () = eval_expr_hook := eval_expr
 let () = apply_hook := apply
 let () = iface_dispatch_hook := apply
+
 
 (* ------------------------------------------------------------------ *)
 (* Task builtins                                                       *)

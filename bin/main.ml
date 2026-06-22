@@ -1675,6 +1675,72 @@ let compile filename =
        resolved dynamically.  Lazy — only built if the program actually calls an
        extern at runtime. *)
     March_eval.Eval.ffi_runtime_so := (fun () -> Some (ensure_runtime_so ()));
+    (* Gap 1: if ffi_c_files are present (from --ffi-c or forge.toml [ffi]),
+       compile them into a temp .so and tell the interpreter to dlopen it.
+       An explicit --ffi-so path (set above) takes precedence.
+       Hash = sum of source paths and their content for cache invalidation. *)
+    (match !March_eval.Eval.ffi_shim_so with
+     | Some _ -> ()  (* already set explicitly via --ffi-so *)
+     | None when !ffi_c_files = [] -> ()  (* no shim sources *)
+     | None ->
+       (* Build a content-addressed temp path for the shim .so *)
+       let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+       let cache_dir = Filename.concat home ".cache/march" in
+       (try Unix.mkdir cache_dir 0o755
+        with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+       let key_buf = Buffer.create 256 in
+       List.iter (fun f ->
+         Buffer.add_string key_buf f;
+         (try Buffer.add_string key_buf (Digest.to_hex (Digest.file f)) with _ -> ()))
+         (List.rev !ffi_c_files);
+       let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
+       let so_path = Filename.concat cache_dir ("march_ffi_shim_" ^ key ^ ".so") in
+       if not (Sys.file_exists so_path) then begin
+         (* Find the runtime dir for the -I flag (march_ffi.h lives there) *)
+         let runtime_dir_opt =
+           let candidates = [
+             "runtime/march_runtime.c";
+             Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
+             Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+           ] in
+           match List.find_opt Sys.file_exists candidates with
+           | Some p -> Some (Filename.dirname p)
+           | None -> None
+         in
+         let inc_flag = match runtime_dir_opt with
+           | Some d -> Printf.sprintf " -I%s" (Filename.quote d)
+           | None -> ""
+         in
+         let src_files = String.concat " "
+           (List.rev_map Filename.quote !ffi_c_files) in
+         let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
+         (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
+            that are not available at .so link time — they'll be resolved at dlopen
+            time via RTLD_GLOBAL.  Pass -undefined dynamic_lookup on Darwin. *)
+         let platform_flags =
+           match Sys.getenv_opt "MARCH_FFI_SHIM_LDFLAGS" with
+           | Some f -> " " ^ f   (* explicit override *)
+           | None ->
+             (* Detect macOS via the existence of /System/Library/CoreServices *)
+             if Sys.file_exists "/System/Library/CoreServices"
+             then " -undefined dynamic_lookup"
+             else ""
+         in
+         let cmd = Printf.sprintf
+           "cc -shared -O2 -fPIC%s%s %s -o %s 2>&1"
+           platform_flags inc_flag src_files tmp in
+         let rc = Sys.command cmd in
+         if rc <> 0 then
+           Printf.eprintf "march: warning: failed to compile FFI shim sources \
+                           to .so (exit %d) — interpreter will not find shim symbols\n" rc
+         else begin
+           (try Sys.rename tmp so_path
+            with Sys_error _ ->
+              (try Sys.remove tmp with Sys_error _ -> ()))
+         end
+       end;
+       if Sys.file_exists so_path then
+         March_eval.Eval.ffi_shim_so := Some so_path);
     (try March_eval.Eval.run_module desugared
      with
      | March_eval.Eval.Eval_error msg ->
@@ -2037,6 +2103,8 @@ let () =
                      "<file.c>  Compile+link an FFI shim C source (forge [[ffi]]); repeatable");
     ("--ffi-link",   Arg.String (fun f -> ffi_link_flags := f :: !ffi_link_flags),
                      "<flag>  Extra linker flag for FFI (e.g. -lz); repeatable");
+    ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
+                     "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
