@@ -1,11 +1,15 @@
 (** forge run — run app through the March interpreter (fast for development) *)
 
-let run ?(dump_phases=false) ?(compiled=false) () =
+let run ?(dump_phases=false) ?(compiled=false) ?target () =
   if compiled then begin
-    match Cmd_build.build ~release:false ~dump_phases () with
+    match Cmd_build.build ~release:false ~dump_phases ?target () with
     | Error msg -> Error msg
-    | Ok binary ->
-      let rc = Sys.command (Filename.quote binary) in
+    | Ok output ->
+      let cmd = match target with
+        | Some ("js" | "javascript") -> "node " ^ Filename.quote output
+        | _ -> Filename.quote output
+      in
+      let rc = Sys.command cmd in
       if rc = 0 then Ok ()
       else Error (Printf.sprintf "program exited with code %d" rc)
   end else

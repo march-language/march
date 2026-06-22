@@ -236,10 +236,12 @@ let ffi_flags_of ~root (proj : Project.project) =
   let links = List.map (fun l -> " --ffi-link " ^ Filename.quote l) proj.Project.ffi_link in
   String.concat "" (srcs @ links)
 
-(** Compile the entry file to a native binary at [output]. *)
-let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry =
-  let opt_flag  = if release then " --opt 2" else " --opt 0" in
-  let dump_flag = if dump_phases then " --dump-phases" else "" in
+(** Compile the entry file to [output]. [target] is passed as --target <t>;
+    omitting it compiles to a native binary. *)
+let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry =
+  let opt_flag    = if release then " --opt 2" else " --opt 0" in
+  let dump_flag   = if dump_phases then " --dump-phases" else "" in
+  let target_flag = match target with Some t -> " --target " ^ t | None -> "" in
   (* Optional List.pmap sequential-fallback cutoff, passed through to the
      compiler.  Sourced from MARCH_PMAP_THRESHOLD so the value can flow
      without a forge.toml schema change. *)
@@ -249,8 +251,8 @@ let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry =
     | _ -> ""
   in
   let cmd =
-    Printf.sprintf "%smarch --compile -o %s%s%s%s%s %s"
-      lib_path_env (Filename.quote output) opt_flag pmap_flag dump_flag ffi_flags (Filename.quote entry)
+    Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s %s"
+      lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag dump_flag ffi_flags (Filename.quote entry)
   in
   Sys.command cmd
 
@@ -319,7 +321,7 @@ let run_preprocessors ~proj ~src_dir ~gen_dir =
     !count
   end
 
-let build ~release ?(dump_phases=false) ?(frozen=false) () =
+let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -415,9 +417,14 @@ let build ~release ?(dump_phases=false) ?(frozen=false) () =
         if orphan_failed > 0 then
           Error "typecheck failed"
         else begin
-          let output = Filename.concat build_dir proj.Project.name in
+          let output_ext = match target with
+            | Some ("js" | "javascript") -> ".mjs"
+            | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
+            | _ -> ""
+          in
+          let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
           let ffi_flags = ffi_flags_of ~root:proj.Project.root proj in
-          let rc = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases entry_path in
+          let rc = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry_path in
           if rc = 0 then begin
             do_islands ();
             Ok output
