@@ -15,7 +15,7 @@ When a property fails, the library automatically **shrinks** the failing input t
 
 ## Quick start
 
-```elixir
+```march
 mod MyTests do
 
   test "addition is commutative" do
@@ -71,7 +71,7 @@ This is the key advantage over QuickCheck-style property testing, where shrinkin
 
 A property is a function that takes a generated value and returns `Bool`:
 
-```elixir
+```march
 test "reverse is involutive" do
   Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
     List.length(List.reverse(List.reverse(xs))) == List.length(xs)
@@ -83,7 +83,7 @@ end
 
 Use `let _ = assert ...` to chain multiple assertions. The final expression must be `true`:
 
-```elixir
+```march
 test "sort invariants" do
   Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
     let sorted = List.sort_by(xs, int_lt)
@@ -100,7 +100,7 @@ If any assertion fails, the runner catches the failure and shrinks to the minima
 
 Properties that crash (division by zero, match failures, index out of bounds) are also caught and shrunk:
 
-```elixir
+```march
 test "safe_divide handles all inputs" do
   Check.all(Gen.tuple2(Gen.int(-100, 100), Gen.int(-100, 100)), fn pair ->
     match pair do
@@ -166,7 +166,7 @@ If `safe_divide` panics for some input, the runner finds the minimal crashing in
 
 ### `Gen.map` — transform values
 
-```elixir
+```march
 -- Generate even numbers
 let gen_even = Gen.map(Gen.int(0, 50), fn n -> n * 2)
 
@@ -181,7 +181,7 @@ let gen_point = Gen.map(
 
 When the second generator depends on the first value:
 
-```elixir
+```march
 -- Generate a list and a valid index into it
 let gen_list_and_index = Gen.bind(
   Gen.filter(Gen.list(Gen.int(0, 100)), fn xs -> List.length(xs) > 0),
@@ -193,7 +193,7 @@ Shrinking the list automatically re-derives a valid index.
 
 ### `Gen.string_of` — custom string alphabets
 
-```elixir
+```march
 -- Hex strings
 let hex_char = Gen.element([48, 49, 50, 51, 52, 53, 54, 55,
                             56, 57, 97, 98, 99, 100, 101, 102])
@@ -207,7 +207,7 @@ let gen_digits = Gen.string_of(Gen.int(48, 57))
 
 The runner grows the `size` parameter from 0 to 100 across runs. Use `Gen.sized` to access it:
 
-```elixir
+```march
 -- Cap list length at 10 regardless of runner size
 let gen_short_list = Gen.sized(fn s ->
   let cap = if s > 10 do 10 else s end
@@ -223,7 +223,7 @@ let gen_short_list = Gen.sized(fn s ->
 
 Override defaults with `Check.all_with`:
 
-```elixir
+```march
 test "stress test with more runs" do
   let config = { Check.default_config() with num_runs = 500, max_size = 200 }
   Check.all_with(Gen.list(Gen.int(0, 100)), fn xs ->
@@ -318,7 +318,7 @@ FAIL: "no division by zero"
 
 Test mathematical properties that must hold:
 
-```elixir
+```march
 -- Commutativity: a + b == b + a
 -- Associativity: (a + b) + c == a + (b + c)
 -- Identity: a + 0 == a
@@ -332,7 +332,7 @@ Test mathematical properties that must hold:
 
 Encode and decode should cancel:
 
-```elixir
+```march
 test "base64 round-trip" do
   Check.all(Gen.lowercase_string(), fn s ->
     let encoded = Base64.encode(Bytes.from_string(s))
@@ -348,7 +348,7 @@ end
 
 Operations should preserve certain properties:
 
-```elixir
+```march
 -- Length preservation: length(map(f, xs)) == length(xs)
 -- Monotonicity: length(filter(p, xs)) <= length(xs)
 -- Sorted output: is_sorted(sort(xs))
@@ -359,7 +359,7 @@ Operations should preserve certain properties:
 
 Compare a complex implementation against a simpler reference:
 
-```elixir
+```march
 test "BigInt mul matches Int for small values" do
   Check.all(Gen.tuple2(Gen.int(-100, 100), Gen.int(-100, 100)), fn pair ->
     match pair do (a, b) ->

@@ -9,7 +9,7 @@ permalink: /docs/parallel-collections/
 
 March can run a transformation over a list across multiple CPU cores with a one-character change: `map` → `pmap`. The parallel operations live in the `List` module, produce **exactly** the same results (same values, same order) as their sequential counterparts, and ride the same green-thread scheduler that powers [actors and tasks]({{ site.baseurl }}/docs/actors/).
 
-```elixir
+```march
 let squares  = List.map(xs, fn x -> x * x)    -- sequential
 let squares2 = List.pmap(xs, fn x -> x * x)   -- parallel, identical result
 ```
@@ -26,7 +26,7 @@ All of these are order-preserving: element *n* of the output corresponds to elem
 
 Parallel map. Drop-in replacement for `List.map` when `f` is safe to run concurrently.
 
-```elixir
+```march
 List.pmap([1, 2, 3], fn x -> x * 2)        -- [2, 4, 6]
 List.pmap(rows, fn r -> render_row(r))     -- each row rendered on a worker
 ```
@@ -35,7 +35,7 @@ List.pmap(rows, fn r -> render_row(r))     -- each row rendered on a worker
 
 Like `pmap`, but caps the number of tasks running at once. Use it when each element is **expensive** — a network call, a heavy computation — and you want to bound how many run simultaneously (rate-limiting, connection pools, memory pressure).
 
-```elixir
+```march
 -- Fetch up to 8 URLs at a time, no matter how long the list is
 List.pmap_n(urls, fn u -> http_get(u), 8)
 ```
@@ -44,7 +44,7 @@ List.pmap_n(urls, fn u -> http_get(u), 8)
 
 Parallel filter. Same semantics as `List.filter`, kept in input order.
 
-```elixir
+```march
 List.pfilter(candidates, fn c -> passes_expensive_check(c))
 ```
 
@@ -52,7 +52,7 @@ List.pfilter(candidates, fn c -> passes_expensive_check(c))
 
 Parallel reduction (a *tree reduce*). Each chunk is reduced independently, then the partial results are combined.
 
-```elixir
+```march
 List.preduce([1, 2, 3, 4], 0, fn (a, b) -> a + b)   -- 10
 List.preduce(words, "", fn (a, b) -> a ++ b)        -- concatenation
 ```
