@@ -400,10 +400,10 @@ JSON.get(obj, "key")                  -- Option(JsonValue)
 let resp = Http.get("https://api.example.com/data")
 let resp = Http.post("https://api.example.com/data", body)
 let resp = Http.request({
-  method  = "PUT",
-  url     = "https://api.example.com/items/1",
-  headers = [("Content-Type", "application/json")],
-  body    = Some(json_body)
+  method:  "PUT",
+  url:     "https://api.example.com/items/1",
+  headers: [("Content-Type", "application/json")],
+  body:    Some(json_body)
 })
 
 match resp do
@@ -553,7 +553,7 @@ Duration.milliseconds(d)   -- 30000
 URI.parse("https://example.com/path?k=v")
 -- Result({ scheme, host, port, path, query, fragment })
 
-URI.build({ scheme = "https", host = "example.com", path = "/api", ... })
+URI.build({ scheme: "https", host: "example.com", path: "/api", ... })
 URI.encode("hello world")     -- "hello%20world"
 URI.decode("hello%20world")   -- "hello world"
 URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
@@ -622,7 +622,7 @@ These modules implement the distributed-OTP transport layer (P1). They are stdli
 type Identity = { name : String, node_id : String, incarnation : Int }
 
 NodeIdentity.make("worker@host", pubkey, 0)
--- { name = "worker@host", node_id = sha256(pubkey), incarnation = 0 }
+-- { name: "worker@host", node_id: sha256(pubkey), incarnation: 0 }
 
 NodeIdentity.encode(id)        -- List(Int)  (MessagePack bytes)
 NodeIdentity.decode(bytes)     -- Result(Identity, String)

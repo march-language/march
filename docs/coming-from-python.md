@@ -97,8 +97,8 @@ March keeps data and functions separate. Records hold data; functions in the sam
 ```march
 type Counter = { count : Int }
 
-fn new() : Counter do { count = 0 } end
-fn increment(c : Counter) : Counter do { c with count = c.count + 1 } end
+fn new() : Counter do { count: 0 } end
+fn increment(c : Counter) : Counter do { c with count: c.count + 1 } end
 fn get(c : Counter) : Int do c.count end
 ```
 

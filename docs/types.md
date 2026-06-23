@@ -92,8 +92,8 @@ type User  = { name : String, age : Int, email : String }
 Create, access, and update:
 
 ```march
-let p = { x = 1.0, y = 2.0 }
-let moved = { p with x = 5.0 }
+let p = { x: 1.0, y: 2.0 }
+let moved = { p with x: 5.0 }
 let dist = p.x +. p.y
 ```
 
@@ -119,8 +119,8 @@ type User  = { name : String, age : Int, active : Bool }
 Create a record by supplying all fields:
 
 ```march
-let p = { x = 1.0, y = 2.0 }
-let u = { name = "Alice", age = 30, active = true }
+let p = { x: 1.0, y: 2.0 }
+let u = { name: "Alice", age: 30, active: true }
 ```
 
 Access fields with `.`:
@@ -132,8 +132,8 @@ let dist = p.x +. p.y
 Update fields with `{ base with field = value }` — this creates a new record; the original is unchanged:
 
 ```march
-let p2 = { p with x = 5.0 }       -- new Point, y unchanged
-let u2 = { u with active = false } -- deactivate user
+let p2 = { p with x: 5.0 }       -- new Point, y unchanged
+let u2 = { u with active: false } -- deactivate user
 ```
 
 Destructure records in patterns:

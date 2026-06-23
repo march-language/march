@@ -132,7 +132,7 @@ end
 fn load(id : Int) : Result(Profile, String) do
   let? user  = fetch_user(id)
   let? prefs = fetch_prefs(user.id)
-  Ok({ user = user, prefs = prefs })
+  Ok({ user: user, prefs: prefs })
 end
 ```
 
@@ -164,7 +164,7 @@ mod UserService do
   end
 
   fn create_user(cfg : Config, name : String, email : String) : Result(User, String) do
-    Db.insert(cfg.db, { name = name, email = email })
+    Db.insert(cfg.db, { name: name, email: email })
   end
 end
 ```
@@ -210,8 +210,8 @@ let y = x + 1
 Record update syntax creates a new record instead of mutating:
 
 ```march
-let user   = { name = "Alice", age = 30 }
-let older  = { user with age = 31 }    -- user is unchanged
+let user   = { name: "Alice", age: 30 }
+let older  = { user with age: 31 }    -- user is unchanged
 ```
 
 ---

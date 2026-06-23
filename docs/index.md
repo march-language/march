@@ -28,10 +28,10 @@ March's concurrency model is the actor model — share-nothing, message-passing 
 ```march
 actor Counter do
   state { count : Int }
-  init  { count = 0 }
+  init  { count: 0 }
 
   on Increment(n : Int) do
-    { state with count = state.count + n }
+    { state with count: state.count + n }
   end
 
   on Get() -> reply state.count
@@ -121,10 +121,10 @@ type Message = Join(String) | Leave(String) | Say(String, String)
 
 actor Room do
   state { members : List(String) }
-  init  { members = [] }
+  init  { members: [] }
 
   on Join(name) do
-    { state with members = [name | state.members] }
+    { state with members: [name | state.members] }
   end
 
   on Say(from, text) do
@@ -134,7 +134,7 @@ actor Room do
   end
 
   on Leave(name) do
-    { state with members = List.filter(fn m -> m != name, state.members) }
+    { state with members: List.filter(fn m -> m != name, state.members) }
   end
 end
 

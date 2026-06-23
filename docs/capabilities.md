@@ -517,7 +517,7 @@ Narrow to a restricted set by constructing a smaller record — the type system 
 type PluginEnv = { clock : Cap(IO.Clock) }
 
 fn run_plugin(env : RuntimeEnv, plugin : Plugin) do
-  plugin.run({ clock = env.clock })  -- plugin structurally cannot use IO or network
+  plugin.run({ clock: env.clock })  -- plugin structurally cannot use IO or network
 end
 ```
 
@@ -526,7 +526,7 @@ Each env module should provide named narrowing functions:
 ```march
 mod RuntimeEnv do
   fn narrow_for_plugin(env : RuntimeEnv) : PluginEnv do
-    { clock = env.clock }
+    { clock: env.clock }
   end
 end
 ```
@@ -544,8 +544,8 @@ type LogEnv = {
 fn test_process() do
   let captured = Ref.new([])
   let env : LogEnv = {
-    log_cap = test_logger_cap(),
-    write   = fn line -> Ref.update(captured, fn xs -> Cons(line, xs))
+    log_cap: test_logger_cap(),
+    write:   fn line -> Ref.update(captured, fn xs -> Cons(line, xs))
   }
   let result = process(env, test_input)
   assert_contains(Ref.get(captured), "expected message")

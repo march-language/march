@@ -546,7 +546,7 @@ on Process(job) do
     Command -> run_command(job.data)
   end
   send(job.reply_to, Done(result))
-  { state with processed = state.processed + 1 }
+  { state with processed: state.processed + 1 }
 end
 
 -- Good
@@ -555,7 +555,7 @@ on Process(job) do handle_process(state, job) end
 pfn handle_process(state, job) do
   let result = dispatch_job(job)
   send(job.reply_to, Done(result))
-  { state with processed = state.processed + 1 }
+  { state with processed: state.processed + 1 }
 end
 
 pfn dispatch_job(job) when job.kind == Query   do run_query(job.data) end
@@ -583,7 +583,7 @@ referenced in type signatures, documentation, and by other actors that send to i
 -- Bad: protocol is implicit, scattered across handler clauses
 actor Counter do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
   on Increment() do ... end
   on Reset()     do ... end
   on GetCount()  do ... end
@@ -594,7 +594,7 @@ type CounterMsg = Increment | Reset | GetCount
 
 actor Counter do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
   on Increment() do ... end
   on Reset()     do ... end
   on GetCount()  do ... end
@@ -620,7 +620,7 @@ about. Supervision config and `init` make the topology visible and restartable.
 on Start(config) do
   let worker = spawn(Worker)
   send(worker, Run(config))
-  { state with worker = Some(worker) }
+  { state with worker: Some(worker) }
 end
 
 -- Good: spawn in init, pass the pid into state
@@ -628,7 +628,7 @@ actor Supervisor do
   state { worker : Pid(Worker) }
   init do
     let worker = spawn(Worker)
-    { worker = worker }
+    { worker: worker }
   end
 
   on Start(config) do

@@ -233,8 +233,8 @@ After `derive Eq for Point`, you can use `eq` on `Point` values.
 type User = { name : String, age : Int, role : String }
 derive Eq, Ord, Show, Hash for User
 
-let u1 = { name = "Alice", age = 30, role = "admin" }
-let u2 = { name = "Bob",   age = 25, role = "user" }
+let u1 = { name: "Alice", age: 30, role: "admin" }
+let u2 = { name: "Bob",   age: 25, role: "user" }
 
 show(u1)       -- "{ name = \"Alice\", age = 30, role = \"admin\" }"
 eq(u1, u1)     -- true

@@ -98,7 +98,7 @@ mod Config do
         let key   = String.trim(k)
         let value = String.trim(v)
         if String.is_empty(key) do None
-        else Some({ key = key, value = value })
+        else Some({ key: key, value: value })
         end
     end
   end

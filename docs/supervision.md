@@ -30,7 +30,7 @@ Any actor can supervise children by adding a `supervise` block:
 ```march
 actor AppSupervisor do
   state { counter : Int, logger : Int }
-  init  { counter = 0, logger = 0 }
+  init  { counter: 0, logger: 0 }
 
   supervise do
     strategy one_for_one
@@ -115,29 +115,29 @@ mod BasicSupervision do
 
   actor Counter do
     state { count : Int }
-    init  { count = 0 }
+    init  { count: 0 }
 
     on Inc() do
       let n = state.count + 1
       println("[Counter] count -> " ++ int_to_string(n))
-      { count = n }
+      { count: n }
     end
   end
 
   actor Logger do
     state { entries : Int }
-    init  { entries = 0 }
+    init  { entries: 0 }
 
     on Log(msg : String) do
       let n = state.entries + 1
       println("[Logger] #" ++ int_to_string(n) ++ ": " ++ msg)
-      { entries = n }
+      { entries: n }
     end
   end
 
   actor AppSupervisor do
     state { counter : Int, logger : Int }
-    init  { counter = 0, logger = 0 }
+    init  { counter: 0, logger: 0 }
 
     supervise do
       strategy one_for_one
@@ -225,7 +225,7 @@ Supervisors can supervise other supervisors, forming a tree:
 ```march
 actor TopSupervisor do
   state { web_sup : Int, db_sup : Int }
-  init  { web_sup = 0, db_sup = 0 }
+  init  { web_sup: 0, db_sup: 0 }
 
   supervise do
     strategy one_for_one
@@ -237,7 +237,7 @@ end
 
 actor WebSupervisor do
   state { router : Int, cache : Int }
-  init  { router = 0, cache = 0 }
+  init  { router: 0, cache: 0 }
 
   supervise do
     strategy one_for_all
@@ -249,7 +249,7 @@ end
 
 actor DbSupervisor do
   state { pool : Int }
-  init  { pool = 0 }
+  init  { pool: 0 }
 
   supervise do
     strategy one_for_one
@@ -271,8 +271,8 @@ The `app` declaration is a shorthand for defining the top-level supervisor:
 mod MyService do
   actor Worker do
     state { n : Int }
-    init  { n = 0 }
-    on Tick() do { state with n = state.n + 1 } end
+    init  { n: 0 }
+    on Tick() do { state with n: state.n + 1 } end
   end
 
   app MyService do

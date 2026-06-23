@@ -23,18 +23,18 @@ An actor declaration has three parts:
 ```march
 actor Counter do
   state { value : Int }
-  init  { value = 0 }
+  init  { value: 0 }
 
   on Increment(n : Int) do
-    { state with value = state.value + n }
+    { state with value: state.value + n }
   end
 
   on Decrement(n : Int) do
-    { state with value = state.value - n }
+    { state with value: state.value - n }
   end
 
   on Reset() do
-    { state with value = 0 }
+    { state with value: 0 }
   end
 end
 ```
@@ -86,13 +86,13 @@ end
 ```march
 actor Dispatcher do
   state { got : Int }
-  init  { got = 0 }
+  init  { got: 0 }
 
   on Dispatch() do
     -- wait for the follow-up message
     let follow = receive()
     match follow do
-      Followup(n) -> { got = n }
+      Followup(n) -> { got: n }
     end
   end
 end
@@ -158,10 +158,10 @@ The `Actor` module provides a synchronous call pattern:
 ```march
 actor Store do
   state { count : Int }
-  init  { count = 0 }
+  init  { count: 0 }
 
   on Inc() do
-    { count = state.count + 1 }
+    { count: state.count + 1 }
   end
 
   on Call(ref, Get()) do
@@ -195,10 +195,10 @@ mod ActorDemo do
 
   actor Counter do
     state { value : Int }
-    init  { value = 0 }
+    init  { value: 0 }
 
     on Increment(n : Int) do
-      { state with value = state.value + n }
+      { state with value: state.value + n }
     end
 
     on Ping(label : String) do
@@ -210,12 +210,12 @@ mod ActorDemo do
 
   actor Logger do
     state { count : Int }
-    init  { count = 0 }
+    init  { count: 0 }
 
     on Log(msg : String) do
       let n = state.count + 1
       println("[LOG #" ++ int_to_string(n) ++ "] " ++ msg)
-      { state with count = n }
+      { state with count: n }
     end
   end
 
@@ -247,7 +247,7 @@ end
 
 ## Actor State with Records
 
-Complex state uses record types. Functional update with `{ state with field = new_value }` is the canonical way to update state:
+Complex state uses record types. Functional update with `{ state with field: new_value }` is the canonical way to update state:
 
 ```march
 actor WebServer do
@@ -257,18 +257,18 @@ actor WebServer do
     last_path     : String
   }
   init {
-    request_count = 0,
-    error_count   = 0,
-    last_path     = ""
+    request_count: 0,
+    error_count:   0,
+    last_path:     ""
   }
 
   on Request(path : String, status : Int) do
     let rc = state.request_count + 1
     let ec = if status >= 400 do state.error_count + 1 else state.error_count end
     { state with
-        request_count = rc,
-        error_count   = ec,
-        last_path     = path }
+        request_count: rc,
+        error_count:   ec,
+        last_path:     path }
   end
 
   on Stats() do
@@ -354,8 +354,8 @@ For long-running applications, use `app` instead of (or alongside) `main`:
 mod MyService do
   actor Worker do
     state { count : Int }
-    init  { count = 0 }
-    on Tick() do { state with count = state.count + 1 } end
+    init  { count: 0 }
+    on Tick() do { state with count: state.count + 1 } end
   end
 
   app MyService do

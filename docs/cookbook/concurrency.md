@@ -47,10 +47,10 @@ An actor has isolated state and processes messages one at a time. No shared memo
 ```march
 actor Counter do
   state { value : Int }
-  init { value = 0 }
+  init { value: 0 }
 
   on Increment(n : Int) do
-    { value = state.value + n }
+    { value: state.value + n }
   end
 
   on Get() do
@@ -88,14 +88,14 @@ For structured coordination, use an actor as a mailbox — tasks send to it, it 
 ```march
 actor Collector do
   state { items : List(String), done : Int, total : Int }
-  init { items = Nil, done = 0, total = 0 }
+  init { items: Nil, done: 0, total: 0 }
 
   on Start(n : Int) do
-    { state with total = n }
+    { state with total: n }
   end
 
   on Item(s : String) do
-    { state with items = Cons(s, state.items), done = state.done + 1 }
+    { state with items: Cons(s, state.items), done: state.done + 1 }
   end
 
   on Results() do

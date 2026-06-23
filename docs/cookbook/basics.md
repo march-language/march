@@ -87,9 +87,9 @@ Record types use named fields:
 ```march
 type User = { name : String, age : Int }
 
-let u = { name = "Alice", age = 30 }
+let u = { name: "Alice", age: 30 }
 let name = u.name
-let older = { u with age = 31 }
+let older = { u with age: 31 }
 ```
 
 ---

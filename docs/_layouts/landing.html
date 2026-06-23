@@ -581,10 +581,10 @@
       </div>
     </div>
     <div class="m-repl-chips">
-      <button class="m-repl-chip" data-tip="actors + message passing from the BEAM" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n = 0 }\n  on Inc()   do { n = state.n + 1 } end\n  on Print() do\n    println(state.n)\n    state\n  end\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Print())\nrun_until_idle()')">Actors</button>
+      <button class="m-repl-chip" data-tip="actors + message passing from the BEAM" onclick="mReplLoad('actor Counter do\n  state { n : Int }\n  init  { n: 0 }\n  on Inc()   do { n: state.n + 1 } end\n  on Print() do\n    println(state.n)\n    state\n  end\nend\n\nlet c = spawn(Counter)\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Inc())\nsend(c, Print())\nrun_until_idle()')">Actors</button>
       <button class="m-repl-chip" data-tip="ADTs + recursive pattern matching" onclick="mReplLoad('type Expr = Num(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\nfn calc(e : Expr) : Int do\n  match e do\n    Num(n)    -> n\n    Add(a, b) -> calc(a) + calc(b)\n    Mul(a, b) -> calc(a) * calc(b)\n  end\nend\n\ncalc(Mul(Add(Num(3), Num(4)), Num(10)))')">Expr tree</button>
       <button class="m-repl-chip" data-tip="typed error handling without exceptions" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do\n    Err(&quot;division by zero&quot;)\n  else\n    Ok(a / b)\n  end\nend\n\nmatch safe_div(100, 4) do\n  Ok(n)  -> &quot;got &quot; ++ int_to_string(n)\n  Err(e) -> &quot;failed: &quot; ++ e\nend')">Result</button>
-      <button class="m-repl-chip" data-tip="mean &amp; std dev via List.fold_left + Math" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet sum  = List.fold_left(0.0, data, fn (a, x) -> a +. x)\nlet mean = sum /. n\nlet sq   = List.fold_left(0.0, data, fn (a, x) -> a +. (x -. mean) *. (x -. mean))\nlet v    = sq /. n\nlet r    = (mean, Math.sqrt(v))\nr')">std dev</button>
+      <button class="m-repl-chip" data-tip="mean &amp; std dev via List.fold_left + Math" onclick="mReplLoad('let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]\nlet n    = int_to_float(List.length(data))\nlet sum  = List.fold_left(data, 0.0, fn (a, x) -> a +. x)\nlet mean = sum /. n\nlet sq   = List.fold_left(data, 0.0, fn (a, x) -> a +. (x -. mean) *. (x -. mean))\nlet v    = sq /. n\nlet r    = (mean, Math.sqrt(v))\nr')">std dev</button>
       <button class="m-repl-chip" data-tip="let? propagates Err automatically" onclick="mReplLoad('fn safe_div(a : Int, b : Int) : Result(Int, String) do\n  if b == 0 do Err(&quot;division by zero&quot;) else Ok(a / b) end\nend\n\nfn pipeline(x : Int) : Result(Int, String) do\n  let? a = safe_div(x, 2)\n  let? b = safe_div(a, 3)\n  Ok(b + 1)\nend\n\n(pipeline(120), pipeline(0))')">let?</button>
       <button class="m-repl-chip" data-tip="print to stdout" onclick="mReplLoad('println(&quot;Hello, world!&quot;)')">Hello World</button>
     </div>
@@ -700,10 +700,10 @@ function syntaxHL(code, dark) {
 const HERO_EXAMPLES = [
   { label: 'Actors', code: `actor Counter do
   state { count : Int }
-  init  { count = 0 }
+  init  { count: 0 }
 
   on Increment(n : Int) do
-    { state with count = state.count + n }
+    { state with count: state.count + n }
   end
 
   on Get() -> reply state.count
@@ -781,7 +781,7 @@ fn load(path : String) : Result(Config, String) do
   let? src  = File.read(path)
   let? toml = Toml.parse(src)
   let? port = Toml.get_int(toml, "port")
-  Ok({ port = port })
+  Ok({ port: port })
 end
 
 -- with adds a custom else handler
@@ -818,16 +818,16 @@ inc_leaves(Node(Node(Leaf(1), Leaf(2)), Leaf(3)))`;
 
 const ACTOR = `actor Counter do
   state { value : Int }
-  init { value = 0 }
+  init { value: 0 }
   on Inc(n : Int) do
-    { value = state.value + n }
+    { value: state.value + n }
   end
   on Get() do
     println("count: " ++ int_to_string(state.value))
     state
   end
   on Reset() do
-    { value = 0 }
+    { value: 0 }
   end
 end`;
 

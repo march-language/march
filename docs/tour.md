@@ -449,8 +449,8 @@ type User  = { name : String, age : Int, admin : Bool }
 Create a record:
 
 ```march
-let p = { x = 1.0, y = 2.0 }
-let u = { name = "Alice", age = 30, admin = false }
+let p = { x: 1.0, y: 2.0 }
+let u = { name: "Alice", age: 30, admin: false }
 ```
 
 Access fields:
@@ -463,8 +463,8 @@ u.name      -- "Alice"
 Functional update (returns a new record with some fields changed):
 
 ```march
-let p2 = { p with x = 5.0 }
-let u2 = { u with age = 31, admin = true }
+let p2 = { p with x: 5.0 }
+let u2 = { u with age: 31, admin: true }
 ```
 
 ---

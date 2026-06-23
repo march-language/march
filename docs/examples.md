@@ -113,10 +113,10 @@ Spawning actors, sending messages, handling death gracefully, and observing stat
 ```march
 actor Counter do
   state { value : Int }
-  init  { value = 0 }
+  init  { value: 0 }
 
-  on Increment(n : Int) do { state with value = state.value + n } end
-  on Reset()            do { state with value = 0 } end
+  on Increment(n : Int) do { state with value: state.value + n } end
+  on Reset()            do { state with value: 0 } end
   on Probe(label : String) do
     println("[Counter] " ++ label ++ " = " ++ int_to_string(state.value))
     state
@@ -173,7 +173,7 @@ All three restart strategies in one file: `one_for_one`, `one_for_all`, and `res
 -- one_for_one: only the crashed child restarts
 actor OneForOneSup do
   state { wa : Int, wb : Int }
-  init  { wa = 0, wb = 0 }
+  init  { wa: 0, wb: 0 }
   supervise do
     strategy one_for_one
     max_restarts 5 within 60
@@ -185,7 +185,7 @@ end
 -- rest_for_one: crash parser → restarts parser + writer, not reader
 actor PipelineSup do
   state { reader : Int, parser : Int, writer : Int }
-  init  { reader = 0, parser = 0, writer = 0 }
+  init  { reader: 0, parser: 0, writer: 0 }
   supervise do
     strategy rest_for_one
     max_restarts 5 within 60

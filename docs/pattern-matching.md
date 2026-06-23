@@ -123,13 +123,20 @@ end
 
 ### Record Patterns
 
+Record patterns are not yet supported in the parser. Use field access in guards instead:
+
 ```march
 type Point = { x : Float, y : Float }
 
-match p do
-  { x = 0.0, y = 0.0 } -> "origin"
-  { x = x, y = 0.0 }   -> "on x-axis at " ++ float_to_string(x)
-  { x = x, y = y }     -> "at " ++ float_to_string(x) ++ ", " ++ float_to_string(y)
+-- Use if/do with field access rather than record patterns:
+fn describe_point(p : Point) : String do
+  if p.x == 0.0 && p.y == 0.0 do
+    "origin"
+  else if p.y == 0.0 do
+    "on x-axis at " ++ float_to_string(p.x)
+  else
+    "at " ++ float_to_string(p.x) ++ ", " ++ float_to_string(p.y)
+  end
 end
 ```
 
@@ -335,8 +342,8 @@ And in function parameters:
 fn fst((a, _)) do a end
 fn snd((_, b)) do b end
 
-fn add_points({ x = x1, y = y1 }, { x = x2, y = y2 }) do
-  { x = x1 +. x2, y = y1 +. y2 }
+fn add_points(p1 : Point, p2 : Point) : Point do
+  { x: p1.x +. p2.x, y: p1.y +. p2.y }
 end
 ```
 
