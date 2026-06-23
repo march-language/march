@@ -27,6 +27,7 @@
 
 #ifdef __APPLE__
 #  include <sys/sysctl.h>
+#  include <mach/mach.h>
 #  include <CommonCrypto/CommonCrypto.h>
 #  include <CommonCrypto/CommonDigest.h>
 #  include <CommonCrypto/CommonHMAC.h>
@@ -1151,6 +1152,63 @@ int64_t march_sys_cpu_count(void) {
 #else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int64_t)n : 1;
+#endif
+}
+
+/* 1-minute load average × 1000 (integer millis); 0 if unavailable.
+ * getloadavg() is available on both macOS and Linux (declared in <stdlib.h>). */
+int64_t march_sys_cpu_load_milli(void) {
+    double avg[3];
+    if (getloadavg(avg, 1) < 1) return 0;
+    if (avg[0] < 0.0) return 0;
+    return (int64_t)(avg[0] * 1000.0);
+}
+
+/* Total physical memory in bytes; 0 if unavailable. */
+int64_t march_sys_mem_total_bytes(void) {
+#ifdef __APPLE__
+    int64_t mem = 0;
+    size_t sz = sizeof(mem);
+    if (sysctlbyname("hw.memsize", &mem, &sz, NULL, 0) != 0) return 0;
+    return mem;
+#else
+    struct sysinfo info;
+    if (sysinfo(&info) != 0) return 0;
+    return (int64_t)info.totalram * (int64_t)info.mem_unit;
+#endif
+}
+
+/* Available (free + reclaimable) memory in bytes; 0 if unavailable. */
+int64_t march_sys_mem_available_bytes(void) {
+#ifdef __APPLE__
+    mach_port_t host = mach_host_self();
+    vm_size_t page_size = 0;
+    if (host_page_size(host, &page_size) != KERN_SUCCESS) return 0;
+    vm_statistics64_data_t vmstat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vmstat, &count) != KERN_SUCCESS)
+        return 0;
+    uint64_t avail_pages = (uint64_t)vmstat.free_count
+                         + (uint64_t)vmstat.inactive_count
+                         + (uint64_t)vmstat.purgeable_count;
+    return (int64_t)(avail_pages * (uint64_t)page_size);
+#else
+    /* Prefer MemAvailable from /proc/meminfo; fall back to sysinfo freeram. */
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            unsigned long kb;
+            if (sscanf(line, "MemAvailable: %lu kB", &kb) == 1) {
+                fclose(f);
+                return (int64_t)kb * 1024;
+            }
+        }
+        fclose(f);
+    }
+    struct sysinfo info;
+    if (sysinfo(&info) != 0) return 0;
+    return (int64_t)info.freeram * (int64_t)info.mem_unit;
 #endif
 }
 

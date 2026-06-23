@@ -139,6 +139,7 @@ let stdlib_file_list = [
   "process.march";
   "io.march";
   "system.march";
+  "cluster_load.march";
   "logger.march";
   "actor.march";
   "flow.march";

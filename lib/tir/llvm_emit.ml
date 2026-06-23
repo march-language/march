@@ -515,6 +515,7 @@ let is_builtin_fn name =
                  "sys_uptime_ms"; "sys_heap_bytes"; "sys_word_size";
                  "sys_minor_gcs"; "sys_major_gcs";
                  "sys_actor_count"; "sys_cpu_count";
+                 "sys_cpu_load_milli"; "sys_mem_total_bytes"; "sys_mem_available_bytes";
                  "sys_os"; "sys_arch";
                  "march_version";
                  (* UUID / identity builtins *)
@@ -838,7 +839,8 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* System introspection builtins *)
   | "sys_uptime_ms" | "sys_heap_bytes" | "sys_word_size"
   | "sys_minor_gcs" | "sys_major_gcs"
-  | "sys_actor_count" | "sys_cpu_count" -> Some Tir.TInt
+  | "sys_actor_count" | "sys_cpu_count"
+  | "sys_cpu_load_milli" | "sys_mem_total_bytes" | "sys_mem_available_bytes" -> Some Tir.TInt
   | "sys_os" | "sys_arch" | "march_version" -> Some Tir.TString
   (* UUID / identity builtins *)
   | "uuid_v4" -> Some Tir.TString
@@ -1114,6 +1116,9 @@ let mangle_extern : string -> string = function
   | "sys_major_gcs"    -> "march_sys_major_gcs"
   | "sys_actor_count"  -> "march_sys_actor_count"
   | "sys_cpu_count"    -> "march_sys_cpu_count"
+  | "sys_cpu_load_milli"     -> "march_sys_cpu_load_milli"
+  | "sys_mem_total_bytes"    -> "march_sys_mem_total_bytes"
+  | "sys_mem_available_bytes" -> "march_sys_mem_available_bytes"
   | "sys_os"           -> "march_sys_os"
   | "sys_arch"         -> "march_sys_arch"
   | "march_version"    -> "march_get_version"
@@ -5328,6 +5333,9 @@ declare i64  @march_sys_minor_gcs()
 declare i64  @march_sys_major_gcs()
 declare i64  @march_sys_actor_count()
 declare i64  @march_sys_cpu_count()
+declare i64  @march_sys_cpu_load_milli()
+declare i64  @march_sys_mem_total_bytes()
+declare i64  @march_sys_mem_available_bytes()
 declare ptr  @march_sys_os()
 declare ptr  @march_sys_arch()
 declare ptr  @march_get_version()

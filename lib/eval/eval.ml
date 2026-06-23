@@ -5642,6 +5642,61 @@ let base_env : env =
   ; ("sys_cpu_count", VBuiltin ("sys_cpu_count", function
         | [] | [VUnit] -> VInt (Domain.recommended_domain_count ())
         | _ -> eval_error "sys_cpu_count: no arguments expected"))
+    (* Interpreter best-effort: read /proc on Linux, 0 elsewhere (native
+       compiled mode uses the real cross-platform C in march_extras.c). *)
+  ; ("sys_cpu_load_milli", VBuiltin ("sys_cpu_load_milli", function
+        | [] | [VUnit] ->
+          let v = try
+            let ic = open_in "/proc/loadavg" in
+            let line = input_line ic in close_in ic;
+            (match String.split_on_char ' ' line with
+             | first :: _ -> int_of_float (float_of_string first *. 1000.0)
+             | [] -> 0)
+          with _ -> 0 in
+          VInt v
+        | _ -> eval_error "sys_cpu_load_milli: no arguments expected"))
+  ; ("sys_mem_total_bytes", VBuiltin ("sys_mem_total_bytes", function
+        | [] | [VUnit] ->
+          let read_meminfo_kb field =
+            try
+              let prefix = field ^ ":" in
+              let plen = String.length prefix in
+              let ic = open_in "/proc/meminfo" in
+              let rec scan () =
+                match input_line ic with
+                | line ->
+                  if String.length line >= plen && String.sub line 0 plen = prefix then begin
+                    close_in ic;
+                    let rest = String.sub line plen (String.length line - plen) in
+                    (try Scanf.sscanf rest " %d" (fun kb -> kb) with _ -> 0)
+                  end else scan ()
+                | exception End_of_file -> close_in ic; 0
+              in scan ()
+            with _ -> 0
+          in
+          VInt (read_meminfo_kb "MemTotal" * 1024)
+        | _ -> eval_error "sys_mem_total_bytes: no arguments expected"))
+  ; ("sys_mem_available_bytes", VBuiltin ("sys_mem_available_bytes", function
+        | [] | [VUnit] ->
+          let read_meminfo_kb field =
+            try
+              let prefix = field ^ ":" in
+              let plen = String.length prefix in
+              let ic = open_in "/proc/meminfo" in
+              let rec scan () =
+                match input_line ic with
+                | line ->
+                  if String.length line >= plen && String.sub line 0 plen = prefix then begin
+                    close_in ic;
+                    let rest = String.sub line plen (String.length line - plen) in
+                    (try Scanf.sscanf rest " %d" (fun kb -> kb) with _ -> 0)
+                  end else scan ()
+                | exception End_of_file -> close_in ic; 0
+              in scan ()
+            with _ -> 0
+          in
+          VInt (read_meminfo_kb "MemAvailable" * 1024)
+        | _ -> eval_error "sys_mem_available_bytes: no arguments expected"))
   ; ("sys_os", VBuiltin ("sys_os", function
         | [] | [VUnit] ->
           let atom = match Sys.os_type with

@@ -153,6 +153,7 @@ let builtin_names : StringSet.t =
       "sys_uptime_ms"; "sys_heap_bytes"; "sys_word_size";
       "sys_minor_gcs"; "sys_major_gcs";
       "sys_actor_count"; "sys_cpu_count";
+      "sys_cpu_load_milli"; "sys_mem_total_bytes"; "sys_mem_available_bytes";
       "sys_os"; "sys_arch";
       "march_version";
       (* UUID / identity builtins *)

@@ -1,0 +1,101 @@
+-- ClusterLoad: per-node CPU/memory headroom for capacity-aware RPC routing.
+--
+-- Each node samples its own resources with `local/1` (backed by the System.*
+-- builtins).  Samples are shared across the cluster (e.g. gossiped or pulled on
+-- demand) and collected into a candidate list; `pick_by/2` then routes to the
+-- node your scoring function rates highest.  Raw metrics are exposed — you
+-- choose what "headroom" means.
+--
+-- Wire transfer: `to_ints/1` / `from_ints/2` marshal a NodeLoad to/from a flat
+-- Int list (node_id stays caller-side, since the caller knows which node it
+-- queried), suitable for MessagePack or any int-array codec.
+--
+--     let me   = ClusterLoad.local("node-a")
+--     -- ... collect peers' NodeLoad into `candidates` ...
+--     match ClusterLoad.pick_by(candidates, ClusterLoad.spare_cpu_milli) do
+--       Some(node) -> -- route the expensive call to node.node_id
+--       None       -> -- cluster view empty; fall back to local
+--     end
+mod ClusterLoad do
+
+  type NodeLoad = {
+    node_id : String,
+    cpu_count : Int,
+    cpu_load_milli : Int,   -- 1-min load average × 1000
+    mem_total_mb : Int,
+    mem_avail_mb : Int
+  }
+
+  doc "Sample the local node's current CPU/memory headroom."
+  fn local(node_id : String) : NodeLoad do
+    { node_id: node_id,
+      cpu_count: System.cpu_count(),
+      cpu_load_milli: System.cpu_load_milli(),
+      mem_total_mb: System.mem_total_bytes() / 1048576,
+      mem_avail_mb: System.mem_available_bytes() / 1048576 }
+  end
+
+  doc "Spare CPU as load-millis below saturation: cpu_count*1000 - load. Higher = more idle."
+  fn spare_cpu_milli(nl : NodeLoad) : Int do
+    nl.cpu_count * 1000 - nl.cpu_load_milli
+  end
+
+  doc "Available memory in MB (a ready-made score for memory-bound work)."
+  fn spare_mem_mb(nl : NodeLoad) : Int do
+    nl.mem_avail_mb
+  end
+
+  doc """
+  Pick the candidate your `score` function rates highest (argmax).  Ties keep the
+  earlier candidate.  Returns None for an empty list.
+  """
+  fn pick_by(candidates : List(NodeLoad), score : NodeLoad -> Int) : Option(NodeLoad) do
+    match candidates do
+      Nil -> None
+      Cons(first, rest) -> Some(pick_go(rest, first, score(first), score))
+    end
+  end
+
+  pfn pick_go(xs : List(NodeLoad), best : NodeLoad, best_score : Int,
+              score : NodeLoad -> Int) : NodeLoad do
+    match xs do
+      Nil -> best
+      Cons(x, rest) ->
+        let s = score(x)
+        if s > best_score do
+          pick_go(rest, x, s, score)
+        else
+          pick_go(rest, best, best_score, score)
+        end
+    end
+  end
+
+  doc "Marshal a NodeLoad's metrics to a flat Int list for the wire (node_id excluded)."
+  fn to_ints(nl : NodeLoad) : List(Int) do
+    Cons(nl.cpu_count,
+    Cons(nl.cpu_load_milli,
+    Cons(nl.mem_total_mb,
+    Cons(nl.mem_avail_mb, Nil))))
+  end
+
+  doc "Rebuild a NodeLoad from a wire Int list plus the known node_id. Missing fields default to 0."
+  fn from_ints(node_id : String, xs : List(Int)) : NodeLoad do
+    let cc = nth_or(xs, 0, 0)
+    let cl = nth_or(xs, 1, 0)
+    let mt = nth_or(xs, 2, 0)
+    let ma = nth_or(xs, 3, 0)
+    { node_id: node_id,
+      cpu_count: cc,
+      cpu_load_milli: cl,
+      mem_total_mb: mt,
+      mem_avail_mb: ma }
+  end
+
+  pfn nth_or(xs : List(Int), i : Int, dflt : Int) : Int do
+    match List.nth_opt(xs, i) do
+      Some(v) -> v
+      None -> dflt
+    end
+  end
+
+end

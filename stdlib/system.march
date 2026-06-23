@@ -45,6 +45,26 @@ mod System do
   end
 
   doc """
+  1-minute load average × 1000 (integer millis).  Divide by `cpu_count()` to
+  get a rough per-core utilization figure.  Returns 0 when unavailable.
+
+      let busy_milli = System.cpu_load_milli() / System.cpu_count()
+  """
+  fn cpu_load_milli() : Int do
+    sys_cpu_load_milli()
+  end
+
+  doc "Total physical memory in bytes (0 if unavailable)."
+  fn mem_total_bytes() : Int do
+    sys_mem_total_bytes()
+  end
+
+  doc "Available (free + reclaimable) memory in bytes (0 if unavailable)."
+  fn mem_available_bytes() : Int do
+    sys_mem_available_bytes()
+  end
+
+  doc """
   Return milliseconds elapsed since the process started.
   Suitable for rough timing; not a wall-clock time.
 
