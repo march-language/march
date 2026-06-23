@@ -72,3 +72,27 @@
        (file ../stdlib/net_frame.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_client.march)))
+
+; Resource introspection demo — prints this node's live CPU/memory headroom.
+; Cross-compile for linux/amd64 and run on a remote host to confirm the
+; resource builtins read real values on that platform.
+;
+; Build: dune build demo/resource_report.exe
+; Run:   ./_build/default/demo/resource_report.exe
+(rule
+ (targets resource_report.exe)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file resource_report.march)
+       (file ../stdlib/cluster_load.march)
+       (file ../stdlib/system.march))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o %{targets} resource_report.march)))

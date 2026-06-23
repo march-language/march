@@ -1,0 +1,14 @@
+-- Print this node's live CPU/memory headroom (ClusterLoad.local + System.*).
+-- Cross-compile for linux/amd64 and run on a remote host to confirm the
+-- resource builtins read real values on that platform.
+mod ResourceReport do
+  fn main() do
+    let nl = ClusterLoad.local("this-node")
+    println("=== node resources ===")
+    println("cpu_count       = " ++ String.from_int(nl.cpu_count))
+    println("cpu_load_milli  = " ++ String.from_int(nl.cpu_load_milli))
+    println("mem_total_mb    = " ++ String.from_int(nl.mem_total_mb))
+    println("mem_avail_mb    = " ++ String.from_int(nl.mem_avail_mb))
+    println("spare_cpu_milli = " ++ String.from_int(ClusterLoad.spare_cpu_milli(nl)))
+  end
+end
