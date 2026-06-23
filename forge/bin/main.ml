@@ -12,7 +12,7 @@ let known_builtin_names =
     "interactive"; "i"; "clean"; "deps"; "add"; "publish";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
-    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "help";
+    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
     "completions" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
@@ -191,6 +191,21 @@ let check_cmd =
   Cmd.v (Cmd.info "check"
            ~doc:"Typecheck every .march file in the project without producing a binary")
     Term.(const run $ const ())
+
+(* ------------------------------------------------------------------- forge fix *)
+
+let fix_cmd =
+  let dry =
+    Arg.(value & flag & info ["dry-run"; "n"]
+           ~doc:"Show what would change without writing any files") in
+  let run d =
+    match Cmd_fix.run ~dry_run:d () with
+    | Ok msg  -> Printf.printf "%s\n%!" msg
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "fix"
+           ~doc:"Apply safe auto-fixes for compiler diagnostics (missing needs, unused params, redundant arms)")
+    Term.(const run $ dry)
 
 (* ------------------------------------------------------------------- forge run *)
 
@@ -956,7 +971,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; check_cmd; fix_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
