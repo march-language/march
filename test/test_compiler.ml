@@ -4045,6 +4045,33 @@ let test_qualified_error_uses_notes () =
       not (_contains_substr d.March_errors.Errors.message "Did you mean")
     ) errors)
 
+(* ── Improvement #7: parse errors route through render_diagnostic ────────── *)
+
+let render_parse_err src =
+  let lexbuf = Lexing.from_string src in
+  (try ignore (March_parser.Parser.module_
+    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf); ""
+  with
+  | March_errors.Errors.ParseError (msg, hint, _) ->
+    let lb2 = Lexing.from_string src in
+    March_errors.Errors.render_parse_error ~src ?hint ~msg lb2
+  | March_parser.Parser.Error ->
+    let lb2 = Lexing.from_string src in
+    March_errors.Errors.render_parse_error ~src ~msg:"Parse error:" lb2
+  | _ -> "")
+
+let test_parse_error_has_error_header () =
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "#7 parse error header is -- ERROR not -- PARSE ERROR" true
+    (_contains_substr output "-- ERROR ")
+
+let test_parse_error_then_note_do_end () =
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "#7 if-then note mentions do/end" true
+    (_contains_substr output "do/end")
+
 let compiler_suites =
   [
       ( "resolver",
@@ -4445,6 +4472,8 @@ let compiler_suites =
           Alcotest.test_case "#6 guarded arm: no redundancy warning"        `Quick test_guarded_arm_no_redundant_warning;
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
+          Alcotest.test_case "#7 parse error uses -- ERROR header"          `Quick test_parse_error_has_error_header;
+          Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
         ] );
   ]
 
