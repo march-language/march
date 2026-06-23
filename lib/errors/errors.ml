@@ -9,6 +9,15 @@ exception ParseError of string * string option * Lexing.position
 
 type severity = Error | Warning | Hint
 
+type fix_kind =
+  | FInsert of { after_line : int; text : string }
+  (** Insert [text] as a new line immediately after line [after_line] (1-indexed).
+      [text] must NOT include a trailing newline; the applier adds one. *)
+  | FDelete of { start_line : int; end_line : int }
+  (** Delete full source lines [start_line]..[end_line] inclusive (1-indexed). *)
+  | FReplace of { span : March_ast.Ast.span; text : string }
+  (** Replace the text covered by [span] with [text] in-place. *)
+
 type diagnostic = {
   severity : severity;
   span : March_ast.Ast.span;
@@ -16,6 +25,7 @@ type diagnostic = {
   labels : label list;     (** Additional labeled source spans *)
   notes : string list;      (** Extra context / suggestions *)
   code : string option;    (** Machine-readable error/warning code, e.g. "unused_binding" *)
+  fix : fix_kind option;   (** Mechanically-determined fix, if one exists *)
 }
 
 and label = {
@@ -32,19 +42,23 @@ let report ctx diag = ctx.diagnostics <- diag :: ctx.diagnostics
 
 let error ctx ~span message =
   report ctx
-    { severity = Error; span; message; labels = []; notes = []; code = None }
+    { severity = Error; span; message; labels = []; notes = []; code = None; fix = None }
 
 let warning ctx ~span message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = None }
+    { severity = Warning; span; message; labels = []; notes = []; code = None; fix = None }
 
 let hint ctx ~span message =
   report ctx
-    { severity = Hint; span; message; labels = []; notes = []; code = None }
+    { severity = Hint; span; message; labels = []; notes = []; code = None; fix = None }
 
 let warning_with_code ctx ~span ~code message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code = Some code }
+    { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = None }
+
+let warning_with_fix ctx ~span ~fix message =
+  report ctx
+    { severity = Warning; span; message; labels = []; notes = []; code = None; fix = Some fix }
 
 (* ── ANSI colour ──────────────────────────────────────────────────────── *)
 
@@ -222,7 +236,7 @@ let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
                   start_line = line; start_col = col;
                   end_line = line; end_col = col + tok_len } in
   let notes   = match hint with None -> [] | Some h -> [h] in
-  { severity = Error; span; message = msg; labels = []; notes; code = None }
+  { severity = Error; span; message = msg; labels = []; notes; code = None; fix = None }
 
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
   render_diagnostic ~src ~filename (parse_error_diagnostic ~filename ?hint ~msg lexbuf)

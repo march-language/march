@@ -3847,6 +3847,7 @@ let test_label_rendered_in_output () =
     labels   = [{ lbl_span; lbl_message = "the expected type comes from here" }];
     notes    = [];
     code     = None;
+    fix      = None;
   } in
   let rendered = render_diagnostic ~src diag in
   let target = "the expected type comes from here" in

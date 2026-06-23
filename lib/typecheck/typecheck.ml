@@ -1935,7 +1935,7 @@ let report_mismatch env ~span ~reason expected found =
   in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note @ mismatch_note @ common_hint; code = None }
+      labels; notes = why_note @ mismatch_note @ common_hint; code = None; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
     Intentionally ignores payload types — only checks session structure shape. *)
@@ -3074,7 +3074,7 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
             message = "This pattern can never be reached.";
             labels  = [];
             notes   = ["An earlier arm already covers all values this pattern matches."];
-            code    = Some "redundant_arm" }
+            code    = Some "redundant_arm"; fix = None }
       end;
       prefix := !prefix @ [arm_row]
     end
@@ -3100,14 +3100,14 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
           message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
           labels  = [];
           notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-          code    = None }
+          code    = None; fix = None }
     | Some [] ->
       Err.report env.errors
         { Err.severity = Warning; span;
           message = "Non-exhaustive pattern match";
           labels  = [];
           notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
-          code    = None }
+          code    = None; fix = None }
   end
 
 (** Unfold one step of a recursive session type.
@@ -3221,7 +3221,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
           message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
           labels  = [];
           notes   = [ "Fill this hole with an expression of the type shown above." ];
-          code    = None };
+          code    = None; fix = None };
       t
 
     (* ── Function application ─────────────────────────────────────── *)
@@ -3650,7 +3650,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              labels = [{ Err.lbl_span = def_span;
                          Err.lbl_message = Printf.sprintf "defined here with %d parameter%s"
                            arity (if arity = 1 then "" else "s") }];
-             notes = []; code = None };
+             notes = []; code = None; fix = None };
          (* Return the declared return type so downstream inference stays sane. *)
          let rec peel n t =
            if n <= 0 then t
@@ -6238,7 +6238,7 @@ let rec check_decl env (d : Ast.decl) : env =
                 (pp_ty (repr state_ty)) (pp_ty (repr inferred));
               labels = [];
               notes = actor_handler_hints (repr state_ty) (repr inferred);
-              code = None }
+              code = None; fix = None }
       ) actor.actor_handlers;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
@@ -7386,6 +7386,60 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
    §17  Module entry point
    ================================================================= *)
 
+(** Build a function's declared type scheme from its annotations, for pass-1
+    forward cross-module reference resolution.  Returns None when the signature
+    cannot be built structurally (unannotated/pattern params, no return
+    annotation, zero params, multiple clauses, or exotic annotation forms) — the
+    caller then falls back to the [fresh_var] placeholder.
+
+    The scheme carries NO class/bound constraints; this is sound because the
+    prior placeholder ([Mono (fresh_var _)]) carried none either, and each
+    function's own [check_fn] re-derives and enforces its full constrained type.
+    The only gain is that a module checked BEFORE this function now sees its real
+    argument and RESULT types instead of an unconstrained type variable — which
+    is what lets niche-encoded [Option]/ADT results lower with the correct match
+    strategy regardless of stdlib check order. *)
+let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
+  let opt_all xs =
+    List.fold_right (fun x acc -> match x, acc with
+      | Some v, Some vs -> Some (v :: vs)
+      | _ -> None) xs (Some []) in
+  let tvars : (string * ty) list ref = ref [] in
+  let rec conv (s : Ast.ty) : ty option =
+    match s with
+    | Ast.TyCon (name, args) ->
+      (match opt_all (List.map conv args) with
+       | Some args' -> Some (TCon (name.txt, args'))
+       | None -> None)
+    | Ast.TyVar v ->
+      (match List.assoc_opt v.txt !tvars with
+       | Some t -> Some t
+       | None -> let fv = fresh_var 1 in tvars := (v.txt, fv) :: !tvars; Some fv)
+    | Ast.TyArrow (a, b) ->
+      (match conv a, conv b with Some a', Some b' -> Some (TArrow (a', b')) | _ -> None)
+    | Ast.TyTuple ts ->
+      (match opt_all (List.map conv ts) with Some ts' -> Some (TTuple ts') | None -> None)
+    | Ast.TyLinear (_, t) -> conv t
+    | _ -> None
+  in
+  match def.fn_clauses with
+  | [clause] when clause.fc_params <> [] ->
+    let param_ty (fp : Ast.fn_param) : ty option =
+      match fp with
+      | Ast.FPNamed p | Ast.FPDefault (p, _) ->
+        (match p.param_ty with Some t -> conv t | None -> None)
+      | Ast.FPPat _ -> None
+    in
+    (match def.fn_ret_ty with
+     | None -> None
+     | Some ret ->
+       (match conv ret, opt_all (List.map param_ty clause.fc_params) with
+        | Some ret_ty, Some param_tys ->
+          let arrow = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
+          Some (generalize 0 arrow)
+        | _ -> None))
+  | _ -> None
+
 (** Type-check a whole module.
 
     Pass 1: collect all top-level function names into the environment
@@ -7409,7 +7463,12 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if StrMap.mem qname e.vars then e
-          else bind_var qname (Mono (fresh_var 1)) e
+          else
+            let sch = match prebind_fn_scheme def with
+              | Some s -> s
+              | None -> Mono (fresh_var 1)
+            in
+            bind_var qname sch e
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
