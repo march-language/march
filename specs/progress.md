@@ -282,6 +282,12 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-22, P2 two-node SWIM discovery + L4 Node.call loopback)
+
+- **Two-node SWIM discovery integration test (`test/native/node_discovery.march`).** Full end-to-end test of the authenticated peer-connection + SWIM discovery stack over real TCP loopback. `node-a` accepts, `node-b` connects; both run `ClusterConn.handshake`; `node-a` sends a `SwimPing` (via `SwimDriver.encode_msg`), `node-b` replies with `SwimPingAck`, and both call `Swim.on_gossip` + `Membership.alive_members` confirming the peer is Alive (`live_peers=1`). Port 29760. Added to `test/dune` as a native compile-and-diff rule. Also fixed `swim_driver.march`: `String.of_int` → `String.from_int` in `int_to_status` and `decode_msg` (the undefined symbol was silently causing a linker failure when those functions were called from another module).
+
+- **L4 Node.call loopback integration test (`test/native/node_call_loopback.march`).** Three RPC scenarios over real TCP on port 29850: matching hashes → `ok:7`, sig_hash mismatch → `err:TypeMismatch`, unknown target → `err:NoTarget`. `NodeCall.serve_one` / `NodeCall.call` wired to `NodeRpc.handle_frame` / `RemoteCall.interpret`. Added `stdlib/node_call.march` transport shim. Test added to `test/dune`.
+
 ## Current State (as of 2026-06-22, FBIP niche fix + forge --target js + clustering docs)
 
 - **FBIP niche self-reference fix (`lib/tir/llvm_emit.ml`).** The FBIP optimization generated a self-referential object for niche-encoded patterns like `Some(result) -> Ok(result)`. For niche `Option`, `Some(x) = x` directly (no wrapper) — the branch variable and the scrutinee are the same runtime pointer. The FBIP reuse branch overwrote `x+8` (tag) and `x+16` (field = `x` itself → cycle); the fresh branch also wrongly called `march_decrc(x)` before storing `x` as Ok's field (use-after-free). Fix in the `EReuse (reuse_atom, TCon(ctor,_), args)` fallback branch: detect when `reuse_atom`'s parent type is niche-shaped and skip FBIP — always allocate fresh without touching the reuse atom's RC. 300 compiler + 320 codegen tests pass. This unblocks `NetKernel.recv_frame` which hung due to the self-referential result confusing downstream pattern matching.
