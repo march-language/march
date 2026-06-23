@@ -1,0 +1,5 @@
+[package]
+name = "dom_demo"
+version = "0.1.0"
+type = "app"
+description = "March DOM demo — colored tiles that move on click, compiled to JS"

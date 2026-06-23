@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "4850", "--directory", "/tmp/march-site-preview-fe1ba9"],
       "port": 4850
+    },
+    {
+      "name": "dom-demo",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4851", "--directory", "/Users/80197052/code/march/demo_app/dom_demo"],
+      "port": 4851
     }
   ]
 }

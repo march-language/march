@@ -94,127 +94,127 @@ mod Dom do
 
   -- ── Public API ─────────────────────────────────────────────────────────
 
-  doc "Find an element by its id attribute. Returns None if not found."
+  doc "Look up an element by its `id` attribute. Returns `None` if no element with that id exists."
   fn find(id)                          do dom_get_element_by_id(id) end
 
-  doc "Find the first element matching a CSS selector. Returns None if not found."
+  doc "Find the first element matching a CSS selector string (e.g. \".my-class\", \"h1\", \"[data-foo]\"). Returns `None` if nothing matches."
   fn select(selector)                  do dom_query_selector(selector) end
 
-  doc "Find all elements matching a CSS selector."
+  doc "Find all elements matching a CSS selector. Returns a `List(Node)`, empty when nothing matches."
   fn select_all(selector)              do dom_query_selector_all(selector) end
 
-  doc "The document body element."
+  doc "The document `<body>` element."
   fn body()                            do dom_body() end
 
-  doc "Create a new element with the given tag name."
+  doc "Create a new element with the given HTML tag name (e.g. \"div\", \"span\", \"button\"). The element is detached until appended to the tree."
   fn create(tag)                       do dom_create_element(tag) end
 
-  doc "Create a text node."
+  doc "Create a text node containing the given string. Use `append` to attach it to an element."
   fn text_node(text)                   do dom_create_text_node(text) end
 
-  doc "Append child to parent."
+  doc "Append `child` as the last child of `parent`. If `child` is already in the tree it is moved."
   fn append(parent, child)             do dom_append_child(parent, child) end
 
-  doc "Prepend child to parent."
+  doc "Insert `child` before all existing children of `parent`. If `child` is already in the tree it is moved."
   fn prepend(parent, child)            do dom_prepend_child(parent, child) end
 
-  doc "Remove a child from its parent."
+  doc "Remove `child` from `parent`. Panics if `child` is not a direct child of `parent`; prefer `remove` when the parent is unknown."
   fn remove_child(parent, child)       do dom_remove_child(parent, child) end
 
-  doc "Remove an element from the DOM."
+  doc "Detach `el` from its parent and remove it from the DOM. No-op if `el` has no parent."
   fn remove(el)                        do dom_remove(el) end
 
-  doc "Get the parent element."
+  doc "Return the direct parent element of `el`, or `None` if `el` is the root or detached."
   fn parent(el)                        do dom_parent(el) end
 
-  doc "Get all child elements."
+  doc "Return a `List(Node)` of the direct element children of `el` (text nodes excluded)."
   fn children(el)                      do dom_children(el) end
 
-  doc "Remove all children from an element."
+  doc "Remove all child nodes from `el`, leaving it empty."
   fn clear(el)                         do dom_clear_children(el) end
 
-  doc "Get the text content of an element."
+  doc "Return the `textContent` of `el` (all descendant text, concatenated)."
   fn get_text(el)                      do dom_get_text(el) end
 
-  doc "Set the text content of an element."
+  doc "Set the `textContent` of `el`. Replaces all children with a single text node; HTML is not interpreted."
   fn set_text(el, text)                do dom_set_text(el, text) end
 
-  doc "Get the inner HTML of an element."
+  doc "Return the `innerHTML` of `el` as a string."
   fn get_html(el)                      do dom_get_html(el) end
 
-  doc "Set the inner HTML of an element."
+  doc "Set the `innerHTML` of `el`. The string is parsed as HTML; use `set_text` when the content is plain text."
   fn set_html(el, html)                do dom_set_html(el, html) end
 
-  doc "Get an attribute value."
+  doc "Return the value of the named attribute, or `None` if the attribute is absent."
   fn get_attr(el, name)                do dom_get_attribute(el, name) end
 
-  doc "Set an attribute."
+  doc "Set the value of the named attribute on `el` (e.g. `set_attr(el, \"href\", \"#top\")`)."
   fn set_attr(el, name, val)           do dom_set_attribute(el, name, val) end
 
-  doc "Remove an attribute."
+  doc "Remove the named attribute from `el`. No-op if the attribute is absent."
   fn remove_attr(el, name)             do dom_remove_attribute(el, name) end
 
-  doc "Check if an element has an attribute."
+  doc "Return `true` if `el` has the named attribute, `false` otherwise."
   fn has_attr(el, name)                do dom_has_attribute(el, name) end
 
-  doc "Add a CSS class."
+  doc "Add CSS class `cls` to `el`'s classList. No-op if already present."
   fn add_class(el, cls)                do dom_class_add(el, cls) end
 
-  doc "Remove a CSS class."
+  doc "Remove CSS class `cls` from `el`'s classList. No-op if absent."
   fn remove_class(el, cls)             do dom_class_remove(el, cls) end
 
-  doc "Toggle a CSS class."
+  doc "Toggle CSS class `cls` on `el`: add it if absent, remove it if present."
   fn toggle_class(el, cls)             do dom_class_toggle(el, cls) end
 
-  doc "Check if an element has a CSS class."
+  doc "Return `true` if `el`'s classList contains `cls`."
   fn has_class(el, cls)                do dom_class_contains(el, cls) end
 
-  doc "Set an inline CSS property."
+  doc "Set an inline CSS property on `el` (e.g. `set_style(el, \"color\", \"red\")` or `set_style(el, \"transform\", \"translateX(40px)\")`). Pass an empty string to remove the property."
   fn set_style(el, prop, val)          do dom_set_style(el, prop, val) end
 
-  doc "Get an inline CSS property."
+  doc "Return the inline CSS value for `prop` on `el`. Returns an empty string if the property is not set inline."
   fn get_style(el, prop)               do dom_get_style(el, prop) end
 
-  doc "Get the value of a form input element."
+  doc "Return the current `value` property of a form input, textarea, or select element."
   fn get_value(el)                     do dom_get_value(el) end
 
-  doc "Set the value of a form input element."
+  doc "Set the `value` property of a form input, textarea, or select element."
   fn set_value(el, val)                do dom_set_value(el, val) end
 
-  doc "Add an event listener. The handler receives the Event."
+  doc "Attach `handler` to `el` for DOM event `event` (e.g. \"click\", \"input\", \"keydown\", \"mouseover\"). The handler receives the `Event` object. Use `event_target` to get the element that triggered it."
   fn listen(el, event, handler)        do dom_add_event_listener(el, event, handler) end
 
-  doc "Remove an event listener."
+  doc "Remove a previously attached event listener. `handler` must be the same function value passed to `listen`."
   fn unlisten(el, event, handler)      do dom_remove_event_listener(el, event, handler) end
 
-  doc "Get the target element from an event."
+  doc "Return the element that triggered `ev` (the `event.target` node)."
   fn event_target(ev)                  do dom_event_target(ev) end
 
-  doc "Get the event type string."
+  doc "Return the event type string for `ev` (e.g. \"click\", \"input\")."
   fn event_type(ev)                    do dom_event_type(ev) end
 
-  doc "Prevent the default browser action for an event."
+  doc "Prevent the browser's default action for `ev` (e.g. stop a link from navigating, a form from submitting)."
   fn prevent_default(ev)               do dom_prevent_default(ev) end
 
-  doc "Stop the event from propagating to parent elements."
+  doc "Stop `ev` from bubbling up to parent elements."
   fn stop_propagation(ev)              do dom_stop_propagation(ev) end
 
-  doc "Show a browser alert dialog."
+  doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end
 
-  doc "Get the current page URL."
+  doc "Return the current page URL (`window.location.href`)."
   fn href()                            do dom_href() end
 
-  doc "Navigate to a URL."
+  doc "Navigate to `url` by setting `window.location.href`. This replaces the current page."
   fn navigate(url)                     do dom_set_href(url) end
 
-  doc "Run a callback after ms milliseconds."
+  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`."
   fn set_timeout(ms, cb)               do dom_set_timeout(ms, cb) end
 
-  doc "Run a callback every ms milliseconds."
+  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM."
   fn set_interval(ms, cb)              do dom_set_interval(ms, cb) end
 
-  doc "Schedule a callback on the next animation frame."
+  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations."
   fn on_frame(cb)                      do dom_request_animation_frame(cb) end
 
 end
