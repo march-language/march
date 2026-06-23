@@ -1466,3 +1466,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
+
+; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
+; node-a accepts, node-b connects; both run the ClusterConn handshake over
+; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each
+; verify the peer appears as Alive in their Membership view.
+(rule
+ (targets native_node_discovery native_node_discovery.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/node_discovery.march)
+       (file ../stdlib/node_identity.march)
+       (file ../stdlib/cluster_auth.march)
+       (file ../stdlib/handshake.march)
+       (file ../stdlib/peer_registry.march)
+       (file ../stdlib/net_frame.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/cluster_conn.march)
+       (file ../stdlib/membership.march)
+       (file ../stdlib/swim.march)
+       (file ../stdlib/swim_driver.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_discovery
+        native/node_discovery.march)
+   (with-stdout-to native_node_discovery.out
+        (system "./native_node_discovery")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_discovery.expected native_node_discovery.out)))
