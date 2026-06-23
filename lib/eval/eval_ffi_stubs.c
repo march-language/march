@@ -122,7 +122,15 @@ static double dyncall_fd(void *fn, const int64_t *ia, int ni, const double *fa, 
  * call it by name from a different code path (eval.ml ffi_extra_so loader). */
 CAMLprim value march_eval_dlopen_extra(value path) {
     CAMLparam1(path);
-    void *h = dlopen(String_val(path), RTLD_NOW | RTLD_GLOBAL);
+    /* On Linux dlopen("bare.so") does not search '.'; prepend "./" when the
+       path contains no directory separator so relative shims work everywhere. */
+    char rel_buf[2048];
+    const char *p = String_val(path);
+    if (p[0] != '/' && p[0] != '.' && !strchr(p, '/')) {
+        snprintf(rel_buf, sizeof(rel_buf), "./%s", p);
+        p = rel_buf;
+    }
+    void *h = dlopen(p, RTLD_NOW | RTLD_GLOBAL);
     if (!h) {
         char buf[512];
         snprintf(buf, sizeof(buf), "march FFI: failed to dlopen shim '%s': %s",
