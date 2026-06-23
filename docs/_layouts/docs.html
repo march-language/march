@@ -154,17 +154,21 @@
       color: var(--accent); background: var(--bg-code);
       padding: 2px 7px; border-radius: 4px;
     }
-    /* fenced code blocks (kramdown wraps in .highlight) */
+    /* fenced code blocks */
     .d-content .highlight,
     .d-content pre {
       background: var(--bg-code); border: 1px solid var(--border);
       border-radius: 6px; margin: 20px 0; overflow-x: auto;
     }
-    .d-content .highlight pre,
+    /* typography for all pre elements */
     .d-content pre {
-      padding: 20px 24px; margin: 0; border: none; border-radius: 0;
+      padding: 20px 24px;
       font-family: 'JetBrains Mono', monospace; font-size: 13.5px;
-      line-height: 1.72; tab-size: 2; background: transparent;
+      line-height: 1.72; tab-size: 2;
+    }
+    /* inner pre inside Rouge .highlight wrapper — outer div provides the box */
+    .d-content .highlight pre {
+      margin: 0; border: none; border-radius: 0; background: transparent;
     }
     .d-content pre code { background: none; color: var(--text); padding: 0; font-size: inherit; }
 

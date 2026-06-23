@@ -29,7 +29,7 @@ A March cluster is a set of named nodes connected by authenticated TCP links. Th
 
 Every node has a stable identity captured in a `NodeIdentity.Identity` record:
 
-```elixir
+```march
 let id = NodeIdentity.make("alice@192.168.1.10", 9000, "v1.2.0")
 -- { node_id: "alice@192.168.1.10", port: 9000, version: "v1.2.0" }
 ```
@@ -40,7 +40,7 @@ let id = NodeIdentity.make("alice@192.168.1.10", 9000, "v1.2.0")
 
 Node identities are serialised to MessagePack for transport:
 
-```elixir
+```march
 let bytes = NodeIdentity.to_bytes(id)   -- List(Int)
 match NodeIdentity.of_bytes(bytes) do
   Ok(id2) -> id2
@@ -56,7 +56,7 @@ Before any cluster traffic flows, nodes exchange a challenge-response handshake 
 
 ### Generating a secret
 
-```elixir
+```march
 let secret = ClusterAuth.gen_secret()   -- 32-byte random key (List(Int))
 ```
 
@@ -66,7 +66,7 @@ All nodes in a cluster must share the same secret (distribute it via environment
 
 `Handshake` is a pure state machine — call it once per new connection:
 
-```elixir
+```march
 -- Initiator side
 let nonce  = NetKernel.fresh_nonce()
 let result = NetKernel.handshake(fd, my_id, secret, nonce)
@@ -79,7 +79,7 @@ end
 
 `ClusterConn.accept_one` wraps the accept → handshake → enroll flow for the listening side:
 
-```elixir
+```march
 match ClusterConn.accept_one(registry, listen_fd, my_id, secret) do
   Ok(peer_id) -> -- new peer enrolled
   Err(e)      -> -- handshake failed
@@ -88,7 +88,7 @@ end
 
 ### Starting the listener
 
-```elixir
+```march
 match ClusterConn.listen(9000) do
   Ok(listen_fd) ->
     -- accept loop
@@ -110,7 +110,7 @@ end
 
 `Membership` maintains the set of known cluster members as a last-write-wins CRDT. Each member carries a `MemberStatus` (`Alive`, `Suspect`, or `Dead`) and a vector clock for causal ordering.
 
-```elixir
+```march
 let members = Membership.empty()
 let members = Membership.join(members, "alice@192.168.1.10", 9000, now_ms)
 let members = Membership.leave(members, "bob@192.168.1.11", now_ms)
@@ -127,7 +127,7 @@ let status = Membership.status_of(members, "alice@192.168.1.10")
 
 `Swim` implements the SWIM gossip protocol as a pure state machine. It produces `Action` values that tell the runtime what to send — no sockets inside.
 
-```elixir
+```march
 let cfg   = { ack_timeout_ms: 200, suspect_timeout_ms: 2000, indirect_k: 3 }
 let state = Swim.make("alice@192.168.1.10", members, cfg)
 
@@ -159,7 +159,7 @@ Each `Action` maps to a message to send over the cluster connection:
 
 `GlobalRegistry` is a cluster-wide name → `{node_id, pid}` mapping that merges correctly under concurrent updates (CRDT with vector-clock causal ordering and deterministic tiebreak).
 
-```elixir
+```march
 let reg = GlobalRegistry.empty()
 
 -- Register a name on this node
@@ -192,7 +192,7 @@ Merge is idempotent: applying the same remote view twice produces the same resul
 
 A `GlobalPid` uniquely identifies a process across the cluster:
 
-```elixir
+```march
 let pid = GlobalPid.make("alice@192.168.1.10", 42, 1)
 -- { node_id: "alice@192.168.1.10", local_pid: 42, creation: 1 }
 
@@ -207,7 +207,7 @@ The `creation` counter lets the runtime distinguish a new process at the same lo
 
 A `RemoteRef` pins a remote function by both its type signature hash and its implementation hash:
 
-```elixir
+```march
 let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
 -- { module_name: "Math", fn_name: "add", sig_hash: ..., impl_hash: ... }
 ```
@@ -223,7 +223,7 @@ The hashes are recorded in the compiled binary. The responder node's RPC dispatc
 
 Build a `CallRequest`, encode it, send it over the connection, then decode the reply:
 
-```elixir
+```march
 let reply_pid = GlobalPid.make(my_node_id, my_local_pid, 1)
 let fref      = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
 let args      = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
@@ -261,7 +261,7 @@ end
 
 ### Caller-side helpers
 
-```elixir
+```march
 -- Check whether a reply belongs to a given request (by correlation id)
 NodeRpc.matches(req, reply)    -- Bool
 
@@ -280,7 +280,7 @@ Each node runs an RPC dispatcher that maps `(module, function)` keys to local st
 
 ### Enrolling a function
 
-```elixir
+```march
 -- A stub: decode args, call the real function, encode the result
 fn add_stub(args : List(Int)) : Result(List(Int), String) do
   match Msgpack.decode(args) do
@@ -301,7 +301,7 @@ let targets = NodeRpc.enroll(targets, "Math", "add", target)
 
 ### Dispatching incoming frames
 
-```elixir
+```march
 -- Given raw bytes from the network:
 match NodeRpc.handle_frame(targets, frame) do
   Some(reply) ->
@@ -330,7 +330,7 @@ A minimal two-node cluster:
 
 **Node A (listener)**
 
-```elixir
+```march
 mod NodeA do
   fn main() do
     let my_id = NodeIdentity.make("a@127.0.0.1", 9000, "1.0")
@@ -352,7 +352,7 @@ end
 
 **Node B (connector)**
 
-```elixir
+```march
 mod NodeB do
   fn main() do
     let my_id = NodeIdentity.make("b@127.0.0.1", 9001, "1.0")
