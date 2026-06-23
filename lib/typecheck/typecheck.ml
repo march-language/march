@@ -3068,13 +3068,20 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
     let arm_row = [norm_pat br.branch_pat] in
     if br.branch_guard = None then begin
       if not (is_useful env [scrut_ty] !prefix arm_row) then begin
-        let sp = span_of_pat br.branch_pat in
+        let pat_sp   = span_of_pat br.branch_pat in
+        let body_sp  = span_of_expr br.branch_body in
+        let arm_span = { pat_sp with
+          March_ast.Ast.end_line = body_sp.March_ast.Ast.end_line;
+          March_ast.Ast.end_col  = body_sp.March_ast.Ast.end_col } in
         Err.report env.errors
-          { Err.severity = Warning; span = sp;
+          { Err.severity = Warning; span = pat_sp;
             message = "This pattern can never be reached.";
             labels  = [];
             notes   = ["An earlier arm already covers all values this pattern matches."];
-            code    = Some "redundant_arm"; fix = None }
+            code    = Some "redundant_arm";
+            fix     = Some (Err.FDelete {
+              start_line = arm_span.March_ast.Ast.start_line;
+              end_line   = arm_span.March_ast.Ast.end_line }) }
       end;
       prefix := !prefix @ [arm_row]
     end
@@ -4429,7 +4436,8 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
        && not (List.mem name used) then
-      Err.warning_with_code env.errors ~span ~code:"unused_binding"
+      Err.warning_with_code_and_fix env.errors ~span ~code:"unused_binding"
+        ~fix:(Err.FReplace { span; text = "_" ^ name })
         (Printf.sprintf "Unused variable `%s`.\n\
                          Use `_` to mark intentionally unused params." name)
   in

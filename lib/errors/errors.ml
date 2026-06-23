@@ -60,6 +60,10 @@ let warning_with_fix ctx ~span ~fix message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = None; fix = Some fix }
 
+let warning_with_code_and_fix ctx ~span ~code ~fix message =
+  report ctx
+    { severity = Warning; span; message; labels = []; notes = []; code = Some code; fix = Some fix }
+
 (* ── ANSI colour ──────────────────────────────────────────────────────── *)
 
 (** Set to [true] at startup when stderr is a TTY (and NO_COLOR is absent).
