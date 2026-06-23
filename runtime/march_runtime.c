@@ -3542,7 +3542,16 @@ void *native_float_arr_filter_mask(void *arr, void *mask) {
 #include <sys/time.h>
 
 static void uuid_v7_bytes(uint8_t bytes[16], int64_t ts_ms) {
+#if defined(__APPLE__)
     arc4random_buf(bytes, 16);
+#else
+    {
+        ssize_t n;
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0) { n = read(fd, bytes, 16); close(fd); }
+        (void)n;
+    }
+#endif
     bytes[0] = (uint8_t)(ts_ms >> 40);
     bytes[1] = (uint8_t)(ts_ms >> 32);
     bytes[2] = (uint8_t)(ts_ms >> 24);

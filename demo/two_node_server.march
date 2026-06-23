@@ -1,0 +1,38 @@
+mod TwoNodeServer do
+  needs IO.NetListen
+
+  fn square(n : Int) : Int do n * n end
+
+  pfn square__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(n), Nil)) ->
+            Ok(Msgpack.encode(Msgpack.int(square(n))))
+          _ -> Err("square: expected one Int argument")
+        end
+    end
+  end
+
+  pfn serve_loop(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        NodeCall.serve_loop(NodeRpc.empty(), conn_fd)
+        tcp_close(conn_fd)
+        serve_loop(listen_fd)
+      Err(e) -> println("accept error: " ++ e)
+    end
+  end
+
+  fn main() do
+    let port = 29852
+    let fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("server ready on :29852")
+    serve_loop(fd)
+  end
+
+end

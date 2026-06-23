@@ -1413,6 +1413,17 @@ let compile filename =
                   Hashtbl.replace remote_sig_hashes base h.March_cas.Hash.sig_hash
                 | None -> ()
             end
+          ) pre_fns;
+          (* Pass 2: hash all remaining pre-opt functions so remote_ref_hashes
+             constant-folding works even when the optimizer eliminated them
+             (e.g. a pfn only referenced from the caller side, not the server). *)
+          List.iter (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            if not (Hashtbl.mem hr_impl_hashes n) then begin
+              let h = March_cas.Hash.hash_fn_def fn in
+              Hashtbl.replace hr_impl_hashes n h.March_cas.Hash.impl_hash;
+              Hashtbl.replace remote_sig_hashes n h.March_cas.Hash.sig_hash
+            end
           ) pre_fns
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
@@ -1668,6 +1679,14 @@ let compile filename =
                   Hashtbl.replace hr_impl_hashes base h.March_cas.Hash.impl_hash;
                   Hashtbl.replace remote_sig_hashes2 base h.March_cas.Hash.sig_hash
                 | None -> ()
+            end
+          ) pre_fns;
+          List.iter (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            if not (Hashtbl.mem hr_impl_hashes n) then begin
+              let h = March_cas.Hash.hash_fn_def fn in
+              Hashtbl.replace hr_impl_hashes n h.March_cas.Hash.impl_hash;
+              Hashtbl.replace remote_sig_hashes2 n h.March_cas.Hash.sig_hash
             end
           ) pre_fns
         in

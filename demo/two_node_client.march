@@ -1,0 +1,46 @@
+mod TwoNodeClient do
+  -- Same body as server → same CAS hash → admission check passes.
+  pfn square(n : Int) : Int do n * n end
+
+  pfn call_square(fd : Int, sig_h : String, impl_h : String,
+                  n : Int, corr : Int) : Int do
+    let fref = RemoteCall.remote_ref("TwoNodeClient", "square", sig_h, impl_h)
+    let args  = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Nil)))
+    let pid   = GlobalPid.make("local", 0, 0)
+    match NodeCall.call(fd, fref, args, pid, 9999999, corr, 0) do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Int(r)) -> r
+          _ -> panic("unexpected payload")
+        end
+      Err(_) -> panic("call failed")
+    end
+  end
+
+  fn main() do
+    let args = Process.argv()
+    let host = match List.nth_opt(args, 1) do
+      Some(h) -> h
+      None -> "127.0.0.1"
+    end
+    let port = match List.nth_opt(args, 2) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> 29852
+        end
+      None -> 29852
+    end
+    let fd = match Socket.connect(host, port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let (sig_h, impl_h) = remote_ref_hashes("TwoNodeClient", "square")
+    let r1 = call_square(fd, sig_h, impl_h, 7, 1)
+    println("square(7)  = " ++ String.from_int(r1))
+    let r2 = call_square(fd, sig_h, impl_h, 12, 2)
+    println("square(12) = " ++ String.from_int(r2))
+    tcp_close(fd)
+  end
+
+end

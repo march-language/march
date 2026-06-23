@@ -13,7 +13,7 @@
        (file ../runtime/march_deque.h)
        (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
        (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file ../runtime/march_remote_registry.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
        (file two_node_rpc.march)
        (file ../stdlib/node_call.march)
        (file ../stdlib/node_rpc.march)
@@ -23,3 +23,52 @@
        (file ../stdlib/net_frame.march))
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_rpc.march)))
+
+; Two-node RPC over TCP — separate server and client binaries for cross-host demo.
+;
+; Build:   dune build demo/two_node_server.exe demo/two_node_client.exe
+; Server:  ./_build/default/demo/two_node_server.exe
+; Client:  ./_build/default/demo/two_node_client.exe [host] [port]
+(rule
+ (targets two_node_server.exe)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file two_node_server.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_server.march)))
+
+(rule
+ (targets two_node_client.exe)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file two_node_client.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_client.march)))

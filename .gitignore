@@ -39,3 +39,6 @@ docs/superpowers/
 
 # march_doc generator, auto-cloned by scripts/gen-stdlib-docs.sh in CI
 /march_doc/
+
+# RPC demo cross-compile output (scripts/rpc/build-linux.sh)
+/dist/

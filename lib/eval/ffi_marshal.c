@@ -12,6 +12,9 @@
  * For `raises` externs the interpreter allocates a C-heap sentinel whose
  * layout matches struct march_env { int64_t raised; int64_t err; }.
  */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE
+#endif
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
 #include <caml/memory.h>

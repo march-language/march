@@ -17,6 +17,9 @@
  *
  * Symbols are prefixed `march_eval_` to avoid clashing with the JIT's
  * identical dlopen/dlsym helpers (both libs are linked into the compiler). */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE
+#endif
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
 #include <caml/memory.h>

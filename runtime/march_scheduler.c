@@ -28,12 +28,16 @@
 
 /* _XOPEN_SOURCE must come before all system headers (see march_scheduler.h).
  * Also needed: _DARWIN_C_SOURCE on macOS to expose getpagesize without
- * relying on the deprecated extension path. */
+ * relying on the deprecated extension path.
+ * On Linux, _GNU_SOURCE exposes MAP_ANONYMOUS which _XOPEN_SOURCE=700 hides. */
 #ifndef _XOPEN_SOURCE
 #  define _XOPEN_SOURCE 700
 #endif
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #  define _DARWIN_C_SOURCE
+#endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE
 #endif
 
 #include "march_scheduler.h"

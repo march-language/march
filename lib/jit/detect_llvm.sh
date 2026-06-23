@@ -31,6 +31,6 @@ else
     fi
     case "$WHAT" in
         c_flags)    printf '(-I%s -DLLVM_MAJOR_VERSION=%s)\n' "$INC" "$LLVM_VER" ;;
-        link_flags) printf '(-ldl -L%s -lLLVM)\n' "$LIB" ;;
+        link_flags) printf '(-ldl -L%s -lLLVM-%s)\n' "$LIB" "$LLVM_VER" ;;
     esac
 fi
