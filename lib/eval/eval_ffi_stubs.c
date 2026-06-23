@@ -23,6 +23,7 @@
 #include <caml/fail.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <dlfcn.h>
 
 CAMLprim value march_eval_dlopen(value path) {
