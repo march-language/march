@@ -4133,6 +4133,80 @@ let test_if_branch_mismatch_reason_not_match () =
       ) d.March_errors.Errors.notes
     ) errors))
 
+(* ── Usability diagnostics: top-level mod + sibling fn, same-name type ──── *)
+
+(* A file with a complete top-level `mod ... end` cannot also define sibling
+   top-level declarations (one top-level module per file is by design).  The
+   diagnostic must say so clearly rather than menhir's generic "stuck here". *)
+let test_toplevel_mod_plus_sibling_fn_error () =
+  let src =
+    "mod Sales do\n\
+    \  fn double(n : Int) : Int do n * 2 end\n\
+     end\n\
+     fn main() do\n\
+    \  println(int_to_string(Sales.double(21)))\n\
+     end\n" in
+  let output = render_parse_err src in
+  Alcotest.(check bool)
+    "top-level mod + sibling fn: message mentions only one top-level mod" true
+    (_contains_substr output "only one top-level" ||
+     _contains_substr output "one top-level `mod`")
+
+(* A nested multi-line match used directly as a match-arm body (no do/end
+   wrapper) must parse.  This locks in the contextual-NL token-filter behavior
+   so it can never silently regress. *)
+let test_nested_inline_match_arm_parses () =
+  let src =
+    "mod Demo do\n\
+    \  type MyList = MyNil | MyCons(Int, MyList)\n\
+    \  fn process(r : Result(MyList, String)) : Int do\n\
+    \    match r do\n\
+    \      Err(_) -> -1\n\
+    \      Ok(MyNil) -> 0\n\
+    \      Ok(MyCons(h, t)) ->\n\
+    \        match t do\n\
+    \          MyNil -> h\n\
+    \          MyCons(h2, _) -> h + h2\n\
+    \        end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do 0 end\n\
+     end\n" in
+  let m = parse_module src in
+  Alcotest.(check bool) "nested inline match arm parses to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 3)
+
+(* When two distinct types share a printed name (e.g. a local type and a
+   same-named type from another module / the stdlib), unification fails with
+   "expected `X` but got `X`".  The diagnostic must add a note explaining the
+   global-namespace collision.  Here a nested-module record `Inner.Thing` and a
+   top-level variant `Thing` both print as `Thing` but are structurally
+   distinct, reproducing the collision without depending on stdlib loading. *)
+let test_same_name_type_collision_note () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      type Thing = { a : Int }
+    end
+    type Thing = MkThing(Int)
+    fn make() : Thing do MkThing(5) end
+    fn use_inner(t : Inner.Thing) : Int do t.a end
+    fn main() do
+      let x = make()
+      println(int_to_string(use_inner(x)))
+    end
+  end|} in
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool)
+    "same-name collision: a note explains two distinct types share the name" true
+    (List.exists (fun d ->
+      List.exists (fun note ->
+        _contains_substr note "Two distinct types" ||
+        _contains_substr note "global type namespace"
+      ) d.March_errors.Errors.notes
+    ) errors)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -4539,6 +4613,9 @@ let compiler_suites =
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;
           Alcotest.test_case "fix: if-branch mismatch reason says if expr"  `Quick test_if_branch_mismatch_reason_is_if_specific;
           Alcotest.test_case "fix: if-branch mismatch no 'match' in note"   `Quick test_if_branch_mismatch_reason_not_match;
+          Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;
+          Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
+          Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
         ] );
   ]
 

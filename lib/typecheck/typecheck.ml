@@ -1923,6 +1923,35 @@ let report_mismatch env ~span ~reason expected found =
          Did you mean to pass this as a callback?" ]
     | _ -> []
   in
+  (* Same-printed-name disambiguation.
+     March has a single global type namespace, so a user-defined type can share
+     its printed name with a stdlib type (e.g. local `Config` vs `Config` from the
+     standard library).  When that happens unification fails but both sides render
+     identically, yielding the baffling "expected `Config` but got `Config`".
+     Detect the case — the two reprs print the same string but are structurally
+     distinct — and explain it.  We compare structural shapes (TCon vs TRecord,
+     constructor name, argument count) rather than exact identity so we only fire
+     when the types genuinely differ despite printing alike. *)
+  let same_name_note =
+    let pe = pp_ty (repr expected) and pf = pp_ty (repr found) in
+    let structurally_distinct =
+      match repr expected, repr found with
+      | TCon (n1, a1), TCon (n2, a2) ->
+        n1 <> n2 || List.length a1 <> List.length a2
+      | TCon _, TRecord _ | TRecord _, TCon _ -> true
+      | _ -> false
+    in
+    if pe = pf && structurally_distinct then
+      [ Printf.sprintf
+          "Two distinct types are both named `%s` — they print the same but have \
+           different definitions. March has a single global type namespace, so a \
+           local type collides with any same-named type from another module or the \
+           standard library.\n\
+           Rename one of them (e.g. `App%s`), or qualify/avoid the import that \
+           brings the other `%s` into scope."
+          pe pe pe ]
+    else []
+  in
   let labels =
     match reason with
     | Some r ->
@@ -1935,7 +1964,8 @@ let report_mismatch env ~span ~reason expected found =
   in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note @ mismatch_note @ common_hint; code = None }
+      labels; notes = why_note @ mismatch_note @ common_hint @ same_name_note;
+      code = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
     Intentionally ignores payload types — only checks session structure shape. *)
