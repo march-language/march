@@ -1426,9 +1426,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
      Name resolution follows the same qualified→unqualified→extern chain
      used by the ECallPtr handlers. *)
   | Tir.AVar v when not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
-    let resolved = match Hashtbl.find_opt ctx.unqualified_fns v.Tir.v_name with
-      | Some q -> q
-      | None   -> v.Tir.v_name
+    let resolved =
+      if Hashtbl.mem ctx.top_fns v.Tir.v_name then v.Tir.v_name
+      else match Hashtbl.find_opt ctx.unqualified_fns v.Tir.v_name with
+        | Some q -> q
+        | None   -> v.Tir.v_name
     in
     let fname = match Hashtbl.find_opt ctx.extern_map resolved with
       | Some c -> c
@@ -1736,6 +1738,79 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
     else begin
+      (* Niche-encoded Option types (None=null, Some(x)=x in a ptr slot) must NOT
+         use the normal tag-at-offset-8 strategy — there is no heap header.
+         Detect niche shape early and emit a null-check equality instead. *)
+      let niche_payload_opt =
+        if Repr.is_niche_shaped !cur_type_defs type_name then
+          match ty_args with
+          | [p] when Repr.niche_payload_ok !cur_type_defs p -> Some p
+          | _ -> None
+        else None
+      in
+      match niche_payload_opt with
+      | Some payload_ty ->
+        Hashtbl.add ctx.emitted_eq_fns fn_name ();
+        let buf = Buffer.create 256 in
+        let ctr = ref 0 in let blk = ref 0 in
+        let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
+        let flbl pfx = incr blk; Printf.sprintf "%s%d" pfx !blk in
+        let e ln  = Buffer.add_string buf ("  " ^ ln ^ "\n") in
+        let lbl l = Buffer.add_string buf (l ^ ":\n") in
+        let lbl_anull        = flbl "nq_anull" in
+        let lbl_anonnull     = flbl "nq_asome" in
+        let lbl_both_nonnull = flbl "nq_both" in
+        let lbl_not_eq       = flbl "nq_neq" in
+        let lbl_eq           = flbl "nq_eq" in
+        Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+        Buffer.add_string buf "entry:\n";
+        let anc = frsh "anc" in
+        e (Printf.sprintf "%s = icmp eq ptr %%a, null" anc);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" anc lbl_anull lbl_anonnull);
+        (* a == null (None): equal iff b is also null *)
+        lbl lbl_anull;
+        let bnc1 = frsh "bnc" in
+        e (Printf.sprintf "%s = icmp eq ptr %%b, null" bnc1);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" bnc1 lbl_eq lbl_not_eq);
+        (* a != null (Some): not equal if b == null *)
+        lbl lbl_anonnull;
+        let bnc2 = frsh "bnc" in
+        e (Printf.sprintf "%s = icmp eq ptr %%b, null" bnc2);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" bnc2 lbl_not_eq lbl_both_nonnull);
+        (* Both non-null (both Some): compare payloads *)
+        lbl lbl_both_nonnull;
+        let ok = frsh "ok" in
+        (match payload_ty with
+         | Tir.TString ->
+           e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %%a, ptr %%b)" ok)
+         | _ when Repr.payload_needs_tag !cur_type_defs payload_ty ->
+           (* Tagged scalar (Int/Bool) in ptr slot: compare raw tagged bits *)
+           let pa = frsh "pa" in let pb = frsh "pb" in
+           e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
+           e (Printf.sprintf "%s = ptrtoint ptr %%b to i64" pb);
+           let c = frsh "c" in
+           e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+           e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+         | _ ->
+           (match ensure_adt_eq_fn ctx payload_ty with
+            | Some fn ->
+              e (Printf.sprintf "%s = call i64 @%s(ptr %%a, ptr %%b)" ok fn)
+            | None ->
+              let pa = frsh "pa" in let pb = frsh "pb" in
+              e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
+              e (Printf.sprintf "%s = ptrtoint ptr %%b to i64" pb);
+              let c = frsh "c" in
+              e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+              e (Printf.sprintf "%s = zext i1 %s to i64" ok c)));
+        let oki = frsh "oki" in
+        e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" oki lbl_eq lbl_not_eq);
+        lbl lbl_eq;     e "ret i64 1";
+        lbl lbl_not_eq; e "ret i64 0";
+        Buffer.add_string buf "}\n";
+        Buffer.add_buffer ctx.extra_fns buf;
+        Some fn_name
+      | None ->
       (* Resolve [type_name] against ctor_info's type-qualified keys
          ("TypePath.CtorName").  TDVariant names from imported modules are
          module-qualified ("Ast.Expr") while the TCon at a use site may carry
@@ -2881,10 +2956,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let args_str  = String.concat ", " arg_strs in
     (* Resolve unqualified cross-module references: lower.ml may emit a
        function reference without its module prefix (e.g. "base64_encode"
-       for "Crypto.base64_encode").  Look up the qualified name first. *)
-    let resolved_name = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-      | Some q -> q
-      | None -> f.Tir.v_name
+       for "Crypto.base64_encode").  Look up the qualified name first.
+       Guard: if the bare name is already a direct top-level function, use
+       it as-is — a same-module function shadows any cross-module match. *)
+    let resolved_name =
+      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
+      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+        | Some q -> q
+        | None -> f.Tir.v_name
     in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
@@ -3029,12 +3108,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (the EApp path handles the same via emit_raises_wrapper). *)
   | Tir.ECallPtr (Tir.AVar f, args)
     when (not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)))
-      && (let rn = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-            | Some q -> q | None -> f.Tir.v_name in
+      && (let rn =
+            if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
+            else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+              | Some q -> q | None -> f.Tir.v_name in
           Hashtbl.mem ctx.raises_externs rn) ->
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let rn = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
-      | Some q -> q | None -> f.Tir.v_name in
+    let rn =
+      if Hashtbl.mem ctx.top_fns f.Tir.v_name then f.Tir.v_name
+      else match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+        | Some q -> q | None -> f.Tir.v_name in
     let fname = match Hashtbl.find_opt ctx.extern_map rn with
       | Some c_name -> c_name | None -> mangle_extern rn in
     let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty rn with
@@ -3052,6 +3135,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ECallPtr (Tir.AVar f, args)
     when (let base = llvm_name f.Tir.v_name in
           not (Hashtbl.mem ctx.var_slot base))
+      && (not (Hashtbl.mem ctx.top_fns f.Tir.v_name))
       && Hashtbl.mem ctx.unqualified_fns f.Tir.v_name ->
     let qualified = Hashtbl.find ctx.unqualified_fns f.Tir.v_name in
     let arg_strs = List.map (fun a ->
@@ -3956,11 +4040,20 @@ and emit_case ctx scrut_atom branches default_opt =
       | Tir.AVar v -> v.Tir.v_name | _ -> ""
     in
     let strip_decrc_niche body =
-      match body with
-      | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
-      | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
-        when String.equal v.Tir.v_name scrut_name -> rest
-      | _ -> body
+      if scrut_name = "" then body
+      else
+        (* The DecRC for the niche scrutinee may appear anywhere in the leading
+           ESeq chain (other owned variables in scope get their own DecRCs
+           first).  Walk the full chain and remove the first match. *)
+        let rec go e =
+          match e with
+          | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+          | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
+            when String.equal v.Tir.v_name scrut_name -> rest
+          | Tir.ESeq (head, rest) -> Tir.ESeq (head, go rest)
+          | _ -> e
+        in
+        go body
     in
     let snapshot_var_slot_n () = Hashtbl.copy ctx.var_slot in
     let restore_var_slot_n snap =
@@ -4476,6 +4569,13 @@ and emit_case ctx scrut_atom branches default_opt =
            emit_label ctx body_lbl;
            br.Tir.br_body
          | None -> br.Tir.br_body)
+      | Some sn, [] ->
+        (* No heap fields; still need to strip a leading dec_rc(scrut) if the body
+           also contains an EReuse(scrut) — otherwise dec_rc and EReuse both
+           release the scrutinee, causing RC underflow on the EReuse fresh path. *)
+        (match strip_scrut_decrc sn br.Tir.br_body with
+         | Some (_, rest) when body_reuses_scrut sn rest -> rest
+         | _ -> br.Tir.br_body)
       | _ -> br.Tir.br_body
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
