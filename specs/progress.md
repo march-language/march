@@ -282,6 +282,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-23, improved if-expression error messages)
+
+- **Follow-up error message fixes — `parser.mly`, `typecheck.ml`.** `if x then` parse error now says "I don't recognize `then` here — March uses do/end blocks instead." (was: "always need an else branch") and the caret underlines `then` rather than the end-of-input error token. `EIf` branch type mismatch uses a dedicated reason "Both branches of an if expression must return the same type." instead of the match-arm reason which said "All branches of a match." 4 new `error_improvements` tests (318 compiler total).
+
 ## Current State (as of 2026-06-23, Elm-like compiler diagnostics + LSP relatedInformation — all 8 improvements)
 
 - **Elm-like error/warning improvements (#1–8 complete) — `errors.ml`, `typecheck.ml`, `parser.mly`.** All eight improvements from `specs/2026-06-22-error-improvements.md`: (1) secondary span *labels* rendered below the primary error as source snippets; (2) `if`/`match` branch type mismatches label the offending branch span; (3) arity errors label the function definition site; (4) record field-not-found suggestions via edit-distance; (5) `let?` type mismatch includes the actual RHS type; (6) redundant arm warnings via Maranget's usefulness algorithm with sigma-completeness termination fix; (7) **parse errors unified with `render_diagnostic`** — new `parse_error_diagnostic` function builds a `diagnostic` from lexbuf position/token; `render_parse_error` delegates to `render_diagnostic`, producing consistent `-- ERROR` header and indented `notes` blocks; `if x then` error rule now notes "do/end blocks, not then"; (8) qualified-error messages return `(message, notes)` pairs. 14 new `error_improvements` tests (314 compiler total).
