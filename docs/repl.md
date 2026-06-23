@@ -77,10 +77,12 @@ This makes it easy to pipe results into the next expression without rebinding.
 When a `tap>` appears in the output, it's a debug trace from a `|> IO.inspect` or explicit `tap` call. Example:
 
 ```
-march> [1, 2, 3] |> List.map(fn x -> x * 2) |> List.filter(fn x -> x > 2)
+march> [1, 2, 3] |> List.map(fn x -> x * 2) |> IO.inspect |> List.filter(fn x -> x > 2)
 tap> [2, 4, 6]
 [4, 6] : List(Int)
 ```
+
+The `IO.inspect` call in the middle of the pipeline prints the intermediate value (`[2, 4, 6]` after the map) as a `tap>` line, then passes it through unchanged so `List.filter` receives the full mapped list.
 
 ---
 

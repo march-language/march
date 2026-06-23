@@ -14,6 +14,13 @@ Pattern matching in March is exhaustive, nested, and deeply integrated with the 
 ## Basic Match
 
 ```march
+match expr do Pattern -> result end
+match do Bool -> result end          -- cond form: no scrutinee, each arm is a boolean
+```
+
+Full form:
+
+```march
 match expr do
   Pattern1 -> result1
   Pattern2 -> result2
@@ -127,6 +134,8 @@ end
 ```
 
 ### Atom Patterns
+
+Atoms are named constants written with a leading colon — each atom is its own type (see the Type System page for a full introduction).
 
 ```march
 match status do
@@ -274,7 +283,7 @@ end
 
 ## Cond (Pattern-Free Multi-Way If)
 
-When you just need multiple boolean conditions, use `match` without a scrutinee:
+When `match` has no scrutinee expression, each arm is a boolean guard — this is equivalent to `cond` in other languages:
 
 ```march
 match do
@@ -333,19 +342,56 @@ end
 
 ---
 
-## Multi-Head Functions (Pattern Dispatch)
+## Multi-head Functions
 
-Consecutive `fn` declarations with the same name and compatible arities are merged into a single function. The compiler dispatches to the first matching clause:
+A function can have multiple clauses that pattern-match directly in the parameter list. Consecutive definitions with the same name are merged by the compiler into a single function that tries each clause in order:
 
 ```march
-fn fact(0) do 1 end
-fn fact(n) do n * fact(n - 1) end
-
-fn describe(Nil)        do "empty list" end
-fn describe(Cons(x, _)) do "starts with " ++ to_string(x) end
+fn factorial(0) : Int do 1 end
+fn factorial(n) : Int do n * factorial(n - 1) end
 ```
 
-This is syntactic sugar — the compiler desugars to a single function with an internal match.
+```march
+fn describe(0) : String do "zero" end
+fn describe(1) : String do "one" end
+fn describe(n) : String do
+  if n < 0 do "negative" else "many" end
+end
+```
+
+Clauses are checked top to bottom; the first matching clause wins. The compiler warns if later clauses are unreachable.
+
+Multi-head functions work with any pattern in the parameter list — constructors, literals, tuples, records:
+
+```march
+fn head(Cons(x, _)) : a do x end
+fn head(Nil)        : a do panic("empty list") end
+
+fn first((x, _)) : a do x end
+```
+
+### `when` Guards
+
+Add a `when` clause to a function head (or match arm) to add a boolean condition beyond the pattern:
+
+```march
+fn classify(n : Int) : String when n < 0  do "negative" end
+fn classify(n : Int) : String when n == 0 do "zero" end
+fn classify(n : Int) : String             do "positive" end
+```
+
+Guards can also appear on match arms:
+
+```march
+match score do
+  n when n >= 90 -> "A"
+  n when n >= 80 -> "B"
+  n when n >= 70 -> "C"
+  _              -> "F"
+end
+```
+
+A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime — make the last clause unconditional or use a wildcard to ensure exhaustiveness.
 
 ---
 

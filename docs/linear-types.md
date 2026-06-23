@@ -147,7 +147,7 @@ The channel handles are linear — each `send`/`recv` operation consumes the old
 
 ## Capabilities as Linear Types
 
-Capabilities (see [capabilities.march](../examples/capabilities.march)) use linear types to ensure a capability token cannot be forged or duplicated:
+Capabilities (see [capabilities]({{ site.baseurl }}/docs/capabilities/)) use linear types to ensure a capability token cannot be forged or duplicated:
 
 ```march
 fn read_secret(linear cap : Cap(Vault)) : String do

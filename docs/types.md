@@ -107,6 +107,80 @@ type Config =
 
 ---
 
+## Records
+
+Record types group named fields into a single value. Define them with curly-brace syntax:
+
+```march
+type Point = { x : Float, y : Float }
+type User  = { name : String, age : Int, active : Bool }
+```
+
+Create a record by supplying all fields:
+
+```march
+let p = { x = 1.0, y = 2.0 }
+let u = { name = "Alice", age = 30, active = true }
+```
+
+Access fields with `.`:
+
+```march
+let dist = p.x +. p.y
+```
+
+Update fields with `{ base with field = value }` — this creates a new record; the original is unchanged:
+
+```march
+let p2 = { p with x = 5.0 }       -- new Point, y unchanged
+let u2 = { u with active = false } -- deactivate user
+```
+
+Destructure records in patterns:
+
+```march
+match p do
+  { x, y } -> x +. y
+end
+```
+
+Records and sum types can be combined — a sum type constructor can carry a record payload:
+
+```march
+type Shape =
+  | Circle({ radius : Float })
+  | Rect({ width : Float, height : Float })
+```
+
+---
+
+## Atoms
+
+An atom is a named constant whose value is its own name. Atoms are written with a leading colon:
+
+```march
+:ok
+:error
+:pending
+:one_for_one
+```
+
+Atoms are commonly used as tags in sum types, supervision strategies, HTTP methods, and protocol states:
+
+```march
+type Status = :ok | :error | :pending
+
+match status do
+  :ok      -> "success"
+  :error   -> "failure"
+  :pending -> "in progress"
+end
+```
+
+Each atom literal has its own distinct type, so the compiler catches typos at the type level.
+
+---
+
 ## Type Parameters (Generics)
 
 Type parameters are lowercase:
@@ -219,7 +293,7 @@ fn run(input : String) : Result(String, String) do
 end
 ```
 
-Use `with` when you need custom `else` handling or mixed `Option`/`Result` chains:
+Use `with` when you need custom `else` handling or mixed `Option`/`Result` chains (the `with` construct is covered in the Pattern Matching page; it short-circuits on non-matching patterns):
 
 ```march
 with Ok(n)    <- parse_int(input),
@@ -241,6 +315,38 @@ Result.unwrap_or(Err("e"), 0)          -- 0
 Result.is_ok(res)
 Result.is_err(res)
 ```
+
+---
+
+## The `let?` Operator
+
+`let?` is syntactic sugar for unwrapping a `Result` and propagating errors automatically. Inside a function that returns `Result`, `let?` saves you from writing nested `match` expressions:
+
+```march
+fn load_config(path : String) : Result(Config, String) do
+  let? raw  = File.read(path)         -- unwrap or propagate Err
+  let? text = Utf8.decode(raw)        -- unwrap or propagate Err
+  let? cfg  = Config.parse(text)      -- unwrap or propagate Err
+  Ok(cfg)
+end
+```
+
+Each `let? x = expr` desugars to:
+
+```march
+match expr do
+  Ok(x)  -> <rest of function>
+  Err(e) -> Err(e)    -- early return, propagating the error
+end
+```
+
+The `?` postfix operator is the expression-level equivalent — use it to unwrap inline:
+
+```march
+let cfg = Config.parse(File.read(path)?)?   -- chain unwraps
+```
+
+`let?` and `?` only work with `Result(a, e)`. For `Option(a)`, use `match` or the `with` construct.
 
 ---
 
@@ -310,32 +416,6 @@ Types from modules are accessed with `.`:
 ```march
 Http.Request
 Map.Entry(String, Int)
-```
-
----
-
-## Type-Level Naturals (Sized Arrays)
-
-March supports `Nat` in type parameters for compile-time dimension checking:
-
-```march
-type Vector(n, a) = Vector(Array(a))
-type Matrix(m, n, a) = Matrix(Array(Array(a)))
-```
-
-Arithmetic on type-level naturals:
-
-```march
-type Doubled(n, a) = Array(n * 2, a)
-```
-
-This enables functions like `zip` that guarantee equal-length inputs:
-
-```march
-fn zip_vectors(v1 : Vector(n, a), v2 : Vector(n, b)) : Vector(n, (a, b)) do
-  -- compiler verifies n is the same for both inputs
-  ...
-end
 ```
 
 ---
@@ -467,6 +547,37 @@ For completely hidden types, use `ptype`:
 ```march
 ptype Internal = Foo | Bar(Int)
 -- Both the type name and constructors are private
+```
+
+---
+
+## Operator Reference
+
+| Operator | Types | Description |
+|----------|-------|-------------|
+| `+` `-` `*` `/` `%` | `Int` | Integer arithmetic |
+| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (dot suffix required) |
+| `==` `!=` | any `Eq` | Equality / inequality |
+| `<` `>` `<=` `>=` | any `Ord` | Ordering |
+| `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
+| `++` | `String` | String concatenation |
+| `\|>` | any | Pipe: `x \|> f` is `f(x)` |
+
+**Float operators require the dot suffix.** Mixing `Int` operators with `Float` values is a type error:
+
+```march
+let a = 1.5 +. 2.5   -- Float: correct
+let b = 1.5 + 2.5    -- type error: + is Int-only
+```
+
+The pipe operator chains transformations left-to-right:
+
+```march
+[1, 2, 3, 4, 5]
+  |> List.filter(fn x -> x % 2 == 0)
+  |> List.map(fn x -> x * x)
+  |> List.fold_left(0, fn acc x -> acc + x)
+-- evaluates to 20
 ```
 
 ---

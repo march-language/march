@@ -376,7 +376,7 @@ end
 
 ### Gen module
 
-**Primitives:** `int`, `int_sized`, `bool`, `float`, `constant`, `element`, `ascii_char`, `lowercase_char`
+**Primitives:** `int(lo, hi)` (bounds required), `int_sized`, `bool`, `float`, `constant`, `element`, `ascii_char`, `lowercase_char`
 
 **Strings:** `string`, `lowercase_string`, `string_of`
 

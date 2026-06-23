@@ -122,7 +122,7 @@ A matching DAP debug extension lives in `editors/vscode-march-debug/`.
 | Feature | What it does |
 |---|---|
 | **Completions** | Context-aware: module members after `.`, constructors, interfaces, in-scope names, keywords; with snippet placeholders for function/constructor arguments |
-| **Auto-import** | Completing an un-imported stdlib/dep member inserts the needed `use` |
+| **Auto-import** | Completing an un-imported stdlib/dep member inserts the needed `import` |
 | **Signature help** | Parameter hints at call sites |
 | **Inlay hints** | Inferred types inline, plus FBIP annotations (`♻ reused` / `⧉ copied`) |
 | **Semantic tokens** | Type-accurate highlighting, including ownership (`linear`/`affine`) |
@@ -198,7 +198,7 @@ type-directed where possible:
 
 > Project-wide refactors that rewrite *every* call site (rename, move, codemod,
 > and **introduce parameter object**) live in the build tool as
-> `forge refactor …` — see [Tooling]({{ site.baseurl }}/tooling). Cursor-driven actions above are
+> `forge refactor …` — see [Tooling]({{ site.baseurl }}/docs/tooling/). Cursor-driven actions above are
 > the LSP's; project-wide rewrites are forge's.
 
 ---
@@ -275,7 +275,7 @@ clients:
 - **Zed** — the `[debug_adapters.march]` entry in `zed-march/`
 
 This is the protocol-based debugger; for a quick inline pause you can also drop a
-`dbg()` call to open the REPL at that point (see [Tooling]({{ site.baseurl }}/tooling)).
+`dbg()` call to open the REPL at that point (see [Tooling]({{ site.baseurl }}/docs/tooling/)).
 
 ---
 

@@ -37,16 +37,16 @@ lists. PascalCase names are reserved for types and modules.
 
 ```march
 -- Bad
-fn myFunction(x: Int) -> Int
+fn myFunction(x : Int) : Int do
   x + 1
 end
 
-fn MyFunction(x: Int) -> Int
+fn MyFunction(x : Int) : Int do
   x + 1
 end
 
 -- Good
-fn my_function(x: Int) -> Int
+fn my_function(x : Int) : Int do
   x + 1
 end
 ```
@@ -198,12 +198,12 @@ match result do
   Err(e) -> handle_error(e)
 end
 
-pfn dispatch(v) when v.kind == Query   -> run_query(v)
-pfn dispatch(v) when v.kind == Command -> run_command(v)
+pfn dispatch(v) when v.kind == Query   do run_query(v) end
+pfn dispatch(v) when v.kind == Command do run_command(v) end
 
 -- Better still, with constructor patterns on the inner type
-pfn dispatch({kind: Query,   ..} = v) -> run_query(v)
-pfn dispatch({kind: Command, ..} = v) -> run_command(v)
+pfn dispatch({kind: Query,   ..} = v) do run_query(v) end
+pfn dispatch({kind: Command, ..} = v) do run_command(v) end
 ```
 
 This rule triggers on:
@@ -270,7 +270,7 @@ between a guard and the main path.
 
 ```march
 -- Bad
-fn divide(a: Int, b: Int) -> Int do
+fn divide(a : Int, b : Int) : Int do
   if b == 0 do
     panic("division by zero")
   else
@@ -279,7 +279,7 @@ fn divide(a: Int, b: Int) -> Int do
 end
 
 -- Good
-fn divide(a: Int, b: Int) -> Int do
+fn divide(a : Int, b : Int) : Int do
   if b == 0 do panic("division by zero") end
   a / b
 end
@@ -332,13 +332,13 @@ public function is a missing contract.
 
 ```march
 -- Bad
-fn connect(url: String) -> Result(Conn, Error) do
+fn connect(url : String) : Result(Conn, Error) do
   ...
 end
 
 -- Good (one-liner)
 doc "Opens a TCP connection to `url`. Returns Err if the host is unreachable."
-fn connect(url: String) -> Result(Conn, Error) do
+fn connect(url : String) : Result(Conn, Error) do
   ...
 end
 
@@ -349,7 +349,7 @@ Opens a TCP connection to `url`.
 Returns `Err(ConnectionRefused)` if the host actively refuses the connection,
 or `Err(Timeout)` if no response is received within the default timeout.
 """
-fn connect(url: String) -> Result(Conn, Error) do
+fn connect(url : String) : Result(Conn, Error) do
   ...
 end
 ```
@@ -375,7 +375,7 @@ fn greet(name) do
 end
 
 -- Good
-fn greet(name: String) -> String do
+fn greet(name : String) : String do
   "Hello, " ++ name
 end
 ```
@@ -454,7 +454,7 @@ uptime matters.
 
 ```march
 -- Bad (in a lib module)
-fn parse_int(s: String) -> Int do
+fn parse_int(s : String) : Int do
   match try_parse(s) do
     Some(n) -> n
     None    -> panic("not a number: " ++ s)
@@ -462,7 +462,7 @@ fn parse_int(s: String) -> Int do
 end
 
 -- Good
-fn parse_int(s: String) -> Result(Int, String) do
+fn parse_int(s : String) : Result(Int, String) do
   match try_parse(s) do
     Some(n) -> Ok(n)
     None    -> Err("not a number: " ++ s)
@@ -491,11 +491,11 @@ analysis from public roots.
 
 ```march
 -- Bad: pfn helper is never called
-pfn helper(x: Int) -> Int do x * 2 end
-fn public_api(x: Int) -> Int do x + 1 end
+pfn helper(x : Int) : Int do x * 2 end
+fn public_api(x : Int) : Int do x + 1 end
 
 -- Good
-fn public_api(x: Int) -> Int do x + 1 end
+fn public_api(x : Int) : Int do x + 1 end
 ```
 
 ---
@@ -552,13 +552,14 @@ end
 -- Good
 on Process(job) do handle_process(state, job) end
 
-pfn handle_process(state, job) ->
+pfn handle_process(state, job) do
   let result = dispatch_job(job)
   send(job.reply_to, Done(result))
   { state with processed = state.processed + 1 }
+end
 
-pfn dispatch_job(job) when job.kind == Query   -> run_query(job.data)
-pfn dispatch_job(job) when job.kind == Command -> run_command(job.data)
+pfn dispatch_job(job) when job.kind == Query   do run_query(job.data) end
+pfn dispatch_job(job) when job.kind == Command do run_command(job.data) end
 ```
 
 Triggers when `on` body contains a `match`, an `if/else`, or more than three `let`
@@ -638,7 +639,9 @@ end
 
 -- Also good: use supervision config for managed child actors
 actor Supervisor do
-  supervise [ Worker ]
+  supervise do
+    Worker worker
+  end
   ...
 end
 ```

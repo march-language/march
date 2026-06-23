@@ -273,11 +273,13 @@ end
 mod Main do
   needs IO
 
-  fn main() : () do
+  -- The initial Cap(IO) is provided implicitly by the runtime to `main()` —
+  -- there is no `root_cap()` call in user code.
+  fn main(cap : Cap(IO)) : () do
     let config  = Config.load("/etc/myapp/config.toml")
-    let io_cap  : Cap(IO.NetListen)      = cap_narrow(root_cap())
-    let tls_cap : Cap(IO.NetConnect.TLS) = cap_narrow(root_cap())
-    let mut_cap : Cap(IO.Mut)            = cap_narrow(root_cap())
+    let io_cap  : Cap(IO.NetListen)      = cap_narrow(cap)
+    let tls_cap : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
+    let mut_cap : Cap(IO.Mut)            = cap_narrow(cap)
     Api.start(io_cap, tls_cap, mut_cap)
   end
 end
@@ -326,7 +328,7 @@ end
 
 `Cap(Db.Migrated)` is **unforgeable**:
 - `cap_narrow` cannot produce it (it's not in the IO hierarchy)
-- `root_cap` cannot produce it
+- The runtime-provided `Cap(IO)` in `main()` cannot produce it
 - Only public (`fn`) functions of `mod Db` can mint it — private (`pfn`) functions may pass it through but cannot create one from nothing
 - External code can pass it through, but cannot create one
 

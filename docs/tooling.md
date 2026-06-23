@@ -22,7 +22,7 @@ dune build && dune install forge
 Then all forge commands are available directly:
 
 ```sh
-forge run my_program.march
+forge build
 forge test
 forge search "map"
 ```
@@ -648,19 +648,6 @@ forge licenses             # list each dependency and its declared license
 forge licenses --json      # JSON output for tooling
 forge licenses --strict    # exit non-zero if any dependency has no license
 ```
-
----
-
-## Capability Inspection
-
-`forge cap query` performs a static analysis pass over the project and summarizes all capability and typestate declarations:
-
-```sh
-forge cap query                 # scan the project root
-forge cap query --dir lib/      # scan a specific directory
-```
-
-Output lists every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration found in the source, by file.
 
 ---
 

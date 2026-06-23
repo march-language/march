@@ -97,7 +97,8 @@ match ClusterConn.listen(9000) do
         Ok(peer_id) -> log("connected: " ++ peer_id.node_id)
         Err(e)      -> log("rejected: " ++ e)
       end
-    Nil
+      loop(Nil)
+    loop(Nil)
   Err(e) -> ...
 end
 ```
@@ -325,6 +326,8 @@ end
 ---
 
 ## Putting It Together
+
+> **Note:** this example shows the API surface — the transport layer (`send`/`recv` over `fd`) is left as an exercise. See the `NetFrame` module for length-prefixed framing helpers.
 
 A minimal two-node cluster:
 

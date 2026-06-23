@@ -22,7 +22,7 @@ March sits in the ML/Elixir family. Most concepts map directly — the main diff
 | Type params | `data Maybe a = Nothing \| Just a` | — | `type 'a option = None \| Some of 'a` | `type Option(a) = None \| Some(a)` |
 | Result | `Either e a` | `{:ok, v} \| {:error, e}` | `('a, 'e) result` | `Result(a, e)` |
 | Let binding | `let x = 42 in ...` | `x = 42` | `let x = 42 in ...` | `let x = 42` (no `in`) |
-| Pipe | `f $ g x` | `x \|> g \|> f` | — | `x \|> g \|> f` |
+| Pipe | `f $ g x` | `x \|> g \|> f` | — | `g(x) \|> f   -- or: f(g(x))` |
 | Record update | `r { field = v }` | `%{r \| field: v}` | `{ r with field = v }` | `{ r with field = v }` |
 | Private fn | module boundary | `defp` | `let` (vs `let ... in sig`) | `pfn` |
 
