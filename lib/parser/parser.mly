@@ -1287,6 +1287,8 @@ expr_eof:
 
 repl_input:
   | d = decl; EOF { March_ast.Ast.ReplDecl d }
+  | LET; QUESTION; p = simple_pattern; EQUALS; e = expr; EOF
+    { March_ast.Ast.ReplLetQ (p, e) }
   | e = expr; EOF { March_ast.Ast.ReplExpr e }
   | EOF           { March_ast.Ast.ReplEOF }
   (* Hint: `name = expr` looks like an assignment but should be `let name = expr`.
@@ -1309,4 +1311,6 @@ repl_input:
 repl_sequence:
   | EOF { [] }
   | d = decl; rest = repl_sequence { March_ast.Ast.ReplDecl d :: rest }
+  | LET; QUESTION; p = simple_pattern; EQUALS; e = expr; rest = repl_sequence
+    { March_ast.Ast.ReplLetQ (p, e) :: rest }
   | e = expr; rest = repl_sequence { March_ast.Ast.ReplExpr e :: rest }

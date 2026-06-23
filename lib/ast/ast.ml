@@ -355,6 +355,7 @@ type module_ = { mod_name : name; mod_decls : decl list }
 type repl_input =
   | ReplDecl of decl
   | ReplExpr of expr
+  | ReplLetQ of pattern * expr
   | ReplEOF
 
 (** Literal formatter matching ppx_deriving.show output — used by tir.ml's [@@deriving show]. *)

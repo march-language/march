@@ -973,6 +973,45 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
                       March_eval.Eval.clear_march_stack ();
+                      Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))
+               | Some (March_ast.Ast.ReplLetQ (p, e)) ->
+                 let e' = March_desugar.Desugar.desugar_expr e in
+                 let input_ctx = March_errors.Errors.create () in
+                 let input_tc  = { !tc_env with errors = input_ctx } in
+                 let new_tc = March_typecheck.Typecheck.check_letq_repl input_tc p e' in
+                 let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+                 if not is_debug then
+                   List.iter print_diag (March_errors.Errors.sorted input_ctx);
+                 if tc_ok || is_debug then
+                   (try
+                      (match March_eval.Eval.eval_expr !env e' with
+                       | March_eval.Eval.VCon ("Ok", [v]) ->
+                         (match March_eval.Eval.match_pattern v p with
+                          | Some bs ->
+                            env := bs @ !env;
+                            if tc_ok then
+                              tc_env := { new_tc with errors = March_errors.Errors.create () };
+                            if not scroll_mode then
+                              List.iter (fun (name, value) ->
+                                Printf.printf "val %s = %s\n%!"
+                                  name (March_eval.Eval.value_to_string value)
+                              ) bs
+                          | None ->
+                            Printf.eprintf "match failure: let? pattern did not match Ok value\n%!")
+                       | March_eval.Eval.VCon ("Err", [err]) ->
+                         Printf.eprintf "error: %s\n%!" (March_eval.Eval.value_to_string err)
+                       | other ->
+                         Printf.eprintf "runtime error: let? expected Result, got %s\n%!"
+                           (March_eval.Eval.value_to_string other))
+                    with
+                    | March_eval.Eval.Eval_error msg ->
+                      March_eval.Eval.clear_march_stack ();
+                      Printf.eprintf "runtime error: %s\n%!" msg
+                    | March_eval.Eval.Match_failure msg ->
+                      March_eval.Eval.clear_march_stack ();
+                      Printf.eprintf "match failure: %s\n%!" msg
+                    | exn ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))));
           (* In scroll mode only :reset and :scroll_done emit the sentinel.
              Regular form evaluation is silent so each cell produces exactly
@@ -1478,7 +1517,58 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          | Failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)
          | exn ->
-           add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn))))
+           add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn)))
+  | Some (March_ast.Ast.ReplLetQ (p, e)) ->
+    let e' = March_desugar.Desugar.desugar_expr e in
+    let input_ctx = March_errors.Errors.create () in
+    let input_tc  = { !tc_env with errors = input_ctx } in
+    let new_tc = March_typecheck.Typecheck.check_letq_repl input_tc p e' in
+    let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+    if not is_debug then
+      List.iter (fun (diag : March_errors.Errors.diagnostic) ->
+        let (label, attr) = match diag.severity with
+          | March_errors.Errors.Error   -> ("error",   Notty.A.(fg red))
+          | March_errors.Errors.Warning -> ("warning", Notty.A.(fg yellow))
+          | March_errors.Errors.Hint    -> ("hint",    Notty.A.(fg blue))
+        in
+        add_line attr (Printf.sprintf "%s: %s" label diag.message);
+        List.iter (fun note ->
+          add_line Notty.A.empty (Printf.sprintf "note: %s" note)) diag.notes
+      ) (March_errors.Errors.sorted input_ctx);
+    if tc_ok || is_debug then
+      (try
+         (match March_eval.Eval.eval_expr !env e' with
+          | March_eval.Eval.VCon ("Ok", [v]) ->
+            (match March_eval.Eval.match_pattern v p with
+             | Some bs ->
+               env := bs @ !env;
+               if tc_ok then
+                 tc_env := { new_tc with errors = March_errors.Errors.create () };
+               List.iter (fun (name, value) ->
+                 add_line Notty.A.empty
+                   (Printf.sprintf "val %s = %s" name
+                      (March_eval.Eval.value_to_string value))
+               ) bs
+             | None ->
+               add_line Notty.A.(fg red)
+                 "match failure: let? pattern did not match Ok value")
+          | March_eval.Eval.VCon ("Err", [err]) ->
+            add_line Notty.A.(fg red)
+              (Printf.sprintf "error: %s" (March_eval.Eval.value_to_string err))
+          | other ->
+            add_line Notty.A.(fg red)
+              (Printf.sprintf "runtime error: let? expected Result, got %s"
+                 (March_eval.Eval.value_to_string other)))
+       with
+       | March_eval.Eval.Eval_error msg ->
+         March_eval.Eval.clear_march_stack ();
+         add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
+       | March_eval.Eval.Match_failure msg ->
+         March_eval.Eval.clear_march_stack ();
+         add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
+       | exn ->
+         March_eval.Eval.clear_march_stack ();
+         add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn))))
   in
 
   let dispatch_action action =

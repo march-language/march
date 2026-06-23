@@ -7551,3 +7551,17 @@ let check_module_with_env_full (env : env) (m : Ast.module_)
 let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   check_module_core ~errors m
+
+let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
+  let env' = enter_level env in
+  let result_ty = infer_expr env' e in
+  let t_ok  = fresh_var env'.level in
+  let t_err = fresh_var env'.level in
+  let sp = span_of_expr e in
+  unify env' ~span:sp
+    ~reason:(Some (RBuiltin "The right-hand side of `let?` must be a Result value."))
+    result_ty (t_result t_ok t_err);
+  let bindings, pat_ty = infer_pattern env' p in
+  unify env' ~span:sp ~reason:(Some (RLetBind sp)) t_ok pat_ty;
+  ignore (leave_level env');
+  bind_vars bindings env
