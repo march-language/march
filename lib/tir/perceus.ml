@@ -1365,18 +1365,32 @@ let elide_cancel_pairs (fn : Tir.fn_def) : Tir.fn_def =
 
 (* ── Phase 4: FBIP Reuse Detection ──────────────────────────────────────── *)
 
+(** True iff [dec_v]'s name appears as an AVar in any of [args].
+    Prevents the self-referential FBIP bug: if the reuse atom IS one of the
+    constructor args (e.g. Some(result)->Ok(result) with niche-encoding, where
+    result = the scrutinee = dec_v), reusing dec_v's memory to build the new
+    object would store dec_v's address into its own field, creating a cycle. *)
+let args_alias_reuse (dec_v : Tir.var) (args : Tir.atom list) : bool =
+  List.exists (function
+    | Tir.AVar v -> String.equal v.Tir.v_name dec_v.Tir.v_name
+    | _ -> false) args
+
 (** Try to sink [EDecRC(dec_v)] into [body] through a chain of ELet
     bindings, stopping when we find an EAlloc of matching shape.  Safe
     only when [dec_v] does not appear in any RHS along the chain. *)
 let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
   match body with
-  (* EAlloc in tail position — reuse directly if arities match *)
+  (* EAlloc in tail position — reuse directly if arities match and dec_v is
+     not one of the constructor args (which would create a self-referential
+     object when dec_v's memory is reused to store dec_v itself). *)
   | Tir.EAlloc (ty, args)
-    when same_arity dec_v.Tir.v_ty (List.length args) ->
+    when same_arity dec_v.Tir.v_ty (List.length args)
+      && not (args_alias_reuse dec_v args) ->
     Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
   (* EAlloc bound to a result variable *)
   | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
-    when same_arity dec_v.Tir.v_ty (List.length args) ->
+    when same_arity dec_v.Tir.v_ty (List.length args)
+      && not (args_alias_reuse dec_v args) ->
     Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
   (* dec_v not used in rhs — safe to sink past this binding *)
   | Tir.ELet (v, rhs, inner)
@@ -1389,11 +1403,12 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
 let rec fbip_expr (e : Tir.expr) : Tir.expr =
   match e with
   (* Pattern: let _ = decrc(v) in let result = alloc(ty, args) in rest
-     where same_arity(v.v_ty, len(args)).
-     Replace the whole thing, dropping the dead let binding for the decrc. *)
+     where same_arity(v.v_ty, len(args)) and dec_v is not itself one of the
+     constructor args (which would create a self-referential object). *)
   | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
               Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when same_arity dec_v.Tir.v_ty (List.length args) ->
+    when same_arity dec_v.Tir.v_ty (List.length args)
+      && not (args_alias_reuse dec_v args) ->
     let rest' = fbip_expr rest in
     Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
   (* ESeq(EDecRC v, body): try to sink the decrc to be adjacent to an

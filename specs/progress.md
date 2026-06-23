@@ -282,6 +282,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-22, FBIP niche fix + forge --target js + clustering docs)
+
+- **FBIP niche self-reference fix (`lib/tir/llvm_emit.ml`).** The FBIP optimization generated a self-referential object for niche-encoded patterns like `Some(result) -> Ok(result)`. For niche `Option`, `Some(x) = x` directly (no wrapper) — the branch variable and the scrutinee are the same runtime pointer. The FBIP reuse branch overwrote `x+8` (tag) and `x+16` (field = `x` itself → cycle); the fresh branch also wrongly called `march_decrc(x)` before storing `x` as Ok's field (use-after-free). Fix in the `EReuse (reuse_atom, TCon(ctor,_), args)` fallback branch: detect when `reuse_atom`'s parent type is niche-shaped and skip FBIP — always allocate fresh without touching the reuse atom's RC. 300 compiler + 320 codegen tests pass. This unblocks `NetKernel.recv_frame` which hung due to the self-referential result confusing downstream pattern matching.
+
+- **`forge build --target js` / `forge run --compiled --target js` (`forge/bin/main.ml`, `forge/lib/cmd_build.ml`, `forge/lib/cmd_run.ml`).** `forge build --target js` compiles the project entry to `.march/build/{debug,release}/<name>.mjs` and auto-copies `march_runtime.mjs` + `march_dom.mjs` alongside it. `forge run --compiled --target js` builds then runs with `node`. All other targets (`native`, `wasm*`) unchanged.
+
+- **Distributed OTP clustering & RPC reference guide (`docs/clustering.md`).** 391-line reference covering all five distributed layers: node identity, authenticated handshake, Membership CRDT, SWIM failure detection + driver, GlobalRegistry CRDT, GlobalPid, RemoteRef/CallError taxonomy, NodeRpc responder pattern. Notes what remains for P2 (two-node integration test) and P3 (compiler-emitted enroll/stub).
+
 ## Current State (as of 2026-06-22, Distributed OTP — L4 compiler enroll/stub)
 
 - **L4 compiler enroll/stub — `remote_ref_hashes`, `remote_register_stub`, `remote_count` builtins.** The compiler touchpoint that closes the CAS-hash gap: functions now carry their real identity into the runtime at compile time. Three new builtins wired end-to-end (typecheck → eval → codegen):

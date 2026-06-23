@@ -708,9 +708,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_kill_proc"           -> Some Tir.TUnit
   | "process_wait_proc"           -> Some Tir.TInt
   (* TCP/network builtins.
-     tcp_listen/tcp_accept return a raw int fd (-1 on error) — march_tcp_listen/
-     accept return int64, not a tagged Result (unlike tcp_connect). *)
-  | "tcp_listen" | "tcp_accept"  -> Some Tir.TInt
+     tcp_listen/tcp_accept return Result(Int,String) — Ok(fd) tagged (n<<1)|1,
+     Err(reason) with tag 1, matching tcp_connect's layout. *)
+  | "tcp_listen" | "tcp_accept"  -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "tcp_close"                   -> Some Tir.TUnit
@@ -3537,6 +3537,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           ) args;
           ("ptr", ptr))
      | _ ->
+    (* Guard: if the reuse_atom's own type is niche-shaped (e.g. Option.Some),
+       the scrutinee IS the payload — no wrapper object was allocated.
+       FBIP reuse would overwrite the payload's own memory with the new
+       object's tag/fields, corrupting whatever type the payload holds.
+       Additionally, for patterns like [Some(result) -> Ok(result)], the
+       branch variable 'result' and dec_v are the same runtime pointer, so
+       calling march_decrc(dec_v) in the fresh branch would decrement the
+       very value we're about to store as Ok's field (use-after-free).
+       Skip FBIP: allocate fresh without touching reuse_atom's RC. *)
+    let reuse_atom_parent_type = match reuse_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon (name, _) ->
+           (match String.rindex_opt name '.' with
+            | Some i -> String.sub name 0 i
+            | None -> name)
+         | _ -> "")
+      | _ -> ""
+    in
+    if reuse_atom_parent_type <> ""
+       && Repr.is_niche_shaped !cur_type_defs reuse_atom_parent_type
+    then begin
+      let entry = ctor_entry ctx ctor (List.length args) in
+      let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+      List.iteri (fun i atom ->
+        let field_ty = match List.nth_opt entry.ce_fields i with
+          | Some t -> llvm_ty t
+          | None -> failwith (Printf.sprintf
+              "LLVM emit: constructor %s has %d field(s) but field index %d \
+               was requested (arity mismatch)"
+              ctor (List.length entry.ce_fields) i)
+        in
+        let (v_ty, v_val) = emit_atom ctx atom in
+        emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
+      ) args;
+      ("ptr", ptr)
+    end else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)
@@ -3590,7 +3627,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
-    ("ptr", result))
+    ("ptr", result)
+    end)
 
   | Tir.EReuse (reuse_atom, reuse_ty, args) ->
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
@@ -4322,10 +4360,16 @@ and emit_case ctx scrut_atom branches default_opt =
         Hashtbl.replace ctx.var_llvm_ty slot field_ty;
         (* Track heap-type fields for conditional IncRC.
            Use the concrete field type (with type-vars resolved) so scalar
-           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd. *)
+           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd.
+           Also guard on field_ty: when the scrutinee's TIR type is TVar "_"
+           (unknown — happens for sub-vars from the pattern-matrix compiler),
+           resolve_ctor_fields falls back to a TVar "_" placeholder, making
+           concrete_field_ty = "ptr" even for primitive fields.  field_ty is
+           always correct (resolved via the concrete ctor_info key) so using
+           both as a conjunction prevents false positives. *)
         let concrete_field_ty = match List.nth_opt concrete_fields i with
           | Some t -> llvm_ty t | None -> field_ty in
-        if concrete_field_ty = "ptr" then
+        if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
       ) br.Tir.br_vars
     end;
@@ -5206,8 +5250,8 @@ declare void @march_task_cancel_by_id(ptr %task)
          declare void @march_yield_from_compiled()\n";
     Buffer.add_string buf {|
 ; TCP/network builtins
-declare i64  @march_tcp_listen(i64 %port)
-declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_listen(i64 %port)
+declare ptr  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare void @march_tcp_send_all(i64 %fd, ptr %data)

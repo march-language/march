@@ -176,6 +176,22 @@ let stdlib_file_list = [
   "uri.march";
   "forge_nb.march";
   "handle.march";
+  (* Distributed OTP — added after all other stdlib deps are loaded *)
+  "net_frame.march";
+  "cluster_auth.march";
+  "node_identity.march";
+  "handshake.march";
+  "global_pid.march";
+  "remote_call.march";
+  "node_rpc.march";
+  "peer_registry.march";
+  "net_kernel.march";
+  "membership.march";
+  "swim.march";
+  "swim_driver.march";
+  "global_registry.march";
+  "cluster_conn.march";
+  "node_call.march";
 ]
 
 (** Stdlib modules only loaded for --target js builds.

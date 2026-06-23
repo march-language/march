@@ -1,0 +1,118 @@
+-- Node.call loopback integration test (P3 L4).
+--
+-- Spins up a listener on 29850, spawns a server task that serves exactly
+-- three RPC requests, then makes three calls from the same process:
+--   1. A correct hash match → ok:7
+--   2. A sig_hash mismatch  → err:TypeMismatch
+--   3. An unknown target    → err:NoTarget
+--
+-- All I/O flows over real TCP sockets. March's green-thread scheduler
+-- interleaves the server and client tasks naturally.
+--
+-- Targets is created fresh per iteration to avoid Perceus RC shared-path
+-- on function-pointer fields (each targets is uniquely owned when used).
+mod NodeCallLoopback do
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- Marshalling stub for Calc.add: decode [a, b], return a + b.
+  pfn add_invoke(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(a), Cons(Msgpack.Int(b), Nil))) ->
+            Ok(Msgpack.encode(Msgpack.int(a + b)))
+          _ -> Err("add: bad args")
+        end
+    end
+  end
+
+  -- Fresh targets per call: ensures Perceus sees it as uniquely owned.
+  pfn fresh_targets() do
+    let add_t = { sig_hash: "sig-1", impl_hash: "impl-1", invoke: add_invoke }
+    NodeRpc.enroll(NodeRpc.empty(), "Calc", "add", add_t)
+  end
+
+  -- Serve exactly [n] requests on [conn_fd], then close both fds.
+  pfn serve_n(conn_fd : Int, listen_fd : Int, n : Int) do
+    if n <= 0 do
+      tcp_close(conn_fd)
+      tcp_close(listen_fd)
+    else
+      let _ = NodeCall.serve_one(fresh_targets(), conn_fd)
+      serve_n(conn_fd, listen_fd, n - 1)
+    end
+  end
+
+  pfn run_server(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) -> serve_n(conn_fd, listen_fd, 3)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  pfn encode_add_args(a : Int, b : Int) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(a), Cons(Msgpack.int(b), Nil))))
+  end
+
+  pfn do_call(fd : Int, module_name : String, fn_name : String,
+              sg : String, im : String, a : Int, b : Int, corr : Int) do
+    let fref = RemoteCall.remote_ref(module_name, fn_name, sg, im)
+    let my_pid = GlobalPid.make("n1", 0, 0)
+    NodeCall.call(fd, fref, encode_add_args(a, b), my_pid, 9999999, corr, 0)
+  end
+
+  fn main() do
+    let port = 29850
+
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+
+    let srv = task_spawn(fn _ -> run_server(listen_fd))
+
+    let conn_fd = match Socket.connect("127.0.0.1", port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    -- Test 1: matching hashes → ok:7
+    let r1 = do_call(conn_fd, "Calc", "add", "sig-1", "impl-1", 3, 4, 1)
+    let out1 = match r1 do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Int(n)) -> "ok:" ++ String.from_int(n)
+          _ -> "fail:bad_payload"
+        end
+      Err(_) -> "fail:unexpected_err"
+    end
+    println(out1)
+
+    -- Test 2: sig_hash mismatch → TypeMismatch
+    let r2 = do_call(conn_fd, "Calc", "add", "BAD_SIG", "impl-1", 1, 1, 2)
+    let out2 = match r2 do
+      Ok(_)             -> "fail:expected_type_mismatch"
+      Err(TypeMismatch) -> "err:TypeMismatch"
+      Err(_)            -> "fail:wrong_error"
+    end
+    println(out2)
+
+    -- Test 3: unknown target → NoTarget
+    let r3 = do_call(conn_fd, "Calc", "nope", "sig-1", "impl-1", 1, 1, 3)
+    let out3 = match r3 do
+      Ok(_)         -> "fail:expected_no_target"
+      Err(NoTarget) -> "err:NoTarget"
+      Err(_)        -> "fail:wrong_error"
+    end
+    println(out3)
+
+    tcp_close(conn_fd)
+    let _ = task_await(srv)
+    ()
+  end
+
+end

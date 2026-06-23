@@ -1,0 +1,90 @@
+-- NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).
+--
+-- The glue between the transport (NetKernel) and the RPC core (NodeRpc):
+-- the caller sends a CallRequest frame and waits for the matching CallReply;
+-- the server-side dispatch loop reads request frames and sends reply frames.
+-- Uses dedicated RPC connections (not shared with SWIM gossip connections).
+--
+-- `call` is synchronous: it blocks the calling task until the reply arrives
+-- or the connection closes. March's green-thread scheduler yields on socket I/O,
+-- so a blocked call lets the server task run and vice versa.
+--
+-- Type annotations use bare names (Targets, RemoteRef, Pid, CallError) rather
+-- than qualified paths (NodeRpc.Targets, etc.) to avoid qualified-vs-bare
+-- unification failures at call sites.
+mod NodeCall do
+
+  -- ── Caller side ─────────────────────────────────────────────────────────────
+
+  -- Send one RPC request on [fd] and wait for the matching reply.
+  -- [now_ms] is compared against [deadline_ms] for an up-front timeout check
+  -- (pass `unix_time_ms(())` at call time). If the deadline has already passed,
+  -- returns Err(DeadlineExceeded) immediately without sending.
+  -- Returns Ok(payload_bytes) on success or Err(CallError) on failure.
+  fn call(fd : Int, fref : RemoteRef, args : List(Int),
+          my_pid : Pid, deadline_ms : Int, correlation : Int,
+          now_ms : Int) : Result(List(Int), CallError) do
+    if NodeRpc.timed_out(now_ms, deadline_ms) do
+      Err(DeadlineExceeded)
+    else
+      let req = RemoteCall.request(fref, args, my_pid, deadline_ms, correlation)
+      match NetKernel.send_frame(fd, RemoteCall.encode_request(req)) do
+        Err(_) -> Err(NoConnection)
+        Ok(_) -> recv_reply(fd, correlation, Nil)
+      end
+    end
+  end
+
+  -- Read frames from [fd] until one decodes as a CallReply matching [correlation].
+  -- Non-matching or malformed frames are skipped (they may be from a prior call
+  -- or a different multiplexed stream). A socket error returns NoConnection.
+  pfn recv_reply(fd : Int, correlation : Int,
+                 buf : List(Int)) : Result(List(Int), CallError) do
+    match NetKernel.recv_frame(fd, buf) do
+      Err(_) -> Err(NoConnection)
+      Ok(fr) ->
+        let frame_bytes = match fr do (f, _) -> f end
+        let rest = match fr do (_, r) -> r end
+        match RemoteCall.decode_reply(frame_bytes) do
+          Err(_) -> recv_reply(fd, correlation, rest)
+          Ok(reply) ->
+            if reply.correlation == correlation do
+              NodeRpc.interpret(reply)
+            else
+              recv_reply(fd, correlation, rest)
+            end
+        end
+    end
+  end
+
+  -- ── Server side ──────────────────────────────────────────────────────────────
+
+  -- Read one RPC request frame from [fd], dispatch it against [targets], and
+  -- send the reply frame back. Malformed request frames (None from handle_frame)
+  -- are silently dropped — no reply is sent (there is no valid correlation to
+  -- echo back). Returns Err on I/O error.
+  fn serve_one(targets : Targets, fd : Int) : Result((), String) do
+    match NetKernel.recv_frame(fd, Nil) do
+      Err(e) -> Err(e)
+      Ok(fr) ->
+        let frame_bytes = match fr do (f, _) -> f end
+        match NodeRpc.handle_frame(targets, frame_bytes) do
+          None -> Ok(())
+          Some(reply) ->
+            match NetKernel.send_frame(fd, RemoteCall.encode_reply(reply)) do
+              Err(e) -> Err(e)
+              Ok(_) -> Ok(())
+            end
+        end
+    end
+  end
+
+  -- Serve RPC requests on [fd] until the connection closes or an I/O error occurs.
+  fn serve_loop(targets : Targets, fd : Int) : () do
+    match serve_one(targets, fd) do
+      Err(_) -> ()
+      Ok(_) -> serve_loop(targets, fd)
+    end
+  end
+
+end
