@@ -708,7 +708,7 @@ let run_test_cmd args =
             if f = filename || f = "" || f = "<unknown>" then (src, filename)
             else (try read_file f with Sys_error _ -> src), f
           in
-          Printf.eprintf "%s\n\n"
+          Printf.eprintf "%s\n\n\n"
             (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
         end
       ) diags;
@@ -1081,7 +1081,7 @@ let compile filename =
           if f = filename || f = "" || f = "<unknown>" then (src, filename)
           else (try read_file f with Sys_error _ -> src), f
         in
-        Printf.eprintf "%s\n\n"
+        Printf.eprintf "%s\n\n\n"
           (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
       end
     ) diags;
