@@ -1,0 +1,108 @@
+-- Two-Node RPC Demo
+--
+-- Two nodes linked by TCP, one calling a function that executes on the other.
+--
+-- Node-B (server) registers `square` via the compiler-emitted stub mechanism:
+-- the `__rpc_stub` suffix causes the compiler to emit
+-- `march_remote_register(impl_hash, sig_hash, &square__rpc_stub)` in @main
+-- automatically. No manual enroll calls are needed.
+--
+-- Node-A (caller) connects to node-b and calls `TwoNodeRpc.square` twice,
+-- getting back the results over a real TCP connection.
+--
+-- Both nodes are green-thread tasks in the same OS process. In production
+-- they would be separate processes on different machines.
+--
+-- Compile and run:
+--   dune build demo/two_node_rpc.exe
+--   ./_build/default/demo/two_node_rpc.exe
+--
+mod TwoNodeRpc do
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- ── Registered function ─────────────────────────────────────────────────────
+
+  fn square(n : Int) : Int do n * n end
+
+  -- Compiler detects the __rpc_stub suffix and emits
+  -- march_remote_register(impl_hash_of_square, sig_hash_of_square, &square__rpc_stub)
+  -- at program startup.
+  pfn square__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(n), Nil)) ->
+            Ok(Msgpack.encode(Msgpack.int(square(n))))
+          _ -> Err("square: expected one Int argument")
+        end
+    end
+  end
+
+  -- ── Node-B: the server ───────────────────────────────────────────────────────
+
+  pfn node_b(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        -- NodeRpc.empty() is sufficient: the C registry (populated by the
+        -- compiler-emitted march_remote_register calls at @main) handles dispatch.
+        NodeCall.serve_loop(NodeRpc.empty(), conn_fd)
+        tcp_close(conn_fd)
+        tcp_close(listen_fd)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("node-b accept: " ++ e)
+    end
+  end
+
+  -- ── Node-A: the caller ───────────────────────────────────────────────────────
+
+  pfn call_square(fd : Int, sig_h : String, impl_h : String,
+                  n : Int, corr : Int) : Int do
+    let fref = RemoteCall.remote_ref("TwoNodeRpc", "square", sig_h, impl_h)
+    let args  = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Nil)))
+    let pid   = GlobalPid.make("node-a", 0, 0)
+    match NodeCall.call(fd, fref, args, pid, 9999999, corr, 0) do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Int(result)) -> result
+          _ -> panic("square: unexpected payload")
+        end
+      Err(_) -> panic("square: call failed")
+    end
+  end
+
+  fn main() do
+    let port = 29852
+
+    -- Start node-b in a background task.
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let srv = task_spawn(fn _ -> node_b(listen_fd))
+
+    -- Node-A connects to node-b.
+    let fd = match Socket.connect("127.0.0.1", port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    -- Derive the CAS hashes at compile time via the remote_ref_hashes builtin.
+    -- The server uses these same hashes to verify the call is type-safe.
+    let (sig_h, impl_h) = remote_ref_hashes("TwoNodeRpc", "square")
+
+    -- Two remote calls over the same persistent connection.
+    let r1 = call_square(fd, sig_h, impl_h, 7, 1)
+    println("square(7) = " ++ String.from_int(r1))
+
+    let r2 = call_square(fd, sig_h, impl_h, 12, 2)
+    println("square(12) = " ++ String.from_int(r2))
+
+    tcp_close(fd)
+    let _ = task_await(srv)
+    ()
+  end
+
+end
