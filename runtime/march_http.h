@@ -15,12 +15,12 @@
 /* ── TCP builtins ──────────────────────────────────────────────────── */
 
 /* Create a listening TCP socket on the given port.
- * Returns the file descriptor (>= 0) on success, or -1 on error. */
-int64_t march_tcp_listen(int64_t port);
+ * Returns Ok(fd) or Err(reason). Ok=tag0, Err=tag1. fd is pre-tagged (n<<1)|1. */
+void *march_tcp_listen(int64_t port);
 
 /* Accept one incoming connection from a listening fd.
- * Blocks until a client connects.  Returns the client fd, or -1 on error. */
-int64_t march_tcp_accept(int64_t listen_fd);
+ * Blocks until a client connects.  Returns Ok(fd) or Err(reason). */
+void *march_tcp_accept(int64_t listen_fd);
 
 /* Read an HTTP request from fd: headers until \r\n\r\n, then Content-Length
  * body bytes (or until close if no Content-Length).  max_bytes caps total.

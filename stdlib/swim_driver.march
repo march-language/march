@@ -213,7 +213,7 @@ mod SwimDriver do
       0 -> Ok(Alive)
       1 -> Ok(Suspect)
       2 -> Ok(Dead)
-      _ -> Err("swim_driver: bad status int " ++ String.of_int(n))
+      _ -> Err("swim_driver: bad status int " ++ String.from_int(n))
     end
   end
 
@@ -273,7 +273,7 @@ mod SwimDriver do
                       end
                   _ -> Err("swim_driver: bad SwimGossip frame")
                 end
-              _ -> Err("swim_driver: unknown tag " ++ String.of_int(tag))
+              _ -> Err("swim_driver: unknown tag " ++ String.from_int(tag))
             end
           _ -> Err("swim_driver: expected Msgpack array")
         end

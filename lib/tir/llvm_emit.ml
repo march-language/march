@@ -126,6 +126,10 @@ type ctx = {
   mutable shape_meta : bool;
   (* Record shape descriptor → (descriptor string global, i32 id-cache global). *)
   rec_shape_globals : (string, string * string) Hashtbl.t;
+  (* Distributed OTP L4: CAS-derived hash maps for remote_ref_hashes constant folding.
+     Maps qualified fn name ("Math.add") → hex hash string. *)
+  remote_impl_hashes : (string, string) Hashtbl.t;
+  remote_sig_hashes  : (string, string) Hashtbl.t;
 }
 
 (** Compilation target. *)
@@ -213,6 +217,8 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   repl;
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
+  remote_impl_hashes = Hashtbl.create 0;
+  remote_sig_hashes  = Hashtbl.create 0;
 }
 
 (* Shared with the inliner; single source of truth in Hot_reload. *)
@@ -491,6 +497,8 @@ let is_builtin_fn name =
                  "vault_ns_set"; "vault_ns_get"; "vault_ns_drop";
                  (* IOList builtins *)
                  "iolist_hash_fnv1a";
+                 (* Distributed OTP L4 remote registry builtins *)
+                 "remote_ref_hashes"; "remote_register_stub"; "remote_count";
                  (* HTTP server builtins *)
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
@@ -700,9 +708,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_kill_proc"           -> Some Tir.TUnit
   | "process_wait_proc"           -> Some Tir.TInt
   (* TCP/network builtins.
-     tcp_listen/tcp_accept return a raw int fd (-1 on error) — march_tcp_listen/
-     accept return int64, not a tagged Result (unlike tcp_connect). *)
-  | "tcp_listen" | "tcp_accept"  -> Some Tir.TInt
+     tcp_listen/tcp_accept return Result(Int,String) — Ok(fd) tagged (n<<1)|1,
+     Err(reason) with tag 1, matching tcp_connect's layout. *)
+  | "tcp_listen" | "tcp_accept"  -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "tcp_close"                   -> Some Tir.TUnit
@@ -833,6 +841,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "sys_os" | "sys_arch" | "march_version" -> Some Tir.TString
   (* UUID / identity builtins *)
   | "uuid_v4" -> Some Tir.TString
+  (* Distributed OTP L4 remote registry builtins *)
+  | "remote_register_stub" -> Some Tir.TInt
+  | "remote_count"         -> Some Tir.TInt
   (* Session-typed channel builtins (binary) *)
   | "chan_new"    -> Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])])
   | "chan_send"   -> Some (Tir.TCon ("Chan", []))
@@ -1116,6 +1127,10 @@ let mangle_extern : string -> string = function
   | "mpst_close"      -> "march_mpst_close"
   (* UUID / identity builtins *)
   | "uuid_v4"          -> "march_uuid_v4"
+  (* Distributed OTP L4 — remote registry; remote_ref_hashes is constant-folded
+     in emit_expr so it never reaches this table. *)
+  | "remote_register_stub" -> "march_remote_register"
+  | "remote_count"         -> "march_remote_count"
   (* Panic/todo/unreachable internal primitives *)
   | "panic_"       -> "march_panic_ext"
   | "todo_"        -> "march_todo_ext"
@@ -2437,6 +2452,41 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, []) when f.Tir.v_name = "pmap_threshold" ->
     ("i64", string_of_int ctx.pmap_threshold)
 
+  (* remote_ref_hashes(module, fn) → constant-fold to (sig_hash, impl_hash) pair.
+     Looks up the CAS-derived hashes baked into the binary at compile time.
+     Returns a heap-allocated (String, String) tuple; both strings are empty
+     when the function name was not found in the hash maps (non-CAS builds).
+     Key lookup strategy: top-level user module functions are stored without
+     the module prefix (fn_name = "fib"), while stdlib/nested module functions
+     are stored with it (fn_name = "String.from_int").  Try both forms. *)
+  | Tir.EApp (f, [mod_atom; fn_atom]) when f.Tir.v_name = "remote_ref_hashes" ->
+    let get_str_lit a = match a with
+      | Tir.ALit (March_ast.Ast.LitString s) -> s
+      | _ -> "" in
+    let mod_name = get_str_lit mod_atom in
+    let fn_name  = get_str_lit fn_atom in
+    let qualified_key = mod_name ^ "." ^ fn_name in
+    let find_h tbl =
+      match Hashtbl.find_opt tbl qualified_key with
+      | Some h -> h
+      | None   -> Option.value ~default:"" (Hashtbl.find_opt tbl fn_name)
+    in
+    let sig_h  = find_h ctx.remote_sig_hashes in
+    let impl_h = find_h ctx.remote_impl_hashes in
+    let emit_str_lit s =
+      let g = intern_string ctx s in
+      let tmp = fresh ctx "rrhsl" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+                  tmp g (String.length s));
+      tmp
+    in
+    let sg_ptr  = emit_str_lit sig_h in
+    let im_ptr  = emit_str_lit impl_h in
+    let tup = emit_heap_alloc ctx 0 2 in
+    emit_store_field ctx tup 0 "ptr" sg_ptr;
+    emit_store_field ctx tup 1 "ptr" im_ptr;
+    ("ptr", tup)
+
   (* task_reductions() → read TLS reduction counter (no-op 0 in REPL mode) *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
     if ctx.repl then ("i64", "0")
@@ -3487,6 +3537,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           ) args;
           ("ptr", ptr))
      | _ ->
+    (* Guard: if the reuse_atom's own type is niche-shaped (e.g. Option.Some),
+       the scrutinee IS the payload — no wrapper object was allocated.
+       FBIP reuse would overwrite the payload's own memory with the new
+       object's tag/fields, corrupting whatever type the payload holds.
+       Additionally, for patterns like [Some(result) -> Ok(result)], the
+       branch variable 'result' and dec_v are the same runtime pointer, so
+       calling march_decrc(dec_v) in the fresh branch would decrement the
+       very value we're about to store as Ok's field (use-after-free).
+       Skip FBIP: allocate fresh without touching reuse_atom's RC. *)
+    let reuse_atom_parent_type = match reuse_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon (name, _) ->
+           (match String.rindex_opt name '.' with
+            | Some i -> String.sub name 0 i
+            | None -> name)
+         | _ -> "")
+      | _ -> ""
+    in
+    if reuse_atom_parent_type <> ""
+       && Repr.is_niche_shaped !cur_type_defs reuse_atom_parent_type
+    then begin
+      let entry = ctor_entry ctx ctor (List.length args) in
+      let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+      List.iteri (fun i atom ->
+        let field_ty = match List.nth_opt entry.ce_fields i with
+          | Some t -> llvm_ty t
+          | None -> failwith (Printf.sprintf
+              "LLVM emit: constructor %s has %d field(s) but field index %d \
+               was requested (arity mismatch)"
+              ctor (List.length entry.ce_fields) i)
+        in
+        let (v_ty, v_val) = emit_atom ctx atom in
+        emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
+      ) args;
+      ("ptr", ptr)
+    end else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)
@@ -3540,7 +3627,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
-    ("ptr", result))
+    ("ptr", result)
+    end)
 
   | Tir.EReuse (reuse_atom, reuse_ty, args) ->
     (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
@@ -4272,10 +4360,16 @@ and emit_case ctx scrut_atom branches default_opt =
         Hashtbl.replace ctx.var_llvm_ty slot field_ty;
         (* Track heap-type fields for conditional IncRC.
            Use the concrete field type (with type-vars resolved) so scalar
-           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd. *)
+           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd.
+           Also guard on field_ty: when the scrutinee's TIR type is TVar "_"
+           (unknown — happens for sub-vars from the pattern-matrix compiler),
+           resolve_ctor_fields falls back to a TVar "_" placeholder, making
+           concrete_field_ty = "ptr" even for primitive fields.  field_ty is
+           always correct (resolved via the concrete ctor_info key) so using
+           both as a conjunction prevents false positives. *)
         let concrete_field_ty = match List.nth_opt concrete_fields i with
           | Some t -> llvm_ty t | None -> field_ty in
-        if concrete_field_ty = "ptr" then
+        if concrete_field_ty = "ptr" && field_ty = "ptr" then
           heap_field_vals := fv :: !heap_field_vals
       ) br.Tir.br_vars
     end;
@@ -5100,6 +5194,10 @@ declare ptr  @march_sys_arch()
 declare ptr  @march_get_version()
 ; UUID / identity builtins
 declare ptr  @march_uuid_v4()
+; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)
+declare void @march_remote_init()
+declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)
+declare i64  @march_remote_count()
 ; Integer math helpers
 declare i64  @march_int_pow(i64 %base, i64 %exp)
 ; LLVM intrinsics
@@ -5152,8 +5250,8 @@ declare void @march_task_cancel_by_id(ptr %task)
          declare void @march_yield_from_compiled()\n";
     Buffer.add_string buf {|
 ; TCP/network builtins
-declare i64  @march_tcp_listen(i64 %port)
-declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_listen(i64 %port)
+declare ptr  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare void @march_tcp_send_all(i64 %fd, ptr %data)
@@ -5318,6 +5416,8 @@ let emit_main_wrapper (buf : Buffer.t) =
 
 let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
@@ -5333,6 +5433,9 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
       |> Hot_reload.Name_table.build
   in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
+  (* Distributed OTP L4: populate CAS hash maps for remote_ref_hashes constant folding. *)
+  Hashtbl.iter (Hashtbl.replace ctx.remote_impl_hashes) remote_impl_hashes;
+  Hashtbl.iter (Hashtbl.replace ctx.remote_sig_hashes)  remote_sig_hashes;
   (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
      dispatch table and publishes each boundary function as its NATIVE baseline
      version. Each boundary fn's per-definition impl_hash (a Merkle root over its
@@ -5686,6 +5789,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
              declare void @march_spawn_main(ptr %%fn)\n\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+               call void @march_remote_init()\n\
              %s\
                call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\

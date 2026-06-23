@@ -1,0 +1,5 @@
+node-b: handshake ok, peer=node-a
+node-a: handshake ok, peer=node-b
+node-b: membership live_peers=1
+node-b: sent PingAck
+node-a: membership live_peers=1

@@ -1554,3 +1554,96 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/ffi_codec2.expected native_ffi_codec2.out)))
+
+; ── L4 remote registry: remote_ref_hashes embeds real CAS hashes (64-char hex) ──
+(rule
+ (targets native_remote_ref_hashes native_remote_ref_hashes.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c)
+       (file native/remote_ref_hashes.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_remote_ref_hashes
+        native/remote_ref_hashes.march)
+   (with-stdout-to native_remote_ref_hashes.out
+        (system "./native_remote_ref_hashes")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/remote_ref_hashes.expected native_remote_ref_hashes.out)))
+
+; ── L4 Node.call loopback: real TCP RPC call round-trip, CAS admission checks ──
+(rule
+ (targets native_node_call_loopback native_node_call_loopback.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c)
+       (file native/node_call_loopback.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_call_loopback
+        native/node_call_loopback.march)
+   (with-stdout-to native_node_call_loopback.out
+        (system "./native_node_call_loopback")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
+
+; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
+; node-a accepts, node-b connects; both run the ClusterConn handshake over
+; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each
+; verify the peer appears as Alive in their Membership view.
+(rule
+ (targets native_node_discovery native_node_discovery.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/node_discovery.march)
+       (file ../stdlib/node_identity.march)
+       (file ../stdlib/cluster_auth.march)
+       (file ../stdlib/handshake.march)
+       (file ../stdlib/peer_registry.march)
+       (file ../stdlib/net_frame.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/cluster_conn.march)
+       (file ../stdlib/membership.march)
+       (file ../stdlib/swim.march)
+       (file ../stdlib/swim_driver.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_node_discovery
+        native/node_discovery.march)
+   (with-stdout-to native_node_discovery.out
+        (system "./native_node_discovery")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/node_discovery.expected native_node_discovery.out)))

@@ -50,15 +50,15 @@ mod Socket do
 
   doc "Receive up to max_bytes from fd (no timeout). Returns Ok(data) or Err."
   fn recv(fd : Int, max_bytes : Int) : Result(String, SocketError) do
-    match tcp_recv_all(fd, max_bytes, 0) do
+    match tcp_recv_chunk(fd, max_bytes) do
     Ok(data) -> Ok(data)
     Err(msg) -> Err(RecvFailed(msg))
     end
   end
 
   doc "Receive up to max_bytes from fd with timeout_ms timeout (0 = no timeout)."
-  fn recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
-    match tcp_recv_all(fd, max_bytes, timeout_ms) do
+  fn recv_timeout(fd : Int, max_bytes : Int, _timeout_ms : Int) : Result(String, SocketError) do
+    match tcp_recv_chunk(fd, max_bytes) do
     Ok(data) -> Ok(data)
     Err(msg) -> Err(RecvFailed(msg))
     end

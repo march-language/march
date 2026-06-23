@@ -1,0 +1,80 @@
+-- Tests for remote_ref_hashes, remote_register_stub, and remote_count builtins.
+-- Eval-path: hashes are deterministic FNV-1a of the qualified name (32-char hex).
+-- Compiled path: hashes are real CAS hashes (64-char hex from the pipeline).
+mod TestRemoteRefHashes do
+
+  describe "remote_ref_hashes" do
+
+    test "returns a non-empty pair for any module/fn name" do
+      let hashes = remote_ref_hashes("Math", "add")
+      let sg = match hashes do (s, _) -> s end
+      let im = match hashes do (_, i) -> i end
+      assert (String.byte_size(sg) > 0)
+      assert (String.byte_size(im) > 0)
+    end
+
+    test "sig_hash and impl_hash are different" do
+      let hashes = remote_ref_hashes("Math", "add")
+      let sg = match hashes do (s, _) -> s end
+      let im = match hashes do (_, i) -> i end
+      assert (sg != im)
+    end
+
+    test "same inputs always produce the same hashes (deterministic)" do
+      let h1 = remote_ref_hashes("NodeRpc", "handle_frame")
+      let h2 = remote_ref_hashes("NodeRpc", "handle_frame")
+      let sg1 = match h1 do (s, _) -> s end
+      let sg2 = match h2 do (s, _) -> s end
+      assert (sg1 == sg2)
+    end
+
+    test "different modules produce different hash pairs" do
+      let h1 = remote_ref_hashes("ModuleA", "fn1")
+      let h2 = remote_ref_hashes("ModuleB", "fn1")
+      let sg1 = match h1 do (s, _) -> s end
+      let sg2 = match h2 do (s, _) -> s end
+      assert (sg1 != sg2)
+    end
+
+    test "different fn names produce different hash pairs" do
+      let h1 = remote_ref_hashes("Math", "add")
+      let h2 = remote_ref_hashes("Math", "sub")
+      let sg1 = match h1 do (s, _) -> s end
+      let sg2 = match h2 do (s, _) -> s end
+      assert (sg1 != sg2)
+    end
+
+    test "hashes can be used to build a RemoteRef" do
+      let hashes = remote_ref_hashes("Math", "add")
+      let sg = match hashes do (s, _) -> s end
+      let im = match hashes do (_, i) -> i end
+      let fref = RemoteCall.remote_ref("Math", "add", sg, im)
+      assert (fref.sig_hash == sg)
+      assert (fref.impl_hash == im)
+      assert (RemoteCall.verify(sg, im, fref) == Accept)
+    end
+
+  end
+
+  describe "remote_register_stub" do
+
+    test "register_stub returns success (0) for any typed function" do
+      let sg = "test-sig"
+      let im = "test-impl"
+      let stub = fn args -> Ok(args)
+      let rc = remote_register_stub(im, sg, stub)
+      assert (rc == 0)
+    end
+
+  end
+
+  describe "remote_count" do
+
+    test "remote_count returns Int (0 in eval)" do
+      let n = remote_count()
+      assert (n >= 0)
+    end
+
+  end
+
+end

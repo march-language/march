@@ -152,7 +152,8 @@ static int istrncmp(const char *a, const char *b, size_t n) {
 
 /* ── TCP builtins ─────────────────────────────────────────────────────── */
 
-int64_t march_tcp_listen(int64_t port) {
+/* Raw helpers used by the internal HTTP server loop (not called from March). */
+static int64_t tcp_listen_raw(int64_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int opt = 1;
@@ -171,12 +172,44 @@ int64_t march_tcp_listen(int64_t port) {
     return (int64_t)fd;
 }
 
-int64_t march_tcp_accept(int64_t listen_fd) {
+static int64_t tcp_accept_raw(int64_t listen_fd) {
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
     int fd = accept((int)listen_fd,
                     (struct sockaddr *)&client_addr, &len);
     return (int64_t)fd;
+}
+
+/* March-callable versions: return Result(Int, String) like tcp_connect.
+ * The Int payload is pre-tagged with (n<<1)|1 per the uniform tagging scheme. */
+void *march_tcp_listen(int64_t port) {
+    int64_t fd = tcp_listen_raw(port);
+    if (fd < 0) {
+        void *s = march_string_lit("tcp_listen: bind failed", 23);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(int64_t *)((char *)ok_obj + 16) = (fd << 1) | 1;
+    return ok_obj;
+}
+
+void *march_tcp_accept(int64_t listen_fd) {
+    int64_t fd = tcp_accept_raw(listen_fd);
+    if (fd < 0) {
+        void *s = march_string_lit("tcp_accept: accept failed", 25);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(int64_t *)((char *)ok_obj + 16) = (fd << 1) | 1;
+    return ok_obj;
 }
 
 /* Per-thread accumulation buffer for march_tcp_recv_http().
@@ -1751,7 +1784,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
 #endif
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
-    int64_t listen_fd = march_tcp_listen(port);
+    int64_t listen_fd = tcp_listen_raw(port);
     if (listen_fd < 0) {
         fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
                 (long long)port, strerror(errno));
@@ -1773,7 +1806,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         }
         if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
 
-        int64_t client_fd = march_tcp_accept(listen_fd);
+        int64_t client_fd = tcp_accept_raw(listen_fd);
         if (client_fd < 0) continue;
 
         /* Enqueue the accepted fd for a pool worker.

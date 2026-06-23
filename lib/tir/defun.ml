@@ -161,7 +161,9 @@ let builtin_names : StringSet.t =
       "chan_new"; "chan_send"; "chan_recv"; "chan_close";
       "chan_choose"; "chan_offer";
       (* Multi-party session type builtins *)
-      "mpst_new"; "mpst_send"; "mpst_recv"; "mpst_close" ]
+      "mpst_new"; "mpst_send"; "mpst_recv"; "mpst_close";
+      (* Distributed OTP L4 — function-by-identity remote registry *)
+      "remote_ref_hashes"; "remote_register_stub"; "remote_count" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

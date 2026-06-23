@@ -1,18 +1,178 @@
 [
   {
+    "hash": "42724c32158151b658746d6469f82768e1b9146a",
+    "short_hash": "42724c3",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T14:29:54-04:00",
+    "message": "feat(codegen): L4 compiler enroll/stub — remote_ref_hashes builtin + CAS hash folding\n\nAdds three builtins for the function-by-identity remote registry:\n\n- remote_ref_hashes(module, fn) : (String, String) — constant-folded at\n  codegen time; the emit_expr handler looks up the CAS-derived Blake3\n  sig_hash/impl_hash (64-char hex) and emits a heap-allocated tuple.\n  Eval path returns FNV-1a 32-char hex (deterministic, non-empty).\n\n- remote_register_stub(impl, sig, stub) : Int — maps to march_remote_register.\n\n- remote_count() : Int — maps to march_remote_count.\n\nmarch_remote_init() is auto-emitted in @main before user code runs.\n\nTwo fixes required:\n1. defun.ml: added all three to builtin_names so defun keeps them as\n   EApp rather than wrapping in ECallPtr (constant-folding arm fires\n   only on EApp).\n2. llvm_emit.ml: top-level user-module functions have no module prefix\n   in TIR fn_name (\"fib\" not \"TestRRH.fib\"); lookup tries both the\n   qualified key (mod.fn) and the bare fn_name.\n\nTests:\n- 8 eval tests in test_stdlib_march (test_remote_ref_hashes.march)\n- 1 compiled native test (test/native/remote_ref_hashes.march) using\n  recursive fib to survive DCE; verifies 64-char Blake3 hashes\n\nSuites: compiler 300, eval 224, codegen 320, stdlib 766 (-q), all green.",
+    "files_changed": 12
+  },
+  {
+    "hash": "acfd55e5f61d6def2a455be241766fc043f9cd07",
+    "short_hash": "acfd55e",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T14:01:48-04:00",
+    "message": "feat(js): fix import ordering and add source maps\n\nES import statements for extern modules (e.g. `import { dirname } from\n\"node:path\"`) previously appeared after const builtin declarations.\nSplit emit_extern_bridges to return (imports_str, consts_str) and\nreorder assembly in emit_module so all ES imports precede any const.\n\nAdd source map v3 generation: collect function → source line from the\nuser AST before TIR lowering (avoiding modifying the many fn_def\nconstruction sites), thread through emit_module as fn_lines, record\n(output_line, src_line) segments during emit_fn_decl_impl, then encode\nvia VLQ base64 into a source map v3 JSON file. The map is written\nalongside the .mjs output and referenced via sourceMappingURL.",
+    "files_changed": 2
+  },
+  {
+    "hash": "28cde4bba6384974717224714e5d19958cc9a8d1",
+    "short_hash": "28cde4b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T13:22:01-04:00",
+    "message": "Merge branch 'main' into claude/nervous-wescoff-9b1ea4",
+    "files_changed": 0
+  },
+  {
+    "hash": "ecf8678eb969f0f96330d6a16714379c5e42e962",
+    "short_hash": "ecf8678",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T13:17:11-04:00",
+    "message": "feat(forge): add --target to watch mode and [js_deps] npm dependency management\n\n- forge watch --target js now rebuilds .mjs on each source change\n- forge watch run --target js rebuilds + re-runs with node\n- [js_deps] in forge.toml declares npm packages; forge build --target js\n  writes package.json and runs npm install automatically\n- docs/tooling.md updated with JS FFI extern + [js_deps] examples",
+    "files_changed": 5
+  },
+  {
+    "hash": "a281d908bf4d8b3a4b52958a1c020322540acd7b",
+    "short_hash": "a281d90",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T13:15:49-04:00",
+    "message": "feat(dist): SWIM runtime driver — step FSM + wire codec + dispatch\n\nSwimDriver wraps the pure Swim state machine with:\n- State: Swim.State + RNG + period timer\n- Event types: PingAck / GossipFrame / PeerDown from the transport layer\n- step(state, now, events): drives probe periods, indirect escalation,\n  suspect expiry, self-refutation, and event folding in one call\n- WireMsg types: SwimPing / SwimPingAck / SwimPingReq / SwimGossip\n  encoded as Msgpack arrays with integer tag dispatch\n- dispatch / dispatch_all: send Actions to peers via PeerRegistry + NetKernel\n- 17 eval tests covering period boundaries, events, escalation, codec",
+    "files_changed": 3
+  },
+  {
+    "hash": "6acd6fb9832faec0bd0abaf7f03881b4514f5a4f",
+    "short_hash": "6acd6fb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T08:44:49-04:00",
+    "message": "feat(js): implement extern blocks for JS FFI via ES module imports\n\nAdds JS extern support to the --target js backend. March modules can\nnow call JavaScript functions from any ES module using the existing\nextern block syntax:\n\n  extern \"node:path\" : Cap(IO.Foreign) do\n    fn dirname(path: String) : String\n    fn js_basename(path: String) : String = \"basename\"\n  end\n\njs_emit.ml changes:\n- Detect JS module specifiers (npm:, https://, ./,  node:, jsr:, ...)\n  vs C library names (\"openssl\", \"dom\", etc.)\n- For JS modules: emit grouped `import { sym, sym2 as march_name }`\n  per lib specifier; sym aliased when march name ≠ JS export name\n- For runtime-backed externs (march_-prefixed C symbols): add to\n  runtime_uses → imported from march_runtime.mjs; emit const alias\n  when march name differs from C symbol (e.g. dom.march functions)\n- Emit $clo wrappers for all used externs so they work first-class\n- Lazy: bridges only emitted for externs actually called/referenced\n  in the emitted code (prevents unused dom.march symbols from polluting\n  non-browser JS builds that auto-load dom.march)\n- Track extern usage in EApp general case and emit_atom (for first-class)\n\ntir.ml / lower.ml: add ed_lib_name (module specifier) and ed_js_sym\n(JS export name: explicit @sym or march name) to extern_decl; filled\nin lower.ml at both DExtern construction sites.\n\nTest: js_extern_import — calls node:path's dirname/basename/extname\nfrom March via extern blocks; verifies both implicit (same name) and\nexplicit (= \"sym\") aliasing.",
+    "files_changed": 6
+  },
+  {
+    "hash": "1caf439a5ee9380c29018f851638f6664d31dbd0",
+    "short_hash": "1caf439",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T16:57:22-04:00",
+    "message": "feat(refine): M-a — quantified measure recursion-equation axioms\n\nAxiomatize @[measure] functions so the solver reasons about measure VALUES\nstructurally, not just symbolically. For a structurally-recursive, total measure\nover a user ADT, refinecheck emits an SMT preamble: a declare-datatypes model of\nthe ADT (element-opaque `Elem` sort for type params), an uninterpreted measure\nfunction, a triggered non-negativity axiom (for non-negative measures), and a\ntriggered recursion-equation axiom per constructor arm. A measure application in\na predicate then reflects to the datatype/function-app encoding (constructor\narguments become (ctor …) terms), so the recursion axioms fire via E-matching.\n\nSoundness gate: a measure is axiomatized ONLY if its body is `match param do\nCtor(vars) -> … end`, the arms cover EVERY constructor (totality), and every\nrecursive call is on a bound pattern variable (structural recursion) and the arm\ntranslates — else it stays symbolic (sound fallback). Solver gets a 3s per-query\ntimeout so a hard quantified query returns `unknown` -> definite-failure skip\n(never a hang, never unsound).\n\nVerified end-to-end (tests + --check): size(Node(Leaf,x,Leaf)) computes to 1 and\nsize(Node(Node(Leaf,x,Leaf),y,Leaf)) to 2, so out-of-bounds tree indices are\ncaught while in-bounds pass. 3 axiom tests (34 total in test_refinecheck); A0\nbridge, existing suites, and stdlib regression all green.\n\nScope (M-a): direct-match single-arg measures over user ADTs; element values\nopaque. Remaining (per spec): general body shapes, measures over built-in List,\nrelational postconditions, performance measurement / flag-gating.",
+    "files_changed": 3
+  },
+  {
+    "hash": "75ec69eaf03699453d76aaa30ebd9060cfc9163c",
+    "short_hash": "75ec69e",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T16:17:04-04:00",
+    "message": "spec: quantified recursion-equation axioms for measures (P1b follow-up)\n\nCareful design for axiomatizing @[measure] recursion equations into SMT so the\nsolver reasons about measures structurally (size(Node(l,x,r))=1+size(l)+size(r))\nrather than just symbolically. Covers: declare-datatypes encoding of ADTs\n(element-opaque sort for polymorphism), measure as an uninterpreted function,\nper-constructor forall-axioms with E-matching triggers, preamble assembly +\ncache key.\n\nCenters the non-negotiable SOUNDNESS GATE: axioms are sound only if the measure\nis total + terminating + pure, else the axiom set is inconsistent and the solver\nproves anything. @[measure] must therefore be a hard error if not structurally\nrecursive / exhaustive / pure (elevating typecheck's existing structural-recursion\ninfo). Recommends a Lean check of the gate. Honest about quantifier\nincompleteness (definite-failure keeps it sound but unpredictable), performance,\nand scope (lists -> general ADTs -> measures-calling-measures -> relational\npostconditions), flag-gated until measured.",
+    "files_changed": 2
+  },
+  {
+    "hash": "cfcb04f8d71b441897a8fbf34fa4e66db2e9e025",
+    "short_hash": "cfcb04f",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T16:11:30-04:00",
+    "message": "feat(refine): measure non-negativity inference (P1b) + richer diagnostics (P1d)\n\nP1b follow-up — non-negativity inference: a @[measure] whose body is\nsyntactically non-negative (literals >= 0, sums/products of non-negatives, calls\nto itself/len/already-non-negative measures across if/match/block return paths)\ngets the sound `m(x) >= 0` axiom, like len. So a count measure can be used\nunguarded — e.g. a `size`-returning function now verifies a `_ >= 0`\npostcondition, and a `_ < 0` postcondition over `size` is caught as a definite\nviolation (single-pass classification in check_module; user measures still get no\naxiom unless provably non-negative).\n\nP1d — diagnostics: counterexamples are now rendered for humans (`m$x` shown as\n`m(x) = v`) on BOTH precondition and postcondition violations (postcondition was\nmissing the model), and each violation carries a `note:` line guiding the fix\n(guard the call / every return path must satisfy it).\n\n2 new tests (31 total). len behavior, stdlib regression, and violation detection\nall green. Remaining P1b: quantified recursion-equation axioms (SMT datatype\nmodeling — the one large follow-up), concrete unfolding of user measures over\nliteral constructors.",
+    "files_changed": 2
+  },
+  {
+    "hash": "1115ac8e3da36ad300a38ff5698da0bd980f8de5",
+    "short_hash": "1115ac8",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T15:41:42-04:00",
+    "message": "feat(refine): P1b — user-defined @[measure] functions\n\nA function annotated `@[measure]` is registered as a measure, so its\napplications can appear in refinement predicates alongside the builtin `len`.\nGeneralizes the hardcoded `len` handling: any measure m(x) reflects to a\nconsistent SMT symbol `m$x`, so a guard about `size(t)` discharges a precondition\nabout `size(t)` via path sensitivity. `len(list-literal)` keeps its concrete\nevaluation; `len` keeps its non-negativity axiom while user measures get no axiom\nin v1 (sound — guarded uses still verify; non-negativity inference is a follow-up).\n\n`@[measure]` is accepted end-to-end (parse + typecheck, it's an ordinary attr).\n3 tests (29 total in test_refinecheck): guarded bounds over a user `size` measure\nverify, a contradicting guard is rejected, an unguarded use is skipped. len\nbehavior unchanged; stdlib regression + violation detection green.\n\nv1 scope: measures reflect symbolically (no quantified recursion-equation axioms,\nno concrete unfolding of user measures over literal constructors) — enough for\nguarded bounds over user-defined structure (size/depth/etc.).",
+    "files_changed": 2
+  },
+  {
+    "hash": "6a6ef2bb46be2746eb38b8c3b695322e08fde25d",
+    "short_hash": "6a6ef2b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T13:52:27-04:00",
+    "message": "spec: refinement subtyping (Path 2) — SPECULATIVE; record Path 1 progress\n\nPath 2 spec, marked speculative throughout (not approved/scheduled): the only\nknown route past the higher-order ceiling is making refinements participate in\nunification as a subtyping relation (emit `assumptions ∧ p ⟹ q` instead of\nrepr-stripping). Documents the hard parts the paper design skipped — no path\ncontext in typecheck (S0), which unify sites are checking boundaries (S2.2), the\nflipped soundness contract (definite-failure → must-prove), generalization/\nlinearity/error-recovery interactions, and performance — plus decision criteria\nand a mandatory Lean-metatheory-first gate. Quarter-scale project, abandonment\nrisk; recommendation remains: ship the separate pass, do Path 1, defer this.\n\ntodos: record Path 1 progress (P1a collision-safe resolution, P1c assert-as-\nassume; P1b measures + P1d diagnostics remaining) and the TRefine carry.",
+    "files_changed": 2
+  },
+  {
+    "hash": "67e9af147d21485d4fa137e625bf8050d499f63a",
+    "short_hash": "67e9af1",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T13:42:01-04:00",
+    "message": "spec: refinement types — state of implementation + forward design\n\nTakes stock of the built reality (A0 SMT bridge, A1/A2 + path sensitivity +\npostconditions in lib/refinecheck, TRefine carried transparently in the type)\nand records the key finding from the type-integration exploration:\n\n  transparent-repr TRefine cannot do higher-order checking — unification strips\n  the refinement, so it only survives on a function's own params at direct call\n  sites (exactly what the separate pass already does, with path sensitivity).\n  True higher-order needs refinement SUBTYPING in unification — a separate,\n  larger project.\n\nDocuments the definite-failure soundness model (report only when a predicate can\nnever hold) that keeps the checker false-positive-free at stdlib scale, and lays\nout the fork: Path 1 (deepen the separate pass — robust call resolution, user\nmeasures, assume/lemmas) vs Path 2 (refinement subtyping, with a Lean soundness\ncheck first). Recommends shipping the separate pass, pursuing Path 1, and NOT\nbuilding the discarded transparent-repr infer_app consumer (2b).\n\nSupersedes the forward-looking portions of 2026-06-20-dependent-types-refinements-design.md.",
+    "files_changed": 1
+  },
+  {
+    "hash": "c28118e6fbdfb5f11326729660d2dfb0ea3d3b3c",
+    "short_hash": "c28118e",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T12:13:19-04:00",
+    "message": "feat(typecheck): TRefine in the internal type (increment 1, plumbing)\n\nAdd `TRefine of ty * string * Ast.expr` to the internal type. It is transparent\nto unification: `repr` strips it to the base, so base-type inference, occurs,\ngeneralize, instantiate, exhaustiveness, and TIR lowering are unchanged.\nsurface_ty now BUILDS TRefine for `{T | p}` annotations (previously erased).\n\nBlast radius was only 8 match sites (not the feared 35) precisely because almost\neverything canonicalises through repr first. The predicate is carried but not yet\nconsumed (generalize/instantiate strip it via repr), so behavior is identical —\nfull suite green. Increment 2 will make generalize/instantiate preserve it and\ninfer_app emit obligations from the type (enabling higher-order/indirect calls).",
+    "files_changed": 2
+  },
+  {
+    "hash": "ee1947dd8fcc58057f7d63ec0fe88b6bf0aa3f50",
+    "short_hash": "ee1947d",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T12:02:29-04:00",
+    "message": "docs(refine): record path sensitivity, postconditions, stdlib hardening",
+    "files_changed": 1
+  },
+  {
+    "hash": "04b6cb243b71e148b9ba9be3aa235adf3ac0584f",
+    "short_hash": "04b6cb2",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T11:48:39-04:00",
+    "message": "feat(refine): path sensitivity — if/when/match guards refine preconditions\n\nrefine_check now threads a path context (conditions known true) through the\nwalk: `if c` adds c to the then-branch and ¬c to the else; match/clause `when`\nguards add the guard. At a call site those conditions become SMT assumptions,\nand variable arguments are reflected as stable constants so a guard about `i`\nconnects to a precondition about `i`.\n\nNow guarded code verifies:\n- `if i >= 0 do take_n(i)` and the else-branch `if i < 0 do _ else take_n(i)`\n- `if i >= 0 && i < len(xs) do at(xs, i)` (full bounds)\nA partial guard (no upper bound) stays conservatively silent; a guard that\ncontradicts the precondition is rejected. The definite-failure discharge keeps\nall of this free of false positives. 5 new tests (16 total in test_refinecheck).",
+    "files_changed": 2
+  },
+  {
+    "hash": "b9232d1cd8b33667f2841310d24bd18558b39041",
+    "short_hash": "b9232d1",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T11:27:17-04:00",
+    "message": "Merge branch 'main' into claude/zealous-wescoff-bc5892",
+    "files_changed": 0
+  },
+  {
+    "hash": "c1213cf1ab155d9a642396e577d11dde924e6494",
+    "short_hash": "c1213cf",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T11:25:29-04:00",
+    "message": "feat(refine): A2 minimal — len measure + bounds checking\n\nExtend lib/refinecheck:\n- `len` measure: len(list-literal) computed statically; len(var) is a symbolic\n  non-negative const (measure axiom len >= 0).\n- Cross-argument predicates: a refined param's predicate may reference sibling\n  params (e.g. `_ < len(xs)`); resolved to the actual arguments at the call.\n- Sound discharge: report a violation ONLY when the precondition can never hold\n  (definite-failure check discharge(not goal) Verified), so unknown/symbolic\n  lengths are skipped — no false positives.\n\nPressure tests (6, in test/test_refinecheck.ml): at([10,20,30], i) rejects 5/3/-1\n(out-of-bounds, off-by-one, negative), passes 1/0, and skips an unknown-length arg.\nA1b behavior unchanged (5 tests still green).",
+    "files_changed": 3
+  },
+  {
+    "hash": "ea3420b3cb860c73943f45e36d9a6622596cc66c",
+    "short_hash": "ea3420b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T11:10:51-04:00",
+    "message": "Merge branch 'main' into claude/zealous-wescoff-bc5892",
+    "files_changed": 0
+  },
+  {
+    "hash": "33a3b2330b11f93750d7cb1faf341cafbb36b515",
+    "short_hash": "33a3b23",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T11:03:32-04:00",
+    "message": "feat(refine): A1b stdlib annotations + integration tests; pressure test\n\n- Annotate two genuine stdlib preconditions: List.chunks size {Int | _ > 0}\n  (size<=0 never terminates) and Decimal.div precision {Int | _ >= 0}\n  (negative precision feeds scale_up with a negative exponent).\n- test/test_refinecheck.ml: 5 gated integration tests (reject/pass/skip/propagate).\n- Remove debug tracing from refine_check.\n- Pressure-test finding recorded in todos: most stdlib Int params defensively\n  clamp negatives, so few have true preconditions; naive _>=0 would over-reject.\n\nExisting literal calls (Decimal.div(_,_,2), List.chunks(_,2)) satisfy the\nrefinements; full alcotest suite green.",
+    "files_changed": 5
+  },
+  {
+    "hash": "c70d03833b47a0fd3b30321f0e6b180730e02f51",
+    "short_hash": "c70d038",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T10:16:55-04:00",
+    "message": "docs(refine): record A1a (refinement syntax + erasure) in specs\n\nA1a complete: parse + erase. Next is A1b (VC emission through the A0 bridge).",
+    "files_changed": 2
+  },
+  {
+    "hash": "da975245765d9314e62d397821d38dc33e5d721d",
+    "short_hash": "da97524",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-21T08:32:07-04:00",
+    "message": "Merge branch 'main' into claude/zealous-wescoff-bc5892",
+    "files_changed": 0
+  },
+  {
     "hash": "e207102d05f6d1ed2ad1aab1f2eb6f1499ecec95",
     "short_hash": "e207102",
     "author": "Matthew Gilliam",
     "date": "2026-06-20T23:43:24-04:00",
     "message": "docs(refine): record Phase A0 (standalone Z3 bridge) in specs",
-    "files_changed": 2
-  },
-  {
-    "hash": "d202ca0339abce68434229ebf900150554c34e91",
-    "short_hash": "d202ca0",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-20T23:30:48-04:00",
-    "message": "feat(refine): discharge orchestration (cache->solver->outcome)",
     "files_changed": 2
   },
   {
@@ -2344,16 +2504,16 @@
     "files_changed": 1
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -2432,16 +2592,16 @@
     "files_changed": 15
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

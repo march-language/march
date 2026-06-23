@@ -1,0 +1,130 @@
+-- Two-node discovery test (P2, L1-L3).
+--
+-- Exercises the full authenticated peer-connection + SWIM discovery stack
+-- in a single process over real TCP loopback:
+--
+--   1. node-a binds the listen socket, node-b connects.
+--   2. Both run ClusterConn.handshake over the live socket and confirm
+--      they see each other in their PeerRegistry.
+--   3. node-a sends a SwimPing; node-b replies with SwimPingAck.
+--   4. Both sides feed the event into their SwimDriver and confirm the
+--      Membership view shows the peer as Alive.
+--
+-- All I/O is real TCP. The green-thread scheduler interleaves the acceptor
+-- and connector tasks naturally (connect blocks until accept is ready).
+mod NodeDiscovery do
+  needs IO.NetListen
+  needs IO.Spawn
+
+  pfn secret() do "test-cluster-secret" end
+
+  pfn node_a_id() do NodeIdentity.make("node-a", "pk-a", 1) end
+  pfn node_b_id() do NodeIdentity.make("node-b", "pk-b", 1) end
+
+  -- Make a single-member SWIM state for [me] that starts with no peers.
+  pfn swim_init(me : String) do
+    let cfg = Swim.config(1000, 5000, 3)
+    Swim.make(me, 1, Membership.empty(), cfg)
+  end
+
+  -- ── node-a: acceptor + ping initiator ────────────────────────────────────
+
+  pfn run_node_a(listen_fd : Int) do
+    let my_id = node_a_id()
+    let reg = PeerRegistry.empty()
+    match ClusterConn.accept_one(reg, listen_fd, my_id, secret()) do
+      Err(e) -> panic("node-a accept: " ++ e)
+      Ok(ok_pair) ->
+        let peer = match ok_pair do (_, p) -> p end
+        tcp_close(listen_fd)
+        println("node-a: handshake ok, peer=" ++ peer.identity.name)
+
+        -- Send a SWIM Ping so node-b adds us to its Membership.
+        let ping = SwimDriver.encode_msg(SwimDriver.SwimPing(my_id.node_id))
+        let _ = NetKernel.send_frame(peer.fd, ping)
+
+        -- Receive the PingAck.
+        match NetKernel.recv_frame(peer.fd, Nil) do
+          Err(e) -> panic("node-a recv: " ++ e)
+          Ok(frame_pair) ->
+            let frame = match frame_pair do (f, _) -> f end
+            match SwimDriver.decode_msg(frame) do
+              Ok(SwimDriver.SwimPingAck(sender_id)) ->
+                -- Update our Membership to mark node-b Alive.
+                let swim = swim_init(my_id.node_id)
+                let alive = Membership.alive(sender_id, 1)
+                let swim2 = Swim.on_gossip(swim, alive)
+                let live = Membership.alive_members(swim2.members)
+                let count = List.length(live)
+                println("node-a: membership live_peers=" ++ String.from_int(count))
+              _ ->
+                println("node-a: unexpected wire message")
+            end
+        end
+
+        tcp_close(peer.fd)
+    end
+  end
+
+  -- ── node-b: connector + ping responder ───────────────────────────────────
+
+  pfn run_node_b(port : Int) do
+    let my_id = node_b_id()
+    let reg = PeerRegistry.empty()
+    match ClusterConn.connect_to_peer(reg, "127.0.0.1", port, my_id, secret()) do
+      Err(e) -> panic("node-b connect: " ++ e)
+      Ok(ok_pair) ->
+        let peer = match ok_pair do (_, p) -> p end
+        println("node-b: handshake ok, peer=" ++ peer.identity.name)
+
+        -- Receive a SWIM Ping from node-a.
+        match NetKernel.recv_frame(peer.fd, Nil) do
+          Err(e) -> panic("node-b recv: " ++ e)
+          Ok(frame_pair) ->
+            let frame = match frame_pair do (f, _) -> f end
+            match SwimDriver.decode_msg(frame) do
+              Ok(SwimDriver.SwimPing(sender_id)) ->
+                -- Update Membership: sender is Alive.
+                let swim = swim_init(my_id.node_id)
+                let alive = Membership.alive(sender_id, 1)
+                let swim2 = Swim.on_gossip(swim, alive)
+                let live = Membership.alive_members(swim2.members)
+                let count = List.length(live)
+                println("node-b: membership live_peers=" ++ String.from_int(count))
+
+                -- Send PingAck.
+                let ack = SwimDriver.encode_msg(SwimDriver.SwimPingAck(my_id.node_id))
+                let _ = NetKernel.send_frame(peer.fd, ack)
+                println("node-b: sent PingAck")
+              _ ->
+                println("node-b: unexpected wire message")
+            end
+        end
+
+        tcp_close(peer.fd)
+    end
+  end
+
+  -- ── main ─────────────────────────────────────────────────────────────────
+
+  fn main() do
+    let port = 29760
+
+    -- Bind the listen socket in the main task so it is ready before we spawn.
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+
+    -- node-a runs as an acceptor task (blocks in tcp_accept).
+    let srv = task_spawn(fn _ -> run_node_a(listen_fd))
+
+    -- node-b runs in the main task: connect blocks until node-a accepts.
+    run_node_b(port)
+
+    -- Wait for node-a to finish.
+    let _ = task_await(srv)
+    ()
+  end
+
+end
