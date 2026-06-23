@@ -152,32 +152,17 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
        @ label_blocks)
   end
 
+let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
+  let pos     = Lexing.lexeme_start_p lexbuf in
+  let line    = pos.Lexing.pos_lnum in
+  let col     = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
+  let tok     = Lexing.lexeme lexbuf in
+  let tok_len = max 1 (String.length tok) in
+  let span    = { March_ast.Ast.file = filename;
+                  start_line = line; start_col = col;
+                  end_line = line; end_col = col + tok_len } in
+  let notes   = match hint with None -> [] | Some h -> [h] in
+  { severity = Error; span; message = msg; labels = []; notes; code = None }
+
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
-  let pos  = Lexing.lexeme_start_p lexbuf in
-  let line = pos.Lexing.pos_lnum in
-  let col  = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
-  let tok  = Lexing.lexeme lexbuf in
-  (* Extract the source line being reported *)
-  let src_line =
-    let lines = String.split_on_char '\n' src in
-    (try List.nth lines (line - 1) with _ -> "")
-  in
-  (* Underline the offending token (at least one ^ wide) *)
-  let tok_len   = max 1 (String.length tok) in
-  let underline = String.make col ' ' ^ String.make tok_len '^' in
-  (* Header bar *)
-  let loc_str = if filename = "" then "" else " " ^ filename in
-  let dashes  = String.make (max 2 (48 - String.length loc_str)) '-' in
-  let header  = "-- PARSE ERROR " ^ dashes ^ loc_str in
-  (* Gutter  "N | " *)
-  let gutter = Printf.sprintf "%d | " line in
-  let pad    = String.make (String.length gutter) ' ' in
-  (* Optional hint block — each line gets 4-space indent *)
-  let hint_block = match hint with
-    | Some h ->
-      let lines = String.split_on_char '\n' h in
-      "\n" ^ String.concat "\n" (List.map (fun l -> "    " ^ l) lines)
-    | None -> ""
-  in
-  String.concat "\n"
-    [ header; ""; msg; ""; gutter ^ src_line; pad ^ underline; hint_block ]
+  render_diagnostic ~src ~filename (parse_error_diagnostic ~filename ?hint ~msg lexbuf)

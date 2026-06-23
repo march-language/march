@@ -976,7 +976,7 @@ expr:
   | IF; _c = expr; THEN; _t = expr; error
     { error_raise
         "March `if` expressions always need an `else` branch:"
-        (Some "if cond then\n    expr1\nelse\n    expr2")
+        (Some "Note: March uses do/end blocks, not then. Try:\n\nif cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($5) }
   | IF; _c = expr; error
     { error_raise
