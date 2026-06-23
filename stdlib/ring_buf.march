@@ -1,74 +1,193 @@
 -- RingBuf: mutable fixed-capacity circular buffer.
 --
 -- All operations are O(1) and allocation-free after make().
--- Shared-reference semantics: all aliases to a RingBuf see the same mutations.
 --
--- Ownership contract: a RingBuf must be owned by a single actor. The typechecker
--- rejects RingBuf values in send() payloads. Pass the buffer as initial actor
--- state at spawn time; do not share it across actor boundaries.
+-- Complexity:
+--   make             O(n) — allocates backing array of [cap] slots
+--   push             O(1) — writes newest; overwrites oldest when full
+--   pop              O(1) — removes and returns oldest (FIFO)
+--   get / peek_*     O(1) — indexed and endpoint access
+--   size / cap       O(1)
+--   clear            O(1) — resets cursors; does not zero the array
+--   to_list          O(n)
 --
 -- Index convention: 0 = oldest element (natural FIFO drain order).
--- push() always writes the newest element. When the buffer is full, push
--- silently overwrites the oldest element.
+-- When the buffer is full, push overwrites the oldest element silently.
+--
+-- Ownership contract: RingBuf is a single-owner primitive. The typechecker
+-- rejects RingBuf values in send() payloads. Pass the buffer as initial
+-- actor state at spawn time; do not share it across actor boundaries.
+--
+-- Shared-reference semantics: within one actor, all aliases to a RingBuf
+-- see the same mutations. push/pop/clear mutate in place and return Unit.
 
 mod RingBuf do
 
-  doc "Create a new ring buffer with fixed [cap] capacity. Panics if cap <= 0."
+  doc """
+  Create a new ring buffer with fixed [cap] capacity.
+  Panics if [cap] <= 0.
+
+  ## Examples
+
+      march> RingBuf.make(4)
+      RingBuf(size=0, cap=4)
+      march> RingBuf.cap(RingBuf.make(16))
+      16
+  """
   fn make(cap : Int) : RingBuf(a) do
     ring_buf_make(cap)
   end
 
-  doc "Push [x] as the newest element. If the buffer is full, the oldest element is silently overwritten."
+  doc """
+  Push [x] as the newest element. O(1), in-place, returns Unit.
+
+  When the buffer is already full (size == cap), the oldest element is
+  silently overwritten and size remains at cap.
+
+  ## Examples
+
+      march> RingBuf.is_empty(RingBuf.make(4))
+      true
+  """
   fn push(rb : RingBuf(a), x : a) : Unit do
     ring_buf_push(rb, x)
   end
 
-  doc "Remove and return the oldest element (FIFO), or None if empty."
+  doc """
+  Remove and return the oldest element (FIFO head), or None if empty. O(1).
+
+  Clears the vacated slot so the GC can collect the element's storage.
+
+  ## Examples
+
+      march> RingBuf.pop(RingBuf.make(4))
+      None
+  """
   fn pop(rb : RingBuf(a)) : Option(a) do
     ring_buf_pop(rb)
   end
 
-  doc "Return the element at logical index [i] (0 = oldest), or None if out of range."
+  doc """
+  Return the element at logical index [i] (0 = oldest), or None if out of range. O(1).
+
+  Valid indices are 0 .. size(rb)-1. Negative indices or indices >= size
+  return None.
+
+  ## Examples
+
+      march> RingBuf.get(RingBuf.make(4), 0)
+      None
+      march> RingBuf.get(RingBuf.make(4), -1)
+      None
+  """
   fn get(rb : RingBuf(a), i : Int) : Option(a) do
     ring_buf_get(rb, i)
   end
 
-  doc "Return the oldest element without removing it, or None if empty."
+  doc """
+  Return the oldest element without removing it, or None if empty. O(1).
+
+  Equivalent to get(rb, 0).
+
+  ## Examples
+
+      march> RingBuf.peek_oldest(RingBuf.make(4))
+      None
+  """
   fn peek_oldest(rb : RingBuf(a)) : Option(a) do
     ring_buf_peek_oldest(rb)
   end
 
-  doc "Return the newest element without removing it, or None if empty."
+  doc """
+  Return the newest element without removing it, or None if empty. O(1).
+
+  Equivalent to get(rb, size(rb) - 1).
+
+  ## Examples
+
+      march> RingBuf.peek_newest(RingBuf.make(4))
+      None
+  """
   fn peek_newest(rb : RingBuf(a)) : Option(a) do
     ring_buf_peek_newest(rb)
   end
 
-  doc "Current number of elements in the buffer."
+  doc """
+  Current number of elements. O(1).
+
+  Starts at 0 and grows with each push up to cap. Once full, subsequent
+  pushes overwrite the oldest element and size stays at cap.
+
+  ## Examples
+
+      march> RingBuf.size(RingBuf.make(8))
+      0
+  """
   fn size(rb : RingBuf(a)) : Int do
     ring_buf_size(rb)
   end
 
-  doc "Fixed capacity of the buffer."
+  doc """
+  Fixed capacity of the buffer. O(1). Set once at make() and never changes.
+
+  ## Examples
+
+      march> RingBuf.cap(RingBuf.make(8))
+      8
+  """
   fn cap(rb : RingBuf(a)) : Int do
     ring_buf_cap(rb)
   end
 
-  doc "True when the buffer contains no elements."
+  doc """
+  True when the buffer contains no elements.
+
+  ## Examples
+
+      march> RingBuf.is_empty(RingBuf.make(4))
+      true
+  """
   fn is_empty(rb : RingBuf(a)) : Bool do
     ring_buf_size(rb) == 0
   end
 
-  doc "True when size equals cap (next push overwrites the oldest element)."
+  doc """
+  True when size equals cap. The next push will overwrite the oldest element.
+
+  ## Examples
+
+      march> RingBuf.is_full(RingBuf.make(4))
+      false
+  """
   fn is_full(rb : RingBuf(a)) : Bool do
     ring_buf_size(rb) == ring_buf_cap(rb)
   end
 
-  doc "Reset to empty in O(1). Does not zero the backing array."
+  doc """
+  Reset to empty in O(1). Does not zero the backing array — elements
+  previously written remain in memory until overwritten by future pushes.
+  Cap is unchanged.
+
+  ## Examples
+
+      march> RingBuf.to_list(RingBuf.make(4))
+      []
+  """
   fn clear(rb : RingBuf(a)) : Unit do
     ring_buf_clear(rb)
   end
 
-  doc "Snapshot of all elements from oldest to newest. O(n)."
+  doc """
+  Snapshot of all elements from oldest to newest as a List. O(n).
+
+  Does not modify the buffer. The returned list is a copy — mutations to
+  the buffer after this call do not affect the list.
+
+  ## Examples
+
+      march> RingBuf.to_list(RingBuf.make(4))
+      []
+  """
   fn to_list(rb : RingBuf(a)) : List(a) do
     ring_buf_to_list(rb)
   end
