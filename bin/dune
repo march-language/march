@@ -9,7 +9,3 @@
  (deps main.exe (source_tree ../stdlib) (source_tree ../runtime))
  (action (no-infer (system "./main.exe warm-cache"))))
 
-(rule
- (alias all)
- (deps (alias warm-cache))
- (action (progn)))
