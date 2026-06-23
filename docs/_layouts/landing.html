@@ -52,7 +52,8 @@
       --syn-id: oklch(18% 0.04 215);
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; }
+    html { overflow-x: hidden; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; overflow-x: hidden; }
     @keyframes fadeUp { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
 
     /* NAV */
@@ -353,11 +354,11 @@
 
     /* RESPONSIVE */
     @media (max-width: 900px) {
-      .m-hero-inner { grid-template-columns: 1fr; gap: 36px; }
+      .m-hero-inner { grid-template-columns: minmax(0, 1fr); gap: 36px; }
       .m-hero-h1 { font-size: 40px; }
     }
     @media (max-width: 768px) {
-      .m-feature-grid { grid-template-columns: 1fr; }
+      .m-feature-grid { grid-template-columns: minmax(0, 1fr); }
       .m-section-h2 { font-size: 32px; }
       .m-hero { padding: 80px 20px 60px; }
       .m-features, .m-playground, .m-install { padding-left: 20px; padding-right: 20px; }
