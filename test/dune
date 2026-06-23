@@ -1647,3 +1647,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/node_discovery.expected native_node_discovery.out)))
+
+; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
+; Demonstrates that the compiler populates the C remote registry at @main, so
+; NodeCall.serve_one(NodeRpc.empty(), fd) works without manual NodeRpc.enroll.
+; Port 29851.
+(rule
+ (targets native_rpc_auto_enroll native_rpc_auto_enroll.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c)
+       (file native/rpc_auto_enroll.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_rpc_auto_enroll
+        native/rpc_auto_enroll.march)
+   (with-stdout-to native_rpc_auto_enroll.out
+        (system "./native_rpc_auto_enroll")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/rpc_auto_enroll.expected native_rpc_auto_enroll.out)))

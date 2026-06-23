@@ -42,11 +42,30 @@ mod NodeRpc do
   -- Run an inbound request against the local target table and produce the reply
   -- to frame back. No target -> NoTarget; CAS mismatch -> TypeMismatch/VersionSkew;
   -- a crash inside the target body -> RemoteExit.
+  --
+  -- When the injected Targets table has no entry, falls back to the C-level remote
+  -- registry populated by compiler-emitted march_remote_register calls at @main.
+  -- This makes NodeCall.serve_one(NodeRpc.empty(), fd) work automatically for any
+  -- module that defines __rpc_stub functions.
   fn handle_request(t : Targets, req : CallRequest) : CallReply do
     match t do
       Targets(m) ->
         match Map.get(m, target_key(req.fref.module_name, req.fref.fn_name), Map.str_cmp) do
-          None -> RemoteCall.err_reply(req.correlation, NoTarget)
+          None ->
+            -- Not in the injected table; try the C registry (compiler-emitted stubs).
+            match remote_check(req.fref.impl_hash, req.fref.sig_hash) do
+              0 -> RemoteCall.err_reply(req.correlation, NoTarget)
+              2 -> RemoteCall.err_reply(req.correlation, TypeMismatch)
+              _ ->
+                match remote_invoke(req.fref.impl_hash, req.args) do
+                  None -> RemoteCall.err_reply(req.correlation, NoTarget)
+                  Some(invoke_result) ->
+                    match invoke_result do
+                      Ok(payload) -> RemoteCall.ok_reply(req.correlation, payload)
+                      Err(reason) -> RemoteCall.err_reply(req.correlation, RemoteExit(reason))
+                    end
+                end
+            end
           Some(target) ->
             match RemoteCall.verify(target.sig_hash, target.impl_hash, req.fref) do
               Reject(e) -> RemoteCall.err_reply(req.correlation, e)

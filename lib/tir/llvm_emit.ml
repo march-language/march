@@ -499,6 +499,7 @@ let is_builtin_fn name =
                  "iolist_hash_fnv1a";
                  (* Distributed OTP L4 remote registry builtins *)
                  "remote_ref_hashes"; "remote_register_stub"; "remote_count";
+                 "remote_invoke"; "remote_check";
                  (* HTTP server builtins *)
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
@@ -844,6 +845,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* Distributed OTP L4 remote registry builtins *)
   | "remote_register_stub" -> Some Tir.TInt
   | "remote_count"         -> Some Tir.TInt
+  | "remote_check"         -> Some Tir.TInt
+  | "remote_invoke"        -> Some (Tir.TCon ("Option", [Tir.TCon ("Result",
+                                [Tir.TCon ("List", [Tir.TInt]); Tir.TString])]))
   (* Session-typed channel builtins (binary) *)
   | "chan_new"    -> Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])])
   | "chan_send"   -> Some (Tir.TCon ("Chan", []))
@@ -1131,6 +1135,8 @@ let mangle_extern : string -> string = function
      in emit_expr so it never reaches this table. *)
   | "remote_register_stub" -> "march_remote_register"
   | "remote_count"         -> "march_remote_count"
+  | "remote_check"         -> "march_remote_check_march"
+  | "remote_invoke"        -> "march_remote_invoke_march"
   (* Panic/todo/unreachable internal primitives *)
   | "panic_"       -> "march_panic_ext"
   | "todo_"        -> "march_todo_ext"
@@ -5198,6 +5204,8 @@ declare ptr  @march_uuid_v4()
 declare void @march_remote_init()
 declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)
 declare i64  @march_remote_count()
+declare i64  @march_remote_check_march(ptr %impl_hash, ptr %sig_hash)
+declare ptr  @march_remote_invoke_march(ptr %impl_hash, ptr %args)
 ; Integer math helpers
 declare i64  @march_int_pow(i64 %base, i64 %exp)
 ; LLVM intrinsics
@@ -5568,6 +5576,43 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 
+  (* Distributed OTP L4 — Compiler-emitted enroll/stub.
+     Scan for functions whose name ends in "__rpc_stub".  For each one, emit
+     string constants for the base function's impl_hash / sig_hash (if known
+     from the CAS pipeline) and collect a march_remote_register call that goes
+     inside @main, between march_remote_init() and march_spawn_main(). *)
+  let stub_suffix = "__rpc_stub" in
+  let stub_suffix_len = String.length stub_suffix in
+  let stub_setup =
+    let b = Buffer.create 256 in
+    List.iteri (fun i (fn : Tir.fn_def) ->
+      let name = fn.Tir.fn_name in
+      let nlen = String.length name in
+      if nlen > stub_suffix_len &&
+         String.sub name (nlen - stub_suffix_len) stub_suffix_len = stub_suffix
+      then begin
+        let base = String.sub name 0 (nlen - stub_suffix_len) in
+        match Hashtbl.find_opt ctx.remote_impl_hashes base,
+              Hashtbl.find_opt ctx.remote_sig_hashes base with
+        | Some impl_h, Some sig_h when String.length impl_h > 0 ->
+          let mangled_stub = llvm_name (mangle_extern name) in
+          let impl_esc = llvm_escape_string impl_h in
+          let sig_esc  = llvm_escape_string sig_h in
+          Printf.bprintf out
+            "@.rpc_impl_%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+            i (String.length impl_h + 1) impl_esc;
+          Printf.bprintf out
+            "@.rpc_sig_%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+            i (String.length sig_h + 1) sig_esc;
+          Printf.bprintf b
+            "  call i32 @march_remote_register(ptr @.rpc_impl_%d, ptr @.rpc_sig_%d, ptr @%s)\n"
+            i i mangled_stub
+        | _ -> ()
+      end
+    ) m.Tir.tm_fns;
+    Buffer.contents b
+  in
+
   (* Find a main function: either top-level "main" or "ModName.main".
      Use fold_left (last match wins) so that when multiple modules define
      fn main(), the entry file's module takes precedence.  The entry file's
@@ -5790,10 +5835,10 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_remote_init()\n\
-             %s\
+             %s%s\
                call void @march_spawn_main(ptr @%s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" hr_setup mangled)
+               ret i32 0\n}\n" hr_setup stub_setup mangled)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

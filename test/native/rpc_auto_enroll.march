@@ -1,0 +1,84 @@
+-- Compiler-emitted enroll/stub integration test (L4).
+--
+-- Demonstrates that the compiler auto-registers __rpc_stub functions at @main
+-- via march_remote_register, so NodeCall.serve_one(NodeRpc.empty(), fd) works
+-- without any manual NodeRpc.enroll calls.
+--
+-- The server serves one RPC request using NodeRpc.empty() — the C registry
+-- handles the dispatch via the compiler-registered add__rpc_stub entry.
+-- Port 29851.
+mod RpcAutoEnroll do
+  needs IO.NetListen
+  needs IO.Spawn
+
+  -- The exported function (the "real" target).
+  fn add(a : Int, b : Int) : Int do a + b end
+
+  -- Marshalling stub: decode [a, b], call add, return encoded result.
+  -- The compiler sees "__rpc_stub" suffix and auto-registers this function
+  -- in @main via march_remote_register(impl_hash_of_add, sig_hash_of_add, &add__rpc_stub).
+  pfn add__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(a), Cons(Msgpack.Int(b), Nil))) ->
+            Ok(Msgpack.encode(Msgpack.int(add(a, b))))
+          _ -> Err("add: bad args")
+        end
+    end
+  end
+
+  -- Server: NodeRpc.empty() — no manual enrollment; C registry handles it.
+  pfn run_server(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        let _ = NodeCall.serve_one(NodeRpc.empty(), conn_fd)
+        tcp_close(conn_fd)
+        tcp_close(listen_fd)
+      Err(e) ->
+        tcp_close(listen_fd)
+        panic("accept: " ++ e)
+    end
+  end
+
+  fn main() do
+    let port = 29851
+
+    let listen_fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+
+    let srv = task_spawn(fn _ -> run_server(listen_fd))
+
+    let conn_fd = match Socket.connect("127.0.0.1", port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+
+    -- Use the CAS-derived hashes; the server checks these against the registry.
+    let (sig_h, impl_h) = remote_ref_hashes("RpcAutoEnroll", "add")
+    let fref = RemoteCall.remote_ref("RpcAutoEnroll", "add", sig_h, impl_h)
+    let args = Msgpack.encode(
+      Msgpack.array(Cons(Msgpack.int(10), Cons(Msgpack.int(5), Nil))))
+    let my_pid = GlobalPid.make("n1", 0, 0)
+    let r = NodeCall.call(conn_fd, fref, args, my_pid, 9999999, 1, 0)
+
+    match r do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Int(n)) -> println("result:" ++ String.from_int(n))
+          _ -> println("fail:bad_payload")
+        end
+      Err(e) ->
+        let _ = e
+        println("fail:call_error")
+    end
+
+    tcp_close(conn_fd)
+    let _ = task_await(srv)
+    ()
+  end
+
+end

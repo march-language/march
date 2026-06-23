@@ -1178,6 +1178,22 @@ let compile filename =
         { tir with March_tir.Tir.tm_exports = exports }
       end else tir
     in
+    (* Pin __rpc_stub functions so the DCE pass keeps them (and their callees)
+       alive.  Without this, private stubs never called from March code are
+       dropped before the CAS hash and LLVM emit steps can see them. *)
+    let tir =
+      let stub_suffix = "__rpc_stub" in
+      let slen = String.length stub_suffix in
+      let stubs = List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+        let n = fn.March_tir.Tir.fn_name in
+        let nl = String.length n in
+        if nl > slen && String.sub n (nl - slen) slen = stub_suffix
+        then Some n else None
+      ) tir.March_tir.Tir.tm_fns in
+      if stubs = [] then tir
+      else { tir with March_tir.Tir.tm_exports =
+               tir.March_tir.Tir.tm_exports @ stubs }
+    in
     let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
     snap_tir "tir-fusion" tir;
     stamp "fusion";
@@ -1240,6 +1256,9 @@ let compile filename =
        When dump_phases is on, each individual opt pass is captured separately
        (tir-opt-1-inline, tir-opt-1-cprop, …) so the viewer shows every step.
        When opt is disabled, fall through to a single tir-opt snapshot. *)
+    (* Save pre-opt TIR so we can hash __rpc_stub base functions that the
+       inliner may eliminate before the CAS hash step below. *)
+    let pre_opt_tir = tir in
     let tir =
       if !opt_enabled then
         March_tir.Opt.run
@@ -1373,6 +1392,29 @@ let compile filename =
           | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
           | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
           h_sccs;
+        (* For __rpc_stub base functions inlined by opt (no post-opt entry),
+           fall back to pre-opt hashes so stub_setup can emit register calls. *)
+        let () =
+          let stub_suffix = "__rpc_stub" in
+          let slen = String.length stub_suffix in
+          let pre_fns = pre_opt_tir.March_tir.Tir.tm_fns in
+          let pre_fn_tbl = Hashtbl.create 16 in
+          List.iter (fun fd -> Hashtbl.replace pre_fn_tbl fd.March_tir.Tir.fn_name fd) pre_fns;
+          List.iter (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            let nl = String.length n in
+            if nl > slen && String.sub n (nl - slen) slen = stub_suffix then begin
+              let base = String.sub n 0 (nl - slen) in
+              if not (Hashtbl.mem hr_impl_hashes base) then
+                match Hashtbl.find_opt pre_fn_tbl base with
+                | Some base_fn ->
+                  let h = March_cas.Hash.hash_fn_def base_fn in
+                  Hashtbl.replace hr_impl_hashes base h.March_cas.Hash.impl_hash;
+                  Hashtbl.replace remote_sig_hashes base h.March_cas.Hash.sig_hash
+                | None -> ()
+            end
+          ) pre_fns
+        in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
@@ -1608,6 +1650,27 @@ let compile filename =
            | March_cas.Pipeline.HSingle { hs_hdef } -> add_hdef hs_hdef
            | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add_hdef hg_hdefs)
            (March_cas.Pipeline.hash_module tir));
+        let () =
+          let stub_suffix = "__rpc_stub" in
+          let slen = String.length stub_suffix in
+          let pre_fns = pre_opt_tir.March_tir.Tir.tm_fns in
+          let pre_fn_tbl = Hashtbl.create 16 in
+          List.iter (fun fd -> Hashtbl.replace pre_fn_tbl fd.March_tir.Tir.fn_name fd) pre_fns;
+          List.iter (fun (fn : March_tir.Tir.fn_def) ->
+            let n = fn.March_tir.Tir.fn_name in
+            let nl = String.length n in
+            if nl > slen && String.sub n (nl - slen) slen = stub_suffix then begin
+              let base = String.sub n 0 (nl - slen) in
+              if not (Hashtbl.mem hr_impl_hashes base) then
+                match Hashtbl.find_opt pre_fn_tbl base with
+                | Some base_fn ->
+                  let h = March_cas.Hash.hash_fn_def base_fn in
+                  Hashtbl.replace hr_impl_hashes base h.March_cas.Hash.impl_hash;
+                  Hashtbl.replace remote_sig_hashes2 base h.March_cas.Hash.sig_hash
+                | None -> ()
+            end
+          ) pre_fns
+        in
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:hr_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 tir in
         let oc = open_out ll_file in
         output_string oc ir;

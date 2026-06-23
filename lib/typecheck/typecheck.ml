@@ -1765,6 +1765,12 @@ let builtin_bindings : (string * scheme) list =
     ("remote_ref_hashes",    Mono (TArrow (t_string, TArrow (t_string, TTuple [t_string; t_string]))));
     ("remote_register_stub", poly1 (fun a -> TArrow (t_string, TArrow (t_string, TArrow (a, t_int)))));
     ("remote_count",         Mono t_int);
+    (* Compiler-emitted enroll/stub dispatch builtins (L4).
+       remote_check(impl_hash, sig_hash): 0=not enrolled, 1=sig match, 2=TypeMismatch.
+       remote_invoke(impl_hash, args): calls the enrolled stub or None if not found. *)
+    ("remote_check",  Mono (TArrow (t_string, TArrow (t_string, t_int))));
+    ("remote_invoke", Mono (TArrow (t_string, TArrow (TCon ("List", [t_int]),
+                        TCon ("Option", [TCon ("Result", [TCon ("List", [t_int]); t_string])])))));
   ]
 
 let builtin_types : (string * int) list =
