@@ -122,8 +122,34 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
       let len  = max 1 (stop - start) in
       String.make start ' ' ^ String.make len '^'
     in
+    let label_blocks =
+      List.filter_map (fun (lbl : label) ->
+        let ll  = lbl.lbl_span.March_ast.Ast.start_line in
+        let lc  = lbl.lbl_span.March_ast.Ast.start_col in
+        let ell = lbl.lbl_span.March_ast.Ast.end_line in
+        let elc = lbl.lbl_span.March_ast.Ast.end_col in
+        if ll <= 0 || lbl.lbl_span = d.span then None
+        else begin
+          let lbl_src = get_line ll in
+          let max_lno = max ll ell in
+          let lw = String.length (string_of_int max_lno) + 3 in
+          let lg n =
+            let ns = string_of_int n in
+            String.make (lw - String.length ns - 3) ' ' ^ ns ^ " | "
+          in
+          let lp = String.make lw ' ' in
+          let lu =
+            let stop = if ell = ll && elc > lc then elc else String.length lbl_src in
+            String.make lc ' ' ^ String.make (max 1 (stop - lc)) '^'
+          in
+          Some (Printf.sprintf "\n    %s:\n\n%s%s\n%s%s"
+            lbl.lbl_message (lg ll) lbl_src lp lu)
+        end
+      ) d.labels
+    in
     String.concat "\n"
-      [ header; ""; d.message; ""; gutter line ^ src_line; pad ^ underline; notes_block ]
+      ([ header; ""; d.message; ""; gutter line ^ src_line; pad ^ underline; notes_block ]
+       @ label_blocks)
   end
 
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =

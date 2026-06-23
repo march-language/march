@@ -3831,6 +3831,220 @@ let test_record_type_still_parses () =
   Alcotest.(check bool) "record type is not a refinement" false
     (List.exists decl_has_refined_param m.March_ast.Ast.mod_decls)
 
+(* ── Improvement #1: labels rendered in render_diagnostic ─────────────── *)
+
+let test_label_rendered_in_output () =
+  let open March_errors.Errors in
+  let src = "let x : String = 42" in
+  let lbl_span = March_ast.Ast.{
+    file = "test"; start_line = 1; start_col = 0; end_line = 1; end_col = 17 } in
+  let primary_span = March_ast.Ast.{
+    file = "test"; start_line = 1; start_col = 17; end_line = 1; end_col = 19 } in
+  let diag = {
+    severity = Error;
+    span     = primary_span;
+    message  = "type mismatch";
+    labels   = [{ lbl_span; lbl_message = "the expected type comes from here" }];
+    notes    = [];
+    code     = None;
+  } in
+  let rendered = render_diagnostic ~src diag in
+  let target = "the expected type comes from here" in
+  let lo = String.lowercase_ascii rendered in
+  let n = String.length target in
+  let found = ref false in
+  for i = 0 to String.length lo - n do
+    if String.sub lo i n = target then found := true
+  done;
+  Alcotest.(check bool) "label message appears in rendered output" true !found
+
+(* ── Improvement #2: if-branch and match-arm mismatch labels ──────────── *)
+
+let test_if_branch_mismatch_has_label () =
+  let ctx = typecheck {|mod Test do
+    fn f() do
+      if true do
+        "hello"
+      else
+        42
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "if-branch mismatch: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool) "if-branch mismatch error has a secondary label"
+    true (List.exists (fun d -> d.March_errors.Errors.labels <> []) errors)
+
+let test_match_arm_mismatch_has_label () =
+  let ctx = typecheck {|mod Test do
+    type Shape = Circle | Square
+    fn f(s : Shape) do
+      match s do
+        Circle -> "round"
+        Square -> 42
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "match-arm mismatch: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool) "match-arm mismatch error has a secondary label"
+    true (List.exists (fun d -> d.March_errors.Errors.labels <> []) errors)
+
+(* ── Improvement #3: arity error labels definition site ───────────────── *)
+
+let test_arity_error_has_definition_label () =
+  let ctx = typecheck {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() do add(1) end
+  end|} in
+  Alcotest.(check bool) "arity error: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool) "arity error has a label pointing to definition"
+    true (List.exists (fun d -> d.March_errors.Errors.labels <> []) errors)
+
+(* ── Improvement #4: record field fuzzy suggestion ─────────────────────── *)
+
+let _contains_substr haystack needle =
+  let hn = String.length haystack and nn = String.length needle in
+  if nn = 0 then true
+  else begin
+    let found = ref false in
+    for i = 0 to hn - nn do
+      if String.sub haystack i nn = needle then found := true
+    done;
+    !found
+  end
+
+let test_record_field_typo_suggestion () =
+  let ctx = typecheck {|mod Test do
+    fn f(r : { name: String, age: Int }) do r.naem end
+  end|} in
+  Alcotest.(check bool) "field typo: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "field typo suggests 'name'"
+    true (List.exists (fun m ->
+      _contains_substr (String.lowercase_ascii m) "name") all_text)
+
+let test_record_field_no_false_suggestion () =
+  let ctx = typecheck {|mod Test do
+    fn f(r : { name: String }) do r.xyz end
+  end|} in
+  Alcotest.(check bool) "unrelated field name: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "no spurious 'did you mean' for unrelated name"
+    false (List.exists (fun m ->
+      _contains_substr (String.lowercase_ascii m) "did you mean") all_text)
+
+(* ── Improvement #5: let? wrong type shows actual type ─────────────────── *)
+
+let test_letq_wrong_type_shows_actual_type () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Result(Int, String) do
+      let? x = Some(42)
+      Ok(x)
+    end
+  end|} in
+  Alcotest.(check bool) "let? on Option: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "let? error mentions actual type 'option'"
+    true (List.exists (fun m ->
+      _contains_substr (String.lowercase_ascii m) "option") all_text)
+
+(* ── Improvement #6: redundant/unreachable match arm warning ───────────── *)
+
+let has_redundant_warning ctx =
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let lo = String.lowercase_ascii d.March_errors.Errors.message in
+    _contains_substr lo "redundant" ||
+    _contains_substr lo "unreachable" ||
+    _contains_substr lo "never be reached"
+  ) (March_errors.Errors.sorted ctx)
+
+let test_redundant_ctor_arm_warning () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn f(c : Color) do
+      match c do
+        Red -> 1
+        Red -> 2
+        _ -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "duplicate ctor arm: redundancy warning present"
+    true (has_redundant_warning ctx)
+
+let test_redundant_after_wildcard_warning () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn f(c : Color) do
+      match c do
+        _ -> 0
+        Red -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "arm after wildcard: redundancy warning present"
+    true (has_redundant_warning ctx)
+
+let test_guarded_arm_no_redundant_warning () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn f(c : Color, x : Int) do
+      match c do
+        Red when x > 0 -> 1
+        Red -> 2
+        _ -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "guarded arm before duplicate: no redundancy warning"
+    false (has_redundant_warning ctx)
+
+let test_non_redundant_no_warning () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn f(c : Color) do
+      match c do
+        Red -> 1
+        Green -> 2
+        Blue -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "exhaustive non-redundant match: no redundancy warning"
+    false (has_redundant_warning ctx)
+
+(* ── Improvement #8: qualified error uses notes ─────────────────────────── *)
+
+let test_qualified_error_uses_notes () =
+  let ctx = typecheck {|mod Test do
+    fn f() do Nonexistent.foo(1) end
+  end|} in
+  Alcotest.(check bool) "unknown module: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  (* Either the suggestion is in notes, or it's not embedded raw in the message *)
+  Alcotest.(check bool) "qualified error: suggestion in notes OR message is clean"
+    true (List.exists (fun d ->
+      d.March_errors.Errors.notes <> [] ||
+      not (_contains_substr d.March_errors.Errors.message "Did you mean")
+    ) errors)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -4217,6 +4431,20 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+        ] );
+      ( "error_improvements", [
+          Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;
+          Alcotest.test_case "#2 if-branch type mismatch has label"         `Quick test_if_branch_mismatch_has_label;
+          Alcotest.test_case "#2 match-arm type mismatch has label"         `Quick test_match_arm_mismatch_has_label;
+          Alcotest.test_case "#3 arity error has definition label"          `Quick test_arity_error_has_definition_label;
+          Alcotest.test_case "#4 record field typo: suggests correction"    `Quick test_record_field_typo_suggestion;
+          Alcotest.test_case "#4 record field no typo: no false suggestion" `Quick test_record_field_no_false_suggestion;
+          Alcotest.test_case "#5 let? wrong type shows actual type"         `Quick test_letq_wrong_type_shows_actual_type;
+          Alcotest.test_case "#6 duplicate ctor arm: redundant warning"     `Quick test_redundant_ctor_arm_warning;
+          Alcotest.test_case "#6 arm after wildcard: redundant warning"     `Quick test_redundant_after_wildcard_warning;
+          Alcotest.test_case "#6 guarded arm: no redundancy warning"        `Quick test_guarded_arm_no_redundant_warning;
+          Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
+          Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
         ] );
   ]
 

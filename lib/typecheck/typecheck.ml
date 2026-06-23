@@ -465,7 +465,7 @@ type env = {
       imported module's concrete scheme, and check_fn then unifies the
       local definition against the WRONG function's type (manifesting as
       nonsense arity/type errors on the local fn's header). *)
-  fn_arities : int StrMap.t;
+  fn_arities : (int * Ast.span) StrMap.t;
   (** Declared parameter count of functions DEFINED in the current module
       scope (populated alongside [local_fns] in the pass-1 prebind).  March
       has no partial application — calling a known function with the wrong
@@ -2943,6 +2943,86 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
        | None -> None
        | Some rest_exs -> Some ("_" :: rest_exs))
 
+let span_of_pat : Ast.pattern -> Ast.span = function
+  | Ast.PatWild sp          -> sp
+  | Ast.PatVar  name        -> name.Ast.span
+  | Ast.PatCon  (name, _)   -> name.Ast.span
+  | Ast.PatAtom (_, _, sp)  -> sp
+  | Ast.PatTuple (_, sp)    -> sp
+  | Ast.PatLit  (_, sp)     -> sp
+  | Ast.PatRecord (_, sp)   -> sp
+  | Ast.PatAs   (_, _, sp)  -> sp
+
+(** Check if [row] is useful relative to [matrix] for scrutinee types [tys].
+    Returns false iff every value matched by [row] is already covered by [matrix]. *)
+let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
+    (row : spat list) : bool =
+  match tys, row with
+  | [], _ | _, [] -> matrix = []
+  | ty :: rest_tys, q :: row_rest ->
+    let ty = repr ty in
+    (match q with
+     | SPWild ->
+       (match ty with
+        | TCon ("Bool", []) ->
+          let check_lit b =
+            let sub_m = spec_lit_mc (Ast.LitBool b) matrix in
+            is_useful env rest_tys sub_m row_rest
+          in
+          check_lit true || check_lit false
+        | TCon (name, parent_args) when ctors_for_type env name <> [] ->
+          let ctors = ctors_for_type env name in
+          List.exists (fun (ctor_name, arity) ->
+            let arg_tys = ctor_arg_tys env ctor_name parent_args in
+            let sub_m = spec_ctor_mc ctor_name arity matrix in
+            let wild_args = List.init arity (fun _ -> SPWild) in
+            is_useful env (arg_tys @ rest_tys) sub_m (wild_args @ row_rest)
+          ) ctors
+        | TTuple inner_tys ->
+          let arity = List.length inner_tys in
+          let sub_m = spec_tup_mc arity matrix in
+          let wild_args = List.init arity (fun _ -> SPWild) in
+          is_useful env (inner_tys @ rest_tys) sub_m (wild_args @ row_rest)
+        | _ ->
+          let def = default_mc matrix in
+          is_useful env rest_tys def row_rest)
+     | SPCon (name, sub_pats) ->
+       let arity = List.length sub_pats in
+       let parent_args = match ty with TCon (_, args) -> args | _ -> [] in
+       let arg_tys = ctor_arg_tys env name parent_args in
+       let sub_m = spec_ctor_mc name arity matrix in
+       is_useful env (arg_tys @ rest_tys) sub_m (sub_pats @ row_rest)
+     | SPTup sub_pats ->
+       let arity = List.length sub_pats in
+       let inner_tys = match ty with TTuple ts -> ts | _ -> List.init arity (fun _ -> TError) in
+       let sub_m = spec_tup_mc arity matrix in
+       is_useful env (inner_tys @ rest_tys) sub_m (sub_pats @ row_rest)
+     | SPLit lit ->
+       let sub_m = spec_lit_mc lit matrix in
+       is_useful env rest_tys sub_m row_rest)
+
+(** Emit Warnings for redundant (unreachable) arms.
+    Guarded arms are never flagged, and their patterns are excluded from the
+    prefix so that subsequent arms aren't mistakenly flagged as subsumed. *)
+let check_redundant_arms (env : env) (scrut_ty : ty)
+    (branches : Ast.branch list) =
+  let prefix = ref [] in
+  List.iter (fun (br : Ast.branch) ->
+    let arm_row = [norm_pat br.branch_pat] in
+    if br.branch_guard = None then begin
+      if not (is_useful env [scrut_ty] !prefix arm_row) then begin
+        let sp = span_of_pat br.branch_pat in
+        Err.report env.errors
+          { Err.severity = Warning; span = sp;
+            message = "This pattern can never be reached.";
+            labels  = [];
+            notes   = ["An earlier arm already covers all values this pattern matches."];
+            code    = Some "redundant_arm" }
+      end;
+      prefix := !prefix @ [arm_row]
+    end
+  ) branches
+
 (** Emit a Warning if the match on [scrut_ty] with [branches] is non-exhaustive.
     Skips the check when any branch has a guard (coverage becomes undecidable). *)
 let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
@@ -3467,23 +3547,28 @@ let rec infer_expr env (e : Ast.expr) : ty =
         match f with
         | Ast.EVar name ->
           (match StrMap.find_opt name.txt env.fn_arities with
-           | Some arity ->
+           | Some (arity, def_span) ->
              let n_args = List.length args in
              let rec count_arrows t =
                match repr t with TArrow (_, r) -> 1 + count_arrows r | _ -> 0 in
-             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args)
+             if n_args <> arity && count_arrows f_ty >= arity then Some (name, arity, n_args, def_span)
              else None
            | None -> None)
         | _ -> None
       in
       (match arity_error with
-       | Some (name, arity, n_args) ->
+       | Some (name, arity, n_args, def_span) ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
-         Err.error env.errors ~span:sp
-           (Printf.sprintf
-              "Function `%s` expects %d argument%s, but got %d.\n\
-               March has no partial application — a call must supply all arguments."
-              name.txt arity (if arity = 1 then "" else "s") n_args);
+         Err.report env.errors
+           { Err.severity = Err.Error; span = sp;
+             message = Printf.sprintf
+               "Function `%s` expects %d argument%s, but got %d.\n\
+                March has no partial application — a call must supply all arguments."
+               name.txt arity (if arity = 1 then "" else "s") n_args;
+             labels = [{ Err.lbl_span = def_span;
+                         Err.lbl_message = Printf.sprintf "defined here with %d parameter%s"
+                           arity (if arity = 1 then "" else "s") }];
+             notes = []; code = None };
          (* Return the declared return type so downstream inference stays sane. *)
          let rec peel n t =
            if n <= 0 then t
@@ -3760,13 +3845,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
       )
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
-    | Ast.EIf (cond, then_, else_, sp) ->
+    | Ast.EIf (cond, then_, else_, _sp) ->
       check_expr env cond t_bool
         ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
-      let t_ty = infer_expr env then_ in
-      let e_ty = infer_expr env else_ in
-      unify env ~span:sp ~reason:(Some (RMatchArm sp)) t_ty e_ty;
-      t_ty
+      let t_then = infer_expr env then_ in
+      let t_else = infer_expr env else_ in
+      (* Point primary error at the else branch; label points at then branch
+         (the source of the expected type), making both branches visible. *)
+      let then_sp = span_of_expr then_ in
+      let else_sp = span_of_expr else_ in
+      unify env ~span:else_sp ~reason:(Some (RMatchArm then_sp)) t_else t_then;
+      t_then
 
     (* ── match do cond_arm* end ───────────────────────────────────── *)
     | Ast.ECond (arms, sp) ->
@@ -4021,6 +4110,7 @@ and infer_match env span scrut scrut_ty branches =
         ~reason:(Some (RMatchArm span))
     ) branches;
   check_exhaustiveness env span scrut_ty branches;
+  check_redundant_arms env scrut_ty branches;
   result_ty
 
 (** Infer types of all expressions in a block, threading [ELet] bindings. *)
@@ -6075,7 +6165,7 @@ let rec check_decl env (d : Ast.decl) : env =
           let arity = match def.fn_clauses with
             | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
           let e = { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
-                           fn_arities = StrMap.add def.fn_name.txt arity e.fn_arities } in
+                           fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
       ) { env with local_fns = StrMap.empty; current_module = name.txt } decls in
@@ -7288,7 +7378,7 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
         let arity = match def.fn_clauses with
           | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
         let env = { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns;
-                             fn_arities = StrMap.add def.fn_name.txt arity env.fn_arities } in
+                             fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities } in
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
