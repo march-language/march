@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Config"
 permalink: /docs/cookbook/config/
+scrollmd: true
 ---
 
 # Parse a config file
@@ -77,11 +78,12 @@ host = "db.internal"
 port = 5432
 ```
 
+<!-- scroll:skip -->
 ```march
 let db_host =
   match Toml.get_in(tv, ["database", "host"]) do
-    Some(Str(h)) -> h
-    _            -> "localhost"
+    Some(TomlValue.Str(h)) -> h
+    _                      -> "localhost"
   end
 ```
 
@@ -102,6 +104,21 @@ precedence: **environment overrides file, file overrides hard-coded default.**
 
 > Prefer YAML? `Yaml.parse` mirrors this API (`Yaml.get`, `Yaml.get_str`, …), so
 > the same structure works for `.yaml` config.
+
+---
+
+## Try it
+
+`Toml.parse` works on any string, so you can try the accessors without a file:
+
+```march
+match Toml.parse("host = \"prod.example.com\"\nport = 443") do
+  Ok(tv) -> Toml.get_str(tv, "host")
+  Err(_) -> None
+end
+```
+
+This returns `Some("prod.example.com")`.
 
 ---
 

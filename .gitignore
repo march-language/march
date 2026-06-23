@@ -42,3 +42,8 @@ docs/superpowers/
 
 # RPC demo cross-compile output (scripts/rpc/build-linux.sh)
 /dist/
+# Generated Scroll notebook downloads (regenerated in CI from docs pages)
+docs/downloads/
+
+# Python bytecode
+__pycache__/

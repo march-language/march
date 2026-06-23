@@ -65,6 +65,11 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      - name: Check doc notebooks (.scrollmd) compile
+        run: |
+          eval $(opam env)
+          MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
+
       - name: Check formatting
         run: |
           eval $(opam env)
