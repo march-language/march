@@ -5197,7 +5197,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       | None -> false
     in
     if not covered && not self_declared then
-      Err.warning env.errors ~span:sp
+      Err.warning_with_fix env.errors ~span:sp
+        ~fix:(Err.FInsert {
+          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+          text = "  needs " ^ cap_path })
         (render_parts [
           MPText "function body calls a builtin that requires "; cap cap_path;
           MPText " but "; MPCode mod_name.txt; MPText " does not declare ";
@@ -5209,7 +5212,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
-      Err.warning env.errors ~span:sp
+      Err.warning_with_fix env.errors ~span:sp
+        ~fix:(Err.FInsert {
+          after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
+          text = "  needs " ^ cap_path })
         (render_parts [
           MPText "extern block in "; MPCode mod_name.txt;
           MPText " requires "; cap cap_path;
@@ -5233,7 +5239,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses in
     if not used then
-      Err.warning env.errors ~span:need_sp
+      Err.warning_with_fix env.errors ~span:need_sp
+        ~fix:(Err.FDelete {
+          start_line = need_sp.March_ast.Ast.start_line;
+          end_line   = need_sp.March_ast.Ast.end_line })
         (render_parts [
           MPText "module "; MPCode mod_name.txt; MPText " declares ";
           MPCode ("needs " ^ need); MPText " but no function requires ";
