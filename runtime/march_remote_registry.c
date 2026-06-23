@@ -142,3 +142,27 @@ size_t march_remote_count(void) {
     pthread_mutex_unlock(&g_lock);
     return n;
 }
+
+/* ── March-string-aware helpers ────────────────────────────────────────────
+ * March strings are heap objects: {i64 rc, i32 tag, i32 pad, i64 len, char data[]}.
+ * The UTF-8 data begins at byte offset 24 and is always NUL-terminated. */
+static const char *march_str_cdata(void *s) {
+    return s ? (const char *)((char *)s + 24) : NULL;
+}
+
+int64_t march_remote_check_march(void *impl_hash_march, void *sig_hash_march) {
+    const char *impl_key = march_str_cdata(impl_hash_march);
+    const char *sig_key  = march_str_cdata(sig_hash_march);
+    const char *stored   = march_remote_sig_hash(impl_key);
+    if (!stored) return 0;                                    /* not enrolled */
+    if (!sig_key || strcmp(stored, sig_key) != 0) return 2;   /* TypeMismatch */
+    return 1;                                                 /* sig match */
+}
+
+void *march_remote_invoke_march(void *impl_hash_march, void *args) {
+    const char *impl_key = march_str_cdata(impl_hash_march);
+    typedef void *(*stub_fn_t)(void *);
+    stub_fn_t fn = (stub_fn_t)march_remote_lookup(impl_key);
+    if (!fn) return NULL; /* None with niche encoding */
+    return fn(args);
+}

@@ -47,4 +47,22 @@ int march_remote_has(const char *impl_hash);
 /* Number of enrolled targets (introspection / tests). */
 size_t march_remote_count(void);
 
+/* March-string-aware dispatch helpers.
+ *
+ * These accept March heap string objects (march_string*) rather than raw C
+ * strings, so they can be called directly from compiled March builtins without
+ * an intermediate string conversion.
+ *
+ * march_remote_check_march: admission check.
+ *   Returns 0 if impl_hash is not enrolled, 1 if enrolled and sig_hash
+ *   matches, 2 if enrolled but sig_hash differs (TypeMismatch).
+ *
+ * march_remote_invoke_march: look up + call a stub.
+ *   Returns the stub's return value (a March Result(List(Int),String) ptr), or
+ *   NULL if impl_hash is not enrolled (maps to March None with niche encoding).
+ */
+#include <stdint.h>
+int64_t march_remote_check_march(void *impl_hash_march, void *sig_hash_march);
+void   *march_remote_invoke_march(void *impl_hash_march, void *args);
+
 #endif /* MARCH_REMOTE_REGISTRY_H */
