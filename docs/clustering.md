@@ -380,15 +380,3 @@ mod NodeB do
   end
 end
 ```
-
----
-
-## Status
-
-The distributed layer is **pure-module complete**: all protocols compile and are tested end-to-end in the evaluator (44 distributed tests). The remaining pieces needed for a production cluster are:
-
-- **Runtime driver**: an actor that ticks the SWIM state machine and drives the CRDT gossip loop
-- **Compiler stubs**: automatic generation of the `invoke` stub and `sig_hash`/`impl_hash` values at compile time
-- **Net-kernel wiring**: routing `handle_frame` calls to the live socket layer
-
-These are tracked in `specs/todos.md` under the P2–P3 distributed roadmap items.
