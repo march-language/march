@@ -47,7 +47,8 @@ lint_docs() {
     find docs -name '*.md' 2>/dev/null || true
     find specs/features -name '*.md' 2>/dev/null || true
     echo .claude/skills/march-lang/SKILL.md
-  } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done
+  } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done \
+    | grep -vE '/plans/|/superpowers/'   # historical/plan corpora & vendored plugin docs are not current-truth
 }
 
 # ─── Check A: dead source pointers ───────────────────────────────────────────
