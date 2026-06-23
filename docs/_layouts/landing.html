@@ -78,6 +78,34 @@
     }
     .m-theme-btn:hover { border-color: var(--text-faint); color: var(--text); }
 
+    /* MOBILE NAV */
+    .m-nav-hamburger {
+      display: none; align-items: center; justify-content: center;
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      cursor: pointer; padding: 7px 9px; border-radius: 5px; line-height: 1;
+      touch-action: manipulation;
+    }
+    .m-nav-hamburger:hover { border-color: var(--text-faint); color: var(--text); }
+    .m-nav-drawer {
+      display: none; flex-direction: column;
+      position: fixed; top: 60px; left: 0; right: 0; z-index: 99;
+      background: var(--bg-nav); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border); padding: 0 20px;
+    }
+    .m-nav-drawer.open { display: flex; }
+    .m-nav-drawer-link {
+      font-size: 15px; color: var(--text-muted); text-decoration: none;
+      padding: 15px 0; border-bottom: 1px solid var(--border); letter-spacing: 0.01em;
+    }
+    .m-nav-drawer-link:hover { color: var(--text); }
+    .m-nav-drawer-theme-row { display: flex; align-items: center; padding: 14px 0; }
+    .m-nav-drawer-theme-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      cursor: pointer; padding: 6px 14px; border-radius: 5px; font-size: 13px;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.02em;
+      touch-action: manipulation;
+    }
+
     /* HERO */
     .m-hero { min-height: 100vh; display: flex; align-items: center; padding: 100px 32px 80px; }
     .m-hero-inner {
@@ -334,6 +362,55 @@
       .m-hero { padding: 80px 20px 60px; }
       .m-features, .m-playground, .m-install { padding-left: 20px; padding-right: 20px; }
     }
+    @media (max-width: 640px) {
+      /* Nav: collapse to hamburger */
+      .m-nav-inner { padding: 0 16px; }
+      .m-nav-links { display: none; }
+      .m-nav-hamburger { display: flex; }
+
+      /* Hero */
+      .m-hero { padding: 76px 16px 48px; }
+      .m-hero-h1 { font-size: 30px; }
+      .m-hero-p { font-size: 15px; margin-bottom: 28px; }
+      .m-hero-badge { margin-bottom: 20px; font-size: 10.5px; }
+      .m-btn-primary, .m-btn-secondary { padding: 12px 20px; font-size: 14px; }
+
+      /* Sections */
+      .m-section-h2 { font-size: 26px; margin-bottom: 32px; }
+      .m-features { padding: 48px 16px; }
+      .m-playground { padding: 48px 16px; }
+      .m-install { padding: 64px 16px; }
+
+      /* Feature cards */
+      .m-feature-card { padding: 24px 18px; }
+      .m-perf-face { padding: 24px 18px; }
+      .m-perf-card { min-height: 360px; }
+      .m-feature-h3 { font-size: 20px; }
+      .m-feature-pre { font-size: 11px; padding: 12px; }
+      .m-hero-pre { font-size: 12px; padding: 16px 18px; }
+
+      /* Bench table */
+      .m-bench-table th { font-size: 9px; }
+      .m-bench-table td { font-size: 11px; padding: 7px 0; }
+
+      /* REPL */
+      .m-repl-history { min-height: 160px; padding: 12px 14px; }
+      .m-repl-input-row { padding: 8px 12px 10px; gap: 5px; }
+      .m-repl-prompt-lbl { font-size: 12px; }
+      .m-repl-textarea { font-size: 12px; }
+      .m-repl-iline, .m-repl-oline, .m-repl-eline { font-size: 12px; }
+      .m-repl-submit-btn { padding: 6px 10px; font-size: 11px; }
+      .m-repl-chips { margin-top: 10px; }
+
+      /* Install */
+      .m-install-h2 { font-size: 28px; }
+      .m-install-pre { font-size: 11.5px; padding: 14px 16px; }
+
+      /* Footer */
+      .m-footer { padding: 24px 16px; }
+      .m-footer-inner { gap: 10px; }
+      .m-footer-name { font-size: 13px; }
+    }
   </style>
 </head>
 <body>
@@ -350,8 +427,22 @@
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-nav-link">GitHub</a>
       <button class="m-theme-btn" id="theme-btn">☀ Light</button>
     </div>
+    <button class="m-nav-hamburger" id="nav-hamburger" aria-label="Open menu" aria-expanded="false">
+      <svg width="18" height="14" viewBox="0 0 18 14" fill="none" aria-hidden="true">
+        <line x1="0" y1="1" x2="18" y2="1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <line x1="0" y1="7" x2="18" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <line x1="0" y1="13" x2="18" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
   </div>
 </nav>
+<div class="m-nav-drawer" id="nav-drawer">
+  <a href="{{ site.baseurl }}/docs/getting-started/" class="m-nav-drawer-link" onclick="closeNavDrawer()">Docs</a>
+  <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-nav-drawer-link" onclick="closeNavDrawer()">GitHub</a>
+  <div class="m-nav-drawer-theme-row">
+    <button class="m-nav-drawer-theme-btn" id="nav-drawer-theme-btn">☀ Light</button>
+  </div>
+</div>
 
 <!-- HERO -->
 <section class="m-hero">
@@ -894,6 +985,36 @@ document.getElementById('copy-btn').addEventListener('click', () => {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 initTheme();
 renderAll();
+
+// ─── Mobile nav ───────────────────────────────────────────────────────────────
+(function () {
+  var btn = document.getElementById('nav-hamburger');
+  var drawer = document.getElementById('nav-drawer');
+  var drawerThemeBt = document.getElementById('nav-drawer-theme-btn');
+
+  function syncDrawerTheme() {
+    drawerThemeBt.textContent = dark ? '☀ Light' : '☾ Dark';
+  }
+  window.closeNavDrawer = function () {
+    drawer.classList.remove('open');
+    btn.setAttribute('aria-expanded', 'false');
+  };
+  btn.addEventListener('click', function () {
+    var open = drawer.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  drawerThemeBt.addEventListener('click', function () {
+    dark = !dark;
+    localStorage.setItem('march-theme', dark ? 'dark' : 'light');
+    applyTheme();
+    renderAll();
+    syncDrawerTheme();
+    closeNavDrawer();
+  });
+  // Keep drawer theme label in sync when desktop button is used
+  document.getElementById('theme-btn').addEventListener('click', syncDrawerTheme);
+  syncDrawerTheme();
+})();
 </script>
 </body>
 </html>
