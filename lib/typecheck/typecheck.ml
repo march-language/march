@@ -3930,7 +3930,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (the source of the expected type), making both branches visible. *)
       let then_sp = span_of_expr then_ in
       let else_sp = span_of_expr else_ in
-      unify env ~span:else_sp ~reason:(Some (RMatchArm then_sp)) t_else t_then;
+      unify env ~span:else_sp
+        ~reason:(Some (RBecause (RMatchArm then_sp,
+          "Both branches of an if expression must return the same type.")))
+        t_else t_then;
       t_then
 
     (* ── match do cond_arm* end ───────────────────────────────────── *)

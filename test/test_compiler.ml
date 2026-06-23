@@ -4072,6 +4072,67 @@ let test_parse_error_then_note_do_end () =
   Alcotest.(check bool) "#7 if-then note mentions do/end" true
     (_contains_substr output "do/end")
 
+(* ── Follow-up fixes: better messages ──────────────────────────────────── *)
+
+let test_parse_error_then_says_then_not_else () =
+  (* "if x then 1 end" should produce a message that names `then` as the problem,
+     not just say "always need an else branch" which is confusing *)
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "if-then error: message names `then` as the problem" true
+    (_contains_substr output "then")
+
+let test_parse_error_then_primary_message () =
+  (* The primary message should not say "always need an else branch" when the
+     actual problem is that the user wrote `then` instead of `do` *)
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 end\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "if-then error: primary message is about `then`, not else" true
+    (not (_contains_substr output "always need an `else` branch"))
+
+let test_if_branch_mismatch_reason_is_if_specific () =
+  (* When if-branch types disagree, the reason note should say "if expression",
+     not "All branches of a match must have the same type." *)
+  let ctx = typecheck {|mod Test do
+    fn f() do
+      if true do
+        "hello"
+      else
+        42
+      end
+    end
+  end|} in
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool) "if-branch mismatch: reason note mentions 'if expression'"
+    true (List.exists (fun d ->
+      List.exists (fun note ->
+        _contains_substr note "if expression"
+      ) d.March_errors.Errors.notes
+    ) errors)
+
+let test_if_branch_mismatch_reason_not_match () =
+  (* Reason note should not say "match" for an if expression *)
+  let ctx = typecheck {|mod Test do
+    fn f() do
+      if true do
+        "hello"
+      else
+        42
+      end
+    end
+  end|} in
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  Alcotest.(check bool) "if-branch mismatch: reason note does not say 'match'"
+    true (not (List.exists (fun d ->
+      List.exists (fun note ->
+        _contains_substr note "branches of a match"
+      ) d.March_errors.Errors.notes
+    ) errors))
+
 let compiler_suites =
   [
       ( "resolver",
@@ -4474,6 +4535,10 @@ let compiler_suites =
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
           Alcotest.test_case "#7 parse error uses -- ERROR header"          `Quick test_parse_error_has_error_header;
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
+          Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
+          Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;
+          Alcotest.test_case "fix: if-branch mismatch reason says if expr"  `Quick test_if_branch_mismatch_reason_is_if_specific;
+          Alcotest.test_case "fix: if-branch mismatch no 'match' in note"   `Quick test_if_branch_mismatch_reason_not_match;
         ] );
   ]
 
