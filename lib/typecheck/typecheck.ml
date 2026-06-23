@@ -1705,6 +1705,28 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_list a, TCon ("TypedArray", [a]))));
     ("typed_array_to_list",  poly1 (fun a ->
         TArrow (TCon ("TypedArray", [a]), t_list a)));
+    (* RingBuf builtins — mutable fixed-capacity circular buffer.
+       RingBuf(a) is a non-sendable type: the typechecker rejects it in send() payloads. *)
+    ("ring_buf_make",        poly1 (fun a ->
+        TArrow (t_int, TCon ("RingBuf", [a]))));
+    ("ring_buf_push",        poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), TArrow (a, t_unit))));
+    ("ring_buf_pop",         poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_option a)));
+    ("ring_buf_get",         poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), TArrow (t_int, t_option a))));
+    ("ring_buf_peek_oldest", poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_option a)));
+    ("ring_buf_peek_newest", poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_option a)));
+    ("ring_buf_size",        poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_int)));
+    ("ring_buf_cap",         poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_int)));
+    ("ring_buf_clear",       poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_unit)));
+    ("ring_buf_to_list",     poly1 (fun a ->
+        TArrow (TCon ("RingBuf", [a]), t_list a)));
     (* TLS builtins — tls_client_ctx, tls_server_ctx, etc. *)
     ("tls_client_ctx",       poly1 (fun e ->
         TArrow (t_string, TArrow (t_list t_string, TArrow (t_int, TArrow (t_int,
@@ -3104,6 +3126,31 @@ let rec unfold_srec s =
     unfold_srec (subst_inner body)
   | _ -> s
 
+(** Type constructor names that cannot appear in actor message payloads.
+    These types carry mutable state that must remain owned by a single actor. *)
+let non_sendable_types = ["RingBuf"]
+
+(** [check_sendable errors span ty] walks [ty] and emits an error for every
+    non-sendable type constructor it finds. Call at every [send()] callsite. *)
+let rec check_sendable errors span ty =
+  match repr ty with
+  | TCon (name, args) ->
+    if List.mem name non_sendable_types then
+      Err.error errors ~span
+        (Printf.sprintf
+           "Values of type `%s` cannot be sent in actor messages.\n\
+            `%s` is a mutable buffer that must be owned by a single actor.\n\
+            Pass it as initial actor state at spawn time instead of sending it."
+           name name)
+    else List.iter (check_sendable errors span) args
+  | TArrow (a, b)     -> check_sendable errors span a; check_sendable errors span b
+  | TTuple ts         -> List.iter (check_sendable errors span) ts
+  | TRecord flds      -> List.iter (fun (_, t) -> check_sendable errors span t) flds
+  | TLin (_, t)       -> check_sendable errors span t
+  | TNatOp (_, a, b)  -> check_sendable errors span a; check_sendable errors span b
+  | TRefine (base, _, _) -> check_sendable errors span base
+  | TVar _ | TChan _ | TNat _ | TError -> ()
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -3922,9 +3969,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
       t_atom
 
     (* ── Actor messaging ──────────────────────────────────────────── *)
-    | Ast.ESend (cap, msg, _) ->
+    | Ast.ESend (cap, msg, sp) ->
       ignore (infer_expr env cap);
-      ignore (infer_expr env msg);
+      let msg_ty = infer_expr env msg in
+      check_sendable env.errors sp msg_ty;
       (* send() returns the handler's result — unconstrained so callers can
          match on Option(a) (drop semantics) or access record fields (state). *)
       fresh_var env.level

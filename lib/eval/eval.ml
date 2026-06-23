@@ -15,6 +15,17 @@
 open March_ast.Ast
 
 (* ------------------------------------------------------------------ *)
+(* Ring buffer type (defined before value so VRingBuf can reference it)*)
+(* ------------------------------------------------------------------ *)
+
+type 'a ring = {
+  mutable rb_arr  : 'a option array;
+  mutable rb_head : int;   (* index of next write position *)
+  mutable rb_size : int;   (* number of entries stored *)
+  rb_cap          : int;
+}
+
+(* ------------------------------------------------------------------ *)
 (* Value type                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -47,6 +58,7 @@ type value =
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
+  | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -445,15 +457,8 @@ let app_spawn_order : int list ref = ref []
 let current_pid : int option ref = ref None
 
 (* ------------------------------------------------------------------ *)
-(* Ring buffer                                                         *)
+(* Ring buffer helpers                                                 *)
 (* ------------------------------------------------------------------ *)
-
-type 'a ring = {
-  mutable rb_arr  : 'a option array;
-  mutable rb_head : int;   (* index of next write position *)
-  mutable rb_size : int;   (* number of entries stored *)
-  rb_cap          : int;
-}
 
 let ring_create cap =
   { rb_arr = Array.make cap None; rb_head = 0; rb_size = 0; rb_cap = cap }
@@ -479,6 +484,18 @@ let ring_drop_newest r n =
   else begin
     r.rb_head <- ((r.rb_head - n) + r.rb_cap * 2) mod r.rb_cap;
     r.rb_size <- r.rb_size - n
+  end
+
+(** [ring_pop_oldest r] removes and returns the oldest element (FIFO head).
+    Clears the slot for GC. Returns None if empty. *)
+let ring_pop_oldest r =
+  if r.rb_size = 0 then None
+  else begin
+    let idx = ((r.rb_head - r.rb_size) + r.rb_cap * 2) mod r.rb_cap in
+    let v = r.rb_arr.(idx) in
+    r.rb_arr.(idx) <- None;
+    r.rb_size <- r.rb_size - 1;
+    v
   end
 
 (* ------------------------------------------------------------------ *)
@@ -957,6 +974,8 @@ let rec value_to_string v =
     (match Hashtbl.find_opt vault_registry id with
      | Some t -> Printf.sprintf "Vault(\"%s\"#%d)" t.vt_name id
      | None   -> Printf.sprintf "Vault(#%d)" id)
+  | VRingBuf r ->
+    Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -6613,6 +6632,63 @@ let base_env : env =
   ; ("remote_count", VBuiltin ("remote_count", function
         | [] | [VUnit] -> VInt 0
         | _ -> eval_error "remote_count: no arguments expected"))
+  (* ── RingBuf builtins — mutable fixed-capacity circular buffer ── *)
+  (* Index convention: 0 = oldest (FIFO drain order). Single-owner — do not share
+     across actor boundaries; the typechecker rejects RingBuf in send() payloads. *)
+  ; ("ring_buf_make", VBuiltin ("ring_buf_make", function
+        | [VInt cap] ->
+          if cap <= 0 then eval_error "ring_buf_make: capacity must be > 0, got %d" cap;
+          VRingBuf (ring_create cap)
+        | _ -> eval_error "ring_buf_make: expected Int capacity"))
+  ; ("ring_buf_push", VBuiltin ("ring_buf_push", function
+        | [VRingBuf r; v] -> ring_push r v; VUnit
+        | _ -> eval_error "ring_buf_push: expected (RingBuf, value)"))
+  ; ("ring_buf_pop", VBuiltin ("ring_buf_pop", function
+        | [VRingBuf r] ->
+          (match ring_pop_oldest r with
+           | None   -> VCon ("None", [])
+           | Some v -> VCon ("Some", [v]))
+        | _ -> eval_error "ring_buf_pop: expected RingBuf"))
+  ; ("ring_buf_get", VBuiltin ("ring_buf_get", function
+        (* get(rb, i): 0 = oldest. Translate to internal index (0 = newest). *)
+        | [VRingBuf r; VInt i] ->
+          (match ring_get r (r.rb_size - 1 - i) with
+           | None   -> VCon ("None", [])
+           | Some v -> VCon ("Some", [v]))
+        | _ -> eval_error "ring_buf_get: expected (RingBuf, Int)"))
+  ; ("ring_buf_peek_oldest", VBuiltin ("ring_buf_peek_oldest", function
+        | [VRingBuf r] ->
+          (match ring_get r (r.rb_size - 1) with
+           | None   -> VCon ("None", [])
+           | Some v -> VCon ("Some", [v]))
+        | _ -> eval_error "ring_buf_peek_oldest: expected RingBuf"))
+  ; ("ring_buf_peek_newest", VBuiltin ("ring_buf_peek_newest", function
+        | [VRingBuf r] ->
+          (match ring_get r 0 with
+           | None   -> VCon ("None", [])
+           | Some v -> VCon ("Some", [v]))
+        | _ -> eval_error "ring_buf_peek_newest: expected RingBuf"))
+  ; ("ring_buf_size", VBuiltin ("ring_buf_size", function
+        | [VRingBuf r] -> VInt r.rb_size
+        | _ -> eval_error "ring_buf_size: expected RingBuf"))
+  ; ("ring_buf_cap", VBuiltin ("ring_buf_cap", function
+        | [VRingBuf r] -> VInt r.rb_cap
+        | _ -> eval_error "ring_buf_cap: expected RingBuf"))
+  ; ("ring_buf_clear", VBuiltin ("ring_buf_clear", function
+        | [VRingBuf r] -> r.rb_head <- 0; r.rb_size <- 0; VUnit
+        | _ -> eval_error "ring_buf_clear: expected RingBuf"))
+  ; ("ring_buf_to_list", VBuiltin ("ring_buf_to_list", function
+        | [VRingBuf r] ->
+          let n = r.rb_size in
+          (* ring_get uses 0=newest. Iterate 0..n-1 with prepend → result is oldest-to-newest. *)
+          let rec go i acc =
+            if i >= n then acc
+            else
+              let v = match ring_get r i with Some x -> x | None -> assert false in
+              go (i + 1) (VCon ("Cons", [v; acc]))
+          in
+          go 0 (VCon ("Nil", []))
+        | _ -> eval_error "ring_buf_to_list: expected RingBuf"))
   ]
 
 (* ------------------------------------------------------------------ *)

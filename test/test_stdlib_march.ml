@@ -138,6 +138,7 @@ let all_stdlib_decls =
     "sigil.march";
     "crypto.march";
     "deque.march";
+    "ring_buf.march";
     "vector_clock.march";
     "merkle.march";
     "crdt.march";
@@ -306,6 +307,10 @@ let () =
     ("deque", [
       Alcotest.test_case "Deque module"
         `Quick (run_stdlib_test "test_deque.march" "TestDeque");
+    ]);
+    ("ring_buf", [
+      Alcotest.test_case "RingBuf module"
+        `Quick (run_stdlib_test "test_ring_buf.march" "TestRingBuf");
     ]);
     ("net_frame", [
       Alcotest.test_case "NetFrame module"
