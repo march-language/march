@@ -1095,11 +1095,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps (file native/ffi_shim.c)
        (file ../runtime/march_ffi.h))
  (action
-  (run cc -shared -O2 -fPIC
-       -undefined dynamic_lookup
-       -I../runtime
-       native/ffi_shim.c
-       -o native_ffi_shim.so)))
+  ; -undefined dynamic_lookup is Apple ld only; Linux allows undef symbols in .so by default
+  (system "case $(uname) in Darwin) F='-undefined dynamic_lookup' ;; *) F= ;; esac; cc -shared -O2 -fPIC $F -I../runtime native/ffi_shim.c -o native_ffi_shim.so")))
 
 ; Step 2: run the interpreter with --ffi-so pointing at the compiled shim.
 (rule
