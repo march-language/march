@@ -67,8 +67,18 @@ let remap_location (d : Utf16.doc) (l : Lsp.Types.Location.t) : Lsp.Types.Locati
 let remap_text_edit (d : Utf16.doc) (e : Lsp.Types.TextEdit.t) : Lsp.Types.TextEdit.t =
   { e with Lsp.Types.TextEdit.range = remap_range d e.Lsp.Types.TextEdit.range }
 
+let remap_diag_related_info (d : Utf16.doc)
+    (ri : Lsp.Types.DiagnosticRelatedInformation.t)
+    : Lsp.Types.DiagnosticRelatedInformation.t =
+  { ri with Lsp.Types.DiagnosticRelatedInformation.location =
+      remap_location d ri.Lsp.Types.DiagnosticRelatedInformation.location }
+
 let remap_diagnostic (d : Utf16.doc) (dg : Lsp.Types.Diagnostic.t) : Lsp.Types.Diagnostic.t =
-  { dg with Lsp.Types.Diagnostic.range = remap_range d dg.Lsp.Types.Diagnostic.range }
+  { dg with
+    Lsp.Types.Diagnostic.range = remap_range d dg.Lsp.Types.Diagnostic.range;
+    Lsp.Types.Diagnostic.relatedInformation =
+      Option.map (List.map (remap_diag_related_info d))
+        dg.Lsp.Types.Diagnostic.relatedInformation }
 
 let remap_inlay_hint (d : Utf16.doc) (h : Lsp.Types.InlayHint.t) : Lsp.Types.InlayHint.t =
   { h with Lsp.Types.InlayHint.position = remap_pos d h.Lsp.Types.InlayHint.position }

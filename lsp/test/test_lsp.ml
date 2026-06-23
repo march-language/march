@@ -196,6 +196,40 @@ end|} in
       | _ -> ()
     ) a.diagnostics
 
+let test_analyse_related_information_on_type_mismatch () =
+  (* A type annotation mismatch should produce relatedInformation
+     pointing at the annotation — improvement #1 + #3 from the
+     error-improvements spec. *)
+  let src = {|mod Test do
+  fn bad() : Int do "not an int" end
+end|} in
+  let a = analyse src in
+  let has_related =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        match d.relatedInformation with
+        | Some (_ :: _) -> true
+        | _ -> false
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "type mismatch has relatedInformation" true has_related
+
+let test_analyse_arity_mismatch_has_related_information () =
+  (* An arity mismatch should produce relatedInformation pointing at the
+     function definition — improvement #3 from the error-improvements spec. *)
+  let src = {|mod Test do
+  fn add(x : Int, y : Int) : Int do x + y end
+  fn bad() : Int do add(1) end
+end|} in
+  let a = analyse src in
+  let has_related =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        match d.relatedInformation with
+        | Some (_ :: _) -> true
+        | _ -> false
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "arity mismatch has relatedInformation" true has_related
+
 (* ------------------------------------------------------------------ *)
 (* 3. Analysis — document symbols                                      *)
 (* ------------------------------------------------------------------ *)
@@ -6127,6 +6161,8 @@ let () =
       Alcotest.test_case "multiple errors all reported"          `Quick test_analyse_multiple_errors_all_reported;
       Alcotest.test_case "warning severity"                      `Quick test_analyse_warning_severity;
       Alcotest.test_case "notes appended to message"             `Quick test_analyse_notes_appended_to_message;
+      Alcotest.test_case "type mismatch has relatedInformation"  `Quick test_analyse_related_information_on_type_mismatch;
+      Alcotest.test_case "arity mismatch has relatedInformation" `Quick test_analyse_arity_mismatch_has_related_information;
       Alcotest.test_case "diagnostics from user file"            `Quick test_multiple_errors_all_from_user_file;
       Alcotest.test_case "src field matches input"               `Quick test_analyse_src_field_matches_input;
     ];

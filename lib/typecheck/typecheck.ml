@@ -2965,19 +2965,38 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
      | SPWild ->
        (match ty with
         | TCon ("Bool", []) ->
-          let check_lit b =
-            let sub_m = spec_lit_mc (Ast.LitBool b) matrix in
-            is_useful env rest_tys sub_m row_rest
-          in
-          check_lit true || check_lit false
+          (* Use Maranget's signature-completeness: only expand if the matrix
+             first column covers both literals; otherwise take the default path.
+             This prevents infinite loops on recursive types. *)
+          let sigma_t = List.exists (fun row ->
+            match row with SPLit (Ast.LitBool true) :: _ -> true | _ -> false) matrix in
+          let sigma_f = List.exists (fun row ->
+            match row with SPLit (Ast.LitBool false) :: _ -> true | _ -> false) matrix in
+          if sigma_t && sigma_f then
+            let check_lit b =
+              let sub_m = spec_lit_mc (Ast.LitBool b) matrix in
+              is_useful env rest_tys sub_m row_rest
+            in
+            check_lit true || check_lit false
+          else
+            is_useful env rest_tys (default_mc matrix) row_rest
         | TCon (name, parent_args) when ctors_for_type env name <> [] ->
           let ctors = ctors_for_type env name in
-          List.exists (fun (ctor_name, arity) ->
-            let arg_tys = ctor_arg_tys env ctor_name parent_args in
-            let sub_m = spec_ctor_mc ctor_name arity matrix in
-            let wild_args = List.init arity (fun _ -> SPWild) in
-            is_useful env (arg_tys @ rest_tys) sub_m (wild_args @ row_rest)
-          ) ctors
+          (* sigma = constructors EXPLICITLY listed in the matrix's first column
+             (wildcards are NOT counted — this is the termination invariant). *)
+          let sigma = List.filter_map (fun row ->
+            match row with SPCon (c, _) :: _ -> Some c | _ -> None) matrix in
+          let is_complete =
+            List.for_all (fun (c, _) -> List.mem c sigma) ctors in
+          if is_complete then
+            List.exists (fun (ctor_name, arity) ->
+              let arg_tys = ctor_arg_tys env ctor_name parent_args in
+              let sub_m = spec_ctor_mc ctor_name arity matrix in
+              let wild_args = List.init arity (fun _ -> SPWild) in
+              is_useful env (arg_tys @ rest_tys) sub_m (wild_args @ row_rest)
+            ) ctors
+          else
+            is_useful env rest_tys (default_mc matrix) row_rest
         | TTuple inner_tys ->
           let arity = List.length inner_tys in
           let sub_m = spec_tup_mc arity matrix in

@@ -381,12 +381,32 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
         String.concat "\n" (List.map (fun n -> "note: " ^ n) d.notes)
     in
     let code = Option.map (fun s -> `String s) d.code in
+    let relatedInformation =
+      let infos = List.filter_map (fun (lbl : Err.label) ->
+        if lbl.lbl_span.Ast.start_line <= 0 then None
+        else begin
+          let lbl_file = lbl.lbl_span.Ast.file in
+          let uri =
+            if lbl_file = "" || lbl_file = "<unknown>" then
+              Lsp.Types.DocumentUri.of_path filename
+            else
+              Lsp.Types.DocumentUri.of_path lbl_file
+          in
+          let location = Lsp.Types.Location.create
+            ~uri ~range:(Pos.span_to_lsp_range lbl.lbl_span) in
+          Some (Lsp.Types.DiagnosticRelatedInformation.create
+            ~location ~message:lbl.lbl_message)
+        end
+      ) d.labels in
+      if infos = [] then None else Some infos
+    in
     Some (Lsp.Types.Diagnostic.create
       ~range
       ~severity:(severity_to_lsp d.severity)
       ~message:(`String message)
       ~source:"march"
       ?code
+      ?relatedInformation
       ())
 
 (* ------------------------------------------------------------------ *)
