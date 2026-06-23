@@ -3637,9 +3637,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end)
 
   | Tir.EReuse (reuse_atom, reuse_ty, args) ->
-    (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
-    let (_, rv) = emit_atom ctx reuse_atom in
-    let arg_vals = List.map (fun atom ->
+    (* Non-TCon reuse (e.g. reusing a dead cell as a join-point closure): same
+       conditional logic without ctor-specific fields. *)
+    let arg_vals_of () = List.map (fun atom ->
       let (ty, v) = emit_atom ctx atom in
       (* Records keep NATURAL slot repr (shape descriptors record the kind);
          tuples / erased cells use the UNIFORM convention (scalars tagged),
@@ -3648,6 +3648,38 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        | Tir.TRecord _ -> (ty, v)
        | _ -> ("ptr", coerce ctx ty v "ptr"))
     ) args in
+    (* Guard (mirrors the TCon branch above): if reuse_atom's own type is
+       niche-shaped (e.g. Option.Some over a pointer), the scrutinee IS its
+       payload — no wrapper cell exists.  FBIP-reusing that memory for a
+       different object (here a closure) overwrites the payload, so a later
+       use of the payload (or its fields) reads corrupted/freed memory.
+       This is exactly the `Some((a, b)) -> ... reuse Option as $Clo ...`
+       pattern emitted for join points: reusing the Option cell would clobber
+       the tuple it points to.  Skip FBIP and allocate fresh, without touching
+       reuse_atom's RC (the payload stays live for its own consumers). *)
+    let reuse_atom_parent_type = match reuse_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon (name, _) ->
+           (match String.rindex_opt name '.' with
+            | Some i -> String.sub name 0 i
+            | None -> name)
+         | _ -> "")
+      | _ -> ""
+    in
+    if reuse_atom_parent_type <> ""
+       && Repr.is_niche_shaped !cur_type_defs reuse_atom_parent_type
+    then begin
+      let arg_vals = arg_vals_of () in
+      let hp = emit_heap_alloc ctx 0 (List.length args) in
+      List.iteri (fun i (ty, v) -> emit_store_field ctx hp i ty v) arg_vals;
+      (match reuse_ty with
+       | Tir.TRecord fields -> emit_set_shape ctx hp fields
+       | _ -> ());
+      ("ptr", hp)
+    end else begin
+    let (_, rv) = emit_atom ctx reuse_atom in
+    let arg_vals = arg_vals_of () in
     let rc = fresh ctx "rc" in
     emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
     let is_unique = fresh ctx "uniq" in
@@ -3684,6 +3716,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      | Tir.TRecord fields -> emit_set_shape ctx result fields
      | _ -> ());
     ("ptr", result)
+    end
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)
   (* Skip RC ops on builtins AND on top-level function references.

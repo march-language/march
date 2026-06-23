@@ -1,0 +1,46 @@
+-- Regression: FBIP must not reuse a niche-shaped cell as a join-point closure.
+--
+-- `String.split_first` returns `Option((String, String))`, which is
+-- niche-shaped: `Some(tuple)` IS the tuple pointer, with no wrapper cell.
+-- When a match arm that ends in a shared continuation is compiled, the
+-- join-point lowering emits `reuse <option> as <closure>`.  The non-TCon
+-- (closure) reuse path in native codegen used to skip the niche-shape guard
+-- that the constructor-reuse path has, so it overwrote the tuple's own memory
+-- with the closure's fields and then freed it — a later read of the tuple's
+-- first field handed `String.trim` a garbage pointer and the program looped /
+-- crashed (only natively; the interpreter doesn't physically reuse).
+--
+-- Mirrors the original SearchIndex.first_line failure that hung `march_doc`.
+
+mod NicheReuseClosure do
+
+  type JV = JStr(String) | JObj(List((String, JV)))
+
+  fn first_line(s) do
+    match String.split_first(s, "\n") do
+      None -> String.trim(s)
+      Some((line, _)) -> String.trim(line)
+    end
+  end
+
+  fn entry(mod_name, kind, name, signature, doc_opt) do
+    let doc_text = match doc_opt do
+      None -> ""
+      Some(d) -> first_line(d)
+    end
+    JObj([("m", JStr(mod_name)), ("k", JStr(kind)), ("n", JStr(name)),
+          ("s", JStr(signature)), ("d", JStr(doc_text))])
+  end
+
+  fn module_entries(mod_name, comment_opt) do
+    entry(mod_name, "module", mod_name, "", comment_opt)
+  end
+
+  fn main() : Unit do
+    match module_entries("MyMod", Some("First line.\nSecond line.")) do
+    JObj(fields) -> IO.puts("ok, fields=" ++ String.from_int(List.length(fields)))
+    _ -> IO.puts("?")
+    end
+  end
+
+end

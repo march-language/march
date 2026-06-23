@@ -517,6 +517,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_scalar_fields.expected native_tuple_scalar_fields.out)))
 
+; ── Regression: FBIP must not reuse a niche cell as a join-point closure ──
+; `String.split_first` returns Option((String,String)), which is niche-shaped
+; (Some(tuple) IS the tuple pointer).  Join-point lowering emits `reuse option
+; as closure`; the non-TCon (closure) reuse path skipped the niche-shape guard
+; the ctor-reuse path has, overwrote the tuple's own memory with the closure's
+; fields and freed it, so a later field read fed String.trim a garbage pointer
+; (native-only hang/crash; the interpreter doesn't physically reuse).  Compile
+; natively, run, diff stdout.
+(rule
+ (targets native_niche_reuse_closure native_niche_reuse_closure.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/niche_reuse_closure.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_niche_reuse_closure
+        native/niche_reuse_closure.march)
+   (with-stdout-to native_niche_reuse_closure.out
+        (system "./native_niche_reuse_closure")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/niche_reuse_closure.expected native_niche_reuse_closure.out)))
+
 ; ── Regression: closure apply-wrapper ABI must be uniform for Bool returns ──
 ; A lambda returning a stored Bool field (dynamic field read → tagged generic
 ; value, polymorphic return → ptr ABI) and one returning a computed Bool
