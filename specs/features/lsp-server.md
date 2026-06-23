@@ -1,3 +1,5 @@
+<!-- doc-lint:ignore-file — file pointers in this doc are shown relative to the `lsp/` subtree root (see the project-layout diagram), not the repo root. -->
+
 # LSP Server (`march-lsp`)
 
 ## Overview

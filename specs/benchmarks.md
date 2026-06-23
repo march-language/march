@@ -131,8 +131,11 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
-**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly in the
-single-threaded interpreter. True parallelism requires OCaml 5 Domains (Phase 2).
+**Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
+mode runs tasks on the M:N pthread work-stealing scheduler
+(`runtime/march_scheduler.c`), so subtrees execute concurrently across cores.
+The tree-walking interpreter evaluates each `task_spawn` thunk eagerly and
+in-order, so interpreted runs are correct but single-threaded.
 
 **Expected output:** `16777216`
 
@@ -141,18 +144,21 @@ single-threaded interpreter. True parallelism requires OCaml 5 Domains (Phase 2)
 | `task_spawn` / `task_await_unwrap` | Task spawning and join |
 | **FBIP + parallelism** | Sibling subtrees have independent RC chains → in-place reuse on both sides with no synchronisation |
 | Task granularity | Parallel to depth 10 (1024 tasks), then sequential |
-| OCaml 5 Domain scalability | One Domain per task up to GOMAXPROCS equivalent |
+| Scheduler scalability | N pthread workers, Chase-Lev work-stealing deques, one green thread per task (not OCaml Domains) |
 
 **Comparison baseline:** Same sequential sum (measure parallel speedup), C with pthreads, Go goroutines.
-**What to watch:** Should show near-linear speedup up to `min(cores, 1024)` tasks.
-FBIP correctness in the parallel case: each task's sub-tree has RC=1 in its
+**What to watch:** In compiled mode, expect near-linear speedup up to
+`min(cores, 1024)` tasks. FBIP correctness in the parallel case: each task's sub-tree has RC=1 in its
 own context, so `inc_leaves`-style transforms remain safe without locking.
 
 ---
 
 ## bench/par_fib.march — Parallel Fibonacci (embarrassingly parallel)
 
-**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly.
+**Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
+mode forks the recursive tasks onto the M:N pthread work-stealing scheduler
+(`runtime/march_scheduler.c`); the interpreter runs each `task_spawn` thunk
+eagerly and in-order (correct but single-threaded).
 
 **Command:** `par_fib(40, 20)`
 **Expected output:** `102334155`
@@ -165,15 +171,22 @@ own context, so `inc_leaves`-style transforms remain safe without locking.
 | Threshold tuning | Sequential below depth 20 to avoid micro-task overhead |
 
 **Comparison baseline:** `bench/fib.march` (sequential), C with pthreads, Go goroutines.
-**What to watch:** Phase 1 (eager) overhead should be <5% vs sequential `fib`.
-With true parallelism, expect near-linear speedup. A regression vs sequential
-`fib` points to task_spawn/task_await_unwrap call overhead.
+**What to watch:** In compiled mode, parallelism is real — expect near-linear
+speedup up to core count over the sequential `fib`. Measured scheduler
+throughput (4-core M1): ~189K–209K tasks/sec (250K green threads in 1.32s;
+see `specs/progress.md`). A regression vs sequential `fib` points to
+task_spawn/task_await_unwrap call overhead or per-task scheduling cost.
 
 ---
 
 ## bench/par_map.march — Parallel Collatz map (embarrassingly parallel)
 
-**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly.
+**Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
+mode runs the per-chunk tasks concurrently on the M:N pthread work-stealing
+scheduler (`runtime/march_scheduler.c`); the interpreter runs each `task_spawn`
+thunk eagerly and in-order (correct but single-threaded). The same machinery
+backs `List.pmap`/`pfilter`/`preduce`, measured at ~281% CPU on a 200k-element
+workload (see `specs/progress.md`).
 
 **Command:** `par_map_sum(range(1, 100000), 1000)`
 **Expected output:** `2660024`
@@ -194,8 +207,11 @@ closure capture overhead or list allocation under task boundaries.
 
 ## bench/par_worksteal.march — Work-stealing Fibonacci (Tier 2)
 
-**Status: PHASE 1 (eager)** — `task_spawn_steal` exists but delegates to eager
-evaluation. True work-stealing requires OCaml 5 Domains (Phase 2).
+**Status: REAL WORK-STEALING (compiled) / SEQUENTIAL (interpreted)** — in
+compiled mode `task_spawn_steal` spawns a real green thread onto the Chase-Lev
+work-stealing deques (`lib/tir/llvm_emit.ml`, `runtime/march_scheduler.c`,
+`runtime/march_deque.h`); idle pthread workers steal from busy ones. The
+interpreter runs the thunk eagerly and in-order (correct but single-threaded).
 
 **Command:** `par_fib(pool, 40, 20)` with `Cap(WorkPool)` from `main()`
 **Expected output:** `102334155`
@@ -209,8 +225,8 @@ evaluation. True work-stealing requires OCaml 5 Domains (Phase 2).
 
 **Comparison baseline:** `bench/par_fib.march` (cooperative tier), C with work-stealing.
 **What to watch:** Compare Tier 2 (work-stealing) vs Tier 1 (cooperative) overhead.
-With true parallelism, work-stealing should show better load balancing for
-uneven workloads. The `Cap(WorkPool)` threading should have zero runtime cost
+In compiled mode the work-stealing scheduler delivers better load balancing for
+uneven workloads, since idle workers steal queued tasks from busy ones. The `Cap(WorkPool)` threading should have zero runtime cost
 (it's a type-level capability, not a runtime check).
 
 ---

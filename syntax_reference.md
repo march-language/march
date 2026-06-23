@@ -558,7 +558,7 @@ Desugars to `List.map` / `List.filter` + `List.map`. Requires `List` in scope.
 Literal:
 
 ```march
-let p = { x = 1.0, y = 2.0 }
+let p = { x: 1.0, y: 2.0 }
 ```
 
 Field access:
@@ -570,8 +570,8 @@ p.x
 Functional update:
 
 ```march
-{ p with x = 3.0 }
-{ state with count = state.count + 1, name = "new" }
+{ p with x: 3.0 }
+{ state with count: state.count + 1, name: "new" }
 ```
 
 ---
@@ -737,10 +737,10 @@ Declares capability requirements for the module.
 ```march
 actor Counter do
   state { count: Int }
-  init { count = 0 }
+  init { count: 0 }
 
   on Increment() do
-    { state with count = state.count + 1 }
+    { state with count: state.count + 1 }
   end
 
   on GetCount(reply_to) do

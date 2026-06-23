@@ -155,6 +155,11 @@ All heavy lifting is in C for performance. March code calls these builtins which
 
 ### HTTP Parsing and Serialization
 
+> **Additional C modules.** Beyond `march_http.c`, the runtime splits performance-critical HTTP work into:
+> - `runtime/march_http_parse_simd.c` — SIMD (SSE4.2 `PCMPESTRI`) request parser; the default request-reception path delegates here unless built with `MARCH_HTTP_DISABLE_SIMD`
+> - `runtime/march_http_io.c` — non-blocking I/O state machines (`march_set_nonblocking`, `march_recv_nonblocking`) used by the event loop
+> - `runtime/march_http_response.c` — zero-copy HTTP/1.1 response builder with cached status lines and a cached `Date` header
+
 **Request Parsing** (`march_http_parse_request`, lines 265-351):
 - Input: Raw HTTP request string
 - Finds `\r\n\r\n` to separate headers and body
@@ -177,12 +182,12 @@ All heavy lifting is in C for performance. March code calls these builtins which
 - 400 "Bad Request", 401 "Unauthorized", 403 "Forbidden", 404 "Not Found", 405 "Method Not Allowed"
 - 500 "Internal Server Error", 101 "Switching Protocols"
 
-### HTTP Server Accept Loop (`march_http_server_listen`, lines 747-798)
+### HTTP Server Accept Loop (`march_http_server_listen`)
 
 **Architecture**:
-- Thread-per-connection model using POSIX threads
-- Main thread runs `select()` with 1-second timeout on listening socket
-- Worker thread spawned for each accepted connection
+- **Default: event loop** (`runtime/march_http_evloop.c`, `march_evloop_server_listen`). `march_http_server_listen` dispatches here when built with `MARCH_HTTP_USE_EVLOOP` (the default). It uses **kqueue (macOS/BSD) / epoll (Linux)** with one thread per core, each thread owning a private `SO_REUSEPORT` listener fd and its own event loop that accepts, reads (non-blocking, see `march_http_io.c`), runs the pipeline, and writes the response.
+- **Fallback: thread-per-connection** with a bounded work queue (`runtime/march_http.c`). Used only when the event loop is not compiled in. The earlier "main thread runs `select()` with a 1-second timeout, one detached worker thread per connection" description applied to this fallback path, not the default.
+- **Keep-alive** is supported: `detect_keep_alive` / `march_detect_keep_alive_simd` (`march_http.c`) inspect the request's `Connection` header so a connection can serve multiple requests.
 
 **Connection Handler** (`connection_thread`, lines 584-745):
 1. Read raw HTTP request via `march_tcp_recv_http`
@@ -248,6 +253,16 @@ All heavy lifting is in C for performance. March code calls these builtins which
 - Groups bytes into 4 base64 chars
 - Handles partial groups with padding
 - Used for Sec-WebSocket-Accept header
+
+### TLS / HTTPS (`runtime/march_tls.c`)
+
+HTTPS is supported via an **OpenSSL-backed TLS layer**:
+- `march_tls_client_ctx` / `march_tls_server_ctx` — create SSL contexts
+- `march_tls_connect(fd, ctx, hostname)` — wrap a connected socket as a TLS client (SNI via `hostname`)
+- `march_tls_accept(fd, ctx)` — wrap an accepted socket as a TLS server
+- `march_tls_read` / `march_tls_write` — TLS I/O
+
+These are wired into the compiler in `lib/tir/llvm_emit.ml` (`mangle_extern` maps `tls_connect → march_tls_connect`, `tls_accept → march_tls_accept`, etc.). On the stdlib side, `stdlib/http_transport.march` deliberately refuses `https://` requests with `SchemeNotSupported` and directs callers to the **`Tls` module** (`stdlib/tls.march`), which provides `Tls.connect` and `Tls.https_get` and routes `https://` traffic through the TLS runtime.
 
 ## Heap Object Layout
 
@@ -372,11 +387,14 @@ Performance benchmarks under `bench/`:
 
 ### Server Connection Management
 
-**Per-Connection Thread**:
-- Listen thread accepts connections
-- Worker thread created for each connection
-- Worker reads 1 request, runs pipeline, sends response, closes
-- Detached thread (not joined by main thread)
+**Default (event loop, `march_http_evloop.c`)**:
+- One event-loop thread per core, each with its own `SO_REUSEPORT` listener and kqueue/epoll instance
+- Non-blocking accept + read; complete requests are detected by the I/O state machine (`march_http_io.c`)
+- Keep-alive connections are kept registered in the event loop and serve multiple requests (`march_detect_keep_alive_simd`)
+
+**Fallback (thread-per-connection, `march_http.c`)**:
+- A worker handles a connection off a bounded work queue, runs the pipeline, sends the response
+- Used only when the event loop is not compiled in
 
 **Pipeline Halting**:
 - Pipeline stops at first plug that halts the connection
@@ -385,23 +403,16 @@ Performance benchmarks under `bench/`:
 
 ## Known Limitations
 
-1. **HTTP/1.0 Only**: No HTTP/1.1 Expect/Continue, no persistent connection support in some layers
-2. **No HTTPS/TLS**: Only HTTP/plain WebSocket (no wss://)
-3. **Single-Request Per Connection (Server)**: HTTP server only handles one request per connection thread, then closes
-4. **No HTTP/2**: No multiplexing
-5. **WebSocket Frame Size**: Limited to 16MB per frame
-6. **No Trailers**: HTTP/1.1 trailers not supported
-7. **No 100-Continue**: Expect header not handled
-8. **No Proxy Support**: No CONNECT method or proxy-related handling
+1. **No HTTP/2**: No multiplexing
+2. **WebSocket Frame Size**: Limited to 16MB per frame
+3. **No Trailers**: HTTP/1.1 trailers not supported
+4. **No Proxy Support**: No CONNECT method or proxy-related handling
+5. **TLS client-side focus**: `march_tls.c` provides both `march_tls_connect` (client) and `march_tls_accept` (server); the high-level stdlib surface is primarily client-oriented (`Tls.https_get` / `Tls.connect`)
 
 ## Future Enhancements
 
-- HTTP/1.1 persistent connections in server
-- HTTPS/TLS support
 - HTTP/2 multiplexing
-- HTTP compression (gzip, brotli)
-- WebSocket compression
-- Request timeouts
+- WebSocket compression (HTTP compression via `march_compress.c` already exists)
 - Request body streaming in server
 
 ## Source File Reference
@@ -413,8 +424,14 @@ Performance benchmarks under `bench/`:
 | `stdlib/http_client.march` | Layer 3: Composable client pipeline | 1-441 |
 | `stdlib/http_server.march` | Server with Plug middleware | 1-234 |
 | `stdlib/websocket.march` | WebSocket frame types and API | 1-53 |
-| `runtime/march_http.c` | C builtins for HTTP/WebSocket | 1-1131 |
-| `runtime/march_http.h` | C API declarations | 1-101 |
+| `stdlib/tls.march` | `Tls` module — `Tls.connect`, `Tls.https_get` | 1- |
+| `runtime/march_http.c` | TCP, request reception, fallback thread-per-conn loop, keep-alive detection | — |
+| `runtime/march_http_evloop.c` | Default event-loop server (kqueue/epoll) | — |
+| `runtime/march_http_parse_simd.c` | SIMD HTTP/1.x request parser | — |
+| `runtime/march_http_io.c` | Non-blocking I/O state machines | — |
+| `runtime/march_http_response.c` | Zero-copy HTTP/1.1 response builder | — |
+| `runtime/march_tls.c` | OpenSSL TLS (`march_tls_connect`/`accept`) | — |
+| `runtime/march_http.h` | C API declarations | — |
 | `runtime/sha1.c` | SHA-1 for WebSocket handshake | 1-72 |
 | `runtime/base64.c` | Base64 for WebSocket | 1-50 |
 | `lib/tir/llvm_emit.ml` | LLVM code generation | 268-279, 1432-1443 |
@@ -451,18 +468,19 @@ HttpClient.run()
 
 ```
 march_http_server_listen()
-  └─ [select loop]
-     └─ march_tcp_accept()
-        └─ [spawn worker thread]
-           ├─ march_tcp_recv_http()
-           ├─ march_http_parse_request()
-           ├─ [build Conn]
-           ├─ [call pipeline closure]
-           ├─ [extract Conn fields]
-           ├─ march_http_serialize_response()
-           ├─ march_tcp_send_all()
-           └─ close(fd)
+  └─ march_evloop_server_listen()   [default: kqueue/epoll, one thread per core]
+     └─ [event-loop thread]
+        ├─ accept() (non-blocking)
+        ├─ march_recv_nonblocking()        [march_http_io.c]
+        ├─ SIMD parse                       [march_http_parse_simd.c]
+        ├─ [build Conn]
+        ├─ [call pipeline closure]
+        ├─ [extract Conn fields]
+        ├─ response builder                 [march_http_response.c]
+        ├─ write()
+        └─ keep-alive? re-arm : close(fd)   [march_detect_keep_alive_simd]
 ```
+(Fallback path in `march_http.c` uses a thread per connection off a bounded work queue.)
 
 ### WebSocket Upgrade
 
@@ -500,7 +518,4 @@ WebSocket can multiplex on actor notification pipes:
 
 ### With Threads
 
-HTTP server spawns detached threads per connection:
-- No thread pooling (unbounded connections)
-- Each thread independent (no shared state except pipeline closure)
-- Potential for resource exhaustion (TODO: max_conns enforcement)
+The default event-loop server uses a fixed set of threads (one per core), each draining its own kqueue/epoll — connection count is bounded by fd limits, not by thread count. The fallback thread-per-connection path uses a bounded work queue. The pipeline closure is shared (reference-counted) across threads in both modes.

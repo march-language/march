@@ -554,7 +554,9 @@ let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
 
 ## Test Coverage
 
-### REPL Tests (`test/test_march.ml:1700-1800+`)
+### REPL Tests (`test/test_compiler.ml`)
+
+> **Note.** `test/test_march.ml` no longer exists — the suite was split into per-area files run via the `run_*.ml` drivers; REPL/parity tests now live in `test/test_compiler.ml`. Line ranges below are historical.
 
 **Multiline Completion**:
 - `test_do_end_depth()`: do/end nesting

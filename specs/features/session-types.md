@@ -47,13 +47,13 @@ and session_ty =
 ### Surface syntax (AST, `lib/ast/ast.ml`)
 
 ```march
-protocol Echo between Alice, Bob do
+protocol Echo do
   Alice -> Bob : String
   Bob -> Alice : String
 end
 ```
 
-Parsed into `Ast.protocol_def` with `proto_steps` listing each interaction.
+The grammar is `PROTOCOL upper_name DO protocol_step* END` (see `lib/parser/parser.mly`). There is **no `between Role, Role`** clause — roles are inferred from the `Role -> Role : Type` steps. Parsed into `Ast.protocol_def` with `proto_steps` listing each interaction.
 
 ---
 
@@ -141,35 +141,39 @@ result: TTuple [Atom; TLin(Linear, TChan(ref S_chosen))]
 ### `VChan` value
 
 ```ocaml
-type chan_endpoint = {
-  ce_proto : string;       (* protocol name *)
-  ce_id    : int;          (* unique channel pair id *)
-  ce_role  : string;       (* which role this endpoint is *)
-  ce_state : session_ty ref; (* current local session state, mutable *)
-  ce_buf   : value Queue.t;  (* shared message buffer between endpoints *)
-  ce_closed: bool ref;
+and chan_endpoint = {
+  ce_id      : int;           (* globally unique channel id *)
+  ce_role    : string;        (* which side of the protocol this is *)
+  ce_proto   : string;        (* protocol name, for runtime error messages *)
+  mutable ce_closed : bool;
+  ce_out_q   : value Queue.t; (* values this endpoint puts out (other side reads) *)
+  ce_in_q    : value Queue.t; (* values this endpoint receives (other side wrote) *)
 }
 ```
 
-Channels are created in pairs sharing the same `ce_buf`. `Chan.send` enqueues; `Chan.recv` dequeues. The session state is advanced on each operation and checked for protocol conformance at runtime (belt-and-suspenders over compile-time checking).
+Channels are created in pairs of **two linked endpoints**, where one endpoint's `ce_out_q` is the other's `ce_in_q` (two directional queues, not a single shared buffer). `Chan.send` enqueues into `ce_out_q`; `Chan.recv` dequeues from `ce_in_q`.
+
+There is **no `ce_state` field** — the interpreter does **not** track or advance the session type at runtime. Session safety (correct send/recv order, no use-after-close) is enforced entirely at **compile time** by the type checker. The runtime endpoint carries only the protocol/role names (for error messages), the closed flag, and the two queues. `Chan.close` marks `ce_closed`; the compile-time check guarantees the endpoint was at `SEnd`.
 
 ### Builtins registered in `base_env` (`lib/eval/eval.ml:~3213`)
 
 | Builtin | Behavior |
 |---------|----------|
-| `Chan.new` | Creates dual `VChan` endpoints |
-| `Chan.send` | Enqueues value, advances state, returns new endpoint |
-| `Chan.recv` | Dequeues value (blocks if empty), returns `(val, new_endpoint)` |
-| `Chan.close` | Marks endpoint closed, errors if state ≠ `SEnd` |
-| `Chan.choose` | Sends label, advances state to selected branch |
-| `Chan.offer` | Receives label, advances state to selected branch |
+| `Chan.new` | Creates the dual `VChan` endpoints (linked `ce_out_q`/`ce_in_q`) |
+| `Chan.send` | Enqueues value into `ce_out_q`, returns the (same) endpoint |
+| `Chan.recv` | Dequeues value from `ce_in_q` (errors if empty), returns `(val, endpoint)` |
+| `Chan.close` | Sets `ce_closed` |
+| `Chan.choose` | Sends a label (enqueues a chosen-branch marker) |
+| `Chan.offer` | Receives a label |
+
+Note: the interpreter does not re-check protocol conformance at runtime; the type checker has already verified the send/recv ordering statically.
 
 ---
 
 ## 5. Example
 
 ```march
-protocol Ping between Client, Server do
+protocol Ping do
   Client -> Server : String  -- the ping message
   Server -> Client : String  -- the pong reply
 end

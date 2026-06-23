@@ -1,8 +1,21 @@
 # March Standard Library Documentation
 
+> **⚠️ HISTORICAL SNAPSHOT — NOT THE CURRENT REFERENCE.**
+> This document is a frozen 21-module snapshot from March 2026. The standard
+> library has since grown to **98 modules** (`ls stdlib/*.march | wc -l`), so the
+> counts and module list below no longer reflect current truth.
+>
+> **The canonical, up-to-date stdlib reference is the generated docs at
+> `docs/docs/stdlib/`** (published to `/docs/stdlib/`). For ad-hoc lookups of
+> functions, types, and modules, run `forge search "<name>"`. Treat the content
+> below as historical context only.
+
 ## Overview
 
-The March standard library consists of **21 modules** totaling **~4,894 lines of code** (as of March 22, 2026). The library is auto-loaded by the compiler into every March program and provides:
+> Historical note: figures in this section describe the March 2026 snapshot (21 modules). <!-- doc-lint:ignore-count -->
+> The current stdlib has 98 modules — see `docs/docs/stdlib/` for the live reference.
+
+The March standard library consisted of **21 modules** totaling **~4,894 lines of code** (as of March 22, 2026). <!-- doc-lint:ignore-count --> The library is auto-loaded by the compiler into every March program and provides:
 
 **Implementation:** `stdlib/` directory — see `bin/main.ml` for load order
 
@@ -1216,7 +1229,7 @@ iterable.march → (placeholder; no deps)
 
 ## Testing
 
-**Test file**: `test/test_march.ml` (82,702 tokens; contains stdlib-specific tests for List, String, Sort, Enum, Option, Result, Math)
+**Test files**: stdlib tests run via the `test/run_stdlib.ml` driver over `test/test_stdlib_suite.ml` (and `test/test_stdlib_march.ml` for March-native suites). The monolithic `test/test_march.ml` referenced in older revisions no longer exists — the suite was split into per-area files.
 
 **Benchmarks**: `bench/` directory includes performance benchmarks for:
 - Sort algorithms: insertion_sort, mergesort, timsort, introsort, alphadev_sort
@@ -1251,12 +1264,15 @@ All other modules are wrapped in `DMod` so they're accessible as module-qualifie
 
 ## Version Information
 
+> Historical snapshot figures. Current stdlib is **98 modules** — see
+> `docs/docs/stdlib/` for the live reference, or `forge search`.
+
 - **Snapshot date**: March 20, 2026
-- **Total stdlib lines**: 4,512
-- **Number of modules**: 21
-- **Number of public functions**: ~250+
-- **Number of types**: ~30+ (including built-ins)
-- **C runtime dependencies**: 50+ functions
+- **Total stdlib lines (snapshot)**: 4,512
+- **Number of modules (snapshot)**: 21 (current: 98 — see `docs/docs/stdlib/`)
+- **Number of public functions (snapshot)**: ~250+
+- **Number of types (snapshot)**: ~30+ (including built-ins)
+- **C runtime dependencies (snapshot)**: 50+ functions
 
 ---
 

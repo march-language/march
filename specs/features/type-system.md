@@ -8,8 +8,9 @@
 March implements a **bidirectional Hindley-Milner type system** with three major extensions:
 
 1. **Linear/Affine Type Tracking** — constrains use of values to exactly once (linear) or at most once (affine)
-2. **Type-Level Naturals** — support for `Vec[T, N]` and other dependent types via arithmetic at the type level
-3. **Provenance-Driven Error Reporting** — errors carry "reason chains" explaining *why* a type was expected
+2. **Type-Level Naturals** — support for `Vec[T, N]` and other dependent types via arithmetic at the type level (reduced by `normalize_tnat`)
+3. **Refinement Types** — `{ x : T | predicate }` types checked by an SMT (Z3) backend (`lib/refinecheck/`, `lib/refine/`)
+4. **Provenance-Driven Error Reporting** — errors carry "reason chains" explaining *why* a type was expected
 
 The type checker is implemented in two stages:
 - **Type Checking** (`lib/typecheck/typecheck.ml`) — bidirectional inference with HM polymorphism
@@ -23,16 +24,18 @@ The type checker is implemented in two stages:
 
 | Component | File | Lines | Purpose |
 |-----------|------|-------|---------|
-| Type Checker | `lib/typecheck/typecheck.ml` | 3389 | Bidirectional HM inference, linearity, session types, interfaces |
-| TIR Definition | `lib/tir/tir.ml` | ~120 | Monomorphic, ANF-based IR |
-| Monomorphization | `lib/tir/mono.ml` | 315 | Specializes polymorphic functions |
-| AST & Types | `lib/ast/ast.ml` | ~320 | Surface syntax, type representations, session types |
-| Error Reporting | `lib/errors/errors.ml` | 90 | Diagnostic context and rendering |
-| Evaluation | `lib/eval/eval.ml` | 4567 | Runtime including Chan.send/recv/close eval |
+| Type Checker | `lib/typecheck/typecheck.ml` | ~7700 | Bidirectional HM inference, linearity, session types, interfaces, exhaustiveness, capability `needs` |
+| Refinement Checker | `lib/refinecheck/refine_check.ml` | ~1069 | Z3-backed refinement-type verification (post-typecheck) |
+| SMT Bridge | `lib/refine/` | — | `smt.ml`, `solver.ml`, `model.ml`, `vc_cache.ml` |
+| TIR Definition | `lib/tir/tir.ml` | — | Monomorphic, ANF-based IR |
+| Monomorphization | `lib/tir/mono.ml` | — | Specializes polymorphic functions |
+| AST & Types | `lib/ast/ast.ml` | — | Surface syntax, type representations (incl. `TyRefine`), session types |
+| Error Reporting | `lib/errors/errors.ml` | — | Diagnostic context and rendering |
+| Evaluation | `lib/eval/eval.ml` | ~8900 | Runtime including Chan.send/recv/close eval |
 
 ### Design Sections in typecheck.ml
 
-The type checker is organized into 16+ sections (file is 3389 lines):
+The type checker is organized into 16+ sections (file is ~7700 lines):
 
 1. **§1 Provenance** (lines 35–70) — `reason` type for error context
 2. **§2 Internal Type Representation** (lines 71–107) — `ty`, `tvar`, `scheme`, `constraint_`, `session_ty`, `TChan`
@@ -229,12 +232,45 @@ fn dot_product(v1: Vec(Int, 3), v2: Vec(Int, 3)) : Int
 
 Allows compile-time verification that operand dimensions match.
 
+### Normalization
+
+Type-level naturals are **live**, not a placeholder. `normalize_tnat` (in `lib/typecheck/typecheck.ml`) reduces `TNatOp` expressions using the arithmetic and identity laws:
+
+- `TNat m + TNat n → TNat (m + n)`; `TNat m * TNat n → TNat (m * n)`
+- Identity laws: `t + 0 → t`, `0 + t → t`, `t * 1 → t`, `1 * t → t`, `t * 0 → 0`, `0 * t → 0`
+
+Both operands are normalized recursively before unification, so e.g. `Vec(Int, 1 + 2)` and `Vec(Int, 3)` unify. There is also limited partial solving in unification: e.g. `NatAdd(TVar, TNat k)` against `TNat n` (with `n ≥ k`) can bind the variable.
+
 ### Limitations
 
-- **Arithmetic is not simplified** — `1 + 2` does not reduce to `3` at type-check time
-- **No constraint solving** — the unifier does not solve equations like `N + 1 = 3` for `N`
+- **No general constraint solving** — beyond the partial cases above, the unifier does not solve arbitrary equations
 - **No dependent pattern matching** — cannot match on natural structure in patterns
-- Primarily a **placeholder** for future dependent-type extensions (Coq-style)
+- Used today mainly for fixed-size types (`Vec(T, N)`); broader dependent-type extensions are future work
+
+---
+
+## 4b. Refinement Types
+
+Refinement types are **implemented** as a post-typecheck verification pass backed by an SMT solver.
+
+### Surface and AST
+
+A refinement type is `{ x : BaseType | predicate }`, represented in the AST as `Ast.TyRefine of ty * name option * expr` — a base type, an optional binder name, and a boolean predicate expression over that binder.
+
+### Pipeline placement
+
+After `Typecheck.check_module`, `bin/main.ml` calls `Refine_check.check_module ~measure_axioms errors desugared` (`lib/refinecheck/refine_check.ml`, ~1069 lines). This pass:
+
+1. Collects refinement predicates from function signatures and bindings
+2. Generates verification conditions (VCs) for each obligation (e.g., a call site must satisfy the callee's argument refinement; a function body must establish its return refinement)
+3. Discharges VCs through the Z3 bridge in `lib/refine/` (`smt.ml`, `solver.ml`, `model.ml`, `vc_cache.ml`)
+4. Supports user-declared **measure axioms** (`~measure_axioms`) — e.g. `measure len(list)` — that are asserted to the solver as background facts
+
+Failed VCs are reported as diagnostics. The VC cache (`vc_cache.ml`) avoids re-solving unchanged obligations.
+
+### Tests
+
+`test/test_refinecheck.ml` exercises the refinement checker end-to-end; `test/test_refine.ml` covers the SMT bridge. There are on the order of 46–51 refinement tests.
 
 ---
 
@@ -484,7 +520,9 @@ let io_cap_hierarchy = [
 
 ## 10. Testing & Coverage
 
-### Test File: `test/test_march.ml`
+### Test Files: `test/test_compiler.ml` (+ `test/test_refinecheck.ml`, `test/test_refine.ml`)
+
+> **Note.** `test/test_march.ml` no longer exists; the alcotest suite was split into per-area files (`test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml`, …). Type-system tests live in `test/test_compiler.ml`; refinement tests in `test/test_refinecheck.ml` and `test/test_refine.ml`. Line ranges below are approximate / historical.
 
 Key type-system test categories:
 
@@ -533,9 +571,9 @@ Tests that the `type_map` (expression → type mapping) is populated for all sub
    - Interface constraints are now discharged via `CInterface` constraint variant
    - `when Eq(a)` clauses are verified at call sites
 
-2. **No constraint simplification**
-   - Type-level naturals like `1 + 2` are not evaluated to `3`
-   - No solving of linear equations (e.g., `N + 1 = 5` for `N`)
+2. **Limited constraint solving**
+   - Type-level naturals like `1 + 2` **are** evaluated to `3` (`normalize_tnat`); identity laws are applied
+   - General solving of linear equations (e.g., `N + 1 = 5` for `N`) is not implemented; only specific partial cases are handled in unification
 
 3. **Linearity not propagated through records**
    - Fields marked `linear` in record definitions don't enforce consumption
@@ -595,7 +633,8 @@ Tests that the `type_map` (expression → type mapping) is populated for all sub
 - Unification with occurs check and level-based generalization
 - Linear/affine type tracking with enforcement
 - Polymorphic operator overloading (Num, Ord)
-- Type-level naturals (parsed, unified, but not solved)
+- Type-level naturals (parsed, unified, and reduced via `normalize_tnat`)
+- Refinement types (`{ x : T | pred }`) verified by the Z3-backed `Refine_check` pass (`lib/refinecheck/`, `lib/refine/`)
 - Monomorphization with name mangling
 - Comprehensive built-in library types and functions
 - Provenance-driven error reporting with reason chains
@@ -765,11 +804,12 @@ String does not implement Num (only Int and Float do).
 
 ## References
 
-- **Type Checker:** `lib/typecheck/typecheck.ml` (2006 lines, 16 sections)
+- **Type Checker:** `lib/typecheck/typecheck.ml` (~7700 lines, 16 sections)
+- **Refinement Checker:** `lib/refinecheck/refine_check.ml` + `lib/refine/` (Z3 bridge)
 - **TIR Definition:** `lib/tir/tir.ml` (monomorphic IR types)
 - **Monomorphization:** `lib/tir/mono.ml` (specialization algorithm)
-- **Tests:** `test/test_march.ml` (1300+ lines, type system tests at ~1020+)
-- **AST Types:** `lib/ast/ast.ml` (surface syntax, including type expressions)
+- **Tests:** `test/test_compiler.ml` (type-system tests), `test/test_refinecheck.ml` / `test/test_refine.ml` (refinement)
+- **AST Types:** `lib/ast/ast.ml` (surface syntax, including type expressions and `TyRefine`)
 - **Error System:** `lib/errors/errors.ml` (diagnostic reporting)
 
 ---
@@ -778,4 +818,4 @@ String does not implement Num (only Int and Float do).
 **Last Verified:** March 22, 2026
 **Maintainer:** Type System Team
 
-**Implementation:** `lib/typecheck/typecheck.ml` (3389 lines), `lib/ast/ast.ml`, `lib/tir/mono.ml`
+**Implementation:** `lib/typecheck/typecheck.ml` (~7700 lines), `lib/refinecheck/refine_check.ml`, `lib/refine/`, `lib/ast/ast.ml`, `lib/tir/mono.ml`

@@ -367,25 +367,8 @@ forge search "" --json > out.json              # JSON output
 forge search sort --rebuild                    # force index rebuild
 forge search map --limit 5
 
-# Bastion web framework
-forge bastion new my_app         # scaffold Bastion web app
-forge bastion server             # dev server (default port 4000)
-forge bastion server --port 8080
-forge bastion routes             # list all routes
-forge bastion gen schema User users name:string email:string age:int
-
-# Database migrations (Depot)
-forge depot migrate              # apply pending migrations
-forge depot rollback             # rollback last
-forge depot rollback --step 3
-forge depot migrations           # show migration status
-forge depot reset                # rollback all, re-apply
-forge depot gen migration create_users
-
-# Asset pipeline
-forge assets build               # bundle for dev
-forge assets deploy              # bundle + minify for production
-forge assets watch               # watch and rebuild
+# Benchmarks
+forge bench                      # compile and run benchmarks under bench/
 
 # Compiler inspection
 forge phases                     # serve phase viewer at localhost:7777
@@ -425,18 +408,14 @@ forge search "" --doc "sort stable"
 forge search fold --type "List" --doc "accumulator"
 ```
 
-### Direct compiler search (no forge)
-
-```bash
-dune exec march -- -search "String -> Int"
-dune exec march -- -search "filter"
-```
+Search is forge-only — there is no `-search` flag on the `march` compiler.
 
 ---
 
 ## 5. Stdlib Manifest
 
-All 76 stdlib modules loaded by `bin/main.ml`:
+98 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
 
@@ -579,51 +558,43 @@ Functions always in scope without `use`:
 
 **Iterable** — `fold`
 
-### Web Framework (Bastion)
+### HTML / Markup
 
 **Html** — `escape`, `raw`, `safe_to_string`, `list`, `join`, `escape_attr`, `tag`, `render_partial`, `render_collection`, `layout`, `content_hash`
 
-**Sigil** — `h(content)` (safe HTML)
+**Sigil** — `h` (safe HTML), `toml`, `xml`, `yaml`
 
-**Islands** — `wrap`, `wrap_with_dataflow`, `wrap_eager`, `client_only`, `wrap_with_css`, `bootstrap_script`, `preload_hint`, `empty_registry`, `register`, `registry_descriptors`, `find_island`
+### Data Formats
 
-**CSRF** — `generate_token`, `token`, `ensure_token`, `tag`, `tag_string`, `validate`, `protect`, `skip`
+**TOML** — `parse`, `parse_exn`, `to_string`, `get`, `get_in`, `get_str`, `get_int`, `get_float`, `get_bool`, `get_table`, `get_array`
 
-**Session** — `new`, `load`, `save`, `save_with_opts`, `get`, `put`, `delete`, `clear`, `put_flash`, `get_flash`, `initialized`, `all`
+**YAML** — `parse`, `parse_exn`, `to_string`, `get`, `get_in`, `get_str`, `get_int`, `get_bool`, `get_seq`
 
-**Bastion** — `etag`, `cached`, `fragment`, `invalidate`, `cache_control`, `no_cache`, `public_cache`, `path`, `serve`, `static_path`, `js_bundle_path`, `css_bundle_path`, `error_tag`
+**XML** — `parse`, `parse_exn`, `to_string`, `to_string_pretty`, `root`, `tag`, `text`, `attr`, `children`, `elements`, `find`, `find_all`
 
-**BastionCookies** — `default_opts`, `put_signed`, `get_signed`, `put_encrypted`, `get_encrypted`, `delete`
+**MsgPack** — `encode`, `decode`, `decode_all` (constructors: `null`, `bool`, `int`, `str`, `bin`, `array`, `map`)
 
-**BastionCSP** — `assign_nonce`, `get_nonce`, `protect`, `protect_with_overrides`, `disable`, `report_only`
+**Compress** — `encode`, `encode_level`, `decode`, `encode_stream`, `decode_stream`, `accept_encoding`, `best_encoding`
 
-**BastionRoutes** — `register`, `all`, `path`, `static_path`, `path1`, `path2`
+**DNS** — `resolve`, `resolve_one`, `is_ip`, `error_message`
 
-**BastionPubSub** — `subscribe`, `broadcast`, `broadcast_from`, `local_broadcast_sync`, `inbox`
+### Distributed / OTP
 
-**BastionTelemetry** — `attach`, `detach`, `execute`, `recent_events`, `start`, `record`, `counters`
+**Gen** (property-test value generators, QuickCheck-style) — `int`, `int_sized`, `bool`, `float`, `element`, `map`, `bind`, `filter`, `one_of`, `frequency`, `tuple`, `option`, `list`, `list_of_size`, `string`, `string_of`, `sized`
 
-**BastionDev** — `request_timer`, `finish_timer`, `server_timing`, `conn_inspector`, `live_reload_script`, `inject_live_reload`, `live_reload_handler`, `error_overlay`, `dashboard_handler`
+**ClusterConn** / **ClusterAuth** / **NetKernel** / **NodeCall** / **NodeRpc** — node connection, RPC, and auth primitives for multi-node clusters
 
-**BastionHotDeploy** — `default_config`, `get_status`, `is_draining`, `start_drain`, `increment_in_flight`, `decrement_in_flight`, `health_status`, `drain_response`
+**GlobalRegistry** / **GlobalPid** — cluster-wide process registration and lookup
 
-**BastionIdempotency** — `get_key`, `lookup`, `mark_in_progress`, `complete_entry`, `replay_response`, `protect`
+**Swim** / **SwimDriver** / **Membership** — SWIM gossip membership protocol
 
-**BastionTestSandbox** — `checkout`, `release`, `vault_get`, `build_conn`, `build_conn_full`, `is_active`, `active_count`
+**CRDT** / **VectorClock** / **Merkle** — conflict-free replicated data types, causal clocks, Merkle trees for anti-entropy
 
-### Database (Depot)
+**ConsistentHash** / **PeerRegistry** / **RingBuf** — consistent hashing, peer tracking, ring buffers
 
-**Depot.Schema** — `field`, `references`, `timestamps`
+### Additional Collections
 
-**Depot.Repo** — `insert`, `update`, `delete`, `get`, `list`
-
-**Depot.Query** — `where`, `select`, `order_by`, `limit`, `offset`
-
-**Depot.Migration** — `up`, `down`
-
-**Depot.Gate** — `build`, `allow`, `deny`
-
-**Depot.Test** — `start_sandbox`, `checkout`, `checkin`, `stop_sandbox`, `sandboxed`, `active`
+**Deque** — `empty`, `singleton`, `is_empty`, `size`, `push_front`, `push_back`, `peek_front`, `peek_back`, `pop_front`, `pop_back`, `to_list`, `from_list`, `map`, `filter`, `fold_left`, `fold_right`, `concat`, `any`, `all`
 
 ### Testing
 
@@ -760,14 +731,14 @@ end
 ```march
 actor Counter do
   state { value : Int }
-  init { value = 0 }
+  init { value: 0 }
 
   on Increment(n : Int) do
-    { state with value = state.value + n }
+    { state with value: state.value + n }
   end
 
   on Reset() do
-    { state with value = 0 }
+    { state with value: 0 }
   end
 end
 
@@ -1026,7 +997,7 @@ Source → Lexer → Parser → Desugar → Typecheck
 ```
 
 Key files:
-- `bin/main.ml` — entry point, stdlib loading, CLI flags (`-search`, `-compile`, etc.)
+- `bin/main.ml` — entry point, stdlib loading, CLI flags (`--compile`, etc.)
 - `lib/ast/ast.ml` — AST types: `span`, `expr`, `pattern`, `decl`
 - `lib/errors/errors.ml` — `Error`/`Warning`/`Hint` diagnostic type with span
 - `lib/search/search.ml` — Hoogle-style search engine
@@ -1036,7 +1007,9 @@ Key files:
 
 ## 9. Testing Patterns
 
-### Test file structure (`test/test_march.ml`, ~19k lines, Alcotest)
+### Test file structure (Alcotest)
+
+The OCaml test suites live under `test/`, split by area: `test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml`, run via the `run_compiler.ml` / `run_eval.ml` / `run_codegen.ml` / `run_stdlib.ml` drivers. (An older monolithic `test/test_march.ml` no longer exists.)
 
 ```ocaml
 (* Helper functions *)
@@ -1079,7 +1052,7 @@ let test_eval_fib () =
 
 ### How to add a test
 
-1. Write `let test_my_feature () = ...` in `test/test_march.ml`
+1. Write `let test_my_feature () = ...` in the relevant `test/test_*.ml` (e.g. `test_compiler.ml`)
 2. Add to the test list at the bottom:
    ```ocaml
    ("category", [
@@ -1114,12 +1087,12 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     87 March stdlib modules
+stdlib/                     98 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server
-test/test_march.ml          alcotest suite (~19k lines)
+test/                       alcotest suites (run_*.ml drivers over test_*.ml)
 specs/                      design specs, progress tracking
-bench/                      benchmark .march programs (47 files)
-examples/                   example .march programs (56 files)
+bench/                      benchmark .march programs (28 files)
+examples/                   example .march programs (30 files)
 ```

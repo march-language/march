@@ -124,24 +124,37 @@ Define a protocol:
 
 ```march
 protocol Transfer do
-  Client -> Server : Request(String)
-  Server -> Client : Response(Int)
+  Client -> Server : Int
+  Server -> Client : Int
 end
 ```
 
-Using a session channel:
+A channel endpoint is typed `Chan(Role, Protocol)`. Each operation consumes
+the current endpoint and returns a continuation typed at the next protocol
+step:
 
 ```march
-fn client_side(send_ch : Send(String), recv_ch : Recv(Int)) do
-  linear let s = send_ch
-  linear let r = recv_ch
-  let s2 = Chan.send(s, "query")   -- s consumed, returns continuation
-  let (result, _) = Chan.recv(r)   -- r consumed, returns (value, continuation)
-  println("result: " ++ int_to_string(result))
+fn client_side(ch : Chan(Client, Transfer)) : Int do
+  let ch2 = Chan.send(ch, 42)        -- send consumes ch, returns continuation
+  let (result, ch3) = Chan.recv(ch2) -- recv returns (value, continuation)
+  Chan.close(ch3)
+  result
 end
 ```
 
-The channel handles are linear — each `send`/`recv` operation consumes the old handle and returns a new one representing the next step of the protocol. The compiler verifies the full protocol is followed.
+The server side mirrors this with the dual sequence (`recv` then `send`):
+
+```march
+fn server_side(ch : Chan(Server, Transfer)) : () do
+  let (n, ch2) = Chan.recv(ch)
+  let ch3 = Chan.send(ch2, n * 2)
+  Chan.close(ch3)
+end
+```
+
+The channel endpoints are linear — each `Chan.send`/`Chan.recv` operation
+consumes the old endpoint and returns a new one representing the next step of
+the protocol. The compiler verifies the full protocol is followed.
 
 ---
 

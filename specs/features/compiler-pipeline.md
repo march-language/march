@@ -20,31 +20,45 @@ Source Code
     ↓
 [Desugaring] (lib/desugar/desugar.ml:1-263)
     ↓
-[Type Checking] (lib/typecheck/typecheck.ml:1-3389)
+[Type Checking] (lib/typecheck/typecheck.ml — Typecheck.check_module / check_module_full)
     ↓
-[Session Type Verification] (lib/typecheck/typecheck.ml: infer_expr Chan.* cases + project_protocol)
+[Session Type Verification] (typecheck.ml: infer_expr Chan.* cases + project_protocol)
     ↓
-[AST → TIR Lowering] (lib/tir/lower.ml:1-1277)
+[Refinement Check] (lib/refinecheck/refine_check.ml — Refine_check.check_module, post-typecheck)
     ↓
-[Monomorphization] (lib/tir/mono.ml:1-315)
+[AST → TIR Lowering] (lib/tir/lower.ml — Lower.lower_module)
     ↓
-[Defunctionalization] (lib/tir/defun.ml:1-373)
+[Monomorphization] (lib/tir/mono.ml — Mono.monomorphize)
     ↓
-[Escape Analysis] (lib/tir/escape.ml:1-279)
+[Fusion] (lib/tir/fusion.ml — Fusion.run)
     ↓
-[Perceus RC Analysis] (lib/tir/perceus.ml:1-523)
+[Defunctionalization] (lib/tir/defun.ml — Defun.defunctionalize)
     ↓
-[Optimization Loop] (lib/tir/opt.ml:1-19)  ← fixed-point over passes
-  ├─ [Inlining] (lib/tir/inline.ml:1-179)
-  ├─ [Constant Folding] (lib/tir/fold.ml:1-91)
-  ├─ [Simplification] (lib/tir/simplify.ml:1-107)
-  ├─ [Dead Code Elimination] (lib/tir/dce.ml:1-130)
-  └─ [Purity Analysis] (lib/tir/purity.ml:1-25)  ← gates inlining decisions
+[Known-call] (lib/tir/known_call.ml — Known_call.run)   ← before Perceus
     ↓
-[LLVM IR Emission] (lib/tir/llvm_emit.ml:1-2021)
+[Beta-ADT] (lib/tir/beta_adt.ml — Beta_adt.run)         ← before Perceus
     ↓
-[Code Generation] (lib/codegen/codegen.ml:1-10)  ← thin shim, clang invoked from bin/main.ml
+[Join points (pre)] (lib/tir/join_points.ml — Join_points.run_pre)
+    ↓
+[Perceus RC Analysis] (lib/tir/perceus.ml — Perceus.perceus)
+    ↓
+[Escape Analysis] (lib/tir/escape.ml — Escape.escape_analysis)   ← AFTER Perceus
+    ↓
+[Optimization Loop] (lib/tir/opt.ml)  ← fixed-point over passes
+  ├─ [Inlining] (lib/tir/inline.ml)
+  ├─ [Constant Folding] (lib/tir/fold.ml)
+  ├─ [Simplification] (lib/tir/simplify.ml)
+  ├─ [Dead Code Elimination] (lib/tir/dce.ml)
+  └─ [Purity Analysis] (lib/tir/purity.ml)  ← gates inlining decisions
+    ↓
+[LLVM IR Emission] (lib/tir/llvm_emit.ml — Llvm_emit.emit_module)
+    ↓
+[Code Generation] (lib/codegen/codegen.ml)  ← thin shim, clang invoked from bin/main.ml
 ```
+
+> **Pass-order note.** The actual ordering enforced by `bin/main.ml` is
+> **Lower → Mono → Fusion → Defun → Known_call → Beta_adt → Join_points → Perceus → Escape → Opt → Llvm_emit.**
+> In particular **Perceus runs *before* Escape** (see `bin/main.ml`, `Perceus.perceus` then `Escape.escape_analysis`). Earlier revisions of this document had the two reversed; that was wrong.
 
 ---
 
@@ -154,8 +168,10 @@ end
 
 ## 4. Type Checking
 
-**File**: `lib/typecheck/typecheck.ml` (2006 lines)
+**File**: `lib/typecheck/typecheck.ml` (~7700 lines)
 **Status**: Complete, heavily featured
+
+Entry points: `Typecheck.check_module` and `check_module_full` (the latter also returns the typecheck env). Capability/`needs` enforcement is embedded here via `check_module_needs`. Pattern-match exhaustiveness (`check_exhaustiveness`/`find_missing_mc`) and redundancy (`check_redundant_arms`) checks run during declaration checking. Type-level naturals are reduced by `normalize_tnat`. Immediately after typecheck, `bin/main.ml` runs `Refine_check.check_module` for refinement-type verification.
 
 ### Architecture (16 sections)
 
@@ -385,8 +401,10 @@ Eliminate lambdas (higher-order functions) by:
 
 ## 9. Escape Analysis Pass
 
-**File**: `lib/tir/escape.ml` (279 lines)
+**File**: `lib/tir/escape.ml` (`Escape.escape_analysis`)
 **Status**: Complete
+
+> **Order:** Escape analysis runs **after** Perceus (§10), not before. It examines the RC-annotated TIR and removes dead RC ops on values it promotes to the stack.
 
 ### Purpose
 
@@ -414,8 +432,10 @@ Stack-promote heap allocations whose lifetimes don't escape the current function
 
 ## 10. Perceus Reference Counting Pass
 
-**File**: `lib/tir/perceus.ml` (498 lines)
+**File**: `lib/tir/perceus.ml` (`Perceus.perceus`)
 **Status**: Complete
+
+> **Order:** Perceus runs **before** Escape analysis (§9). Several earlier passes (Known_call, Beta_adt, Join_points.run_pre) are deliberately sequenced *before* Perceus so RC is inserted once over their already-simplified output.
 
 ### Purpose
 
@@ -664,8 +684,8 @@ Currently a stub. Full code generation (linking, assembly) not yet implemented.
    - `ensure_runtime_so()`: Compile C runtime to shared lib if needed
    - Cached at `~/.cache/march/libmarch_runtime.so`
 
-3. **File compilation** (lines 157-334):
-   - Parse → Desugar → Inject stdlib → Typecheck → Lower → Mono → Defun → Escape → Perceus → Opt → LLVM emit
+3. **File compilation**:
+   - Parse → Desugar → Inject stdlib → Typecheck → Refine-check → Lower → Mono → Fusion → Defun → Known_call → Beta_adt → Join_points → Perceus → Escape → Opt → LLVM emit
    - Error filtering: Show only user file diagnostics
    - Diagnostic rendering with source snippets
 
@@ -683,10 +703,10 @@ Currently a stub. Full code generation (linking, assembly) not yet implemented.
 
 ## 19. Effects System (Capability-Based)
 
-**File**: `lib/effects/effects.ml` (9 lines)
-**Status**: Stub
+**File**: `lib/effects/effects.ml` (`Effects.check_capabilities`)
+**Status**: Enforced
 
-Currently a placeholder. Capability-based effects system (for I/O, Network, etc.) is declared in AST (`needs` directive) but not actively enforced in type checker.
+Capabilities **are** enforced. `lib/effects/effects.ml` is a thin wrapper whose `check_capabilities` delegates to `Typecheck.check_module`, which embeds capability checking in `check_module_needs`. `bin/main.ml` runs this as part of typechecking (`Typecheck.check_module_full`). Enforcement includes: transitive `needs` checking (a module that imports another module declaring `needs X` must itself declare `X` or a parent capability), and a requirement that `extern` blocks declare their capability via `needs`. This matches `type-system.md` §9 (capability hierarchy and `needs` checking); the previous "stub / not enforced" claim here was wrong.
 
 ---
 
@@ -726,8 +746,10 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 
 ## 22. Test Coverage
 
-**File**: `test/test_march.ml` (5499 lines)
+**Files**: `test/test_compiler.ml`, `test/test_eval.ml`, `test/test_codegen.ml`, `test/test_stdlib_suite.ml` (driven by `test/run_compiler.ml`, `run_eval.ml`, `run_codegen.ml`, `run_stdlib.ml`)
 **Status**: Comprehensive
+
+> **Note.** `test/test_march.ml` no longer exists — the monolithic alcotest suite was split into the per-area files above. Line ranges below are approximate / historical.
 
 ### Test Categories
 
@@ -785,8 +807,13 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | TIR Types | `lib/tir/tir.ml` | 107 | ✓ Complete |
 | Monomorphization | `lib/tir/mono.ml` | 314 | ✓ Complete |
 | Defunctionalization | `lib/tir/defun.ml` | 336 | ✓ Complete |
-| Escape Analysis | `lib/tir/escape.ml` | 279 | ✓ Complete |
-| Perceus RC | `lib/tir/perceus.ml` | 498 | ✓ Complete |
+| Perceus RC | `lib/tir/perceus.ml` | — | ✓ Complete (runs before Escape) |
+| Escape Analysis | `lib/tir/escape.ml` | — | ✓ Complete (runs after Perceus) |
+| Fusion | `lib/tir/fusion.ml` | — | ✓ Complete |
+| Known-call | `lib/tir/known_call.ml` | — | ✓ Complete |
+| Beta-ADT | `lib/tir/beta_adt.ml` | — | ✓ Complete |
+| Join points | `lib/tir/join_points.ml` | — | ✓ Complete |
+| Refinement check | `lib/refinecheck/refine_check.ml` | ~1069 | ✓ Complete (post-typecheck) |
 | Inlining | `lib/tir/inline.ml` | 179 | ✓ Complete |
 | Constant Folding | `lib/tir/fold.ml` | 91 | ✓ Complete |
 | Simplification | `lib/tir/simplify.ml` | 107 | ✓ Complete |
@@ -794,18 +821,17 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Optimization Loop | `lib/tir/opt.ml` | 19 | ✓ Complete |
 | LLVM Emission | `lib/tir/llvm_emit.ml` | 1659 | ✓ Substantial (constructor collision & arity mismatch fixed) |
 | Code Generation | `lib/codegen/codegen.ml` | 10 | ⚠ Stub |
-| Effects System | `lib/effects/effects.ml` | 9 | ⚠ Stub |
+| Effects System | `lib/effects/effects.ml` | — | ✓ Enforced (delegates to `Typecheck.check_module_needs`) |
 | Purity Analysis | `lib/tir/purity.ml` | 25 | ✓ Complete |
 | Pretty Printing | `lib/tir/pp.ml` | 98 | ✓ Complete |
 | Main CLI | `bin/main.ml` | 334 | ✓ Complete |
-| Tests | `test/test_march.ml` | 5499 | ✓ Comprehensive |
+| Tests | `test/test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml` | — | ✓ Comprehensive |
 
 ---
 
 ## Known Limitations
 
-1. **Effects system**: Capability-based effects (I/O, Network) are declared but not enforced at compile time
-2. **Code generation**: Currently emits LLVM IR; linking/assembly generation (final executable) not implemented
+1. **Code generation**: `lib/codegen/codegen.ml` is a thin shim; linking/assembly is driven from `bin/main.ml` (clang invocation), not from a single codegen module
 3. **Module system**: No higher-kinded polymorphism; interfaces use simple parameter `a`
 4. **Gradual typing**: Type-level naturals (`Nat`, `NatOp`) mostly unused; dynamic type-level computation not implemented
 5. **Linearity checking**: Enforced at type check time but no sophisticated "must use linearly" analysis during lowering
@@ -826,11 +852,15 @@ Type Checking → (type_map)
                ↓
          Monomorphization (eliminates TVar)
                ↓
+            Fusion
+               ↓
         Defunctionalization (lifts lambdas)
                ↓
-         Escape Analysis (stack-promotes)
+       Known_call → Beta_adt → Join_points.run_pre
                ↓
        Perceus RC Analysis (inserts RC ops)
+               ↓
+         Escape Analysis (stack-promotes)
                ↓
       Optimization Loop (fixed-point)
          ├─ Inlining
@@ -840,14 +870,14 @@ Type Checking → (type_map)
                ↓
          LLVM IR Emission
                ↓
-      Code Generation (stub)
+      Code Generation (clang link, driven from bin/main.ml)
 ```
 
 **Critical invariants**:
-- Type checking must precede lowering (type_map required)
+- Type checking must precede lowering (type_map required); refinement checking runs right after typecheck
 - Monomorphization must precede defunctionalization (TVar → concrete types)
-- Defunctionalization must precede escape analysis (lambdas → top-level)
-- Escape analysis must precede perceus (identifies stack-allocatable values)
+- Known_call, Beta_adt, and Join_points.run_pre run **before** Perceus so RC is inserted once over their simplified output. In particular Known_call must precede Perceus because the closure-apply ABI consumes the closure argument, so Perceus must not insert a post-decrement on apply functions.
+- **Perceus must precede Escape analysis** (Escape removes dead RC ops on stack-promoted values)
 - Optimization loop assumes purity + recursion info stable
 - DCE assumes defun + mono complete (no polymorphic/lambda code)
 

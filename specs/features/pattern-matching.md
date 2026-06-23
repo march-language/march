@@ -6,14 +6,15 @@ March provides expressive pattern matching through `match` expressions and funct
 
 ## Implementation Status
 
-**Mostly complete.** Pattern matching is fully implemented from parsing through LLVM code generation. **Exhaustiveness checking is NOT implemented** — non-exhaustive patterns produce a runtime `Match_failure` exception, not a compile-time error.
+**Complete.** Pattern matching is fully implemented from parsing through LLVM code generation. **Exhaustiveness checking IS implemented** — a Maranget-style usefulness algorithm (`find_missing_mc` / `check_exhaustiveness` in `lib/typecheck/typecheck.ml`) emits a **compile-time Warning** for non-exhaustive matches, naming a missing case. Redundant (unreachable) arms are reported by `check_redundant_arms`. The exhaustiveness check is **skipped when any arm has a `when` guard** (coverage becomes undecidable). A still-unmatched value at runtime falls through to a match-failure path.
 
-**Syntax note (as of 2026-03-21):** Match expressions use `do` instead of `with`:
+**Syntax note:** Match expressions use `do ... end`, not `with`:
 ```march
 match expr do
-| Pat -> body
+  Pat -> body
 end
 ```
+Arms do not require a leading `|`. (This document's older examples used `match ... with`, which is **not** valid March syntax — they have been corrected.)
 
 ## Source Files & Line References
 
@@ -89,13 +90,17 @@ let rec infer_pattern env (pat : Ast.pattern)
 - Each pattern introduces bindings that are added to the type environment for the branch body
 - Duplicate bindings in a pattern are detected and reported as errors
 
-### Exhaustiveness Checking: NOT IMPLEMENTED
+### Exhaustiveness Checking: IMPLEMENTED
 
-**No compile-time exhaustiveness analysis exists.** The type checker does not validate that match expressions cover all possible cases. Missing branches are silently accepted and result in a runtime `Match_failure` exception when reached.
+**Compile-time exhaustiveness analysis exists** in `lib/typecheck/typecheck.ml`, using a Maranget-style pattern-matrix usefulness algorithm:
 
-This is a known gap. Future work would implement a pattern matrix usefulness/reachability algorithm (similar to OCaml's or Rust's) to warn or error on non-exhaustive matches at compile time.
+- `find_missing_mc env tys matrix` searches the pattern matrix for a witness value not covered by any row; it returns `Some example` when the match is non-exhaustive and `None` when complete.
+- `check_exhaustiveness env span scrut_ty branches` runs this during declaration checking and emits a **`Warning`** (not an error) naming the missing case, e.g. *"Non-exhaustive pattern match — missing case: `Some(_)`"*, with a note suggesting a catch-all `_ -> ...`.
+- `check_redundant_arms env scrut_ty branches` emits a Warning (`code = "redundant_arm"`) for arms that can never match.
 
-**Practical implication:** Always include a wildcard `| _ -> ...` branch if you don't want a potential runtime crash for unmatched patterns.
+**Guard handling:** `check_exhaustiveness` first tests whether any branch carries a `when` guard; if so, it **skips** the check entirely, because guard-conditioned coverage is undecidable.
+
+**Practical implication:** A non-exhaustive `match` compiles (with a warning); to silence it, add a `_ -> ...` catch-all or cover all constructors.
 
 ### Desugaring: Multi-Clause Function Conversion: `lib/desugar/desugar.ml` (45–280)
 
@@ -303,62 +308,62 @@ When the branch body starts with `dec_rc(scrutinee)` and the branch extracts hea
 
 **1. Literals**
 ```march
-match x with
-| 42 -> "found forty-two"
-| "hello" -> "greeting"
-| true -> "boolean"
-| :ok -> "atom"
+match x do
+  42 -> "found forty-two"
+  "hello" -> "greeting"
+  true -> "boolean"
+  :ok -> "atom"
 end
 ```
 
 **2. Variables and Wildcards**
 ```march
-match opt with
-| Some(v) -> v
-| None -> 0
-| _ -> -1   (* unreachable after Some and None *)
+match opt do
+  Some(v) -> v
+  None -> 0
+  _ -> -1   -- unreachable after Some and None
 end
 ```
 
 **3. Constructors**
 ```march
-match list with
-| Cons(h, t) -> h + sum(t)
-| Nil -> 0
+match list do
+  Cons(h, t) -> h + sum(t)
+  Nil -> 0
 end
 ```
 
 **4. Tuples**
 ```march
-match pair with
-| (x, 0) -> x
-| (0, y) -> y
-| (a, b) -> a + b
+match pair do
+  (x, 0) -> x
+  (0, y) -> y
+  (a, b) -> a + b
 end
 ```
 
 **5. Records**
 ```march
-match person with
-| { name = "Alice", age = a } -> a
-| { name, age } -> name ++ ": " ++ int_to_string(age)
+match person do
+  { name = "Alice", age = a } -> a
+  { name, age } -> name ++ ": " ++ int_to_string(age)
 end
 ```
 
 **6. As-patterns (bind outer name)**
 ```march
-match opt with
-| Some(v) as full -> (v, full)
-| None as empty -> (0, empty)
+match opt do
+  Some(v) as full -> (v, full)
+  None as empty -> (0, empty)
 end
 ```
 
 **7. Guards**
 ```march
-match x with
-| y when y > 0 -> "positive"
-| y when y < 0 -> "negative"
-| _ -> "zero"
+match x do
+  y when y > 0 -> "positive"
+  y when y < 0 -> "negative"
+  _ -> "zero"
 end
 ```
 
@@ -367,12 +372,12 @@ end
 Equivalent ways to express the same logic:
 
 ```march
-(* Style 1: match expression *)
+-- Style 1: match expression
 fn fib(n) do
-  match n with
-  | 0 -> 1
-  | 1 -> 1
-  | k -> fib(k-1) + fib(k-2)
+  match n do
+    0 -> 1
+    1 -> 1
+    k -> fib(k-1) + fib(k-2)
   end
 end
 
@@ -390,15 +395,17 @@ All three are desugared to the same internal representation.
 
 ## Test Coverage
 
-### `test/test_march.ml`
+### `test/test_compiler.ml`
 
-**Pattern parsing and desugaring (lines 115–220):**
+> **Note.** `test/test_march.ml` no longer exists; tests were split into per-area files. Parser/desugar/typecheck tests (including pattern tests) live in `test/test_compiler.ml`.
+
+**Pattern parsing and desugaring:**
 - `test_parse_module_multi_head`: Parser handles multi-clause functions
 - `test_desugar_multi_head_fn`: Multi-clause functions desugar to match expressions
 - `test_desugar_single_named_fn`: Single-named-param functions don't get wrapped in match
 - `test_desugar_multi_param`: Multiple parameters create tuple patterns
 
-**Type checking patterns (lines 249–260):**
+**Type checking patterns:**
 - `test_tc_match`: Match expressions type-check correctly
 - Pattern bindings are visible in branch bodies
 - Type errors in branches are reported
@@ -464,12 +471,13 @@ The compilation pipeline for pattern matching:
 ```march
 type Color = Red | Green | Blue
 
-fn color_name(c : Color) : String =
-  match c with
-  | Red -> "red"
-  | Green -> "green"
-  | Blue -> "blue"
+fn color_name(c : Color) : String do
+  match c do
+    Red -> "red"
+    Green -> "green"
+    Blue -> "blue"
   end
+end
 ```
 
 ### Nested Pattern Matching
@@ -477,23 +485,25 @@ fn color_name(c : Color) : String =
 ```march
 type Tree(a) = Leaf(a) | Branch(Tree(a), Tree(a))
 
-fn sum_tree(t : Tree(Int)) : Int =
-  match t with
-  | Leaf(x) -> x
-  | Branch(Leaf(l), Leaf(r)) -> l + r
-  | Branch(l, r) -> sum_tree(l) + sum_tree(r)
+fn sum_tree(t : Tree(Int)) : Int do
+  match t do
+    Leaf(x) -> x
+    Branch(Leaf(l), Leaf(r)) -> l + r
+    Branch(l, r) -> sum_tree(l) + sum_tree(r)
   end
+end
 ```
 
 ### Guard-Based Dispatch
 
 ```march
-fn compare_int(x : Int, y : Int) : String =
-  match (x, y) with
-  | (a, b) when a > b -> "greater"
-  | (a, b) when a < b -> "less"
-  | _ -> "equal"
+fn compare_int(x : Int, y : Int) : String do
+  match (x, y) do
+    (a, b) when a > b -> "greater"
+    (a, b) when a < b -> "less"
+    _ -> "equal"
   end
+end
 ```
 
 ### Multi-Clause with Guards
@@ -506,9 +516,9 @@ fn max(x, y) do y end
 This is desugared to:
 ```march
 fn max(x, y) do
-  match (x, y) with
-  | (x, y) when x >= y -> x
-  | (x, y) -> y
+  match (x, y) do
+    (x, y) when x >= y -> x
+    (x, y) -> y
   end
 end
 ```
@@ -518,9 +528,10 @@ end
 ```march
 type Person = { name : String, age : Int }
 
-fn is_adult(p : Person) : Bool =
-  match p with
-  | { age = a } when a >= 18 -> true
-  | _ -> false
+fn is_adult(p : Person) : Bool do
+  match p do
+    { age = a } when a >= 18 -> true
+    _ -> false
   end
+end
 ```

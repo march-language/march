@@ -6,7 +6,7 @@ The March language runtime is a C-based system providing core functionality for 
 
 - **Memory management**: Heap allocation, reference counting (RC), and deallocation
 - **String system**: String literals, operations, conversions, and transformations
-- **Actor runtime**: Lightweight process scheduler with message passing
+- **Actor runtime**: M:N work-stealing green-thread scheduler with message passing (`march_scheduler.c`)
 - **Mathematical functions**: Floating-point and trigonometric operations
 - **File system operations**: File and directory existence checks
 - **HTTP/WebSocket support**: TCP networking, HTTP request/response parsing, and WebSocket protocol
@@ -30,14 +30,25 @@ Offset 16+: fields        (each 8 bytes: int64_t for Int/Bool, double for Float,
 
 ## Source Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `runtime/march_runtime.h` | ~114 | Core runtime function declarations |
-| `runtime/march_runtime.c` | ~880 | Implementation of memory, string, actor, and utility functions |
-| `runtime/march_http.h` | ~101 | HTTP and WebSocket function declarations |
-| `runtime/march_http.c` | ~1130 | TCP, HTTP parsing/serialization, and WebSocket implementation |
-| `runtime/base64.c` | ~50 | Base64 encoder for WebSocket handshake |
-| `runtime/sha1.c` | ~72 | SHA-1 implementation for WebSocket handshake |
+There are ~19 C source files in `runtime/`. The principal ones:
+
+| File | Purpose |
+|------|---------|
+| `runtime/march_runtime.c` | Memory, string, actor metadata (`march_actor_meta`), `march_spawn`/`send`/`kill`, math, FS, utility functions |
+| `runtime/march_scheduler.c` | M:N work-stealing green-thread scheduler (`march_proc`, `march_sched_spawn`, `march_sched_send`) |
+| `runtime/march_heap.c` | Per-process bump-allocator arena heaps (`march_heap_t`, `march_process_alloc`) |
+| `runtime/march_gc.c` | Per-process semi-space copying collector (`march_gc_collect`) |
+| `runtime/march_message.c` | Cross-heap message passing (`march_msg_copy`/`march_msg_move`), MPSC mailbox, `march_msg_node` |
+| `runtime/march_http.c` | TCP, request reception, fallback thread-per-connection accept loop |
+| `runtime/march_http_evloop.c` | Default event-loop HTTP server (kqueue/epoll, one thread per core) |
+| `runtime/march_http_parse_simd.c` | SIMD (SSE4.2) HTTP/1.x request parser |
+| `runtime/march_http_io.c` | Non-blocking I/O state machines for the event loop |
+| `runtime/march_http_response.c` | Zero-copy HTTP/1.1 response builder |
+| `runtime/march_tls.c` | OpenSSL-backed TLS (`march_tls_connect`/`march_tls_accept`) |
+| `runtime/march_ffi.c` | FFI / extern call support |
+| `runtime/march_dispatch.c`, `march_extras.c`, `march_compress.c`, `march_remote_registry.c`, `march_runtime_wasm.c` | Dispatch, channel/session builtins, compression, remote actor registry, WASM target |
+| `runtime/base64.c` | Base64 encoder for WebSocket handshake |
+| `runtime/sha1.c` | SHA-1 implementation for WebSocket handshake |
 
 ## Memory Management
 
@@ -418,7 +429,9 @@ void march_panic(void *s);
 
 ## Actor Runtime
 
-The actor runtime implements **lightweight processes with message-passing concurrency**. Each actor is a heap object containing state and a dispatch function. A separate `march_process` structure wraps the actor and manages its mailbox and scheduler state.
+The actor runtime implements **lightweight processes with message-passing concurrency**. Each actor is a heap object containing state and a dispatch function. Actors run as **green threads** on the M:N work-stealing scheduler in `runtime/march_scheduler.c`. The public actor API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`) lives in `runtime/march_runtime.c` and is declared in `march_runtime.h` — all of these take a `void *actor` (the actor heap object), not a separate handle struct.
+
+> **Note (architecture).** An earlier design used a `struct march_process` with a per-process mutex/condvar mailbox, a global run queue, and a fixed pool of `scheduler_worker()` threads tuned by `MARCH_SCHEDULER_THREADS`. **That design has been deleted.** None of `march_process`, `msg_node` (the run-queue node), `scheduler_worker`, or `MARCH_SCHEDULER_THREADS` exist in the runtime any longer. The current design is the green-thread scheduler described below.
 
 ### Data Structures
 
@@ -427,109 +440,78 @@ An actor is a heap object with this layout:
 - Field 0 (offset 16): `dispatch` — pointer to closure for message handling
 - Field 1+ (offset 24+): **state fields** (user-defined)
 
-#### Handle Layout
-A handle (returned by `march_spawn`) is a standard March heap object (16 bytes header + 1 field):
-- Field 0 (offset 16): `process_ptr` — cast to `march_process*`
+`march_spawn` returns the actor pointer itself; there is no separate handle object.
 
-#### Process Structure (Lines 213-223)
+#### Actor metadata (`march_actor_meta`, in `runtime/march_runtime.c`)
+A side table (`g_actor_tbl`, a hash table keyed by actor pointer) maps each actor to its scheduling metadata:
+
 ```c
-typedef struct march_process {
-    void               *actor;           /* reference to actor object */
-    pthread_mutex_t     lock;            /* mailbox synchronization */
-    pthread_cond_t      idle_cond;       /* signals when mailbox emptied */
-    msg_node           *mbox_head;       /* message queue head */
-    msg_node           *mbox_tail;       /* message queue tail */
-    int                 scheduled;       /* 1 if currently on run queue */
-    int                 processing;      /* 1 if worker thread is handling msg */
-    int                 alive;           /* 0 if killed */
-    struct march_process *next_runnable; /* run queue linking */
-} march_process;
+typedef struct march_actor_meta {
+    march_proc                *green_thread;  /* Green thread running this actor's loop */
+    struct march_actor_meta   *tbl_next;      /* Hash-table chain */
+    /* ... liveness / link bookkeeping ... */
+} march_actor_meta;
 ```
 
-### Scheduler
+Each actor runs as a green thread (`march_proc`, defined in `march_scheduler.c`). The green-thread loop (`actor_green_thread`) blocks in the scheduler until a message arrives in the process's mailbox, then calls the actor's dispatch closure (FBIP: dispatch may mutate state in place when RC is 1).
 
-The scheduler uses a **global run queue** and a **fixed thread pool** (default: 4 threads, configurable via `MARCH_SCHEDULER_THREADS`).
+### Scheduler (`runtime/march_scheduler.c`)
 
-#### `enqueue_runnable()` — Lines 243-254
-- **Purpose**: Add process to global run queue
-- **Synchronization**: Locks scheduler mutex, signals work condition
+The scheduler is **M:N**: N OS threads each run a scheduler loop, and each owns a **Chase-Lev work-stealing deque** of READY processes. The owner pushes/pops from the bottom (LIFO for cache locality); idle schedulers steal from the top of other schedulers' deques (FIFO for load balance). Context switching uses `ucontext_t` / `swapcontext` stackful coroutines, each `march_proc` having its own `mmap`'d stack. Preemption is reduction-budget-based (each process gets a reduction quantum, reset on schedule-in).
 
-#### `dequeue_runnable()` — Lines 256-268
-- **Purpose**: Remove next process from run queue (blocks if empty)
-- **Synchronization**: Locks scheduler mutex, waits on work condition
+#### `march_sched_spawn(void (*fn)(void *), void *arg)` → `march_proc *`
+Allocates a `march_proc`, sets up its stack/context with a trampoline that calls `march_sched_exit()` on return, and enqueues it READY.
 
-#### `scheduler_worker()` — Lines 272-321
-- **Purpose**: Worker thread main loop
-- **Algorithm**:
-  1. Dequeue a process
-  2. Extract one message from its mailbox
-  3. Call the dispatch closure (FBIP: forces RC=1 for in-place mutation)
-  4. Check for more messages; if none, unschedule and wake waiters
-- **Special handling**: Temporarily sets actor RC to 1 during dispatch to enable FBIP (first-class in-place functional programming), then restores original RC. **Update (Track C):** The FBIP RC data race in actor dispatch has been fixed — RC save/restore now uses proper synchronization to prevent concurrent RC modifications from being clobbered.
-
-#### `init_scheduler_once()` — Lines 323-331
-- **Purpose**: Create fixed thread pool (one-time initialization)
-- **Threads**: Created detached, run until program exits
+#### `march_sched_send(march_proc *p, void *msg)`
+Pushes `msg` into the target process's mailbox and wakes it if WAITING. This is the primitive that `march_send` delegates to.
 
 ### Spawn and Send
 
-#### `march_spawn(void *actor)` — Lines 341-360
-- **Purpose**: Create a lightweight process for an actor
-- **Parameters**: `actor` is a March heap object with dispatch field
-- **Returns**: Handle (24-byte object with process pointer in field 0)
-- **Behavior**:
-  - Creates `march_process` structure
-  - Increments actor RC (process owns a reference)
-  - Initializes mutex and condition variable
-  - Sets alive = 1, scheduled = 0
-- **Thread-safe**: Yes (all fields initialized before returning)
+#### `march_spawn(void *actor)` — `runtime/march_runtime.c`
+- **Purpose**: Create the green thread that runs an actor's message loop
+- **Parameters**: `actor` is a March heap object with a dispatch field
+- **Returns**: the `actor` pointer (no wrapper handle)
+- **Behavior**: looks up or creates a `march_actor_meta`, spawns `actor_green_thread` via `march_sched_spawn`, and stores the resulting `march_proc *` in `meta->green_thread`
 
 ```c
 void *march_spawn(void *actor);
 ```
 
-#### `march_send(void *handle, void *msg)` — Lines 364-402
-- **Purpose**: Send message to process mailbox
-- **Parameters**: `handle` returned by `march_spawn`, `msg` is any March value
-- **Returns**: `Option(Unit)` (None if dead, Some(()) if enqueued)
-- **Algorithm**:
-  1. Check if alive; return None if dead
-  2. Allocate message node, append to mailbox tail
-  3. If process not scheduled, enqueue it; else signal existing scheduled state
-- **Thread-safe**: Yes (locks process mutex)
+#### `march_send(void *actor, void *msg)` — `runtime/march_runtime.c`
+- **Purpose**: Deliver a message to the actor's mailbox
+- **Returns**: the result of dispatch (or a synchronous reply for call-style sends)
+- **Behavior**: finds the actor's `march_actor_meta`, then calls `march_sched_send(meta->green_thread, msg)` to enqueue and wake the green thread
 
-> **Update (March 20, 2026, Track C):** `march_send` no longer increments message RC. The previous double-increment (once by Perceus, once by `march_send`) caused every sent message to leak. The ownership semantics have been resolved: Perceus handles the ownership transfer, and `march_send` no longer takes a redundant reference.
+> **Note.** `march_send` does **not** call `march_incrc` on the message; Perceus at the call site handles the ownership transfer.
 
 ```c
-void *march_send(void *handle, void *msg);
+void *march_send(void *actor, void *msg);
 ```
 
 ### Query and Control
 
-#### `march_is_alive(void *handle)` — Lines 416-419
-- **Purpose**: Check if process is still alive
+#### `march_is_alive(void *actor)` — `runtime/march_runtime.h`
 - **Returns**: 1 (alive) or 0 (dead)
 
 ```c
-int64_t march_is_alive(void *handle);
+int64_t march_is_alive(void *actor);
 ```
 
-#### `march_kill(void *handle)` — Lines 406-412
-- **Purpose**: Mark process as dead (no longer processes messages)
-- **Behavior**: Sets alive = 0, broadcasts condition to wake waiters
+#### `march_kill(void *actor)` — `runtime/march_runtime.h`
+- **Purpose**: Mark the actor dead so its green thread stops processing messages
 
 ```c
-void march_kill(void *handle);
+void march_kill(void *actor);
 ```
 
-#### `march_actor_get_int(void *handle, int64_t index)` — Lines 423-433
-- **Purpose**: Drain remaining messages, then read integer state field
-- **Parameters**: `index` is the field number (0-based; index 0 refers to first user-defined field)
-- **Behavior**: Blocks until mailbox is drained and processing completes
-- **Returns**: `int64_t` value of `actor[4 + index]` (field layout offset)
+#### `march_link` / `march_unlink(void *actor_a, void *actor_b)`
+Bidirectional links between actors (declared in `march_runtime.h`).
+
+#### `march_actor_get_int(void *actor, int64_t index)` — `runtime/march_runtime.c`
+- **Purpose**: Drain pending messages, then read an integer state field by index
 
 ```c
-int64_t march_actor_get_int(void *handle, int64_t index);
+int64_t march_actor_get_int(void *actor, int64_t index);
 ```
 
 ## Float Operations
@@ -643,7 +625,7 @@ The HTTP runtime provides TCP networking, HTTP protocol handling, and WebSocket 
 
 - **TCP**: `march_tcp_listen()`, `march_tcp_accept()`, `march_tcp_recv_http()`, `march_tcp_send_all()`, `march_tcp_close()`
 - **HTTP**: `march_http_parse_request()`, `march_http_serialize_response()`
-- **HTTP Server**: `march_http_server_listen()` (thread-per-connection model)
+- **HTTP Server**: `march_http_server_listen()` dispatches to `march_evloop_server_listen()` (kqueue/epoll event loop, default) and falls back to a bounded thread-per-connection loop
 - **WebSocket**: `march_ws_handshake()`, `march_ws_recv()`, `march_ws_send()`, `march_ws_select()`
 
 ### Supporting Functions
@@ -716,13 +698,11 @@ The compiler:
 
 ## Known Limitations
 
-1. **No GC**: Only reference counting; circular data structures will leak
+1. **Cycle collection**: Reference counting is the primary memory discipline; in addition, each process has a semi-space copying collector (`march_gc.c`, see Phase 5 below) that reclaims dead objects within its arena. Cross-process reference cycles still leak (per-process GC cannot trace across heaps).
 2. **String operations are UTF-8 aware but not fully Unicode-aware**: Reverse, grapheme counting, etc. may not handle all edge cases
-3. **Scheduler thread pool is fixed-size**: Configured at compile-time via `MARCH_SCHEDULER_THREADS`
-4. **HTTP server limitations**:
-   - `max_conns` parameter not enforced (TODO)
-   - `idle_timeout` parameter not set (TODO)
-   - Thread-per-connection model may not scale to thousands of concurrent connections
+3. **HTTP server limitations**:
+   - The default server is the event loop (`march_http_evloop.c`); the thread-per-connection path (`march_http.c`) is a bounded fallback
+   - `max_conns` / `idle_timeout` parameters not fully enforced on every path (TODO)
 5. **WebSocket frame size limit**: 16 MB per frame
 6. **No dynamic memory pool**: All allocations go through `malloc()`/`calloc()`
 7. **SHA-1 for WebSocket is not cryptographically secure**: Only for handshake use

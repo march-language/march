@@ -11,6 +11,14 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 
 These files are the canonical record of what exists. Do not let them go stale.
 
+**Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
+(root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead
+compiler-source pointers (e.g. a path that moved) and stale stdlib module counts. It does
+**not** lint the historical corpus (`specs/plans/`, dated design specs, the append-only
+`progress.md`/`todos.md`). If a current doc must reference a since-removed file or a frozen
+count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /
+`doc-lint:ignore-file` marker — don't silently let the pointer rot.
+
 ## Build & test
 
 The opam switch is `march`. `opam` and `dune` are available directly in PATH — no wrapper needed.
@@ -109,11 +117,11 @@ lib/tir/                    typed IR: lower, mono, defun, perceus, borrow, fusio
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
-stdlib/                     57 March stdlib modules (bastion, csrf, session, html, islands, …)
+stdlib/                     98 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
-forge/                      build tool (new, build, run, test, deps, bastion subcommands)
+forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)
-test/test_march.ml          alcotest suite
+test/                       alcotest suites — run_{compiler,eval,codegen,stdlib}.ml drivers over test_*.ml
 specs/                      design specs, progress tracking, feature plans
 ```
 

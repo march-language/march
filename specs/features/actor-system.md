@@ -4,7 +4,7 @@
 
 The March actor system implements a lightweight, message-passing concurrency model inspired by the Erlang/OTP supervisor model. Actors are isolated processes that communicate exclusively through asynchronous message passing. The system supports spawning new actors, sending messages, monitoring/linking actors, and graceful termination through supervision hierarchies.
 
-**Current Status**: Fully functional in the tree-walking interpreter. TIR lowering and LLVM code generation are planned (see [actor-lowering.md](../actor-lowering.md)).
+**Current Status**: Fully functional in the tree-walking interpreter **and** in compiled code. Actor declarations lower to TIR (`lib/tir/lower.ml`, `lower_actor_decl`) and emit LLVM IR; the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, all taking `void *actor`) runs each actor as a green thread on the M:N work-stealing scheduler (`runtime/march_scheduler.c`). See [actor-lowering.md](../actor-lowering.md) for the lowering strategy.
 
 ---
 
@@ -88,7 +88,7 @@ send(counter_pid, Increment(5))
 **Line references**:
 - **AST**: `lib/ast/ast.ml:69` (`ESend` expression type)
 - **Interpreter**: `lib/eval/eval.ml:2538–2559` (send implementation)
-- **Runtime C**: `runtime/march_runtime.c:362–402` (`march_send` function)
+- **Runtime C**: `runtime/march_runtime.c` (`march_send` → delegates to `march_sched_send`)
 - **Example**: `examples/actors.march:57–62` (safe_send wrapper)
 
 ### kill
@@ -104,8 +104,8 @@ kill(counter_pid)
 - Subsequent sends to this actor return `None`
 
 **Line references**:
-- **Interpreter**: `lib/eval/eval.ml:1063–1065` (kill builtin)
-- **Runtime C**: `runtime/march_runtime.c:404–412` (`march_kill` function)
+- **Interpreter**: `lib/eval/eval.ml` (`kill` builtin)
+- **Runtime C**: `runtime/march_runtime.c` (`march_kill` function)
 
 ### is_alive
 
@@ -116,8 +116,8 @@ bool_to_string(is_alive(counter_pid))
 **Semantics**: Returns `true` if the actor is alive, `false` if killed or never existed.
 
 **Line references**:
-- **Interpreter**: `lib/eval/eval.ml:1066–1071` (is_alive builtin)
-- **Runtime C**: `runtime/march_runtime.c:414–419` (`march_is_alive` function)
+- **Interpreter**: `lib/eval/eval.ml` (`is_alive` builtin)
+- **Runtime C**: `runtime/march_runtime.c` (`march_is_alive` function)
 
 ### receive (Async-only)
 
@@ -273,49 +273,31 @@ type proc_state =
 - Raises `Preempted` exception if budget is exhausted
 - Scheduler catches exception, saves current continuation, reschedules
 
-### Compiled Scheduler (Thread Pool)
+### Compiled Scheduler (M:N Green Threads)
 
-**Design** (`runtime/march_runtime.c:225–331`):
+**Design** (`runtime/march_scheduler.c`):
 
-- Fixed thread pool of worker threads (default: `MARCH_SCHEDULER_THREADS = 4`)
-- Global run queue protected by mutex + condition variable
-- Each process has a mailbox, alive flag, and dispatch function pointer
-- Workers dequeue processes, drain one message, call the dispatch handler
+- N OS threads, each running a scheduler loop and owning a **Chase-Lev work-stealing deque** of READY processes
+- Each actor runs as a green thread (`march_proc`) created via `march_sched_spawn`; context switches use `ucontext_t` / `swapcontext` stackful coroutines (each `march_proc` has its own `mmap`'d stack)
+- Per-process mailbox; `march_sched_send` pushes a message and wakes the process if WAITING
+- Preemption is reduction-budget-based: each process gets a reduction quantum, reset when it is scheduled in
 
-**Process structure** (`runtime/march_runtime.c:213–223`):
-```c
-typedef struct march_process {
-    void               *actor;           /* Actor struct pointer */
-    pthread_mutex_t     lock;            /* Protects mailbox */
-    pthread_cond_t      idle_cond;       /* Woken when mailbox empty & idle */
-    msg_node           *mbox_head;       /* Mailbox queue head */
-    msg_node           *mbox_tail;       /* Mailbox queue tail */
-    int                 scheduled;       /* Already in run queue */
-    int                 processing;      /* Currently executing handler */
-    int                 alive;           /* Live flag (kill sets to 0) */
-    struct march_process *next_runnable; /* Run queue link */
-} march_process;
-```
+> **Note (architecture).** The earlier "fixed thread pool + global run queue + `struct march_process`" design has been **deleted**. The symbols `march_process`, `msg_node` (run-queue node), `scheduler_worker`, and the `MARCH_SCHEDULER_THREADS` env var no longer exist anywhere in `runtime/`. Actors run on the green-thread scheduler described here.
 
-**Scheduler loop** (`runtime/march_runtime.c:272–321`):
-1. Dequeue a process (blocks if queue empty)
-2. Lock the process; dequeue one message
-3. If alive, read dispatch function and handler arguments from actor struct
-4. Force RC=1 temporarily (FBIP: in-place mutation)
-5. Call `dispatch(actor, msg)`
-6. Restore RC, check for more messages
-7. If messages remain, re-enqueue; otherwise park
+**Process structure** (`march_proc`, in `runtime/march_scheduler.c`): holds the saved `ucontext_t`, stack, owner-scheduler pointer, mailbox, intrusive deque links, and state (READY / WAITING / DEAD). Actor-specific bookkeeping lives in a `march_actor_meta` side table (`runtime/march_runtime.c`) that maps each actor pointer to its `march_proc *green_thread`.
+
+**Scheduler loop** (`runtime/march_scheduler.c`):
+1. Pop the next READY process from the local deque
+2. If empty, attempt to steal from a random other scheduler
+3. Reset reduction budget, `swapcontext` into the process
+4. On return: if READY, push back to the local deque; if DEAD, free; if WAITING, leave parked — a `march_sched_send` will re-enqueue it
+5. When all deques are empty and no live processes remain, exit
 
 **Key properties**:
-- Multiple messages processed per worker context switch (batch scheduling for throughput)
+- Work-stealing balances load across cores while keeping per-thread LIFO cache locality
+- Actor green-thread loops call the dispatch closure with FBIP (in-place mutation when RC = 1)
 - Handlers are synchronous but non-blocking (can send to other actors)
-- Messages to a dead actor are dropped before dequeuing
-
-> **Update (March 20, 2026, Track C):** The scheduler now processes multiple messages per cycle instead of one, fixing a starvation issue where high-throughput actors incurred excessive queue management overhead. The `scheduled` flag race condition (H1 in correctness audit) has been fixed — messages are no longer silently lost when a sender and worker thread race on the scheduling decision. All changes passed ThreadSanitizer validation.
-
-**Configuration**:
-- `MARCH_SCHEDULER_THREADS` can be set at compile time
-- Default 4 threads; tunable for workload
+- Messages to a dead actor are dropped
 
 ---
 
@@ -329,13 +311,13 @@ typedef struct march_process {
 - Handlers dispatch via `run_scheduler` hook which iteratively pops from the run queue
 - Fully functional, used for REPL and testing
 
-**Compiled (`lib/tir/lower.ml` + `runtime/march_runtime.c`)**:
-- Actor declarations lower to TIR: message variant type + actor struct + spawn/dispatch/handler functions
-- Spawning allocates the actor struct and wraps it in a process handle
-- Sending enqueues a message; the scheduler dispatches it
-- Currently **not yet implemented** for full compilation (planned Phase 2)
+**Compiled (`lib/tir/lower.ml` + `runtime/march_runtime.c` + `runtime/march_scheduler.c`)**:
+- Actor declarations lower to TIR: message variant type + actor struct + spawn/dispatch/handler functions (`lower_actor_decl` in `lib/tir/lower.ml`)
+- `spawn(ActorName)` lowers to a call to `ActorName_spawn`, which allocates the actor struct and calls `march_spawn` to create its green thread
+- Sending enqueues a message via `march_send` → `march_sched_send`; the scheduler wakes the actor's green thread to dispatch it
+- This path is **implemented** and compiles to native code (see Phase 2 below).
 
-### Lowering (Planned)
+### Lowering
 
 See `specs/actor-lowering.md` for detailed lowering strategy. Summary:
 
@@ -575,110 +557,68 @@ let max_reductions = 4_000
 
 ## Runtime C Functions
 
+All of these take the **actor pointer directly** — there is no separate process handle object. Scheduling metadata is kept in a `march_actor_meta` side table keyed by actor pointer.
+
 ### march_spawn
 
-**Signature**: `void *march_spawn(void *actor)`
+**Signature**: `void *march_spawn(void *actor)` (`runtime/march_runtime.h`)
 
-**Purpose**: Create a process wrapper around an actor struct, initialize the scheduler, and return a handle.
+**Purpose**: Create the green thread that runs the actor's message loop.
 
-**Implementation** (`runtime/march_runtime.c:341–360`):
-1. Allocate a `march_process` struct
-2. Store actor pointer and initialize locks/condition variables
-3. Increment actor RC (process owns a reference)
-4. Allocate a handle object (16+8 bytes for header + process pointer)
-5. Store process pointer in handle's field [2]
-6. Return handle
-
-**Handle layout**:
-```
-offset 0  : i64   rc           (reference count)
-offset 8  : i32   tag+pad      (header)
-offset 16 : i64*  process_ptr  (cast to int64)
-```
+**Implementation** (`runtime/march_runtime.c`, `find_or_create_meta` + `actor_green_thread`):
+1. Look up or create a `march_actor_meta` for `actor` in `g_actor_tbl`
+2. Spawn `actor_green_thread` via `march_sched_spawn`, storing the resulting `march_proc *` in `meta->green_thread`
+3. Return the `actor` pointer
 
 ### march_send
 
-**Signature**: `void *march_send(void *handle, void *msg)`
+**Signature**: `void *march_send(void *actor, void *msg)` (`runtime/march_runtime.h`)
 
-**Returns**: `Some(())` on success, `None` if actor is dead.
+**Implementation** (`runtime/march_runtime.c`):
+1. Find the actor's `march_actor_meta`
+2. Call `march_sched_send(meta->green_thread, msg)` — enqueues the message and wakes the green thread
+3. For call-style sends, blocks the caller's green thread until the reply arrives
 
-**Implementation** (`runtime/march_runtime.c:364–402`):
-1. Extract process pointer from handle (field [2])
-2. Lock process
-3. Check alive flag; if dead, unlock and return `None`
-4. Append message to mailbox queue (FIFO)
-5. If not already scheduled, enqueue process to global run queue and signal workers
-6. Unlock and return `Some(())`
-
-> **Update (March 20, 2026, Track C):** `march_send` no longer increments message RC. The previous double-increment (once by Perceus, once by `march_send`) caused every sent message to leak its payload. Perceus now handles the full ownership transfer.
-
-**Message node structure** (`runtime/march_runtime.c:208–211`):
-```c
-typedef struct msg_node {
-    void              *msg;
-    struct msg_node   *next;
-} msg_node;
-```
+> **Note.** `march_send` does **not** increment the message RC. Perceus at the call site owns the message transfer.
 
 ### march_kill
 
-**Signature**: `void march_kill(void *handle)`
+**Signature**: `void march_kill(void *actor)` (`runtime/march_runtime.h`)
 
-**Implementation** (`runtime/march_runtime.c:406–412`):
-1. Extract process pointer
-2. Lock process
-3. Set alive flag to 0
-4. Broadcast condition variable to wake any waiting threads
-5. Unlock
+Marks the actor dead so its green thread stops processing. Does **not** deallocate; reference counting / per-process GC handles that.
 
-Note: Does **not** deallocate; reference counting handles that.
+### march_link / march_unlink
+
+**Signatures**: `void march_link(void *actor_a, void *actor_b)` / `void march_unlink(void *actor_a, void *actor_b)`
+
+Establish or remove a bidirectional link between two actors.
 
 ### march_is_alive
 
-**Signature**: `int64_t march_is_alive(void *handle)`
+**Signature**: `int64_t march_is_alive(void *actor)` (`runtime/march_runtime.h`)
 
 **Returns**: 1 if alive, 0 if dead.
 
-**Implementation** (`runtime/march_runtime.c:416–419`):
-1. Extract process pointer
-2. Return alive flag
-
 ### march_actor_get_int
 
-**Signature**: `int64_t march_actor_get_int(void *handle, int64_t index)`
+**Signature**: `int64_t march_actor_get_int(void *actor, int64_t index)` (`runtime/march_runtime.h`)
 
-**Purpose**: Drain the mailbox, then read an integer state field.
-
-**Implementation** (`runtime/march_runtime.c:423–433`):
-1. Extract process pointer
-2. Lock process
-3. Wait (with condition variable) until mailbox empty and processing done
-4. Index into actor struct's state fields: `fields[4 + index]` (fields 0–1 are dispatch and alive)
-5. Return value
-
-**Field offsets**:
-- Field 0 (offset 16): dispatch function pointer
-- Field 1 (offset 24): alive flag (i64)
-- Field 2+ (offset 32+): state fields in alphabetical order
+**Purpose**: Drain the mailbox, then read an integer state field by index from the actor struct's state fields (stored in alphabetical order after the dispatch and alive header fields).
 
 ---
 
 ## Test Coverage
 
-### Interpreter Tests (`test/test_march.ml`)
+### Interpreter Tests (`test/test_compiler.ml`)
 
-**Actor handler tests** (lines 1544–1628):
+> **Note.** `test/test_march.ml` no longer exists — the alcotest suite was split into `test/test_compiler.ml`, `test/test_eval.ml`, `test/test_codegen.ml`, `test/test_stdlib_suite.ml`, etc. (run via the `run_*.ml` drivers). Actor handler tests live in `test/test_compiler.ml`.
+
+**Actor handler tests** (`test/test_compiler.ml`):
 - `test_actor_handler_extra_field` — Reject handlers returning records with extra fields
 - `test_actor_handler_missing_field` — Reject handlers returning records with missing fields
 - `test_actor_handler_correct` — Correct state update through handler
-
-**Actor list tests** (lines 1817–1845):
-- `test_list_actors_empty` — Empty registry returns empty list
-- `test_list_actors_alive` — Filters to alive actors only
-- `test_list_actors_sorted` — Returns actors sorted by Pid
-
-**Actor snapshot/restore** (lines 2026–2035):
-- `test_actor_snapshot` — Snapshot captures current state; restore returns to clean state
+- `test_actor_handler_duplicate_name` — Reject duplicate handler names
+- `test_actor_handler_cap_needs_ok` / `test_actor_handler_cap_missing_needs_error` — capability checks on handler params
 
 ### Example Programs
 
@@ -902,8 +842,9 @@ For N roles, N×(N-1) directed queues are created — one per ordered role pair.
 
 | File | Lines | Purpose |
 |---|---|---|
-| `runtime/march_runtime.h` | 43–51 | Actor function declarations |
-| `runtime/march_runtime.c` | 200–433 | Process structure, scheduler, march_spawn/send/kill/is_alive |
+| `runtime/march_runtime.h` | 122–149 | Actor function declarations (`march_spawn`/`send`/`kill`/`link`/`is_alive`, all take `void *actor`) |
+| `runtime/march_runtime.c` | — | `march_actor_meta` side table, `actor_green_thread`, `march_spawn`/`send`/`kill`/`is_alive` |
+| `runtime/march_scheduler.c` | — | M:N work-stealing green-thread scheduler (`march_proc`, `march_sched_spawn`, `march_sched_send`) |
 
 ### Examples and Tests
 
@@ -912,7 +853,7 @@ For N roles, N×(N-1) directed queues are created — one per ordered role pair.
 | `examples/actors.march` | 1–113 | Counter/Logger demo with supervision |
 | `test_actor.march` | 1–42 | Simple Counter actor example |
 | `test_server_actor.march` | 1–31 | Actor integrated with HTTP server |
-| `test/test_march.ml` | 1544–2035 | Actor handler, list, snapshot tests |
+| `test/test_compiler.ml` | — | Actor handler tests (`test_actor_handler_*`) |
 
 ### Documentation
 
@@ -934,13 +875,13 @@ For N roles, N×(N-1) directed queues are created — one per ordered role pair.
 - **Receive**: O(1) queue pop
 - **Scheduling overhead**: ~1% per reduction check (inline branch)
 
-### Compiled (Planned)
+### Compiled
 
-- **Spawn**: O(1) allocation + RC increment
-- **Send**: O(1) mailbox push + process enqueue (CAS-based lock-free)
-- **Kill**: O(1) flag update + broadcasts
+- **Spawn**: O(1) actor alloc + `march_sched_spawn` (green-thread creation)
+- **Send**: O(1) mailbox push via `march_sched_send` + wake
+- **Kill**: O(1) flag update
 - **Dispatch**: O(log handlers) switch table lookup
-- **Context switch**: One message per worker preemption (fair scheduling)
+- **Context switch**: `swapcontext` between green threads; work-stealing across scheduler threads
 
 ---
 

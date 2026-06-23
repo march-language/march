@@ -224,7 +224,12 @@ type Age  = Int
 type DB   = Map(String, List(Int))
 ```
 
-Type aliases are structural — `Name` and `String` are interchangeable.
+A type alias expands to its definition, so a value declared as the alias can be
+used where the underlying type is expected — e.g. a `Name` flows into a function
+taking a `String`. The reverse is not always accepted: passing a bare `String`
+where the alias `Name` is expected can be rejected, so don't rely on aliases
+being freely interchangeable in both directions. Use aliases for readability,
+not as a substitute for a distinct wrapper type.
 
 ---
 

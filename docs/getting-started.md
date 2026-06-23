@@ -56,7 +56,7 @@ mod Greet do
     let message = greet("World")
     println(message)
     let names = ["Alice", "Bob", "Carol"]
-    List.iter(names, fn n -> println(greet(n)))
+    List.each(names, fn n -> println(greet(n)))
   end
 
 end
@@ -78,7 +78,7 @@ Hello, Carol!
 Key things to notice:
 - `let x = expr` binds a name (no `in` needed; subsequent lines in the block see it)
 - `++` concatenates strings
-- `List.iter` takes a list and a function
+- `List.each` takes a list and a function, running it for its side effects
 - Lambdas are written `fn x -> body`
 
 ---
@@ -101,8 +101,10 @@ The compiler runs LLVM, links the C runtime, and produces a native executable.
 Start an interactive session:
 
 ```sh
-dune exec march -- --repl
+dune exec march -- repl
 ```
+
+(With an installed binary, just run `march repl`, or `march` with no arguments.)
 
 Or via forge:
 ```sh

@@ -6,14 +6,13 @@ March defines four standard interfaces that ADTs can automatically derive via a 
 
 ## Implementation Status
 
-**Implemented on branch `claude/intelligent-austin` — pending merge to main.**
+**Implemented and merged.** The `derive` machinery is fully wired in the current tree:
 
-The implementation adds:
-- `derive [Eq, Ord, Show, Hash]` surface syntax
-- `DDeriving` AST node
-- Lexer/parser support
-- Eval dispatch via `impl_tbl` for `==`, `show`, `hash`, `compare`
-- Desugar expansion of `DDeriving` into concrete `DImpl` blocks
+- `derive [Eq, Ord, Show, Hash]` surface syntax — `derive_decl` rule in `lib/parser/parser.mly`
+- `DDeriving` AST node — `lib/ast/ast.ml` (`DDeriving of name * name list * span`)
+- `DERIVE` lexer token — `lib/lexer/lexer.mll` (`("derive", DERIVE)`)
+- Desugar expansion of `DDeriving` into concrete `DImpl` blocks — `lib/desugar/desugar.ml` (`derive_impl` builds Eq/Ord/Show/Hash/Json impls; expanded before `desugar_decl`)
+- Eval dispatch via `impl_tbl` for `==`, `show`, `hash`, `compare` — `lib/eval/eval.ml`
 
 ## Superclass Constraints
 
@@ -28,7 +27,7 @@ The type checker verifies superclass satisfaction when processing `DImpl` declar
 - When you implement interface `B` for type `T`, and `B` requires superclass `A`, the checker verifies an `impl A(T)` already exists in scope.
 - Multi-param superclasses are not yet supported (single-param only).
 
-## Surface Syntax (after merge)
+## Surface Syntax
 
 ```march
 -- Derive Eq and Show automatically
@@ -62,7 +61,7 @@ interface Hash(a) when Eq(a) do
 end
 ```
 
-## Implementation Files (on branch `claude/intelligent-austin`)
+## Implementation Files
 
 | File | Purpose |
 |---|---|
@@ -80,9 +79,4 @@ The eval interpreter already has an `impl_tbl` for interface dispatch (`lib/eval
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 ```
 
-`impl_tbl` maps `(interface_name, type_name)` → closure. The `Drop` interface is already dispatched this way. Once merged, `Eq`/`Ord`/`Show`/`Hash` will use the same mechanism.
-
-## Merge Blockers
-
-- Needs review and testing before merging to main
-- Should add tests in `test/test_march.ml` for derive syntax and dispatch correctness
+`impl_tbl` maps `(interface_name, type_name)` → closure. `Drop`, `Eq`, `Ord`, `Show`, and `Hash` all dispatch through this table; derived impls populate it via the desugar-generated `DImpl` blocks.

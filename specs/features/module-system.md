@@ -263,7 +263,9 @@ use Collections                (* Import Collections as a prefix *)
 
 ## Test Coverage
 
-### `test/test_march.ml`
+### `test/test_compiler.ml`
+
+> **Note.** `test/test_march.ml` no longer exists — the alcotest suite was split into per-area files (`test_compiler.ml`, `test_eval.ml`, `test_codegen.ml`, `test_stdlib_suite.ml`) run via the `run_*.ml` drivers. Module/parser tests live in `test/test_compiler.ml`; the line numbers below are approximate / historical.
 
 **Module-related tests:**
 - `test_parse_module_multi_head` (lines 115–130): Parser correctly handles module declarations

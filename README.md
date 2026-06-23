@@ -21,7 +21,7 @@ end
 **Type system**
 - Hindley-Milner inference with bidirectional checking at function boundaries — annotations are optional except where inference fails
 - Algebraic data types with pattern matching
-- Records with functional update syntax (`{ r with field = value }`)
+- Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
 - Linear and affine types for ownership and safe mutation (in progress)
 
@@ -47,7 +47,7 @@ end
 
 **Concurrency**
 - Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive` (interpreter only)
-- Actor state updated via record spread: `{ state with count = state.count + 1 }`
+- Actor state updated via record spread: `{ state with count: state.count + 1 }`
 - Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
 - Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
 
@@ -349,13 +349,13 @@ end
 ```march
 type Point = { x : Int, y : Int }
 
-let p = { x = 3, y = 4 }
+let p = { x: 3, y: 4 }
 
 -- Field access
 let px = p.x
 
 -- Functional update (returns a new record)
-let q = { p with x = 10 }
+let q = { p with x: 10 }
 ```
 
 ### Pattern matching
@@ -401,10 +401,10 @@ end
 ```march
 actor Counter do
   state { value : Int }
-  init  { value = 0 }
+  init  { value: 0 }
 
   on Increment(n : Int) do
-    { state with value = state.value + n }
+    { state with value: state.value + n }
   end
 
   on Get() do

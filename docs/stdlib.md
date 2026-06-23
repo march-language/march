@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 76 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 98 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -107,7 +107,6 @@ List.take([1, 2, 3, 4, 5], 3)         -- [1, 2, 3]
 List.drop([1, 2, 3, 4], 2)            -- [3, 4]
 List.take_while([1, 2, 3, 4], fn x -> x < 3)   -- [1, 2]
 List.drop_while([1, 2, 3, 4], fn x -> x < 3)   -- [3, 4]
-Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
 
 -- Parallel (real multi-core parallelism in compiled code; the supplied
 -- function MUST be safe to run concurrently)
@@ -217,19 +216,30 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 ## Set
 
-`set.march` — HAMT-backed persistent set.
+`set.march` — HAMT-backed persistent set. The set is always the **first**
+argument, and operations that need element identity take a trailing comparator
+`cmp : a -> a -> Bool` where `cmp(a)(b) = true` means `a < b` (same convention
+as `Map`).
 
 ```march
-let s = Set.from_list([1, 2, 3, 4, 5])
-Set.member(3, s)           -- true
-Set.insert(6, s)           -- {1,2,3,4,5,6}
-Set.delete(3, s)           -- {1,2,4,5}
+let cmp = fn a -> fn b -> a < b
+
+let s = Set.from_list([1, 2, 3, 4, 5], cmp)
+Set.contains(s, 3, cmp)    -- true
+Set.insert(s, 6, cmp)      -- {1,2,3,4,5,6}
+Set.remove(s, 3, cmp)      -- {1,2,4,5}
 Set.size(s)                -- 5
-Set.union(s1, s2)
-Set.intersection(s1, s2)
-Set.difference(s1, s2)
-Set.to_list(s)             -- [1, 2, 3, 4, 5]
-Set.filter(s, fn x -> x % 2 == 0)  -- {2, 4}
+Set.is_empty(Set.empty())  -- true
+
+let s1 = Set.from_list([1, 2, 3], cmp)
+let s2 = Set.from_list([2, 3, 4], cmp)
+Set.union(s1, s2, cmp)         -- {1,2,3,4}
+Set.intersection(s1, s2, cmp)  -- {2,3}
+Set.difference(s1, s2, cmp)    -- {1}
+Set.is_subset(s1, s2, cmp)     -- false
+
+Set.to_list(s)                       -- [1, 2, 3, 4, 5]
+Set.fold(s, 0, fn (acc, x) -> acc + x)  -- 15
 ```
 
 ---
@@ -341,15 +351,27 @@ Math.is_nan(0.0 /. 0.0)   -- true
 `crypto.march` — Cryptographic primitives.
 
 ```march
+-- Hashing
 Crypto.sha256("hello")              -- hex string
 Crypto.sha512("hello")              -- hex string
-Crypto.hmac_sha256(key, message)    -- hex string
-Crypto.random_bytes(32)             -- List(Int) of random bytes
+Crypto.hmac(:sha256, key, message)  -- HMAC; algo is :sha256 or :sha512
+
+-- Password hashing (PBKDF2 under the hood; stores salt + iterations)
+let h = Crypto.hash_password("hunter2")     -- "pbkdf2:sha256:..." digest string
+Crypto.verify_password("hunter2", h)         -- true (constant-time)
+
+-- Randomness
+Crypto.random_bytes(32)             -- Bytes of cryptographically random data
 Crypto.random_hex(16)               -- random hex string (32 chars)
-Crypto.base64_encode(bytes)         -- Base64 string
-Crypto.base64_decode(s)             -- List(Int)
-Crypto.secure_compare(a, b)         -- constant-time equality
-Crypto.pbkdf2_sha256(password, salt, iterations, key_len)  -- derived key
+
+-- Encoding
+Crypto.base64_encode("hello")       -- "aGVsbG8="
+Crypto.base64_decode("aGVsbG8=")    -- Ok(Bytes)
+Crypto.base64_url_encode("hello")   -- URL-safe Base64
+Crypto.base64_url_decode(s)         -- Ok(Bytes)
+
+-- Constant-time comparison (use for secrets / MACs)
+Crypto.secure_compare(a, b)         -- Bool
 ```
 
 ---
@@ -506,10 +528,10 @@ Vault.all()                   -- List((String, a))
 ```march
 Enum.map(items, fn x -> x * 2)
 Enum.filter(items, fn x -> x > 0)
-Enum.fold(items, 0, fn acc x -> acc + x)
-Enum.sort(items)
-Enum.sort_by(items, fn x -> x.name)
+Enum.fold(items, 0, fn acc -> fn x -> acc + x)   -- combiner is curried
+Enum.sort_by(items, fn a -> fn b -> a < b)        -- comparator: a < b
 Enum.chunk_every(items, 3)     -- group into chunks of 3
+Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x)  -- [(1, [1, 1]), (2, [2, 2]), (3, [3])]
 Enum.zip(items_a, items_b)
 Enum.dedup(items)              -- remove consecutive duplicates
 Enum.uniq(items)               -- remove all duplicates
@@ -517,11 +539,11 @@ Enum.take_while(items, pred)
 Enum.drop_while(items, pred)
 Enum.sum(nums)
 Enum.product(nums)
-Enum.scan(items, 0, fn acc x -> acc + x)
-Enum.with_index(items)         -- [(0, x), (1, y), ...]
-Enum.frequencies(items)        -- Map(a, Int) count of each item
-Enum.min_by(items, fn x -> x.score)
-Enum.max_by(items, fn x -> x.score)
+Enum.scan(items, 0, fn acc -> fn x -> acc + x)
+Enum.with_index(items)         -- [(x, 0), (y, 1), ...]
+Enum.frequencies(items)        -- List((a, Int)): count of each item
+Enum.min_by(items, fn x -> x.score)   -- Option(a)
+Enum.max_by(items, fn x -> x.score)   -- Option(a)
 ```
 
 ---
