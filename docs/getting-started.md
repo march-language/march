@@ -234,7 +234,13 @@ Both are valid. The compiler will catch type errors either way.
 
 ## Next Steps
 
+**Ready to build something?** → [Build a CLI Tool](build-a-cli.md) takes you from `forge new` to a working binary, and the [Cookbook](cookbook/) has goal-oriented recipes (CLI, HTTP, JSON, files, config).
+
+Learn the language:
+
 - [Language Tour](tour.md) — a comprehensive walkthrough of all syntax
 - [Type System](types.md) — algebraic data types, generics, Option/Result
 - [Pattern Matching](pattern-matching.md) — destructuring and exhaustiveness checking
 - [Actors](actors.md) — concurrent programming with the actor model
+
+Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

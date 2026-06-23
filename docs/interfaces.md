@@ -9,6 +9,13 @@ permalink: /docs/interfaces/
 
 Interfaces (typeclasses) provide ad-hoc polymorphism — the ability to write code that works for any type that satisfies a contract, without inheritance.
 
+**The bug they kill:** duplication that drifts out of sync. Without interfaces
+you write `show_color`, `show_user`, `show_order` — N near-identical functions
+that every new caller has to know about and every refactor has to update in
+lockstep. One `show` constraint collapses them into a single contract: callers
+write `show(x)`, and the compiler routes to the right implementation. Add a new
+type and you write *one* `impl`, not a new function name to thread everywhere.
+
 ---
 
 ## Defining an Interface
@@ -210,6 +217,13 @@ Required for keys in `Map` and elements in `Set`.
 ---
 
 ## `derive` — Automatic Implementations
+
+**The bug `derive` kills:** field drift. A hand-written `eq` or `show` that
+enumerates a record's fields silently goes stale the moment you add a field —
+the new field just isn't compared or printed, and nothing complains. `derive`
+regenerates the implementation from the type definition on every build, so adding
+a field automatically extends every derived instance. The structure is the single
+source of truth.
 
 For types with straightforward structure, `derive` generates implementations automatically:
 

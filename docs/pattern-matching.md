@@ -226,6 +226,14 @@ end
 
 Exhaustiveness extends to nested patterns. The compiler understands which combinations are possible.
 
+**Why this matters — refactoring safety.** Exhaustiveness turns "add a variant"
+from a silent hazard into a guided checklist. Add a `Blue` case to a `Color` that
+already had `Red` and `Green`, and the compiler flags **every** `match` in the
+codebase that forgot to handle it — each one a precise compile error pointing at
+the spot to update. (The LSP even offers an "Add all N missing cases" quick fix.)
+You can't ship a stale match arm by accident; the type that changed pulls every
+dependent decision back into review.
+
 ---
 
 ## Nested Patterns

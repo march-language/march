@@ -99,6 +99,29 @@ No garbage collector — reference counting with in-place reuse (FBIP). Determin
 
 ---
 
+## Concurrency & shared state
+
+If you're coming from Haskell, mutable references (`IORef`, `MVar`, `TVar`) and
+`async`/`Async` map onto March's two concurrency tools. If you're coming from
+Elixir, you'll find the model familiar — actors *are* GenServers.
+
+| Haskell / Elixir / OCaml | March |
+|---|---|
+| `IORef` / `MVar` / `TVar` (mutable cell) | an `actor`'s `state { … }` |
+| `Control.Concurrent.Async` / `async` | `Task.async(fn () -> …)` + `Task.await` |
+| `mapConcurrently` / `Async.Parallel` | `List.pmap` or `Task.await_many` |
+| Elixir `GenServer` (`handle_call`/`cast`) | `actor` with `on Msg do … end` handlers |
+| Elixir supervision tree | [Supervision](supervision.md) (`one_for_one`, …) |
+| `bracket` / `with` / `withFile` | a `linear` resource — the compiler *checks* it's released, no runtime wrapper |
+
+The last row is the interesting one: where Haskell's `bracket` guarantees cleanup
+at runtime via an exception handler, March's [linear types](linear-types.md) make
+"this handle must be consumed exactly once" a **compile-time** property — forget to
+close it and the program doesn't build. For streaming with backpressure (GenStage
+territory), see [Flow](flow.md).
+
+---
+
 ## What maps cleanly
 
 | Haskell / OCaml | March |

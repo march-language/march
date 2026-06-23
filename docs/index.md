@@ -50,14 +50,17 @@ The type system enforces actor isolation — you cannot accidentally share mutab
 March can verify at compile time that two actors follow a compatible communication protocol — including that neither side will deadlock. If your protocol says the server sends a response after receiving a request, the compiler checks both sides agree.
 
 ```march
--- Protocol: client sends a query, server replies with a result
-session Search do
-  client -> server : Query(String)
-  server -> client : Results(List(String))
+-- Protocol: Client sends a query, Server replies with results.
+-- Roles are inferred from the steps; the keyword is `protocol`.
+protocol Search do
+  Client -> Server : String
+  Server -> Client : List(String)
 end
 ```
 
-Mismatched message patterns and deadlocks become compile errors, not runtime surprises.
+Each side gets its own projected view and the compiler checks they're duals, so
+mismatched message patterns and deadlocks become compile errors, not runtime
+surprises. See [Session Types]({{ site.baseurl }}/docs/session-types/) for the full walkthrough.
 
 ### Perceus reference counting + FBIP
 
@@ -200,15 +203,25 @@ end
 | [Installation](installation.md) | Build from source, prerequisites |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes — the essentials |
+| [Build a CLI Tool](build-a-cli.md) | Start-to-finish: scaffold, args, files, test, build |
+| [Cookbook](cookbook/) | Goal-oriented recipes: CLI, HTTP, JSON, files, config |
 | [Type System](types.md) | ADTs, records, generics, Option, Result |
 | [Linear Types](linear-types.md) | Ownership, linear and affine qualifiers |
 | [Capabilities](capabilities.md) | IO permission caps, proof tokens, `needs` enforcement |
+| [Refinement Types](refinement-types.md) | `{T \| pred}` predicates checked by Z3 |
 | [Pattern Matching](pattern-matching.md) | Match, guards, exhaustiveness, nested patterns |
+| [Safety by Construction](safety-by-construction.md) | Composing linear, capability, refinement, and typestate guarantees |
+| [Memory Model](memory-model.md) | Perceus RC, FBIP in-place reuse, allocation-free code |
 | [Module System](modules.md) | `mod`, `use`, `import`, `alias`, visibility |
 | [Actors](actors.md) | Spawn, send, receive, linking, monitoring |
 | [Supervision](supervision.md) | Supervision trees, restart strategies |
+| [Parallelism](parallelism.md) | Tasks, `pmap`, the M:N work-stealing scheduler |
+| [Session Types](session-types.md) | Typed two-party protocols; deadlocks caught at compile time |
+| [Flow](flow.md) | Backpressure pipelines for streaming work |
+| [Clustering](clustering.md) | Distributed actors: SWIM, CRDTs, RPC across nodes |
 | [Interfaces](interfaces.md) | `interface`, `impl`, `derive` |
 | [FFI](ffi.md) | Bind C/Rust libraries: `extern`, ownership, codecs, the `march` crate |
 | [Standard Library](stdlib.md) | List, Map, String, Option, Result, and more |
 | [REPL](repl.md) | Interactive session guide |
 | [Tooling](tooling.md) | LSP, Zed, forge build tool |
+| Coming from [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md) | Mental-model maps for newcomers |

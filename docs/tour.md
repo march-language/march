@@ -562,7 +562,13 @@ dune exec forge -- test
 
 ## Next Steps
 
+**Ready to build something?** → [Build a CLI Tool](build-a-cli.md) goes start-to-finish, and the [Cookbook](cookbook/) has goal-oriented recipes.
+
+Go deeper:
+
 - [Type System](types.md) — algebraic data types and generics in depth
 - [Pattern Matching](pattern-matching.md) — exhaustiveness, guards, nested patterns
 - [Modules](modules.md) — organizing code across files
 - [Actors](actors.md) — concurrent programming
+
+Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).

@@ -587,6 +587,87 @@ The pipe operator chains transformations left-to-right:
 
 ---
 
+## Which Safety Tool for Which Job
+
+March gives you many ways to make illegal states unrepresentable. Choose by **the
+guarantee you want**, not by the feature name. This table is keyed on the
+guarantee:
+
+| Guarantee you want | Reach for | Checked by | Granularity |
+|--------------------|-----------|------------|-------------|
+| A value stays in a numeric/logical range (`>= 0`, `!= 0`, `< len`) | Refinement `{T \| pred}` | SMT solver (Z3), compile time | Per value |
+| A dimension/length matches across values | Type-level natural `Vector(n, a)` | Type inference, compile time | Per value |
+| A value can only be built through a vetted constructor | Smart-constructor / opaque `ptype` | Type checker (private constructor) | Per value |
+| Validate data whose shape isn't known until runtime | Runtime validator returning `Result` | Your code, run time | Per value |
+| A resource is used the right number of times | `linear` (exactly once) / `affine` (at most once) | Type checker, compile time | Per value |
+| A resource is used in the right order (open → read → close) | Typestate (`always_linear type` + `transitions`) | Type checker, compile time | Per value |
+| Code may only touch resources it was granted | Capability `needs` / `Cap(X)` | Type checker (transitive), compile time | Per module / call |
+| A two-party conversation follows a protocol | Session type `protocol` + `Chan` | Type checker, compile time | Per channel |
+
+### Two confusable pairs
+
+**Refinement vs. smart-constructor.** A refinement `{Int | _ > 0}` checks a
+*predicate the solver can read* every time the value flows into a refined
+position — great for arithmetic ranges and bounds. A smart-constructor (`ptype`
+with a private constructor) enforces an invariant the solver *can't* express
+(`Email` is well-formed, `Sanitized` has been escaped): the only way to get the
+type is to go through the function that establishes the invariant. Use a
+refinement when the property is arithmetic; use a smart-constructor when it's
+structural or semantic.
+
+**Refinement vs. runtime validator.** They live at different boundaries:
+**refine internals, validate untrusted input at the edge.** A refinement is a
+*static* contract between functions you control — it disappears at runtime. A
+runtime validator returning `Result` is for data crossing a trust boundary (a
+request body, a file, a CLI argument) where you genuinely don't know the value
+until it arrives. Validate once at the edge, then carry the proof inward as a
+smart-constructor or a refined type.
+
+See [Safety by Construction](safety-by-construction.md) for one function that
+threads capability, typestate, and refinement together.
+
+---
+
+## What's Inferred, What You Must Write
+
+March's rule of thumb: **it infers structure (facts it can read off your code)
+and asks you to declare claims (constraints, predicates, and effects it must
+verify against your code).**
+
+| | What March does | Examples |
+|---|---|---|
+| **Inferred** (you write nothing) | Reconstructed from the code | Types of `let` locals; lambda parameter types; generic instantiation at call sites |
+| **Optional** (write for docs/clarity) | Inferred, but you may pin it | Function parameter and return signatures |
+| **NOT inferred** (you declare, compiler verifies) | A claim the compiler checks but won't guess | Interface constraints (`when Ord(a)`); refinement predicates (`{Int \| _ >= 0}`); capabilities (`needs IO.FileRead`) |
+
+The asymmetry is deliberate. A *fact* like "this local is an `Int`" the compiler
+can simply read off the expression. A *claim* like "this argument is always
+positive" or "this module may read files" is a contract you're asserting — the
+compiler can't invent the contract for you, but once you state it, it holds you
+(and your callers) to it.
+
+---
+
+## What the Type System Buys at Runtime
+
+The static guarantees aren't just for catching bugs — they let the compiler
+*delete* runtime machinery that dynamic languages pay for on every call:
+
+- **Whole-program monomorphization → no dynamic dispatch.** Generic code is
+  specialized to concrete types, so interface calls become direct calls with no
+  vtable lookup. (See [memory model](memory-model.md).)
+- **Defunctionalization → no heap closures.** Higher-order functions are compiled
+  to plain tagged data and a dispatch, so passing a lambda doesn't allocate a
+  closure object on the heap. (See [memory model](memory-model.md).)
+- **Immutable by default → no write barriers.** Pointer fields are never written
+  after construction, so there's no GC write barrier on the common path. (See
+  [memory model](memory-model.md).)
+- **Linear / affine → static free.** Values with statically known lifetimes get a
+  compiler-inserted `free` at last use — no reference-count bookkeeping at all.
+  (See [memory model](memory-model.md).)
+
+---
+
 ## The Type Hierarchy at a Glance
 
 ```

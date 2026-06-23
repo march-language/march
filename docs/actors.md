@@ -368,6 +368,35 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 
 ---
 
+## Choosing a concurrency primitive
+
+March gives you several concurrency tools, and they all run on the **same M:N green-thread scheduler** — the choice is about *shape of problem*, not about performance tiers. One mental model to keep them straight:
+
+> **Actors** = identity + state + mailbox. **Tasks** = structured fork/join. **Flow** = bounded streaming. **`pmap`** = data-parallel collections. **Session channels** = a typed two-party conversation.
+
+Pick by what you need:
+
+| If you need… | Reach for | Why |
+|---|---|---|
+| A long-lived stateful entity many parties talk to (counter, connection, cache) | **actor** (`spawn` / `send`) | Identity + private state + a mailbox; survives across messages and restarts |
+| To fan out independent work and collect *all* the results | **`Task.async`** + **`Task.await_many`** | Structured fork/join; you await every task |
+| The *first* result and want to cancel the losers | **`Task.race`** / **`Task.any`** | Returns as soon as one finishes (`any` = first success; `race` = first to settle) |
+| Fork tasks that are guaranteed to be cleaned up when the block exits | **`Task.scope`** | Structured concurrency — no task outlives its scope |
+| To transform a whole list across cores, identical result to `map` | **`List.pmap`** / **`pmap_n`** | Data-parallel; `pmap_n` bounds concurrency for expensive items |
+| A multi-stage stream where one stage can fall behind a fast producer | **`Flow`** | Backpressure — the consumer's demand caps how far the producer runs ahead |
+| A strict two-party protocol whose message *order* the compiler should enforce | **session channels** (`Chan.*`) | Linear, typed conversation; wrong-order/use-after-close are compile errors |
+| Raw, un-managed green-thread spawn (you handle joining yourself) | **`task_spawn`** | The low-level primitive `Task.*` is built on — prefer `Task.*` |
+
+Rules of thumb:
+
+- **Default to `Task.async` / `await_many`** for "do these N things concurrently, give me the answers." It's the simplest structured option.
+- **Default to an actor** the moment there's *mutable state with an identity* — something that several callers update over time.
+- **Choose `Flow` over an unbounded `Task.async_stream`** when a fast producer could overwhelm a slow downstream stage and pile up in-flight work. See [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
+- **Choose `pmap` over hand-wired tasks** when the input is a list, items are independent, and you want the order-preserving, threshold-managed convenience. See [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
+- **Choose session channels over a bare actor** when two parties run a fixed protocol and ordering correctness matters. See [Session Types]({{ site.baseurl }}/docs/session-types/).
+
+---
+
 ## Builtins Reference
 
 | Builtin | Signature | Description |
@@ -389,6 +418,12 @@ The `app` declaration integrates with the supervision system. See [Supervision](
 
 ## Next Steps
 
-- [Supervision](supervision.md) — fault-tolerant hierarchies with automatic restart
-- [Linear Types](linear-types.md) — how linear types interact with message passing
-- [Task stdlib](stdlib/Task.html) — full Task API reference
+The concurrency and distribution docs form a journey — actors are the foundation; each step below builds on them:
+
+- [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — fault-tolerant hierarchies with automatic restart, ending in a capstone crash-tolerant job processor.
+- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for data-parallel work on the same scheduler.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming pipelines when a fast producer outruns a slow consumer.
+- [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols whose message order the compiler enforces.
+- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised actor app from one node to a cluster with cross-node calls.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types interact with message passing.
+- [Task stdlib]({{ site.baseurl }}/docs/stdlib/Task.html) — full Task API reference.

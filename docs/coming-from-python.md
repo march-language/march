@@ -177,6 +177,46 @@ fn fetch(id : Int) : Result(User, String) do ... end
 
 ---
 
+## Concurrency & shared state
+
+Python reaches for a class with mutable `self` state, plus `threading` or
+`asyncio` for concurrency. March has no mutable objects — **state that changes
+over time lives in an actor**, a process you talk to by message.
+
+```python
+# Python
+class Counter:
+    def __init__(self):
+        self.count = 0
+    def inc(self, n):
+        self.count += n
+```
+
+```march
+-- March: state lives in an actor; messages drive the transitions
+actor Counter do
+  state { value : Int }
+  init  { value: 0 }
+
+  on Increment(n : Int) do
+    { state with value: state.value + n }
+  end
+end
+```
+
+You `spawn` the actor and `send` it messages; it owns its state and no other code can touch it.
+
+| Python | March |
+|--------|-------|
+| `class` with mutable `self` | `actor` with `state { … }` |
+| `threading.Thread` / `asyncio` task | `Task.async(fn () -> …)` + `Task.await` |
+| `asyncio.gather(...)` | `Task.await_many([...])` |
+| module-level / `global` mutable state | a `Vault` (in-memory key-value store) |
+
+See [Actors](actors.md) and [Choosing a concurrency primitive](actors.md#choosing-a-concurrency-primitive).
+
+---
+
 ## What's the same
 
 - `println(...)` for output

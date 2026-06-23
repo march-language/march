@@ -297,7 +297,131 @@ end
 
 ---
 
+## Capstone: a crash-tolerant job processor
+
+Let's build something real by layering the pieces one at a time — each step adds exactly one capability, and you can stop at whichever level your problem needs.
+
+### Step 1 — one worker
+
+Start with a single actor that processes jobs. On a bad job it just crashes; we'll make that survivable in the next step.
+
+```march
+mod JobProcessorV1 do
+
+  actor Worker do
+    state { done : Int }
+    init  { done: 0 }
+
+    on Process(job : Int) do
+      -- pretend-work; a real handler might crash on a malformed job
+      println("[Worker] processed job " ++ int_to_string(job))
+      { done: state.done + 1 }
+    end
+  end
+
+  fn main() do
+    let w = spawn(Worker)
+    send(w, Process(1))
+    send(w, Process(2))
+    run_until_idle()
+  end
+
+end
+```
+
+That's the whole job processor — but if `Process` ever crashes, the worker is gone and every later job is dropped.
+
+### Step 2 — put it under a supervisor (crash recovery)
+
+Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: the supervisor restarts the worker (with fresh state) instead of losing it.
+
+```march
+mod JobProcessorV2 do
+
+  actor Worker do
+    state { done : Int }
+    init  { done: 0 }
+
+    on Process(job : Int) do
+      println("[Worker] processed job " ++ int_to_string(job))
+      { done: state.done + 1 }
+    end
+  end
+
+  actor JobSupervisor do
+    state { worker : Int }
+    init  { worker: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 30
+      Worker worker
+    end
+  end
+
+  fn main() do
+    let sup = spawn(JobSupervisor)
+    let w_int = match get_actor_field(sup, "worker") do
+                  None    -> -1
+                  Some(n) -> n
+                end
+    let w = pid_of_int(w_int)
+    send(w, Process(1))
+    run_until_idle()
+
+    -- A crash is now survivable: kill the worker and the supervisor restarts it.
+    kill(w)
+    let w2_int = match get_actor_field(sup, "worker") do
+                   None    -> -1
+                   Some(n) -> n
+                 end
+    println("worker restarted, alive: "
+            ++ bool_to_string(is_alive(pid_of_int(w2_int))))
+    run_until_idle()
+  end
+
+end
+```
+
+`one_for_one` is the right strategy here: one worker, independent of anything else, restarted on its own. See [Restart Strategies](#restart-strategies) for when to escalate to `one_for_all` or `rest_for_one`.
+
+### Step 3 — fan out to N workers
+
+One worker is a bottleneck. Spawn a pool and spread jobs across it. Each worker is the same supervised actor; we just spawn several and round-robin work to them. The data-parallel shortcut for "run this over a whole list across the pool" is [`List.pmap`]({{ site.baseurl }}/docs/parallel-collections/) — same scheduler, order-preserving results:
+
+```march
+-- Dispatch a batch of jobs across N workers, in parallel.
+fn dispatch_all(jobs : List(Int)) do
+  -- Each job handled on a worker green-thread; results come back in order.
+  List.pmap(jobs, fn job -> handle_job(job))
+end
+```
+
+Under a supervisor you'd list several `Worker` children (`Worker w1`, `Worker w2`, …, each its own state field) so a crash in one doesn't disturb the others — that's exactly what `one_for_one` gives a pool.
+
+### Step 4 — add backpressure so a fast producer can't flood the pool
+
+The missing piece: if jobs arrive faster than the pool drains them, an unbounded queue grows until memory runs out. Put a [`Flow`]({{ site.baseurl }}/docs/flow/) pipeline in front so the *consumer* (the pool) sets the pace — the producer only runs as far ahead as there's capacity:
+
+```march
+fn process_stream(jobs : List(Int)) do
+  Flow.from_list(jobs)
+    |> Flow.map(fn job -> handle_job(job))   -- the slow stage
+    |> Flow.with_concurrency(4)              -- 4 worker actors, bounded demand
+    |> Flow.collect
+end
+```
+
+If you'd rather bound concurrency on a plain list without a pipeline, [`List.pmap_n(jobs, handle_job, 4)`]({{ site.baseurl }}/docs/parallel-collections/) caps in-flight work the same way. Either way, the chain is now complete: **one worker → supervised (survives crashes) → a pool (throughput) → backpressured (bounded memory under load).** That progression — start simple, add exactly the resilience you need — is the heart of how March systems are built.
+
+> **What runs where.** The plain actor/supervisor programs (Steps 1–2) execute in the interpreter via `run_until_idle()`. The `Flow` / `pmap` stages (Steps 3–4) produce identical *results* in the interpreter but only parallelise when **compiled** — see [Parallel Collections → Interpreter vs. compiled]({{ site.baseurl }}/docs/parallel-collections/) and [Flow & Backpressure]({{ site.baseurl }}/docs/flow/).
+
+---
+
 ## Next Steps
 
-- [Actors](actors.md) — the actor model basics
-- [Linear Types](linear-types.md) — how linear types support safe actor messaging
+- [Actors]({{ site.baseurl }}/docs/actors/) — the actor model basics and the concurrency decision guide.
+- [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/) — `pmap` / `pmap_n` for fanning work across a pool.
+- [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming so a fast producer can't flood your workers.
+- [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised app from one node to a cluster.
+- [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types support safe actor messaging.

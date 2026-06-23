@@ -216,6 +216,38 @@ let older  = { user with age: 31 }    -- user is unchanged
 
 ---
 
+## Concurrency & shared state
+
+A `Promise<T>` maps to a `Task(T)`: a value being computed concurrently. `await`
+becomes `Task.await`, and `Promise.all` becomes `Task.await_many`.
+
+```typescript
+// TypeScript
+const [a, b] = await Promise.all([fetchUser(1), fetchUser(2)]);
+```
+
+```march
+-- March
+let t1 = Task.async(fn () -> fetch_user(1))
+let t2 = Task.async(fn () -> fetch_user(2))
+let results = Task.await_many([t1, t2])   -- waits for both
+```
+
+For mutable, long-lived state (what you'd put in a class instance field), use an
+**actor** — a process that owns its state and receives messages:
+
+| TypeScript | March |
+|------------|-------|
+| `Promise<T>` | `Task(T)` |
+| `await p` | `Task.await(t)` |
+| `Promise.all([...])` | `Task.await_many([...])` |
+| `async function f()` | `Task.async(fn () -> …)` |
+| `class` with mutable fields | `actor` with `state { … }` |
+
+See [Actors](actors.md) and [Parallelism](parallelism.md).
+
+---
+
 ## What's the same
 
 - Generics / type parameters (different syntax, same concept)

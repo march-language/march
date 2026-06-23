@@ -83,6 +83,14 @@ Because the number of tasks tracks the chunk count (not the element count), the 
 
 In **compiled** code, tasks run on March's M:N green-thread scheduler: several OS threads (4 by default), each running many lightweight green threads, with work-stealing to keep cores busy. This is the same runtime described in [Actors]({{ site.baseurl }}/docs/actors/). Reference counting is atomic and each actor/task owns a private arena heap, so there is **no stop-the-world GC pause** — parallel work scales cleanly.
 
+### Why parallel FBIP needs no locks
+
+The reason `preduce` over a tree — or any divide-and-conquer over a uniquely-owned structure — scales without a single mutex comes down to **ownership**. March's [memory model]({{ site.baseurl }}/docs/memory-model/) tracks each value's reference count; a structure whose root has `RC == 1` is *uniquely owned*. When you split a uniquely-owned tree at its root, the left and right subtrees are themselves uniquely owned and **disjoint** — no node is reachable from both halves.
+
+That disjointness is the whole game. Hand each subtree to a different task and the two tasks rewrite their nodes **in place** (functional-but-in-place, FBIP) on separate cores. Because no node is shared, there is nothing to race over: no lock, no atomic fence on the data, no cache-line ping-pong. The only synchronization is the join at the end, when the parent task collects two already-finished results and combines them. Reference counting is needed only where sharing is *possible*; unique ownership proves it isn't, so the fast path is lock-free by construction.
+
+This is exactly what the **depth-24 parallel tree-sum benchmark** exercises: a ~16-million-node tree is split top-down, each task sums its disjoint subtree in place, and partial sums combine on the way up. The speedup tracks core count almost linearly precisely because there is zero contention between tasks — the structure's own shape guarantees they never touch the same memory.
+
 ### Interpreter vs. compiled
 
 | | Result correctness | Real CPU parallelism |

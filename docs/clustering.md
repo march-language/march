@@ -7,7 +7,48 @@ permalink: /docs/clustering/
 
 # Clustering & RPC
 
-March's distributed layer lets multiple nodes form a cluster, discover each other, detect failures, and call functions across node boundaries with type-safety guarantees. The full stack is built from composable pure modules layered on top of the actor runtime.
+March's distributed layer lets multiple nodes form a cluster, discover each other, detect failures, and call functions across node boundaries with type-safety guarantees. The full stack is built from composable pure modules layered on top of the [actor runtime]({{ site.baseurl }}/docs/actors/) and its [supervision trees]({{ site.baseurl }}/docs/supervision/).
+
+---
+
+## From one node to a cluster
+
+Start from where [Supervision Trees]({{ site.baseurl }}/docs/supervision/) leaves off: a supervised actor app running on a single machine. You `spawn` a worker, it gets a `Pid`, and locally you might register it under a name so other parts of the program can find it without threading the `Pid` around.
+
+**Clustering is that exact pattern, stretched across machines.** `GlobalRegistry` is *the distributed version of spawning and registering an actor*: instead of a name → `Pid` map living in one process, it's a cluster-wide, gossip-replicated name → `{node_id, pid}` map that every node converges on. Register a worker under a cluster name on Node A, and Node B can look that name up and call it — without ever holding A's raw `Pid`.
+
+Here's the whole arc in miniature. On Node A, a supervised worker registers itself under a cluster-wide name:
+
+```march
+-- Node A: register a local worker under a cluster-wide name.
+-- `my_clock` is this node's VectorClock; `42` is the worker's local Pid as an Int.
+let reg = GlobalRegistry.empty()
+let reg = GlobalRegistry.register(reg, "image-resizer", "a@127.0.0.1", 42, my_clock)
+```
+
+That `reg` is gossiped to peers (every `merge` is idempotent, so re-delivery is safe). On Node B, after the registry has converged, a second node looks the name up and issues a `RemoteCall` against it:
+
+```march
+-- Node B: find the worker by name, then call it across the cluster.
+match GlobalRegistry.lookup(reg, "image-resizer") do
+  None ->
+    -- not registered yet (or tombstoned) — retry later
+    ()
+  Some((node_id, pid)) ->
+    -- Build a type-safe remote reference and a request addressed to that pid.
+    let fref      = RemoteCall.remote_ref("Image", "resize", sig_hash, impl_hash)
+    let reply_to  = GlobalPid.make(my_id.node_id, 1, 1)
+    let args      = Msgpack.encode(Msgpack.int(800))
+    let req       = RemoteCall.request(fref, args, reply_to, 5000, 1)
+    -- `RemoteCall.encode_request(req)` is the frame to send to `node_id`;
+    -- the reply is decoded with `NodeRpc.interpret`. (Full loop below.)
+    ()
+end
+```
+
+The rest of this page is the machinery that makes those two snippets safe: how nodes authenticate (handshake), how they agree on who's alive (membership + SWIM), how a name resolves to a node (`GlobalRegistry`), and how a call is type-checked before the remote body runs (`RemoteCall` / `NodeRpc`). Read it top-to-bottom for the layered model, or jump to [Putting It Together](#putting-it-together) for an end-to-end two-node skeleton.
+
+> `GlobalRegistry.lookup` returns `Option((String, Int))` — the holder's `node_id` and its **local** `pid` on that node. You address remote calls with a `GlobalPid` (node + local pid + creation counter), which is what survives a restart unambiguously.
 
 ---
 
@@ -327,7 +368,7 @@ end
 
 ## Putting It Together
 
-> **Note:** this example shows the API surface — the transport layer (`send`/`recv` over `fd`) is left as an exercise. See the `NetFrame` module for length-prefixed framing helpers.
+> **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect — identity, listen/connect, handshake, then a `RemoteCall` — but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
 
 A minimal two-node cluster:
 
@@ -380,3 +421,20 @@ mod NodeB do
   end
 end
 ```
+
+### Wiring up the transport
+
+To turn the skeleton into a running program, close the two gaps the note above flagged:
+
+1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [Starting the listener](#starting-the-listener) — receive a frame, dispatch, write the reply.
+2. **Hashes.** `sig_hash` and `impl_hash` are produced by the compiler for the enrolled function (`Image.resize`, `Math.add`, …) and recorded in the binary; you reference the compiler-provided values rather than inventing them. A mismatch is caught *before* the remote body runs (`TypeMismatch` / `VersionSkew`), which is the whole point of the type-safe call path.
+
+For a complete, executing example, see the cluster integration tests under the project's `test/` tree (search with `forge search` for `ClusterConn`, `NodeRpc`, and `GlobalRegistry`), which exercise the full accept → handshake → enroll → call → reply loop end to end.
+
+---
+
+## See also
+
+- [Actors]({{ site.baseurl }}/docs/actors/) — `spawn` / `send` and the mailbox model the cluster layers on; `GlobalRegistry` is the distributed counterpart of registering a `Pid` under a name.
+- [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — start from a supervised actor app on one node, then register its workers in the cluster as shown in [From one node to a cluster](#from-one-node-to-a-cluster).
+- [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols, the in-process analogue of a type-safe `RemoteCall`.

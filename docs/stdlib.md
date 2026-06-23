@@ -17,6 +17,28 @@ All stdlib modules are available without any import statement — use qualified 
 
 ---
 
+## What do I use for…?
+
+You know the task; this maps it to the module(s) that do it. (Don't see your task? The [full reference](/docs/stdlib/) is searchable.)
+
+| I want to… | Reach for | Recipe |
+|---|---|---|
+| Parse CLI args | `System` / `Process` (`argv`) | [CLI](cookbook/cli/), [Build a CLI](build-a-cli/) |
+| Read / write files | `File`, `Dir`, `Path` | [Files](cookbook/files/) |
+| Parse a CSV | `Csv` | [Files](cookbook/files/) |
+| Call an HTTP API | `HttpClient`, `Http` | [HTTP](cookbook/http/) |
+| Parse a JSON response | `Json` | [JSON API](cookbook/json-api/) |
+| Parse TOML / YAML config | `Toml`, `Yaml` | [Config](cookbook/config/) |
+| Read environment variables | `Env`, `Config` | [Config](cookbook/config/) |
+| Run a subprocess | `Process` (`run`, `run_stream`) | — |
+| Hash / encode data | `Crypto`, `Base64` | — |
+| Work with dates / durations | `DateTime`, `Duration` | — |
+| Structured logging | `Logger` | — |
+| Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](cookbook/concurrency/) |
+| Transform a big collection in parallel | `List.pmap` / `pmap_n` | — |
+
+---
+
 ## Prelude (Auto-imported)
 
 The `Prelude` module is automatically imported into every March program. These names are always in scope:

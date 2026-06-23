@@ -108,6 +108,23 @@ The compiler tracks each linear field independently. Accessing `r.fd` consumes t
 
 ---
 
+## Linearity and Memory
+
+Linearity isn't only about correctness — it's the strongest case for March's
+in-place memory model. A `linear` value has **reference count 1 by
+construction**: the type system guarantees exactly one owner, so the compiler
+never has to emit a single reference-count adjustment for it. At the value's last
+use, it is simply freed — no scan, no count to check. This is the cleanest
+[Perceus]({{ site.baseurl }}/docs/memory-model/) case there is.
+
+The same guarantee makes actor message passing **zero-copy**. Sending an ordinary
+value to another actor copies its bytes (so the two heaps stay disjoint). A
+`linear` value can't be aliased, so sending it *transfers ownership* instead:
+the runtime hands the pointer over and adjusts bookkeeping, with no bytes copied.
+Uniqueness turns "send" from a copy into a move.
+
+---
+
 ## Linear Types and Actors
 
 Actors communicate by message passing. For safety, a linear value cannot be sent as a message directly — sending would require copying, and copying a linear value violates the uniqueness guarantee.
@@ -155,6 +172,12 @@ end
 The channel endpoints are linear — each `Chan.send`/`Chan.recv` operation
 consumes the old endpoint and returns a new one representing the next step of
 the protocol. The compiler verifies the full protocol is followed.
+
+> **What session types catch:** sending when you should receive, receiving the
+> wrong type, abandoning a conversation half-finished, or letting the two ends
+> drift out of step — all become compile errors. See
+> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full protocol
+> syntax and duality rules.
 
 ---
 

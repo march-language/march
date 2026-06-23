@@ -16,7 +16,11 @@ Practical recipes for getting things done in March. Each chapter covers one topi
 |---------|------------------|
 | [Basics](basics/) | Functions, types, pattern matching, `let?`, modules |
 | [Strings](strings/) | Concatenation, interpolation, parsing, formatting |
+| [CLI](cli/) | Reading args, flag parsing, files, exit codes |
 | [HTTP](http/) | Making requests, handling responses, simple servers |
+| [JSON API](json-api/) | Calling an API and decoding the JSON response |
+| [Files](files/) | Reading a CSV, aggregating columns, walking a directory |
+| [Config](config/) | Parsing TOML/YAML with environment overrides |
 | [Concurrency](concurrency/) | `Task.async`/`await`, actors, channels |
 | [Capabilities](capabilities/) | The capability system, `needs`, proof caps |
 | [Linear Types](linear-types/) | `linear type`, `always_linear`, typestate handles |
