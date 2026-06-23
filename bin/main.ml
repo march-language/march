@@ -475,6 +475,7 @@ let ffi_cas_tag () : string list =
     ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
   end
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
+let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
@@ -1073,6 +1074,13 @@ let compile filename =
     let f = d.span.March_ast.Ast.file in
     f = filename || f = "" || f = "<unknown>" || List.mem f user_files
   in
+  if !check_json then begin
+    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+      if is_user_file d then
+        print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
+    ) diags;
+    exit 0
+  end;
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then begin
         (* Render against the file the span points into — imported-module
@@ -2238,6 +2246,7 @@ let () =
     ("--ffi-so",     Arg.String (fun p -> March_eval.Eval.ffi_shim_so := Some p),
                      "<path.so>  Pre-compiled FFI shim .so to dlopen in interpreter mode");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");

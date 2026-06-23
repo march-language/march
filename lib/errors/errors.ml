@@ -244,3 +244,46 @@ let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
 
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
   render_diagnostic ~src ~filename (parse_error_diagnostic ~filename ?hint ~msg lexbuf)
+
+(* ── JSON output (--check-json) ───────────────────────────────────────── *)
+
+let json_string s =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter (function
+    | '"'  -> Buffer.add_string b "\\\""
+    | '\\' -> Buffer.add_string b "\\\\"
+    | '\n' -> Buffer.add_string b "\\n"
+    | '\r' -> Buffer.add_string b "\\r"
+    | '\t' -> Buffer.add_string b "\\t"
+    | c    -> Buffer.add_char b c
+  ) s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+let render_diagnostic_json (d : diagnostic) : string =
+  let sev = match d.severity with Error -> "error" | Warning -> "warning" | Hint -> "hint" in
+  let sp  = d.span in
+  let file    = json_string sp.March_ast.Ast.file in
+  let msg     = json_string d.message in
+  let code    = match d.code with None -> "null" | Some c -> json_string c in
+  let fix_json = match d.fix with
+    | None -> "null"
+    | Some (FInsert { after_line; text }) ->
+      Printf.sprintf {|{"kind":"insert","after_line":%d,"text":%s}|}
+        after_line (json_string text)
+    | Some (FDelete { start_line; end_line }) ->
+      Printf.sprintf {|{"kind":"delete","start_line":%d,"end_line":%d}|}
+        start_line end_line
+    | Some (FReplace { span = rs; text }) ->
+      Printf.sprintf {|{"kind":"replace","start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"text":%s}|}
+        rs.March_ast.Ast.start_line rs.March_ast.Ast.start_col
+        rs.March_ast.Ast.end_line   rs.March_ast.Ast.end_col
+        (json_string text)
+  in
+  Printf.sprintf
+    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s}|}
+    (json_string sev) file
+    sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col
+    sp.March_ast.Ast.end_line   sp.March_ast.Ast.end_col
+    msg code fix_json
