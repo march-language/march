@@ -7,6 +7,13 @@ on:
   pull_request:
 
 jobs:
+  doc-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint docs for stale source pointers and stdlib counts
+        run: scripts/check-docs.sh
+
   build:
     strategy:
       fail-fast: false
