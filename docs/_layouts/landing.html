@@ -419,7 +419,7 @@
 <nav class="m-nav">
   <div class="m-nav-inner">
     <a href="{{ site.baseurl }}/" class="m-nav-logo">
-      <img src="{{ site.baseurl }}/assets/logo.png" alt="March">
+      <img src="{{ site.baseurl }}/assets/logo.webp" alt="March">
       <span>March</span>
     </a>
     <div class="m-nav-links">
@@ -623,7 +623,7 @@
 <footer class="m-footer">
   <div class="m-footer-inner">
     <div class="m-footer-brand">
-      <img src="{{ site.baseurl }}/assets/logo.png" alt="">
+      <img src="{{ site.baseurl }}/assets/logo.webp" alt="">
       <span class="m-footer-name">March Programming Language</span>
       <span class="m-footer-mit">· MIT</span>
     </div>
@@ -634,7 +634,6 @@
   </div>
 </footer>
 
-<script src="{{ site.baseurl }}/assets/march-repl.js?v={{ site.time | date: '%s' }}"></script>
 <script>
 // ─── Syntax Highlighter ───────────────────────────────────────────────────────
 function syntaxHL(code, dark) {
@@ -934,26 +933,61 @@ function renderInstall() {
     `<span style="color:${ac}">i</span>`;
 }
 
-// ─── Landing REPL ────────────────────────────────────────────────────────────
+// ─── Landing REPL (lazy-loaded) ──────────────────────────────────────────────
+var _repl = { loading: false, ready: false, queue: [] };
+
+function _loadRepl() {
+  if (_repl.loading || _repl.ready) return;
+  _repl.loading = true;
+  var wrap = document.getElementById('m-repl-wrap');
+  var s = document.createElement('script');
+  s.src = (wrap.dataset.base || '') + '/assets/march-repl.js?v=' + (wrap.dataset.ver || '');
+  s.onload = function () {
+    var repl = new MarchRepl({
+      wrapId:    'm-repl-wrap',
+      historyId: 'm-repl-history',
+      inputId:   'm-repl-input',
+      loadingId: 'm-repl-loading',
+      cls: {
+        entry:     'm-repl-entry',
+        inputLine: 'm-repl-iline',
+        output:    'm-repl-oline',
+        error:     'm-repl-eline',
+        info:      'm-repl-nfo'
+      }
+    });
+    document.getElementById('m-repl-submit').addEventListener('click', function () { repl.submit(); });
+    document.getElementById('m-repl-reset').addEventListener('click', function () { repl.reset(); });
+    window.mReplLoad     = function (code)        { repl.load(code); };
+    window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };
+    _repl.ready = true;
+    _repl.queue.forEach(function (fn) { fn(); });
+    _repl.queue = [];
+  };
+  document.head.appendChild(s);
+}
+
+// Stubs: queue actions until the script is ready
+window.mReplLoad = function (code) {
+  _repl.queue.push(function () { window.mReplLoad(code); });
+  _loadRepl();
+};
+window.mReplLoadThen = function (setup, code) {
+  _repl.queue.push(function () { window.mReplLoadThen(setup, code); });
+  _loadRepl();
+};
+
+// Load on first interaction with the REPL area
+document.getElementById('m-repl-input').addEventListener('focus', _loadRepl, { once: true });
+document.getElementById('m-repl-submit').addEventListener('click', _loadRepl, { once: true });
+
+// Preload when REPL section scrolls within 500px of the viewport
 (function () {
-  var repl = new MarchRepl({
-    wrapId:    'm-repl-wrap',
-    historyId: 'm-repl-history',
-    inputId:   'm-repl-input',
-    loadingId: 'm-repl-loading',
-    cls: {
-      entry:     'm-repl-entry',
-      inputLine: 'm-repl-iline',
-      output:    'm-repl-oline',
-      error:     'm-repl-eline',
-      info:      'm-repl-nfo'
-    }
-  });
-  document.getElementById('m-repl-submit').addEventListener('click', function () { repl.submit(); });
-  document.getElementById('m-repl-reset').addEventListener('click', function () { repl.reset(); });
-  window.mReplLoad     = function (code)        { repl.load(code); };
-  window.mReplLoadThen = function (setup, code) { repl.loadThen(setup, code); };
-})();
+  var obs = new IntersectionObserver(function (entries) {
+    if (entries[0].isIntersecting) { obs.disconnect(); _loadRepl(); }
+  }, { rootMargin: '500px' });
+  obs.observe(document.getElementById('m-repl-wrap'));
+}());
 
 // ─── Try-in-REPL ─────────────────────────────────────────────────────────────
 function tryInRepl(code) {

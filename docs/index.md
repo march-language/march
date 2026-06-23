@@ -6,7 +6,7 @@ permalink: /
 ---
 
 <div style="text-align: center; margin: 2rem 0 1.5rem;">
-  <img src="{{ site.baseurl }}/assets/logo.png" alt="March logo" width="120" height="120" style="display: inline-block;">
+  <img src="{{ site.baseurl }}/assets/logo.webp" alt="March logo" width="120" height="120" style="display: inline-block;">
 </div>
 
 # March
