@@ -46,6 +46,53 @@ let warning_with_code ctx ~span ~code message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = []; code = Some code }
 
+(* ── ANSI colour ──────────────────────────────────────────────────────── *)
+
+(** Set to [true] at startup when stderr is a TTY (and NO_COLOR is absent).
+    Callers (bin/main.ml) are responsible for setting this before any output. *)
+let use_color : bool ref = ref false
+
+let ansi_reset        = "\027[0m"
+let ansi_bold         = "\027[1m"
+let ansi_dim          = "\027[2m"
+let ansi_cyan         = "\027[36m"
+let ansi_magenta      = "\027[35m"
+let ansi_bold_magenta = "\027[1;35m"
+
+let sev_bold_code  = function Error -> "\027[1;31m" | Warning -> "\027[1;33m" | Hint -> "\027[1;34m"
+let sev_plain_code = function Error -> "\027[31m"   | Warning -> "\027[33m"   | Hint -> "\027[34m"
+
+(** Wrap [s] in an ANSI [code]…reset pair when colour is on. *)
+let paint code s =
+  if !use_color then code ^ s ^ ansi_reset else s
+
+(** Colour backtick-quoted spans within [s].
+    Each matched `` `…` `` is wrapped in [inner_code]; [parent_code] is
+    restored afterwards so surrounding styling is not lost. *)
+let colorize_backticks ~parent_code ~inner_code s =
+  if not !use_color then s
+  else begin
+    let parts = String.split_on_char '`' s in
+    let n = List.length parts in
+    List.mapi (fun i part ->
+      if i mod 2 = 1 && i + 1 < n then
+        inner_code ^ "`" ^ part ^ "`" ^ ansi_reset ^ parent_code
+      else part
+    ) parts |> String.concat ""
+  end
+
+(** Bold primary message with bold-magenta backtick terms. *)
+let fmt_message s =
+  paint ansi_bold
+    (colorize_backticks ~parent_code:ansi_bold ~inner_code:ansi_bold_magenta s)
+
+(** Dim note with plain-magenta backtick terms. *)
+let fmt_note s =
+  paint ansi_dim
+    (colorize_backticks ~parent_code:ansi_dim ~inner_code:ansi_magenta s)
+
+(* ─────────────────────────────────────────────────────────────────────── *)
+
 let has_errors ctx =
   List.exists (fun d -> d.severity = Error) ctx.diagnostics
 
@@ -86,20 +133,28 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
   (* Header bar *)
   let loc_str = if filename = "" then "" else " " ^ filename in
   let dashes  = String.make (max 2 (48 - String.length loc_str)) '-' in
-  let header  = "-- " ^ sev_str ^ " " ^ dashes ^ loc_str in
+  let header =
+    if not !use_color then "-- " ^ sev_str ^ " " ^ dashes ^ loc_str
+    else
+      paint ansi_dim "--" ^ " " ^
+      paint (sev_bold_code d.severity) sev_str ^
+      paint ansi_dim (" " ^ dashes) ^
+      paint ansi_cyan loc_str
+  in
   (* Notes block — each note gets 4-space indent on every line *)
   let notes_block =
     if d.notes = [] then ""
     else
       "\n" ^ String.concat "\n"
         (List.map (fun n ->
-           let note_lines = String.split_on_char '\n' n in
+           let colored = fmt_note n in
+           let note_lines = String.split_on_char '\n' colored in
            String.concat "\n" (List.map (fun l -> "    " ^ l) note_lines)
          ) d.notes)
   in
   (* When no span info, just show the header and message. *)
   if line <= 0 || src = "" then
-    String.concat "\n" [ header; ""; d.message; notes_block ]
+    String.concat "\n" [ header; ""; fmt_message d.message; notes_block ]
   else begin
     (* Extract the source line(s) *)
     let src_lines = String.split_on_char '\n' src in
@@ -143,12 +198,17 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
             String.make lc ' ' ^ String.make (max 1 (stop - lc)) '^'
           in
           Some (Printf.sprintf "\n    %s:\n\n%s%s\n%s%s"
-            lbl.lbl_message (lg ll) lbl_src lp lu)
+            (paint ansi_dim lbl.lbl_message)
+            (paint ansi_dim (lg ll)) lbl_src lp
+            (paint ansi_dim lu))
         end
       ) d.labels
     in
     String.concat "\n"
-      ([ header; ""; d.message; ""; gutter line ^ src_line; pad ^ underline; notes_block ]
+      ([ header; ""; fmt_message d.message; "";
+         paint ansi_dim (gutter line) ^ src_line;
+         pad ^ paint (sev_plain_code d.severity) underline;
+         notes_block ]
        @ label_blocks)
   end
 

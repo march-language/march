@@ -2058,6 +2058,18 @@ let analyze_gc_trace path =
   exit (if ok then 0 else 1)
 
 let () =
+  (* Colour — priority: MARCH_COLOR env > NO_COLOR env > TERM=dumb > isatty. *)
+  March_errors.Errors.use_color := (
+    match Sys.getenv_opt "MARCH_COLOR" with
+    | Some "always" -> true
+    | Some "never"  -> false
+    | _ ->
+      Sys.getenv_opt "NO_COLOR" = None
+      && Sys.getenv_opt "TERM" <> Some "dumb"
+      && Unix.isatty Unix.stderr
+  )
+
+let () =
   (* Handle subcommands before Arg.parse *)
   let argv = Sys.argv in
   if Array.length argv >= 2 && (argv.(1) = "--version" || argv.(1) = "-version") then begin
