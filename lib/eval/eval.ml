@@ -8164,11 +8164,21 @@ let rec eval_decl (env : env) (d : decl) : env =
          String.sub k 0 (String.length n + 1) = n ^ ".")
       ) own_names
     in
-    let prefixed = List.filter_map (fun (k, v) ->
+    let prefixed_raw = List.filter_map (fun (k, v) ->
         if is_own_key k
         then Some (name.txt ^ "." ^ k, v)
         else None
       ) mod_env in
+    (* Deduplicate: mod_env is an assoc list with most-recently-bound entries
+       first, so inherited outer bindings that share a name with a module-local
+       fn appear after the module-local one.  Keep only the first occurrence of
+       each key so that e.g. "MyNet.connect" maps to MyNet's own closure, not
+       the outer module's "connect" that leaked in via inner_ref. *)
+    let seen_keys = Hashtbl.create 8 in
+    let prefixed = List.filter_map (fun (k, v) ->
+        if Hashtbl.mem seen_keys k then None
+        else begin Hashtbl.replace seen_keys k (); Some (k, v) end
+      ) prefixed_raw in
     (* Register in the global module registry so that cross-module
        qualified lookups (EField) can find these bindings at call time
        even if the referencing module was evaluated before this one. *)
