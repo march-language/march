@@ -390,12 +390,10 @@ void *march_tcp_peer_addr(int64_t fd) {
     return march_string_lit(p, (int64_t)strlen(p));
 }
 
-/* tcp_recv_all(fd_ptr, max_bytes, timeout_ms) → Result(String, String)
- * Reads until connection closes or max_bytes reached.
- * fd_ptr: the socket fd passed as ptr (inttoptr of i64 fd value). */
-void *march_tcp_recv_all(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) {
-    /* fd comes as a ptr-sized value carrying the raw i64 fd. */
-    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+/* tcp_recv_all(fd, max_bytes, timeout_ms) → Result(String, String)
+ * Reads until connection closes or max_bytes reached. */
+void *march_tcp_recv_all(int64_t fd_arg, int64_t max_bytes, int64_t timeout_ms) {
+    int fd = (int)fd_arg;
     (void)timeout_ms;  /* TODO: implement timeout */
     char chunk[65536];
     char *accum = NULL;
@@ -421,11 +419,10 @@ void *march_tcp_recv_all(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) {
     return make_ok(s);
 }
 
-/* tcp_recv_chunk(fd_ptr, max_bytes, timeout_ms) → Result(String, String)
+/* tcp_recv_chunk(fd, max_bytes) → Result(String, String)
  * Reads one chunk (up to max_bytes) from the socket. */
-void *march_tcp_recv_chunk(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) {
-    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
-    (void)timeout_ms;
+void *march_tcp_recv_chunk(int64_t fd_arg, int64_t max_bytes) {
+    int fd = (int)fd_arg;
     size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
     char *buf = malloc(sz);
     if (!buf) return make_err("OOM");
@@ -463,12 +460,12 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     return make_ok(b);
 }
 
-/* tcp_recv_chunked_frame(fd_ptr) → Result(String, String)
+/* tcp_recv_chunked_frame(fd) → Result(String, String)
  * Reads one HTTP chunked transfer-encoding frame.
  * Returns Ok("") when the terminal 0-size chunk is reached.
  * Format: "<hex_len>\r\n<data>\r\n" per chunk. */
-void *march_tcp_recv_chunked_frame(void *fd_ptr) {
-    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+void *march_tcp_recv_chunked_frame(int64_t fd_arg) {
+    int fd = (int)fd_arg;
     /* Read the chunk-size line (hex digits followed by \r\n). */
     char size_buf[32];
     size_t si = 0;
@@ -510,10 +507,11 @@ void *march_tcp_recv_chunked_frame(void *fd_ptr) {
     return make_ok(s);
 }
 
-/* tcp_recv_http_headers(fd_ptr, max_bytes) → Result(String, String)
+/* tcp_recv_http_headers(fd) → Result(String, String)
  * Reads until \r\n\r\n (end of HTTP headers). */
-void *march_tcp_recv_http_headers(void *fd_ptr, int64_t max_bytes) {
-    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+void *march_tcp_recv_http_headers(int64_t fd_arg) {
+    int fd = (int)fd_arg;
+    int64_t max_bytes = 65536;
     char *accum = NULL;
     size_t total = 0;
     char c;
