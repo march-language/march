@@ -1729,7 +1729,7 @@ let compile filename =
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
-                | Some hex -> Printf.sprintf " -DMARCH_SIGNING_PUBKEY_HEX=\"%s\"" hex
+                | Some hex -> Printf.sprintf " -DMARCH_SIGNING_PUBKEY_HEX=\\\"%s\\\"" hex
                 | None ->
                   Printf.eprintf "march: --signing-pubkey: invalid base64 or not 32 bytes\n";
                   ""
