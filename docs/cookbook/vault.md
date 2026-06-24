@@ -99,14 +99,14 @@ mod RateLimit do
     end
   end
 
-  fn handle(conn) do
-    let ip = HttpServer.get_req_header(conn, "x-forwarded-for")
-              |> Option.unwrap_or("unknown")
-    if check(ip, 100) do
-      HttpServer.text(conn, 200, "ok")
-    else
-      HttpServer.text(conn, 429, "rate limit exceeded")
-    end
-  end
+end
+
+fn main() do
+  let ip = "192.0.2.1"
+  let limit = 3
+  print("hit 1: " ++ bool_to_string(RateLimit.check(ip, limit)))
+  print("hit 2: " ++ bool_to_string(RateLimit.check(ip, limit)))
+  print("hit 3: " ++ bool_to_string(RateLimit.check(ip, limit)))
+  print("hit 4 (over limit): " ++ bool_to_string(RateLimit.check(ip, limit)))
 end
 ```
