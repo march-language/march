@@ -6687,6 +6687,21 @@ let base_env : env =
   ; ("remote_count", VBuiltin ("remote_count", function
         | [] | [VUnit] -> VInt 0
         | _ -> eval_error "remote_count: no arguments expected"))
+  (* remote_check(impl_hash, sig_hash) → Int  — admission check against the remote
+     registry: 0 = NoTarget (not enrolled), 1 = sig match, 2 = TypeMismatch.
+     Eval-path: the interpreter has no registry (remote_register_stub is a no-op),
+     so nothing is ever enrolled → always 0/NoTarget.  This matches the compiled
+     path's march_remote_check_march on an empty registry.  Real RPC dispatch is
+     exercised through the injected Targets table, not this C-registry fallback. *)
+  ; ("remote_check", VBuiltin ("remote_check", function
+        | [VString _impl; VString _sig] -> VInt 0
+        | _ -> eval_error "remote_check: expected (String, String)"))
+  (* remote_invoke(impl_hash, args) → Option(Result(List(Int), String))
+     Eval-path: empty registry → always None (no stub to call), consistent with
+     remote_check returning NoTarget. *)
+  ; ("remote_invoke", VBuiltin ("remote_invoke", function
+        | [VString _impl; _args] -> VCon ("None", [])
+        | _ -> eval_error "remote_invoke: expected (String, List(Int))"))
   (* ── RingBuf builtins — mutable fixed-capacity circular buffer ── *)
   (* Index convention: 0 = oldest (FIFO drain order). Single-owner — do not share
      across actor boundaries; the typechecker rejects RingBuf in send() payloads. *)

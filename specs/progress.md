@@ -282,6 +282,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-23, node_rpc interpreter gap closed — remote_check/remote_invoke eval builtins)
+
+- **`remote_check` / `remote_invoke` registered as interpreter builtins (`lib/eval/eval.ml`).** `stdlib/node_rpc.march`'s `handle_request` falls back to the remote registry (`remote_check` then `remote_invoke`) when a target isn't in the injected `Targets` table. Those were codegen-only builtins, so under the interpreter the call hit `unbound variable: remote_check` — the long-standing `test_stdlib_march` 46/47 failure. The interpreter has no registry (`remote_register_stub`/`remote_count` are deliberate no-ops — real dispatch is the compiled path), so the eval builtins are consistent with an empty registry: `remote_check` → `0` (NoTarget), `remote_invoke` → `None`. This is exactly what `march_remote_check_march` returns on an empty registry, and matches the "unknown target yields NoTarget" test; real RPC dispatch in eval still flows through the `Targets` table, not this fallback.
+- **`test_stdlib_march` is now 47/47** (the `node_rpc` `unbound variable: remote_check` gap, carried across this whole arc, is closed). Full suite green — compiler 321, eval 224, codegen 320, stdlib 786.
+
 ## Current State (as of 2026-06-23, capacity-aware routing demo — end-to-end cross-host)
 
 - **`demo/load_server.march` + `demo/load_client.march`** complete the original capacity-routing goal: a client queries each cluster node's live CPU/memory headroom over RPC (`report_load`, registered via the `__rpc_stub` mechanism), picks the node with the most spare CPU via `ClusterLoad.pick_by`, and routes the expensive call (`square`) there. Depends on every fix from this arc: the resource builtins, the `ClusterLoad` API, the niche-match codegen hardening, and — critically — the stable cross-binary RPC impl_hash (without it `report_load`, a non-trivial body, failed admission).
