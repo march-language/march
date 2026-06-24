@@ -987,7 +987,8 @@ let compile filename =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag ()
-              @ (if !compile_so then ["compile-so"] else [])) in
+              @ (if !compile_so then ["compile-so"] else [])
+              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1507,7 +1508,8 @@ let compile filename =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag ()
-              @ (if !compile_so then ["compile-so"] else [])) in
+              @ (if !compile_so then ["compile-so"] else [])
+              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
