@@ -499,7 +499,10 @@ static void sched_loop(march_scheduler *sched) {
                 atomic_store_explicit(&g_all_done, 1, memory_order_release);
                 break;
             }
-            sched_yield();
+            /* No runnable process: sleep 1ms to avoid burning CPU at idle.
+             * sched_yield() alone causes ~99% CPU on a waiting server. */
+            struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
+            nanosleep(&idle_sleep, NULL);
             continue;
         }
 

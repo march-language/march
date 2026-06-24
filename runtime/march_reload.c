@@ -212,6 +212,7 @@ static void handle_client(int fd) {
             size_t sz = (size_t)size_ll;
             unsigned char *buf = (unsigned char *)malloc(sz);
             if (!buf) { wresp(fd, "ERR oom\n"); continue; }
+            wresp(fd, "READY\n");
             if (read_exact(fd, buf, sz) != 0) {
                 free(buf); wresp(fd, "ERR read_failed\n"); continue;
             }

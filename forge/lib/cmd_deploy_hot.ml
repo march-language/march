@@ -113,13 +113,32 @@ let sha256_file path =
 
 (* ─── SSH tunnel ─────────────────────────────────────────────────────────── *)
 
-let open_tunnel ~ssh_host ~remote_socket ~local_socket =
-  let pid = Unix.create_process "ssh"
-    [| "ssh"; "-N"; "-o"; "StrictHostKeyChecking=no"; "-o"; "ExitOnForwardFailure=yes";
-       "-L"; Printf.sprintf "%s:%s" local_socket remote_socket;
-       ssh_host |]
-    Unix.stdin Unix.stdout Unix.stderr
+(* Build proxy args for SSH from HTTPS_PROXY / https_proxy / HTTP_PROXY env vars. *)
+let ssh_proxy_args () =
+  let raw = match Sys.getenv_opt "HTTPS_PROXY" with
+    | Some v when v <> "" -> v
+    | _ -> match Sys.getenv_opt "https_proxy" with
+      | Some v when v <> "" -> v
+      | _ -> match Sys.getenv_opt "HTTP_PROXY" with
+        | Some v when v <> "" -> v
+        | _ -> Option.value ~default:"" (Sys.getenv_opt "http_proxy")
   in
+  if raw = "" then [||]
+  else begin
+    (* Strip http:// or https:// scheme and trailing slash. *)
+    let s = if String.length raw > 8 && String.sub raw 0 8 = "https://" then String.sub raw 8 (String.length raw - 8)
+            else if String.length raw > 7 && String.sub raw 0 7 = "http://" then String.sub raw 7 (String.length raw - 7)
+            else raw in
+    let s = if s <> "" && s.[String.length s - 1] = '/' then String.sub s 0 (String.length s - 1) else s in
+    [| "-o"; Printf.sprintf "ProxyCommand=nc -X connect -x %s %%h %%p" s |]
+  end
+
+let open_tunnel ~ssh_host ~remote_socket ~local_socket =
+  let proxy_args = ssh_proxy_args () in
+  let base = [| "ssh"; "-N"; "-o"; "StrictHostKeyChecking=no"; "-o"; "ExitOnForwardFailure=yes";
+                "-L"; Printf.sprintf "%s:%s" local_socket remote_socket |] in
+  let argv = Array.append (Array.append base proxy_args) [| ssh_host |] in
+  let pid = Unix.create_process "ssh" argv Unix.stdin Unix.stdout Unix.stderr in
   (* Wait for the tunnel socket to appear (up to 5 seconds). *)
   let ready = ref false in
   for i = 1 to 50 do
