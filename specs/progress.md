@@ -282,6 +282,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-24, Perceus dead br_var RC leak + task_await_unwrap double-untag)
+
+> **Authoritative test counts (2026-06-24): 321 compiler / 224 eval / 786 stdlib / 49 stdlib_march.** No new tests added; both bugs were in runtime codegen.
+
+- **Perceus dead br_var EDecRC leak fixed (`lib/tir/perceus.ml`)** — Wildcard-bound constructor fields in pattern matches (e.g. `PVec(n, _, _, _) -> n`) now get `EDecRC` emitted when they are heap-typed and never used in the branch body. Previously the shared (RC > 1) path's `inc_rc` on those fields had no matching `dec_rc`, causing permanent RC inflation (eventually RC underflow crash in Perceus-managed code using `Array.length`, `Array.is_empty`, etc.). Also populates `_var_ctx` with br_vars so nested cross-branch EDecRC can find their types.
+- **`task_await_unwrap` double-untag fixed (`lib/tir/llvm_emit.ml`)** — For `i64` (integer) task results, the thunk trampoline stores `4*n+3` (doubly tagged). One `ptr→i64` coerce yielded `2*n+1` (still tagged). A second conditional `ashr 1` now recovers the raw `n`. Without this fix all integer-valued parallel reductions (`psum`, `preduce`, `pcount`) returned `2×correct + N_workers`.
+- **`rrb_vec.march` and `parallel.march` registered in `stdlib_file_list` (`bin/main.ml`)** — These modules were added to the stdlib directory but missing from the compiler's hardcoded load list, causing "Unknown module `RRB`" errors in compiled programs.
+
 ## Current State (as of 2026-06-24, HashMap stdlib module + O(n) Enum.uniq/frequencies)
 
 - **`stdlib/hash_map.march`** — new HAMT-backed persistent map using structural `==` and the built-in polymorphic `hash` function. No comparator anywhere in the API. Full public interface: `new`, `put`, `get`, `get_or`, `has`, `delete`, `size`, `fold`, `keys`, `values`, `entries`, `from_list`, `to_list`, `update`, `map_values`, `filter`, `merge`, `merge_with`. Self-contained HAMT with private `HEntry`/`HamtHashMap` types; does not depend on `hamt.march`. `hash_map.march` wired into `bin/main.ml` (after `set.march`), `test/test_stdlib_march.ml` (stdlib load list + `hash_map` test group), `test/test_helpers.ml` (`hash_map_decl` lazy val + wired into `eval_with_enum`). 40 tests in `test/stdlib/test_hash_map.march` (TDD, covers all public API including collision/stress paths).
