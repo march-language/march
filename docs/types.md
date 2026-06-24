@@ -129,7 +129,7 @@ Access fields with `.`:
 let dist = p.x +. p.y
 ```
 
-Update fields with `{ base with field = value }` — this creates a new record; the original is unchanged:
+Update fields with `{ base with field: value }` — this creates a new record; the original is unchanged:
 
 ```march
 let p2 = { p with x: 5.0 }       -- new Point, y unchanged

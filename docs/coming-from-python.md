@@ -102,7 +102,7 @@ fn increment(c : Counter) : Counter do { c with count: c.count + 1 } end
 fn get(c : Counter) : Int do c.count end
 ```
 
-`{ c with count = ... }` creates a new record with one field changed — values are immutable by default. For mutable shared state, use `actor` or `Vault`.
+`{ c with count: ... }` creates a new record with one field changed — values are immutable by default. For mutable shared state, use `actor` or `Vault`.
 
 ---
 
