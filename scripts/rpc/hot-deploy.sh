@@ -51,6 +51,10 @@ echo ""
 echo "--- Step 1: cross-compile hcr_server --hot-reload Server (linux/amd64) ---"
 mkdir -p "$DIST"
 
+# Ensure the named build-cache volume is writable by the container's opam user.
+docker run --rm --platform linux/amd64 --user root \
+  -v "$VOL":"$BD" "$IMAGE" chown -R opam:opam "$BD" 2>/dev/null || true
+
 docker run --rm --platform linux/amd64 \
   -v "$ROOT":/march \
   -v "$VOL":"$BD" \
@@ -60,7 +64,7 @@ docker run --rm --platform linux/amd64 \
     set -euo pipefail
     cd /march
     export MARCH_STDLIB=/march/stdlib
-    /Users/80197052/.opam/march/bin/dune build --build-dir=$BD bin/main.exe
+    dune build --build-dir=$BD bin/main.exe
     MC=$BD/default/bin/main.exe
     \"\$MC\" --compile --hot-reload Server \
       -o /out/hcr_server_linux demo/hcr_server.march
@@ -126,7 +130,8 @@ echo ""
 
 # ── Step 4: create patch — Server.square(n) → n*n*n ─────────────────────────
 echo "--- Step 4: create patch (square: n*n → n*n*n) ---"
-PATCH_SRC="/tmp/hcr_server_patch_${SLUG}.march"
+# Write into $DIST (already mounted as /out in Docker) to avoid /tmp symlink issues on macOS.
+PATCH_SRC="$DIST/hcr_server_patch_${SLUG}.march"
 cat > "$PATCH_SRC" << 'MARCH'
 -- Patch: Server.square now returns n*n*n instead of n*n.
 -- Compiled with: march --compile --compile-so --hot-reload Server -o patch.so this.march
@@ -193,7 +198,6 @@ docker run --rm --platform linux/amd64 \
   -v "$ROOT":/march \
   -v "$VOL":"$BD" \
   -v "$DIST":/out \
-  -v "$(dirname "$PATCH_SRC")":"$(dirname "$PATCH_SRC")" \
   "$IMAGE" \
   bash -lc "
     set -euo pipefail
@@ -201,7 +205,7 @@ docker run --rm --platform linux/amd64 \
     export MARCH_STDLIB=/march/stdlib
     MC=$BD/default/bin/main.exe  # reuse compiler built in Step 1
     \"\$MC\" --compile --compile-so --hot-reload Server \
-      -o /out/hcr_server_patch_${SLUG}.so $PATCH_SRC
+      -o /out/hcr_server_patch_${SLUG}.so /out/hcr_server_patch_${SLUG}.march
     head -c4 /out/hcr_server_patch_${SLUG}.so | od -An -tx1  # expect 7f 45 4c 46 (ELF)
     echo '--- exported symbols (Server.*):'
     nm -D /out/hcr_server_patch_${SLUG}.so 2>/dev/null | grep -E 'Server\.(square|report)' || true

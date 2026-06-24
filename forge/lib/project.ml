@@ -43,6 +43,12 @@ type ffi_rust_crate = {
   frc_lib  : string;  (** archive base name (without "lib" prefix and ".a" suffix) *)
 }
 
+type hot_reload_config = {
+  hr_socket     : string;         (** Unix socket path on the server *)
+  hr_ssh_host   : string;         (** SSH target for tunnel, e.g. "root@1.2.3.4" *)
+  hr_public_key : string option;  (** base64-encoded ed25519 public key *)
+}
+
 type project = {
   name          : string;
   version       : string;
@@ -67,6 +73,7 @@ type project = {
   ffi_link      : string list;  (** [ffi] link = [...]: extra linker flags, e.g. "-lz" *)
   ffi_rust      : ffi_rust_crate option;  (** [ffi.rust]: Rust staticlib crate auto-built by forge build *)
   js_deps       : (string * string) list;  (** [js_deps] name = "version": npm packages for JS target builds *)
+  hot_reload    : hot_reload_config option;  (** [hot-reload] section (Phase 4) *)
 }
 
 let project_type_of_string = function
@@ -265,10 +272,21 @@ let load_from root =
       | _ -> None
     ) (Toml.get_section doc "js_deps")
   in
+  (* [hot-reload] section: forge deploy hot configuration (Phase 4) *)
+  let hot_reload =
+    let hr = Toml.get_section doc "hot-reload" in
+    if hr = [] then None
+    else begin
+      let socket     = Option.value ~default:"/tmp/march_hcr.sock" (Toml.get_string hr "socket") in
+      let ssh_host   = Option.value ~default:""                    (Toml.get_string hr "ssh_host") in
+      let public_key = Toml.get_string hr "public_key" in
+      Some { hr_socket = socket; hr_ssh_host = ssh_host; hr_public_key = public_key }
+    end
+  in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
     deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
-    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps }
+    preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload }
 
 let load_from_dir dir =
   try Ok (load_from dir)

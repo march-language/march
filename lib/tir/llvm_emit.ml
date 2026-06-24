@@ -5199,7 +5199,7 @@ let emit_preamble ?(target=Native) ?(repl=false) (buf : Buffer.t) =
 ; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)
 declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare void @march_dispatch_leave(i32 %name_id, i32 %version)
-declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, i8 %kind)
+declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
 declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare void @march_reload_server_start(ptr)
@@ -5655,9 +5655,20 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
                   Printf.sprintf "ptr %s" g
                 | _ -> "ptr null"
               in
+              let sig_arg =
+                match Hashtbl.find_opt ctx.remote_sig_hashes fn.Tir.fn_name with
+                | Some h when String.length h > 0 ->
+                  let sg = Printf.sprintf "@.hr_sighash%d" id in
+                  Buffer.add_string ctx.preamble
+                    (Printf.sprintf
+                       "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+                       sg (String.length h + 1) (llvm_escape_string h));
+                  Printf.sprintf "ptr %s" sg
+                | _ -> "ptr null"
+              in
               Printf.bprintf b
-                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, i8 0)\n"
-                id (mangle_extern fn.Tir.fn_name) hash_arg;
+                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, %s, i8 0)\n"
+                id (mangle_extern fn.Tir.fn_name) hash_arg sig_arg;
               (* Register name→ID mapping for the reload server. *)
               let name_g = Printf.sprintf "@.hr_name%d" id in
               Buffer.add_string ctx.preamble

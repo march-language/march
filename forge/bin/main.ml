@@ -13,7 +13,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
-    "completions" ]
+    "completions"; "deploy"; "hot-reload" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -929,6 +929,43 @@ let ffi_cmd =
   Cmd.group (Cmd.info "ffi" ~doc:"FFI binding tooling")
     [ffi_gen_c_cmd; ffi_add_rust_cmd]
 
+(* ---------------------------------------------------------- forge deploy hot *)
+
+let deploy_hot_cmd =
+  let output =
+    Arg.(value & opt string "" &
+         info ["o"; "output"] ~docv:"PATH"
+           ~doc:"Output path prefix for the .so and manifest (default: .march/<name>_hot)")
+  in
+  let run o =
+    match Cmd_deploy_hot.deploy ~output:o () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "hot"
+           ~doc:"Build and hot-deploy changed functions to a running server")
+    Term.(const run $ output)
+
+let deploy_cmd =
+  Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
+    [deploy_hot_cmd]
+
+(* -------------------------------------------------------- forge hot-reload *)
+
+let hot_reload_keygen_cmd =
+  Cmd.v (Cmd.info "keygen"
+           ~doc:"Generate an ed25519 keypair for forge deploy hot signing")
+    Term.(const Cmd_hot_reload.run_keygen $ const ())
+
+let hot_reload_show_pubkey_cmd =
+  Cmd.v (Cmd.info "show-pubkey"
+           ~doc:"Print the public key from the saved ed25519 secret key")
+    Term.(const Cmd_hot_reload.run_show_pubkey $ const ())
+
+let hot_reload_cmd =
+  Cmd.group (Cmd.info "hot-reload" ~doc:"Manage ed25519 keys for hot code replacement")
+    [hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd]
+
 (* --------------------------------------------------------- forge completions *)
 
 let completions_cmd =
@@ -976,7 +1013,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; ffi_cmd; completions_cmd; help_cmd ]
+      cap_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
