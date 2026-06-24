@@ -156,7 +156,10 @@ static void gf_reduce(gf o) {
     for (int i = 0; i < 16; i++) {
         o[i] += (1LL<<16);
         c = o[i] >> 16;
-        o[(i+1) & 15] += (i < 15) ? c : 38*c;
+        /* Subtract 1 from carry to cancel the 2^16 bias we added above.
+         * Original TweetNaCl car25519 uses (c-1) not c. */
+        if (i < 15) o[i+1] += c - 1;
+        else        o[0]    += 38*(c - 1);
         o[i] -= c * (1LL<<16);
     }
 }
@@ -335,264 +338,46 @@ static int ed_unpack(gf r[4], const uint8_t p[32]) {
 }
 
 /* ── Scalar reduction mod l (group order of Ed25519) ───────────────────── */
-/* l = 2^252 + 27742317777372353535851937790883648493 */
+/* Verbatim from TweetNaCl reference (tweetnacl-20140427.c), byte-level arithmetic. */
 
-static const uint8_t L[32] = {
+static const long long sc_L[32] = {
     0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10
 };
 
-static void mod_l(uint8_t r[64], const long long x[64]) {
-    long long t[64]; int i;
-    for (i = 0; i < 64; i++) t[i] = x[i];
-    for (i = 63; i >= 32; i--) {
-        long long c = t[i]; int j;
-        t[i-32] += -c * 683901L;  /* = c * (2^32 - L[0..7]) */
-        t[i-31] += c * 646383L;   /* Barrett reduction coefficients for L */
-        t[i-30] -= c * 1515980L;
-        t[i-29] += c * 1346650L;
-        t[i-28] -= c * 407664L;
-        t[i-27] += c * 1147784L;
-        t[i-26] -= c * 659183L;
-        t[i-25] += c * 1432811L;
-        t[i-24] -= c * 258563L;
-        t[i-23] += c * 742985L;
-        t[i-22] -= c * 256767L;
-        t[i-21] += c * 874869L;
-        t[i-20] -= c * 1188233L;
-        t[i-19] -= c * 1651917L;
-        t[i-18] += c * 1095438L;
-        t[i-17] -= c * 1099701L;
-        t[i-16] -= c * 2200603L;
-        t[i-15] += c * 978729L;
-        t[i-14] -= c * 1659840L;
-        t[i-13] += c * 2140587L;
-        t[i-12] -= c * 1049312L;
-        t[i-11] += c * 1399326L;
-        t[i-10] -= c * 1406606L;
-        t[i-9]  += c * 2288695L;
-        t[i-8]  -= c * 1804556L;
-        t[i-7]  += c * 1785233L;
-        t[i-6]  -= c * 2028688L;
-        t[i-5]  += c * 1359941L;
-        t[i-4]  -= c * 2037965L;
-        t[i-3]  += c * 648833L;
-        t[i-2]  -= c * 1077862L;
-        t[i-1]  += c * 1173584L;
-        t[i]     = 0;
+/* Reduce a 64-element byte-array x mod l, writing 32-byte result to r. */
+static void sc_modL(uint8_t *r, long long x[64]) {
+    long long carry, i, j, k;
+    for (i = 63; i >= 32; --i) {
+        carry = 0;
+        for (j = i - 32, k = i - 12; j < k; ++j) {
+            x[j] += carry - 16 * x[i] * sc_L[j - (i - 32)];
+            carry = (x[j] + 128) >> 8;
+            x[j] -= carry * 256;
+        }
+        x[j] += carry;
+        x[i] = 0;
     }
-    /* Carry propagation */
-    long long carry[32] = {0};
-    for (i = 0; i < 31; i++) {
-        carry[i] = (t[i] + (1LL << 20)) >> 21;
-        t[i+1] += carry[i];
-        t[i] -= carry[i] * (1LL << 21);
+    carry = 0;
+    for (j = 0; j < 32; ++j) {
+        x[j] += carry - (x[31] >> 4) * sc_L[j];
+        carry = x[j] >> 8;
+        x[j] &= 255;
     }
-    /* Final reduction */
-    long long b = 1;
-    for (i = 0; i < 32; i++) { b = b + 0xff + t[i]; r[i] = (uint8_t)(b & 0xff); b >>= 8; }
+    for (j = 0; j < 32; ++j) x[j] -= carry * sc_L[j];
+    for (i = 0; i < 32; ++i) {
+        x[i+1] += x[i] >> 8;
+        r[i] = (uint8_t)(x[i] & 255);
+    }
 }
 
-/* Reduce a 64-byte hash modulo l, writing result to r[32] */
+/* Reduce a 64-byte value mod l in-place, zeroing the upper 32 bytes. */
 static void sc_reduce(uint8_t r[64]) {
     long long x[64];
-    for (int i = 0; i < 64; i++) x[i] = r[i];
-    uint8_t out[64] = {0};
-    mod_l(out, x);
-    memcpy(r, out, 32);
-    memset(r + 32, 0, 32);
-}
-
-/* Compute s = (r + h*a) mod l, all inputs as 32-byte little-endian.
- * r, h, a are 32-byte values; out is 32 bytes. */
-static void sc_muladd(uint8_t *s, const uint8_t *a, const uint8_t *b, const uint8_t *c) {
-    /* s = a*b + c mod l  — used as: S = (r + H * a_scalar) mod l */
-    long long a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11;
-    long long b0,b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11;
-    long long c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11;
-    long long s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,s20,s21,s22,s23;
-    long long carry0,carry1,carry2,carry3,carry4,carry5,carry6,carry7,carry8,carry9,carry10,carry11;
-    long long carry12,carry13,carry14,carry15,carry16,carry17,carry18,carry19,carry20,carry21,carry22;
-    /* Unpack 3-byte limbs (21 bits each) */
-    #define LOAD3H(p, i) ((long long)((p)[(i)] | ((p)[(i)+1]<<8) | ((p)[(i)+2]<<16)) >> 5)
-    #define LOAD4(p, i)  ((long long)((p)[(i)] | ((p)[(i)+1]<<8) | ((p)[(i)+2]<<16) | ((int32_t)((p)[(i)+3])<<24)))
-    a0 =  2097151 & (((long long)a[0])|(((long long)a[1])<<8)|(((long long)a[2])<<16));
-    a1 =  2097151 & ((((long long)a[2])>>5)|(((long long)a[3])<<3)|(((long long)a[4])<<11)|(((long long)a[5])<<19));
-    a2 =  2097151 & ((((long long)a[5])>>2)|(((long long)a[6])<<6)|(((long long)a[7])<<14));
-    a3 =  2097151 & ((((long long)a[7])>>7)|(((long long)a[8])<<1)|(((long long)a[9])<<9)|(((long long)a[10])<<17));
-    a4 =  2097151 & ((((long long)a[10])>>4)|(((long long)a[11])<<4)|(((long long)a[12])<<12));
-    a5 =  2097151 & ((((long long)a[12])>>1)|(((long long)a[13])<<7)|(((long long)a[14])<<15));
-    a6 =  2097151 & ((((long long)a[14])>>6)|(((long long)a[15])<<2)|(((long long)a[16])<<10));
-    a7 =  2097151 & ((((long long)a[16])>>3)|(((long long)a[17])<<5)|(((long long)a[18])<<13));
-    a8 =  2097151 & (((long long)a[19])|(((long long)a[20])<<8)|(((long long)a[21])<<16));
-    a9 =  2097151 & ((((long long)a[21])>>5)|(((long long)a[22])<<3)|(((long long)a[23])<<11)|(((long long)a[24])<<19));
-    a10 = 2097151 & ((((long long)a[24])>>2)|(((long long)a[25])<<6)|(((long long)a[26])<<14));
-    a11 = (((long long)a[26])>>7)|(((long long)a[27])<<1)|(((long long)a[28])<<9)|(((long long)a[29])<<17)|(((long long)a[30])<<25)|(((long long)a[31])<<33);
-
-    b0 =  2097151 & (((long long)b[0])|(((long long)b[1])<<8)|(((long long)b[2])<<16));
-    b1 =  2097151 & ((((long long)b[2])>>5)|(((long long)b[3])<<3)|(((long long)b[4])<<11)|(((long long)b[5])<<19));
-    b2 =  2097151 & ((((long long)b[5])>>2)|(((long long)b[6])<<6)|(((long long)b[7])<<14));
-    b3 =  2097151 & ((((long long)b[7])>>7)|(((long long)b[8])<<1)|(((long long)b[9])<<9)|(((long long)b[10])<<17));
-    b4 =  2097151 & ((((long long)b[10])>>4)|(((long long)b[11])<<4)|(((long long)b[12])<<12));
-    b5 =  2097151 & ((((long long)b[12])>>1)|(((long long)b[13])<<7)|(((long long)b[14])<<15));
-    b6 =  2097151 & ((((long long)b[14])>>6)|(((long long)b[15])<<2)|(((long long)b[16])<<10));
-    b7 =  2097151 & ((((long long)b[16])>>3)|(((long long)b[17])<<5)|(((long long)b[18])<<13));
-    b8 =  2097151 & (((long long)b[19])|(((long long)b[20])<<8)|(((long long)b[21])<<16));
-    b9 =  2097151 & ((((long long)b[21])>>5)|(((long long)b[22])<<3)|(((long long)b[23])<<11)|(((long long)b[24])<<19));
-    b10 = 2097151 & ((((long long)b[24])>>2)|(((long long)b[25])<<6)|(((long long)b[26])<<14));
-    b11 = (((long long)b[26])>>7)|(((long long)b[27])<<1)|(((long long)b[28])<<9)|(((long long)b[29])<<17)|(((long long)b[30])<<25)|(((long long)b[31])<<33);
-
-    c0 =  2097151 & (((long long)c[0])|(((long long)c[1])<<8)|(((long long)c[2])<<16));
-    c1 =  2097151 & ((((long long)c[2])>>5)|(((long long)c[3])<<3)|(((long long)c[4])<<11)|(((long long)c[5])<<19));
-    c2 =  2097151 & ((((long long)c[5])>>2)|(((long long)c[6])<<6)|(((long long)c[7])<<14));
-    c3 =  2097151 & ((((long long)c[7])>>7)|(((long long)c[8])<<1)|(((long long)c[9])<<9)|(((long long)c[10])<<17));
-    c4 =  2097151 & ((((long long)c[10])>>4)|(((long long)c[11])<<4)|(((long long)c[12])<<12));
-    c5 =  2097151 & ((((long long)c[12])>>1)|(((long long)c[13])<<7)|(((long long)c[14])<<15));
-    c6 =  2097151 & ((((long long)c[14])>>6)|(((long long)c[15])<<2)|(((long long)c[16])<<10));
-    c7 =  2097151 & ((((long long)c[16])>>3)|(((long long)c[17])<<5)|(((long long)c[18])<<13));
-    c8 =  2097151 & (((long long)c[19])|(((long long)c[20])<<8)|(((long long)c[21])<<16));
-    c9 =  2097151 & ((((long long)c[21])>>5)|(((long long)c[22])<<3)|(((long long)c[23])<<11)|(((long long)c[24])<<19));
-    c10 = 2097151 & ((((long long)c[24])>>2)|(((long long)c[25])<<6)|(((long long)c[26])<<14));
-    c11 = (((long long)c[26])>>7)|(((long long)c[27])<<1)|(((long long)c[28])<<9)|(((long long)c[29])<<17)|(((long long)c[30])<<25)|(((long long)c[31])<<33);
-
-    s0 = c0 + a0*b0;
-    s1 = c1 + a0*b1 + a1*b0;
-    s2 = c2 + a0*b2 + a1*b1 + a2*b0;
-    s3 = c3 + a0*b3 + a1*b2 + a2*b1 + a3*b0;
-    s4 = c4 + a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0;
-    s5 = c5 + a0*b5 + a1*b4 + a2*b3 + a3*b2 + a4*b1 + a5*b0;
-    s6 = c6 + a0*b6 + a1*b5 + a2*b4 + a3*b3 + a4*b2 + a5*b1 + a6*b0;
-    s7 = c7 + a0*b7 + a1*b6 + a2*b5 + a3*b4 + a4*b3 + a5*b2 + a6*b1 + a7*b0;
-    s8 = c8 + a0*b8 + a1*b7 + a2*b6 + a3*b5 + a4*b4 + a5*b3 + a6*b2 + a7*b1 + a8*b0;
-    s9 = c9 + a0*b9 + a1*b8 + a2*b7 + a3*b6 + a4*b5 + a5*b4 + a6*b3 + a7*b2 + a8*b1 + a9*b0;
-    s10= c10+ a0*b10+ a1*b9 + a2*b8 + a3*b7 + a4*b6 + a5*b5 + a6*b4 + a7*b3 + a8*b2 + a9*b1 + a10*b0;
-    s11= c11+ a0*b11+ a1*b10+ a2*b9 + a3*b8 + a4*b7 + a5*b6 + a6*b5 + a7*b4 + a8*b3 + a9*b2 + a10*b1 + a11*b0;
-    s12=      a1*b11+ a2*b10+ a3*b9 + a4*b8 + a5*b7 + a6*b6 + a7*b5 + a8*b4 + a9*b3 + a10*b2 + a11*b1;
-    s13=      a2*b11+ a3*b10+ a4*b9 + a5*b8 + a6*b7 + a7*b6 + a8*b5 + a9*b4 + a10*b3 + a11*b2;
-    s14=      a3*b11+ a4*b10+ a5*b9 + a6*b8 + a7*b7 + a8*b6 + a9*b5 + a10*b4 + a11*b3;
-    s15=      a4*b11+ a5*b10+ a6*b9 + a7*b8 + a8*b7 + a9*b6 + a10*b5 + a11*b4;
-    s16=      a5*b11+ a6*b10+ a7*b9 + a8*b8 + a9*b7 + a10*b6 + a11*b5;
-    s17=      a6*b11+ a7*b10+ a8*b9 + a9*b8 + a10*b7 + a11*b6;
-    s18=      a7*b11+ a8*b10+ a9*b9 + a10*b8 + a11*b7;
-    s19=      a8*b11+ a9*b10+ a10*b9 + a11*b8;
-    s20=      a9*b11+ a10*b10+ a11*b9;
-    s21=      a10*b11+ a11*b10;
-    s22=      a11*b11;
-    s23= 0;
-
-    #define CARRY21(i) carry##i = (s##i + (1<<20)) >> 21; s##i##1 += carry##i; s##i -= carry##i * (1LL<<21)
-    /* reduce s12..s23 using l coefficients */
-    s11 += s23 * 666643; s10 += s23 * 470296; s9  += s23 * 654183;
-    s8  -= s23 * 997805; s7  += s23 * 136657; s6  -= s23 * 683901; s23 = 0;
-    s10 += s22 * 666643; s9  += s22 * 470296; s8  += s22 * 654183;
-    s7  -= s22 * 997805; s6  += s22 * 136657; s5  -= s22 * 683901; s22 = 0;
-    s9  += s21 * 666643; s8  += s21 * 470296; s7  += s21 * 654183;
-    s6  -= s21 * 997805; s5  += s21 * 136657; s4  -= s21 * 683901; s21 = 0;
-    s8  += s20 * 666643; s7  += s20 * 470296; s6  += s20 * 654183;
-    s5  -= s20 * 997805; s4  += s20 * 136657; s3  -= s20 * 683901; s20 = 0;
-    s7  += s19 * 666643; s6  += s19 * 470296; s5  += s19 * 654183;
-    s4  -= s19 * 997805; s3  += s19 * 136657; s2  -= s19 * 683901; s19 = 0;
-    s6  += s18 * 666643; s5  += s18 * 470296; s4  += s18 * 654183;
-    s3  -= s18 * 997805; s2  += s18 * 136657; s1  -= s18 * 683901; s18 = 0;
-
-    carry6  = (s6  + (1<<20)) >> 21; s7  += carry6;  s6  -= carry6  * (1LL<<21);
-    carry8  = (s8  + (1<<20)) >> 21; s9  += carry8;  s8  -= carry8  * (1LL<<21);
-    carry10 = (s10 + (1<<20)) >> 21; s11 += carry10; s10 -= carry10 * (1LL<<21);
-    carry12 = (s12 + (1<<20)) >> 21; s13 += carry12; s12 -= carry12 * (1LL<<21);
-    carry14 = (s14 + (1<<20)) >> 21; s15 += carry14; s14 -= carry14 * (1LL<<21);
-    carry16 = (s16 + (1<<20)) >> 21; s17 += carry16; s16 -= carry16 * (1LL<<21);
-    carry7  = (s7  + (1<<20)) >> 21; s8  += carry7;  s7  -= carry7  * (1LL<<21);
-    carry9  = (s9  + (1<<20)) >> 21; s10 += carry9;  s9  -= carry9  * (1LL<<21);
-    carry11 = (s11 + (1<<20)) >> 21; s12 += carry11; s11 -= carry11 * (1LL<<21);
-    carry13 = (s13 + (1<<20)) >> 21; s14 += carry13; s13 -= carry13 * (1LL<<21);
-    carry15 = (s15 + (1<<20)) >> 21; s16 += carry15; s15 -= carry15 * (1LL<<21);
-
-    s5  += s17 * 666643; s4  += s17 * 470296; s3  += s17 * 654183;
-    s2  -= s17 * 997805; s1  += s17 * 136657; s0  -= s17 * 683901; s17 = 0;
-    s4  += s16 * 666643; s3  += s16 * 470296; s2  += s16 * 654183;
-    s1  -= s16 * 997805; s0  += s16 * 136657;
-    carry16 = (s16 * 666643) >> 21; /* unused if s16 already 0 after above */
-    s1  -= s16 * 683901; s16 = 0;
-
-    s3  += s15 * 666643; s2  += s15 * 470296; s1  += s15 * 654183;
-    s0  -= s15 * 997805;
-    carry15 = (s15 * 136657 + (1<<20)) >> 21;
-    s0  += s15 * 136657; s15 -= s15 * 683901; s15 = 0;
-
-    s2  += s14 * 666643; s1  += s14 * 470296; s0  += s14 * 654183;
-    carry14 = (s14 * (-997805) + (1<<20)) >> 21;
-    s0  -= s14 * 997805; s14 = 0;
-
-    s1  += s13 * 666643; s0  += s13 * 470296;
-    carry13 = (s13 * 654183 + (1<<20)) >> 21;
-    s0  += s13 * 654183; s13 = 0;
-
-    s0  += s12 * 666643;
-    s12 = 0;
-
-    carry0  = (s0  + (1<<20)) >> 21; s1  += carry0;  s0  -= carry0  * (1LL<<21);
-    carry2  = (s2  + (1<<20)) >> 21; s3  += carry2;  s2  -= carry2  * (1LL<<21);
-    carry4  = (s4  + (1<<20)) >> 21; s5  += carry4;  s4  -= carry4  * (1LL<<21);
-    carry6  = (s6  + (1<<20)) >> 21; s7  += carry6;  s6  -= carry6  * (1LL<<21);
-    carry8  = (s8  + (1<<20)) >> 21; s9  += carry8;  s8  -= carry8  * (1LL<<21);
-    carry10 = (s10 + (1<<20)) >> 21; s11 += carry10; s10 -= carry10 * (1LL<<21);
-    carry1  = (s1  + (1<<20)) >> 21; s2  += carry1;  s1  -= carry1  * (1LL<<21);
-    carry3  = (s3  + (1<<20)) >> 21; s4  += carry3;  s3  -= carry3  * (1LL<<21);
-    carry5  = (s5  + (1<<20)) >> 21; s6  += carry5;  s5  -= carry5  * (1LL<<21);
-    carry7  = (s7  + (1<<20)) >> 21; s8  += carry7;  s7  -= carry7  * (1LL<<21);
-    carry9  = (s9  + (1<<20)) >> 21; s10 += carry9;  s9  -= carry9  * (1LL<<21);
-    carry11 = (s11 + (1<<20)) >> 21; s12 += carry11; s11 -= carry11 * (1LL<<21);
-
-    s0  += s12 * 666643; s1  += s12 * 470296; s2  += s12 * 654183;
-    s3  -= s12 * 997805; s4  += s12 * 136657; s5  -= s12 * 683901; s12 = 0;
-
-    carry0 = (s0 + (1<<20)) >> 21; s1  += carry0; s0  -= carry0  * (1LL<<21);
-    carry1 = (s1 + (1<<20)) >> 21; s2  += carry1; s1  -= carry1  * (1LL<<21);
-    carry2 = (s2 + (1<<20)) >> 21; s3  += carry2; s2  -= carry2  * (1LL<<21);
-    carry3 = (s3 + (1<<20)) >> 21; s4  += carry3; s3  -= carry3  * (1LL<<21);
-    carry4 = (s4 + (1<<20)) >> 21; s5  += carry4; s4  -= carry4  * (1LL<<21);
-    carry5 = (s5 + (1<<20)) >> 21; s6  += carry5; s5  -= carry5  * (1LL<<21);
-    carry6 = (s6 + (1<<20)) >> 21; s7  += carry6; s6  -= carry6  * (1LL<<21);
-    carry7 = (s7 + (1<<20)) >> 21; s8  += carry7; s7  -= carry7  * (1LL<<21);
-    carry8 = (s8 + (1<<20)) >> 21; s9  += carry8; s8  -= carry8  * (1LL<<21);
-    carry9 = (s9 + (1<<20)) >> 21; s10 += carry9; s9  -= carry9  * (1LL<<21);
-    carry10= (s10+ (1<<20)) >> 21; s11 += carry10;s10 -= carry10 * (1LL<<21);
-    carry11= (s11+ (1<<20)) >> 21; s12 += carry11;s11 -= carry11 * (1LL<<21);
-
-    s[0]  = (uint8_t)(s0  >> 0 );
-    s[1]  = (uint8_t)(s0  >> 8 );
-    s[2]  = (uint8_t)((s0 >> 16) | (s1  << 5));
-    s[3]  = (uint8_t)(s1  >> 3 );
-    s[4]  = (uint8_t)(s1  >> 11);
-    s[5]  = (uint8_t)((s1 >> 19) | (s2  << 2));
-    s[6]  = (uint8_t)(s2  >> 6 );
-    s[7]  = (uint8_t)((s2 >> 14) | (s3  << 7));
-    s[8]  = (uint8_t)(s3  >> 1 );
-    s[9]  = (uint8_t)(s3  >> 9 );
-    s[10] = (uint8_t)((s3 >> 17) | (s4  << 4));
-    s[11] = (uint8_t)(s4  >> 4 );
-    s[12] = (uint8_t)(s4  >> 12);
-    s[13] = (uint8_t)((s4 >> 20) | (s5  << 1));
-    s[14] = (uint8_t)(s5  >> 7 );
-    s[15] = (uint8_t)((s5 >> 15) | (s6  << 6));
-    s[16] = (uint8_t)(s6  >> 2 );
-    s[17] = (uint8_t)(s6  >> 10);
-    s[18] = (uint8_t)((s6 >> 18) | (s7  << 3));
-    s[19] = (uint8_t)(s7  >> 5 );
-    s[20] = (uint8_t)(s7  >> 13);
-    s[21] = (uint8_t)(s8  >> 0 );
-    s[22] = (uint8_t)(s8  >> 8 );
-    s[23] = (uint8_t)((s8 >> 16) | (s9  << 5));
-    s[24] = (uint8_t)(s9  >> 3 );
-    s[25] = (uint8_t)(s9  >> 11);
-    s[26] = (uint8_t)((s9 >> 19) | (s10 << 2));
-    s[27] = (uint8_t)(s10 >> 6 );
-    s[28] = (uint8_t)((s10>> 14) | (s11 << 7));
-    s[29] = (uint8_t)(s11 >> 1 );
-    s[30] = (uint8_t)(s11 >> 9 );
-    s[31] = (uint8_t)(s11 >> 17);
-    (void)carry16; (void)s23; (void)s22; (void)s21; (void)s20; (void)s19; (void)s18;
-    (void)s17; (void)s16; (void)s15; (void)s14; (void)s13;
+    int i;
+    for (i = 0; i < 64; i++) x[i] = (long long)(unsigned char)r[i];
+    memset(r, 0, 64);
+    sc_modL(r, x);
 }
 
 /* ── Clamp scalar per ed25519 spec ─────────────────────────────────────── */
@@ -631,7 +416,7 @@ int crypto_sign_keypair(unsigned char *pk, unsigned char *sk) {
 int crypto_sign(unsigned char *sm, unsigned long long *smlen,
                 const unsigned char *m, unsigned long long mlen,
                 const unsigned char *sk) {
-    uint8_t h[64], r[64], nonce[64], hram[64];
+    uint8_t nonce[64], hram[64];
     uint8_t az[64], pk[32];
 
     memcpy(pk, sk + 32, 32);
@@ -653,8 +438,16 @@ int crypto_sign(unsigned char *sm, unsigned long long *smlen,
     sha512_3parts(sm, 32, pk, 32, m, (size_t)mlen, hram);
     sc_reduce(hram);
 
-    /* S = nonce + hram * az */
-    sc_muladd(sm + 32, hram, az, nonce);
+    /* S = nonce + hram * az mod l (TweetNaCl byte-level) */
+    {
+        long long x[64]; int i, j;
+        for (i = 0; i < 64; i++) x[i] = 0;
+        for (i = 0; i < 32; i++) x[i] = (long long)(unsigned char)nonce[i];
+        for (i = 0; i < 32; i++)
+            for (j = 0; j < 32; j++)
+                x[i+j] += (long long)(unsigned char)hram[i] * (long long)(unsigned char)az[j];
+        sc_modL(sm + 32, x);
+    }
 
     memcpy(sm + 64, m, (size_t)mlen);
     if (smlen) *smlen = mlen + 64;
