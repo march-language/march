@@ -937,14 +937,20 @@ let deploy_hot_cmd =
          info ["o"; "output"] ~docv:"PATH"
            ~doc:"Output path prefix for the .so and manifest (default: .march/<name>_hot)")
   in
-  let run o =
-    match Cmd_deploy_hot.deploy ~output:o () with
+  let so =
+    Arg.(value & opt string "" &
+         info ["so"] ~docv:"FILE.so"
+           ~doc:"Use a pre-built .so instead of rebuilding (manifest is <FILE.so>.hcr_manifest). \
+                 Useful when the target host differs from the build host (e.g. cross-compiled via Docker).")
+  in
+  let run o s =
+    match Cmd_deploy_hot.deploy ~output:o ~so:s () with
     | Ok () -> ()
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server")
-    Term.(const run $ output)
+    Term.(const run $ output $ so)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")

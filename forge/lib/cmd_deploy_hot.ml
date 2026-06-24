@@ -362,7 +362,11 @@ let build_so ~proj ~output : (string * string, string) result =
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 
-let deploy ?(output="") () : (unit, string) result =
+(** [deploy ~so ~output ()] deploys a hot-reload artifact.
+    When [so] is non-empty, it is used as the pre-built .so (the build step is
+    skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
+    a remote Linux host) to be deployed without a local rebuild. *)
+let deploy ?(output="") ?(so="") () : (unit, string) result =
   (* Load project *)
   match Project.load () with
   | Error m -> Error m
@@ -377,17 +381,38 @@ let deploy ?(output="") () : (unit, string) result =
         match Cmd_hot_reload.read_sk_raw () with
         | Error m -> Error m
         | Ok sk ->
-          (* Determine output path *)
-          let out = if output <> "" then output
-            else Filename.concat (Filename.concat proj.Project.root ".march")
-                   (proj.Project.name ^ "_hot") in
-          (* Build *)
-          Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
-          match build_so ~proj ~output:out with
+          let (so_path, manifest_path) =
+            if so <> "" then
+              (* Pre-built artifact supplied: manifest is <so>.hcr_manifest *)
+              (so, so ^ ".hcr_manifest")
+            else begin
+              let out = if output <> "" then output
+                else Filename.concat (Filename.concat proj.Project.root ".march")
+                       (proj.Project.name ^ "_hot") in
+              (out ^ ".so", out ^ ".so.hcr_manifest")
+            end
+          in
+          let result =
+            if so <> "" then begin
+              (* Skip build — use pre-built .so *)
+              if not (Sys.file_exists so_path) then
+                Error (Printf.sprintf "pre-built .so not found: %s" so_path)
+              else if not (Sys.file_exists manifest_path) then
+                Error (Printf.sprintf "manifest not found: %s" manifest_path)
+              else
+                Ok (so_path, manifest_path)
+            end else begin
+              Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
+              build_so ~proj ~output:(if output <> "" then output
+                else Filename.concat (Filename.concat proj.Project.root ".march")
+                       (proj.Project.name ^ "_hot"))
+            end
+          in
+          match result with
           | Error m -> Error m
-          | Ok (so_path, manifest_path) ->
+          | Ok (so_path2, manifest_path2) ->
             (* Parse manifest *)
-            match parse_manifest manifest_path with
+            match parse_manifest manifest_path2 with
             | Error m -> Error m
             | Ok manifest ->
               let signing_pubkey = Option.value ~default:"" hr.Project.hr_public_key in
@@ -397,6 +422,6 @@ let deploy ?(output="") () : (unit, string) result =
                 ~signing_pubkey
                 ~sk
                 ~manifest
-                ~so_path
+                ~so_path:so_path2
               |> Result.map ignore
       end
