@@ -99,14 +99,13 @@ mod RateLimit do
     end
   end
 
-end
-
-fn main() do
-  let ip = "192.0.2.1"
-  let limit = 3
-  print("hit 1: " ++ bool_to_string(RateLimit.check(ip, limit)))
-  print("hit 2: " ++ bool_to_string(RateLimit.check(ip, limit)))
-  print("hit 3: " ++ bool_to_string(RateLimit.check(ip, limit)))
-  print("hit 4 (over limit): " ++ bool_to_string(RateLimit.check(ip, limit)))
+  fn main() do
+    let ip = "192.0.2.1"
+    let limit = 3
+    println("hit 1: " ++ bool_to_string(check(ip, limit)))
+    println("hit 2: " ++ bool_to_string(check(ip, limit)))
+    println("hit 3: " ++ bool_to_string(check(ip, limit)))
+    println("hit 4 (over limit): " ++ bool_to_string(check(ip, limit)))
+  end
 end
 ```
