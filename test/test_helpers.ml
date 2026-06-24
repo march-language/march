@@ -665,11 +665,12 @@ let eval_with_http_client src =
   let client_decl = load_stdlib_file_for_test "http_client.march" in
   eval_with_stdlib [string_decl; http_decl; transport_decl; client_decl] src
 
-let sort_decl = lazy (load_stdlib_file_for_test "sort.march")
-let enum_decl = lazy (load_stdlib_file_for_test "enum.march")
+let sort_decl     = lazy (load_stdlib_file_for_test "sort.march")
+let hash_map_decl = lazy (load_stdlib_file_for_test "hash_map.march")
+let enum_decl     = lazy (load_stdlib_file_for_test "enum.march")
 
 let eval_with_sort src    = eval_with_stdlib [Lazy.force sort_decl] src
-let eval_with_enum src    = eval_with_stdlib [Lazy.force sort_decl; Lazy.force enum_decl] src
+let eval_with_enum src    = eval_with_stdlib [Lazy.force sort_decl; Lazy.force hash_map_decl; Lazy.force enum_decl] src
 
 (** Build a March Cons-list from an OCaml int list. *)
 let[@warning "-32"] rec make_vlist = function

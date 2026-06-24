@@ -425,55 +425,42 @@ mod Enum do
   end
 
   doc """
-  Remove all duplicate elements, keeping the first occurrence. O(n²) in list
-  length. For large lists of Int, String, or any orderable type, prefer
-  `uniq_ord` which runs in O(n log n).
+  Remove all duplicate elements, keeping the first occurrence. O(n) average
+  using a hash map for membership. For sorted output, prefer `uniq_ord`.
 
       uniq([1,2,1,3,2])  -- [1,2,3]
   """
   fn uniq(xs : List(a)) : List(a) do
-    fn member(lst : List(a), x : a) : Bool do
-      match lst do
-      Nil        -> false
-      Cons(h, t) -> if h == x do true else member(t, x) end
-      end
-    end
-    fn go(lst : List(a), seen : List(a), acc : List(a)) : List(a) do
+    fn go(lst, seen, acc) do
       match lst do
       Nil        -> rev(acc)
       Cons(h, t) ->
-        if member(seen, h) do go(t, seen, acc)
-        else go(t, Cons(h, seen), Cons(h, acc)) end
+        if HashMap.has(seen, h) do go(t, seen, acc)
+        else go(t, HashMap.put(seen, h, true), Cons(h, acc)) end
       end
     end
-    go(xs, Nil, Nil)
+    go(xs, HashMap.new(), Nil)
   end
 
   doc """
-  Remove duplicates by key function, keeping the first occurrence. O(n²) in
-  list length. For large lists where the key type is orderable, prefer
-  `uniq_ord` with a key-derived comparator.
+  Remove duplicates by key function, keeping the first occurrence. O(n) average
+  using a hash map for membership. For large lists where the key type is
+  orderable, `uniq_ord` with a key-derived comparator also works.
 
       uniq_by(["alice","bob","anna"], fn s -> string_slice(s, 0, 1))
         -- ["alice","bob"]   (keeps first with each initial letter)
   """
   fn uniq_by(xs : List(a), f : a -> k) : List(a) do
-    fn member_key(lst, key) do
-      match lst do
-      Nil        -> false
-      Cons(h, t) -> if h == key do true else member_key(t, key) end
-      end
-    end
     fn go(lst, seen, acc) do
       match lst do
       Nil        -> rev(acc)
       Cons(h, t) ->
         let ky = f(h)
-        if member_key(seen, ky) do go(t, seen, acc)
-        else go(t, Cons(ky, seen), Cons(h, acc)) end
+        if HashMap.has(seen, ky) do go(t, seen, acc)
+        else go(t, HashMap.put(seen, ky, true), Cons(h, acc)) end
       end
     end
-    go(xs, Nil, Nil)
+    go(xs, HashMap.new(), Nil)
   end
 
   doc """
@@ -697,40 +684,32 @@ mod Enum do
 
   doc """
   Count occurrences of each element. Returns List((element, count)) in order
-  of first appearance. O(n²) in unique elements. For large lists of orderable
-  types, prefer `frequencies_ord` which runs in O(n log n).
+  of first appearance. O(n) average using a hash map for counting.
 
       frequencies(["a","b","a","c","b","a"])
         -- [("a",3),("b",2),("c",1)]
   """
   fn frequencies(xs : List(a)) : List((a, Int)) do
-    fn update(pairs : List((a, Int)), key : a) : List((a, Int)) do
-      fn go(lst : List((a, Int)), acc : List((a, Int))) : List((a, Int)) do
-        match lst do
-        Nil -> rev(Cons((key, 1), acc))
-        Cons((k, c), t) ->
-          if k == key do
-            fn rev_onto(rv : List((a, Int)), rest : List((a, Int))) : List((a, Int)) do
-              match rv do
-              Nil         -> rest
-              Cons(h, tl) -> rev_onto(tl, Cons(h, rest))
-              end
-            end
-            rev_onto(acc, Cons((k, c + 1), t))
-          else
-            go(t, Cons((k, c), acc))
+    fn go(lst, counts, order) do
+      match lst do
+      Nil ->
+        fn build(ks, acc) do
+          match ks do
+          Nil        -> rev(acc)
+          Cons(k, t) ->
+            build(t, Cons((k, HashMap.get_or(counts, k, 0)), acc))
           end
         end
+        build(rev(order), Nil)
+      Cons(h, t) ->
+        if HashMap.has(counts, h) do
+          go(t, HashMap.put(counts, h, HashMap.get_or(counts, h, 0) + 1), order)
+        else
+          go(t, HashMap.put(counts, h, 1), Cons(h, order))
+        end
       end
-      go(pairs, Nil)
     end
-    fn go(lst : List(a), acc : List((a, Int))) : List((a, Int)) do
-      match lst do
-      Nil        -> acc
-      Cons(h, t) -> go(t, update(acc, h))
-      end
-    end
-    go(xs, Nil)
+    go(xs, HashMap.new(), Nil)
   end
 
   doc """

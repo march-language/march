@@ -236,6 +236,61 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 ---
 
+## HashMap
+
+`hash_map.march` — HAMT-backed persistent map using structural `==` for key
+equality and the built-in polymorphic `hash` function. No comparator needed at
+any call site. Key iteration order is hash-traversal order (not sorted, not
+insertion order).
+
+Use `Map` when you need sorted output or a custom comparator. Use `HashMap`
+when you don't want to thread a comparator everywhere — especially for
+string/int keys or for Enum.uniq / Enum.frequencies patterns.
+
+```march
+-- Construction (no comparator arg anywhere)
+let m = HashMap.new()
+let m2 = HashMap.from_list([("a", 1), ("b", 2), ("c", 3)])
+
+-- Access
+HashMap.get(m2, "a")           -- Some(1)
+HashMap.get_or(m2, "z", 0)    -- 0
+HashMap.has(m2, "b")           -- true
+HashMap.size(m2)               -- 3
+HashMap.is_empty(m)            -- true
+
+-- Modification (returns new map)
+let m3 = HashMap.put(m2, "d", 4)
+let m4 = HashMap.delete(m3, "a")
+
+-- Counter pattern (no get-then-put dance)
+let counts = List.fold_left(words, HashMap.new(), fn (acc, w) ->
+  HashMap.update(acc, w, fn opt ->
+    match opt do
+    None    -> 1
+    Some(n) -> n + 1
+    end
+  )
+)
+
+-- Traversal
+HashMap.keys(m2)     -- ["a", "b", "c"] (hash order)
+HashMap.values(m2)   -- [1, 2, 3]
+HashMap.entries(m2)  -- [("a", 1), ("b", 2), ("c", 3)]
+HashMap.fold(m2, 0, fn (acc, _k, v) -> acc + v)  -- 6
+
+-- Transformation
+HashMap.map_values(m2, fn v -> v * 10)
+HashMap.filter(m2, fn _k -> fn v -> v > 1)
+HashMap.merge(m2, m3)                               -- right takes precedence
+HashMap.merge_with(m2, m3, fn va -> fn vb -> va + vb)
+
+-- Converting
+HashMap.to_list(m2)  -- [("a", 1), ("b", 2), ("c", 3)] (hash order)
+```
+
+---
+
 ## Set
 
 `set.march` — HAMT-backed persistent set. The set is always the **first**

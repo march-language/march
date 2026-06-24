@@ -282,6 +282,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-24, HashMap stdlib module + O(n) Enum.uniq/frequencies)
+
+- **`stdlib/hash_map.march`** — new HAMT-backed persistent map using structural `==` and the built-in polymorphic `hash` function. No comparator anywhere in the API. Full public interface: `new`, `put`, `get`, `get_or`, `has`, `delete`, `size`, `fold`, `keys`, `values`, `entries`, `from_list`, `to_list`, `update`, `map_values`, `filter`, `merge`, `merge_with`. Self-contained HAMT with private `HEntry`/`HamtHashMap` types; does not depend on `hamt.march`. `hash_map.march` wired into `bin/main.ml` (after `set.march`), `test/test_stdlib_march.ml` (stdlib load list + `hash_map` test group), `test/test_helpers.ml` (`hash_map_decl` lazy val + wired into `eval_with_enum`). 40 tests in `test/stdlib/test_hash_map.march` (TDD, covers all public API including collision/stress paths).
+- **`Enum.uniq` / `Enum.uniq_by` — O(n) rewrite** — previously O(n²) via linear `member`/`member_key` list scan; now O(n) average via `HashMap` membership. Output order (first occurrence) preserved.
+- **`Enum.frequencies` — O(n) rewrite** — previously O(n²) quadratic list-scan rebuild; now O(n) average via `HashMap` counting + separate `order` list to preserve first-appearance output order. `frequencies_ord` (comparator-based, O(n log n)) unchanged.
+- **Docs updated**: `docs/stdlib.md` (HashMap reference section), `docs/cookbook/basics.md` (counter pattern, merge, use-vs-Map guide).
+- **Test counts (2026-06-24):** compiler 321 / eval 224 / stdlib (run_stdlib.exe) unchanged / stdlib_march 49 tests (was 47 + 2 new hash_map group). All suites green.
+
 ## Current State (as of 2026-06-23, node_rpc interpreter gap closed — remote_check/remote_invoke eval builtins)
 
 - **`remote_check` / `remote_invoke` registered as interpreter builtins (`lib/eval/eval.ml`).** `stdlib/node_rpc.march`'s `handle_request` falls back to the remote registry (`remote_check` then `remote_invoke`) when a target isn't in the injected `Targets` table. Those were codegen-only builtins, so under the interpreter the call hit `unbound variable: remote_check` — the long-standing `test_stdlib_march` 46/47 failure. The interpreter has no registry (`remote_register_stub`/`remote_count` are deliberate no-ops — real dispatch is the compiled path), so the eval builtins are consistent with an empty registry: `remote_check` → `0` (NoTarget), `remote_invoke` → `None`. This is exactly what `march_remote_check_march` returns on an empty registry, and matches the "unknown target yields NoTarget" test; real RPC dispatch in eval still flows through the `Targets` table, not this fallback.

@@ -1,0 +1,627 @@
+-- HashMap module: persistent hash-array-mapped-trie map.
+--
+-- HashMap(k, v) is an immutable, hash-indexed key-value store.
+-- Unlike Map(k, v), no comparator is needed: key equality uses
+-- structural `==` and hashing uses the built-in polymorphic `hash`.
+--
+-- Performance (n entries):
+--   get / put / delete   O(log₃₂ n) ≈ O(1)
+--   size / fold / keys   O(n)
+--
+-- Key order is hash-traversal order (not insertion order, not sorted).
+-- Use Map if you need sorted iteration or Ord-derived equality.
+
+mod HashMap do
+
+  ptype HEntry(k, v) =
+    HEmpty
+    | HLeaf(Int, k, v)
+    | HBranch(Int, List(HEntry(k, v)))
+    | HCollision(Int, List((k, v)))
+
+  ptype HashMap(k, v) = HamtHashMap(HEntry(k, v))
+
+  -- ── Private bit helpers ────────────────────────────────────────────────────
+
+  pfn key_hash(k) do
+    int_and(hash(k), 1073741823)
+  end
+
+  pfn hash_slot(h, level) do
+    int_and(int_shr(h, level * 5), 31)
+  end
+
+  pfn bitmap_has(bitmap, idx) do
+    int_and(int_shr(bitmap, idx), 1) == 1
+  end
+
+  pfn bitmap_rank(bitmap, idx) do
+    int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
+  end
+
+  pfn bitmap_set(bitmap, idx) do
+    int_or(bitmap, int_shl(1, idx))
+  end
+
+  pfn bitmap_clear(bitmap, idx) do
+    int_and(bitmap, int_not(int_shl(1, idx)))
+  end
+
+  -- ── Dense-list helpers ─────────────────────────────────────────────────────
+
+  pfn lst_rev(lst) do
+    fn go(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(lst, Nil)
+  end
+
+  pfn list_insert_at(lst, idx, elem) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      if i == 0 do rev_onto(acc, Cons(elem, xs))
+      else match xs do
+        Nil        -> rev_onto(acc, Cons(elem, Nil))
+        Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+        end end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_replace_at(lst, idx, elem) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      match xs do
+      Nil -> rev_onto(acc, Nil)
+      Cons(h, t) -> do
+        if i == 0 do rev_onto(acc, Cons(elem, t))
+        else go(t, i - 1, Cons(h, acc)) end
+      end
+      end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_delete_at(lst, idx) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      match xs do
+      Nil -> rev_onto(acc, Nil)
+      Cons(h, t) -> do
+        if i == 0 do rev_onto(acc, t)
+        else go(t, i - 1, Cons(h, acc)) end
+      end
+      end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_nth_safe(lst, n) do
+    match lst do
+    Nil -> panic("HashMap: HAMT node index out of range")
+    Cons(h, t) ->
+      if n == 0 do h else list_nth_safe(t, n - 1) end
+    end
+  end
+
+  -- ── Collision-bucket helpers (use == for key equality) ────────────────────
+
+  pfn coll_find(pairs, key) do
+    match pairs do
+    Nil -> None
+    Cons(pair, rest) -> do
+      let (k, v) = pair
+      if k == key do Some(v)
+      else coll_find(rest, key) end
+    end
+    end
+  end
+
+  pfn coll_insert(pairs, key, val) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(ps, acc) do
+      match ps do
+      Nil -> rev_onto(acc, Cons((key, val), Nil))
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        if k == key do rev_onto(acc, Cons((key, val), rest))
+        else go(rest, Cons(pair, acc)) end
+      end
+      end
+    end
+    go(pairs, Nil)
+  end
+
+  pfn coll_remove(pairs, key) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(ps, acc) do
+      match ps do
+      Nil -> rev_onto(acc, Nil)
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        if k == key do rev_onto(acc, rest)
+        else go(rest, Cons(pair, acc)) end
+      end
+      end
+    end
+    go(pairs, Nil)
+  end
+
+  -- ── HAMT core ─────────────────────────────────────────────────────────────
+
+  pfn node_get(node, key, h, level) do
+    match node do
+    HEmpty -> None
+    HLeaf(lh, lk, lv) -> do
+      if lh == h do
+        if lk == key do Some(lv) else None end
+      else None end
+    end
+    HCollision(ch, pairs) -> do
+      if ch == h do coll_find(pairs, key)
+      else None end
+    end
+    HBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        node_get(child, key, h, level + 1)
+      else None end
+    end
+    end
+  end
+
+  pfn make_branch(h1, k1, v1, h2, k2, v2, level) do
+    fn apply_slots(node, slots) do
+      match slots do
+      Nil -> node
+      Cons(s, rest) ->
+        apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
+      end
+    end
+    fn go(lvl, slots_acc) do
+      if lvl > 6 do
+        apply_slots(HCollision(h1, Cons((k1, v1), Cons((k2, v2), Nil))), slots_acc)
+      else do
+        let s1 = hash_slot(h1, lvl)
+        let s2 = hash_slot(h2, lvl)
+        if s1 == s2 do
+          go(lvl + 1, Cons(s1, slots_acc))
+        else do
+          let leaf1 = HLeaf(h1, k1, v1)
+          let leaf2 = HLeaf(h2, k2, v2)
+          let bm = bitmap_set(bitmap_set(0, s1), s2)
+          let base_node =
+            if s1 < s2 do HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+            else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil))) end
+          apply_slots(base_node, slots_acc) end
+        end end
+      end
+    end
+    go(level, Nil)
+  end
+
+  pfn node_insert(node, key, val, h, level) do
+    match node do
+    HEmpty -> HLeaf(h, key, val)
+    HLeaf(lh, lk, lv) -> do
+      if lh == h do
+        if lk == key do HLeaf(h, key, val)
+        else HCollision(h, Cons((lk, lv), Cons((key, val), Nil))) end
+      else
+        make_branch(lh, lk, lv, h, key, val, level)
+      end
+    end
+    HCollision(ch, pairs) -> do
+      if ch == h do
+        HCollision(ch, coll_insert(pairs, key, val))
+      else do
+        fn expand(nd, ps) do
+          match ps do
+          Nil -> nd
+          Cons(pair, rest) -> do
+            let (ck, cv) = pair
+            expand(node_insert(nd, ck, cv, ch, level), rest)
+          end
+          end
+        end
+        expand(node_insert(HEmpty, key, val, h, level), pairs) end
+      end
+    end
+    HBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        let new_child = node_insert(child, key, val, h, level + 1)
+        HBranch(bitmap, list_replace_at(children, idx, new_child))
+      else do
+        let idx = bitmap_rank(bitmap, slot)
+        let new_leaf = HLeaf(h, key, val)
+        HBranch(bitmap_set(bitmap, slot),
+          list_insert_at(children, idx, new_leaf))
+      end end
+    end
+    end
+  end
+
+  pfn node_remove(node, key, h, level) do
+    match node do
+    HEmpty -> HEmpty
+    HLeaf(lh, lk, _lv) -> do
+      if lh == h && lk == key do HEmpty
+      else node end
+    end
+    HCollision(ch, pairs) -> do
+      if ch == h do
+        let new_pairs = coll_remove(pairs, key)
+        match new_pairs do
+        Nil -> HEmpty
+        Cons(sole, Nil) -> do
+          let (sk, sv) = sole
+          HLeaf(ch, sk, sv)
+        end
+        _ -> HCollision(ch, new_pairs)
+        end
+      else node end
+    end
+    HBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        let new_child = node_remove(child, key, h, level + 1)
+        match new_child do
+        HEmpty -> do
+          let new_bm = bitmap_clear(bitmap, slot)
+          let new_children = list_delete_at(children, idx)
+          match new_children do
+          Nil -> HEmpty
+          Cons(sole, Nil) -> do
+            match sole do
+            HCollision(_, _) -> sole
+            HLeaf(_, _, _) -> sole
+            _ -> HBranch(new_bm, new_children)
+            end
+          end
+          _ -> HBranch(new_bm, new_children)
+          end
+        end
+        _ -> HBranch(bitmap, list_replace_at(children, idx, new_child))
+        end
+      else node end
+    end
+    end
+  end
+
+  pfn node_fold(acc, node, f) do
+    match node do
+    HEmpty -> acc
+    HLeaf(_, k, v) -> f(acc, k, v)
+    HCollision(_, pairs) -> do
+      fn go(ps, a) do
+        match ps do
+        Nil -> a
+        Cons(pair, rest) -> do
+          let (k, v) = pair
+          go(rest, f(a, k, v))
+        end
+        end
+      end
+      go(pairs, acc)
+    end
+    HBranch(_, children) -> do
+      fn go(cs, a) do
+        match cs do
+        Nil -> a
+        Cons(child, rest) -> go(rest, node_fold(a, child, f))
+        end
+      end
+      go(children, acc)
+    end
+    end
+  end
+
+  pfn node_size(node) do
+    match node do
+    HEmpty -> 0
+    HLeaf(_, _, _) -> 1
+    HCollision(_, pairs) -> List.length(pairs)
+    HBranch(_, children) -> do
+      fn go(acc, cs) do
+        match cs do
+        Nil -> acc
+        Cons(child, rest) -> go(acc + node_size(child), rest)
+        end
+      end
+      go(0, children)
+    end
+    end
+  end
+
+  -- ── Public API ─────────────────────────────────────────────────────────────
+
+  doc """
+  Returns an empty HashMap. No comparator needed.
+
+  march> HashMap.is_empty(HashMap.new())
+  true
+  """
+  fn new() do
+    HamtHashMap(HEmpty)
+  end
+
+  doc "Returns true if the map contains no entries."
+  fn is_empty(m) do
+    match m do
+    HamtHashMap(HEmpty) -> true
+    _                   -> false
+    end
+  end
+
+  doc """
+  Inserts or replaces a key-value pair. Returns the new map.
+
+  march> HashMap.get(HashMap.put(HashMap.new(), "a", 1), "a")
+  Some(1)
+  """
+  fn put(m, key, val) do
+    match m do
+    HamtHashMap(node) -> do
+      let h = key_hash(key)
+      HamtHashMap(node_insert(node, key, val, h, 0))
+    end
+    end
+  end
+
+  doc """
+  Returns `Some(value)` if key is present, or `None`.
+
+  march> HashMap.get(HashMap.new(), "missing")
+  None
+  """
+  fn get(m, key) do
+    match m do
+    HamtHashMap(node) -> do
+      let h = key_hash(key)
+      node_get(node, key, h, 0)
+    end
+    end
+  end
+
+  doc "Returns the value for key, or default if the key is absent."
+  fn get_or(m, key, default) do
+    match get(m, key) do
+    Some(v) -> v
+    None    -> default
+    end
+  end
+
+  doc "Returns true if key is present."
+  fn has(m, key) do
+    match get(m, key) do
+    Some(_) -> true
+    None    -> false
+    end
+  end
+
+  doc """
+  Removes a key from the map. Returns the map unchanged if key is absent.
+
+  march> HashMap.has(HashMap.delete(HashMap.put(HashMap.new(), "a", 1), "a"), "a")
+  false
+  """
+  fn delete(m, key) do
+    match m do
+    HamtHashMap(node) -> do
+      let h = key_hash(key)
+      HamtHashMap(node_remove(node, key, h, 0))
+    end
+    end
+  end
+
+  doc "Returns the number of key-value pairs. O(n)."
+  fn size(m) do
+    match m do
+    HamtHashMap(node) -> node_size(node)
+    end
+  end
+
+  doc """
+  Left fold over all entries. `f` is called as `f(acc, key, value) -> new_acc`.
+  Iteration order is hash-traversal order (not sorted, not insertion order).
+  """
+  fn fold(m, acc, f) do
+    match m do
+    HamtHashMap(node) -> node_fold(acc, node, f)
+    end
+  end
+
+  doc "Returns all keys as a list (hash-traversal order)."
+  fn keys(m) do
+    let ks = fold(m, Nil, fn (acc, k, _v) -> Cons(k, acc))
+    lst_rev(ks)
+  end
+
+  doc "Returns all values as a list (hash-traversal order)."
+  fn values(m) do
+    let vs = fold(m, Nil, fn (acc, _k, v) -> Cons(v, acc))
+    lst_rev(vs)
+  end
+
+  doc "Returns all (key, value) pairs as a list (hash-traversal order)."
+  fn entries(m) do
+    let es = fold(m, Nil, fn (acc, k, v) -> Cons((k, v), acc))
+    lst_rev(es)
+  end
+
+  doc """
+  Builds a HashMap from a list of (key, value) pairs.
+  Later entries overwrite earlier ones for duplicate keys.
+
+  march> HashMap.size(HashMap.from_list([("a",1),("b",2),("a",99)]))
+  2
+  """
+  fn from_list(pairs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        go(rest, put(acc, k, v))
+      end
+      end
+    end
+    go(pairs, new())
+  end
+
+  doc "Converts a HashMap to a list of (key, value) pairs (hash-traversal order)."
+  fn to_list(m) do
+    entries(m)
+  end
+
+  doc """
+  Updates a key using a function from `Option(v) -> v`.
+  `None` is passed when the key is absent; `Some(existing)` when present.
+  The function's return value becomes the new value for that key.
+
+  march> HashMap.get(HashMap.update(HashMap.new(), "k", fn _ -> 42), "k")
+  Some(42)
+  """
+  fn update(m, key, f) do
+    let new_val = f(get(m, key))
+    put(m, key, new_val)
+  end
+
+  doc "Applies f to each value, returning a new map with the same keys."
+  fn map_values(m, f) do
+    fn go(node) do
+      match node do
+      HEmpty -> HEmpty
+      HLeaf(h, k, v) -> HLeaf(h, k, f(v))
+      HBranch(bm, children) -> do
+        fn map_cs(cs) do
+          fn go_cs(lst, acc) do
+            match lst do
+            Nil -> lst_rev(acc)
+            Cons(c, rest) -> go_cs(rest, Cons(go(c), acc))
+            end
+          end
+          go_cs(cs, Nil)
+        end
+        HBranch(bm, map_cs(children))
+      end
+      HCollision(h, pairs) -> do
+        fn map_ps(ps) do
+          fn go_ps(lst, acc) do
+            match lst do
+            Nil -> lst_rev(acc)
+            Cons(pair, rest) -> do
+              let (k, v) = pair
+              go_ps(rest, Cons((k, f(v)), acc))
+            end
+            end
+          end
+          go_ps(ps, Nil)
+        end
+        HCollision(h, map_ps(pairs))
+      end
+      end
+    end
+    match m do
+    HamtHashMap(node) -> HamtHashMap(go(node))
+    end
+  end
+
+  doc """
+  Returns a map containing only entries where `pred(key)(value)` is true.
+  pred : k -> v -> Bool (curried).
+  """
+  fn filter(m, pred) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        let p = pred(k)
+        if p(v) do go(rest, put(acc, k, v))
+        else go(rest, acc) end
+      end
+      end
+    end
+    go(entries(m), new())
+  end
+
+  doc """
+  Merges two maps. When a key appears in both, the value from `b` takes
+  precedence. O(n log n) in the size of b.
+  """
+  fn merge(a, b) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        go(rest, put(acc, k, v))
+      end
+      end
+    end
+    go(entries(b), a)
+  end
+
+  doc """
+  Merges two maps with a combining function for conflicting keys.
+  When key exists in both, value is `f(val_from_a)(val_from_b)`.
+  f : v -> v -> v (curried).
+  """
+  fn merge_with(a, b, f) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(pair, rest) -> do
+        let (k, v) = pair
+        let new_val =
+          match get(acc, k) do
+          None    -> v
+          Some(existing) -> do
+            let combine = f(existing)
+            combine(v)
+          end
+          end
+        go(rest, put(acc, k, new_val))
+      end
+      end
+    end
+    go(entries(b), a)
+  end
+
+end
