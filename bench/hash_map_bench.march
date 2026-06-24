@@ -1,0 +1,119 @@
+-- HashMap + Enum.uniq/frequencies benchmark.
+--
+-- Measures three workloads at three scales (10k / 50k / 100k elements)
+-- to demonstrate O(n) behaviour.  Each workload reports wall-time via
+-- System.monotonic_time() and a checksum so the compiler cannot dead-code
+-- eliminate the work.
+--
+-- Usage:
+--   march --compile --opt 2 bench/hash_map_bench.march -o bench/hash_map_bench
+--   bench/hash_map_bench
+--
+-- Expected output: three sections (HashMap raw, Enum.uniq, Enum.frequencies)
+-- each with three timing lines.  Times should grow linearly (2× n ≈ 2× ms).
+
+mod HashMapBench do
+
+-- ── Helpers ────────────────────────────────────────────────────────────────
+
+-- Builds a list of n integers where the value repeats every `period` steps,
+-- creating exactly `period` unique values.
+pfn build_cyclic(n : Int, period : Int) : List(Int) do
+  fn go(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else go(i - 1, Cons(i % period, acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+pfn sum_list(xs : List(Int)) : Int do
+  fn go(lst : List(Int), acc : Int) : Int do
+    match lst do
+    Nil        -> acc
+    Cons(h, t) -> go(t, acc + h)
+    end
+  end
+  go(xs, 0)
+end
+
+pfn list_length(xs : List(a)) : Int do
+  fn go(lst : List(a), acc : Int) : Int do
+    match lst do
+    Nil        -> acc
+    Cons(_, t) -> go(t, acc + 1)
+    end
+  end
+  go(xs, 0)
+end
+
+pfn print_timing(label : String, ms : Int, check : Int) : Unit do
+  println(label ++ " " ++ int_to_string(ms) ++ "ms  (check=" ++ int_to_string(check) ++ ")")
+end
+
+-- ── Workload 1: raw HashMap put / get ──────────────────────────────────────
+
+-- Insert n unique keys, look up all of them, sum the values.
+pfn bench_hashmap_raw(n : Int) : Int do
+  let keys = List.range(0, n)
+  let m = List.fold_left(keys, HashMap.new(), fn (acc, k) ->
+    HashMap.put(acc, k, k * 3)
+  )
+  List.fold_left(keys, 0, fn (acc, k) ->
+    acc + HashMap.get_or(m, k, 0)
+  )
+end
+
+-- ── Workload 2: Enum.uniq ──────────────────────────────────────────────────
+
+-- List of n ints cycling over n/2 unique values.
+-- Enum.uniq should return exactly n/2 elements.
+pfn bench_uniq(n : Int) : Int do
+  let xs = build_cyclic(n, n / 2)
+  let deduped = Enum.uniq(xs)
+  list_length(deduped)
+end
+
+-- ── Workload 3: Enum.frequencies ───────────────────────────────────────────
+
+-- List of n ints cycling over n/10 unique values (each appears 10 times).
+-- Sum of all counts should equal n.
+pfn bench_frequencies(n : Int) : Int do
+  let xs = build_cyclic(n, n / 10)
+  let pairs = Enum.frequencies(xs)
+  List.fold_left(pairs, 0, fn (acc, pair) ->
+    let (_, c) = pair
+    acc + c
+  )
+end
+
+-- ── Main ───────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  let scales = [10000, 50000, 100000]
+
+  println("=== HashMap raw put/get ===")
+  let _ = List.fold_left(scales, (), fn (_, n) ->
+    let t0 = System.monotonic_time()
+    let check = bench_hashmap_raw(n)
+    let t1 = System.monotonic_time()
+    print_timing("  n=" ++ int_to_string(n), t1 - t0, check)
+  )
+
+  println("=== Enum.uniq ===")
+  let _ = List.fold_left(scales, (), fn (_, n) ->
+    let t0 = System.monotonic_time()
+    let check = bench_uniq(n)
+    let t1 = System.monotonic_time()
+    print_timing("  n=" ++ int_to_string(n), t1 - t0, check)
+  )
+
+  println("=== Enum.frequencies ===")
+  let _ = List.fold_left(scales, (), fn (_, n) ->
+    let t0 = System.monotonic_time()
+    let check = bench_frequencies(n)
+    let t1 = System.monotonic_time()
+    print_timing("  n=" ++ int_to_string(n), t1 - t0, check)
+  )
+end
+
+end

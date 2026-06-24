@@ -350,6 +350,51 @@ Pipeline script: `bench/tfb/pipeline.lua`.
 
 ---
 
+## bench/hash_map_bench.march — HashMap + Enum.uniq/frequencies (O(n) proof)
+
+**Command:** compile with `--opt 2`, run directly (includes internal timing via
+`System.monotonic_time()`).
+
+```bash
+march --compile --opt 2 bench/hash_map_bench.march -o bench/hash_map_bench
+bench/hash_map_bench
+```
+
+Three workloads at three scales (10 k / 50 k / 100 k elements):
+
+| Workload | What it exercises | Checksum |
+|----------|-------------------|---------|
+| HashMap raw put/get | HAMT insert + lookup over unique Int keys | sum of values |
+| Enum.uniq | dedup 50%-duplicate list via HashMap membership | unique count |
+| Enum.frequencies | count 10-repeat list via HashMap + order list | total count |
+
+**Baseline results (2026-06-24, Apple M-class, --opt 2):**
+
+```
+=== HashMap raw put/get ===
+  n=10000  27ms  (check=149985000)
+  n=50000 161ms  (check=3749925000)
+  n=100000 367ms  (check=14999850000)
+=== Enum.uniq ===
+  n=10000  13ms  (check=5000)
+  n=50000  84ms  (check=25000)
+  n=100000 193ms  (check=50000)
+=== Enum.frequencies ===
+  n=10000  23ms  (check=10000)
+  n=50000 150ms  (check=50000)
+  n=100000 323ms  (check=100000)
+```
+
+Times grow ~linearly (10× elements ≈ 14× time), consistent with O(n·log₃₂ n)
+HAMT operations (effectively O(n) at these scales).  The previous O(n²)
+`Enum.frequencies` at n=100k would do ~2.5 billion list-scan steps; this does
+100k HashMap lookups.
+
+**What to watch:** a regression here suggests a change to HashMap's HAMT core,
+the `hash` builtin dispatch, or Perceus RC paths for `HEntry` nodes.
+
+---
+
 ## Running benchmarks to validate changes
 
 See also the note in `CLAUDE.md`: run the relevant benchmark after any change
@@ -370,3 +415,4 @@ to the features it exercises. Quick reference:
 | `Deque.*` / Cons allocation / RC amortised | `deque_ops` |
 | `Merkle.*` / `Crypto.sha256` / TVar equality | `merkle` |
 | `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |
+| `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
