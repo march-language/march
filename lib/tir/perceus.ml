@@ -975,8 +975,44 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           la br.Tir.br_vars
       else la
       in
+      (* Add br_vars to _var_ctx so nested cross-branch EDecRC can find their
+         types.  Branch-bound constructor fields are not ELet-bound and would
+         otherwise be invisible to the cross-branch dead-variable pass inside
+         the branch body (e.g. [root] of [PVec(n,shift,root,tail)] in the
+         tail-access sub-path of Array.get where root is dead).
+         Save/restore handles shadowing correctly. *)
+      let saved_br_var_ctx = List.map (fun (v : Tir.var) ->
+        let prev = StringMap.find_opt v.Tir.v_name !_var_ctx in
+        _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
+        (v.Tir.v_name, prev)
+      ) br.Tir.br_vars in
       let (body', live_before_br) = insert_rc_expr br.Tir.br_body la in
-      (br, body', live_before_br, bound)
+      List.iter (fun (name, prev) ->
+        match prev with
+        | None    -> _var_ctx := StringMap.remove name !_var_ctx
+        | Some pv -> _var_ctx := StringMap.add name pv !_var_ctx
+      ) saved_br_var_ctx;
+      (* Emit EDecRC for br_vars that are heap-typed but dead in this branch body.
+         These fields were bound by the pattern but not used anywhere in the arm
+         (e.g. [root] and [tail] in [PVec(n,_,_,_) -> n]).
+         In the shared (RC > 1) case llvm_emit increments their RC on the
+         shared path, so without a matching decrement they leak permanently.
+         In the unique (FBIP) case they were moved from the freed constructor
+         and must be released here to avoid memory leaks.
+         When scrutinee_borrowed = true, all br_vars are re-added to [la]
+         above, so they appear in [live_before_br] and the check below
+         correctly suppresses EDecRC for borrowed fields. *)
+      let body'' = List.fold_right (fun (v : Tir.var) body_acc ->
+        if needs_rc v.Tir.v_ty
+           && not (StringSet.mem v.Tir.v_name live_before_br)
+           && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+           && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) then
+          Tir.ESeq (decrc_for v (Tir.AVar v), body_acc)
+        else
+          body_acc
+      ) br.Tir.br_vars body'
+      in
+      (br, body'', live_before_br, bound)
     ) branches in
     (* Cross-branch dead-variable EDecRC.
        A variable may be live in some arms (used) but dead in others (not

@@ -176,6 +176,8 @@ let stdlib_file_list = [
   "base64.march";
   "native_array.march";
   "task.march";
+  "rrb_vec.march";
+  "parallel.march";
   "uri.march";
   "forge_nb.march";
   "handle.march";
