@@ -1,0 +1,19 @@
+-- REGRESSION FIXTURE for the lazy-load niche codegen path.
+--
+-- Intentionally NOT registered in bin/main.ml's `stdlib_file_list`, so this
+-- module is loaded LAZILY (signatures only, no body type inference) when
+-- referenced.  Its niche-encoded Option match (`List.nth_opt`) therefore reaches
+-- codegen with an unresolved scrutinee type (`'_`).  emit_case must recover the
+-- niche shape from the pattern constructors instead of defaulting to the
+-- heap-tag match strategy (which dereferences a tagged int → segfault).
+--
+-- Do NOT add this file to stdlib_file_list — that would make it eagerly
+-- typechecked and defeat the regression it guards (see test/native/lazy_niche).
+mod LazyNicheProbe do
+  fn first_or(xs : List(Int), dflt : Int) : Int do
+    match List.nth_opt(xs, 0) do
+      Some(v) -> v
+      None -> dflt
+    end
+  end
+end

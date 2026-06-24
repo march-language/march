@@ -3990,8 +3990,41 @@ and emit_case ctx scrut_atom branches default_opt =
   let scrut_tir_ty_init =
     match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
   in
+  (* Recover a niche match when the scrutinee type is unresolved.  A scrutinee
+     typed [TVar "_"] (e.g. a lazily-loaded module body whose expression types
+     were never inferred) makes [repr_of_ty] return [Boxed], which lowers the
+     match with the heap-tag strategy (load a ctor tag at [scrut+8]).  For a
+     niche-encoded type (Option-shaped) the value is a tagged scalar or null —
+     not a heap cell — so that load segfaults.  If the branch constructors name
+     a niche-shaped type, use the niche strategy with [tagged=false] so the
+     payload is taken verbatim; the erased-i64 convention then conditionally
+     untags it at its concrete use sites.  The generated niche code is identical
+     for every niche type at [tagged=false], so we only need to know *whether*
+     the match is niche-shaped, not which type.  Boxed ADTs are unaffected — the
+     heap-tag path is already correct for them. *)
+  let branches_match_niche_shape () =
+    let ctor_tags = List.filter_map (fun br ->
+      let t = br.Tir.br_tag in
+      if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some t else None
+    ) branches in
+    ctor_tags <> [] &&
+    List.exists (function
+      | Tir.TDVariant (tname, variants) ->
+        Repr.is_niche_shaped !cur_type_defs tname
+        && (let ctor_names = List.map fst variants in
+            List.for_all (fun t -> List.mem t ctor_names) ctor_tags)
+      | _ -> false) !cur_type_defs
+  in
+  let effective_repr =
+    match Repr.repr_of_ty !cur_type_defs scrut_tir_ty_init with
+    | Repr.Boxed
+      when (match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
+           && branches_match_niche_shape () ->
+      Repr.Niche { payload = Tir.TVar "_"; tagged = false }
+    | r -> r
+  in
   (* Fast path: newtype scrutinee — the value IS the payload; no tag/alloc. *)
-  match Repr.repr_of_ty !cur_type_defs scrut_tir_ty_init with
+  match effective_repr with
   | Repr.Newtype payload ->
     (* Strip a leading DecRC(scrut) from a branch body.
        Perceus inserts DecRC(box) inside the branch assuming box is a heap cell.

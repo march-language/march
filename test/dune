@@ -488,6 +488,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/default_args_nested.expected native_default_args_nested.out)))
 
+; ── Regression: lazy-loaded module + niche-Option match must not segfault ──
+; LazyNicheProbe is a stdlib module deliberately NOT in stdlib_file_list, so it
+; loads lazily (signatures only, no body typecheck).  Its `match List.nth_opt`
+; reaches codegen with an unresolved ('_) scrutinee type; emit_case must recover
+; the niche shape from the pattern constructors rather than use the heap-tag
+; strategy (which dereferenced a tagged int and crashed).  Compile, run, diff.
+(rule
+ (targets native_lazy_niche native_lazy_niche.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/lazy_niche.march)
+       (file ../stdlib/lazy_niche_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_lazy_niche
+        native/lazy_niche.march)
+   (with-stdout-to native_lazy_niche.out
+        (system "./native_lazy_niche")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/lazy_niche.expected native_lazy_niche.out)))
+
 ; ── Regression: destructuring a tuple's scalar (Int/Bool) field must untag it ──
 ; Tuple fields are stored low-bit tagged (coerce i64->ptr at construction); the
 ; destructure must read them back as ptr + conditional untag.  A raw-i64
