@@ -1,0 +1,65 @@
+mod TestCluster do
+
+  describe "Cluster.from_list" do
+
+    test "builds NodeAddr records from (host, port) pairs" do
+      let addrs = Cluster.from_list([("127.0.0.1", 29852), ("10.0.0.2", 29853)])
+      assert (List.length(addrs) == 2)
+    end
+
+    test "host and port are accessible" do
+      let addrs = Cluster.from_list([("10.0.0.1", 9000)])
+      match List.head_opt(addrs) do
+        None -> assert false
+        Some(a) ->
+          assert (a.host == "10.0.0.1")
+          assert (a.port == 9000)
+      end
+    end
+
+    test "empty input gives empty list" do
+      assert (List.length(Cluster.from_list([])) == 0)
+    end
+
+  end
+
+  describe "Cluster.from_env" do
+
+    test "returns empty list when MARCH_CLUSTER_NODES is unset" do
+      let addrs = Cluster.from_env()
+      assert (List.length(addrs) == 0)
+    end
+
+    test "parses a single host:port" do
+      System.put_env("MARCH_CLUSTER_NODES", "127.0.0.1:29852")
+      let addrs = Cluster.from_env()
+      assert (List.length(addrs) == 1)
+      match List.head_opt(addrs) do
+        None -> assert false
+        Some(a) ->
+          assert (a.host == "127.0.0.1")
+          assert (a.port == 29852)
+      end
+    end
+
+    test "parses multiple comma-separated entries" do
+      System.put_env("MARCH_CLUSTER_NODES", "10.0.0.1:29852,10.0.0.2:29853")
+      let addrs = Cluster.from_env()
+      assert (List.length(addrs) == 2)
+    end
+
+    test "trims whitespace around entries" do
+      System.put_env("MARCH_CLUSTER_NODES", " 10.0.0.1:29852 , 10.0.0.2:29853 ")
+      let addrs = Cluster.from_env()
+      assert (List.length(addrs) == 2)
+    end
+
+    test "skips malformed entries silently" do
+      System.put_env("MARCH_CLUSTER_NODES", "good:9000,no-colon,bad-port:xyz,10.0.0.1:1")
+      let addrs = Cluster.from_env()
+      assert (List.length(addrs) == 2)
+    end
+
+  end
+
+end

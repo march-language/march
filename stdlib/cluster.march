@@ -1,0 +1,59 @@
+-- Cluster: peer address discovery for distributed March applications.
+--
+-- Parse `MARCH_CLUSTER_NODES=host:port,host:port,...` from the environment
+-- into a `List(NodeAddr)`, then dial each node with `NodeRpc.connect`.
+--
+--     let addrs = Cluster.from_env()
+--     let conns  = List.map(fn a -> NodeRpc.connect(a.host, a.port), addrs)
+--
+-- Malformed entries (missing colon, non-numeric port) are silently skipped.
+-- For testing or hardcoded configs use `Cluster.from_list`.
+mod Cluster do
+  type NodeAddr = {
+    host : String,
+    port : Int
+  }
+
+  pfn parse_addr(s : String) : Option(NodeAddr) do
+    match String.split_first(String.trim(s), ":") do
+      None -> None
+      Some((h, p)) ->
+        match String.to_int(String.trim(p)) do
+          Ok(port) -> Some({ host: String.trim(h), port: port })
+          Err(_)   -> None
+        end
+    end
+  end
+
+  doc """
+  Parse `MARCH_CLUSTER_NODES` into a list of peer addresses.
+  Returns `[]` if the variable is unset or empty.
+
+      march> Cluster.from_env()  -- with MARCH_CLUSTER_NODES=127.0.0.1:29852
+      [{host: "127.0.0.1", port: 29852}]
+  """
+  fn from_env() : List(NodeAddr) do
+    match System.env("MARCH_CLUSTER_NODES") do
+      None      -> []
+      Some(val) ->
+        val
+        |> String.split(",")
+        |> List.filter_map(parse_addr)
+    end
+  end
+
+  doc """
+  Build a peer list from a literal list of `(host, port)` pairs.
+  Useful in tests or when addresses are known at compile time.
+
+      march> Cluster.from_list([("127.0.0.1", 29852), ("10.0.0.2", 29853)])
+      [{host: "127.0.0.1", port: 29852}, {host: "10.0.0.2", port: 29853}]
+  """
+  fn from_list(pairs : List((String, Int))) : List(NodeAddr) do
+    List.map(pairs, fn pair ->
+      match pair do
+        (h, p) -> { host: h, port: p }
+      end
+    )
+  end
+end

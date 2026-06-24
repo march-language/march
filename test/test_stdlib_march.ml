@@ -157,6 +157,8 @@ let all_stdlib_decls =
     "global_pid.march";
     "remote_call.march";
     "node_rpc.march";
+    "system.march";
+    "cluster.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -319,6 +321,10 @@ let () =
     ("node_identity", [
       Alcotest.test_case "NodeIdentity module"
         `Quick (run_stdlib_test "test_node_identity.march" "TestNodeIdentity");
+    ]);
+    ("cluster", [
+      Alcotest.test_case "Cluster module"
+        `Quick (run_stdlib_test "test_cluster.march" "TestCluster");
     ]);
     ("cluster_auth", [
       Alcotest.test_case "ClusterAuth module"
