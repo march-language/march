@@ -1273,6 +1273,23 @@ let compile filename =
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
     stamp "opt";
+    (* RPC admission hashes (remote_ref_hashes constant-folding + the @main
+       march_remote_register calls) must be IDENTICAL across SEPARATE client and
+       server compilations of the same source.  Derive them uniformly from the
+       PRE-opt TIR via hash_fn_def for ALL functions — never from the post-opt
+       SCC hashes, which only a live (server-side) function receives while a
+       caller-side function is usually dead-code-eliminated, so the two binaries
+       would disagree.  Combined with alpha-normalized serialization this makes
+       each hash a pure function of the function's normalized body + its callees'
+       stable names, so a non-trivial body (one that calls stdlib functions)
+       matches across binaries just like a trivial leaf does. *)
+    let rpc_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+    let rpc_sig_hashes  : (string, string) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (fn : March_tir.Tir.fn_def) ->
+      let h = March_cas.Hash.hash_fn_def fn in
+      Hashtbl.replace rpc_impl_hashes fn.March_tir.Tir.fn_name h.March_cas.Hash.impl_hash;
+      Hashtbl.replace rpc_sig_hashes  fn.March_tir.Tir.fn_name h.March_cas.Hash.sig_hash
+    ) pre_opt_tir.March_tir.Tir.tm_fns;
     (* Write all collected phases to march-phases/phases.json *)
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
@@ -1443,7 +1460,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:hr_impl_hashes ~remote_sig_hashes:remote_sig_hashes tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1691,7 +1708,7 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:hr_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;

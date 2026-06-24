@@ -1,0 +1,14 @@
+-- Cross-binary RPC hash stability (caller side): same `probe` body, but here it
+-- is dead-code-eliminated (only referenced by remote_ref_hashes), so before the
+-- fix it was hashed pre-optimization with different temp names → a different
+-- impl_hash than the server.  The padding functions perturb the temp counter to
+-- prove name-independence.  Its printed hash must equal rpc_hash_live's.
+mod RpcHashElim do
+  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n")) end
+  fn pad1(x : Int) : Int do x + 1 end
+  fn pad2(x : Int) : Int do x + 2 end
+  fn main() do
+    let (_s, i) = remote_ref_hashes("RpcHashElim", "probe")
+    println(i)
+  end
+end

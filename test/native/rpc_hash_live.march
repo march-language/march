@@ -1,0 +1,17 @@
+-- Cross-binary RPC hash stability (server side): `probe` is kept LIVE by its
+-- __rpc_stub, so before the fix it was hashed post-optimization.  It calls
+-- stdlib functions (ClusterLoad/List/Msgpack), so its impl_hash must still
+-- match the caller-side compilation (rpc_hash_elim).  Prints only the hash.
+mod RpcHashLive do
+  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n")) end
+  pfn probe__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(_) -> Ok(Msgpack.encode(Msgpack.array(List.map(probe(0), fn x -> Msgpack.int(x)))))
+    end
+  end
+  fn main() do
+    let (_s, i) = remote_ref_hashes("RpcHashLive", "probe")
+    println(i)
+  end
+end

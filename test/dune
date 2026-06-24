@@ -518,6 +518,46 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
+; ── Regression: RPC CAS impl_hash stable across separate compilations ──
+; The remote_ref_hashes / march_remote_register admission check compares a
+; function's impl_hash computed in the CALLER binary against the SERVER's.  Two
+; modules share an identical `probe` body that calls stdlib functions: in _live
+; it is kept by a __rpc_stub (formerly hashed post-opt); in _elim it is
+; dead-code-eliminated with extra padding fns perturbing the temp counter
+; (formerly hashed pre-opt with different temp names).  Each prints its probe
+; impl_hash; the two MUST be equal.  Before alpha-normalized serialization +
+; uniform pre-opt RPC hashing they differed, and the admission check rejected
+; non-trivial cross-binary calls.
+(rule
+ (targets native_rpc_hash_live native_rpc_hash_live.out
+          native_rpc_hash_elim native_rpc_hash_elim.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file native/rpc_hash_live.march)
+       (file native/rpc_hash_elim.march)
+       (file ../stdlib/cluster_load.march)
+       (file ../stdlib/system.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_rpc_hash_live
+        native/rpc_hash_live.march)
+   (run %{exe:../bin/main.exe} --compile -o native_rpc_hash_elim
+        native/rpc_hash_elim.march)
+   (with-stdout-to native_rpc_hash_live.out (system "./native_rpc_hash_live"))
+   (with-stdout-to native_rpc_hash_elim.out (system "./native_rpc_hash_elim")))))
+
+(rule
+ (alias runtest)
+ (action (diff native_rpc_hash_live.out native_rpc_hash_elim.out)))
+
 ; ── Regression: destructuring a tuple's scalar (Int/Bool) field must untag it ──
 ; Tuple fields are stored low-bit tagged (coerce i64->ptr at construction); the
 ; destructure must read them back as ptr + conditional untag.  A raw-i64
