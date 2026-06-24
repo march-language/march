@@ -222,6 +222,13 @@ void march_free(void *p) {
  * where the call needs to land. */
 void march_incrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
+    /* When called from a scheduler worker thread, multiple tasks may share the
+     * same heap object (e.g. an Array backing parallel chunks).  Use atomic
+     * increment to avoid a data race on the RC field. */
+    if (march_sched_in_scheduler()) {
+        march_incrc(p);
+        return;
+    }
     ((march_hdr *)p)->rc++;
     if (gc_trace_on())
         gc_emit("inc_ref", p, 0, ((march_hdr *)p)->rc, ((march_hdr *)p)->tag);
@@ -229,6 +236,11 @@ void march_incrc_local(void *p) {
 
 void march_decrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
+    /* Matching atomic path for the scheduler context (see march_incrc_local). */
+    if (march_sched_in_scheduler()) {
+        march_decrc(p);
+        return;
+    }
     march_hdr *h = (march_hdr *)p;
     h->rc--;
     if (gc_trace_on())

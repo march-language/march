@@ -217,7 +217,7 @@ mod Array do
         fn descend(nd, s, path) do
           match nd do
           TrieBranch(children) -> do
-            let slot = trie_slot(leaf_idx, s)
+            let slot = trie_slot(leaf_idx, s - 5)
             let n = lst_len(children)
             if slot == n do
               ascend(TrieBranch(lst_snoc(children, new_path(leaf_values, s - 5))), path)
