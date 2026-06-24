@@ -109,6 +109,7 @@ let all_stdlib_decls =
     "http_server.march";
     "iterable.march";
     "set.march";
+    "hash_map.march";
     "array.march";
     "bigint.march";
     "decimal.march";
@@ -259,6 +260,10 @@ let () =
     ("config", [
       Alcotest.test_case "Config module"
         `Quick (run_stdlib_test "test_config.march" "TestConfig");
+    ]);
+    ("hash_map", [
+      Alcotest.test_case "HashMap module"
+        `Quick (run_stdlib_test "test_hash_map.march" "TestHashMap");
     ]);
     ("stats", [
       Alcotest.test_case "Stats module"

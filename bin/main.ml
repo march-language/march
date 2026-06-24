@@ -125,6 +125,7 @@ let stdlib_file_list = [
   "http_server.march";
   "iterable.march";
   "set.march";
+  "hash_map.march";
   "array.march";
   "bigint.march";
   "decimal.march";

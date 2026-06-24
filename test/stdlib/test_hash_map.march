@@ -1,0 +1,314 @@
+mod TestHashMap do
+
+describe "new and is_empty" do
+  test "new() produces an empty map" do
+    let m = HashMap.new()
+    assert HashMap.is_empty(m)
+  end
+
+  test "is_empty is false after put" do
+    let m = HashMap.put(HashMap.new(), "a", 1)
+    assert !HashMap.is_empty(m)
+  end
+end
+
+describe "put and get" do
+  test "get returns Some for an inserted key" do
+    let m = HashMap.put(HashMap.new(), "x", 42)
+    assert HashMap.get(m, "x") == Some(42)
+  end
+
+  test "get returns None for missing key" do
+    let m = HashMap.new()
+    assert HashMap.get(m, "missing") == None
+  end
+
+  test "put overwrites an existing key" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), "k", 1), "k", 99)
+    assert HashMap.get(m, "k") == Some(99)
+  end
+
+  test "multiple distinct keys coexist" do
+    let m = HashMap.put(HashMap.put(HashMap.put(HashMap.new(), "a", 1), "b", 2), "c", 3)
+    assert HashMap.get(m, "a") == Some(1)
+    assert HashMap.get(m, "b") == Some(2)
+    assert HashMap.get(m, "c") == Some(3)
+  end
+
+  test "integer keys work" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), 1, "one"), 2, "two")
+    assert HashMap.get(m, 1) == Some("one")
+    assert HashMap.get(m, 2) == Some("two")
+  end
+end
+
+describe "get_or" do
+  test "returns value when key present" do
+    let m = HashMap.put(HashMap.new(), "k", 5)
+    assert HashMap.get_or(m, "k", 0) == 5
+  end
+
+  test "returns default when key absent" do
+    assert HashMap.get_or(HashMap.new(), "missing", 99) == 99
+  end
+end
+
+describe "has" do
+  test "has returns true for present key" do
+    let m = HashMap.put(HashMap.new(), "p", 1)
+    assert HashMap.has(m, "p")
+  end
+
+  test "has returns false for absent key" do
+    assert !HashMap.has(HashMap.new(), "nope")
+  end
+end
+
+describe "delete" do
+  test "delete removes an existing key" do
+    let m = HashMap.put(HashMap.new(), "a", 1)
+    let m2 = HashMap.delete(m, "a")
+    assert HashMap.get(m2, "a") == None
+  end
+
+  test "delete on absent key is a no-op" do
+    let m = HashMap.put(HashMap.new(), "a", 1)
+    let m2 = HashMap.delete(m, "z")
+    assert HashMap.get(m2, "a") == Some(1)
+  end
+
+  test "delete leaves other keys intact" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), "a", 1), "b", 2)
+    let m2 = HashMap.delete(m, "a")
+    assert HashMap.get(m2, "b") == Some(2)
+    assert HashMap.get(m2, "a") == None
+  end
+
+  test "map is_empty after last key deleted" do
+    let m = HashMap.put(HashMap.new(), "only", 1)
+    let m2 = HashMap.delete(m, "only")
+    assert HashMap.is_empty(m2)
+  end
+end
+
+describe "size" do
+  test "empty map has size 0" do
+    assert HashMap.size(HashMap.new()) == 0
+  end
+
+  test "size increments on put" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), "a", 1), "b", 2)
+    assert HashMap.size(m) == 2
+  end
+
+  test "put duplicate does not increase size" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), "a", 1), "a", 99)
+    assert HashMap.size(m) == 1
+  end
+
+  test "size decrements on delete" do
+    let m = HashMap.put(HashMap.put(HashMap.new(), "a", 1), "b", 2)
+    let m2 = HashMap.delete(m, "a")
+    assert HashMap.size(m2) == 1
+  end
+end
+
+describe "from_list and to_list" do
+  test "from_list empty gives empty map" do
+    let m = HashMap.from_list([])
+    assert HashMap.is_empty(m)
+  end
+
+  test "from_list builds correct map" do
+    let m = HashMap.from_list([("a", 1), ("b", 2), ("c", 3)])
+    assert HashMap.get(m, "a") == Some(1)
+    assert HashMap.get(m, "b") == Some(2)
+    assert HashMap.get(m, "c") == Some(3)
+    assert HashMap.size(m) == 3
+  end
+
+  test "from_list deduplicates by last value" do
+    let m = HashMap.from_list([("k", 1), ("k", 2), ("k", 3)])
+    assert HashMap.size(m) == 1
+    assert HashMap.get(m, "k") == Some(3)
+  end
+
+  test "to_list round-trips through from_list" do
+    let pairs = [("a", 1), ("b", 2), ("c", 3)]
+    let m = HashMap.from_list(pairs)
+    let out = HashMap.to_list(m)
+    let out_sorted = List.sort_by(out, fn (pa, pb) ->
+      let (ka, _va) = pa
+      let (kb, _vb) = pb
+      ka < kb
+    )
+    assert out_sorted == [("a", 1), ("b", 2), ("c", 3)]
+  end
+end
+
+describe "fold" do
+  test "fold over empty map returns acc" do
+    let result = HashMap.fold(HashMap.new(), 0, fn (acc, _k, _v) -> acc + 1)
+    assert result == 0
+  end
+
+  test "fold sums all values" do
+    let m = HashMap.from_list([("a", 1), ("b", 2), ("c", 3)])
+    let total = HashMap.fold(m, 0, fn (acc, _k, v) -> acc + v)
+    assert total == 6
+  end
+end
+
+describe "keys, values, entries" do
+  test "keys returns all keys" do
+    let m = HashMap.from_list([("x", 1), ("y", 2)])
+    let ks = List.sort_by(HashMap.keys(m), fn (a, b) -> a < b)
+    assert ks == ["x", "y"]
+  end
+
+  test "values returns all values" do
+    let m = HashMap.from_list([("a", 10), ("b", 20)])
+    let vs = List.sort_by(HashMap.values(m), fn (a, b) -> a < b)
+    assert vs == [10, 20]
+  end
+
+  test "entries returns all pairs" do
+    let m = HashMap.from_list([("a", 1), ("b", 2)])
+    let es = List.sort_by(HashMap.entries(m), fn (pa, pb) ->
+      let (ka, _va) = pa
+      let (kb, _vb) = pb
+      ka < kb
+    )
+    assert es == [("a", 1), ("b", 2)]
+  end
+end
+
+describe "update" do
+  test "update on absent key passes None" do
+    let m = HashMap.update(HashMap.new(), "k", fn opt ->
+      match opt do
+      None    -> 0
+      Some(v) -> v + 1
+      end
+    )
+    assert HashMap.get(m, "k") == Some(0)
+  end
+
+  test "update on existing key passes Some(v)" do
+    let m0 = HashMap.put(HashMap.new(), "k", 5)
+    let m1 = HashMap.update(m0, "k", fn opt ->
+      match opt do
+      None    -> 0
+      Some(v) -> v + 1
+      end
+    )
+    assert HashMap.get(m1, "k") == Some(6)
+  end
+
+  test "update enables counter pattern" do
+    let words = ["a", "b", "a", "c", "a", "b"]
+    let incr = fn opt ->
+      match opt do
+      None    -> 1
+      Some(n) -> n + 1
+      end
+    let m = List.fold_left(words, HashMap.new(), fn (acc, w) ->
+      HashMap.update(acc, w, incr)
+    )
+    assert HashMap.get(m, "a") == Some(3)
+    assert HashMap.get(m, "b") == Some(2)
+    assert HashMap.get(m, "c") == Some(1)
+  end
+end
+
+describe "map_values" do
+  test "map_values transforms each value" do
+    let m = HashMap.from_list([("a", 1), ("b", 2)])
+    let m2 = HashMap.map_values(m, fn v -> v * 10)
+    assert HashMap.get(m2, "a") == Some(10)
+    assert HashMap.get(m2, "b") == Some(20)
+  end
+end
+
+describe "filter" do
+  test "filter keeps only matching entries" do
+    let m = HashMap.from_list([("a", 1), ("b", 2), ("c", 3)])
+    let m2 = HashMap.filter(m, fn _k -> fn v -> v > 1)
+    assert HashMap.has(m2, "a") == false
+    assert HashMap.has(m2, "b")
+    assert HashMap.has(m2, "c")
+  end
+end
+
+describe "merge" do
+  test "merge empty with map gives map" do
+    let m = HashMap.from_list([("a", 1)])
+    let result = HashMap.merge(HashMap.new(), m)
+    assert HashMap.get(result, "a") == Some(1)
+  end
+
+  test "merge prefers b on conflict" do
+    let a = HashMap.from_list([("k", 1)])
+    let b = HashMap.from_list([("k", 99)])
+    let result = HashMap.merge(a, b)
+    assert HashMap.get(result, "k") == Some(99)
+  end
+
+  test "merge combines disjoint maps" do
+    let a = HashMap.from_list([("x", 1)])
+    let b = HashMap.from_list([("y", 2)])
+    let result = HashMap.merge(a, b)
+    assert HashMap.size(result) == 2
+  end
+end
+
+describe "merge_with" do
+  test "merge_with combines conflicting values via f" do
+    let a = HashMap.from_list([("k", 3)])
+    let b = HashMap.from_list([("k", 4)])
+    let result = HashMap.merge_with(a, b, fn va -> fn vb -> va + vb)
+    assert HashMap.get(result, "k") == Some(7)
+  end
+
+  test "merge_with inserts non-conflicting keys from b" do
+    let a = HashMap.from_list([("a", 1)])
+    let b = HashMap.from_list([("b", 2)])
+    let result = HashMap.merge_with(a, b, fn va -> fn _vb -> va)
+    assert HashMap.size(result) == 2
+  end
+end
+
+describe "large map stress" do
+  test "100 sequential puts and gets" do
+    let keys = List.range(0, 100)
+    let m = List.fold_left(keys, HashMap.new(), fn (acc, k) ->
+      HashMap.put(acc, k, k * k)
+    )
+    assert HashMap.size(m) == 100
+    let all_found = List.all(keys, fn k ->
+      HashMap.get(m, k) == Some(k * k)
+    )
+    assert all_found
+  end
+
+  test "100 puts then 50 deletes leaves correct size" do
+    let keys = List.range(0, 100)
+    let m0 = List.fold_left(keys, HashMap.new(), fn (acc, k) ->
+      HashMap.put(acc, k, k)
+    )
+    let to_delete = List.range(0, 50)
+    let m1 = List.fold_left(to_delete, m0, fn (acc, k) ->
+      HashMap.delete(acc, k)
+    )
+    assert HashMap.size(m1) == 50
+    let remaining = List.range(50, 100)
+    let all_present = List.all(remaining, fn k ->
+      HashMap.get(m1, k) == Some(k)
+    )
+    assert all_present
+  end
+end
+
+fn main() do () end
+
+end

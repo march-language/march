@@ -211,3 +211,74 @@ mod Calc do
   end
 end
 ```
+
+---
+
+## HashMap — key-value store without a comparator
+
+`HashMap(k, v)` is like `Map` but uses structural `==` and the built-in `hash`
+function instead of an explicit comparator. This means you never pass a `cmp`
+argument anywhere.
+
+### Building and querying
+
+```march
+let m = HashMap.from_list([("a", 1), ("b", 2), ("c", 3)])
+
+HashMap.get(m, "a")        -- Some(1)
+HashMap.get_or(m, "z", 0)  -- 0
+HashMap.has(m, "b")         -- true
+HashMap.size(m)             -- 3
+```
+
+### Counting word frequencies (O(n))
+
+The `update` function eliminates the get-then-put pattern that Map requires:
+
+```march
+mod WordCount do
+  fn count_words(words : List(String)) : HashMap(String, Int) do
+    List.fold_left(words, HashMap.new(), fn (acc, w) ->
+      HashMap.update(acc, w, fn opt ->
+        match opt do
+        None    -> 1
+        Some(n) -> n + 1
+        end
+      )
+    )
+  end
+
+  fn main() do
+    let words = ["the", "cat", "sat", "on", "the", "mat", "the"]
+    let freq = count_words(words)
+    println(int_to_string(HashMap.get_or(freq, "the", 0)))  -- 3
+  end
+end
+```
+
+The same pattern is why `Enum.frequencies` and `Enum.uniq` are now O(n)
+instead of O(n²) — they use `HashMap` internally.
+
+### Merging two maps
+
+```march
+let a = HashMap.from_list([("x", 1), ("y", 2)])
+let b = HashMap.from_list([("y", 99), ("z", 3)])
+
+-- b wins on conflict:
+let merged = HashMap.merge(a, b)
+HashMap.get(merged, "y")  -- Some(99)
+
+-- custom conflict resolution:
+let summed = HashMap.merge_with(a, b, fn va -> fn vb -> va + vb)
+HashMap.get(summed, "y")  -- Some(101)
+```
+
+### When to use HashMap vs Map
+
+| Situation | Use |
+|-----------|-----|
+| String/int keys, no ordering needed | `HashMap` |
+| Need sorted iteration (`to_list` in key order) | `Map` with `str_cmp`/`int_cmp` |
+| Custom equality beyond `==` | `Map` with a comparator |
+| Enum.frequencies / Enum.uniq patterns | `HashMap` (done internally) |
