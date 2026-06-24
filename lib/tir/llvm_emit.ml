@@ -5201,6 +5201,9 @@ declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare void @march_dispatch_leave(i32 %name_id, i32 %version)
 declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, i8 %kind)
 declare void @march_dispatch_init(i32 %n_slots)
+declare void @march_dispatch_register_name(i32, ptr)
+declare void @march_reload_server_start(ptr)
+declare ptr  @getenv(ptr)
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
@@ -5653,9 +5656,25 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
               in
               Printf.bprintf b
                 "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, i8 0)\n"
-                id (mangle_extern fn.Tir.fn_name) hash_arg
+                id (mangle_extern fn.Tir.fn_name) hash_arg;
+              (* Register name→ID mapping for the reload server. *)
+              let name_g = Printf.sprintf "@.hr_name%d" id in
+              Buffer.add_string ctx.preamble
+                (Printf.sprintf
+                   "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+                   name_g (String.length fn.Tir.fn_name + 1)
+                   (llvm_escape_string fn.Tir.fn_name));
+              Printf.bprintf b
+                "  call void @march_dispatch_register_name(i32 %d, ptr %s)\n"
+                id name_g
             | None -> ()
         ) m.Tir.tm_fns;
+        (* Start the reload server if MARCH_HOT_RELOAD_SOCKET is set. *)
+        Buffer.add_string ctx.preamble
+          "@.hr_sock_env = private unnamed_addr constant [24 x i8] c\"MARCH_HOT_RELOAD_SOCKET\\00\"\n";
+        Buffer.add_string b
+          "  %hr_sock_ptr = call ptr @getenv(ptr @.hr_sock_env)\n\
+          \  call void @march_reload_server_start(ptr %hr_sock_ptr)\n";
         Buffer.contents b
       end
   in
