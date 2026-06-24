@@ -199,6 +199,10 @@ String.chars("hi")                  -- ["h", "i"]
 Map operations that need key identity take an explicit comparator:
 `cmp : k -> k -> Bool` where `cmp(a)(b) = true` means `a < b`.
 
+> **No comparator?** If your keys are strings, ints, or any type where structural
+> `==` is the right equality, use [`HashMap`](#hashmap) instead — identical API,
+> no `cmp` argument anywhere.
+
 ```march
 let cmp = fn a -> fn b -> a < b   -- comparator for String keys
 
