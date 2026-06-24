@@ -185,6 +185,26 @@ forge check
 
 This catches type errors in every file under `lib/` (including orphaned modules that aren't reachable from the entry point), without paying for codegen or linking.
 
+### Auto-fixing Diagnostics
+
+`forge fix` reads compiler warnings and applies mechanically-determined fixes automatically — no human judgment needed, no ambiguity. It's the equivalent of `cargo fix` or `eslint --fix`.
+
+```sh
+forge fix              # apply all auto-fixable warnings in the project
+forge fix --dry-run    # show what would change without writing any files
+```
+
+**What it fixes:**
+
+| Warning | Fix |
+|---|---|
+| Missing `needs X` declaration | Inserts `needs X` after the `mod Name do` opening line |
+| Unused `needs X` declaration | Deletes the `needs X` line |
+| Unused function parameter | Prefixes the parameter name with `_` |
+| Redundant (unreachable) match arm | Deletes the entire arm (pattern + body) |
+
+`forge fix` refuses to apply any fixes if the project has errors — fix those first. It only touches files inside your project root, applies edits bottom-up so earlier line offsets stay valid, and deduplicates identical fixes before writing.
+
 ### Testing
 
 ```sh
