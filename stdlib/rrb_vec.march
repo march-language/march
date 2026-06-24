@@ -1,0 +1,298 @@
+-- RRB.Vec — persistent sequence for bulk-parallel work.
+--
+-- v1 is backed by a plain list (O(1) cons, O(n) append) so that we can
+-- ship the Parallel module without adding new compiler builtins. A future
+-- v2 will replace the representation with a proper 32-way RRB trie, giving
+-- O(log N) push and O(log N) concat; callers will see no API change.
+--
+-- For the parallel merge phase this is adequate: each worker receives
+-- a Slice (O(1) creation) and folds it (O(slice length)); the N-worker
+-- sequential merge is O(total elements).
+--
+-- Key operations:
+--   chunk(v, n)     -- split into n contiguous Slices — O(n + total)
+--   fold(s, acc, f) -- scan a Slice without copying — O(slice length)
+--   concat(l, r)    -- merge two Vecs — O(length(r))
+--
+-- ## Examples
+--
+--     march> let v = RRB.from_list([1, 2, 3, 4, 5])
+--     march> RRB.length(v)
+--     5
+--     march> let s = RRB.slice(v, 1, 4)
+--     march> RRB.fold(s, 0, fn (acc, x) -> acc + x)
+--     9
+
+mod RRB do
+
+  -- ── Internal helpers ──────────────────────────────────────────────────────
+
+  pfn imax(a: Int, b: Int): Int do if a > b do a else b end end
+  pfn imin(a: Int, b: Int): Int do if a < b do a else b end end
+
+  -- Reverse a list. O(n).
+  pfn lst_rev(xs: List(a)): List(a) do
+    fn go(ys: List(a), acc: List(a)): List(a) do
+      match ys do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- Return (first n elements in order, remaining elements). O(n).
+  pfn lst_take_drop(xs: List(a), n: Int): (List(a), List(a)) do
+    fn go(ys: List(a), m: Int, acc: List(a)): (List(a), List(a)) do
+      if m == 0 do (lst_rev(acc), ys)
+      else match ys do
+        Nil -> (lst_rev(acc), Nil)
+        Cons(h, t) -> go(t, m - 1, Cons(h, acc))
+        end
+      end
+    end
+    go(xs, n, Nil)
+  end
+
+  -- Drop the first n elements of a list. O(n).
+  pfn lst_drop(xs: List(a), n: Int): List(a) do
+    fn go(ys: List(a), m: Int): List(a) do
+      if m == 0 do ys
+      else match ys do
+        Nil -> Nil
+        Cons(_, t) -> go(t, m - 1)
+        end
+      end
+    end
+    go(xs, n)
+  end
+
+  -- ── Types ─────────────────────────────────────────────────────────────────
+
+  -- A persistent sequence. Constructors are private; use the public API below.
+  -- Representation: (length, elements in forward order).
+  ptype Vec(a) = Vec(Int, List(a))
+
+  -- A lazy view into a contiguous sub-range of a Vec. O(1) to create,
+  -- O(len) to fold. Constructors are private.
+  -- Representation: (sublist starting at lo, count of elements).
+  ptype Slice(a) = Slice(List(a), Int)
+
+  -- ── Construction ────────────────────────────────────────────────────────
+
+  doc "An empty `Vec`. O(1)."
+  fn empty(): Vec(a) do Vec(0, Nil) end
+
+  doc "A `Vec` containing exactly one element. O(1)."
+  fn singleton(x: a): Vec(a) do Vec(1, Cons(x, Nil)) end
+
+  doc "Build a `Vec` from a list. O(n)."
+  fn from_list(xs: List(a)): Vec(a) do
+    Vec(List.length(xs), xs)
+  end
+
+  doc "Wrap an array as a `Vec`. O(n)."
+  fn from_array(xs): Vec(a) do
+    from_list(Array.to_list(xs))
+  end
+
+  doc """
+  Build a `Vec` of length `n` by calling `f(i)` for each index i ∈ [0, n).
+  O(n).
+  """
+  fn tabulate(n: Int, f: Int -> a): Vec(a) do
+    let count = imax(n, 0)
+    fn go(i: Int, acc: List(a)): List(a) do
+      if i < 0 do acc
+      else go(i - 1, Cons(f(i), acc))
+      end
+    end
+    Vec(count, go(count - 1, Nil))
+  end
+
+  doc """
+  Build a `Vec` of consecutive integers `[lo, lo+1, …, hi-1]`. O(hi-lo).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.range(1, 5))
+      [1, 2, 3, 4]
+  """
+  fn range(lo: Int, hi: Int): Vec(Int) do
+    tabulate(imax(hi - lo, 0), fn i -> lo + i)
+  end
+
+  -- ── Basic access ─────────────────────────────────────────────────────────
+
+  doc "Number of elements. O(1)."
+  fn length(v: Vec(a)): Int do
+    match v do Vec(n, _) -> n end
+  end
+
+  doc "True when the `Vec` is empty. O(1)."
+  fn is_empty(v: Vec(a)): Bool do
+    match v do Vec(n, _) -> n == 0 end
+  end
+
+  doc """
+  Return element at 0-based index `i`. Panics if out of bounds. O(i).
+
+  ## Examples
+
+      march> RRB.get(RRB.from_list([10, 20, 30]), 1)
+      20
+  """
+  fn get(v: Vec(a), i: Int): a do
+    match v do Vec(n, lst) ->
+      if i < 0 || i >= n do panic("RRB.get: index out of bounds")
+      else List.nth(lst, i)
+      end
+    end
+  end
+
+  -- ── Modification ─────────────────────────────────────────────────────────
+
+  doc "Append `x` at the end. Returns a new `Vec`. O(n) in v1."
+  fn push(v: Vec(a), x: a): Vec(a) do
+    match v do Vec(n, lst) ->
+      Vec(n + 1, List.append(lst, Cons(x, Nil)))
+    end
+  end
+
+  doc """
+  Concatenate two `Vec`s: all elements of `l` followed by all of `r`.
+  Returns a new `Vec`. O(length(r)).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.concat(RRB.from_list([1,2]), RRB.from_list([3,4])))
+      [1, 2, 3, 4]
+  """
+  fn concat(l: Vec(a), r: Vec(a)): Vec(a) do
+    match l do Vec(nl, ll) ->
+      match r do Vec(nr, rl) ->
+        Vec(nl + nr, List.append(ll, rl))
+      end
+    end
+  end
+
+  -- ── Slices ───────────────────────────────────────────────────────────────
+
+  doc """
+  Create a `Slice` covering the half-open range [lo, hi). O(lo).
+
+  Indices are clamped to [0, length(v)]; lo > hi (after clamping) yields
+  an empty slice.
+  """
+  fn slice(v: Vec(a), lo: Int, hi: Int): Slice(a) do
+    match v do Vec(total, lst) ->
+      let lo2 = imax(0, imin(lo, total))
+      let hi2 = imax(lo2, imin(hi, total))
+      Slice(lst_drop(lst, lo2), hi2 - lo2)
+    end
+  end
+
+  doc """
+  Left fold over a `Slice` in index order. `f(acc, elem) = new_acc`. O(hi-lo).
+
+  This is the hot path inside each parallel worker: it visits only the
+  elements in the slice's range without copying or allocating.
+
+  ## Examples
+
+      march> let s = RRB.slice(RRB.range(0, 5), 1, 4)
+      march> RRB.fold(s, 0, fn (acc, x) -> acc + x)
+      6
+  """
+  fn fold(s: Slice(a), zero: b, f: b -> a -> b): b do
+    fn go(xs: List(a), i: Int, len: Int, acc: b): b do
+      if i >= len do acc
+      else match xs do
+        Nil -> acc
+        Cons(h, t) -> go(t, i + 1, len, f(acc, h))
+        end
+      end
+    end
+    match s do Slice(lst, len) -> go(lst, 0, len, zero) end
+  end
+
+  doc """
+  Split `v` into `n` roughly equal contiguous `Slice`s in index order.
+  Returns an Array of Slices. The last slice absorbs any remainder.
+  O(n + total).
+
+  Edge cases:
+  - `n <= 0` is treated as 1.
+  - `n > length(v)` is clamped to `length(v)` (no empty slices).
+  - Empty `v` returns an empty Array.
+
+  ## Examples
+
+      march> let v = RRB.range(0, 6)
+      march> Array.length(RRB.chunk(v, 3))
+      3
+  """
+  fn chunk(v: Vec(a), n: Int) do
+    match v do Vec(total, lst) -> do
+      if total == 0 do Array.empty()
+      else do
+        let n2   = imax(1, imin(n, total))
+        let size = imax(total / n2, 1)
+        fn go(rest: List(a), i: Int, remaining: Int, acc: List(Slice(a))) do
+          if i == n2 do Array.from_list(lst_rev(acc))
+          else do
+            let sz = if i == n2 - 1 do remaining else size end
+            let (taken, rest2) = lst_take_drop(rest, sz)
+            go(rest2, i + 1, remaining - sz, Cons(Slice(taken, sz), acc))
+          end
+          end
+        end
+        go(lst, 0, total, Nil)
+      end
+      end
+    end
+    end
+  end
+
+  -- ── Conversion ───────────────────────────────────────────────────────────
+
+  doc "Return all elements as a list in index order. O(1)."
+  fn to_list(v: Vec(a)): List(a) do
+    match v do Vec(_, lst) -> lst end
+  end
+
+  doc "Return all elements as an Array. O(n)."
+  fn to_array(v: Vec(a)) do
+    match v do Vec(_, lst) -> Array.from_list(lst) end
+  end
+
+  -- ── Bulk operations ──────────────────────────────────────────────────────
+
+  doc "Apply `f` to each element for side effects. O(n)."
+  fn each(v: Vec(a), f: a -> Unit): Unit do
+    match v do Vec(_, lst) -> List.each(lst, f) end
+  end
+
+  doc """
+  Apply `f` to every element, collecting results in a new `Vec`. O(n).
+
+  For parallel map, use `Parallel.pmap` instead — this is the sequential
+  version.
+  """
+  fn map(v: Vec(a), f: a -> b): Vec(b) do
+    match v do Vec(n, lst) -> Vec(n, List.map(lst, f)) end
+  end
+
+  doc """
+  Left fold over all elements. `f(acc, elem) = new_acc`. O(n).
+
+  ## Examples
+
+      march> RRB.fold_left(RRB.from_list([1, 2, 3]), 0, fn (acc, x) -> acc + x)
+      6
+  """
+  fn fold_left(v: Vec(a), zero: b, f): b do
+    match v do Vec(_, lst) -> List.fold_left(lst, zero, f) end
+  end
+
+end

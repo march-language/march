@@ -1,0 +1,164 @@
+-- Parallel map-reduce over RRB.Vec.
+--
+-- Three public entry points:
+--
+--   pmap     (input, f)           -- transform every element, collect in order
+--   preduce  (input, zero, f, g)  -- transform + reduce with explicit zero/merge
+--   pmap_n   (input, f, workers)  -- like pmap  but with explicit worker count
+--   preduce_n(input, zero, f, g, workers) -- like preduce with explicit count
+--
+-- Convenience wrappers built on preduce:
+--   psum, psum_float, pcount, pany, pall
+--
+-- All functions follow the same structure:
+--   1. chunk(input, workers) — split into N slices
+--   2. task_spawn per slice  — each worker transforms its slice
+--   3. fold_left over tasks  — await and merge results left-to-right
+--
+-- Static partitioning means each worker processes a fixed slice. Imbalanced
+-- workloads (elements that vary widely in processing time) may leave fast
+-- workers idle while slow ones finish. This is a known v1 limitation.
+--
+-- ## Interpreter vs. compiled
+--
+-- Tasks run eagerly (single-threaded) in the interpreter, giving correct
+-- but sequential results. Real multi-core parallelism requires compiling
+-- with `forge build` or `march --compile`.
+--
+-- ## Quick start
+--
+--     let nums  = RRB.range(1, 1_000_001)
+--     let total = Parallel.psum(nums)                         -- 500_000_500_000
+--     let evens = Parallel.pcount(nums, fn n -> n % 2 == 0)  -- 500_000
+--     let sq    = Parallel.pmap(nums, fn n -> n * n)          -- Vec of squares
+--
+-- See docs/cookbook/parallel-data.md for full examples.
+
+mod Parallel do
+
+  -- ── Core functions ────────────────────────────────────────────────────────
+
+  doc """
+  Map `f` over every element of `input` in parallel, collecting results in a
+  new `Vec` in the **same order as the input**. Uses `System.cpu_count()`
+  workers. For a custom worker count, use `pmap_n`.
+
+  ## Examples
+
+      let doubled = Parallel.pmap(RRB.range(1, 6), fn n -> n * 2)
+      -- Vec [2, 4, 6, 8, 10], same order as input
+
+      let rows = Parallel.pmap(records, fn r -> render(r))
+  """
+  fn pmap(input, f) do
+    pmap_n(input, f, System.cpu_count())
+  end
+
+  doc """
+  Like `pmap` but with an explicit `workers` count. Passing a larger value
+  creates finer chunks for heterogeneous per-element workloads.
+  """
+  fn pmap_n(input, f, workers: Int) do
+    let chunks = RRB.chunk(input, workers)
+    let tasks  = Array.map(chunks, fn chunk ->
+      task_spawn(fn _ ->
+        RRB.fold(chunk, RRB.empty(), fn (acc, x) -> RRB.push(acc, f(x)))))
+    Array.fold_left(tasks, RRB.empty(), fn (acc, t) ->
+      RRB.concat(acc, task_await_unwrap(t)))
+  end
+
+  doc """
+  Map `f` over every element then reduce with `merge`. Uses `zero` as the
+  starting accumulator for each chunk (it must be the identity for `merge`).
+  Uses `System.cpu_count()` workers. For a custom count, use `preduce_n`.
+
+  **Contract:** `merge` must be associative and `zero` must be its identity.
+
+  ## Examples
+
+      -- Parallel sum of squares
+      let sum_sq = Parallel.preduce(RRB.range(1, 1001), 0, fn n -> n * n, fn (a, b) -> a + b)
+
+      -- Parallel max (identity = Int.min_value)
+      let mx = Parallel.preduce(scores, -2147483648, fn n -> n, fn (a, b) -> if a > b do a else b end)
+  """
+  fn preduce(input, zero, f, merge) do
+    preduce_n(input, zero, f, merge, System.cpu_count())
+  end
+
+  doc """
+  Like `preduce` but with an explicit `workers` count.
+  """
+  fn preduce_n(input, zero, f, merge, workers: Int) do
+    let chunks = RRB.chunk(input, workers)
+    let tasks  = Array.map(chunks, fn chunk ->
+      task_spawn(fn _ ->
+        RRB.fold(chunk, zero, fn (acc, x) -> merge(acc, f(x)))))
+    Array.fold_left(tasks, zero, fn (acc, t) -> merge(acc, task_await_unwrap(t)))
+  end
+
+  -- ── Convenience functions ─────────────────────────────────────────────────
+
+  doc """
+  Parallel sum of an integer `Vec`.
+
+  ## Examples
+
+      march> Parallel.psum(RRB.range(1, 6))
+      15
+  """
+  fn psum(v): Int do
+    preduce(v, 0, fn n -> n, fn (a, b) -> a + b)
+  end
+
+  doc """
+  Parallel sum of a float `Vec`.
+
+  ## Examples
+
+      march> Parallel.psum_float(RRB.from_list([1.0, 2.5, 3.5]))
+      7.0
+  """
+  fn psum_float(v): Float do
+    preduce(v, 0.0, fn n -> n, fn (a, b) -> a +. b)
+  end
+
+  doc """
+  Count elements satisfying `pred` in parallel.
+
+  ## Examples
+
+      march> Parallel.pcount(RRB.range(1, 11), fn n -> n % 2 == 0)
+      5
+  """
+  fn pcount(v, pred): Int do
+    preduce(v, 0, fn x -> if pred(x) do 1 else 0 end, fn (a, b) -> a + b)
+  end
+
+  doc """
+  True if `pred` holds for at least one element. Evaluates all chunks even
+  after finding a match (no short-circuit in v1).
+
+  ## Examples
+
+      march> Parallel.pany(RRB.from_list([1, 3, 4, 7]), fn n -> n % 2 == 0)
+      true
+  """
+  fn pany(v, pred): Bool do
+    preduce(v, false, pred, fn (a, b) -> a || b)
+  end
+
+  doc """
+  True if `pred` holds for every element. Evaluates all chunks (no early exit
+  in v1).
+
+  ## Examples
+
+      march> Parallel.pall(RRB.from_list([2, 4, 6]), fn n -> n % 2 == 0)
+      true
+  """
+  fn pall(v, pred): Bool do
+    preduce(v, true, pred, fn (a, b) -> a && b)
+  end
+
+end

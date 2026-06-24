@@ -179,8 +179,36 @@ Whether to parallelize is a judgment call that depends on data size and per-elem
 
 ---
 
+## Bulk parallel work: RRB.Vec and Parallel
+
+For **large datasets where you want full map-reduce control**, use the `RRB` and `Parallel` modules
+instead of `List.pmap`.
+
+| Feature | `List.pmap` | `Parallel.pmap` |
+|---------|-------------|-----------------|
+| Input type | `List` | `RRB.Vec` |
+| Custom worker count | `pmap_n(xs, f, n)` | `pmap_n(v, f, n)` |
+| Reduce with identity | `preduce` | `Parallel.preduce` |
+| Built-in psum / pcount | No | Yes |
+| Zero-copy slices | No | Yes (`RRB.slice`) |
+
+### Quick example
+
+```march
+let nums  = RRB.range(1, 1_000_001)
+let total = Parallel.psum(nums)                        -- 500_000_500_000
+let evens = Parallel.pcount(nums, fn n -> n % 2 == 0) -- 500_000
+let sq    = Parallel.pmap(nums, fn n -> n * n)         -- Vec of squares
+```
+
+See the [Parallel Data cookbook]({{ site.baseurl }}/docs/cookbook/parallel-data/) for full
+examples including word frequency, image processing, and statistics.
+
+---
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/) — the scheduler, `Task.async` / `Task.await`, and message-passing concurrency these functions build on.
+- [Parallel Data cookbook]({{ site.baseurl }}/docs/cookbook/parallel-data/) — `RRB.Vec` and `Parallel` with copy-and-run examples.
 - [Standard Library → List]({{ site.baseurl }}/docs/stdlib/List.html) — the full `List` API reference.
 - [LSP & Editors]({{ site.baseurl }}/docs/lsp/) — set up the language server to get the parallelization hints and quick-fix.

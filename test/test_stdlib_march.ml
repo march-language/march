@@ -160,6 +160,8 @@ let all_stdlib_decls =
     "node_rpc.march";
     "system.march";
     "cluster.march";
+    "rrb_vec.march";
+    "parallel.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -398,6 +400,10 @@ let () =
     ("list_parallel", [
       Alcotest.test_case "List parallel ops"
         `Quick (run_stdlib_test "test_list_parallel.march" "TestListParallel");
+    ]);
+    ("rrb_vec", [
+      Alcotest.test_case "RRB.Vec and Parallel modules"
+        `Quick (run_stdlib_test "test_rrb_vec.march" "TestRRBVec");
     ]);
     ("list", [
       Alcotest.test_case "List module"
