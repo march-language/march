@@ -940,7 +940,9 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
+          :: Printf.sprintf "pmt%d" !pmap_threshold
+          :: (hr_cas_tag () @ ffi_cas_tag ()
+              @ (if !compile_so then ["compile-so"] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1458,7 +1460,9 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
+          :: Printf.sprintf "pmt%d" !pmap_threshold
+          :: (hr_cas_tag () @ ffi_cas_tag ()
+              @ (if !compile_so then ["compile-so"] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
@@ -1656,7 +1660,13 @@ let compile filename =
             let ffi_inc = if !ffi_c_files = [] then ""
                           else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
             let rdynamic_flag =
-              if !hot_reload_prefix <> None && not !compile_so then " -Wl,-rdynamic" else "" in
+              (* Export all symbols so dlopen'd patch .so can resolve back to server.
+                 Linux: -Wl,-rdynamic. macOS: -Wl,-export_dynamic (or -rdynamic accepted by clang
+                 on newer toolchains, but -export_dynamic is more portable). *)
+              if !hot_reload_prefix <> None && not !compile_so then
+                if Sys.file_exists "/proc/version" then " -Wl,-rdynamic"
+                else " -Wl,-export_dynamic"
+              else "" in
             let so_flag =
               if !compile_so then
                 (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
@@ -1667,7 +1677,9 @@ let compile filename =
                 " -shared -fPIC" ^ undef
               else "" in
             let reload_ldl =
-              if !hot_reload_prefix <> None && not !compile_so && Sys.unix then " -ldl" else "" in
+              (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
+              if !hot_reload_prefix <> None && not !compile_so
+                 && Sys.file_exists "/proc/version" then " -ldl" else "" in
             let cmd = Printf.sprintf
               "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s %s%s%s%s%s %s -o %s%s%s"
               opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag reload_ldl in

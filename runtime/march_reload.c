@@ -1,11 +1,11 @@
-/* march_reload.c — HCR Phase 3 reload server (Linux, Unix-domain socket).
+/* march_reload.c — HCR Phase 3 reload server (Linux + macOS, Unix-domain socket).
  *
  * Protocol (newline-terminated text):
  *   PING                              → PONG
  *   ABI_QUERY                         → SLOT <id> <impl_hash>  (one per slot), then END
  *   ACTIVATE <name> <impl_hash> <so>  → OK <impl_hash>  or  ERR <reason>
  */
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 
 #include "march_reload.h"
 #include "march_dispatch.h"
@@ -44,8 +44,7 @@ static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
     while (1) {
         int r = read_line(fd, line, RELOAD_LINE_MAX);
-        if (r < 0) break;
-        if (r == 0 && errno == 0) break;  /* clean EOF */
+        if (r <= 0) break;  /* 0 = EOF, negative = read error */
 
         if (strcmp(line, "PING") == 0) {
             write(fd, "PONG\n", 5);
@@ -135,9 +134,14 @@ static void *reload_server_thread(void *arg) {
 
     while (1) {
         int cli = accept(srv, NULL, NULL);
-        if (cli < 0) { if (errno == EINTR) continue; break; }
+        if (cli < 0) {
+            if (errno == EINTR) continue;
+            perror("march_reload: accept");
+            break;
+        }
         handle_client(cli);  /* serial: one client at a time (sufficient for deploys) */
     }
+    unlink(g_socket_path);
     close(srv);
     return NULL;
 }
@@ -154,13 +158,13 @@ void march_reload_server_start(const char *socket_path) {
     pthread_attr_destroy(&attr);
 }
 
-#else  /* non-Linux stub (macOS, WASM, etc.) */
+#else  /* non-POSIX stub (WASM, Windows, etc.) */
 
 #include "march_reload.h"
 
 void march_reload_server_start(const char *socket_path) {
     (void)socket_path;
-    /* No-op on non-Linux platforms in Phase 3. */
+    /* No-op on unsupported platforms. */
 }
 
-#endif /* __linux__ */
+#endif /* __linux__ || __APPLE__ */

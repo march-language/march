@@ -1,0 +1,61 @@
+-- HCR Phase 3 minimal demo.
+--
+-- A TCP server that listens for a single integer n per connection,
+-- computes square(n), and returns the result as a decimal string.
+-- Used to demonstrate hot code reload without the RPC layer.
+--
+-- Build:
+--   march --compile --hot-reload Compute -o hcr_simple hcr_simple.march
+--   MARCH_HOT_RELOAD_SOCKET=/tmp/hcr.sock ./hcr_simple 29900
+--
+-- Probe: echo -n "7" | nc 127.0.0.1 29900; echo
+-- Reload: march-reload --socket /tmp/hcr.sock --name Compute.square --src hcr_simple_patch.march
+mod App do
+  needs IO.NetListen
+
+  mod Compute do
+    fn square(n : Int) : Int do n * n end
+  end
+
+  pfn handle_conn(fd : Int) do
+    let line = match tcp_read_line(fd) do
+      Ok(l)  -> l
+      Err(_) -> "0"
+    end
+    let n = match String.to_int(String.trim(line)) do
+      Ok(v)  -> v
+      Err(_) -> 0
+    end
+    let result = Compute.square(n)
+    tcp_write(fd, String.from_int(result) ++ "\n")
+    tcp_close(fd)
+  end
+
+  pfn serve_loop(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        handle_conn(conn_fd)
+        serve_loop(listen_fd)
+      Err(e) -> println("accept error: " ++ e)
+    end
+  end
+
+  fn main() do
+    let args = Process.argv()
+    let port = match List.nth_opt(args, 1) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> 29900
+        end
+      None -> 29900
+    end
+    let fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("hcr-simple ready on :" ++ String.from_int(port))
+    serve_loop(fd)
+  end
+
+end
