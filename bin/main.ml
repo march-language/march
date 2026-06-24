@@ -350,6 +350,7 @@ let ensure_runtime_so () =
           (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+      ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
@@ -489,6 +490,7 @@ let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
    versioned dispatch table so their functions can be hot-swapped at runtime. *)
 let hot_reload_prefix = ref None
+let compile_so = ref false   (* --compile-so: emit a shared library patch (no @main) *)
 let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
@@ -1469,7 +1471,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes ~emit_main:(not !compile_so) tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1586,7 +1588,8 @@ let compile filename =
                 Printf.sprintf "%s%s%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2)
                   (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
-              ^ (opt_file2 (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
               ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
@@ -1652,9 +1655,22 @@ let compile filename =
                path so their `#include "march_ffi.h"` resolves with no config. *)
             let ffi_inc = if !ffi_c_files = [] then ""
                           else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
+            let rdynamic_flag =
+              if !hot_reload_prefix <> None && not !compile_so then " -Wl,-rdynamic" else "" in
+            let so_flag =
+              if !compile_so then
+                (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
+                   macOS: clang uses -undefined dynamic_lookup for the same effect. *)
+                let undef = if Sys.file_exists "/proc/version"
+                            then " -Wl,--allow-shlib-undefined"
+                            else " -undefined dynamic_lookup" in
+                " -shared -fPIC" ^ undef
+              else "" in
+            let reload_ldl =
+              if !hot_reload_prefix <> None && not !compile_so && Sys.unix then " -ldl" else "" in
             let cmd = Printf.sprintf
-              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s %s%s%s%s%s %s -o %s%s"
-              opt_flag dbg_flag san_flag evloop_flag ffi_inc runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag in
+              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s %s%s%s%s%s %s -o %s%s%s"
+              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -1717,7 +1733,7 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes ~emit_main:(not !compile_so) tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
@@ -2238,6 +2254,8 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--compile-so", Arg.Set compile_so,
+     " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),
      "<Prefix> Compile modules under <Prefix> with the hot-reload dispatch table");
     ("--ffi-c",      Arg.String (fun f -> ffi_c_files := f :: !ffi_c_files),

@@ -5603,6 +5603,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
+    ?(emit_main=true)
     (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
@@ -5965,7 +5966,9 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
           (Printf.sprintf "\ndefine dllexport void @_start() {\nentry:\n  call void @%s()\n  ret void\n}\n" mangled)
       | None -> ())
    | _ ->
-     (* Native / WASI: test-runner @main (when tm_tests populated) or standard @main. *)
+     (* Native / WASI: test-runner @main (when tm_tests populated) or standard @main.
+        Suppressed when emit_main=false (--compile-so: patch shared library). *)
+     if not emit_main then () else
      if m.Tir.tm_tests <> [] then begin
        (* --test mode: emit a @main that calls the test harness.
           For each test fn we emit a string constant for its display name and
