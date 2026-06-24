@@ -329,10 +329,10 @@ distinct exit codes, a test suite, and a native binary.
 
 ## Where to go next
 
-- [CLI recipe](cookbook/cli/) — flags, multiple files, and error handling
+- [CLI recipe](/docs/cookbook/cli/) — flags, multiple files, and error handling
   patterns for larger tools
-- [Read a CSV and aggregate it](cookbook/files/) — process structured data files
-- [Parse a config file](cookbook/config/) — TOML/YAML config with env overrides
-- [Standard Library](stdlib.md) — the "What do I use for…?" index and full module
+- [Read a CSV and aggregate it](/docs/cookbook/files/) — process structured data files
+- [Parse a config file](/docs/cookbook/config/) — TOML/YAML config with env overrides
+- [Standard Library](/docs/stdlib-guide/) — the "What do I use for…?" index and full module
   reference
-- [Cookbook](cookbook/) — task-focused recipes for everything else
+- [Cookbook](/docs/cookbook/) — task-focused recipes for everything else
