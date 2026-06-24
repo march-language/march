@@ -301,6 +301,7 @@
   <!-- MAIN CONTENT -->
   <main class="d-main">
     <div class="d-content">
+      {% if page.scrollmd %}{% include scrollmd-button.html %}{% endif %}
       {{ content }}
     </div>
   </main>

@@ -71,19 +71,19 @@ A March cluster is a set of named nodes connected by authenticated TCP links. Th
 Every node has a stable identity captured in a `NodeIdentity.Identity` record:
 
 ```march
-let id = NodeIdentity.make("alice@192.168.1.10", 9000, "v1.2.0")
--- { node_id: "alice@192.168.1.10", port: 9000, version: "v1.2.0" }
+let id = NodeIdentity.make("alice@host", "alice-public-key", 1)
+-- { name: "alice@host", node_id: <sha256 of pubkey>, incarnation: 1 }
 ```
 
-`node_id` is a `host@address` string that must be unique across the cluster. It is the primary key used in every distributed data structure.
+`make(name, pubkey, incarnation)` derives the `node_id` by hashing the public key (`Crypto.sha256(pubkey)`). The resulting `node_id` is the primary key used in every distributed data structure, and it must be unique across the cluster. `incarnation` increments each time the node restarts, so peers can tell a fresh start from a stale one.
 
 ### Serialisation
 
 Node identities are serialised to MessagePack for transport:
 
 ```march
-let bytes = NodeIdentity.to_bytes(id)   -- List(Int)
-match NodeIdentity.of_bytes(bytes) do
+let bytes = NodeIdentity.encode(id)   -- List(Int)
+match NodeIdentity.decode(bytes) do
   Ok(id2) -> id2
   Err(e)  -> ...
 end
@@ -98,10 +98,10 @@ Before any cluster traffic flows, nodes exchange a challenge-response handshake 
 ### Generating a secret
 
 ```march
-let secret = ClusterAuth.gen_secret()   -- 32-byte random key (List(Int))
+let secret = Crypto.random_hex(32)   -- random hex String shared by all nodes
 ```
 
-All nodes in a cluster must share the same secret (distribute it via environment variable or a secrets manager).
+The secret is just a `String`; `ClusterAuth.prove(secret, nonce)` signs a challenge with `HMAC-SHA256(secret, nonce)` and the secret itself never goes on the wire. All nodes in a cluster must share the same secret (distribute it via environment variable or a secrets manager).
 
 ### Performing the handshake
 
@@ -150,19 +150,20 @@ end
 
 ### Membership CRDT
 
-`Membership` maintains the set of known cluster members as a last-write-wins CRDT. Each member carries a `MemberStatus` (`Alive`, `Suspect`, or `Dead`) and a vector clock for causal ordering.
+`Membership` maintains the set of known cluster members as a last-write-wins CRDT. Each member carries a `MemberStatus` (`Alive`, `Suspect`, or `Dead`) and an `incarnation` counter for causal ordering. You build a `Member` value with `alive`/`suspect`/`dead`, then fold it into the view with `observe`.
 
 ```march
 let members = Membership.empty()
-let members = Membership.join(members, "alice@192.168.1.10", 9000, now_ms)
-let members = Membership.leave(members, "bob@192.168.1.11", now_ms)
+let members = Membership.observe(members, Membership.alive("alice@192.168.1.10", 1))
+-- Mark a member dead by observing a Dead status at its current incarnation
+let members = Membership.observe(members, Membership.dead("bob@192.168.1.11", 1))
 
 -- Merge two views (safe to call repeatedly — idempotent)
 let merged = Membership.merge(local_view, remote_view)
 
 -- Query
-let alive = Membership.alive_nodes(members)   -- List(String)
-let status = Membership.status_of(members, "alice@192.168.1.10")
+let alive  = Membership.alive_members(members)   -- List(Member)
+let member = Membership.get(members, "alice@192.168.1.10")   -- Option(Member)
 ```
 
 ### SWIM failure detection
@@ -170,21 +171,24 @@ let status = Membership.status_of(members, "alice@192.168.1.10")
 `Swim` implements the SWIM gossip protocol as a pure state machine. It produces `Action` values that tell the runtime what to send — no sockets inside.
 
 ```march
-let cfg   = { ack_timeout_ms: 200, suspect_timeout_ms: 2000, indirect_k: 3 }
-let state = Swim.make("alice@192.168.1.10", members, cfg)
+let cfg   = Swim.config(200, 2000, 3)   -- ack_timeout_ms, suspect_timeout_ms, indirect_k
+let state = Swim.make("alice@192.168.1.10", 1, members, cfg)
 
--- Tick: begin a probe period
-let (state, actions) = Swim.begin_period(state, now_ms, random_index)
--- actions may contain SendPing / SendPingReq
+-- Tick: begin a probe period by directly pinging a (caller-chosen) target
+let (state, action) = Swim.begin_period(state, now_ms, "bob@192.168.1.11")
+-- action is SendPing(target)
 
 -- Process an incoming ack
-let state = Swim.on_ack(state, "bob@192.168.1.11", now_ms)
+let state = Swim.on_ack(state, "bob@192.168.1.11")
 
--- Check for overdue probes
-let (state, actions) = Swim.ack_overdue(state, now_ms)
+-- Escalate an overdue direct ping to indirect ping-reqs via helper nodes
+let (state, actions) = Swim.escalate_indirect(state, now_ms, helpers)
 
--- Advance suspect timeouts
-let (state, dead_nodes) = Swim.expire_suspects(state, now_ms)
+-- End the period: an unacked probe marks its target Suspect and gossips it
+let (state, actions) = Swim.end_period(state, now_ms)
+
+-- Advance suspect timeouts: promote expired Suspects to Dead
+let (state, actions) = Swim.expire_suspects(state, now_ms)
 ```
 
 Each `Action` maps to a message to send over the cluster connection:
@@ -207,14 +211,14 @@ let reg = GlobalRegistry.empty()
 -- Register a name on this node
 let reg = GlobalRegistry.register(reg, "worker-1", "alice@192.168.1.10", 42, my_clock)
 
--- Look up a name
+-- Look up a name — returns Option((node_id, pid))
 match GlobalRegistry.lookup(reg, "worker-1") do
-  Some(entry) -> entry.pid      -- Int (local pid on entry.node_id)
-  None        -> ...
+  Some((node_id, pid)) -> pid      -- Int (local pid on node_id)
+  None                 -> ...
 end
 
 -- Remove a name (tombstone — converges with concurrent registrations)
-let reg = GlobalRegistry.unregister(reg, "worker-1", "alice@192.168.1.10", my_clock)
+let reg = GlobalRegistry.unregister(reg, "worker-1", my_clock)
 
 -- Merge two registry views (idempotent)
 let reg = GlobalRegistry.merge(local_reg, remote_reg)
@@ -377,8 +381,8 @@ A minimal two-node cluster:
 ```march
 mod NodeA do
   fn main() do
-    let my_id = NodeIdentity.make("a@127.0.0.1", 9000, "1.0")
-    let secret = ClusterAuth.gen_secret()
+    let my_id = NodeIdentity.make("a@127.0.0.1", "node-a-pubkey", 1)
+    let secret = Crypto.random_hex(32)
     let reg    = PeerRegistry.empty()
 
     match ClusterConn.listen(9000) do
@@ -399,7 +403,7 @@ end
 ```march
 mod NodeB do
   fn main() do
-    let my_id = NodeIdentity.make("b@127.0.0.1", 9001, "1.0")
+    let my_id = NodeIdentity.make("b@127.0.0.1", "node-b-pubkey", 1)
     let secret = -- same secret as Node A
 
     match Socket.connect("127.0.0.1", 9000) do

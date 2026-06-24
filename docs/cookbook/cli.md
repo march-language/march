@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: CLI"
 permalink: /docs/cookbook/cli/
+scrollmd: true
 ---
 
 # A CLI that takes args and files
@@ -17,6 +18,7 @@ project end-to-end, see [Build a CLI tool](../../build-a-cli/).
 `System.argv()` returns the argument vector as a `List(String)`. The first
 element is the executable path; the rest are the user's arguments.
 
+<!-- scroll:skip -->
 ```march
 fn main() do
   match System.argv() do
@@ -38,6 +40,7 @@ Send usage and errors to **stderr** with `IO.warn` (it adds a newline), keeping
 stdout clean for real output. Set the process exit code with `System.exit(n)` —
 returning an `Int` from `main` does *not* affect the exit status.
 
+<!-- scroll:skip -->
 ```march
 fn main() do
   match System.argv() do
@@ -63,6 +66,7 @@ There's no built-in flag library; for small tools, fold over the argument list
 and pick out the flags you care about. Here we support a `-n` count flag and
 treat everything else as a filename:
 
+<!-- scroll:skip -->
 ```march
 mod Repeat do
 
@@ -103,6 +107,7 @@ two-argument lambda (note the parentheses).
 `File.read` returns `Result(String, FileError)`. Match on it so a missing file
 becomes a clean error instead of a crash:
 
+<!-- scroll:skip -->
 ```march
 fn run(path : String) do
   match File.read(path) do

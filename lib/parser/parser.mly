@@ -197,6 +197,17 @@ module_:
   | MOD; path = upper_dot_path; DO; decls = decl_list_r; END; EOF
     { let name = join_mod_path path in
       { mod_name = name; mod_decls = group_fn_clauses decls } }
+  (* A complete top-level `mod ... end` followed by anything other than EOF.
+     March files hold exactly one top-level module; sibling top-level
+     declarations (functions, types, …) are not allowed — they must live
+     inside the module.  Give a precise diagnostic instead of menhir's
+     generic "I got stuck here". *)
+  | MOD; _path = upper_dot_path; DO; _decls = decl_list_r; END; error
+    { raise (March_errors.Errors.ParseError (
+        "A file may have only one top-level `mod`; \
+         everything else must live inside it.",
+        Some "mod Name do\n    fn helper() do ... end\n    fn main() do ... end\nend",
+        $startpos($6))) }
   | MOD; _n = upper_dot_path; error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `do` to start the module body here:",

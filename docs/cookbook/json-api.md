@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: JSON API"
 permalink: /docs/cookbook/json-api/
+scrollmd: true
 ---
 
 # Call a JSON API and parse the response
@@ -18,6 +19,7 @@ response.)
 
 `Json.parse` returns `Result(JsonValue, String)`, where `JsonValue` is an ADT:
 
+<!-- scroll:skip -->
 ```march
 type JsonValue =
     Null
@@ -81,12 +83,29 @@ For values buried in nested objects, `Json.get_in(jv, ["main", "temp"])` walks a
 key path; `Json.get_at(jv, i)` indexes into an array. Both return
 `Option(JsonValue)`, so they compose with the same matching style:
 
+<!-- scroll:skip -->
 ```march
 match Json.get_in(jv, ["main", "temp"]) do
   Some(JsonValue.Number(t)) -> Ok(t)
   _                         -> Err("no main.temp")
 end
 ```
+
+---
+
+## Try it
+
+`Json.parse` works on any string, so you can exercise the accessors without a
+network call:
+
+```march
+match Json.parse("{\"name\": \"Paris\", \"temp\": 14.5}") do
+  Ok(jv) -> Json.get(jv, "name")
+  Err(_) -> None
+end
+```
+
+This returns `Some(JsonValue.Str("Paris"))`.
 
 ---
 

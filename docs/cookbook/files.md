@@ -2,6 +2,7 @@
 layout: cookbook
 title: "Cookbook: Files"
 permalink: /docs/cookbook/files/
+scrollmd: true
 ---
 
 # Read a CSV and aggregate it

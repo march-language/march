@@ -3,6 +3,7 @@ layout: docs
 title: Memory Model
 nav_order: 6.7
 permalink: /docs/memory-model/
+scrollmd: true
 ---
 
 # Memory Model — How FBIP Works
@@ -73,12 +74,28 @@ This is the whole trick. FBIP is just this rule applied to constructor rewrites.
 Here is the canonical example — incrementing every leaf of a binary tree:
 
 ```march
-ptype Tree = Leaf(Int) | Node(Tree, Tree)
+mod TreeDemo do
+  ptype Tree = Leaf(Int) | Node(Tree, Tree)
 
-pfn inc_leaves(t : Tree) : Tree do
-  match t do
-  Leaf(n)    -> Leaf(n + 1)
-  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  pfn inc_leaves(t : Tree) : Tree do
+    match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+    end
+  end
+
+  pfn sum_leaves(t : Tree) : Int do
+    match t do
+    Leaf(n)    -> n
+    Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+    end
+  end
+
+  -- A runnable entry point: build a small tree, increment every leaf, and
+  -- fold it back to a number so the demo cell below can print a result.
+  fn demo() : Int do
+    let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))
+    sum_leaves(inc_leaves(t))
   end
 end
 ```
@@ -120,6 +137,14 @@ agree because no one else is looking.
 > the equivalent C that allocates and frees a fresh tree each pass, and several
 > times faster than OCaml's tracing GC: it does no allocator work at all in
 > steady state.
+
+**Try it.** The `TreeDemo` module above is runnable — this cell builds the sample
+tree `Node(Leaf(1), Node(Leaf(2), Leaf(3)))`, runs `inc_leaves`, and sums the
+result. The leaves `1, 2, 3` become `2, 3, 4`, so the total is `9`:
+
+```march
+println("sum after inc_leaves: " ++ int_to_string(TreeDemo.demo()))
+```
 
 ---
 
@@ -175,6 +200,7 @@ inlay hints and per-function code lenses:
 
 Here is a `⧉`-triggering anti-pattern next to its `♻` fix:
 
+<!-- scroll:skip -->
 ```march
 ptype Box = Box(Int, Int)
 
@@ -210,6 +236,7 @@ The uniqueness that powers FBIP also makes it **lock-free across cores**.
 
 Consider summing or transforming the two children of a tree in parallel:
 
+<!-- scroll:skip -->
 ```march
 Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
 ```

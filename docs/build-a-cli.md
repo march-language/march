@@ -3,6 +3,7 @@ layout: docs
 title: Build a CLI Tool
 nav_order: 4.5
 permalink: /docs/build-a-cli/
+scrollmd: true
 ---
 
 # Build a CLI Tool
@@ -68,6 +69,7 @@ forge run
 A CLI needs its arguments. `System.argv()` returns the full argument vector as a
 `List(String)`, with the executable path as the first element:
 
+<!-- scroll:skip -->
 ```march
 mod Mcount do
   fn main() do
@@ -101,6 +103,7 @@ branch.
 `Err` if the file is missing or unreadable. Match on it so a bad path produces a
 clean error instead of a crash:
 
+<!-- scroll:skip -->
 ```march
 match File.read(path) do
   Ok(text) -> report(path, text)
@@ -119,6 +122,7 @@ Exit code `1` signals a runtime failure (distinct from the `2` for bad usage).
 Now the actual counting. We split the text into lines, split each line into
 words, and use `String.byte_size` for the byte count:
 
+<!-- scroll:skip -->
 ```march
 fn count(text : String) : (Int, Int, Int) do
   let lines = String.split(text, "\n")
@@ -234,6 +238,13 @@ Running it prints:
 the: 3
 cat: 2
 sat: 1
+```
+
+Since `TopWords.main` works on an inline string literal — no argv, no files — you
+can run it directly:
+
+```march
+TopWords.main()
 ```
 
 ---
