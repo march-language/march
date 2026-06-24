@@ -1,0 +1,121 @@
+-- Capacity-aware routing demo — client.
+--
+-- Connects to two server nodes, asks each for its live CPU/memory headroom over
+-- RPC (report_load), picks the node with the most spare CPU via
+-- ClusterLoad.pick_by, and routes the expensive call (square) there.
+--
+--   ./load_client <hostA> <portA> <hostB> <portB>
+-- e.g. node A = local server, node B = droplet via ssh tunnel:
+--   ./load_client 127.0.0.1 29853 127.0.0.1 29852
+mod LoadClient do
+
+  -- Mirrored from the server with identical bodies so the CAS impl_hashes match
+  -- (admission compares content hashes; the stable-hash fix makes non-trivial
+  -- bodies like report_load match across separate compilations).
+  pfn square(n : Int) : Int do n * n end
+
+  fn report_load(_tag : Int) : List(Int) do
+    ClusterLoad.to_ints(ClusterLoad.local("node"))
+  end
+
+  pfn nth_str(xs : List(String), i : Int, dflt : String) : String do
+    match List.nth_opt(xs, i) do
+      Some(v) -> v
+      None -> dflt
+    end
+  end
+
+  pfn nth_int(xs : List(String), i : Int, dflt : Int) : Int do
+    match List.nth_opt(xs, i) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> dflt
+        end
+      None -> dflt
+    end
+  end
+
+  pfn dial(host : String, port : Int) : Int do
+    match Socket.connect(host, port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " — " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn query_load(fd : Int, node_id : String, sig_h : String, impl_h : String,
+                 corr : Int) : ClusterLoad.NodeLoad do
+    let fref = RemoteCall.remote_ref("LoadClient", "report_load", sig_h, impl_h)
+    let args = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(0), Nil)))
+    let pid  = GlobalPid.make("client", 0, 0)
+    match NodeCall.call(fd, fref, args, pid, 9999999, corr, 0) do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Array(items)) ->
+            let ints = List.map(items, fn it ->
+              match it do
+                Msgpack.Int(n) -> n
+                _ -> 0
+              end)
+            ClusterLoad.from_ints(node_id, ints)
+          _ -> panic("report_load: unexpected payload")
+        end
+      Err(_) -> panic("report_load: call rejected")
+    end
+  end
+
+  pfn call_square(fd : Int, sig_h : String, impl_h : String, n : Int, corr : Int) : Int do
+    let fref = RemoteCall.remote_ref("LoadClient", "square", sig_h, impl_h)
+    let args = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Nil)))
+    let pid  = GlobalPid.make("client", 0, 0)
+    match NodeCall.call(fd, fref, args, pid, 9999999, corr, 0) do
+      Ok(payload) ->
+        match Msgpack.decode(payload) do
+          Ok(Msgpack.Int(r)) -> r
+          _ -> panic("square: unexpected payload")
+        end
+      Err(_) -> panic("square: call rejected")
+    end
+  end
+
+  pfn describe(nl : ClusterLoad.NodeLoad) : String do
+    "node " ++ nl.node_id
+      ++ ": cpus=" ++ String.from_int(nl.cpu_count)
+      ++ " load_milli=" ++ String.from_int(nl.cpu_load_milli)
+      ++ " spare_cpu=" ++ String.from_int(ClusterLoad.spare_cpu_milli(nl))
+      ++ " mem_avail_mb=" ++ String.from_int(nl.mem_avail_mb)
+  end
+
+  fn main() do
+    let args = Process.argv()
+    let hostA = nth_str(args, 1, "127.0.0.1")
+    let portA = nth_int(args, 2, 29853)
+    let hostB = nth_str(args, 3, "127.0.0.1")
+    let portB = nth_int(args, 4, 29852)
+
+    let fdA = dial(hostA, portA)
+    let fdB = dial(hostB, portB)
+
+    let (sigL, implL) = remote_ref_hashes("LoadClient", "report_load")
+    let (sigS, implS) = remote_ref_hashes("LoadClient", "square")
+
+    let nlA = query_load(fdA, "A", sigL, implL, 1)
+    let nlB = query_load(fdB, "B", sigL, implL, 2)
+    println(describe(nlA))
+    println(describe(nlB))
+
+    match ClusterLoad.pick_by(Cons(nlA, Cons(nlB, Nil)), ClusterLoad.spare_cpu_milli) do
+      Some(w) ->
+        println("==> routing square to node " ++ w.node_id
+                ++ " (most spare CPU: " ++ String.from_int(ClusterLoad.spare_cpu_milli(w)) ++ ")")
+        let fd = if w.node_id == "A" do fdA else fdB end
+        let r = call_square(fd, sigS, implS, 7, 3)
+        println("square(7) executed on node " ++ w.node_id ++ " = " ++ String.from_int(r))
+      None -> println("no candidates available")
+    end
+
+    tcp_close(fdA)
+    tcp_close(fdB)
+  end
+
+end

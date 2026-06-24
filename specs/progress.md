@@ -282,6 +282,20 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-23, capacity-aware routing demo — end-to-end cross-host)
+
+- **`demo/load_server.march` + `demo/load_client.march`** complete the original capacity-routing goal: a client queries each cluster node's live CPU/memory headroom over RPC (`report_load`, registered via the `__rpc_stub` mechanism), picks the node with the most spare CPU via `ClusterLoad.pick_by`, and routes the expensive call (`square`) there. Depends on every fix from this arc: the resource builtins, the `ClusterLoad` API, the niche-match codegen hardening, and — critically — the stable cross-binary RPC impl_hash (without it `report_load`, a non-trivial body, failed admission).
+- **Cross-host verified against a real droplet.** `load_server` cross-compiled for `linux/amd64` and run on a 1-core droplet; the Mac client queried both nodes over an `ssh -L` tunnel and routed correctly:
+  ```
+  node A (Mac):     cpus=14 spare_cpu=-38364 mem_avail_mb=8052
+  node B (droplet): cpus=1  spare_cpu=-2266  mem_avail_mb=324
+  ==> routing square to node B (most spare CPU)   →   square(7)=49 executed on the droplet
+  ```
+  The Mac is more oversubscribed (load ~52 on 14 cores) than the idle droplet (load ~3 on 1 core), so the client routes CPU-bound work to the droplet — real cross-host headroom, decision by the user-supplied selector.
+- **Demo naming footgun fixed:** the client's `connect` helper collided with `Socket.connect`'s unqualified name (Socket's own callers resolve bare `connect`), mis-routing and hanging; renamed to `dial`. (The underlying unqualified-name cross-module collision is a separate compiler sharp edge.)
+- **Smoke test** `scripts/rpc/route-smoke.sh`: two local nodes; asserts the client queries both over RPC, routes, and runs `square(7)=49`.
+- **Verification.** Full suite green (compiler 318, eval 224, codegen 320, stdlib 786; RPC + niche native tests pass). `test_stdlib_march` 46/47 (pre-existing `node_rpc` `remote_check` eval gap).
+
 ## Current State (as of 2026-06-23, RPC CAS impl_hash stable across separate compilations)
 
 - **`lib/cas/serialize.ml` — alpha-normalized variable serialization (format v2).** The impl_hash serializer wrote generated variable names verbatim (`write_var`), so bodies with desugar/lower-introduced temps (`$t<n>`, `$f<n>`, `$lam<n>`) hashed differently across compilations — the counter depends on surrounding code. Bound variables (function params, `let`/branch/`letrec` binders) are now written by a binding INDEX assigned in deterministic traversal order; a variable occurrence is its binder's index if in scope, else its name (a free reference — a top-level/monomorphized callee in `EApp`, or a global — whose name is a stable cross-binary identity). `impl_hash` is now invariant to temp-name counters. Signatures (`sig_hash`) were already name-free.

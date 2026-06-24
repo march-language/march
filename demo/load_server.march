@@ -1,0 +1,74 @@
+-- Capacity-aware routing demo — server node.
+--
+-- Exposes two RPC targets (registered automatically via the __rpc_stub suffix):
+--   report_load(_)  — this node's live CPU/memory headroom, as a flat Int list
+--                     [cpu_count, cpu_load_milli, mem_total_mb, mem_avail_mb]
+--   square(n)       — the "expensive" work that gets routed here
+--
+-- Run one instance per node (port from argv, default 29852):
+--   ./load_server 29852
+mod LoadServer do
+  needs IO.NetListen
+
+  fn square(n : Int) : Int do n * n end
+
+  pfn square__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(n), Nil)) ->
+            Ok(Msgpack.encode(Msgpack.int(square(n))))
+          _ -> Err("square: expected one Int argument")
+        end
+    end
+  end
+
+  -- Sample this node's headroom and return it as a flat Int list.
+  fn report_load(_tag : Int) : List(Int) do
+    ClusterLoad.to_ints(ClusterLoad.local("node"))
+  end
+
+  pfn report_load__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+    match Msgpack.decode(args) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(tag), Nil)) ->
+            let metrics = report_load(tag)
+            let items = List.map(metrics, fn x -> Msgpack.int(x))
+            Ok(Msgpack.encode(Msgpack.array(items)))
+          _ -> Err("report_load: expected one Int argument")
+        end
+    end
+  end
+
+  pfn serve_loop(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        NodeCall.serve_loop(NodeRpc.empty(), conn_fd)
+        tcp_close(conn_fd)
+        serve_loop(listen_fd)
+      Err(e) -> println("accept error: " ++ e)
+    end
+  end
+
+  fn main() do
+    let args = Process.argv()
+    let port = match List.nth_opt(args, 1) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> 29852
+        end
+      None -> 29852
+    end
+    let fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("load-server ready on :" ++ String.from_int(port))
+    serve_loop(fd)
+  end
+
+end
