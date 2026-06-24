@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef struct {
     void              *fn_ptr;          /* native code or trampoline thunk */
@@ -21,6 +22,47 @@ typedef struct {
 static MarchDispatchSlot *g_slots = NULL;
 static uint32_t           g_n_slots = 0;
 
+/* ── Name registry ──────────────────────────────────────────────────────── */
+
+#define MARCH_NAME_BUCKETS 64   /* must be power of two */
+
+typedef struct NameEntry {
+    const char       *name;
+    uint32_t          id;
+    struct NameEntry *next;
+} NameEntry;
+
+static NameEntry *g_name_buckets[MARCH_NAME_BUCKETS];
+
+static uint32_t name_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; }
+    return h & (MARCH_NAME_BUCKETS - 1);
+}
+
+void march_dispatch_register_name(uint32_t id, const char *name) {
+    if (!name) return;
+    uint32_t b = name_hash(name);
+    NameEntry *e = (NameEntry *)malloc(sizeof(NameEntry));
+    if (!e) return;
+    e->name = name;   /* points into the binary's rodata — stable lifetime */
+    e->id   = id;
+    e->next = g_name_buckets[b];
+    g_name_buckets[b] = e;
+}
+
+int march_dispatch_name_to_id(const char *name, uint32_t *out_id) {
+    if (!name) return 0;
+    uint32_t b = name_hash(name);
+    for (NameEntry *e = g_name_buckets[b]; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            if (out_id) *out_id = e->id;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void march_dispatch_init(uint32_t n_slots) {
     march_dispatch_shutdown();
     g_slots = (MarchDispatchSlot *)calloc(n_slots, sizeof(MarchDispatchSlot));
@@ -31,6 +73,11 @@ void march_dispatch_shutdown(void) {
     free(g_slots);
     g_slots = NULL;
     g_n_slots = 0;
+    for (int i = 0; i < MARCH_NAME_BUCKETS; i++) {
+        NameEntry *e = g_name_buckets[i];
+        while (e) { NameEntry *nx = e->next; free(e); e = nx; }
+        g_name_buckets[i] = NULL;
+    }
 }
 
 int march_dispatch_publish(uint32_t name_id, void *fn_ptr,

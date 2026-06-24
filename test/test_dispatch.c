@@ -131,6 +131,25 @@ static void test_out_of_range_is_safe(void) {
     march_dispatch_shutdown();
 }
 
+static void test_name_registry(void) {
+    march_dispatch_init(4);
+    march_dispatch_register_name(0, "App.foo");
+    march_dispatch_register_name(1, "App.bar");
+    march_dispatch_register_name(2, "App.baz");
+
+    uint32_t id = 99;
+    CHECK(march_dispatch_name_to_id("App.foo", &id) == 1 && id == 0, "lookup App.foo -> 0");
+    CHECK(march_dispatch_name_to_id("App.bar", &id) == 1 && id == 1, "lookup App.bar -> 1");
+    CHECK(march_dispatch_name_to_id("App.baz", &id) == 1 && id == 2, "lookup App.baz -> 2");
+    CHECK(march_dispatch_name_to_id("App.missing", &id) == 0, "lookup unknown -> 0");
+    march_dispatch_shutdown();
+    /* After shutdown, registry is cleared. */
+    CHECK(march_dispatch_name_to_id("App.foo", &id) == 0, "after shutdown, registry cleared");
+    march_dispatch_init(0);   /* leave in clean state for subsequent tests */
+    march_dispatch_shutdown();
+    printf("PASS: test_name_registry\n");
+}
+
 int main(void) {
     test_first_publish_and_enter();
     test_leave_drops_refs();
@@ -139,6 +158,7 @@ int main(void) {
     test_publish_blocked_then_unblocked();
     test_impl_hash_stored();
     test_out_of_range_is_safe();
+    test_name_registry();
     if (g_failed == 0) { printf("test_dispatch: all checks passed\n"); return 0; }
     fprintf(stderr, "test_dispatch: %d check(s) failed\n", g_failed);
     return 1;

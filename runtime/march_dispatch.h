@@ -54,4 +54,10 @@ uint32_t    march_dispatch_current(uint32_t name_id);
 uint64_t    march_dispatch_refs(uint32_t name_id, uint32_t version);
 const char *march_dispatch_impl_hash(uint32_t name_id, uint32_t version);
 
+/* Name registry: maps function name strings → dispatch slot IDs.
+ * Populated at startup by @main alongside march_dispatch_publish.
+ * Thread-safe for concurrent reads after startup; writes are startup-only. */
+void march_dispatch_register_name(uint32_t id, const char *name);
+int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
+
 #endif /* MARCH_DISPATCH_H */
