@@ -108,7 +108,7 @@ Use `rest_for_one` when later children depend on earlier ones.
 
 ## A Full Supervision Example
 
-Adapted from [examples/supervision_basic.march](../examples/supervision_basic.march):
+Adapted from `examples/supervision_basic.march`:
 
 ```march
 mod BasicSupervision do
