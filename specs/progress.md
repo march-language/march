@@ -282,6 +282,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-24, RRB.Vec v2 + atomic RC in scheduler threads)
+
+> **Authoritative test counts (2026-06-24): 321 compiler / 224 eval / 786 stdlib / 49 stdlib_march.** No new tests added; fixes are in runtime and stdlib internals.
+
+- **`stdlib/rrb_vec.march` v2 — Array-backed (32-way trie)** — `ptype Vec(a) = Vec(Array(a))` / `ptype Slice(a) = Slice(Array(a), Int, Int)`. All public API preserved; `push` is now O(1) amortised (was O(n) list rebuild), `get` is O(log₃₂ n), `slice`/`chunk` are O(1) zero-copy views sharing the underlying `Array`. `fold` iterates `[lo, hi)` via `Array.get` without allocating. `to_list`/`to_array`/`map`/`each`/`fold_left`/`range`/`tabulate`/`concat`/`from_list`/`from_array` all rewritten to use `Array` module. Private helpers `imax`/`imin`.
+- **`stdlib/array.march` — off-by-5 trie push fix** — `descend` passed `s` instead of `s - 5` when computing the branch slot for an existing non-leaf node; produced wrong trie structure on larger pushes. Fixed `trie_slot(leaf_idx, s - 5)` in the `TrieBranch` arm.
+- **`runtime/march_runtime.c` — atomic RC in scheduler worker threads** — `march_incrc_local`/`march_decrc_local` now delegate to `march_incrc`/`march_decrc` (atomic) when `march_sched_in_scheduler()` is true. Multiple tasks spawned by `Parallel.preduce_n` share the same `Array` backing RRB chunks; non-atomic RC ops on a shared heap object across 4 OS scheduler workers caused data races (RC corruption → segfault or "local RC underflow" abort). Root cause: `chunk(v, n)` zero-copy creates `n` Slices all pointing to the same `arr`; each task's `go$apply` calls `march_incrc_local(arr)` before `Array.get` on 4 different OS threads simultaneously.
+
 ## Current State (as of 2026-06-24, Perceus dead br_var RC leak + task_await_unwrap double-untag)
 
 > **Authoritative test counts (2026-06-24): 321 compiler / 224 eval / 786 stdlib / 49 stdlib_march.** No new tests added; both bugs were in runtime codegen.
