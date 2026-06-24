@@ -1669,6 +1669,145 @@ let expand_defaults_decl (d : decl) : decl list =
        end)
   | _ -> [d]
 
+(* ---- Intra-module qualification pass ---- *)
+
+(** Collect the bare names of all functions/values declared directly in [decls].
+    Does NOT recurse into nested [DMod]. *)
+let collect_direct_names (decls : decl list) : string list =
+  List.concat_map (function
+    | DFn (def, _) -> [def.fn_name.txt]
+    | DLet (_, b, _) ->
+      let rec from_pat = function
+        | PatVar n -> [n.txt]
+        | PatTuple (ps, _) -> List.concat_map from_pat ps
+        | PatCon (_, ps) -> List.concat_map from_pat ps
+        | _ -> []
+      in
+      from_pat b.bind_pat
+    | _ -> []
+  ) decls
+
+(** Extend [bound] with all variable names introduced by [pat]. *)
+let rec add_pat_vars (bound : string list) (pat : pattern) : string list =
+  match pat with
+  | PatVar n -> n.txt :: bound
+  | PatCon (_, ps) | PatTuple (ps, _) | PatAtom (_, ps, _) ->
+    List.fold_left add_pat_vars bound ps
+  | PatRecord (fs, _) ->
+    List.fold_left (fun b (_, p) -> add_pat_vars b p) bound fs
+  | PatAs (p, n, _) -> add_pat_vars (n.txt :: bound) p
+  | PatWild _ | PatLit _ -> bound
+
+(** Return the expression walker for [prefix]/[own_names].
+    [go bound e] rewrites [EVar "name"] → [EVar "prefix.name"]
+    when [name ∈ own_names] and [name ∉ bound]. *)
+let make_qualifier (prefix : string) (own_names : string list) =
+  let is_own n = List.mem n own_names && not (String.contains n '.') in
+  let rec go bound e =
+    match e with
+    | EVar n when is_own n.txt && not (List.mem n.txt bound) ->
+      EVar { n with txt = prefix ^ n.txt }
+    | ELam (ps, body, sp) ->
+      let bound' = List.fold_left (fun b p -> p.param_name.txt :: b) bound ps in
+      ELam (ps, go bound' body, sp)
+    | EBlock (es, sp) -> EBlock (go_block bound es, sp)
+    | ELet (b, sp) ->
+      (* RHS does not see its own binding; add_pat_vars is handled in go_block. *)
+      ELet ({ b with bind_expr = go bound b.bind_expr }, sp)
+    | ELetFn (nm, ps, ret, body, sp) ->
+      let bound' = List.fold_left (fun b p -> p.param_name.txt :: b) bound ps in
+      ELetFn (nm, ps, ret, go bound' body, sp)
+    | ELetQ (pat, result, cont, sp) ->
+      ELetQ (pat, go bound result, go (add_pat_vars bound pat) cont, sp)
+    | EMatch (scrut, branches, sp) ->
+      let branches' = List.map (fun br ->
+          let bound' = add_pat_vars bound br.branch_pat in
+          { br with branch_body  = go bound' br.branch_body
+                 ; branch_guard = Option.map (go bound') br.branch_guard }
+        ) branches in
+      EMatch (go bound scrut, branches', sp)
+    | EApp (f, args, sp)        -> EApp (go bound f, List.map (go bound) args, sp)
+    | ECon (n, args, sp)        -> ECon (n, List.map (go bound) args, sp)
+    | ETuple (es, sp)           -> ETuple (List.map (go bound) es, sp)
+    | ERecord (fs, sp)          -> ERecord (List.map (fun (n, ex) -> (n, go bound ex)) fs, sp)
+    | ERecordUpdate (b, fs, sp) ->
+      ERecordUpdate (go bound b, List.map (fun (n, ex) -> (n, go bound ex)) fs, sp)
+    | EField (ex, n, sp)        -> EField (go bound ex, n, sp)
+    | EIf (c, t, f, sp)         -> EIf (go bound c, go bound t, go bound f, sp)
+    | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (go bound c, go bound b)) arms, sp)
+    | EPipe (l, r, sp)          -> EPipe (go bound l, go bound r, sp)
+    | EAnnot (ex, ty, sp)       -> EAnnot (go bound ex, ty, sp)
+    | EDbg (Some ex, sp)        -> EDbg (Some (go bound ex), sp)
+    | ESend (cap, msg, sp)      -> ESend (go bound cap, go bound msg, sp)
+    | ESpawn (ex, sp)           -> ESpawn (go bound ex, sp)
+    | EAssert (ex, sp)          -> EAssert (go bound ex, sp)
+    | EAtom (a, args, sp)       -> EAtom (a, List.map (go bound) args, sp)
+    | ESigil (s, ex, sp)        -> ESigil (s, go bound ex, sp)
+    | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
+  and go_block bound = function
+    | [] -> []
+    | ELet (b, sp) :: rest ->
+      let b' = { b with bind_expr = go bound b.bind_expr } in
+      ELet (b', sp) :: go_block (add_pat_vars bound b.bind_pat) rest
+    | ELetFn (nm, ps, ret, body, sp) :: rest ->
+      let bound' = List.fold_left (fun b p -> p.param_name.txt :: b) bound ps in
+      ELetFn (nm, ps, ret, go bound' body, sp) :: go_block (nm.txt :: bound) rest
+    | e :: rest -> go bound e :: go_block bound rest
+  in
+  go
+
+(** Qualify bare intra-module calls in [DFn]/[DLet]/[DActor] at the current
+    level.  Does NOT descend into nested [DMod] — those are handled by
+    [qualify_module_refs]'s recursive walk. *)
+let qualify_level (prefix : string) (own_names : string list) (decls : decl list) : decl list =
+  let go = make_qualifier prefix own_names in
+  let param_bound fps =
+    List.fold_left (fun acc fp -> match fp with
+      | FPNamed p | FPDefault (p, _) -> p.param_name.txt :: acc
+      | FPPat (PatVar n) -> n.txt :: acc
+      | FPPat _ -> acc) [] fps
+  in
+  List.map (function
+    | DFn (def, sp) ->
+      let def' = { def with fn_clauses = List.map (fun c ->
+          let bound = param_bound c.fc_params in
+          { c with fc_body  = go bound c.fc_body
+                 ; fc_guard = Option.map (go bound) c.fc_guard }
+        ) def.fn_clauses } in
+      DFn (def', sp)
+    | DLet (vis, b, sp) ->
+      DLet (vis, { b with bind_expr = go [] b.bind_expr }, sp)
+    | DActor (vis, name, actor, sp) ->
+      let actor' = { actor with
+        actor_init     = go [] actor.actor_init
+      ; actor_handlers = List.map (fun h ->
+            let bound = List.map (fun p -> p.param_name.txt) h.ah_params in
+            { h with ah_body = go bound h.ah_body }) actor.actor_handlers
+      } in
+      DActor (vis, name, actor', sp)
+    | d -> d
+  ) decls
+
+(** Qualify bare intra-module function calls throughout the declaration tree.
+    For each [DMod], rewrites [EVar "name"] → [EVar "Mod.name"] in function
+    bodies when [name] is a function declared directly in that module.
+    The prefix accumulates as the walk descends into nested modules so that
+    "MyNet" inside the top-level module gets prefix "MyNet." matching TIR. *)
+let qualify_module_refs (decls : decl list) : decl list =
+  let rec walk prefix decls =
+    List.map (function
+      | DMod (name, vis, inner, sp) ->
+        let mod_prefix = prefix ^ name.txt ^ "." in
+        let own_names  = collect_direct_names inner in
+        (* Recurse first so nested mods pick up their full prefix. *)
+        let inner' = walk mod_prefix inner in
+        (* Then qualify this module's own function bodies. *)
+        DMod (name, vis, qualify_level mod_prefix own_names inner', sp)
+      | d -> d
+    ) decls
+  in
+  walk "" decls
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
@@ -1695,4 +1834,5 @@ let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
     ) expanded in
+  let decls = qualify_module_refs decls in
   { m with mod_decls = decls }
