@@ -109,13 +109,20 @@ echo ""
 
 # ── Step 4: deploy server to droplet ────────────────────────────────────────
 echo "--- Step 4: deploy server to $HOST ---"
-scp -q "$DIST/hcr_server_p4_linux" "$HOST":/tmp/
 
-ssh "$HOST" bash -s <<REMOTE
-  set -e
-  pkill -f 'hcr_server_p4_linux' 2>/dev/null || true
+# Kill all old server processes first (so scp can overwrite the binary).
+ssh "$HOST" bash -s <<KILLREMOTE
+  fuser -k '${PORT}/tcp' 2>/dev/null || true
+  pkill -f 'hcr_server' 2>/dev/null || true
   rm -f '$SOCK_PATH'
-  sleep 0.3
+  sleep 0.5
+  echo '[droplet] old servers stopped'
+KILLREMOTE
+
+scp "$DIST/hcr_server_p4_linux" "$HOST":/tmp/
+
+ssh "$HOST" bash -s <<STARTREMOTE
+  set -e
   chmod +x /tmp/hcr_server_p4_linux
   MARCH_HOT_RELOAD_SOCKET='$SOCK_PATH' \\
     nohup /tmp/hcr_server_p4_linux > /tmp/hcr_server_p4.log 2>&1 &
@@ -127,21 +134,23 @@ ssh "$HOST" bash -s <<REMOTE
     echo 'server did not bind :$PORT'; cat /tmp/hcr_server_p4.log; exit 1
   }
   echo '[droplet] hcr_server_p4_linux ready on :$PORT (socket: $SOCK_PATH)'
-REMOTE
+STARTREMOTE
 echo ""
 
 # ── Step 5: verify baseline square(7) = 49 ──────────────────────────────────
 echo "--- Step 5: verify baseline square(7) = 49 ---"
-LPORT=29862  # local forwarding port (different from remote PORT to avoid conflicts)
-
-ssh -N -f -L "$LPORT":127.0.0.1:"$PORT" "$HOST" -o ExitOnForwardFailure=yes
-sleep 1.0
+# Use SSH tunnel: the march macOS binary can't make direct outbound TCP connections
+# to remote IPs (macOS network privacy for unsigned binaries), but localhost works.
+LPORT=29862  # local forwarding port — avoids clash with remote PORT
+ssh -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
+TUNNEL1_PID=$!
+sleep 1.5  # wait for tunnel to bind
 
 OUT_BEFORE=$("$CLIENT" 127.0.0.1 "$LPORT" 7 2>&1 || true)
 echo "$OUT_BEFORE"
 
-# Kill the forwarding tunnel.
-pkill -f "ssh -N -f -L $LPORT" 2>/dev/null || true
+kill "$TUNNEL1_PID" 2>/dev/null || true
+wait "$TUNNEL1_PID" 2>/dev/null || true
 
 echo "$OUT_BEFORE" | grep -q "square(7) = 49" \
   || die "baseline check failed (got: $OUT_BEFORE)"
@@ -229,7 +238,7 @@ docker run --rm --platform linux/amd64 \
     export MARCH_STDLIB=/march/stdlib
     # Reuse the compiler binary from Step 3 (same build dir).
     MC=$BD/default/bin/main.exe
-    \"\$MC\" --compile-so --hot-reload Server \
+    \"\$MC\" --compile --compile-so --hot-reload Server \
       -o /out/hcr_patch_p4.so \
       /out/hcr_patch_p4/main.march
     echo '[docker] built: hcr_patch_p4.so'
@@ -254,13 +263,15 @@ echo ""
 
 # ── Step 9: verify square(7) = 343 after hot reload ─────────────────────────
 echo "--- Step 9: verify square(7) = 343 after hot reload ---"
-ssh -N -f -L "$LPORT":127.0.0.1:"$PORT" "$HOST" -o ExitOnForwardFailure=yes
-sleep 1.0
+ssh -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
+TUNNEL2_PID=$!
+sleep 1.5
 
 OUT_AFTER=$("$CLIENT" 127.0.0.1 "$LPORT" 7 2>&1 || true)
 echo "$OUT_AFTER"
 
-pkill -f "ssh -N -f -L $LPORT" 2>/dev/null || true
+kill "$TUNNEL2_PID" 2>/dev/null || true
+wait "$TUNNEL2_PID" 2>/dev/null || true
 
 echo "$OUT_AFTER" | grep -q "square(7) = 343" \
   || die "post-reload check failed (got: $OUT_AFTER)"

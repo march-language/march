@@ -350,7 +350,7 @@ let build_so ~proj ~output : (string * string, string) result =
       Filename.concat src (proj.Project.name ^ ".march")
   in
   let cmd = Printf.sprintf
-    "%smarch --compile-so -o %s%s %s"
+    "%smarch --compile --compile-so -o %s%s %s"
     lib_env (Filename.quote so_path) ffi_flags (Filename.quote entry)
   in
   let rc = Sys.command cmd in
