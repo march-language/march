@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# march-reload — compile a March function patch and hot-reload it into a running server.
+#
+# Usage:
+#   march-reload --socket <path> --name <FnName> --src <file.march> [--prefix <Prefix>]
+#   march-reload --socket <path> --name <FnName> --so <prebuilt.so> [--hash <impl_hash>]
+#
+# The --src form cross-compiles the patch; --so skips compilation.
+# Requires socat for socket communication.
+set -euo pipefail
+
+SOCKET=""
+FN_NAME=""
+SRC=""
+SO=""
+IMPL_HASH="live_patch_$(date +%s)"
+MARCH="${MARCH_EXE:-march}"
+HR_PREFIX=""
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  echo "Usage: march-reload --socket PATH --name FnName (--src file.march | --so file.so [--hash h])" >&2
+  echo "  --socket PATH     Path to the server's MARCH_HOT_RELOAD_SOCKET" >&2
+  echo "  --name FnName     Fully-qualified March function name (e.g. Core.answer)" >&2
+  echo "  --src file.march  Compile this file as a patch .so" >&2
+  echo "  --prefix Prefix   Hot-reload prefix (default: first component of --name)" >&2
+  echo "  --so file.so      Use a pre-compiled patch .so directly" >&2
+  echo "  --hash h          impl_hash for the patch (default: live_patch_<timestamp>)" >&2
+  echo "  --march path      Path to the march compiler (default: march from PATH)" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --socket)  SOCKET="$2";    shift 2 ;;
+    --name)    FN_NAME="$2";   shift 2 ;;
+    --src)     SRC="$2";       shift 2 ;;
+    --so)      SO="$2";        shift 2 ;;
+    --hash)    IMPL_HASH="$2"; shift 2 ;;
+    --prefix)  HR_PREFIX="$2"; shift 2 ;;
+    --march)   MARCH="$2";     shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "Unknown option: $1" >&2; usage ;;
+  esac
+done
+
+[[ -z "$SOCKET" ]] && { echo "Missing --socket" >&2; usage; }
+[[ -z "$FN_NAME" ]] && { echo "Missing --name" >&2; usage; }
+[[ -z "$SRC" && -z "$SO" ]] && { echo "Missing --src or --so" >&2; usage; }
+
+# Derive hot-reload prefix from the first component of FN_NAME if not given.
+if [[ -z "$HR_PREFIX" ]]; then
+  HR_PREFIX="$(echo "$FN_NAME" | cut -d. -f1)"
+fi
+
+# Compile if --src given.
+if [[ -n "$SRC" ]]; then
+  [[ ! -f "$SRC" ]] && die "source file not found: $SRC"
+  SO="${SRC%.march}.patch.so"
+  echo "[march-reload] compiling $SRC → $SO"
+  echo "  ($MARCH --compile --compile-so --hot-reload $HR_PREFIX -o $SO $SRC)"
+  "$MARCH" --compile --compile-so --hot-reload "$HR_PREFIX" -o "$SO" "$SRC"
+  echo "[march-reload] compiled ok"
+fi
+
+[[ ! -f "$SO" ]] && die ".so not found: $SO"
+SO_ABS="$(cd "$(dirname "$SO")" && pwd)/$(basename "$SO")"
+
+# Send ACTIVATE command.
+echo "[march-reload] sending ACTIVATE $FN_NAME $IMPL_HASH $SO_ABS"
+if ! command -v socat &>/dev/null; then
+  die "socat is required for socket communication (brew install socat / apt install socat)"
+fi
+RESPONSE="$(echo "ACTIVATE $FN_NAME $IMPL_HASH $SO_ABS" | socat - "UNIX-CONNECT:$SOCKET" 2>&1)" || true
+echo "[march-reload] server: $RESPONSE"
+case "$RESPONSE" in
+  OK*)  echo "[march-reload] hot reload successful" ;;
+  ERR*) echo "[march-reload] hot reload FAILED: $RESPONSE" >&2; exit 1 ;;
+  *)    echo "[march-reload] unexpected response: $RESPONSE" >&2; exit 1 ;;
+esac
