@@ -76,10 +76,11 @@ send(pid, Get())
 A common pattern: fan out N tasks, collect when all complete. `Task.async_stream` maps a list to concurrent tasks and returns results as they finish:
 
 ```march
+let client = HttpClient.new_client()
 let urls = ["https://api.example.com/a", "https://api.example.com/b"]
 
 let results = Task.async_stream(urls, fn url ->
-  HttpClient.get(url)
+  HttpClient.get(client, url)
 )
 ```
 
@@ -107,28 +108,24 @@ end
 
 ---
 
-## Complete example: parallel fetch with timeout
+## Complete example: parallel computation with timeout
 
 ```march
-mod Fetch do
-  fn fetch_all(urls : List(String)) : List(Result(String, String)) do
-    let tasks = List.map(urls, fn url ->
-      Task.async(fn () -> HttpClient.get(url))
-    )
-    Task.await_many_ms(tasks, 5000)
+mod Parallel do
+  pfn sum_to(n : Int) : Int do
+    List.fold_left(List.range(1, n + 1), 0, fn (acc, x) -> acc + x)
   end
 
   fn main() do
-    let urls = [
-      "https://httpbin.org/get",
-      "https://httpbin.org/delay/1",
-      "https://httpbin.org/status/500"
-    ]
-    let results = fetch_all(urls)
+    let inputs = [10, 20, 30, 40, 50]
+    let tasks = List.map(inputs, fn n ->
+      Task.async(fn () -> sum_to(n))
+    )
+    let results = Task.await_many_ms(tasks, 5000)
     List.each(results, fn r ->
       match r do
-        Ok(resp) -> println("ok: " ++ String.slice_bytes(resp.body, 0, 40))
-        Err(e)   -> println("err: " ++ e)
+        Ok(v)  -> println("sum: " ++ int_to_string(v))
+        Err(e) -> println("error: " ++ e)
       end
     )
   end

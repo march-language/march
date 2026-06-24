@@ -119,13 +119,13 @@ mod UserList do
     <ul class="user-list">${items}</ul>
     """
   end
-end
 
-fn main() do
-  let users = [
-    { name: "Alice", email: "alice@example.com", admin: True },
-    { name: "Bob", email: "bob@example.com", admin: False }
-  ]
-  print(IOList.to_string(UserList.render(users)))
+  fn main() do
+    let users = [
+      { name: "Alice", email: "alice@example.com", admin: true },
+      { name: "Bob", email: "bob@example.com", admin: false }
+    ]
+    print(IOList.to_string(render(users)))
+  end
 end
 ```

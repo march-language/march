@@ -176,22 +176,22 @@ end
 mod Calc do
   type Expr =
     Num(Float)
-    | Add(Expr, Expr)
-    | Mul(Expr, Expr)
-    | Div(Expr, Expr)
+    | Plus(Expr, Expr)
+    | Times(Expr, Expr)
+    | Slash(Expr, Expr)
 
   fn eval(e : Expr) : Result(Float, String) do
     match e do
-      Num(n)    -> Ok(n)
-      Add(a, b) ->
+      Num(n)      -> Ok(n)
+      Plus(a, b)  ->
         let? x = eval(a)
         let? y = eval(b)
         Ok(x +. y)
-      Mul(a, b) ->
+      Times(a, b) ->
         let? x = eval(a)
         let? y = eval(b)
         Ok(x *. y)
-      Div(a, b) ->
+      Slash(a, b) ->
         let? x = eval(a)
         let? y = eval(b)
         if y == 0.0 do
@@ -203,7 +203,7 @@ mod Calc do
   end
 
   fn main() do
-    let expr = Div(Add(Num(10.0), Num(2.0)), Num(3.0))
+    let expr = Slash(Plus(Num(10.0), Num(2.0)), Num(3.0))
     match eval(expr) do
       Ok(v)  -> println("result: " ++ float_to_string(v))
       Err(e) -> println("error: " ++ e)
