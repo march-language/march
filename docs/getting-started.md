@@ -234,7 +234,7 @@ Both are valid. The compiler will catch type errors either way.
 
 ## Next Steps
 
-**Ready to build something?** → [Build a CLI Tool](build-a-cli.md) takes you from `forge new` to a working binary, and the [Cookbook](cookbook/) has goal-oriented recipes (CLI, HTTP, JSON, files, config).
+**Ready to build something?** → [Build a CLI Tool](/docs/build-a-cli/) takes you from `forge new` to a working binary, and the [Cookbook](/docs/cookbook/) has goal-oriented recipes (CLI, HTTP, JSON, files, config).
 
 Learn the language:
 

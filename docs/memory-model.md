@@ -251,7 +251,7 @@ the disjointness proof.
 This is exactly the property the `parallel` benchmark relies on: sibling subtrees
 have independent RC chains, so in-place reuse stays correct on both sides with no
 locking. The same idea scales to actor message passing — see the
-[parallelism]({{ site.baseurl }}/docs/parallelism/) guide, and
+[parallelism](/docs/parallel-collections/) guide, and
 [linear types]({{ site.baseurl }}/docs/linear-types/) for the ownership-transfer
 ("zero-copy send") case where a `linear` value is *guaranteed* RC == 1.
 
@@ -284,7 +284,7 @@ operations the compiler already wrote — not a collector you have to wait for.
   guarantees RC == 1, and zero-copy actor sends.
 - [Safety by Construction]({{ site.baseurl }}/docs/safety-by-construction/) —
   how the safety layers stack on one function.
-- [Parallelism]({{ site.baseurl }}/docs/parallelism/) — the scheduler that runs
+- [Parallelism](/docs/parallel-collections/) — the scheduler that runs
   disjoint, uniquely-owned subtrees across cores.
 - [LSP & Editors]({{ site.baseurl }}/docs/lsp/) — turning on the `♻ / ⧉ / ⚡`
   performance hints.

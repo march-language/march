@@ -562,7 +562,7 @@ dune exec forge -- test
 
 ## Next Steps
 
-**Ready to build something?** → [Build a CLI Tool](build-a-cli.md) goes start-to-finish, and the [Cookbook](cookbook/) has goal-oriented recipes.
+**Ready to build something?** → [Build a CLI Tool](/docs/build-a-cli/) goes start-to-finish, and the [Cookbook](/docs/cookbook/) has goal-oriented recipes.
 
 Go deeper:
 

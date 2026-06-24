@@ -23,18 +23,18 @@ You know the task; this maps it to the module(s) that do it. (Don't see your tas
 
 | I want to… | Reach for | Recipe |
 |---|---|---|
-| Parse CLI args | `System` / `Process` (`argv`) | [CLI](cookbook/cli/), [Build a CLI](build-a-cli/) |
-| Read / write files | `File`, `Dir`, `Path` | [Files](cookbook/files/) |
-| Parse a CSV | `Csv` | [Files](cookbook/files/) |
-| Call an HTTP API | `HttpClient`, `Http` | [HTTP](cookbook/http/) |
-| Parse a JSON response | `Json` | [JSON API](cookbook/json-api/) |
-| Parse TOML / YAML config | `Toml`, `Yaml` | [Config](cookbook/config/) |
-| Read environment variables | `Env`, `Config` | [Config](cookbook/config/) |
+| Parse CLI args | `System` / `Process` (`argv`) | [CLI](/docs/cookbook/cli/), [Build a CLI](/docs/build-a-cli/) |
+| Read / write files | `File`, `Dir`, `Path` | [Files](/docs/cookbook/files/) |
+| Parse a CSV | `Csv` | [Files](/docs/cookbook/files/) |
+| Call an HTTP API | `HttpClient`, `Http` | [HTTP](/docs/cookbook/http/) |
+| Parse a JSON response | `Json` | [JSON API](/docs/cookbook/json-api/) |
+| Parse TOML / YAML config | `Toml`, `Yaml` | [Config](/docs/cookbook/config/) |
+| Read environment variables | `Env`, `Config` | [Config](/docs/cookbook/config/) |
 | Run a subprocess | `Process` (`run`, `run_stream`) | — |
 | Hash / encode data | `Crypto`, `Base64` | — |
 | Work with dates / durations | `DateTime`, `Duration` | — |
 | Structured logging | `Logger` | — |
-| Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](cookbook/concurrency/) |
+| Run work concurrently | `Task`, `actor`, `Flow` | [Concurrency](/docs/cookbook/concurrency/) |
 | Transform a big collection in parallel | `List.pmap` / `pmap_n` | — |
 
 ---

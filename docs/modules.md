@@ -201,7 +201,7 @@ Aliases are useful when a module name is long or conflicts with another name in 
 
 ## A Full Example
 
-From [examples/modules.march](../examples/modules.march):
+From `examples/modules.march`:
 
 ```march
 mod Example do
