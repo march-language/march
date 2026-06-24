@@ -60,11 +60,11 @@ mod Parallel do
   """
   fn pmap_n(input, f, workers: Int) do
     let chunks = RRB.chunk(input, workers)
-    let tasks  = Array.map(chunks, fn chunk ->
+    let tasks  = List.map(Array.to_list(chunks), fn chunk ->
       task_spawn(fn _ ->
         RRB.fold(chunk, RRB.empty(), fn (acc, x) -> RRB.push(acc, f(x)))))
-    Array.fold_left(tasks, RRB.empty(), fn (acc, t) ->
-      RRB.concat(acc, task_await_unwrap(t)))
+    let partials = List.map(tasks, fn t -> task_await_unwrap(t))
+    List.fold_left(partials, RRB.empty(), fn (acc, r) -> RRB.concat(acc, r))
   end
 
   doc """
@@ -91,10 +91,11 @@ mod Parallel do
   """
   fn preduce_n(input, zero, f, merge, workers: Int) do
     let chunks = RRB.chunk(input, workers)
-    let tasks  = Array.map(chunks, fn chunk ->
+    let tasks  = List.map(Array.to_list(chunks), fn chunk ->
       task_spawn(fn _ ->
         RRB.fold(chunk, zero, fn (acc, x) -> merge(acc, f(x)))))
-    Array.fold_left(tasks, zero, fn (acc, t) -> merge(acc, task_await_unwrap(t)))
+    let partials = List.map(tasks, fn t -> task_await_unwrap(t))
+    List.fold_left(partials, zero, fn (acc, r) -> merge(acc, r))
   end
 
   -- ── Convenience functions ─────────────────────────────────────────────────

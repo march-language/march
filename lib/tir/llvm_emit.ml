@@ -2499,12 +2499,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Spin-wait and return tagged raw result from task[3]; no Ok wrapper. *)
     let tv = fresh ctx "tv" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await_value(ptr %s)" tv task_ptr);
-    (* Untag: conditional ashr-1 recovers original scalar or heap-ptr value. *)
+    (* Untag: task[3] holds (llvm_ret << 1) | 1.  For ptr results llvm_ret is a
+       heap address → one conditional ashr restores it; inttoptr recovers the ptr.
+       For i64 results llvm_ret is already a tagged scalar (2*n+1), so task[3]
+       holds 4*n+3 — double-tagged.  One coerce ptr→i64 yields 2*n+1; a second
+       conditional ashr gives the raw n. *)
     let r_i64 = coerce ctx "ptr" tv "i64" in
     let r = if inner_ty = "ptr" then begin
       let p = fresh ctx "r" in
       emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
       p
+    end else if inner_ty = "i64" then begin
+      let b  = fresh ctx "cv" in
+      let s  = fresh ctx "cv" in
+      let o  = fresh ctx "cv" in
+      let r2 = fresh ctx "r"  in
+      emit ctx (Printf.sprintf "%s = and i64 %s, 1"                b  r_i64);
+      emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0"            o  b);
+      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1"               s  r_i64);
+      emit ctx (Printf.sprintf "%s = select i1 %s, i64 %s, i64 %s" r2 o s r_i64);
+      r2
     end else r_i64 in
     (inner_ty, r)
 

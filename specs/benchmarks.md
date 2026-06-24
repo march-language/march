@@ -395,6 +395,46 @@ the `hash` builtin dispatch, or Perceus RC paths for `HEntry` nodes.
 
 ---
 
+## bench/rrb_bench.march — RRB.Vec + Parallel bulk operations (n=1M)
+
+**Command:** compile with `--opt 2`, run directly.
+
+```bash
+march --compile --opt 2 bench/rrb_bench.march -o bench/rrb_bench
+bench/rrb_bench
+```
+
+Four workloads over n=1,000,000 integers:
+
+| Workload | What it exercises | Expected result |
+|----------|-------------------|-----------------|
+| `RRB.fold_left` (sequential) | List-backed Vec traversal | `500000500000` |
+| `Parallel.psum` | `task_spawn`/`task_await_unwrap` integer reduce | `500000500000` |
+| `Parallel.preduce` (square+sum) | Parallel map-reduce pass | `333333833333500000` |
+| `Parallel.pmap` (n=1000) | Vec-building tasks, small n to avoid O(n²) list-push | `333833500` |
+
+**Baseline results (2026-06-24, Apple M-class, no --opt):**
+
+```
+seq_sum=500000500000  seq_fold_left: 8ms
+par_sum=500000500000  psum: 86ms
+par_reduce_sum=333333833333500000  preduce: 87ms
+par_map_sum=333833500  pmap+fold (n=1000): 5ms
+```
+
+**Note on `pmap` scale:** `RRB.Vec` is list-backed in v1, so `push` is O(n).
+Building a Vec of k elements is O(k²); at n=1M per task this would take
+minutes. The benchmark uses n=1000 for pmap and verifies correctness of the
+task return path only.
+
+**What to watch:** `psum` and `preduce` correctness depend on `task_await_unwrap`
+correctly double-untagging i64 task results (`lib/tir/llvm_emit.ml`). If results
+are `2×correct+N` the i64 double-untagging is broken. A `psum` that is slower
+than `seq_fold_left` by more than 3× (on a multi-core machine) suggests the
+parallel scheduler is degraded.
+
+---
+
 ## Running benchmarks to validate changes
 
 See also the note in `CLAUDE.md`: run the relevant benchmark after any change
@@ -416,3 +456,4 @@ to the features it exercises. Quick reference:
 | `Merkle.*` / `Crypto.sha256` / TVar equality | `merkle` |
 | `llvm_emit` equality dispatch (TVar / `march_poly_eq`) | `merkle` |
 | `HashMap.*` / `Enum.uniq` / `Enum.frequencies` | `hash_map_bench` |
+| `RRB.*` / `Parallel.*` / `task_await_unwrap` i64 | `rrb_bench` |

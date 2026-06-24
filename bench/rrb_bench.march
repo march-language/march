@@ -1,0 +1,56 @@
+-- RRB.Vec + Parallel benchmark.
+--
+-- Measures:
+--   1. RRB.range + fold_left (sequential baseline)
+--   2. Parallel.psum (parallel sum — same answer as fold_left)
+--   3. Parallel.preduce (single parallel pass: square then sum)
+--   4. Parallel.pmap then fold_left (parallel map + sequential reduce, small n)
+--
+-- Expected output (n=1000000):
+--   seq_sum=500000500000
+--   par_sum=500000500000
+--   par_reduce_sum=333333833333500000
+--   par_map_sum=333833500 (n=1000)
+--
+-- Note: pmap builds a new Vec element-by-element (list-backed, O(n) push), so
+-- it is only benchmarked at n=1000 to avoid O(n^2) build time.
+--
+-- Usage:
+--   march --compile --opt 2 bench/rrb_bench.march -o bench/rrb_bench
+--   bench/rrb_bench
+
+mod RRBBench do
+
+  fn main() do
+    let n = 1000000
+
+    -- 1. Sequential baseline: fold_left over RRB.range
+    let v = RRB.range(1, n + 1)
+    let t0 = System.monotonic_time()
+    let seq_sum = RRB.fold_left(v, 0, fn (acc, x) -> acc + x)
+    let t1 = System.monotonic_time()
+    print("seq_sum=" ++ int_to_string(seq_sum) ++ "  seq_fold_left: " ++ int_to_string(t1 - t0) ++ "ms")
+
+    -- 2. Parallel sum via Parallel.psum
+    let t2 = System.monotonic_time()
+    let par_sum = Parallel.psum(v)
+    let t3 = System.monotonic_time()
+    print("par_sum=" ++ int_to_string(par_sum) ++ "  psum: " ++ int_to_string(t3 - t2) ++ "ms")
+
+    -- 3. preduce: square then sum in one parallel pass
+    let t4 = System.monotonic_time()
+    let par_reduce_sum = Parallel.preduce(v, 0, fn x -> x * x, fn (a, b) -> a + b)
+    let t5 = System.monotonic_time()
+    print("par_reduce_sum=" ++ int_to_string(par_reduce_sum) ++ "  preduce: " ++ int_to_string(t5 - t4) ++ "ms")
+
+    -- 4. Parallel map (small n=1000 to avoid O(n^2) list-push cost)
+    let n2 = 1000
+    let v2 = RRB.range(1, n2 + 1)
+    let t6 = System.monotonic_time()
+    let sq = Parallel.pmap(v2, fn x -> x * x)
+    let par_map_sum = RRB.fold_left(sq, 0, fn (acc, x) -> acc + x)
+    let t7 = System.monotonic_time()
+    print("par_map_sum=" ++ int_to_string(par_map_sum) ++ "  pmap+fold (n=1000): " ++ int_to_string(t7 - t6) ++ "ms")
+  end
+
+end
