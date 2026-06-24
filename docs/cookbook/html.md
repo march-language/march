@@ -119,10 +119,13 @@ mod UserList do
     <ul class="user-list">${items}</ul>
     """
   end
+end
 
-  fn handle(conn) do
-    let users = Db.list_users()
-    HttpServer.html(conn, 200, IOList.to_string(render(users)))
-  end
+fn main() do
+  let users = [
+    { name: "Alice", email: "alice@example.com", admin: True },
+    { name: "Bob", email: "bob@example.com", admin: False }
+  ]
+  print(IOList.to_string(UserList.render(users)))
 end
 ```
