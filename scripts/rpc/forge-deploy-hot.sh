@@ -44,27 +44,6 @@ CLIENT="$ROOT/_build/default/demo/hcr_client.exe"
 die()     { echo "ERROR: $*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
 
-# ── HTTPS proxy support ───────────────────────────────────────────────────────
-# When HTTPS_PROXY (or https_proxy / HTTP_PROXY / http_proxy) is set, route
-# SSH through it via nc CONNECT tunneling.  Format: http://host:port or host:port
-_resolve_proxy() {
-  local p="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
-  p="${p#http://}"; p="${p#https://}"; p="${p%/}"
-  echo "$p"
-}
-SSH_PROXY="$(_resolve_proxy)"
-
-# SSH_OPTS is prepended to every ssh/scp call in this script.
-if [[ -n "$SSH_PROXY" ]]; then
-  PROXY_HOST="${SSH_PROXY%:*}"
-  PROXY_PORT="${SSH_PROXY##*:}"
-  SSH_OPTS=(-o StrictHostKeyChecking=no
-            -o "ProxyCommand=nc -X connect -x ${PROXY_HOST}:${PROXY_PORT} %h %p")
-  echo "Using HTTPS proxy: ${PROXY_HOST}:${PROXY_PORT}"
-else
-  SSH_OPTS=(-o StrictHostKeyChecking=no)
-fi
-
 require docker
 require ssh
 
@@ -132,7 +111,7 @@ echo ""
 echo "--- Step 4: deploy server to $HOST ---"
 
 # Kill all old server processes first (so scp can overwrite the binary).
-ssh "${SSH_OPTS[@]}" "$HOST" bash -s <<KILLREMOTE
+ssh "$HOST" bash -s <<KILLREMOTE
   fuser -k '${PORT}/tcp' 2>/dev/null || true
   pkill -f 'hcr_server' 2>/dev/null || true
   rm -f '$SOCK_PATH'
@@ -140,9 +119,9 @@ ssh "${SSH_OPTS[@]}" "$HOST" bash -s <<KILLREMOTE
   echo '[droplet] old servers stopped'
 KILLREMOTE
 
-scp "${SSH_OPTS[@]}" "$DIST/hcr_server_p4_linux" "$HOST":/tmp/
+scp "$DIST/hcr_server_p4_linux" "$HOST":/tmp/
 
-ssh "${SSH_OPTS[@]}" "$HOST" bash -s <<STARTREMOTE
+ssh "$HOST" bash -s <<STARTREMOTE
   set -e
   chmod +x /tmp/hcr_server_p4_linux
   MARCH_HOT_RELOAD_SOCKET='$SOCK_PATH' \\
@@ -163,7 +142,7 @@ echo "--- Step 5: verify baseline square(7) = 49 ---"
 # Use SSH tunnel: the march macOS binary can't make direct outbound TCP connections
 # to remote IPs (macOS network privacy for unsigned binaries), but localhost works.
 LPORT=29862  # local forwarding port — avoids clash with remote PORT
-ssh "${SSH_OPTS[@]}" -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
+ssh -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
 TUNNEL1_PID=$!
 # Poll until local port is bound (up to 6 seconds)
 for _i in $(seq 1 30); do
@@ -288,7 +267,7 @@ echo ""
 
 # ── Step 9: verify square(7) = 343 after hot reload ─────────────────────────
 echo "--- Step 9: verify square(7) = 343 after hot reload ---"
-ssh "${SSH_OPTS[@]}" -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
+ssh -N -L "${LPORT}":127.0.0.1:"${PORT}" "$HOST" &
 TUNNEL2_PID=$!
 for _i in $(seq 1 30); do
   nc -z 127.0.0.1 "${LPORT}" 2>/dev/null && break
