@@ -27,6 +27,7 @@ Practical recipes for getting things done in March. Each chapter covers one topi
 | [Vault](vault/) | In-memory key-value store: CRUD, TTL, namespacing |
 | [HTML](html/) | `~H` sigil, `Html` module, CSRF, layouts |
 | [DOM](dom/) | Browser DOM with `--target js`: elements, events, animation |
+| [Parallel Data](parallel-data/) | `RRB.Vec` + `Parallel` module: pmap, preduce, psum, pcount |
 
 ---
 

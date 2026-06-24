@@ -117,7 +117,7 @@ lib/tir/                    typed IR: lower, mono, defun, perceus, borrow, fusio
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
-stdlib/                     98 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     103 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

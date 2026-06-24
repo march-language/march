@@ -1,0 +1,331 @@
+-- Tests for RRB.Vec and Parallel modules.
+-- Run with: dune exec march -- test test/stdlib/test_rrb_vec.march
+
+mod TestRRBVec do
+
+-- ── RRB.Vec ──────────────────────────────────────────────────────────────────
+
+describe "empty" do
+  test "empty vec has length 0" do
+    assert (RRB.length(RRB.empty()) == 0)
+  end
+
+  test "empty vec is_empty" do
+    assert RRB.is_empty(RRB.empty())
+  end
+
+  test "empty to_list is []" do
+    assert (RRB.to_list(RRB.empty()) == [])
+  end
+end
+
+describe "singleton" do
+  test "singleton has length 1" do
+    assert (RRB.length(RRB.singleton(42)) == 1)
+  end
+
+  test "singleton get" do
+    assert (RRB.get(RRB.singleton(7), 0) == 7)
+  end
+end
+
+describe "from_list / to_list" do
+  test "round-trip preserves elements and order" do
+    let xs = [1, 2, 3, 4, 5]
+    assert (RRB.to_list(RRB.from_list(xs)) == xs)
+  end
+
+  test "empty list round-trips" do
+    assert (RRB.to_list(RRB.from_list([])) == [])
+  end
+
+  test "length matches list length" do
+    assert (RRB.length(RRB.from_list([10, 20, 30])) == 3)
+  end
+end
+
+describe "range" do
+  test "range 1 5 = [1,2,3,4]" do
+    assert (RRB.to_list(RRB.range(1, 5)) == [1, 2, 3, 4])
+  end
+
+  test "empty range" do
+    assert RRB.is_empty(RRB.range(5, 5))
+  end
+
+  test "inverted range is empty" do
+    assert RRB.is_empty(RRB.range(10, 3))
+  end
+end
+
+describe "get" do
+  test "get first element" do
+    assert (RRB.get(RRB.from_list([10, 20, 30]), 0) == 10)
+  end
+
+  test "get middle element" do
+    assert (RRB.get(RRB.from_list([10, 20, 30]), 1) == 20)
+  end
+
+  test "get last element" do
+    assert (RRB.get(RRB.from_list([10, 20, 30]), 2) == 30)
+  end
+end
+
+describe "push" do
+  test "push extends length" do
+    let v = RRB.push(RRB.from_list([1, 2]), 3)
+    assert (RRB.length(v) == 3)
+  end
+
+  test "pushed element is at the end" do
+    let v = RRB.push(RRB.from_list([1, 2]), 99)
+    assert (RRB.to_list(v) == [1, 2, 99])
+  end
+end
+
+describe "concat" do
+  test "concat two non-empty vecs" do
+    let l = RRB.from_list([1, 2, 3])
+    let r = RRB.from_list([4, 5, 6])
+    assert (RRB.to_list(RRB.concat(l, r)) == [1, 2, 3, 4, 5, 6])
+  end
+
+  test "concat with empty left" do
+    let v = RRB.from_list([1, 2, 3])
+    assert (RRB.to_list(RRB.concat(RRB.empty(), v)) == [1, 2, 3])
+  end
+
+  test "concat with empty right" do
+    let v = RRB.from_list([1, 2, 3])
+    assert (RRB.to_list(RRB.concat(v, RRB.empty())) == [1, 2, 3])
+  end
+
+  test "concat length is sum" do
+    let l = RRB.from_list([1, 2])
+    let r = RRB.from_list([3, 4, 5])
+    assert (RRB.length(RRB.concat(l, r)) == 5)
+  end
+end
+
+describe "slice" do
+  test "full-range slice" do
+    let v = RRB.from_list([1, 2, 3, 4, 5])
+    let s = RRB.slice(v, 0, 5)
+    assert (RRB.fold(s, 0, fn (acc, x) -> acc + x) == 15)
+  end
+
+  test "middle slice" do
+    let v = RRB.from_list([1, 2, 3, 4, 5])
+    let s = RRB.slice(v, 1, 4)
+    assert (RRB.fold(s, 0, fn (acc, x) -> acc + x) == 9)
+  end
+
+  test "empty slice" do
+    let v = RRB.from_list([1, 2, 3])
+    let s = RRB.slice(v, 2, 2)
+    assert (RRB.fold(s, 0, fn (acc, x) -> acc + x) == 0)
+  end
+
+  test "slice clamps to bounds" do
+    let v = RRB.from_list([1, 2, 3])
+    let s = RRB.slice(v, -10, 100)
+    assert (RRB.fold(s, 0, fn (acc, x) -> acc + x) == 6)
+  end
+end
+
+describe "chunk" do
+  test "chunk covers all elements" do
+    let v = RRB.range(0, 12)
+    let chunks = RRB.chunk(v, 3)
+    let total = Array.fold_left(chunks, 0, fn (acc, c) ->
+      acc + RRB.fold(c, 0, fn (a, x) -> a + x))
+    assert (total == 66)
+  end
+
+  test "chunk count is correct" do
+    let v = RRB.range(0, 9)
+    assert (Array.length(RRB.chunk(v, 3)) == 3)
+  end
+
+  test "chunk of empty vec is empty array" do
+    assert (Array.length(RRB.chunk(RRB.empty(), 4)) == 0)
+  end
+
+  test "chunk with n > length clamps" do
+    let v = RRB.from_list([1, 2])
+    assert (Array.length(RRB.chunk(v, 100)) == 2)
+  end
+
+  test "chunk with n=1 gives one slice" do
+    let v = RRB.range(0, 10)
+    assert (Array.length(RRB.chunk(v, 1)) == 1)
+  end
+
+  test "elements covered exactly once (no overlap, no gap)" do
+    let v = RRB.range(0, 10)
+    let chunks = RRB.chunk(v, 4)
+    let covered = Array.fold_left(chunks, [], fn (acc, c) ->
+      List.append(acc, RRB.fold(c, [], fn (a, x) -> List.append(a, [x]))))
+    assert (covered == RRB.to_list(v))
+  end
+end
+
+describe "fold_left" do
+  test "sum via fold_left" do
+    assert (RRB.fold_left(RRB.from_list([1, 2, 3, 4]), 0, fn (acc, x) -> acc + x) == 10)
+  end
+
+  test "fold_left on empty" do
+    assert (RRB.fold_left(RRB.empty(), 42, fn (acc, _) -> acc) == 42)
+  end
+end
+
+describe "map" do
+  test "map doubles each element" do
+    let v = RRB.from_list([1, 2, 3])
+    assert (RRB.to_list(RRB.map(v, fn x -> x * 2)) == [2, 4, 6])
+  end
+
+  test "map preserves length" do
+    let v = RRB.range(0, 5)
+    assert (RRB.length(RRB.map(v, fn x -> x)) == 5)
+  end
+end
+
+describe "tabulate" do
+  test "tabulate squares" do
+    let v = RRB.tabulate(5, fn i -> i * i)
+    assert (RRB.to_list(v) == [0, 1, 4, 9, 16])
+  end
+
+  test "tabulate 0 is empty" do
+    assert RRB.is_empty(RRB.tabulate(0, fn i -> i))
+  end
+end
+
+-- ── Parallel ──────────────────────────────────────────────────────────────────
+
+describe "Parallel.pmap" do
+  test "pmap on empty vec is empty vec" do
+    let v = RRB.empty()
+    let r = Parallel.pmap(v, fn x -> x + 1)
+    assert RRB.is_empty(r)
+  end
+
+  test "pmap doubles each element in order" do
+    let v = RRB.from_list([1, 2, 3, 4, 5])
+    let r = Parallel.pmap(v, fn x -> x * 2)
+    assert (RRB.to_list(r) == [2, 4, 6, 8, 10])
+  end
+
+  test "pmap preserves order on larger input" do
+    let v = RRB.range(0, 100)
+    let r = Parallel.pmap(v, fn x -> x * x)
+    assert (RRB.to_list(r) == List.map(RRB.to_list(v), fn x -> x * x))
+  end
+
+  test "pmap_n with workers=1 is equivalent to map" do
+    let v = RRB.from_list([10, 20, 30])
+    let r = Parallel.pmap_n(v, fn x -> x + 1, 1)
+    assert (RRB.to_list(r) == [11, 21, 31])
+  end
+end
+
+describe "Parallel.preduce" do
+  test "preduce sums a vec" do
+    let v = RRB.range(1, 6)
+    let s = Parallel.preduce(v, 0, fn x -> x, fn (a, b) -> a + b)
+    assert (s == 15)
+  end
+
+  test "preduce on empty vec returns zero" do
+    let s = Parallel.preduce(RRB.empty(), 0, fn x -> x, fn (a, b) -> a + b)
+    assert (s == 0)
+  end
+
+  test "preduce with explicit workers=4" do
+    let v = RRB.range(1, 11)
+    let s = Parallel.preduce_n(v, 0, fn x -> x, fn (a, b) -> a + b, 4)
+    assert (s == 55)
+  end
+
+  test "preduce finds max" do
+    let v = RRB.from_list([3, 1, 4, 1, 5, 9, 2, 6, 5, 3])
+    let mx = Parallel.preduce(v, -2147483648, fn x -> x, fn (a, b) -> if a > b do a else b end)
+    assert (mx == 9)
+  end
+
+  test "preduce product" do
+    let v = RRB.from_list([1, 2, 3, 4, 5])
+    let p = Parallel.preduce(v, 1, fn x -> x, fn (a, b) -> a * b)
+    assert (p == 120)
+  end
+end
+
+describe "Parallel.psum" do
+  test "psum of range(1,6) = 15" do
+    assert (Parallel.psum(RRB.range(1, 6)) == 15)
+  end
+
+  test "psum of empty = 0" do
+    assert (Parallel.psum(RRB.empty()) == 0)
+  end
+
+  test "psum large range" do
+    -- 1 + 2 + ... + 100 = 5050
+    assert (Parallel.psum(RRB.range(1, 101)) == 5050)
+  end
+end
+
+describe "Parallel.psum_float" do
+  test "psum_float basic" do
+    let v = RRB.from_list([1.0, 2.5, 3.5])
+    assert (Parallel.psum_float(v) == 7.0)
+  end
+end
+
+describe "Parallel.pcount" do
+  test "count evens in 1..10" do
+    assert (Parallel.pcount(RRB.range(1, 11), fn n -> n % 2 == 0) == 5)
+  end
+
+  test "pcount on empty = 0" do
+    assert (Parallel.pcount(RRB.empty(), fn _ -> true) == 0)
+  end
+
+  test "pcount all-match = length" do
+    let v = RRB.range(0, 10)
+    assert (Parallel.pcount(v, fn _ -> true) == 10)
+  end
+end
+
+describe "Parallel.pany" do
+  test "pany finds an even number" do
+    assert Parallel.pany(RRB.from_list([1, 3, 4, 7]), fn n -> n % 2 == 0)
+  end
+
+  test "pany is false when none match" do
+    assert !Parallel.pany(RRB.from_list([1, 3, 5, 7]), fn n -> n % 2 == 0)
+  end
+
+  test "pany on empty is false" do
+    assert !Parallel.pany(RRB.empty(), fn _ -> true)
+  end
+end
+
+describe "Parallel.pall" do
+  test "pall true when all match" do
+    assert Parallel.pall(RRB.from_list([2, 4, 6]), fn n -> n % 2 == 0)
+  end
+
+  test "pall false when one doesn't match" do
+    assert !Parallel.pall(RRB.from_list([2, 3, 6]), fn n -> n % 2 == 0)
+  end
+
+  test "pall on empty is true (vacuous)" do
+    assert Parallel.pall(RRB.empty(), fn _ -> false)
+  end
+end
+
+end

@@ -414,7 +414,7 @@ Search is forge-only — there is no `-search` flag on the `march` compiler.
 
 ## 5. Stdlib Manifest
 
-98 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+103 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -595,6 +595,10 @@ Functions always in scope without `use`:
 ### Additional Collections
 
 **Deque** — `empty`, `singleton`, `is_empty`, `size`, `push_front`, `push_back`, `peek_front`, `peek_back`, `pop_front`, `pop_back`, `to_list`, `from_list`, `map`, `filter`, `fold_left`, `fold_right`, `concat`, `any`, `all`
+
+**RRB** — persistent sequence for bulk-parallel work. `empty`, `singleton`, `from_list`, `from_array`, `tabulate`, `range`, `length`, `is_empty`, `get`, `push`, `concat`, `slice`, `fold`, `chunk`, `to_list`, `to_array`, `each`, `map`, `fold_left`. `chunk(v, n)` → `Array(Slice(a))`; `fold(s, zero, f)` traverses a `Slice`.
+
+**Parallel** — parallel map-reduce over `RRB.Vec`. `pmap(v, f)`, `pmap_n(v, f, workers)`, `preduce(v, zero, f, merge)`, `preduce_n(v, zero, f, merge, workers)`. Convenience: `psum`, `psum_float`, `pcount`, `pany`, `pall`. Uses `task_spawn`/`task_await_unwrap` internally; real multi-core in compiled mode, sequential in interpreter.
 
 ### Testing
 
@@ -1087,7 +1091,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     98 March stdlib modules
+stdlib/                     103 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

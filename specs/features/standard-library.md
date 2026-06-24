@@ -2,7 +2,7 @@
 
 > **⚠️ HISTORICAL SNAPSHOT — NOT THE CURRENT REFERENCE.**
 > This document is a frozen 21-module snapshot from March 2026. The standard
-> library has since grown to **98 modules** (`ls stdlib/*.march | wc -l`), so the
+> library has since grown to **103 modules** (`ls stdlib/*.march | wc -l`), so the
 > counts and module list below no longer reflect current truth.
 >
 > **The canonical, up-to-date stdlib reference is the generated docs at
@@ -13,7 +13,7 @@
 ## Overview
 
 > Historical note: figures in this section describe the March 2026 snapshot (21 modules). <!-- doc-lint:ignore-count -->
-> The current stdlib has 98 modules — see `docs/docs/stdlib/` for the live reference.
+> The current stdlib has 103 modules — see `docs/docs/stdlib/` for the live reference.
 
 The March standard library consisted of **21 modules** totaling **~4,894 lines of code** (as of March 22, 2026). <!-- doc-lint:ignore-count --> The library is auto-loaded by the compiler into every March program and provides:
 
@@ -1264,12 +1264,12 @@ All other modules are wrapped in `DMod` so they're accessible as module-qualifie
 
 ## Version Information
 
-> Historical snapshot figures. Current stdlib is **98 modules** — see
+> Historical snapshot figures. Current stdlib is **103 modules** — see <!-- doc-lint:ignore-count -->
 > `docs/docs/stdlib/` for the live reference, or `forge search`.
 
 - **Snapshot date**: March 20, 2026
 - **Total stdlib lines (snapshot)**: 4,512
-- **Number of modules (snapshot)**: 21 (current: 98 — see `docs/docs/stdlib/`)
+- **Number of modules (snapshot)**: 21 (current: 103 — see `docs/docs/stdlib/`) <!-- doc-lint:ignore-count -->
 - **Number of public functions (snapshot)**: ~250+
 - **Number of types (snapshot)**: ~30+ (including built-ins)
 - **C runtime dependencies (snapshot)**: 50+ functions
