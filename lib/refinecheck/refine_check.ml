@@ -190,6 +190,8 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
              (fun (br : A.branch) ->
                match br.A.branch_pat with
                | A.PatCon (ctor, pats) ->
+                 (* Counter is per-arm so _w1/_w2/… are unique within an arm's
+                    scope; cross-arm collisions are harmless (vars are per-arm). *)
                  let wildcard_ctr = ref 0 in
                  let vars =
                    List.map
@@ -346,14 +348,14 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
     (fun (name, _, arms) ->
       let bases =
         List.filter_map
-          (fun (ctor, vars, body) ->
-            (* A base case arm has a body that is a concrete integer (no recursion,
-               no bound variables needed).  We capture it for OCaml-level evaluation. *)
-            if vars = [] then
-              match body with
-              | A.ELit (A.LitInt n, _) -> Some (ctor, n)
-              | _ -> None
-            else None)
+          (fun (ctor, _vars, body) ->
+            (* A base case arm has a concrete-integer body.  We do not guard on
+               vars=[] because wildcard arms (e.g. Leaf(_)) now produce generated
+               names (_w1, …) in vars — but an ELit body is always variable-free
+               regardless of how many wildcards appear in the pattern. *)
+            match body with
+            | A.ELit (A.LitInt n, _) -> Some (ctor, n)
+            | _ -> None)
           arms
       in
       if bases <> [] then Hashtbl.replace measure_base_cases name bases)
@@ -437,7 +439,23 @@ let type_only_preamble () : string =
   else
     let all_sorts = adt_closure record_sorts in
     if all_sorts = [] then ""
-    else "(declare-sort Elem 0)\n" ^ datatype_decls all_sorts
+    else
+      (* Only emit `(declare-sort Elem 0)` when a sort in the closure actually
+         uses Elem-typed fields (i.e. a List ADT is reachable).  Pure record
+         types with no list fields don't need Elem and emitting it is harmless
+         but inconsistent with build_type_preamble's deduplication logic. *)
+      let needs_elem =
+        List.exists
+          (fun sort ->
+            List.exists
+              (fun ctor ->
+                List.exists
+                  (fun s -> s = Smt.SData "Elem")
+                  (try Hashtbl.find ctor_field_sorts ctor with Not_found -> []))
+              (try Hashtbl.find adt_ctors sort with Not_found -> []))
+          all_sorts
+      in
+      (if needs_elem then "(declare-sort Elem 0)\n" else "") ^ datatype_decls all_sorts
 
 let record_vc_preamble () : string =
   match !measure_preamble, !type_preamble with
@@ -1045,10 +1063,8 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
   match Hashtbl.find_opt measure_base_cases name with
   | None -> None
   | Some bases ->
-    let rec go depth term =
-      if depth > 32 then None
-      else
-        match selector_reduce term with
+    let go term =
+      match selector_reduce term with
         | Smt.App (ctor, []) ->
           (* Zero-arg constructor: look up in base cases *)
           List.assoc_opt ctor bases
@@ -1056,9 +1072,13 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
           (* Multi-arg constructor: not a base case for simple measures;
              would need the step case — give up for now *)
           None
-        | _ -> go (depth + 1) (selector_reduce term)
+        | _ ->
+          (* Non-App after selector_reduce: opaque (variable, literal, etc.).
+             selector_reduce is a fixed point on non-App terms, so further
+             recursion cannot reduce it — return None immediately. *)
+          None
     in
-    go 0 arg_term
+    go arg_term
 
 (* Build a resolve_field closure for a known record binder: v.fname becomes the
    SMT selector applied to the term representing v. *)
