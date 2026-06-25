@@ -176,6 +176,7 @@ rule token = parse
   | "cap" [' ' '\t']+ "pure"          { CAP_PURE }
   | "cap" [' ' '\t']+ "no_extern"     { CAP_NO_EXTERN }
   | "cap" [' ' '\t']+ "deterministic" { CAP_DETERMINISTIC }
+  | "cap" [' ' '\t']+ "no_alloc"      { CAP_NO_ALLOC }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

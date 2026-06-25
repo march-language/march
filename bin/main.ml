@@ -744,6 +744,8 @@ let run_test_cmd args =
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
+    (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
+    March_refinecheck.No_alloc.check_module errors desugared;
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -1123,6 +1125,8 @@ let compile filename =
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
+  (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
+  March_refinecheck.No_alloc.check_module errors desugared;
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
