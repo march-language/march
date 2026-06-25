@@ -1226,6 +1226,20 @@ let compile filename =
     in
     let actor_compat_map : (string * string) list =
       collect_actor_compat [] desugared.March_ast.Ast.mod_decls in
+    let rec collect_actor_invariant acc (decls : March_ast.Ast.decl list) =
+      List.fold_left (fun acc d ->
+          match d with
+          | March_ast.Ast.DActor (_, name, adef, _) ->
+            (match adef.March_ast.Ast.actor_invariant with
+             | None -> acc
+             | Some e -> (name.March_ast.Ast.txt, e) :: acc)
+          | March_ast.Ast.DMod (_, _, inner, _) ->
+            collect_actor_invariant acc inner
+          | _ -> acc
+        ) acc decls
+    in
+    let actor_invariant_map : (string * March_ast.Ast.expr) list =
+      collect_actor_invariant [] desugared.March_ast.Ast.mod_decls in
     let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
       if Option.is_some !hot_reload_prefix && !compile_so then
         List.filter_map (fun td ->
@@ -1827,6 +1841,32 @@ let compile filename =
            and types so forge deploy hot can diff old vs new schemas. *)
         (if !compile_so && actor_schemas <> [] then begin
           let schema_path = out_bin ^ ".schemas.json" in
+          (* Convert an AST predicate expression to a source-text string for
+             storage in .schemas.json.  Raises Invalid_argument on unsupported nodes.
+             Operators are represented as EApp in the March AST (e.g. "+"(a,b)). *)
+          let rec pred_to_string (e : March_ast.Ast.expr) : string =
+            let open March_ast.Ast in
+            match e with
+            | ELit (LitInt n, _)    -> string_of_int n
+            | ELit (LitBool b, _)   -> if b then "true" else "false"
+            | EVar { txt; _ }       -> txt
+            | EField (base, field, _) ->
+              pred_to_string base ^ "." ^ field.txt
+            (* Binary operators: &&, ||, arithmetic, comparisons *)
+            | EApp (EVar { txt = ("&&"|"||"|"+"|"-"|"*"|"/"|"%"
+                                 |"=="|"!="|"<"|">"|"<="|">=" as op); _ },
+                    [l; r], _) ->
+              "(" ^ pred_to_string l ^ " " ^ op ^ " " ^ pred_to_string r ^ ")"
+            (* Unary operators *)
+            | EApp (EVar { txt = "not"; _ }, [inner], _) ->
+              "not " ^ pred_to_string inner
+            | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
+              "-" ^ pred_to_string inner
+            (* Single-argument measure/function calls *)
+            | EApp (EVar { txt = fn_name; _ }, [arg], _) ->
+              fn_name ^ "(" ^ pred_to_string arg ^ ")"
+            | _ -> raise (Invalid_argument "pred_to_string")
+          in
           (try
             let oc = open_out schema_path in
             Printf.fprintf oc "{\n";
@@ -1840,8 +1880,19 @@ let compile filename =
                 in
                 let compat = Option.value ~default:"full"
                     (List.assoc_opt actor_name actor_compat_map) in
-                Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat field_lines
+                let invariant_line = match List.assoc_opt actor_name actor_invariant_map with
+                  | None -> ""
+                  | Some e ->
+                    (try Printf.sprintf "    \"invariant\": %S,\n" (pred_to_string e)
+                     with Invalid_argument _ ->
+                       Printf.eprintf
+                         "warning: @invariant on %s contains unsupported expression; omitting\n"
+                         actor_name;
+                       "")
+                in
+                Printf.fprintf oc
+                  "  %S: {\n    \"compat\": %S,\n%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat invariant_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.fprintf oc "}\n";

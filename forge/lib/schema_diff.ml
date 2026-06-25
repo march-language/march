@@ -9,6 +9,7 @@ type field = { name: string; ty: string }
 
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
+  invariant: string option;  (* @invariant predicate text, if any *)
   state_fields: field list;
 }
 
@@ -34,6 +35,7 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
     let schemas = ref [] in
     let current_actor = ref "" in
     let current_compat = ref "full" in
+    let current_invariant : string option ref = ref None in
     let current_fields : field list ref = ref [] in
     let in_fields = ref false in
     List.iter (fun line ->
@@ -44,14 +46,17 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
           (* Detect actor key: "ActorName": { — first char is '"', not in a fields array *)
           if line.[0] = '"' && not !in_fields then begin
             (match String.split_on_char '"' line with
-            | "" :: name :: _ when name <> "compat" && name <> "state_fields"
+            | "" :: name :: _ when name <> "compat" && name <> "invariant"
+                                 && name <> "state_fields"
                                  && name <> "name" && name <> "ty" ->
               if !current_actor <> "" then
                 schemas := (!current_actor,
                   { compat = !current_compat;
+                    invariant = !current_invariant;
                     state_fields = List.rev !current_fields }) :: !schemas;
               current_actor := name;
               current_compat := "full";
+              current_invariant := None;
               current_fields := []
             | _ -> ())
           end;
@@ -59,6 +64,15 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
           if llen > 10 && String.sub line 0 9 = "\"compat\":" then begin
             (match String.split_on_char '"' line with
             | _ :: "compat" :: _ :: v :: _ -> current_compat := v
+            | _ -> ())
+          end;
+          (* Detect "invariant": "value" *)
+          if llen > 13 && String.sub line 0 12 = "\"invariant\":" then begin
+            (* The value is a JSON string; extract between the first pair of
+               quotes after the colon.  Split on '"' gives:
+               ["\"invariant\": "; ""; " "; "<value>"; ...] *)
+            (match String.split_on_char '"' line with
+            | _ :: "invariant" :: _ :: v :: _ -> current_invariant := Some v
             | _ -> ())
           end;
           (* Detect state_fields array start *)
@@ -79,6 +93,7 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
     if !current_actor <> "" then
       schemas := (!current_actor,
         { compat = !current_compat;
+          invariant = !current_invariant;
           state_fields = List.rev !current_fields }) :: !schemas;
     List.rev !schemas
   end

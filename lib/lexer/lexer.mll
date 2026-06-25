@@ -59,6 +59,7 @@ let () =
       ("rest_for_one", REST_FOR_ONE);
       ("requires", REQUIRES);
       ("import", IMPORT);
+      ("invariant", INVARIANT);
       ("alias", ALIAS);
       ("only", ONLY);
       ("except", EXCEPT);
