@@ -197,9 +197,6 @@ let stdlib_file_list = [
   "global_registry.march";
   "cluster_conn.march";
   "node_call.march";
-  (* Bulk parallel data *)
-  "rrb_vec.march";
-  "parallel.march";
 ]
 
 (** Stdlib modules only loaded for --target js builds.
