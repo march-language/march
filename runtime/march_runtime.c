@@ -1342,6 +1342,45 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
     if (meta) meta->dispatch_name_id = name_id;
 }
 
+#define MARCH_MIGRATE_SNAPSHOT 2048
+
+void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
+                                   void *(*migrate_fn)(void *)) {
+    if (!dispatch_name_id) return;
+
+    /* Phase 1: snapshot matching actors under lock.
+     * We incrc each actor so it stays alive while we hold the snapshot.
+     * The lock is released before injecting messages to avoid holding
+     * g_tbl_mu while calling march_sched_send (which may block). */
+    march_actor_meta *snaps[MARCH_MIGRATE_SNAPSHOT];
+    int n = 0;
+
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int b = 0; b < MARCH_SCHED_BUCKETS && n < MARCH_MIGRATE_SNAPSHOT; b++) {
+        for (march_actor_meta *m = g_actor_tbl[b];
+             m && n < MARCH_MIGRATE_SNAPSHOT;
+             m = m->tbl_next) {
+            if (m->dispatch_name_id == dispatch_name_id && m->actor && m->green_thread) {
+                march_incrc(m->actor);
+                snaps[n++] = m;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    /* Phase 2: inject migrate messages outside the lock. */
+    for (int i = 0; i < n; i++) {
+        march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
+        if (mm) {
+            mm->_rc        = 1;
+            mm->_tag       = MARCH_MIGRATE_TAG;
+            mm->migrate_fn = migrate_fn;
+            march_sched_send(snaps[i]->green_thread, mm);
+        }
+        march_decrc(snaps[i]->actor);
+    }
+}
+
 /* ── Lightweight task spawn ──────────────────────────────────────────────── */
 
 /* Forward declarations for Result helpers defined later in this file. */
