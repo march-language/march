@@ -75,8 +75,9 @@ let recv_line conn =
   let rec loop () =
     match Buffer.contents conn.buf |> String.split_on_char '\n' with
     | line :: rest when String.length line > 0 ->
+      let rest_str = String.concat "\n" rest in
       Buffer.clear conn.buf;
-      List.iter (fun s -> Buffer.add_string conn.buf s; Buffer.add_char conn.buf '\n') rest;
+      Buffer.add_string conn.buf rest_str;
       line
     | _ ->
       let tmp = Bytes.create 4096 in
@@ -228,7 +229,13 @@ let cas_put conn hash path =
 
 (* ─── Main deploy flow ───────────────────────────────────────────────────── *)
 
-let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path =
+(* Check if a symbol is exported from a shared library (for migrate_state presence check). *)
+let so_exports_symbol (so_path : string) (sym : string) : bool =
+  let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'" so_path sym in
+  Sys.command cmd = 0
+
+let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
+    ?(old_schemas_path="") ?(new_schemas_path="") () =
   let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
 
   (* 1. SSH tunnel *)
@@ -298,16 +305,69 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path =
           end else
             Printf.printf "Artifact already on server (cache hit).\n%!";
 
+          (* Phase 5: load actor state schemas for compat checking and migrate_required flag *)
+          let old_schemas =
+            if old_schemas_path <> "" then Schema_diff.parse_schemas_file old_schemas_path
+            else []
+          in
+          let new_schemas =
+            if new_schemas_path <> "" then Schema_diff.parse_schemas_file new_schemas_path
+            else []
+          in
+          let actor_diffs = Schema_diff.diff_schemas old_schemas new_schemas in
+
+          (* Abort if any actor has a compat violation and no migrate_state is present *)
+          let compat_errors = List.filter_map (fun d ->
+              let compat = match List.assoc_opt d.Schema_diff.actor new_schemas with
+                | Some s -> s.Schema_diff.compat | None -> "full" in
+              match Schema_diff.check_compat compat d.Schema_diff.changes with
+              | Ok () -> None
+              | Error msg ->
+                let actor_mangled = String.map (fun c -> if c = '.' then '_' else c)
+                    d.Schema_diff.actor in
+                let migrate_sym = "__migrate_" ^ actor_mangled in
+                if so_exports_symbol so_path migrate_sym then None
+                else Some (d.Schema_diff.actor, msg)
+            ) actor_diffs
+          in
+          if compat_errors <> [] then begin
+            List.iter (fun (actor, msg) ->
+              Printf.eprintf "forge deploy hot: actor %s — %s\n" actor msg
+            ) compat_errors;
+            Printf.eprintf "Provide a migrate_state function or add @compat annotation.\n";
+            Unix.close fd;
+            raise (Failure "compat violation — deploy aborted")
+          end;
+
           (* 7. Sign + ACTIVATE each changed function *)
           let _ = signing_pubkey in  (* public key already embedded in server binary *)
           let activated = ref 0 in
           let failed = ref 0 in
           List.iter (fun fm ->
+            (* Phase 5: determine migrate_required for actor dispatch functions *)
+            let dispatch_suffix = "_dispatch" in
+            let dlen = String.length dispatch_suffix in
+            let flen = String.length fm.fn_name in
+            let migrate_required =
+              if flen > dlen && String.sub fm.fn_name (flen - dlen) dlen = dispatch_suffix
+              then
+                let actor_name = String.sub fm.fn_name 0 (flen - dlen) in
+                match List.find_opt (fun d -> d.Schema_diff.actor = actor_name) actor_diffs with
+                | None -> 0
+                | Some d ->
+                  let compat = match List.assoc_opt actor_name new_schemas with
+                    | Some s -> s.Schema_diff.compat | None -> "full" in
+                  (match Schema_diff.check_compat compat d.Schema_diff.changes with
+                  | Ok () ->
+                    if Schema_diff.requires_migration d.Schema_diff.changes then 1 else 0
+                  | Error _ -> 1)
+              else 0
+            in
             let msg = Printf.sprintf "%s %s %s" fm.fn_name fm.fn_impl_hash cas_hash in
             let sig_bytes = March_ed25519.Ed25519.sign_str msg sk in
             let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s"
-              fm.fn_name fm.fn_impl_hash cas_hash sig_b64 in
+            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d"
+              fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required in
             send_line conn cmd;
             let resp = recv_line conn in
             if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
@@ -416,12 +476,36 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
             | Error m -> Error m
             | Ok manifest ->
               let signing_pubkey = Option.value ~default:"" hr.Project.hr_public_key in
-              run
-                ~ssh_host:hr.Project.hr_ssh_host
-                ~remote_socket:hr.Project.hr_socket
-                ~signing_pubkey
-                ~sk
-                ~manifest
-                ~so_path:so_path2
-              |> Result.map ignore
+              (* Phase 5: compute schema paths for compat checking.
+                 new_schemas = <so>.schemas.json; old_schemas = last deployed schemas file.
+                 After a successful deploy, write new schemas as the "prev" baseline. *)
+              let new_schemas_path = so_path2 ^ ".schemas.json" in
+              let prev_schemas_path = Filename.concat
+                  (Filename.concat proj.Project.root ".march")
+                  (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+              let result2 =
+                run
+                  ~ssh_host:hr.Project.hr_ssh_host
+                  ~remote_socket:hr.Project.hr_socket
+                  ~signing_pubkey
+                  ~sk
+                  ~manifest
+                  ~so_path:so_path2
+                  ~old_schemas_path:prev_schemas_path
+                  ~new_schemas_path
+                  ()
+              in
+              (* After successful deploy, save new schemas as the baseline for next time *)
+              (match result2 with
+              | Ok _ when Sys.file_exists new_schemas_path ->
+                (try
+                  let ic = open_in new_schemas_path in
+                  let content = In_channel.input_all ic in
+                  close_in ic;
+                  let oc = open_out prev_schemas_path in
+                  output_string oc content;
+                  close_out oc
+                with Sys_error _ -> ())
+              | _ -> ());
+              result2 |> Result.map ignore
       end

@@ -595,6 +595,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_init      = ELit (LitInt 0, dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
+  actor_compat    = "full";
 }
 
 let mk_actor_inst name alive st = March_eval.Eval.{

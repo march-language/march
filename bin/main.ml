@@ -1208,6 +1208,20 @@ let compile filename =
         "(" ^ String.concat "," (List.map ty_to_schema_str ts) ^ ")"
       | other -> March_tir.Tir.show_ty other
     in
+    (* Build actor_name → @compat policy map from the desugared AST.
+       Walks all module-level and nested DActor declarations. *)
+    let rec collect_actor_compat acc (decls : March_ast.Ast.decl list) =
+      List.fold_left (fun acc d ->
+          match d with
+          | March_ast.Ast.DActor (_, name, adef, _) ->
+            (name.March_ast.Ast.txt, adef.March_ast.Ast.actor_compat) :: acc
+          | March_ast.Ast.DMod (_, _, inner, _) ->
+            collect_actor_compat acc inner
+          | _ -> acc
+        ) acc decls
+    in
+    let actor_compat_map : (string * string) list =
+      collect_actor_compat [] desugared.March_ast.Ast.mod_decls in
     let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
       if Option.is_some !hot_reload_prefix && !compile_so then
         List.filter_map (fun td ->
@@ -1815,8 +1829,10 @@ let compile filename =
                 let field_json = String.concat ", " (List.map (fun (fname, fty) ->
                     Printf.sprintf {|{"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
                   ) fields) in
-                Printf.fprintf oc "  %S: {\n    \"compat\": \"full\",\n    \"state_fields\": [%s]\n  }%s\n"
-                  actor_name field_json
+                let compat = Option.value ~default:"full"
+                    (List.assoc_opt actor_name actor_compat_map) in
+                Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n    \"state_fields\": [%s]\n  }%s\n"
+                  actor_name compat field_json
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.fprintf oc "}\n";
