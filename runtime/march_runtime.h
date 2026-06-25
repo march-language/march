@@ -128,12 +128,44 @@ void    march_unlink(void *actor_a, void *actor_b);
 void    march_register_supervisor(void *supervisor, int64_t strategy,
                                    int64_t max_restarts, int64_t window_secs);
 
+/* ── Phase 5: Actor state migration ─────────────────────────────────── */
+
+/* Tag value for system migrate messages.  Chosen to be far outside the range
+ * of normal March ADT constructor tags (which start at 0 and are bounded by
+ * the number of constructors per type, typically < 1000). */
+#define MARCH_MIGRATE_TAG ((int64_t)0x4D494752L)   /* "MIGR" */
+
+/* System message injected into an actor's mailbox to trigger state migration.
+ * Layout: standard 16-byte march object header (rc at 0, tag at 8) so that
+ * actor_green_thread can detect it by checking ((int64_t*)msg)[1].
+ * Allocated with malloc() by march_actor_broadcast_migrate; freed with free()
+ * (NOT march_decrc) by actor_green_thread after handling. */
+typedef struct {
+    int64_t  _rc;              /* always 1 (not reference-counted) */
+    int64_t  _tag;             /* MARCH_MIGRATE_TAG */
+    void    *(*migrate_fn)(void *);  /* migrate_fn(old_state_ptr) → new_state_ptr, or NULL */
+} march_migrate_msg_t;
+
+/* Set the dispatch-table NAME_ID for a hot-reload actor.  Must be called
+ * immediately after march_spawn().  name_id is the slot ID registered for
+ * the actor's _dispatch function.  No-op if actor has no meta entry. */
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
+
+/* Walk all live actors whose dispatch_name_id equals [dispatch_name_id] and
+ * inject a MARCH_MIGRATE_TAG message so each actor migrates its state on
+ * the next turn.  migrate_fn may be NULL (skip state transform). */
+void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
+                                   void *(*migrate_fn)(void *));
+
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):
  *   offset 16: ptr     dispatch fn  (field 0, stored as closure struct)
  *   offset 24: int64_t alive flag   (field 1; 1=alive, 0=dead)
  *   offset 32+: state fields        (fields 2+, alphabetical order)
- * As int64_t array: [0]=rc [1]=tag+pad [2]=dispatch [3]=alive [4+]=state */
+ *   -- in --hot-reload builds only:
+ *   offset 32: ptr     state record (field 2, $f_state ptr, replaces inline fields)
+ * As int64_t array: [0]=rc [1]=tag+pad [2]=dispatch [3]=alive [4+]=state
+ *   (hot-reload: [4]=ptr-to-state-record instead of inline state fields) */
 void    march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Register an actor with the scheduler; returns actor unchanged. */
