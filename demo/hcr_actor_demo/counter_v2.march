@@ -1,0 +1,58 @@
+-- HCR Phase 5 Demo: Actor state migration — Counter v2
+--
+-- v2 adds a `history` field (list of past counts).
+-- The migrate_state function translates v1 state (just count: Int)
+-- to v2 state (count: Int, history: List(Int)).
+--
+-- When forge deploy hot activates this version:
+--   1. It detects the state schema changed (history field added)
+--   2. It finds __migrate_MyApp_Counter exported from this .so
+--   3. It broadcasts MARCH_MIGRATE_TAG to all running Counter actors
+--   4. Each Counter swaps its state ptr to the result of migrate_state
+--
+-- The running actors continue without restart.
+
+mod MyApp do
+
+  actor Counter do
+    state = { count: Int = 0, history: List(Int) = [] }
+
+    on Inc() ->
+      let new_count = state.count + 1
+      { count = new_count, history = [state.count] ++ state.history }
+
+    on Dec() ->
+      let new_count = state.count - 1
+      { count = new_count, history = [state.count] ++ state.history }
+
+    on Reset() ->
+      { count = 0, history = state.history }
+
+    on GetCount() ->
+      state.count
+
+    on GetHistory() ->
+      state.history
+  end
+
+  -- migrate_state is the magic name: the compiler exports it as
+  -- @__migrate_MyApp_Counter so the reload server can dlsym it.
+  -- It receives the old state (Counter_State with just count: Int)
+  -- and must return the new state (Counter_State with count + history).
+  fn migrate_state(old : Counter_State) : Counter_State do
+    { count = old.count, history = [] }
+  end
+
+  fn main() do
+    let pid = spawn(Counter)
+    send(pid, Inc())
+    send(pid, Inc())
+    send(pid, Inc())
+    let n = actor_call(pid, GetCount(), 1000)
+    println("Count: " ++ int_to_string(n))
+    let hist = actor_call(pid, GetHistory(), 1000)
+    println("History length: " ++ int_to_string(List.length(hist)))
+    ()
+  end
+
+end
