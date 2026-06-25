@@ -4260,6 +4260,89 @@ let test_same_name_type_collision_note () =
       ) d.March_errors.Errors.notes
     ) errors)
 
+(* ------------------------------------------------------------------ *)
+(* return_refine_infer tests                                           *)
+(* ------------------------------------------------------------------ *)
+
+let z3_available () =
+  match Sys.command "z3 --version > /dev/null 2>&1" with 0 -> true | _ -> false
+
+let infer_returns src =
+  let m = parse_and_desugar src in
+  March_refinecheck.Return_infer.infer_module m
+
+let has_pred fn_name pred infers =
+  match List.find_opt
+          (fun r -> r.March_refinecheck.Return_infer.fn_name = fn_name)
+          infers
+  with
+  | None   -> false
+  | Some r -> List.mem pred r.March_refinecheck.Return_infer.verified_preds
+
+(* add_one(x : {v : Int | v >= 0}) : Int do x + 1 end  =>  r >= 1 *)
+let test_return_infer_add_one () =
+  let infers = infer_returns {|mod T do
+    fn add_one(x : {v : Int | v >= 0}) : Int do x + 1 end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "add_one infers r >= 1" true
+      (has_pred "add_one" "r >= 1" infers)
+
+(* double(x : {v : Int | v > 0}) : Int do x * 2 end  =>  r > 0 *)
+let test_return_infer_double () =
+  let infers = infer_returns {|mod T do
+    fn double(x : {v : Int | v > 0}) : Int do x * 2 end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "double infers r > 0" true
+      (has_pred "double" "r > 0" infers)
+
+(* negate(x : {v : Int | v > 0}) : Int do 0 - x end  =>  r < 0 *)
+let test_return_infer_negate () =
+  let infers = infer_returns {|mod T do
+    fn negate(x : {v : Int | v > 0}) : Int do 0 - x end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "negate infers r < 0" true
+      (has_pred "negate" "r < 0" infers)
+
+(* no refined params => no inference result *)
+let test_return_infer_no_refined_params () =
+  let infers = infer_returns {|mod T do
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "no refined params: infers = []" true (infers = [])
+
+(* if body: smt_of returns None => no inference, no exception *)
+let test_return_infer_if_body_no_crash () =
+  let infers = infer_returns {|mod T do
+    fn abs(x : {v : Int | v != 0}) : Int do
+      if x > 0 do x else 0 - x end
+    end
+  end|} in
+  (* abs body is EIf — smt_of returns None → no preds inferred *)
+  let preds =
+    match List.find_opt
+            (fun r -> r.March_refinecheck.Return_infer.fn_name = "abs")
+            infers
+    with
+    | None   -> []
+    | Some r -> r.March_refinecheck.Return_infer.verified_preds
+  in
+  Alcotest.(check bool) "if body: no crash and no preds" true (preds = [])
+
+(* let propagation: y = x + 1, return y * 2  =>  r >= 0 (since y >= 1) *)
+let test_return_infer_let_propagation () =
+  let infers = infer_returns {|mod T do
+    fn f(x : {v : Int | v >= 0}) : Int do
+      let y = x + 1
+      y * 2
+    end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "let propagation infers r >= 0" true
+      (has_pred "f" "r >= 0" infers)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -4677,5 +4760,12 @@ let compiler_suites =
           Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
         ] );
+      ( "return_refine_infer", [
+          Alcotest.test_case "add_one: infers r >= 1"                  `Quick test_return_infer_add_one;
+          Alcotest.test_case "double: infers r > 0"                    `Quick test_return_infer_double;
+          Alcotest.test_case "negate: infers r < 0"                    `Quick test_return_infer_negate;
+          Alcotest.test_case "no refined params: no inference"         `Quick test_return_infer_no_refined_params;
+          Alcotest.test_case "if body: no crash, no preds"             `Quick test_return_infer_if_body_no_crash;
+          Alcotest.test_case "let propagation: r >= 0"                 `Quick test_return_infer_let_propagation;
+        ] );
   ]
-

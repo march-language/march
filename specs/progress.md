@@ -282,6 +282,13 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, template-based return refinement inference)
+
+- **`lib/refinecheck/return_infer.ml` (new).** Template-based pass that infers sign/bound predicates (`r > 0`, `r >= 0`, `r >= 1`, `r != 0`, `r < 0`, `r <= -1`) on return values of functions with refined `Int` params, without requiring a user annotation. Single-pass, no fixpoint: reflect the return expression via `smt_of` into an SMT term, then probe each candidate via `Refine.discharge`. Let-binding propagation: `EBlock` stmts before the final expression are walked and `let`-bound variables that reflect to SMT terms are added to the decl/assumption set. Conservative: non-linear bodies (if/match) and Z3-absent environments produce no preds. Module added to `lib/refinecheck/dune` alongside `refine_check` and `division_safety`.
+- **Test coverage (6 new tests in `return_refine_infer` suite).** `add_one` (v>=0 → r>=1), `double` (v>0 → r>0), `negate` (v>0 → r<0), no-refined-params (empty result), if-body (no crash/no preds), let-propagation (y=x+1,y*2 → r>=0). All pass with Z3; Z3-absent runs skip assertions safely. 333 compiler tests pass; eval 224 / codegen 320 unchanged.
+
+> **Authoritative test counts (2026-06-25): 333 compiler / 224 eval / 320 codegen.** +6 return_refine_infer tests; eval and codegen unchanged.
+
 ## Current State (as of 2026-06-25, Z3 division-safety for `cap no_panic`)
 
 - **`lib/refinecheck/division_safety.ml` (new).** Post-typecheck pass that checks every integer division/modulo site inside `cap no_panic` modules. Division ops (`/`, `%`, `int_div`, `int_mod`, `int_div_euclid`, `int_mod_euclid`) removed from `panic_surface_direct` in `typecheck.ml` and handed to this pass instead. Literal divisors: `0` → always error; non-zero → always safe. Variable divisors with `{v : Int | pred}` refinement: syntactic fast-path covers `v > 0`, `v >= 1`, `v < 0`, `v != 0`, `&&`-conjunctions; Z3 discharge (via `Refine.discharge`) for anything else in the linear-arithmetic fragment. Variable divisors without any refinement → always error. Complex expression divisors → always error (conservative). Soundness: `Unverified` (Z3 absent / timeout) raises an error, preserving the `cap no_panic` guarantee.
