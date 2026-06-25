@@ -18,6 +18,11 @@ mod MyApp do
       println(label ++ int_to_string(state.count))
       state
     end
+
+    on PrintHistory(label) do
+      println(label ++ "(none)")
+      state
+    end
   end
 
   fn main() do

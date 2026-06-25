@@ -1831,13 +1831,17 @@ let compile filename =
             let oc = open_out schema_path in
             Printf.fprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
-                let field_json = String.concat ", " (List.map (fun (fname, fty) ->
-                    Printf.sprintf {|{"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
-                  ) fields) in
+                let field_lines =
+                  if fields = [] then "[]"
+                  else "[\n" ^
+                    String.concat ",\n" (List.map (fun (fname, fty) ->
+                      Printf.sprintf {|      {"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                    ) fields) ^ "\n    ]"
+                in
                 let compat = Option.value ~default:"full"
                     (List.assoc_opt actor_name actor_compat_map) in
-                Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n    \"state_fields\": [%s]\n  }%s\n"
-                  actor_name compat field_json
+                Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.fprintf oc "}\n";

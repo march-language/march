@@ -385,7 +385,17 @@ static void handle_client(int fd) {
                 wresp(fd, "ERR missing_artifact\n"); continue;
             }
 
-            void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+            /* RTLD_DEEPBIND: prefer this .so's own symbols over the main
+             * executable's when resolving PLT calls inside the patch.
+             * Without it, a hot-patched Counter_dispatch calling
+             * Counter_PrintHistory$Counter_Actor$V__ would find the v1
+             * version compiled into the server binary instead of the v2
+             * version in the patch .so. RTLD_DEEPBIND is a GNU extension;
+             * guard it for portability. */
+#ifndef RTLD_DEEPBIND
+#define RTLD_DEEPBIND 0
+#endif
+            void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
             if (!handle) {
                 write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
                 char resp[512];
@@ -453,11 +463,14 @@ static void handle_client(int fd) {
                 void *(*migrate_fn)(void *) = NULL;
                 if (raw_sym) {
                     memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
+                    fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
+                            migrate_sym, slot_id);
                 } else {
                     char warn[512];
                     int wn = snprintf(warn, sizeof(warn),
                                       "WARN migrate symbol not found: %s\n", migrate_sym);
                     write(fd, warn, (size_t)wn);
+                    fprintf(stderr, "[hcr] migrate: symbol not found: %s\n", migrate_sym);
                 }
                 march_actor_broadcast_migrate(slot_id, migrate_fn);
             }

@@ -14,7 +14,7 @@
 #   6. forge deploy hot --so counter_v2.so
 #      └─ ACTIVATE Counter_dispatch → triggers __migrate_Counter on all actors
 #   7. Signal the server (connect to port 8765) to print post-migration state
-#   8. Verify: post_migrate count=3  AND  post_migrate+inc count=4
+#   8. Verify: post_migrate count=3, history=[]  AND  post_inc count=4, history=[3]
 #
 # Prereqs:
 #   - Docker with march-builder:latest image (linux/amd64)
@@ -142,13 +142,15 @@ ssh "$HOST" bash -s <<STARTREMOTE
 STARTREMOTE
 echo ""
 
-# ── Step 5: verify pre_migrate count=3 ───────────────────────────────────────
-echo "--- Step 5: verify pre_migrate count=3 ---"
+# ── Step 5: verify pre_migrate state (v1: no history field) ──────────────────
+echo "--- Step 5: verify pre_migrate state (v1 baseline) ---"
 PRE_LOG=$(ssh "$HOST" "cat /tmp/counter_server.log")
 echo "$PRE_LOG"
 echo "$PRE_LOG" | grep -q "pre_migrate count=3" \
   || die "pre_migrate count mismatch (got: $PRE_LOG)"
-echo "PASS: pre_migrate count=3"
+echo "$PRE_LOG" | grep -q "pre_migrate history=(none)" \
+  || die "pre_migrate history wrong — expected (none) from v1 (got: $PRE_LOG)"
+echo "PASS: pre_migrate count=3, history=(none)"
 echo ""
 
 # ── Step 6: create patch project (counter_v2) ────────────────────────────────
@@ -169,6 +171,42 @@ public_key = "$PUBKEY_B64"
 TOML
 
 echo "patch dir: $PATCH_DIR"
+echo ""
+
+# ── Step 6b: establish v1 schema baseline ────────────────────────────────────
+# forge deploy hot uses {project_root}/.march/{name}_hot.so.schemas.json.prev
+# to compute schema diffs. Without it, migrate_required=0 is sent in ACTIVATE
+# and __migrate_Counter is never called — actors keep v1 state layout and v2's
+# PrintHistory would read garbage instead of the history field.
+echo "--- Step 6b: build counter_v1.so to establish schema baseline ---"
+V1_SO="$DIST/counter_v1.so"
+
+docker run --rm --platform linux/amd64 \
+  -v "$ROOT":/march \
+  -v "$VOL":"$BD" \
+  -v "$DIST":/out \
+  "$IMAGE" \
+  bash -lc "
+    set -euo pipefail
+    cd /march
+    export MARCH_STDLIB=/march/stdlib
+    MC=$BD/default/bin/main.exe
+    \"\$MC\" --compile --compile-so --hot-reload MyApp \
+      -o /out/counter_v1.so \
+      demo/hcr_actor_demo/counter_v1.march
+    echo '[docker] built: counter_v1.so'
+    echo '--- v1 schema:'
+    cat /out/counter_v1.so.schemas.json
+  "
+
+# Install v1 schema as the .prev baseline that forge deploy hot will diff against.
+# Path: {project_root}/.march/{project_name}_hot.so.schemas.json.prev
+MARCH_DIR="$PATCH_DIR/.march"
+PREV_SCHEMA="$MARCH_DIR/counter_patch_v2_hot.so.schemas.json.prev"
+mkdir -p "$MARCH_DIR"
+cp "$V1_SO.schemas.json" "$PREV_SCHEMA"
+echo "Baseline schema written: $PREV_SCHEMA"
+cat "$PREV_SCHEMA"
 echo ""
 
 # ── Step 7: cross-compile counter_v2.so (linux/amd64) ────────────────────────
@@ -229,12 +267,20 @@ echo "--- Step 10: verify actor state survived migration ---"
 POST_LOG=$(ssh "$HOST" "cat /tmp/counter_server.log")
 echo "$POST_LOG"
 
+# count must survive unchanged
 echo "$POST_LOG" | grep -q "post_migrate count=3" \
   || die "actor count lost during migration (expected post_migrate count=3)"
-echo "$POST_LOG" | grep -q "post_migrate+inc count=4" \
-  || die "post-migration increment failed (expected post_migrate+inc count=4)"
 
-# Bonus: verify forge hot-reload status shows the migrated slot
+# history must be initialized to [] by counter_migrate_state — not absent, not garbage
+echo "$POST_LOG" | grep -q "post_migrate history=\[\]" \
+  || die "history field not initialized (expected post_migrate history=[] from migrate_state)"
+
+# after one v2 Inc: count→4, history→[3] (v2 Inc prepends old count)
+echo "$POST_LOG" | grep -q "post_inc count=4" \
+  || die "post-migration increment failed (expected post_inc count=4)"
+echo "$POST_LOG" | grep -q "post_inc history=\[3\]" \
+  || die "history not tracking after migration (expected post_inc history=[3])"
+
 echo ""
 echo "--- Status check (forge hot-reload status) ---"
 (cd "$PATCH_DIR" && "$FORGE" hot-reload status) || true
@@ -242,7 +288,7 @@ echo "--- Status check (forge hot-reload status) ---"
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
 echo "║   PHASE 5 ACTOR MIGRATION VERIFIED                              ║"
-echo "║   Counter ran 3 Incs → hot reload → count=3 preserved           ║"
-echo "║   v2 migrate_state added history=[] without data loss            ║"
-echo "║   post_migrate+inc: count=4 ✓                                    ║"
+echo "║   pre_migrate:  count=3, history=(none)  [v1 — no field]        ║"
+echo "║   post_migrate: count=3, history=[]      [migrate_state ran]    ║"
+echo "║   post_inc:     count=4, history=[3]     [v2 tracking active]   ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"

@@ -25,6 +25,12 @@ mod MyApp do
       println(label ++ int_to_string(state.count))
       state
     end
+
+    on PrintHistory(label) do
+      let strs = List.map(state.history, fn n -> String.from_int(n))
+      println(label ++ "[" ++ String.join(strs, ",") ++ "]")
+      state
+    end
   end
 
   -- Magic name: <actor_lowercase>_migrate_state
