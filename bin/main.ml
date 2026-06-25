@@ -1191,6 +1191,38 @@ let compile filename =
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
     stamp "lower";
+    (* Phase 5: collect actor state schemas for .schemas.json emission.
+       Picks up TDRecord entries named *_State — the state record emitted
+       by lower_actor for every actor definition. Only collected when both
+       --hot-reload and --compile-so are active. *)
+    let rec ty_to_schema_str = function
+      | March_tir.Tir.TInt    -> "Int"
+      | March_tir.Tir.TBool   -> "Bool"
+      | March_tir.Tir.TFloat  -> "Float"
+      | March_tir.Tir.TString -> "String"
+      | March_tir.Tir.TUnit   -> "Unit"
+      | March_tir.Tir.TCon (n, []) -> n
+      | March_tir.Tir.TCon (n, args) ->
+        n ^ "(" ^ String.concat "," (List.map ty_to_schema_str args) ^ ")"
+      | March_tir.Tir.TTuple ts ->
+        "(" ^ String.concat "," (List.map ty_to_schema_str ts) ^ ")"
+      | other -> March_tir.Tir.show_ty other
+    in
+    let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
+      if Option.is_some !hot_reload_prefix && !compile_so then
+        List.filter_map (fun td ->
+            match td with
+            | March_tir.Tir.TDRecord (tname, fields)
+              when let n = String.length tname in
+                   n > 6 && String.sub tname (n - 6) 6 = "_State" ->
+                let actor_name = String.sub tname 0 (String.length tname - 6) in
+                let user_fields = List.filter (fun (nm, _) ->
+                    nm = "" || nm.[0] <> '$') fields in
+                Some (actor_name, user_fields)
+            | _ -> None
+          ) tir.March_tir.Tir.tm_types
+      else []
+    in
     (* Capture the interface-dispatch table before it is cleared by lower_module.
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
@@ -1770,6 +1802,27 @@ let compile filename =
              ) hr_impl_hashes;
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
+        end);
+        (* Phase 5: emit .schemas.json sidecar for actor state schema checking
+           at deploy time.  Each entry records the actor's state field names
+           and types so forge deploy hot can diff old vs new schemas. *)
+        (if !compile_so && actor_schemas <> [] then begin
+          let schema_path = out_bin ^ ".schemas.json" in
+          (try
+            let oc = open_out schema_path in
+            Printf.fprintf oc "{\n";
+            List.iteri (fun i (actor_name, fields) ->
+                let field_json = String.concat ", " (List.map (fun (fname, fty) ->
+                    Printf.sprintf {|{"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                  ) fields) in
+                Printf.fprintf oc "  %S: {\n    \"compat\": \"full\",\n    \"state_fields\": [%s]\n  }%s\n"
+                  actor_name field_json
+                  (if i < List.length actor_schemas - 1 then "," else "")
+              ) actor_schemas;
+            Printf.fprintf oc "}\n";
+            close_out oc
+          with Sys_error e ->
+            Printf.eprintf "warning: could not write %s: %s\n" schema_path e)
         end)
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
