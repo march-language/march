@@ -1305,6 +1305,27 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
       | _ -> ())
     decls
 
+(** Register ADT/record sorts for a list of declarations without running the full
+    VC pass.  Called by [--check-migration] mode to prime the type tables before
+    invoking [check_fn_post] on a synthesised migrate_state signature.
+
+    Clears all tables first to avoid stale accumulation from prior calls.
+    Must be called with the prior-version record decls (e.g. [RawRecord]) so
+    that their selectors are available when check_post reflects field projections. *)
+let register_types_for_check (decls : A.decl list) : unit =
+  Hashtbl.clear adt_ctors;
+  Hashtbl.clear ctor_field_sorts;
+  Hashtbl.clear ctor_field_names;
+  Hashtbl.clear axiom_measures;
+  Hashtbl.clear measure_base_cases;
+  Hashtbl.clear measure_preamble_sorts;
+  measure_preamble := "";
+  type_preamble := "";
+  register_builtin_adts ();
+  register_adt_names decls;
+  register_field_sorts decls;
+  build_type_preamble ()
+
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
 (* Functions annotated `@[measure]` as (bare name, fn_def). *)

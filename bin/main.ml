@@ -547,6 +547,10 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
+(* Gap #3: --check-migration mode — verify migrate_state soundness via SMT *)
+let check_migration   = ref false
+let prior_schema_path = ref ""
+let new_schema_path   = ref ""
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -906,6 +910,91 @@ let run_fmt args =
   else exit 0
 
 (* ------------------------------------------------------------------ *)
+(* Gap #3: --check-migration helpers                                   *)
+(* ------------------------------------------------------------------ *)
+
+(* STUB-GAP2: replace with March_parser.Parser.expr_eof after Gap #2 merges *)
+let parse_pred (_src : string) : March_ast.Ast.expr option = None
+
+(* Convert a schema type string back to an AST type.
+   Inverse of the ty_to_schema_str function that writes .schemas.json. *)
+let rec schema_str_to_ty (s : string) : March_ast.Ast.ty =
+  let module A = March_ast.Ast in
+  let sp = A.dummy_span in
+  let con name args = A.TyCon ({ A.txt = name; A.span = sp }, args) in
+  match s with
+  | "Int"    -> con "Int"    []
+  | "Bool"   -> con "Bool"   []
+  | "String" -> con "String" []
+  | "Float"  -> con "Float"  []
+  | _ when String.length s > 5 && String.sub s 0 5 = "List(" ->
+    let inner = String.sub s 5 (String.length s - 6) in
+    con "List" [schema_str_to_ty inner]
+  | other -> con other []
+
+(* Synthesise a fake DType for the prior-version state shape (called RawRecord)
+   from the field list in the prior .schemas.json.  This lets register_types_for_check
+   see the selectors so check_post can reflect old.field projections in inv_old. *)
+let make_rawrecord_decl (prior_fields : March_forge.Schema_diff.field list) : March_ast.Ast.decl =
+  let module A = March_ast.Ast in
+  let sp = A.dummy_span in
+  let ast_fields = List.map (fun (f : March_forge.Schema_diff.field) ->
+      { A.fld_name = { A.txt = f.March_forge.Schema_diff.name; A.span = sp };
+        A.fld_ty   = schema_str_to_ty f.March_forge.Schema_diff.ty;
+        A.fld_lin  = A.Unrestricted })
+    prior_fields
+  in
+  A.DType (A.Public, { A.txt = "RawRecord"; A.span = sp },
+           [], A.TDRecord ast_fields, sp)
+
+(* Search the desugared AST for a migrate_state fn_def inside the named actor.
+   DMod is (name * visibility * decl list * span). *)
+let rec find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
+    : March_ast.Ast.fn_def option =
+  let module A = March_ast.Ast in
+  List.find_map (fun d -> match d with
+    | A.DFn (fd, _) when fd.A.fn_name.A.txt = "migrate_state" ->
+      Some fd
+    | A.DMod (name, _, inner, _) when name.A.txt = actor ->
+      find_migrate_fn actor inner
+    | A.DMod (_, _, inner, _) ->
+      find_migrate_fn actor inner
+    | _ -> None) decls
+
+(* Patch a migrate_state fn_def with refined param/return types for the VC.
+   - First param gets type  { old : RawRecord | inv_old(old) }
+   - Return type becomes    { v : <state_name> | inv_new(v) } *)
+let patch_migrate_fn (fd : March_ast.Ast.fn_def)
+    ~(inv_old : March_ast.Ast.expr) ~(inv_new : March_ast.Ast.expr)
+    ~(state_name : string) : March_ast.Ast.fn_def =
+  let module A = March_ast.Ast in
+  let sp = fd.A.fn_name.A.span in
+  let rawrec_ty = A.TyCon ({ A.txt = "RawRecord"; A.span = sp }, []) in
+  let state_ty  = A.TyCon ({ A.txt = state_name;  A.span = sp }, []) in
+  let mk_binder name = Some { A.txt = name; A.span = sp } in
+  let patch_clause (c : A.fn_clause) =
+    let params = match c.A.fc_params with
+      | [] -> []
+      | fp :: rest ->
+        (match fp with
+         | A.FPNamed p | A.FPDefault (p, _) ->
+           let refined = A.TyRefine (rawrec_ty, mk_binder "s", inv_old) in
+           let p' = { p with A.param_ty = Some refined } in
+           (match fp with
+            | A.FPNamed _ -> A.FPNamed p'
+            | A.FPDefault (_, def) -> A.FPDefault (p', def)
+            | A.FPPat _ -> fp)
+           :: rest
+         | A.FPPat _ -> fp :: rest)
+    in
+    { c with A.fc_params = params }
+  in
+  let ret_ty = A.TyRefine (state_ty, mk_binder "v", inv_new) in
+  { fd with
+    A.fn_clauses = List.map patch_clause fd.A.fn_clauses;
+    A.fn_ret_ty  = Some ret_ty }
+
+(* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
 (* ------------------------------------------------------------------ *)
 
@@ -1168,6 +1257,67 @@ let compile filename =
        March_cas.Cas.store_artifact src_store src_ch filename
      | None -> ());
     exit 0
+  end
+  else if !check_migration then begin
+    (* Gap #3: verify migrate_state soundness for each actor that has a
+       new-version @invariant.  Shells out nothing — runs entirely in-process
+       using the existing check_fn_post postcondition machinery.
+
+       STUB-GAP2: Both parse_pred calls below return None (no expr_eof parser
+       entry point yet).  All actors therefore hit the (None, _) early-exit and
+       the whole block is a no-op.  Remove the stubs after Gap #2 merges. *)
+    let module A  = March_ast.Ast in
+    let module Rc = March_refinecheck.Refine_check in
+    let module Sd = March_forge.Schema_diff in
+
+    (* STUB-GAP2: replace with s.Sd.invariant after Gap #2 adds the field *)
+    let schema_invariant (_s : Sd.actor_schema) : string option = None in
+
+    let prior_schemas = Sd.parse_schemas_file !prior_schema_path in
+    let new_schemas   = Sd.parse_schemas_file !new_schema_path   in
+    let mig_errctx    = March_errors.Errors.create () in
+    let any_error     = ref false in
+
+    List.iter (fun (actor_name, new_schema) ->
+      match schema_invariant new_schema with
+      | None -> ()   (* actor has no @invariant — nothing to verify *)
+      | Some inv_new_str ->
+        let inv_old_str = match List.assoc_opt actor_name prior_schemas with
+          | Some s -> Option.value (schema_invariant s) ~default:"true"
+          | None   -> "true"
+        in
+        (* STUB-GAP2: replace with parse_pred using expr_eof after Gap #2 merges *)
+        let inv_old_opt = parse_pred inv_old_str in
+        let inv_new_opt = parse_pred inv_new_str in
+        ignore (inv_old_str, inv_new_str);
+        (match inv_old_opt, inv_new_opt with
+        | None, _ | _, None -> ()   (* stub: always skipped until Gap #2 lands *)
+        | Some inv_old, Some inv_new ->
+          let prior_fields = match List.assoc_opt actor_name prior_schemas with
+            | Some s -> s.Sd.state_fields | None -> [] in
+          (* Register the prior-version record shape as RawRecord so
+             field selectors are available in the SMT context. *)
+          Rc.register_types_for_check [make_rawrecord_decl prior_fields];
+          (match find_migrate_fn actor_name desugared.A.mod_decls with
+          | None -> ()   (* no migrate_state for this actor — nothing to verify *)
+          | Some fd ->
+            let patched = patch_migrate_fn fd ~inv_old ~inv_new
+                            ~state_name:(actor_name ^ "_State") in
+            Rc.check_fn_post ~root:(Sys.getcwd ()) mig_errctx patched;
+            if March_errors.Errors.has_errors mig_errctx then
+              any_error := true))
+    ) new_schemas;
+
+    if !any_error then begin
+      let diags = March_errors.Errors.sorted mig_errctx in
+      List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          Printf.eprintf "%s\n\n"
+            (March_errors.Errors.render_diagnostic ~src d))
+        diags;
+      Printf.eprintf "deploy aborted: migrate_state is not provably sound\n";
+      exit 1
+    end else
+      exit 0
   end
   else if compile_mode then begin
     (* -dump-phases: collect per-stage JSON graphs *)
@@ -2446,6 +2596,12 @@ let () =
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
     ("--no-copy-runtime", Arg.Set no_copy_runtime, " (JS) Skip auto-copy of march_runtime.mjs / march_dom.mjs (for build tools that manage them)");
+    ("--check-migration", Arg.Set check_migration,
+     " Verify migrate_state soundness via SMT (requires --prior-schema and --new-schema)");
+    ("--prior-schema", Arg.Set_string prior_schema_path,
+     "<path>  Prior .schemas.json for --check-migration");
+    ("--new-schema", Arg.Set_string new_schema_path,
+     "<path>  New .schemas.json for --check-migration");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
