@@ -80,6 +80,9 @@ static _Atomic(march_proc *) g_ext_spawn_head = NULL;
 
 static _Thread_local march_scheduler *tl_sched = NULL;
 
+/* Definition of the sentinel exported via march_scheduler.h. */
+int march_recv_no_msg_sentinel;
+
 /* Cached OS page size — initialised once in march_sched_init().
  * Used by the SIGSEGV handler (sysconf is not async-signal-safe). */
 static size_t g_page_size = 0;
@@ -664,16 +667,17 @@ int march_sched_send(march_proc *target, void *msg) {
 
 void *march_sched_recv(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
-    if (!p) return NULL;
+    if (!p) return MARCH_RECV_NO_MSG;
 
-    /* Fast path: message already available. */
-    void *msg = mbox_pop(p);
-    if (msg) return msg;
+    /* Fast path: check node existence, not message value.
+     * March zero-arg constructors are valid msg=NULL (inttoptr i64 0), so we
+     * MUST NOT use "if (msg)" to detect "has message" — we use the node ptr. */
+    if (p->mailbox) return mbox_pop(p);
 
     /* Slow path: check mailbox under lock, then park if truly empty. */
     mbox_lock_acquire(p);
-    msg = mbox_pop(p);
-    if (msg) {
+    if (p->mailbox) {
+        void *msg = mbox_pop(p);
         mbox_lock_release(p);
         return msg;
     }
@@ -691,9 +695,15 @@ void *march_sched_recv(void) {
      * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
      * its side, making it safe for a waker to push us to a deque. */
 
-    /* Resumed — a sender woke us. */
+    /* Resumed — a sender woke us.  Pop under lock; return sentinel if empty
+     * (the actor was woken for a reason other than a new message, e.g. kill). */
     mbox_lock_acquire(p);
-    msg = mbox_pop(p);
+    void *msg;
+    if (p->mailbox) {
+        msg = mbox_pop(p);
+    } else {
+        msg = MARCH_RECV_NO_MSG;
+    }
     mbox_lock_release(p);
     return msg;
 }

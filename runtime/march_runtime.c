@@ -1210,13 +1210,16 @@ static void actor_green_thread(void *arg) {
 
     while (a[3]) {  /* while alive */
         void *msg = march_sched_recv();
-        if (!msg) break;  /* woken without message (killed) */
+        if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
 
         /* ── Phase 5: detect system migrate message ──────────────────────────
          * Check BEFORE the alive gate so the message is always freed even if
          * the actor died between injection and receipt.
-         * The migrate message is malloc'd (not march-heap), so free with free(). */
-        if (((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+         * The migrate message is malloc'd (not march-heap), so free with free().
+         * Guard against msg==NULL: zero-arg constructors (e.g. Inc()) are
+         * legitimately represented as the null pointer by the niche optimization;
+         * they are never migrate messages. */
+        if (msg != NULL && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
             march_migrate_msg_t *mm = (march_migrate_msg_t *)msg;
             if (a[3] && mm->migrate_fn) {
                 /* a[4] is the state record pointer (state indirection layout).
@@ -1234,25 +1237,28 @@ static void actor_green_thread(void *arg) {
             break;
         }
 
-        typedef void (*closure_fn_t)(void *, void *, void *);
-        closure_fn_t fn;
         uint32_t tbl_version = 0;
-
-        if (meta->dispatch_name_id) {
-            /* Hot-reload actor: look up the current dispatch fn in the dispatch table.
-             * Actor dispatch fns ignore their env arg, so passing the (possibly stale)
-             * closure at a[2] as env is safe — the function only uses actor and msg. */
-            void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
-            memcpy(&fn, &fn_raw, sizeof(fn));
-        } else {
-            /* Regular actor: direct closure dispatch. */
-            char *closure = (char *)(uintptr_t)a[2];
-            fn = *(closure_fn_t *)(closure + 16);
-        }
 
         int64_t saved_rc = a[0];
         a[0] = 1;  /* FBIP: force RC=1 for in-place reuse */
-        fn((void *)(uintptr_t)a[2], actor, msg);
+
+        if (meta->dispatch_name_id) {
+            /* Hot-reload actor: the dispatch fn is a bare 2-arg function
+             * Counter_dispatch(actor, msg) — NOT a closure wrapper.
+             * Call it directly without a closure env arg. */
+            typedef void (*dispatch_fn_t)(void *, void *);
+            void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
+            dispatch_fn_t dispatch_fn;
+            memcpy(&dispatch_fn, &fn_raw, sizeof(dispatch_fn));
+            dispatch_fn(actor, msg);
+        } else {
+            /* Regular actor: indirect via closure wrapper (3-arg: closure, actor, msg). */
+            typedef void (*closure_fn_t)(void *, void *, void *);
+            char *closure = (char *)(uintptr_t)a[2];
+            closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+            fn((void *)(uintptr_t)a[2], actor, msg);
+        }
+
         a[0] = saved_rc;
 
         if (meta->dispatch_name_id) {
@@ -1350,8 +1356,10 @@ void *march_spawn(void *actor) {
 }
 
 void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
-    march_actor_meta *meta = find_meta(actor);
-    if (meta) meta->dispatch_name_id = name_id;
+    /* Called before march_spawn, so find_or_create_meta to ensure the entry
+     * exists; march_spawn will find the same entry and attach the green thread. */
+    march_actor_meta *meta = find_or_create_meta(actor);
+    meta->dispatch_name_id = name_id;
 }
 
 #define MARCH_MIGRATE_SNAPSHOT 2048
@@ -1727,7 +1735,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 
     /* Block until the actor calls actor_reply. */
     void *result = march_sched_recv();
-    if (!result) return mk_err_cstr("actor_call: no reply");
+    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
 
     return mk_ok(result);
 }

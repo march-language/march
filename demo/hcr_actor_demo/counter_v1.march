@@ -1,43 +1,31 @@
--- HCR Phase 5 Demo: Actor state migration — Counter v1
+-- HCR Phase 5 Demo: Counter v1 (baseline patch)
 --
--- This actor tracks a simple integer count.
--- Deploy v2 (counter_v2.march) while this is running to trigger
--- live state migration: the count field is preserved and a new
--- history list is added.
---
--- Build and run:
---   march demo/hcr_actor_demo/counter_v1.march \
---     --hot-reload MyApp --compile-so -o /tmp/counter_v1.so
---   march demo/hcr_actor_demo/server.march --hot-reload MyApp \
---     --compile -o /tmp/counter_server
---   /tmp/counter_server
+-- Message type MUST match counter_server.march so the server's encoded messages
+-- are understood by this dispatch function after hot-swap.
+-- State: { count: Int }
 
 mod MyApp do
 
   actor Counter do
-    state = { count: Int = 0 }
+    state { count: Int }
+    init { count: 0 }
 
-    on Inc() ->
-      { count = state.count + 1 }
+    on Inc() do
+      { count: state.count + 1 }
+    end
 
-    on Dec() ->
-      { count = state.count - 1 }
-
-    on Reset() ->
-      { count = 0 }
-
-    on GetCount() ->
-      state.count
+    on PrintCount(label) do
+      println(label ++ int_to_string(state.count))
+      state
+    end
   end
 
   fn main() do
     let pid = spawn(Counter)
-    send(pid, Inc())
-    send(pid, Inc())
-    send(pid, Inc())
-    let n = actor_call(pid, GetCount(), 1000)
-    println("Count after 3 increments: " ++ int_to_string(n))
-    ()
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    send(pid, PrintCount("v1 count="))
   end
 
 end

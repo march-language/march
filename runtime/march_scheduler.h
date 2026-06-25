@@ -152,10 +152,22 @@ int64_t      march_sched_total_spawned(void);
  * Returns 0 on success, -1 if target is NULL or DEAD. */
 int          march_sched_send(march_proc *target, void *msg);
 
+/* Sentinel returned by march_sched_recv when the process was woken without a
+ * message (killed or spurious wakeup).  This is the address of a static C
+ * variable — never a valid March heap object or tagged integer.
+ *
+ * March zero-arg constructors (e.g. Inc()) are legitimately represented as
+ * the null pointer (inttoptr i64 0), so callers MUST test against
+ * MARCH_RECV_NO_MSG rather than against NULL / 0. */
+extern int march_recv_no_msg_sentinel;
+#define MARCH_RECV_NO_MSG ((void *)&march_recv_no_msg_sentinel)
+
 /* Receive the next message from the current process's mailbox.
  * If the mailbox is empty, parks the process as PROC_WAITING and yields
- * to the scheduler. Returns the message pointer on success, NULL if the
- * process was woken without a message (e.g., killed). */
+ * to the scheduler.
+ *
+ * Returns the message pointer on success (may be NULL for zero-arg
+ * constructors!), or MARCH_RECV_NO_MSG if woken without a message. */
 void        *march_sched_recv(void);
 
 /* Try to receive without blocking. Returns the message if available,

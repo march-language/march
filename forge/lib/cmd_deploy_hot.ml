@@ -279,13 +279,32 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
       end else begin
         Printf.printf "Deploying %d changed function(s)...\n%!" (List.length to_activate);
 
-        (* 5. sig_hash safety gate: new sig_hash must match old sig_hash (no ABI breaks) *)
+        (* 5. sig_hash safety gate: new sig_hash must match old sig_hash (no ABI breaks).
+           Exception: actor dispatch functions whose state schema changed AND whose actor
+           exports a __migrate_<Actor> symbol are allowed to have a different sig_hash —
+           the state migration path handles the ABI change safely. *)
+        let dispatch_suffix = "_dispatch" in
+        let has_migrate_exemption (fn_name : string) : bool =
+          (* fn_name pattern: "Module.ActorName_dispatch" or "ActorName_dispatch" *)
+          let base = match String.rindex_opt fn_name '.' with
+            | Some i -> String.sub fn_name (i+1) (String.length fn_name - i - 1)
+            | None   -> fn_name
+          in
+          let dlen = String.length dispatch_suffix in
+          if String.length base > dlen &&
+             String.sub base (String.length base - dlen) dlen = dispatch_suffix
+          then begin
+            let actor_name = String.sub base 0 (String.length base - dlen) in
+            so_exports_symbol so_path ("__migrate_" ^ actor_name)
+          end else false
+        in
         let abi_violations = List.filter (fun fm ->
           match Hashtbl.find_opt slot_map fm.fn_name with
           | None -> false
           | Some slot ->
             slot.slot_sig_hash <> "" && fm.fn_sig_hash <> "" &&
-            slot.slot_sig_hash <> fm.fn_sig_hash
+            slot.slot_sig_hash <> fm.fn_sig_hash &&
+            not (has_migrate_exemption fm.fn_name)
         ) to_activate in
         if abi_violations <> [] then begin
           Printf.eprintf "error: ABI mismatch — sig_hash changed for:\n";
@@ -502,6 +521,10 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                   let ic = open_in new_schemas_path in
                   let content = In_channel.input_all ic in
                   close_in ic;
+                  (* Ensure the .march directory exists before writing *)
+                  let march_dir = Filename.dirname prev_schemas_path in
+                  (if not (Sys.file_exists march_dir) then
+                    try Unix.mkdir march_dir 0o755 with Unix_error _ -> ());
                   let oc = open_out prev_schemas_path in
                   output_string oc content;
                   close_out oc

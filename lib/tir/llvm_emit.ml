@@ -3516,6 +3516,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          let v_coerced = coerce ctx v_ty v_val field_ty in
          emit_store_field ctx ptr i field_ty v_coerced
        ) args;
+       (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
+          after allocation so the actor green thread uses the hot-reload table.
+          Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
+          wrapper; injecting here survives all IR transformations.
+          Actor types are named <Base>_Actor; dispatch functions are <Base>_dispatch. *)
+       let actor_sfx = "_Actor" in
+       let atn_len = String.length alloc_type_name in
+       let sfx_len = String.length actor_sfx in
+       if ctx.hr_config <> None
+          && atn_len > sfx_len
+          && String.sub alloc_type_name (atn_len - sfx_len) sfx_len = actor_sfx
+       then begin
+         let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
+         let dispatch_fn = actor_base ^ "_dispatch" in
+         match Hot_reload.Name_table.id_of ctx.hr_names dispatch_fn with
+         | Some id0 ->
+           let slot_id = id0 + 1 in  (* 1-based; 0 = "not set" sentinel *)
+           emit ctx (Printf.sprintf
+             "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
+         | None -> ()
+       end;
        ("ptr", ptr))
 
   | Tir.EAlloc (_, args) ->
@@ -4032,8 +4053,23 @@ and emit_case ctx scrut_atom branches default_opt =
   let effective_repr =
     match Repr.repr_of_ty !cur_type_defs scrut_tir_ty_init with
     | Repr.Boxed
-      when (match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
-           && branches_match_niche_shape () ->
+      when (
+        (* TVar path: scrutinee type unknown (unresolved module body), recover
+           niche from the branch constructor names. *)
+        ((match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
+         && branches_match_niche_shape ())
+        ||
+        (* Concrete niche path: TCon with no type params -- repr_of_ty returns
+           Boxed because it cannot determine niche-safety without concrete params,
+           but EAlloc uses is_niche_shaped (which works without params) and emits
+           the nullary ctor as inttoptr i64 0 (null).  We must match that choice
+           here so the match uses icmp eq null rather than a tag load, which would
+           segfault on the null pointer.  The erased-i64 convention untags
+           scalar payloads at their concrete use sites, so tagged=false is safe. *)
+        (match scrut_tir_ty_init with
+         | Tir.TCon (name, []) -> Repr.is_niche_shaped !cur_type_defs name
+         | _ -> false)
+      ) ->
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
     | r -> r
   in
@@ -5622,15 +5658,27 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
-     into NAME_IDs for the dispatch table. *)
+     into NAME_IDs for the dispatch table.
+     Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
+     TIR because lower.ml strips the top-level file-module name from all
+     declarations (only nested submodule functions retain their prefix).
+     We include any *_dispatch function unconditionally so that actor hot-reload
+     works when the --hot-reload boundary is the file-level module. *)
+  let is_actor_dispatch_fn (n : string) =
+    let sfx = "_dispatch" in
+    let ln = String.length n and ls = String.length sfx in
+    ln > ls && String.sub n (ln - ls) ls = sfx
+  in
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
     | Some cfg ->
       m.Tir.tm_fns
       |> List.filter_map (fun fn ->
-           if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name)
-           then Some fn.Tir.fn_name else None)
+           let n = fn.Tir.fn_name in
+           if Hot_reload.is_reloadable cfg (module_of_name n)
+              || is_actor_dispatch_fn n
+           then Some n else None)
       |> Hot_reload.Name_table.build
   in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
@@ -5648,15 +5696,18 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   let hr_setup =
     match hot_reload with
     | None -> ""
-    | Some cfg ->
+    | Some _cfg ->
       let n = Hot_reload.Name_table.count hr_names in
       if n = 0 then "" else begin
         let b = Buffer.create 256 in
-        Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" n;
+        (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
+           sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)
+        Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" (n + 1);
         List.iter (fun (fn : Tir.fn_def) ->
-          if Hot_reload.is_reloadable cfg (module_of_name fn.Tir.fn_name) then
-            match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
-            | Some id ->
+          match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
+          | None -> ()
+          | Some id0 ->
+              let id = id0 + 1 in  (* shift to 1-based *)
               (* Emit the impl_hash (if known) as a private string global and
                  pass its ptr; otherwise fall back to a null baseline hash. *)
               let hash_arg =
@@ -5694,7 +5745,6 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
               Printf.bprintf b
                 "  call void @march_dispatch_register_name(i32 %d, ptr %s)\n"
                 id name_g
-            | None -> ()
         ) m.Tir.tm_fns;
         (* Start the reload server if MARCH_HOT_RELOAD_SOCKET is set. *)
         Buffer.add_string ctx.preamble
@@ -5761,54 +5811,48 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
                            "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
   let migrate_suffix = "_migrate_state" in
   let migrate_suffix_len = String.length migrate_suffix in
-  let spawn_suffix = "_spawn" in
-  let spawn_suffix_len = String.length spawn_suffix in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
       else if List.mem fn.Tir.fn_name mutual_fn_names then ()
       else begin
         let fname = fn.Tir.fn_name in
         let flen = String.length fname in
-        (* Phase 5: for hot-reload spawn functions, emit the body as
-           fname_impl, then a thin wrapper that also calls
-           march_actor_set_dispatch_id so the runtime can use the dispatch
-           table for this actor (function updates + migrate walk). *)
-        let spawn_dispatch_slot =
-          if ctx.hr_config <> None && flen > spawn_suffix_len
-             && String.sub fname (flen - spawn_suffix_len) spawn_suffix_len = spawn_suffix
-          then
-            let actor_name = String.sub fname 0 (flen - spawn_suffix_len) in
-            Hot_reload.Name_table.id_of hr_names (actor_name ^ "_dispatch")
-          else None
-        in
-        (match spawn_dispatch_slot with
-        | Some slot_id ->
-          (* Emit body under fname_impl, then a thin wrapper *)
-          emit_fn ctx { fn with Tir.fn_name = fname ^ "_impl" };
-          let mangled_wrapper = mangle_extern fname in
-          let mangled_impl    = mangle_extern (fname ^ "_impl") in
-          Buffer.add_string ctx.buf (Printf.sprintf
-            "\ndefine ptr @%s() {\nentry:\n\
-             \  %%a = call ptr @%s()\n\
-             \  call void @march_actor_set_dispatch_id(ptr %%a, i32 %d)\n\
-             \  ret ptr %%a\n}\n"
-            mangled_wrapper mangled_impl slot_id)
-        | None ->
-          emit_fn ctx fn);
-        (* Phase 5: for migrate_state functions, export a __migrate_<actor>
+        emit_fn ctx fn;
+        (* Phase 5: for migrate_state functions, export a __migrate_<Actor>
            alias so march_reload.c can dlsym it without knowing the full
-           mangled March name. Convention: Mod.Counter_migrate_state →
-           __migrate_Mod_Counter (dots → underscores, strip _migrate_state). *)
+           mangled March name.
+           Convention: fn counter_migrate_state inside mod MyApp →
+             TIR name "MyApp.counter_migrate_state"
+             → strip "_migrate_state" → "MyApp.counter"
+             → last dot-component → "counter"
+             → capitalize first letter → "Counter"
+             → alias "@__migrate_Counter"
+           The march_reload.c runtime forms the same name by stripping
+           "_dispatch" from the ACTIVATE name "Counter_dispatch". *)
         if flen > migrate_suffix_len
            && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
         then begin
-          let actor_qualified = String.sub fname 0 (flen - migrate_suffix_len) in
-          let actor_mangled = String.map (fun c -> if c = '.' then '_' else c) actor_qualified in
-          let alias_name  = "__migrate_" ^ actor_mangled in
-          let llvm_fn_name = mangle_extern fname in
-          (* LLVM alias: same signature as migrate_state (ptr → ptr) *)
-          Buffer.add_string ctx.buf (Printf.sprintf
-            "@%s = alias ptr (ptr), ptr @%s\n" alias_name llvm_fn_name)
+          (* Take the part before _migrate_state, then extract the last
+             dot-separated component (strips module prefix), then capitalize
+             the first letter to recover the actor name. *)
+          let before_suffix = String.sub fname 0 (flen - migrate_suffix_len) in
+          let last_component =
+            match String.rindex_opt before_suffix '.' with
+            | None   -> before_suffix
+            | Some i -> String.sub before_suffix (i + 1)
+                          (String.length before_suffix - i - 1)
+          in
+          if last_component <> "" then begin
+            let actor_name =
+              (String.uppercase_ascii (String.sub last_component 0 1))
+              ^ (String.sub last_component 1 (String.length last_component - 1))
+            in
+            let alias_name   = "__migrate_" ^ actor_name in
+            let llvm_fn_name = mangle_extern fname in
+            (* LLVM alias: same signature as migrate_state (ptr → ptr) *)
+            Buffer.add_string ctx.buf (Printf.sprintf
+              "@%s = alias ptr (ptr), ptr @%s\n" alias_name llvm_fn_name)
+          end
         end
       end
     ) m.Tir.tm_fns;

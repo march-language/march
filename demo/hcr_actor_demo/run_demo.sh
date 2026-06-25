@@ -58,12 +58,12 @@ if [ -f "$WORKDIR/counter_v2.so.schemas.json" ]; then
     echo ""
 fi
 
-# Step 5: Check __migrate_MyApp_Counter is exported
+# Step 5: Check __migrate_Counter is exported
 echo "--- Checking migrate symbol export ---"
-if nm -D "$WORKDIR/counter_v2.so" 2>/dev/null | grep -q "__migrate_MyApp_Counter"; then
-    echo "✓ __migrate_MyApp_Counter exported from v2 .so"
+if nm -D "$WORKDIR/counter_v2.so" 2>/dev/null | grep -q "__migrate_Counter"; then
+    echo "✓ __migrate_Counter exported from v2 .so"
 else
-    echo "⚠ __migrate_MyApp_Counter not found (expected when actors are named without module)"
+    echo "⚠ __migrate_Counter not found"
     nm -D "$WORKDIR/counter_v2.so" 2>/dev/null | grep __migrate || true
 fi
 echo ""

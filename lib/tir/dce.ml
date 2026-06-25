@@ -100,6 +100,17 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
     if fd.Tir.fn_name = "__march_setup__" || fd.Tir.fn_name = "__march_setup_all__"
     then begin Queue.push fd.Tir.fn_name queue; has_seeds := true end
   ) m.Tir.tm_fns;
+  (* Hot-reload migration entry points: seeded like exports so the __migrate_<Actor>
+     alias in llvm_emit survives DCE.  Not reachable from main but dlsym'd at
+     deploy time by march_reload.c. *)
+  List.iter (fun (fd : Tir.fn_def) ->
+    let n = fd.Tir.fn_name in
+    let suf = "_migrate_state" in
+    let ln = String.length n and ls = String.length suf in
+    if ln >= ls && String.sub n (ln - ls) ls = suf then begin
+      Queue.push n queue; has_seeds := true
+    end
+  ) m.Tir.tm_fns;
   if not !has_seeds then
     List.iter (fun fd -> Queue.push fd.Tir.fn_name queue) m.Tir.tm_fns;
   while not (Queue.is_empty queue) do

@@ -1,58 +1,46 @@
--- HCR Phase 5 Demo: Actor state migration — Counter v2
+-- HCR Phase 5 Demo: Counter v2 (migration patch)
 --
--- v2 adds a `history` field (list of past counts).
--- The migrate_state function translates v1 state (just count: Int)
--- to v2 state (count: Int, history: List(Int)).
+-- Message type matches counter_server.march and counter_v1.march exactly
+-- so dispatch remains compatible after hot-swap.
+-- State adds: history: List(Int)
 --
 -- When forge deploy hot activates this version:
---   1. It detects the state schema changed (history field added)
---   2. It finds __migrate_MyApp_Counter exported from this .so
---   3. It broadcasts MARCH_MIGRATE_TAG to all running Counter actors
---   4. Each Counter swaps its state ptr to the result of migrate_state
---
--- The running actors continue without restart.
+--   1. Schema diff detects history field added
+--   2. __migrate_Counter is found (from counter_migrate_state below)
+--   3. MARCH_MIGRATE_TAG broadcast to all Counter actors
+--   4. Each Counter calls counter_migrate_state({count}) → {count, history=[]}
 
 mod MyApp do
 
   actor Counter do
-    state = { count: Int = 0, history: List(Int) = [] }
+    state { count: Int, history: List(Int) }
+    init { count: 0, history: [] }
 
-    on Inc() ->
+    on Inc() do
       let new_count = state.count + 1
-      { count = new_count, history = [state.count] ++ state.history }
+      { count: new_count, history: List.append([state.count], state.history) }
+    end
 
-    on Dec() ->
-      let new_count = state.count - 1
-      { count = new_count, history = [state.count] ++ state.history }
-
-    on Reset() ->
-      { count = 0, history = state.history }
-
-    on GetCount() ->
-      state.count
-
-    on GetHistory() ->
-      state.history
+    on PrintCount(label) do
+      println(label ++ int_to_string(state.count))
+      state
+    end
   end
 
-  -- migrate_state is the magic name: the compiler exports it as
-  -- @__migrate_MyApp_Counter so the reload server can dlsym it.
-  -- It receives the old state (Counter_State with just count: Int)
-  -- and must return the new state (Counter_State with count + history).
-  fn migrate_state(old : Counter_State) : Counter_State do
-    { count = old.count, history = [] }
+  -- Magic name: <actor_lowercase>_migrate_state
+  -- Exported as @__migrate_Counter by the compiler.
+  -- Receives old state (v1: {count: Int}) and returns new state (v2: {count, history}).
+  fn counter_migrate_state(old : { count: Int }) : { count: Int, history: List(Int) } do
+    { count: old.count, history: [] }
   end
 
   fn main() do
     let pid = spawn(Counter)
-    send(pid, Inc())
-    send(pid, Inc())
-    send(pid, Inc())
-    let n = actor_call(pid, GetCount(), 1000)
-    println("Count: " ++ int_to_string(n))
-    let hist = actor_call(pid, GetHistory(), 1000)
-    println("History length: " ++ int_to_string(List.length(hist)))
-    ()
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    let _ = send(pid, PrintCount("v2 count="))
+    send(pid, PrintCount("(history tracking active)"))
   end
 
 end

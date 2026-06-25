@@ -328,8 +328,26 @@ static void handle_client(int fd) {
              * actors registered with this dispatch slot. */
             if (migrate_required) {
                 char migrate_sym[320];
-                snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", name);
-                /* Replace dots with underscores in the mangled name */
+                /* Strip "_dispatch" suffix from the ACTIVATE name to get the
+                 * actor short-name, matching the __migrate_<Actor> alias emitted
+                 * by the compiler for fn counter_migrate_state functions.
+                 * E.g. "Counter_dispatch" → "Counter" → "__migrate_Counter". */
+                const char *dispatch_sfx = "_dispatch";
+                size_t name_len = strlen(name);
+                size_t dsfx_len = strlen(dispatch_sfx);
+                char actor_short[256];
+                if (name_len > dsfx_len &&
+                    strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
+                    size_t alen = name_len - dsfx_len;
+                    if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
+                    strncpy(actor_short, name, alen);
+                    actor_short[alen] = '\0';
+                } else {
+                    strncpy(actor_short, name, sizeof(actor_short) - 1);
+                    actor_short[sizeof(actor_short) - 1] = '\0';
+                }
+                snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
+                /* Replace dots with underscores (safety: actor names normally have none) */
                 for (char *p = migrate_sym + 10; *p; p++) {
                     if (*p == '.') *p = '_';
                 }

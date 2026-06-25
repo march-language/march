@@ -1,0 +1,52 @@
+-- HCR Phase 5 live test server.
+--
+-- Spawns a Counter actor, increments it 3 times, then blocks on a TCP port
+-- waiting for the test script to signal (by connecting) that the hot deploy
+-- is done.  After the signal, it prints whether the count survived migration.
+--
+-- Build for linux/amd64 (see phase5-actor-test.sh):
+--   march --compile --hot-reload MyApp --signing-pubkey $KEY \
+--     -o /out/counter_server demo/hcr_actor_demo/counter_server.march
+--
+-- Run on droplet:
+--   MARCH_HOT_RELOAD_SOCKET=/tmp/march_counter.sock ./counter_server
+
+mod MyApp do
+  needs IO.NetListen
+
+  actor Counter do
+    state { count: Int }
+    init { count: 0 }
+
+    on Inc() do
+      { count: state.count + 1 }
+    end
+
+    on PrintCount(label) do
+      println(label ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  fn main() do
+    let pid = spawn(Counter)
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    let _ = send(pid, Inc())
+    -- Print the count before migration so the test can verify it
+    let _ = send(pid, PrintCount("pre_migrate count="))
+    -- Block on TCP port 8765.  The test script connects here after hot-deploy,
+    -- which unblocks tcp_accept so we can check the post-migration state.
+    match tcp_listen(8765) do
+      Err(e) ->
+        println("ERROR tcp_listen: " ++ e)
+      Ok(listen_fd) ->
+        let _ = tcp_accept(listen_fd)
+        -- After hot-deploy + migration, the count should still be 3
+        let _ = send(pid, PrintCount("post_migrate count="))
+        let _ = send(pid, Inc())
+        send(pid, PrintCount("post_migrate+inc count="))
+    end
+  end
+
+end

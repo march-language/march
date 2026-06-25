@@ -234,15 +234,49 @@ end
 
 ## Performance notes
 
-| Concern | Guidance |
-|---------|---------|
-| Work per element too small | Spawning tasks has overhead; use `List.pmap` for simple arithmetic on small lists |
-| Skewed workloads | Use `pmap_n` / `preduce_n` with a larger chunk count (e.g. `workers * 4`) |
-| Merge is expensive | Merge runs on the main thread; prefer commutative numeric reductions over `RRB.concat` chains |
-| Results must be in order | `pmap` preserves order; `preduce` does not guarantee any element-ordering in intermediate merges |
+### When parallelism pays
 
-The interpreter runs tasks sequentially, so timing in the REPL will not reflect compiled performance.
-Benchmark with `forge build --release`.
+The March runtime runs 4 OS scheduler threads (`MARCH_NUM_SCHEDULERS = 4`).  Theoretical
+maximum speedup is 4×.  In practice, how close you get depends almost entirely on **how much
+work each element does**:
+
+| Per-element work | Example | Observed speedup (4 workers) |
+|-----------------|---------|------------------------------|
+| Trivial (add, compare) | `psum` on 1 M ints | ~1.4× |
+| Moderate (10 Collatz calls) | `preduce` on 100 K ints | ~2.5× |
+| Heavy (rendering, crypto, simulation) | — | approaching 4× |
+
+The task machinery itself adds only ~2 % overhead (measured: par-1 worker ≈ sequential).
+The limiting factor for light workloads is **trie traversal**: `RRB.fold` calls `Array.get`
+for every element, and `Array.get` is O(log₃₂ n) pointer hops through the backing trie.
+For a trivial reduction like `psum`, that pointer-chasing *is* the work — parallelising it
+doesn't help much because all workers are chasing the same shared branch nodes.
+
+**Rule of thumb:** reach for `Parallel` when each element requires at least a few dozen
+arithmetic operations or a recursive call.  For simple sums and counts, `RRB.fold_left`
+is sequential but cheaper overall.
+
+### Skewed workloads
+
+Static partitioning (one chunk per worker) leaves fast workers idle while slow ones finish.
+Pass a larger `workers` argument to `preduce_n` / `pmap_n` to create finer chunks:
+
+```march
+-- 4× more chunks than schedulers — reduces worst-case idle time
+Parallel.preduce_n(v, 0, expensive_fn, merge, System.cpu_count() * 4)
+```
+
+### Merge cost
+
+The final `fold_left` over partial results runs on the main thread sequentially.  For numeric
+reductions (sum, max, count) this is negligible.  For `RRB.concat` chains — e.g. `pfilter`
+or `pmap` returning a new `Vec` — the merge cost grows with output size.
+
+### Ordering
+
+`pmap` preserves element order.  `preduce` merges left-to-right: chunk 0 merges with chunk 1,
+then chunk 2, and so on — so the final value is the same as a sequential `fold_left` over the
+whole input (assuming an associative, identity-having `merge`).
 
 ---
 
