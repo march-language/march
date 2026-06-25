@@ -466,11 +466,17 @@ static void handle_client(int fd) {
                     fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
                             migrate_sym, slot_id);
                 } else {
-                    char warn[512];
-                    int wn = snprintf(warn, sizeof(warn),
-                                      "WARN migrate symbol not found: %s\n", migrate_sym);
-                    write(fd, warn, (size_t)wn);
-                    fprintf(stderr, "[hcr] migrate: symbol not found: %s\n", migrate_sym);
+                    /* Symbol absent but migrate_required=1 (e.g. @compat(any) with
+                     * schema changes and no migrate_state fn).  Log to stderr only —
+                     * do NOT write WARN to the socket.  Writing WARN then OK would
+                     * cause the client to read the WARN line, treat it as a failure,
+                     * and report the function as unactivated even though
+                     * march_dispatch_publish below will atomically install v2.
+                     * This split-brain would cause save_schemas_baseline to be
+                     * skipped on a partial-success deploy, permanently poisoning the
+                     * schema diff for the next retry. */
+                    fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
+                            migrate_sym);
                 }
                 march_actor_broadcast_migrate(slot_id, migrate_fn);
             }

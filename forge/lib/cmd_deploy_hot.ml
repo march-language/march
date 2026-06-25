@@ -803,11 +803,17 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                 if List.length servers > 1 then
                   Printf.printf "==> Deploying to %d server(s) (env: %s)...\n%!" (List.length servers) env;
                 let results = deploy_list servers in
-                save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                 let failed = List.filter_map (fun (srv, r) -> match r with
                     | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
-                if failed = [] then Ok ()
-                else begin
+                if failed = [] then begin
+                  (* Only advance the schema baseline when all servers succeeded.
+                     Saving before the error check would permanently advance the
+                     baseline even on a complete failure, making the next retry
+                     see no schema diff and send migrate_required=0 to servers
+                     still running the old dispatch. *)
+                  save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                  Ok ()
+                end else begin
                   Printf.eprintf "\nFailed servers:\n";
                   List.iter (fun (host, m) -> Printf.eprintf "  %s: %s\n" host m) failed;
                   Error (Printf.sprintf "%d/%d server(s) failed" (List.length failed) (List.length servers))
