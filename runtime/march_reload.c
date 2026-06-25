@@ -17,6 +17,7 @@
 
 #include "march_reload.h"
 #include "march_dispatch.h"
+#include "march_runtime.h"
 #include "tweetnacl.h"
 #include <pthread.h>
 #include <sys/socket.h>
@@ -236,10 +237,14 @@ static void handle_client(int fd) {
         /* ── ACTIVATE ─────────────────────────────────────────────────── */
         } else if (strncmp(line, "ACTIVATE ", 9) == 0) {
             char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
-            if (sscanf(line + 9, "%255s %127s %127s %255s",
-                       name, impl_hash, cas_hash, sig_b64) != 4) {
+            char migrate_required_str[8] = {0};
+            int parsed = sscanf(line + 9, "%255s %127s %127s %255s %7s",
+                                name, impl_hash, cas_hash, sig_b64,
+                                migrate_required_str);
+            if (parsed < 4) {
                 wresp(fd, "ERR bad_format\n"); continue;
             }
+            int migrate_required = (parsed >= 5 && migrate_required_str[0] == '1') ? 1 : 0;
 
 #if HAVE_SIGNING_KEY
             /* Verify ed25519 signature before doing anything else. */
@@ -315,6 +320,30 @@ static void handle_client(int fd) {
                 wresp(fd, "ERR publish_failed all_slots_pinned\n");
                 dlclose(handle);
                 continue;
+            }
+
+            /* ── Phase 5: optional actor migration ───────────────────────────
+             * If migrate_required=1, dlsym the __migrate_<name> function from
+             * the newly-loaded .so and broadcast migrate messages to all live
+             * actors registered with this dispatch slot. */
+            if (migrate_required) {
+                char migrate_sym[320];
+                snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", name);
+                /* Replace dots with underscores in the mangled name */
+                for (char *p = migrate_sym + 10; *p; p++) {
+                    if (*p == '.') *p = '_';
+                }
+                void *raw_sym = dlsym(handle, migrate_sym);
+                void *(*migrate_fn)(void *) = NULL;
+                if (raw_sym) {
+                    memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
+                } else {
+                    char warn[512];
+                    int wn = snprintf(warn, sizeof(warn),
+                                      "WARN migrate symbol not found: %s\n", migrate_sym);
+                    write(fd, warn, (size_t)wn);
+                }
+                march_actor_broadcast_migrate(slot_id, migrate_fn);
             }
 
             char resp[256];
