@@ -1409,13 +1409,16 @@ let () = _ensure_module_lowered := (fun mod_name ->
       Name_dispatch(actor:ptr, msg:ptr) → Unit
       Name_spawn() → ptr
 *)
-let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
+let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
   (* State fields sorted alphabetically (matches TRecord ordering) *)
   let state_fields_sorted : (string * Tir.ty) list =
     List.sort (fun (a, _) (b, _) -> String.compare a b)
       (List.map (fun (f : Ast.field) -> (f.fld_name.txt, lower_ty f.fld_ty))
          actor.actor_state)
   in
+  (* In hot_reload mode, state lives in a separate heap record.
+     state_type_name is the TIR name for that record. *)
+  let state_type_name = name ^ "_State" in
 
   (* ── 1. Message variant type ─────────────────────────────── *)
   let msg_type_name = name ^ "_Msg" in
@@ -1432,12 +1435,18 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
   (* ── 2. Actor struct type ────────────────────────────────── *)
   let actor_type_name = name ^ "_Actor" in
   (* Layout order: $d_dispatch (field 0), $e_alive (field 1), state fields (fields 2+)
-     Names are prefixed so alphabetical sort ($d < $e) in llvm_emit.ml's
+     Names are prefixed so alphabetical sort ($d < $e < $f < letters) in llvm_emit.ml's
      get_record_fields matches the alloc/reuse arg order and the C runtime's
-     hardcoded word indices (a[2]=dispatch, a[3]=alive). *)
+     hardcoded word indices (a[2]=dispatch, a[3]=alive).
+     In hot_reload mode: field 2 is $f_state (ptr to state record) → a[4]=state ptr. *)
   let actor_struct_fields : (string * Tir.ty) list =
-    [("$d_dispatch", Tir.TPtr Tir.TUnit); ("$e_alive", Tir.TBool)]
-    @ state_fields_sorted
+    if hot_reload then
+      [("$d_dispatch", Tir.TPtr Tir.TUnit);
+       ("$e_alive", Tir.TBool);
+       ("$f_state", Tir.TCon (state_type_name, []))]
+    else
+      [("$d_dispatch", Tir.TPtr Tir.TUnit); ("$e_alive", Tir.TBool)]
+      @ state_fields_sorted
   in
   let actor_record = Tir.TDRecord (actor_type_name, actor_struct_fields) in
 
@@ -1501,17 +1510,29 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
     (* Step 4: build EReuse args: $d_dispatch, $e_alive, then new state fields *)
     let dispatch_var = actor_var "$d_dispatch_v" (Tir.TPtr Tir.TUnit) in
     let alive_var    = actor_var "$e_alive_v" Tir.TBool in
+    (* In hot_reload mode, a separate state ptr var ($f_state_v) holds the state record *)
+    let state_ptr_var = actor_var "$f_state_v" (Tir.TCon (state_type_name, [])) in
 
     (* Build the innermost expression: ESeq(EReuse(...), unit) *)
-    let reuse_args : Tir.atom list =
-      [Tir.AVar dispatch_var; Tir.AVar alive_var]
-      @ List.map (fun (_, v) -> Tir.AVar v) new_field_vars
-    in
     let reuse_expr =
-      Tir.ESeq (
-        Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []), reuse_args),
-        Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
-      )
+      if hot_reload then
+        (* Two-level reuse: first update state record in-place, then write new ptr into actor *)
+        let new_state_var = actor_var "$new_state" (Tir.TCon (state_type_name, [])) in
+        Tir.ELet (new_state_var,
+          Tir.EReuse (Tir.AVar state_ptr_var, Tir.TCon (state_type_name, []),
+                      List.map (fun (_, v) -> Tir.AVar v) new_field_vars),
+          Tir.ESeq (
+            Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []),
+                        [Tir.AVar dispatch_var; Tir.AVar alive_var; Tir.AVar new_state_var]),
+            Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))))
+      else
+        let reuse_args : Tir.atom list =
+          [Tir.AVar dispatch_var; Tir.AVar alive_var]
+          @ List.map (fun (_, v) -> Tir.AVar v) new_field_vars
+        in
+        Tir.ESeq (
+          Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []), reuse_args),
+          Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")))
     in
 
     (* Wrap: let $nf_fi = EField($result, fi) for each state field *)
@@ -1540,11 +1561,18 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
       Tir.ELet (state_var, Tir.ERecord state_record_fields, inner_with_result)
     in
 
-    (* Wrap: let $sf_fi = EField(actor, fi) for each state field *)
+    (* Wrap: let $sf_fi = EField(actor/$f_state_v, fi) for each state field.
+       In hot_reload mode, first load the state ptr from actor, then load fields from it. *)
     let inner_with_state_loads =
-      List.fold_right (fun (fname, sfv) acc ->
-          Tir.ELet (sfv, Tir.EField (actor_atom, fname), acc)
-        ) state_field_vars inner_with_state
+      if hot_reload then
+        Tir.ELet (state_ptr_var, Tir.EField (actor_atom, "$f_state"),
+          List.fold_right (fun (fname, sfv) acc ->
+              Tir.ELet (sfv, Tir.EField (Tir.AVar state_ptr_var, fname), acc)
+            ) state_field_vars inner_with_state)
+      else
+        List.fold_right (fun (fname, sfv) acc ->
+            Tir.ELet (sfv, Tir.EField (actor_atom, fname), acc)
+          ) state_field_vars inner_with_state
     in
 
     (* Wrap: let $e_alive_v = EField(actor, "$e_alive") *)
@@ -1624,9 +1652,14 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
         (fname, actor_var ("$init_" ^ fname) fty)
       ) state_fields_sorted
   in
+  (* In hot_reload mode, pass $init_state directly as the state ptr ($f_state).
+     In normal mode, unpack each state field and pass them individually. *)
   let alloc_args : Tir.atom list =
-    [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true)]
-    @ List.map (fun (_, v) -> Tir.AVar v) init_field_vars
+    if hot_reload then
+      [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true); Tir.AVar init_var]
+    else
+      [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true)]
+      @ List.map (fun (_, v) -> Tir.AVar v) init_field_vars
   in
   let alloc_expr = Tir.EAlloc (Tir.TCon (actor_type_name, []), alloc_args) in
   let actor_result_var = actor_var "$spawned" (Tir.TPtr Tir.TUnit) in
@@ -1634,9 +1667,12 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
     Tir.ELet (actor_result_var, alloc_expr, Tir.EAtom (Tir.AVar actor_result_var))
   in
   let spawn_with_fields =
-    List.fold_right (fun (fname, ifv) acc ->
-        Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
-      ) init_field_vars spawn_inner
+    if hot_reload then
+      spawn_inner
+    else
+      List.fold_right (fun (fname, ifv) acc ->
+          Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
+        ) init_field_vars spawn_inner
   in
   (* ── 5b. Supervision registration ───────────────────────────────── *)
   (* If this actor declares a supervise block, call march_register_supervisor
@@ -1712,7 +1748,7 @@ let builtin_type_defs : Tir.type_def list = [
 ]
 
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
   _type_map_ref := type_map;
   _iface_methods := Hashtbl.create 16;
@@ -2050,7 +2086,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            top_lets := (v, rhs) :: !top_lets
          | _ -> ())
       | Ast.DActor (_, name, actor_def, _) ->
-        let (new_types, new_fns) = lower_actor name.txt actor_def in
+        let (new_types, new_fns) = lower_actor ~hot_reload name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
@@ -2152,7 +2188,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    Handler bodies reference the module's private helpers by short
                    name; rename_tir_vars rewrites them to their qualified names so
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
-                let (new_types, new_fns) = lower_actor name.txt actor_def in
+                let (new_types, new_fns) = lower_actor ~hot_reload name.txt actor_def in
                 let renamed_fns = List.map (rename_tir_vars prefix direct_fn_names) new_fns in
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns

@@ -1175,7 +1175,7 @@ let compile filename =
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
-    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
+    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
     (* Inject IO-module names from the typecheck env so the policy audit can
        identify calls that require Cap(IO) at the TIR level. *)
     let io_modules =
