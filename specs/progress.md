@@ -699,6 +699,13 @@ march/
 - **Browser playground HTTP client requests** — `HttpClient.get`/`post` (and everything funneling through `HttpTransport.request`) now run in the js_of_ocaml playground over `fetch`/XHR. New `http_fetch`/`http_fetch_available` builtins + `http_fetch_hook` ref in `lib/eval/eval.ml` (native inert); browser build (`js/march_browser.ml`) installs a synchronous-`XMLHttpRequest` impl and loads `http`/`http_transport`/`http_client` into the browser stdlib. `HttpTransport.request` branches on `http_fetch_available()`. Server side, streaming, and raw sockets remain native-only; browser requests are CORS-limited and block the page during the request.
 - **5 new eval tests** (`browser http` suite). Test count: **1540** (Phase 3c's 1535 + 5 new `browser http` eval tests; 2 pre-existing `parser gaps` failures). Verified end-to-end via a Node smoke test loading the compiled bundle with a polyfilled sync XHR.
 
+## Current State (as of 2026-06-25, `cap no_alloc` module directive)
+
+- **`cap no_alloc` directive** (`lib/refinecheck/no_alloc.ml`, new): AST-level pass walks all `DFn` bodies in modules with `DOpts(["no_alloc"], _)` and flags `ETuple` (non-empty), `ERecord`, `ECon` (non-empty args), and `ELam` as heap-allocating. Nullary constructors and unit tuples are safe. Recurses into all other expression forms so nested allocations are caught.
+- **Lexer/parser**: `CAP_NO_ALLOC` compound token; `cap_no_alloc_decl` grammar rule → `DOpts(["no_alloc"], span)`; wired into `decl` production.
+- **Pipeline**: `No_alloc.check_module` called after `Refine_check.check_module` in both `--check` and `--compile` paths in `bin/main.ml`.
+- **Tests**: `march_refinecheck` added to `march_test_compiler` deps. **8 new tests** in `cap_no_alloc` suite. **329 compiler / 1639 total tests pass.**
+
 ## Current State (as of 2026-06-18, Phase 3c — `cap no_panic` module directive)
 
 - **`cap no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).

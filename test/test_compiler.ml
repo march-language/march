@@ -3222,6 +3222,86 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
 
+(* ── cap no_alloc tests ─────────────────────────────────────────────────── *)
+
+(* Helper: run typecheck + no_alloc pass together. *)
+let check_no_alloc src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.No_alloc.check_module errors m;
+  errors
+
+let test_cap_no_alloc_lexes () =
+  let lexbuf = Lexing.from_string "cap no_alloc" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "cap no_alloc lexes as CAP_NO_ALLOC token" true
+    (match tok with March_parser.Parser.CAP_NO_ALLOC -> true | _ -> false)
+
+let test_cap_no_alloc_tuple_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Int do
+      let _ = (1, 2)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + tuple: error" true (has_errors ctx)
+
+let test_cap_no_alloc_record_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Bool do
+      let _ = {x: 1}
+      true
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + record: error" true (has_errors ctx)
+
+let test_cap_no_alloc_some_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f(x : Int) : Int do
+      let _ = Some(x)
+      x
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + Some(x): error" true (has_errors ctx)
+
+let test_cap_no_alloc_lambda_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Int do
+      let g = fn x -> x
+      g(1)
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + lambda: error" true (has_errors ctx)
+
+let test_cap_no_alloc_arithmetic_ok () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + pure arithmetic: no error" false (has_errors ctx)
+
+let test_cap_no_alloc_if_ok () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn abs(x : Int) : Int do
+      if x >= 0 do x else 0 - x end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + if/match: no error" false (has_errors ctx)
+
+let test_cap_not_set_tuple_ok () =
+  let ctx = check_no_alloc {|mod M do
+    fn f() : Int do
+      let _ = (1, 2)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "no cap no_alloc + tuple: no error" false (has_errors ctx)
+
 (* ── Record field auto-satisfy tests ───────────────────────────────────── *)
 
 let test_record_auto_satisfy_ok () =
@@ -4541,6 +4621,16 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+        ] );
+      ( "cap_no_alloc", [
+          Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
+          Alcotest.test_case "cap no_alloc + tuple: error"                 `Quick test_cap_no_alloc_tuple_error;
+          Alcotest.test_case "cap no_alloc + record: error"                `Quick test_cap_no_alloc_record_error;
+          Alcotest.test_case "cap no_alloc + Some(x): error"              `Quick test_cap_no_alloc_some_error;
+          Alcotest.test_case "cap no_alloc + lambda: error"                `Quick test_cap_no_alloc_lambda_error;
+          Alcotest.test_case "cap no_alloc + pure arithmetic: no error"   `Quick test_cap_no_alloc_arithmetic_ok;
+          Alcotest.test_case "cap no_alloc + if/match: no error"           `Quick test_cap_no_alloc_if_ok;
+          Alcotest.test_case "no cap no_alloc + tuple: no error"           `Quick test_cap_not_set_tuple_ok;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;

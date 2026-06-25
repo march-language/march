@@ -173,6 +173,7 @@ rule token = parse
   | '~' (['a'-'z'] ['a'-'z' '0'-'9' '_']* as name) { SIGIL_PREFIX name }
   | "proof" [' ' '\t']+ "cap" { PROOFCAP }
   | "cap" [' ' '\t']+ "no_panic" { CAP_NO_PANIC }
+  | "cap" [' ' '\t']+ "no_alloc" { CAP_NO_ALLOC }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

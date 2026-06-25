@@ -12,7 +12,7 @@
  (name march_test_compiler)
  (wrapped false)
  (modules test_compiler)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_refinecheck alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
