@@ -487,6 +487,15 @@ type env = {
   no_panic_modules : string list;
   (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
+  pure_mod : bool;
+  (** True when the module currently being checked has `cap pure`.
+      Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
+  no_extern_mod : bool;
+  (** True when the module currently being checked has `cap no_extern`.
+      Set by [check_decl] on [DOpts ["no_extern"]]; read by [check_no_extern_module]. *)
+  deterministic_mod : bool;
+  (** True when the module currently being checked has `cap deterministic`.
+      Set by [check_decl] on [DOpts ["deterministic"]]; read by [check_deterministic_module]. *)
 }
 
 let make_env errors type_map = {
@@ -503,6 +512,9 @@ let make_env errors type_map = {
   current_module = "";
   no_panic_mod = false;
   no_panic_modules = [];
+  pure_mod = false;
+  no_extern_mod = false;
+  deterministic_mod = false;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -6120,6 +6132,98 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
     end
   ) fn_entries
 
+(* ── cap pure: ban side-effectful builtins ───────────────────────────────── *)
+
+let pure_banned : StringSet.t = StringSet.of_list [
+  "spawn"; "send"; "print"; "println"; "eprint"; "eprintln";
+  "read_line"; "exit"; "random_int"; "random_float"; "random_bool";
+  "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
+  "vault_delete"; "vault_update"; "vault_keys"; "write_file";
+  "read_file"; "append_file"; "delete_file";
+]
+
+let pure_suggestion : string =
+  "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
+
+let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
+  let mod_name = env.current_module in
+  List.iter (fun d ->
+    match d with
+    | Ast.DFn (def, _fn_span) ->
+      List.iter (fun clause ->
+        let calls = calls_in_expr [] clause.Ast.fc_body in
+        List.iter (fun (name, site_span) ->
+          if StringSet.mem name pure_banned then
+            Err.error errors ~span:site_span
+              (Printf.sprintf
+                 "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
+                 def.Ast.fn_name.txt mod_name name pure_suggestion)
+        ) calls
+      ) def.Ast.fn_clauses
+    | _ -> ()
+  ) decls
+
+(* ── cap no_extern: ban FFI extern blocks ────────────────────────────────── *)
+
+let no_extern_suggestion : string =
+  "Remove `extern` blocks and `needs IO.Foreign` from `cap no_extern` modules."
+
+let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
+  let mod_name = env.current_module in
+  List.iter (fun d ->
+    match d with
+    | Ast.DExtern (edef, sp) ->
+      Err.error errors ~span:sp
+        (Printf.sprintf
+           "`mod %s` (declared `cap no_extern`) contains an `extern` block (`%s`).\n\n%s"
+           mod_name edef.Ast.ext_lib_name no_extern_suggestion)
+    | Ast.DNeeds (caps, sp) ->
+      (* Check if any capability path starts with "IO" and contains "Foreign" *)
+      let has_foreign = List.exists (fun path ->
+        match path with
+        | first :: rest ->
+          first.Ast.txt = "IO" &&
+          List.exists (fun p -> p.Ast.txt = "Foreign") rest
+        | [] -> false
+      ) caps in
+      if has_foreign then
+        Err.error errors ~span:sp
+          (Printf.sprintf
+             "`mod %s` (declared `cap no_extern`) uses `needs IO.Foreign`.\n\n%s"
+             mod_name no_extern_suggestion)
+    | _ -> ()
+  ) decls
+
+(* ── cap deterministic: ban non-deterministic builtins ───────────────────── *)
+
+let deterministic_banned : StringSet.t = StringSet.of_list [
+  "random_int"; "random_float"; "random_bool"; "random_bytes";
+  "uuid_v4"; "now_ms"; "now_ns"; "monotonic_ms";
+]
+
+let deterministic_suggestion : string =
+  "Use deterministic operations only in a `cap deterministic` module. \
+   Avoid random/time builtins."
+
+let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
+  let mod_name = env.current_module in
+  List.iter (fun d ->
+    match d with
+    | Ast.DFn (def, _fn_span) ->
+      List.iter (fun clause ->
+        let calls = calls_in_expr [] clause.Ast.fc_body in
+        List.iter (fun (name, site_span) ->
+          if StringSet.mem name deterministic_banned then
+            Err.error errors ~span:site_span
+              (Printf.sprintf
+                 "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
+                  which is non-deterministic.\n\n%s"
+                 def.Ast.fn_name.txt mod_name name deterministic_suggestion)
+        ) calls
+      ) def.Ast.fn_clauses
+    | _ -> ()
+  ) decls
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -6430,9 +6534,15 @@ let rec check_decl env (d : Ast.decl) : env =
           StrMap.add (name.txt ^ "." ^ k) v (StrMap.add k v acc)
         else acc
       ) inner_env.records StrMap.empty in
-    (* Validate no_panic invariant for this nested module if declared *)
+    (* Validate capability invariants for this nested module if declared *)
     if inner_env.no_panic_mod then
       check_no_panic_module env.errors inner_env decls;
+    if inner_env.pure_mod then
+      check_pure_module env.errors inner_env decls;
+    if inner_env.no_extern_mod then
+      check_no_extern_module env.errors inner_env decls;
+    if inner_env.deterministic_mod then
+      check_deterministic_module env.errors inner_env decls;
     let env' = bind_vars new_names env in
     let no_panic_modules' =
       if inner_env.no_panic_mod then name.txt :: env'.no_panic_modules
@@ -6998,9 +7108,11 @@ let rec check_decl env (d : Ast.decl) : env =
     env
 
   | Ast.DOpts (opts, _sp) ->
-    if List.mem "no_panic" opts then
-      { env with no_panic_mod = true }
-    else env
+    let env = if List.mem "no_panic"      opts then { env with no_panic_mod      = true } else env in
+    let env = if List.mem "pure"          opts then { env with pure_mod          = true } else env in
+    let env = if List.mem "no_extern"     opts then { env with no_extern_mod     = true } else env in
+    let env = if List.mem "deterministic" opts then { env with deterministic_mod = true } else env in
+    env
 
   | Ast.DSatisfy _ ->
     (* DSatisfy is expanded to DImpl blocks by the desugar pass; nothing to typecheck here. *)
@@ -7667,9 +7779,18 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
-  (* Validate no_panic invariant if declared *)
+  (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;
+  (* Validate cap pure invariant if declared *)
+  if final_env.pure_mod then
+    check_pure_module errors final_env m.Ast.mod_decls;
+  (* Validate cap no_extern invariant if declared *)
+  if final_env.no_extern_mod then
+    check_no_extern_module errors final_env m.Ast.mod_decls;
+  (* Validate cap deterministic invariant if declared *)
+  if final_env.deterministic_mod then
+    check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)

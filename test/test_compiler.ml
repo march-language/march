@@ -3222,6 +3222,85 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
 
+(* ── cap pure, cap no_extern, cap deterministic tests ───────────────────── *)
+
+let test_cap_pure_spawn_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn bad() : Unit do spawn(fn _ -> 0) end
+  end|} in
+  Alcotest.(check bool) "cap pure + spawn: error" true (has_errors ctx)
+
+let test_cap_pure_println_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn greet() : Unit do println("hello") end
+  end|} in
+  Alcotest.(check bool) "cap pure + println: error" true (has_errors ctx)
+
+let test_cap_pure_arithmetic_ok () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap pure + pure arithmetic: no error" false (has_errors ctx)
+
+let test_cap_pure_now_ms_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn ts() : Int do now_ms() end
+  end|} in
+  Alcotest.(check bool) "cap pure + now_ms: error" true (has_errors ctx)
+
+let test_cap_pure_random_int_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn roll() : Int do random_int(6) end
+  end|} in
+  Alcotest.(check bool) "cap pure + random_int: error" true (has_errors ctx)
+
+let test_cap_pure_uuid_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn gen() : String do uuid_v4() end
+  end|} in
+  Alcotest.(check bool) "cap pure + uuid_v4: error" true (has_errors ctx)
+
+let test_cap_no_extern_regular_fn_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_extern
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap no_extern + regular fn: no error" false (has_errors ctx)
+
+let test_cap_deterministic_random_int_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn roll() : Int do random_int(6) end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + random_int: error" true (has_errors ctx)
+
+let test_cap_deterministic_uuid_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn gen() : String do uuid_v4() end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + uuid_v4: error" true (has_errors ctx)
+
+let test_cap_deterministic_now_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn ts() : Int do now_ms() end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + now_ms: error" true (has_errors ctx)
+
+let test_cap_deterministic_arithmetic_ok () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
+
 (* ── Record field auto-satisfy tests ───────────────────────────────────── *)
 
 let test_record_auto_satisfy_ok () =
@@ -4541,6 +4620,19 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+        ] );
+      ( "cap_pure_no_extern_det", [
+          Alcotest.test_case "cap pure + spawn: error"                `Quick test_cap_pure_spawn_error;
+          Alcotest.test_case "cap pure + println: error"              `Quick test_cap_pure_println_error;
+          Alcotest.test_case "cap pure + pure arithmetic: no error"   `Quick test_cap_pure_arithmetic_ok;
+          Alcotest.test_case "cap pure + now_ms: error"               `Quick test_cap_pure_now_ms_error;
+          Alcotest.test_case "cap pure + random_int: error"           `Quick test_cap_pure_random_int_error;
+          Alcotest.test_case "cap pure + uuid_v4: error"              `Quick test_cap_pure_uuid_error;
+          Alcotest.test_case "cap no_extern + regular fn: no error"   `Quick test_cap_no_extern_regular_fn_ok;
+          Alcotest.test_case "cap deterministic + random_int: error"  `Quick test_cap_deterministic_random_int_error;
+          Alcotest.test_case "cap deterministic + uuid_v4: error"     `Quick test_cap_deterministic_uuid_error;
+          Alcotest.test_case "cap deterministic + now_ms: error"      `Quick test_cap_deterministic_now_ms_error;
+          Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;
