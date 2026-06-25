@@ -23,16 +23,18 @@ mod ClusterLoad do
     cpu_count : Int,
     cpu_load_milli : Int,   -- 1-min load average × 1000
     mem_total_mb : Int,
-    mem_avail_mb : Int
+    mem_avail_mb : Int,
+    sampled_at : Int        -- unix_time_ms when the sample was taken
   }
 
-  doc "Sample the local node's current CPU/memory headroom."
-  fn local(node_id : String) : NodeLoad do
+  doc "Sample the local node's current CPU/memory headroom at [now_ms]."
+  fn local(node_id : String, now_ms : Int) : NodeLoad do
     { node_id: node_id,
       cpu_count: System.cpu_count(),
       cpu_load_milli: System.cpu_load_milli(),
       mem_total_mb: System.mem_total_bytes() / 1048576,
-      mem_avail_mb: System.mem_available_bytes() / 1048576 }
+      mem_avail_mb: System.mem_available_bytes() / 1048576,
+      sampled_at: now_ms }
   end
 
   doc "Spare CPU as load-millis below saturation: cpu_count*1000 - load. Higher = more idle."
@@ -70,12 +72,13 @@ mod ClusterLoad do
     end
   end
 
-  doc "Marshal a NodeLoad's metrics to a flat Int list for the wire (node_id excluded)."
+  doc "Marshal a NodeLoad's metrics to a flat Int list for the wire (node_id excluded). [cpu_count, cpu_load_milli, mem_total_mb, mem_avail_mb, sampled_at]."
   fn to_ints(nl : NodeLoad) : List(Int) do
     Cons(nl.cpu_count,
     Cons(nl.cpu_load_milli,
     Cons(nl.mem_total_mb,
-    Cons(nl.mem_avail_mb, Nil))))
+    Cons(nl.mem_avail_mb,
+    Cons(nl.sampled_at, Nil)))))
   end
 
   doc "Rebuild a NodeLoad from a wire Int list plus the known node_id. Missing fields default to 0."
@@ -84,11 +87,13 @@ mod ClusterLoad do
     let cl = nth_or(xs, 1, 0)
     let mt = nth_or(xs, 2, 0)
     let ma = nth_or(xs, 3, 0)
+    let sa = nth_or(xs, 4, 0)
     { node_id: node_id,
       cpu_count: cc,
       cpu_load_milli: cl,
       mem_total_mb: mt,
-      mem_avail_mb: ma }
+      mem_avail_mb: ma,
+      sampled_at: sa }
   end
 
   pfn nth_or(xs : List(Int), i : Int, dflt : Int) : Int do

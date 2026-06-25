@@ -55,6 +55,69 @@ mod TestGlobalRegistry do
 
   end
 
+  describe "GlobalRegistry.root_hash (P5a Merkle anti-entropy)" do
+
+    test "empty registry has empty-string root hash" do
+      assert (GlobalRegistry.root_hash(GlobalRegistry.empty()) == "")
+    end
+
+    test "non-empty registry has a non-empty root hash" do
+      let r = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      assert (GlobalRegistry.root_hash(r) != "")
+    end
+
+    test "same registry content produces the same hash" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let r2 = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      assert (GlobalRegistry.root_hash(r1) == GlobalRegistry.root_hash(r2))
+    end
+
+    test "different content produces different hash" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let r2 = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n2", 2, clk("n2", 1))
+      assert (GlobalRegistry.root_hash(r1) != GlobalRegistry.root_hash(r2))
+    end
+
+    test "adding a name changes the root hash" do
+      let r1 = GlobalRegistry.register(GlobalRegistry.empty(), "a", "n1", 1, clk("n1", 1))
+      let r2 = GlobalRegistry.register(r1, "b", "n1", 2, clk("n1", 2))
+      assert (GlobalRegistry.root_hash(r1) != GlobalRegistry.root_hash(r2))
+    end
+
+  end
+
+  describe "GlobalRegistry.diff_entries (P5a anti-entropy merge)" do
+
+    test "when hashes match, local is returned unchanged" do
+      let r = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let h = GlobalRegistry.root_hash(r)
+      let r2 = GlobalRegistry.diff_entries(r, h, Nil)
+      assert (GlobalRegistry.root_hash(r2) == h)
+    end
+
+    test "when hashes differ, remote leaves are merged in (CRDT join)" do
+      -- a has "x"; remote has "y"
+      let ra = GlobalRegistry.register(GlobalRegistry.empty(), "x", "n1", 1, clk("n1", 1))
+      let rb = GlobalRegistry.register(GlobalRegistry.empty(), "y", "n2", 2, clk("n2", 1))
+      let remote_root = GlobalRegistry.root_hash(rb)
+      let remote_leaves = GlobalRegistry.all_entries(rb)
+      let merged = GlobalRegistry.diff_entries(ra, remote_root, remote_leaves)
+      assert (GlobalRegistry.size(merged) == 2)
+      assert (GlobalRegistry.lookup(merged, "x") == Some(("n1", 1)))
+      assert (GlobalRegistry.lookup(merged, "y") == Some(("n2", 2)))
+    end
+
+    test "diff_entries with diverged registries converges to same state as merge" do
+      let ra = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n1", 1, clk("n1", 1))
+      let rb = GlobalRegistry.register(GlobalRegistry.empty(), "svc", "n2", 2, clk("n2", 1))
+      let merged_direct = GlobalRegistry.merge(ra, rb)
+      let remote_leaves = GlobalRegistry.all_entries(rb)
+      let merged_via_ae = GlobalRegistry.diff_entries(ra, GlobalRegistry.root_hash(rb), remote_leaves)
+      assert (GlobalRegistry.root_hash(merged_direct) == GlobalRegistry.root_hash(merged_via_ae))
+    end
+
+  end
+
   describe "GlobalRegistry.merge (CRDT join)" do
 
     test "concurrent same-name registrations converge deterministically" do

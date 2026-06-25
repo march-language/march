@@ -158,6 +158,11 @@ let all_stdlib_decls =
     "global_pid.march";
     "remote_call.march";
     "node_rpc.march";
+    "node_call.march";
+    "cluster_load.march";
+    "work_dispatch.march";
+    "dist_link.march";
+    "dist_supervisor.march";
     "system.march";
     "cluster.march";
     "rrb_vec.march";
@@ -408,5 +413,17 @@ let () =
     ("list", [
       Alcotest.test_case "List module"
         `Quick (run_stdlib_test "test_list.march" "TestList");
+    ]);
+    ("work_dispatch", [
+      Alcotest.test_case "WorkDispatch module"
+        `Quick (run_stdlib_test "test_work_dispatch.march" "TestWorkDispatch");
+    ]);
+    ("dist_link", [
+      Alcotest.test_case "DistLink module"
+        `Quick (run_stdlib_test "test_dist_link.march" "TestDistLink");
+    ]);
+    ("dist_supervisor", [
+      Alcotest.test_case "DistSupervisor module"
+        `Quick (run_stdlib_test "test_dist_supervisor.march" "TestDistSupervisor");
     ]);
   ]

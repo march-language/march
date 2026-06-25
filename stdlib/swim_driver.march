@@ -12,6 +12,9 @@
 --   2 SwimPingReq(requester_id, target_id)
 --   3 SwimGossip(node_id, status_int, incarnation)
 --     status_int: 0=Alive, 1=Suspect, 2=Dead
+--   3 SwimGossipLoad(node_id, status_int, incarnation, [load_ints])
+--     5-element frame: the 5th element is a Msgpack array of NodeLoad ints
+--     (same tag 3, distinguished by element count)
 --
 -- Period lifecycle (period_ms ≈ 1000–5000 ms is typical):
 --   1. step() at period boundary: end prior probe → expire suspects →
@@ -20,34 +23,52 @@
 --      escalate to k-way indirect ping-req.
 --   3. Transport delivers PingAck events when acks arrive; GossipFrame events
 --      when gossip frames are decoded; PeerDown events on socket close.
+--
+-- Anti-entropy (P5a):
+--   anti_entropy_peers(s, now) returns live peers when the 30s timer fires.
+--   The transport calls this each tick and sends REGISTRY_SYNC_REQ to peers.
+--   bump_anti_entropy(s, now) resets the timer after firing.
+--
+-- Load gossip (P4):
+--   peer_loads tracks the last NodeLoad heard from each live peer.
+--   dispatch_all_with_load embeds the local NodeLoad in outgoing Gossip frames.
 mod SwimDriver do
 
+  pfn load_stale_ms() : Int do 10000 end
+  pfn anti_entropy_period_ms() : Int do 30000 end
+
   type State = {
-    swim       : Swim.State,
-    rng        : Random.Rng,
-    period_ms  : Int,
-    period_end : Int     -- unix_time_ms when the current period expires (0 = not started)
+    swim               : Swim.State,
+    rng                : Random.Rng,
+    period_ms          : Int,
+    period_end         : Int,     -- unix_time_ms when the current period expires (0 = not started)
+    peer_loads         : Map(String, NodeLoad),  -- last NodeLoad heard from each peer
+    anti_entropy_next  : Int      -- unix_time_ms of next anti-entropy sweep (0 = fire immediately)
   }
 
   -- Events delivered from the transport layer each tick.
   type Event =
-      PingAck(String)              -- received a PingAck from this node_id
-    | GossipFrame(Member)          -- received and decoded a gossip member update
-    | PeerDown(String)             -- transport confirmed this peer's socket closed
+      PingAck(String)                    -- received a PingAck from this node_id
+    | GossipFrame(Member)                -- received and decoded a gossip member update
+    | GossipWithLoad(Member, NodeLoad)   -- gossip + piggybacked load sample
+    | PeerDown(String)                   -- transport confirmed this peer's socket closed
 
   -- Wire messages.
   type WireMsg =
-      SwimPing(String)             -- sender_id
-    | SwimPingAck(String)          -- sender_id
-    | SwimPingReq(String, String)  -- requester_id, target_id
-    | SwimGossip(String, MemberStatus, Int)  -- node_id, status, incarnation
+      SwimPing(String)                         -- sender_id
+    | SwimPingAck(String)                      -- sender_id
+    | SwimPingReq(String, String)              -- requester_id, target_id
+    | SwimGossip(String, MemberStatus, Int)    -- node_id, status, incarnation
+    | SwimGossipLoad(String, MemberStatus, Int, NodeLoad)  -- with piggybacked load
 
   fn make(me : String, incarnation : Int, members : Members, swim_cfg : Swim.Config,
           period_ms : Int, seed : Int) : State do
     { swim: Swim.make(me, incarnation, members, swim_cfg),
       rng:  Random.seed(seed),
       period_ms: period_ms,
-      period_end: 0 }
+      period_end: 0,
+      peer_loads: Map.empty(),
+      anti_entropy_next: 0 }
   end
 
   -- ── target / helper selection ─────────────────────────────────────────────
@@ -92,6 +113,9 @@ mod SwimDriver do
         (Swim.on_ack(swim, node_id), Nil)
       GossipFrame(member) ->
         (Swim.on_gossip(swim, member), Nil)
+      GossipWithLoad(member, _nl) ->
+        -- Apply membership update; load table update is handled by apply_load_events.
+        (Swim.on_gossip(swim, member), Nil)
       PeerDown(node_id) ->
         -- Definitive failure: skip Suspect, go straight to Dead at current incarnation
         -- so the verdict supersedes any prior Alive/Suspect for the same incarnation.
@@ -104,6 +128,16 @@ mod SwimDriver do
         let out = (swim2, Cons(Gossip(dead_m), Nil))
         out
     end
+  end
+
+  -- Fold load samples from events into the peer_loads map.
+  pfn apply_load_events(peer_loads : Map(String, NodeLoad), evs : List(Event)) : Map(String, NodeLoad) do
+    List.fold_left(evs, peer_loads, fn (acc, ev) ->
+      match ev do
+        GossipWithLoad(_member, nl) ->
+          Map.insert(acc, nl.node_id, nl, Map.str_cmp)
+        _ -> acc
+      end)
   end
 
   pfn apply_events(swim : Swim.State, evs : List(Event)) : (Swim.State, List(Swim.Action)) do
@@ -127,6 +161,9 @@ mod SwimDriver do
     let ev_out = apply_events(s.swim, events)
     let swim1 = match ev_out do (sw, _) -> sw end
     let ev_acts = match ev_out do (_, a) -> a end
+
+    -- 1b. Update peer load table from any GossipWithLoad events.
+    let new_peer_loads = apply_load_events(s.peer_loads, events)
 
     -- 2. Period boundary?
     if now >= s.period_end do
@@ -159,7 +196,8 @@ mod SwimDriver do
       match tgt_opt do
         None ->
           -- No alive peers to probe; just roll the period timer.
-          let s2 = { s_with_rng with swim: swim4, period_end: now + s.period_ms }
+          let s2 = { s_with_rng with swim: swim4, period_end: now + s.period_ms,
+                                     peer_loads: new_peer_loads }
           let all_acts = List.append(ev_acts,
                            List.append(end_acts,
                              List.append(exp_acts, rf_act)))
@@ -169,7 +207,8 @@ mod SwimDriver do
           let bp_out = Swim.begin_period(swim4, now, target)
           let swim5 = match bp_out do (sw, _) -> sw end
           let bp_act = match bp_out do (_, a) -> Cons(a, Nil) end
-          let s2 = { s_with_rng with swim: swim5, period_end: now + s.period_ms }
+          let s2 = { s_with_rng with swim: swim5, period_end: now + s.period_ms,
+                                     peer_loads: new_peer_loads }
           let all_acts = List.append(ev_acts,
                            List.append(end_acts,
                              List.append(exp_acts,
@@ -191,11 +230,47 @@ mod SwimDriver do
       let esc_out = Swim.escalate_indirect(swim1, now, helpers)
       let swim2 = match esc_out do (sw, _) -> sw end
       let esc_acts = match esc_out do (_, a) -> a end
-      let s2 = { s_rng2 with swim: swim2 }
+      let s2 = { s_rng2 with swim: swim2, peer_loads: new_peer_loads }
       let all_acts = List.append(ev_acts, esc_acts)
       let out = (s2, all_acts)
       out
     end
+  end
+
+  -- ── Anti-entropy helpers (P5a) ─────────────────────────────────────────────
+
+  -- Returns live peer node_ids when the anti-entropy timer has fired; else Nil.
+  -- The transport layer calls this each tick and sends REGISTRY_SYNC_REQ to
+  -- each returned peer.
+  fn anti_entropy_peers(s : State, now : Int) : List(String) do
+    if now >= s.anti_entropy_next do
+      alive_others(s)
+    else
+      Nil
+    end
+  end
+
+  -- Reset the anti-entropy timer after firing. Call immediately after
+  -- anti_entropy_peers returns a non-empty list.
+  fn bump_anti_entropy(s : State, now : Int) : State do
+    { s with anti_entropy_next: now + anti_entropy_period_ms() }
+  end
+
+  -- ── Load queries (P4) ─────────────────────────────────────────────────────
+
+  -- Current load reading for a peer, or None if never heard or stale.
+  fn peer_load(s : State, node_id : String, now : Int) : Option(NodeLoad) do
+    match Map.get(s.peer_loads, node_id, Map.str_cmp) do
+      None -> None
+      Some(nl) ->
+        if now - nl.sampled_at <= load_stale_ms() do Some(nl) else None end
+    end
+  end
+
+  -- All non-stale peer loads.
+  fn fresh_peer_loads(s : State, now : Int) : List(NodeLoad) do
+    let all = Map.values(s.peer_loads)
+    List.filter(all, fn nl -> now - nl.sampled_at <= load_stale_ms())
   end
 
   -- ── wire codec ────────────────────────────────────────────────────────────
@@ -236,6 +311,14 @@ mod SwimDriver do
             Cons(Msgpack.str(node_id),
             Cons(Msgpack.int(status_to_int(status)),
             Cons(Msgpack.int(incarnation), Nil))))))
+      SwimGossipLoad(node_id, status, incarnation, nl) ->
+        let load_vals = List.map(ClusterLoad.to_ints(nl), fn i -> Msgpack.int(i))
+        Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(3),
+            Cons(Msgpack.str(node_id),
+            Cons(Msgpack.int(status_to_int(status)),
+            Cons(Msgpack.int(incarnation),
+            Cons(Msgpack.array(load_vals), Nil)))))))
     end
   end
 
@@ -266,6 +349,17 @@ mod SwimDriver do
                 match rest do
                   Cons(Msgpack.Str(nid),
                     Cons(Msgpack.Int(st),
+                    Cons(Msgpack.Int(inc),
+                    Cons(Msgpack.Array(load_vals), Nil)))) ->
+                      match int_to_status(st) do
+                        Err(e) -> Err(e)
+                        Ok(status) ->
+                          let ints = List.filter_map(load_vals, fn v ->
+                            match v do Msgpack.Int(i) -> Some(i) | _ -> None end)
+                          Ok(SwimGossipLoad(nid, status, inc, ClusterLoad.from_ints(nid, ints)))
+                      end
+                  Cons(Msgpack.Str(nid),
+                    Cons(Msgpack.Int(st),
                     Cons(Msgpack.Int(inc), Nil))) ->
                       match int_to_status(st) do
                         Ok(status) -> Ok(SwimGossip(nid, status, inc))
@@ -287,6 +381,8 @@ mod SwimDriver do
       SwimPingAck(sender)            -> Some(PingAck(sender))
       SwimGossip(node_id, status, incarnation) ->
         Some(GossipFrame({ node_id: node_id, status: status, incarnation: incarnation }))
+      SwimGossipLoad(node_id, status, incarnation, nl) ->
+        Some(GossipWithLoad({ node_id: node_id, status: status, incarnation: incarnation }, nl))
       _ -> None
     end
   end
@@ -323,6 +419,26 @@ mod SwimDriver do
   fn dispatch_all(actions : List(Swim.Action), peers : PeerRegistry.Registry, my_id : String) : () do
     List.fold_left(actions, (), fn (_, action) ->
       dispatch(action, peers, my_id))
+  end
+
+  -- Like dispatch, but piggybacks [my_load] on Gossip frames (P4).
+  fn dispatch_with_load(action : Swim.Action, peers : PeerRegistry.Registry,
+                        my_id : String, my_load : NodeLoad) : () do
+    match action do
+      Gossip(member) ->
+        let ps = PeerRegistry.peers(peers)
+        let encoded = encode_msg(SwimGossipLoad(member.node_id, member.status,
+                                                member.incarnation, my_load))
+        List.fold_left(ps, (), fn (_, p) ->
+          send_to_peer(peers, p.node_id, encoded))
+      _ -> dispatch(action, peers, my_id)
+    end
+  end
+
+  fn dispatch_all_with_load(actions : List(Swim.Action), peers : PeerRegistry.Registry,
+                             my_id : String, my_load : NodeLoad) : () do
+    List.fold_left(actions, (), fn (_, action) ->
+      dispatch_with_load(action, peers, my_id, my_load))
   end
 
 end

@@ -1,0 +1,175 @@
+mod TestDistLink do
+
+  describe "DistLink.reason_of_tag / tag_of_reason round-trip" do
+
+    test "Normal round-trips" do
+      let r = DistLink.reason_of_tag(0, "")
+      assert (r == DistLink.Normal)
+      let pair = DistLink.tag_of_reason(DistLink.Normal)
+      let tag = match pair do (t, _) -> t end
+      assert (tag == 0)
+    end
+
+    test "Killed round-trips" do
+      let r = DistLink.reason_of_tag(1, "")
+      assert (r == DistLink.Killed)
+      let pair = DistLink.tag_of_reason(DistLink.Killed)
+      let tag = match pair do (t, _) -> t end
+      assert (tag == 1)
+    end
+
+    test "Crash round-trips with message" do
+      let r = DistLink.reason_of_tag(2, "boom")
+      match r do
+        DistLink.Crash(msg) -> assert (msg == "boom")
+        _                   -> assert false
+      end
+      let pair = DistLink.tag_of_reason(DistLink.Crash("boom"))
+      let tag = match pair do (t, _) -> t end
+      let msg = match pair do (_, m) -> m end
+      assert (tag == 2)
+      assert (msg == "boom")
+    end
+
+    test "NodeDown round-trips" do
+      let r = DistLink.reason_of_tag(3, "")
+      assert (r == DistLink.NodeDown)
+      let pair = DistLink.tag_of_reason(DistLink.NodeDown)
+      let tag = match pair do (t, _) -> t end
+      assert (tag == 3)
+    end
+
+    test "unknown tag defaults to NodeDown" do
+      let r = DistLink.reason_of_tag(99, "")
+      assert (r == DistLink.NodeDown)
+    end
+
+  end
+
+  describe "DistLink MONITOR_REQ wire codec" do
+
+    test "encode_req / decode_req round-trips" do
+      let bytes = DistLink.encode_req("node-a", 42, 99)
+      match DistLink.decode_req(bytes) do
+        Err(e) -> assert false
+        Ok(r) ->
+          match r do
+            (wn, wp, tp) ->
+              assert (wn == "node-a")
+              assert (wp == 42)
+              assert (tp == 99)
+          end
+      end
+    end
+
+  end
+
+  describe "DistLink MONITOR_FIRE wire codec" do
+
+    test "encode_fire / decode_fire round-trips for Normal" do
+      let bytes = DistLink.encode_fire(77, DistLink.Normal)
+      match DistLink.decode_fire(bytes) do
+        Err(e) -> assert false
+        Ok(r) ->
+          match r do
+            (tp, reason) ->
+              assert (tp == 77)
+              assert (reason == DistLink.Normal)
+          end
+      end
+    end
+
+    test "encode_fire / decode_fire round-trips for Crash" do
+      let bytes = DistLink.encode_fire(12, DistLink.Crash("oops"))
+      match DistLink.decode_fire(bytes) do
+        Err(e) -> assert false
+        Ok(r) ->
+          match r do
+            (tp, reason) ->
+              assert (tp == 12)
+              match reason do
+                DistLink.Crash(msg) -> assert (msg == "oops")
+                _                   -> assert false
+              end
+          end
+      end
+    end
+
+    test "encode_fire / decode_fire round-trips for NodeDown" do
+      let bytes = DistLink.encode_fire(55, DistLink.NodeDown)
+      match DistLink.decode_fire(bytes) do
+        Err(e) -> assert false
+        Ok(r) ->
+          match r do
+            (tp, reason) ->
+              assert (tp == 55)
+              assert (reason == DistLink.NodeDown)
+          end
+      end
+    end
+
+  end
+
+  pfn mk_ref(n : Int) : DistLink.MonitorRef do DistLink.MonitorRef(n) end
+  pfn mk_pid(n : Int) : GlobalPid.Pid do GlobalPid.make("n1", n, 0) end
+
+  pfn mk_monitor(ref_n : Int, target_node : String, target_pid : Int) : DistLink.PendingMonitor do
+    DistLink.make_monitor(mk_ref(ref_n), target_node, target_pid, mk_pid(1))
+  end
+
+  describe "DistLink.MonitorTable" do
+
+    test "insert and find by target_pid" do
+      let m = mk_monitor(1, "node-b", 42)
+      let tbl = DistLink.insert_monitor(DistLink.empty_table(), m)
+      match DistLink.find_by_target_pid(tbl, 42) do
+        None    -> assert false
+        Some(found) -> assert (found.target_node == "node-b")
+      end
+    end
+
+    test "find returns None for unknown target_pid" do
+      match DistLink.find_by_target_pid(DistLink.empty_table(), 99) do
+        None    -> assert true
+        Some(_) -> assert false
+      end
+    end
+
+    test "remove_monitor removes by ref" do
+      let m = mk_monitor(5, "node-b", 10)
+      let tbl = DistLink.insert_monitor(DistLink.empty_table(), m)
+      let tbl2 = DistLink.remove_monitor(tbl, mk_ref(5))
+      match DistLink.find_by_target_pid(tbl2, 10) do
+        None    -> assert true
+        Some(_) -> assert false
+      end
+    end
+
+    test "monitors_on_node filters by node_id" do
+      let m1 = mk_monitor(1, "node-b", 10)
+      let m2 = mk_monitor(2, "node-c", 20)
+      let m3 = mk_monitor(3, "node-b", 30)
+      let tbl = DistLink.insert_monitor(
+                  DistLink.insert_monitor(
+                    DistLink.insert_monitor(DistLink.empty_table(), m1), m2), m3)
+      let on_b = DistLink.monitors_on_node(tbl, "node-b")
+      assert (List.length(on_b) == 2)
+    end
+
+    test "down_msg returns correct tuple" do
+      let m = mk_monitor(7, "node-b", 99)
+      let pair = DistLink.down_msg(m, DistLink.Crash("fail"))
+      match pair do
+        (ref, pid, reason) ->
+          assert (ref == mk_ref(7))
+          assert (pid == 99)
+          match reason do
+            DistLink.Crash(msg) -> assert (msg == "fail")
+            _                   -> assert false
+          end
+      end
+    end
+
+  end
+
+end

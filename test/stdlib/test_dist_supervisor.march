@@ -1,0 +1,120 @@
+mod TestDistSupervisor do
+
+  pfn mk_ref(n : Int) : DistLink.MonitorRef do DistLink.MonitorRef(n) end
+  pfn mk_pid(node : String, n : Int) : GlobalPid.Pid do GlobalPid.make(node, n, 0) end
+
+  pfn dummy_fref() : RemoteRef do
+    RemoteCall.remote_ref("Foo", "bar", "sig123", "impl456")
+  end
+
+  pfn mk_child_state(node : String, restart : DistSupervisor.RestartStrategy,
+                      local_pid_n : Int, ref_n : Int) : DistSupervisor.ChildState do
+    { spec: { fn_ref: dummy_fref(), node_id: node, restart: restart },
+      global_pid: mk_pid(node, local_pid_n),
+      ref: mk_ref(ref_n) }
+  end
+
+  describe "DistSupervisor.should_restart" do
+
+    test "Permanent always restarts" do
+      assert (DistSupervisor.should_restart(DistSupervisor.Permanent, DistLink.Normal))
+      assert (DistSupervisor.should_restart(DistSupervisor.Permanent, DistLink.Killed))
+      assert (DistSupervisor.should_restart(DistSupervisor.Permanent, DistLink.Crash("x")))
+      assert (DistSupervisor.should_restart(DistSupervisor.Permanent, DistLink.NodeDown))
+    end
+
+    test "Temporary never restarts" do
+      assert (not (DistSupervisor.should_restart(DistSupervisor.Temporary, DistLink.Normal)))
+      assert (not (DistSupervisor.should_restart(DistSupervisor.Temporary, DistLink.Killed)))
+      assert (not (DistSupervisor.should_restart(DistSupervisor.Temporary, DistLink.Crash("x"))))
+      assert (not (DistSupervisor.should_restart(DistSupervisor.Temporary, DistLink.NodeDown)))
+    end
+
+    test "Transient restarts on abnormal exit only" do
+      assert (not (DistSupervisor.should_restart(DistSupervisor.Transient, DistLink.Normal)))
+      assert (DistSupervisor.should_restart(DistSupervisor.Transient, DistLink.Killed))
+      assert (DistSupervisor.should_restart(DistSupervisor.Transient, DistLink.Crash("x")))
+      assert (DistSupervisor.should_restart(DistSupervisor.Transient, DistLink.NodeDown))
+    end
+
+  end
+
+  describe "DistSupervisor.restart_indices" do
+
+    test "OneForOne restarts only the failed child" do
+      let idxs = DistSupervisor.restart_indices(DistSupervisor.OneForOne, 2, 5)
+      assert (idxs == Cons(2, Nil))
+    end
+
+    test "OneForAll restarts all children" do
+      let idxs = DistSupervisor.restart_indices(DistSupervisor.OneForAll, 1, 4)
+      assert (List.length(idxs) == 4)
+      assert (idxs == List.range(0, 4))
+    end
+
+    test "RestForOne restarts failed child and those after it" do
+      let idxs = DistSupervisor.restart_indices(DistSupervisor.RestForOne, 2, 5)
+      assert (idxs == List.range(2, 5))
+    end
+
+    test "RestForOne with last child restarts only that child" do
+      let idxs = DistSupervisor.restart_indices(DistSupervisor.RestForOne, 4, 5)
+      assert (idxs == Cons(4, Nil))
+    end
+
+  end
+
+  describe "DistSupervisor.find_child_by_ref" do
+
+    test "finds child by MonitorRef" do
+      let c0 = mk_child_state("node-b", DistSupervisor.Permanent, 10, 0)
+      let c1 = mk_child_state("node-c", DistSupervisor.Transient, 20, 1)
+      let c2 = mk_child_state("node-b", DistSupervisor.Permanent, 30, 2)
+      let children = Cons(c0, Cons(c1, Cons(c2, Nil)))
+      match DistSupervisor.find_child_by_ref(children, mk_ref(1)) do
+        None -> assert false
+        Some(pair) ->
+          match pair do
+            (idx, child) ->
+              assert (idx == 1)
+              assert (child.spec.node_id == "node-c")
+          end
+      end
+    end
+
+    test "returns None for unknown ref" do
+      let c = mk_child_state("node-b", DistSupervisor.Permanent, 10, 5)
+      match DistSupervisor.find_child_by_ref(Cons(c, Nil), mk_ref(99)) do
+        None    -> assert true
+        Some(_) -> assert false
+      end
+    end
+
+  end
+
+  describe "DistSupervisor.update_child" do
+
+    test "replaces child at given index" do
+      let c0 = mk_child_state("node-b", DistSupervisor.Permanent, 10, 0)
+      let c1 = mk_child_state("node-c", DistSupervisor.Transient, 20, 1)
+      let children = Cons(c0, Cons(c1, Nil))
+      let new_c1 = mk_child_state("node-c", DistSupervisor.Permanent, 99, 1)
+      let updated = DistSupervisor.update_child(children, 1, new_c1)
+      match List.nth_opt(updated, 1) do
+        None -> assert false
+        Some(c) -> assert (c.global_pid.local_pid == 99)
+      end
+    end
+
+  end
+
+  describe "DistSupervisor.make / child_count" do
+
+    test "empty supervisor has zero children" do
+      let s = DistSupervisor.make(DistSupervisor.OneForOne)
+      assert (DistSupervisor.child_count(s) == 0)
+    end
+
+  end
+
+end

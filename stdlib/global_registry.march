@@ -112,4 +112,57 @@ mod GlobalRegistry do
     end
   end
 
+  -- ── Merkle anti-entropy (P5a) ────────────────────────────────────────────
+
+  -- Serialize one registry entry to a stable byte string for Merkle hashing.
+  pfn entry_to_bytes(pair : (String, Entry)) : String do
+    match pair do
+      (name, e) ->
+        name ++ "|" ++ e.node_id ++ "|" ++ String.from_int(e.pid) ++ "|" ++
+        (if e.present do "1" else "0" end)
+    end
+  end
+
+  doc """
+  Build a Merkle tree over sorted (name, entry) pairs and return its root hash.
+  Comparing root hashes across nodes detects divergence in O(1).
+  Returns the empty-string sentinel when the registry is empty.
+  """
+  fn root_hash(reg : Names) : String do
+    match reg do
+      Names(m) ->
+        let sorted = List.sort_by(Map.entries(m), fn (a, b) ->
+          match a do (na, _) -> match b do (nb, _) -> na < nb end end)
+        match Merkle.build(sorted, entry_to_bytes) do
+          None    -> ""
+          Some(t) -> Merkle.root_hash(t)
+        end
+    end
+  end
+
+  doc """
+  CRDT-merge [remote_leaves] into [local], but only when hashes differ.
+  remote_leaves is the list of (name, entry) pairs from the remote node.
+  Returns the updated registry.
+  """
+  fn diff_entries(local : Names, remote_root : String,
+                  remote_leaves : List((String, Entry))) : Names do
+    if root_hash(local) == remote_root do
+      -- Hashes match; nothing to merge.
+      local
+    else
+      List.fold_left(remote_leaves, local, fn (acc, pair) ->
+        match pair do
+          (name, entry) -> observe(acc, name, entry)
+        end)
+    end
+  end
+
+  doc "Collect all (name, entry) pairs, including tombstones, for wire transfer."
+  fn all_entries(reg : Names) : List((String, Entry)) do
+    match reg do
+      Names(m) -> Map.entries(m)
+    end
+  end
+
 end

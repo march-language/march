@@ -194,6 +194,96 @@ mod TestSwimDriver do
               Some(GossipFrame({ node_id: "b@h", status: Suspect, incarnation: 5 })))
     end
 
+    test "SwimGossipLoad round-trips with piggybacked NodeLoad" do
+      let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 1500,
+                 mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 99999 }
+      let enc = SwimDriver.encode_msg(SwimGossipLoad("b@h", Alive, 7, nl))
+      match SwimDriver.decode_msg(enc) do
+        Err(e) -> assert false
+        Ok(msg) ->
+          match msg do
+            SwimGossipLoad(nid, status, inc, nl2) ->
+              assert (nid == "b@h")
+              assert (status == Alive)
+              assert (inc == 7)
+              assert (nl2.cpu_count == 4)
+              assert (nl2.cpu_load_milli == 1500)
+              assert (nl2.sampled_at == 99999)
+            _ -> assert false
+          end
+      end
+    end
+
+    test "msg_to_event converts SwimGossipLoad to GossipWithLoad event" do
+      let nl = { node_id: "b@h", cpu_count: 2, cpu_load_milli: 800,
+                 mem_total_mb: 4096, mem_avail_mb: 2048, sampled_at: 12345 }
+      let ev = SwimDriver.msg_to_event(SwimGossipLoad("b@h", Dead, 9, nl))
+      match ev do
+        None -> assert false
+        Some(e) ->
+          match e do
+            GossipWithLoad(member, nl2) ->
+              assert (member.node_id == "b@h")
+              assert (member.status == Dead)
+              assert (nl2.sampled_at == 12345)
+            _ -> assert false
+          end
+      end
+    end
+
+  end
+
+  describe "SwimDriver load gossip — peer_loads updated via step" do
+
+    test "GossipWithLoad event updates peer_loads in state" do
+      let s = driver_a()
+      let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
+                 mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 5000 }
+      let events = Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil)
+      let result = SwimDriver.step(s, 500, events)
+      let s2 = match result do (st, _) -> st end
+      let load = SwimDriver.peer_load(s2, "b@h", 5500)
+      match load do
+        None    -> assert false
+        Some(l) -> assert (l.cpu_load_milli == 2000)
+      end
+    end
+
+    test "stale peer_load returns None beyond LOAD_STALE_MS" do
+      let s = driver_a()
+      let nl = { node_id: "b@h", cpu_count: 4, cpu_load_milli: 2000,
+                 mem_total_mb: 8192, mem_avail_mb: 4096, sampled_at: 100 }
+      let events = Cons(GossipWithLoad({ node_id: "b@h", status: Alive, incarnation: 1 }, nl), Nil)
+      let result = SwimDriver.step(s, 500, events)
+      let s2 = match result do (st, _) -> st end
+      -- now_ms = 100 + 10001 → stale
+      assert (SwimDriver.peer_load(s2, "b@h", 10200) == None)
+    end
+
+    test "anti_entropy_peers fires on first tick (anti_entropy_next=0)" do
+      let s = driver_a()
+      -- now=500 >= anti_entropy_next=0 → should return peers
+      let peers = SwimDriver.anti_entropy_peers(s, 500)
+      -- b@h is alive other
+      assert (List.length(peers) >= 1)
+    end
+
+    test "anti_entropy_peers returns empty after bump_anti_entropy" do
+      let s = driver_a()
+      let s2 = SwimDriver.bump_anti_entropy(s, 500)
+      -- anti_entropy_next = 500 + 30000 = 30500; now=1000 < 30500
+      let peers = SwimDriver.anti_entropy_peers(s2, 1000)
+      assert (peers == Nil)
+    end
+
+    test "anti_entropy_peers fires again after period elapses" do
+      let s = driver_a()
+      let s2 = SwimDriver.bump_anti_entropy(s, 500)
+      -- now = 500 + 30001 > anti_entropy_next
+      let peers = SwimDriver.anti_entropy_peers(s2, 30501)
+      assert (List.length(peers) >= 1)
+    end
+
   end
 
 end

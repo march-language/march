@@ -1,6 +1,7 @@
 #include "march_runtime.h"
 #include "march_scheduler.h"
 #include "march_dispatch.h"
+#include "march_monitor_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1303,7 +1304,7 @@ void march_kill(void *actor) {
         meta->cleanup_head = NULL;
     }
 
-    /* Deliver Down notifications to all watchers. */
+    /* Deliver Down notifications to all local watchers. */
     if (meta && meta->monitor_head) {
         march_monitor_node *mn = meta->monitor_head;
         while (mn) {
@@ -1317,6 +1318,12 @@ void march_kill(void *actor) {
             mn = next_mn;
         }
         meta->monitor_head = NULL;
+    }
+
+    /* Fire MONITOR_FIRE to any remote (cross-node) watchers of this pid. */
+    if (meta) {
+        march_dist_monitor_fire_pid(meta->pid_index,
+                                     MARCH_DIST_REASON_NORMAL, NULL);
     }
 
     fields[3] = 0;   /* $alive flag at byte offset 24 */

@@ -1,0 +1,128 @@
+mod TestWorkDispatch do
+
+  -- Build a NodeLoad with explicit fields for testing.
+  pfn make_load(node_id : String, cpu_count : Int, cpu_load_milli : Int,
+                sampled_at : Int) : NodeLoad do
+    { node_id: node_id,
+      cpu_count: cpu_count,
+      cpu_load_milli: cpu_load_milli,
+      mem_total_mb: 8192,
+      mem_avail_mb: 4096,
+      sampled_at: sampled_at }
+  end
+
+  describe "WorkDispatch.pick_dispatch_target" do
+
+    test "returns None when fewer than 2 fresh candidates" do
+      let now = 100000
+      let empty = WorkDispatch.pick_dispatch_target(Nil, ClusterLoad.spare_cpu_milli, now)
+      assert (empty == None)
+      let single = Cons(make_load("n1", 4, 1000, now - 100), Nil)
+      assert (WorkDispatch.pick_dispatch_target(single, ClusterLoad.spare_cpu_milli, now) == None)
+    end
+
+    test "returns None when all readings are stale" do
+      let now = 100000
+      let stale_at = now - 15000  -- older than LOAD_STALE_MS (10000)
+      let members = Cons(make_load("n1", 4, 1000, stale_at),
+                    Cons(make_load("n2", 4, 500, stale_at), Nil))
+      assert (WorkDispatch.pick_dispatch_target(members, ClusterLoad.spare_cpu_milli, now) == None)
+    end
+
+    test "ignores stale entries; returns None if only 1 fresh remains" do
+      let now = 100000
+      let stale_at = now - 15000
+      let members = Cons(make_load("n1", 4, 1000, now - 100),   -- fresh
+                    Cons(make_load("n2", 4, 500,  stale_at), Nil))  -- stale
+      assert (WorkDispatch.pick_dispatch_target(members, ClusterLoad.spare_cpu_milli, now) == None)
+    end
+
+    test "returns the better of two fresh candidates" do
+      let now = 100000
+      -- n1: spare = 4*1000 - 500 = 3500; n2: spare = 4*1000 - 2000 = 2000
+      let idle = make_load("n1", 4, 500, now - 100)
+      let busy = make_load("n2", 4, 2000, now - 100)
+      let members = Cons(idle, Cons(busy, Nil))
+      let result = WorkDispatch.pick_dispatch_target(members, ClusterLoad.spare_cpu_milli, now)
+      assert (result != None)
+      match result do
+        None -> assert false
+        Some(winner) -> assert (winner.node_id == "n1")
+      end
+    end
+
+  end
+
+  describe "WorkDispatch.pick_two (index-based selection)" do
+
+    test "picks the higher-scored of two indexed candidates" do
+      let now = 100000
+      let idle = make_load("n1", 8, 500, now)   -- spare = 7500
+      let busy = make_load("n2", 8, 6000, now)  -- spare = 2000
+      let members = Cons(idle, Cons(busy, Nil))
+      -- idx 0 = idle, idx 1 = busy → idle should win
+      let result = WorkDispatch.pick_two(members, 0, 1, ClusterLoad.spare_cpu_milli, now)
+      match result do
+        None -> assert false
+        Some(w) -> assert (w.node_id == "n1")
+      end
+    end
+
+    test "when both have equal score, first picked candidate wins" do
+      let now = 100000
+      let a = make_load("n1", 4, 1000, now)
+      let b = make_load("n2", 4, 1000, now)
+      let members = Cons(a, Cons(b, Nil))
+      let result = WorkDispatch.pick_two(members, 0, 1, ClusterLoad.spare_cpu_milli, now)
+      match result do
+        None -> assert false
+        Some(w) -> assert (w.node_id == "n1")
+      end
+    end
+
+    test "returns None for fewer than 2 fresh candidates" do
+      let now = 100000
+      let stale = now - 20000
+      let members = Cons(make_load("n1", 4, 1000, stale), Cons(make_load("n2", 4, 500, stale), Nil))
+      assert (WorkDispatch.pick_two(members, 0, 1, ClusterLoad.spare_cpu_milli, now) == None)
+    end
+
+  end
+
+  describe "ClusterLoad.spare_cpu_milli" do
+
+    test "spare = cpu_count*1000 - load" do
+      let nl = make_load("n1", 4, 1500, 0)
+      assert (ClusterLoad.spare_cpu_milli(nl) == 2500)
+    end
+
+    test "spare can be negative when overloaded" do
+      let nl = make_load("n1", 2, 3000, 0)
+      assert (ClusterLoad.spare_cpu_milli(nl) == -1000)
+    end
+
+  end
+
+  describe "ClusterLoad.to_ints / from_ints round-trip (including sampled_at)" do
+
+    test "round-trips all 5 fields" do
+      let nl = make_load("n1", 8, 2500, 123456789)
+      let ints = ClusterLoad.to_ints(nl)
+      assert (List.length(ints) == 5)
+      let nl2 = ClusterLoad.from_ints("n1", ints)
+      assert (nl2.cpu_count == 8)
+      assert (nl2.cpu_load_milli == 2500)
+      assert (nl2.mem_total_mb == 8192)
+      assert (nl2.mem_avail_mb == 4096)
+      assert (nl2.sampled_at == 123456789)
+    end
+
+    test "missing sampled_at defaults to 0 when only 4 ints provided" do
+      let ints = Cons(4, Cons(1000, Cons(8192, Cons(4096, Nil))))
+      let nl = ClusterLoad.from_ints("n2", ints)
+      assert (nl.sampled_at == 0)
+    end
+
+  end
+
+end
