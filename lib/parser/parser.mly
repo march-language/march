@@ -157,7 +157,7 @@
 %token <string> INTERP_MID
 %token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
-%token AT
+%token AT INVARIANT
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
@@ -253,6 +253,20 @@ decl:
         ) "full" attrs in
       match d with
       | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat }, span)
+      | d -> d }
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
+    { match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_invariant = Some inv }, span)
+      | d -> d }
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN; attrs = nonempty_list(fn_attr); d = actor_decl
+    { let compat = List.fold_left (fun acc a ->
+          let n = String.length a in
+          if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
+        ) "full" attrs in
+      match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat }, span)
       | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
@@ -448,7 +462,7 @@ actor_decl:
     END
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup; actor_compat = "full" },
+                actor_supervise = sup; actor_compat = "full"; actor_invariant = None },
               mk_span ($loc)) }
 
 (** Application entry point:
