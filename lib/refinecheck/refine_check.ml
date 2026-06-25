@@ -1083,7 +1083,10 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool =
         (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
                  ~resolve_field:rf ~resolve_measure_app:rma q with
          | Some qa -> (ds, qa :: asm, true)
-         | None -> (ds, asm, true)))
+         (* Predicate untranslatable: declare the const but don't set has_rec.
+            Without a loaded assumption, scope_has_record would trigger the
+            "SAT = definite error" path with an unconstrained cex — unsound. *)
+         | None -> (ds, asm, has_rec)))
     ([], [], false) sc
 
 (* Evaluate a field-selector application on a concrete constructor term.
