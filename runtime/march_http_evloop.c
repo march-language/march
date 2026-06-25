@@ -38,6 +38,38 @@
 #include <stdatomic.h>
 #include <assert.h>
 
+/* ── WebSocket upgrade thread ─────────────────────────────────────────── */
+
+typedef struct {
+    int   fd;
+    void *ws_closure;   /* March closure: WsSocket -> Unit */
+} ws_upgrade_arg_t;
+
+/* Thread that runs the blocking WebSocket handler after upgrade.
+ * Takes ownership of fd; closes it on exit. */
+static void *ws_handler_thread(void *arg) {
+    ws_upgrade_arg_t *a = (ws_upgrade_arg_t *)arg;
+    int   fd         = a->fd;
+    void *ws_closure = a->ws_closure;
+    free(a);
+
+    /* Switch fd back to blocking — WS send/recv use blocking syscalls. */
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    /* Allocate WsSocket(fd) march heap value.
+     * Layout: header(16) + fd field(8) = 24 bytes. tag=0, field[0]=fd. */
+    void *ws_sock = march_alloc(24);
+    *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+
+    /* Invoke closure: fn_ptr(closure, ws_sock).
+     * March closure layout: [rc(8)|tag(4)|pad(4)|fn_ptr@16|captures...] */
+    call_closure1(ws_closure, ws_sock);
+
+    close(fd);
+    return NULL;
+}
+
 /* ── Platform event API selection ─────────────────────────────────────── */
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
@@ -196,6 +228,23 @@ static void close_conn(int evfd, conn_state_t *c) {
     conn_state_free(c);
 }
 
+/* ── Detach a connection from the event loop without closing the fd ───── */
+/* Used for WebSocket upgrades: the fd is handed off to a blocking thread. */
+
+static void detach_conn(int evfd, conn_state_t *c) {
+#if EVLOOP_USE_KQUEUE
+    /* Explicitly delete the kqueue read filter.  We are NOT closing the fd,
+     * so kqueue won't remove the filter automatically. */
+    struct kevent ev;
+    EV_SET(&ev, c->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(evfd, &ev, 1, NULL, 0, NULL);   /* ignore error — filter may be gone */
+#elif EVLOOP_USE_EPOLL
+    epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
+#endif
+    /* Do NOT close c->fd — the WebSocket thread takes ownership. */
+    conn_state_free(c);
+}
+
 /* ── Defer a partial/EAGAIN write to handle_write ─────────────────────── */
 
 static void evloop_defer_write(int evfd, conn_state_t *c,
@@ -303,14 +352,46 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                 break;
             }
 
-            /* WebSocket upgrade — fall through to close (full WS async
-             * support requires a separate handler, out of scope here). */
+            /* WebSocket upgrade: complete the HTTP 101 handshake and hand
+             * the fd off to a dedicated blocking thread that runs the
+             * March WS handler closure.  The event-loop thread retains no
+             * reference to the fd after this point. */
             char    *rc_p        = (char *)result_conn;
             void    *upgrade_val = *(void **)(rc_p + 112);
             int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
             if (upgrade_tag == 1) {
                 if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
-                close_conn(evfd, c);
+
+                void *ws_closure = *(void **)((char *)upgrade_val + 16);
+                void *ws_key     = find_ws_key_header(*(void **)(rc_p + 56));
+
+                int ws_fd = c->fd;
+                /* Remove fd from event loop before spawning the thread. */
+                detach_conn(evfd, c);
+
+                if (ws_key) {
+                    march_ws_handshake((int64_t)ws_fd, ws_key);
+
+                    ws_upgrade_arg_t *targ = malloc(sizeof(*targ));
+                    if (targ) {
+                        targ->fd         = ws_fd;
+                        targ->ws_closure = ws_closure;
+                        pthread_t tid;
+                        pthread_attr_t attr;
+                        pthread_attr_init(&attr);
+                        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+                        if (pthread_create(&tid, &attr, ws_handler_thread, targ) != 0) {
+                            free(targ);
+                            close(ws_fd);
+                        }
+                        pthread_attr_destroy(&attr);
+                    } else {
+                        close(ws_fd);
+                    }
+                } else {
+                    close(ws_fd);
+                }
+
                 batch_ok = 0;
                 break;
             }

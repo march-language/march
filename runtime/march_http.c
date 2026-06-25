@@ -139,15 +139,9 @@ static void *make_tuple4(void *a, void *b, void *c, void *d) {
     return t;
 }
 
-/* Case-insensitive strncmp. */
+/* Case-insensitive strncmp (local alias; istrncmp_ws is in march_http_internal.h). */
 static int istrncmp(const char *a, const char *b, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        int ca = tolower((unsigned char)a[i]);
-        int cb = tolower((unsigned char)b[i]);
-        if (ca != cb) return ca - cb;
-        if (ca == '\0') return 0;
-    }
-    return 0;
+    return istrncmp_ws(a, b, n);
 }
 
 /* ── TCP builtins ─────────────────────────────────────────────────────── */
@@ -1186,21 +1180,7 @@ static void *make_conn(int64_t fd, int64_t method, void *path, void *path_info,
 
 /* Find the Sec-WebSocket-Key header value from a March List(Header).
  * Returns the march_string* value if found, NULL otherwise. */
-static void *find_ws_key_header(void *headers) {
-    void *cur = headers;
-    while (cur) {
-        int32_t tag = *(int32_t *)((char *)cur + 8);
-        if (tag == 0) break;  /* Nil */
-        void *hdr  = *(void **)((char *)cur + 16);
-        void *tail = *(void **)((char *)cur + 24);
-        march_string *hname = *(march_string **)((char *)hdr + 16);
-        if (hname->len == 17 && istrncmp(hname->data, "sec-websocket-key", 17) == 0) {
-            return *(void **)((char *)hdr + 24);  /* value */
-        }
-        cur = tail;
-    }
-    return NULL;
-}
+/* find_ws_key_header: defined as static inline in march_http_internal.h */
 
 /* Determine whether the request wants keep-alive.
  * HTTP/1.1 defaults to keep-alive; HTTP/1.0 defaults to close.
@@ -1404,14 +1384,13 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
     void    *upgrade_val = *(void **)(rc + 112);
     int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
     if (upgrade_tag == 1) {
-        void *ws_handler = *(void **)((char *)upgrade_val + 16);
+        void *ws_closure = *(void **)((char *)upgrade_val + 16);
         void *ws_key     = find_ws_key_header(*(void **)(rc + 56));
         if (ws_key) {
             march_ws_handshake((int64_t)fd, ws_key);
             void *ws_sock = march_alloc(16 + 8);
             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
-            typedef void *(*ws_handler_fn_t)(void *);
-            ((ws_handler_fn_t)ws_handler)(ws_sock);
+            call_closure1(ws_closure, ws_sock);
         }
         return -1;  /* WebSocket took over — close HTTP loop */
     }
@@ -1549,7 +1528,7 @@ static void *connection_thread(void *arg) {
                         { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
                                                     &zero, sizeof(zero)); }
 #endif
-                        void *ws_handler =
+                        void *ws_closure =
                             *(void **)((char *)upgrade_val + 16);
                         void *ws_key =
                             find_ws_key_header(*(void **)(rc_p + 56));
@@ -1557,8 +1536,7 @@ static void *connection_thread(void *arg) {
                             march_ws_handshake((int64_t)fd, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
                             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
-                            typedef void *(*ws_handler_fn_t)(void *);
-                            ((ws_handler_fn_t)ws_handler)(ws_sock);
+                            call_closure1(ws_closure, ws_sock);
                         }
                         running = 0;
                         break;

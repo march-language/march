@@ -8,6 +8,7 @@
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 #include "march_runtime.h"
+#include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,6 +17,48 @@ typedef void *(*closure_fn_t)(void *clo, void *arg);
 
 /* Build an empty March List (Nil tag=0).  Used for empty headers lists. */
 static inline void *make_nil(void) { return march_alloc(16); }
+
+/* ── WebSocket helpers (used by both march_http.c and march_http_evloop.c) ── */
+
+/* Case-insensitive strncmp. */
+static inline int istrncmp_ws(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int ca = tolower((unsigned char)a[i]);
+        int cb = tolower((unsigned char)b[i]);
+        if (ca != cb) return ca - cb;
+        if (ca == '\0') return 0;
+    }
+    return 0;
+}
+
+/* Walk a March List(Header) and return the String value of the
+ * Sec-WebSocket-Key header, or NULL if not present.
+ * Header layout: [rc|tag|name_ptr@16|value_ptr@24], List cell [rc|tag@8|head@16|tail@24]. */
+static inline void *find_ws_key_header(void *headers) {
+    void *cur = headers;
+    while (cur) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break;  /* Nil */
+        void *hdr  = *(void **)((char *)cur + 16);
+        void *tail = *(void **)((char *)cur + 24);
+        march_string *hname = *(march_string **)((char *)hdr + 16);
+        if (hname->len == 17 &&
+            istrncmp_ws(hname->data, "sec-websocket-key", 17) == 0) {
+            return *(void **)((char *)hdr + 24);  /* value */
+        }
+        cur = tail;
+    }
+    return NULL;
+}
+
+/* Invoke a March closure with one argument.
+ * March closure layout: [rc(8)|tag(4)|pad(4)|fn_ptr(8)|captures...]
+ * Calling convention: fn_ptr(closure, arg). */
+static inline void *call_closure1(void *clo, void *arg) {
+    typedef void *(*clo_fn1_t)(void *, void *);
+    clo_fn1_t fn = *(clo_fn1_t *)((char *)clo + 16);
+    return fn(clo, arg);
+}
 
 /* Build a March Conn heap object directly from a parsed SIMD request.
  * This is the fast path that avoids the intermediate Ok(tuple(...)) allocation
