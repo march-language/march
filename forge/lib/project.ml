@@ -43,10 +43,19 @@ type ffi_rust_crate = {
   frc_lib  : string;  (** archive base name (without "lib" prefix and ".a" suffix) *)
 }
 
+(** A single server in a named hot-reload environment ([[hot-reload.env]]). *)
+type hot_reload_env = {
+  hre_name       : string;
+  hre_ssh_host   : string;
+  hre_socket     : string;
+  hre_public_key : string option;
+}
+
 type hot_reload_config = {
-  hr_socket     : string;         (** Unix socket path on the server *)
-  hr_ssh_host   : string;         (** SSH target for tunnel, e.g. "root@1.2.3.4" *)
-  hr_public_key : string option;  (** base64-encoded ed25519 public key *)
+  hr_socket     : string;             (** Unix socket path on the server *)
+  hr_ssh_host   : string;             (** SSH target for tunnel, e.g. "root@1.2.3.4" *)
+  hr_public_key : string option;      (** base64-encoded ed25519 public key *)
+  hr_envs       : hot_reload_env list; (** multi-server environments ([[hot-reload.env]]) *)
 }
 
 type project = {
@@ -272,15 +281,31 @@ let load_from root =
       | _ -> None
     ) (Toml.get_section doc "js_deps")
   in
-  (* [hot-reload] section: forge deploy hot configuration (Phase 4) *)
+  (* [hot-reload] section: forge deploy hot configuration (Phase 4/7) *)
   let hot_reload =
     let hr = Toml.get_section doc "hot-reload" in
-    if hr = [] then None
+    (* [[hot-reload.env]] entries: multi-server environments (Phase 7) *)
+    let hr_envs =
+      List.filter_map (fun env_pairs ->
+        let ssh_host = Option.value ~default:"" (Toml.get_string env_pairs "ssh_host") in
+        if ssh_host = "" then None
+        else begin
+          let name       = Option.value ~default:"" (Toml.get_string env_pairs "name") in
+          let socket     = Option.value ~default:"/tmp/march_hcr.sock"
+                             (Toml.get_string env_pairs "socket") in
+          let public_key = Toml.get_string env_pairs "public_key" in
+          Some { hre_name = name; hre_ssh_host = ssh_host;
+                 hre_socket = socket; hre_public_key = public_key }
+        end
+      ) (Toml.get_all_sections doc "hot-reload.env")
+    in
+    if hr = [] && hr_envs = [] then None
     else begin
       let socket     = Option.value ~default:"/tmp/march_hcr.sock" (Toml.get_string hr "socket") in
       let ssh_host   = Option.value ~default:""                    (Toml.get_string hr "ssh_host") in
       let public_key = Toml.get_string hr "public_key" in
-      Some { hr_socket = socket; hr_ssh_host = ssh_host; hr_public_key = public_key }
+      Some { hr_socket = socket; hr_ssh_host = ssh_host;
+             hr_public_key = public_key; hr_envs }
     end
   in
   { name; version; project_type = project_type_of_string type_str;

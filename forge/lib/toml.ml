@@ -149,13 +149,23 @@ let parse text =
     let line = String.trim raw in
     if line = "" || (String.length line > 0 && line.[0] = '#') then
       ()
-    else if String.length line >= 3 && line.[0] = '[' then begin
-      (match String.index_opt line ']' with
-       | None -> ()
-       | Some close ->
-         finish ();
-         let name = String.trim (String.sub line 1 (close - 1)) in
-         cur_section := name)
+    else if String.length line >= 2 && line.[0] = '[' then begin
+      finish ();
+      if String.length line >= 4 && line.[1] = '[' then begin
+        (* [[array-of-tables]] — strip both pairs of brackets *)
+        let inner = String.sub line 2 (String.length line - 2) in
+        (match String.index_opt inner ']' with
+         | None -> ()
+         | Some rel ->
+           let name = String.trim (String.sub inner 0 rel) in
+           cur_section := name)
+      end else begin
+        (match String.index_opt line ']' with
+         | None -> ()
+         | Some close ->
+           let name = String.trim (String.sub line 1 (close - 1)) in
+           cur_section := name)
+      end
     end else begin
       match String.index_opt line '=' with
       | None -> ()
@@ -175,6 +185,12 @@ let get_section doc name =
   match List.assoc_opt name doc.sections with
   | None -> []
   | Some pairs -> pairs
+
+(** Return ALL sections with the given name (for [[array-of-tables]]). *)
+let get_all_sections doc name =
+  List.filter_map
+    (fun (n, pairs) -> if n = name then Some pairs else None)
+    doc.sections
 
 let get_string pairs key =
   match List.assoc_opt key pairs with

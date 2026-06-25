@@ -282,6 +282,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, HCR Phase 7 — fleet tooling P1–P6)
+
+- **Audit log (`runtime/march_reload.c`).** `write_audit_log` + `pubkey_to_hex` helper. Every ACTIVATE (sig pass or fail) appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`). Fields: `ts/type/fn/impl_hash/signer/cas_hash/result`. Results: `ok | err_sig | err_abi | err_cas_miss | err_dlopen`.
+- **`VERSIONS_DETAIL` protocol command (`runtime/march_reload.c`, `runtime/march_dispatch.{h,c}`).** New response format: `SLOT <id> <name> <impl_hash> <activated_at_ms> <signer_hex>`. Backed by `activated_at_ms : long long` + `signer_hex[65]` per-slot fields in `MarchDispatchSlot`. `march_dispatch_set_activation` called after each successful publish; `march_dispatch_activated_at`/`march_dispatch_signer_hex` getters.
+- **`forge hot-reload status` (`forge/lib/cmd_deploy_hot.ml`).** Opens SSH tunnel, sends `VERSIONS_DETAIL`, parses `detail_slot` list, prints a dashboard table (Function / impl_hash / activated / signer columns). `format_elapsed_ms` converts Unix ms timestamps to human-readable "Xs ago / Xm ago / never (baseline)".
+- **`forge hot-reload init` (`forge/lib/cmd_hot_reload.ml`).** `git log --name-only --since=<days> --diff-filter=M` analysis; counts commits per `.march` file; prints "suggest excluding" vs "keep reloadable" table; emits `[hot-reload] exclude = [...]` snippet. `--lookback` (default 90 days) and `--threshold` (default 3 commits) flags.
+- **`forge hot-reload keygen --rotate` + `use-key` (`forge/lib/cmd_hot_reload.ml`).** `keygen --rotate` generates versioned `ed25519_secret_v<N>.key` (scans `~/.march/` for highest existing N, uses N+1). `use-key <path>` copies the chosen key to the canonical `~/.march/ed25519_secret.key`.
+- **Multi-env fan-out + `--canary` (`forge/lib/cmd_deploy_hot.ml`, `forge/lib/project.ml`, `forge/lib/toml.ml`).** TOML parser extended to handle `[[array-of-tables]]` (double-bracket sections). `project.ml`: new `hot_reload_env` type + `hr_envs : hot_reload_env list` field on `hot_reload_config`. `deploy_env`: resolves server list from `[[hot-reload.env]]` filtered by `--env <name>`; sequential fan-out via `deploy_one`; with `--canary <n>`: deploys to first n servers, polls PING every 2s for `--timeout` ms, rolls out to rest on healthy, aborts on failure.
+- **`forge deploy hot` CLI (`forge/bin/main.ml`).** New flags: `--env <name>`, `--canary <n>`, `--timeout <ms>`.
+- **`forge hot-reload` CLI.** New subcommands: `status`, `init`, `use-key`; `keygen` gains `--rotate`.
+- **Verification.** All test suites green: compiler 321, eval 224, codegen 320, stdlib 766, stdlib_march 53/53. Forge builds cleanly.
+
 ## Current State (as of 2026-06-25, Distributed OTP P4+P5 — load gossip, work dispatch, anti-entropy, cross-node monitors, dist supervisors)
 
 - **P4 — Load gossip (`stdlib/swim_driver.march`, `stdlib/cluster_load.march`).** `ClusterLoad.NodeLoad` gains `sampled_at : Int`; `to_ints`/`from_ints` updated to 5-element wire codec. `SwimDriver` extended with `peer_loads` map, `GossipWithLoad` event, `SwimGossipLoad` wire msg (tag=3, piggybacked load array), `load_stale_ms()`/`anti_entropy_period_ms()` constants, and public API `anti_entropy_peers`/`bump_anti_entropy`/`peer_load`/`fresh_peer_loads`. Anti-entropy timer exposed as separate functions so `step`'s return type is unchanged.

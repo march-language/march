@@ -415,6 +415,112 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
   close_tunnel tunnel_pid local_socket;
   result
 
+(* ─── Status: VERSIONS_DETAIL dashboard ─────────────────────────────────── *)
+
+type detail_slot = {
+  ds_id           : int;
+  ds_name         : string;
+  ds_impl_hash    : string;
+  ds_activated_at : int64;   (* Unix ms; 0 = never activated (baseline) *)
+  ds_signer       : string;  (* 64-char hex pubkey, or "(none)" if baseline *)
+}
+
+let parse_versions_detail conn =
+  let slots = ref [] in
+  let rec loop () =
+    let line = recv_line conn in
+    if line = "END" then List.rev !slots
+    else begin
+      (match String.split_on_char ' ' line with
+       | ["SLOT"; id_s; name; impl_h; ts_s; signer] ->
+         (match int_of_string_opt id_s, Int64.of_string_opt ts_s with
+          | Some id, Some ts ->
+            slots := { ds_id = id; ds_name = name; ds_impl_hash = impl_h;
+                       ds_activated_at = ts; ds_signer = signer } :: !slots
+          | _ -> ())
+       | _ -> ());
+      loop ()
+    end
+  in
+  loop ()
+
+let format_elapsed_ms (ts_ms : int64) : string =
+  if ts_ms = 0L then "never (baseline)"
+  else begin
+    let now_ms = Int64.of_float (Unix.gettimeofday () *. 1000.0) in
+    let diff_ms = Int64.sub now_ms ts_ms in
+    let diff_s = Int64.to_int (Int64.div diff_ms 1000L) in
+    if diff_s < 0 then "just now"
+    else if diff_s < 60 then Printf.sprintf "%ds ago" diff_s
+    else if diff_s < 3600 then Printf.sprintf "%dm ago" (diff_s / 60)
+    else if diff_s < 86400 then Printf.sprintf "%dh ago" (diff_s / 3600)
+    else Printf.sprintf "%dd ago" (diff_s / 86400)
+  end
+
+let run_status () : (unit, string) result =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    match proj.Project.hot_reload with
+    | None -> Error "no [hot-reload] section in forge.toml"
+    | Some hr ->
+      if hr.Project.hr_ssh_host = "" then
+        Error "[hot-reload] ssh_host is required"
+      else begin
+        let local_socket =
+          Printf.sprintf "/tmp/march_status_%d.sock" (Unix.getpid ())
+        in
+        Printf.printf "Connecting to %s...\n%!" hr.Project.hr_ssh_host;
+        let (tunnel_pid, _) =
+          open_tunnel ~ssh_host:hr.Project.hr_ssh_host
+                      ~remote_socket:hr.Project.hr_socket
+                      ~local_socket
+        in
+        let result =
+          (try
+            let fd = connect_socket local_socket in
+            let conn = conn_of_fd fd in
+            send_line conn "VERSIONS_DETAIL";
+            let slots = parse_versions_detail conn in
+            Unix.close fd;
+            if slots = [] then
+              Printf.printf "(no registered functions)\n%!"
+            else begin
+              let col_fn   = 48 in
+              let col_hash = 14 in
+              let col_age  = 20 in
+              Printf.printf "%-*s  %-*s  %-*s  %s\n"
+                col_fn "Function" col_hash "impl_hash" col_age "activated" "signer";
+              Printf.printf "%s\n" (String.make (col_fn + col_hash + col_age + 30) '-');
+              List.iter (fun ds ->
+                let hash_short =
+                  if String.length ds.ds_impl_hash >= 8
+                  then String.sub ds.ds_impl_hash 0 8 ^ "..."
+                  else ds.ds_impl_hash
+                in
+                let signer_short =
+                  if ds.ds_signer = "(none)" then "(baseline)"
+                  else if String.length ds.ds_signer >= 8
+                       then String.sub ds.ds_signer 0 8 ^ "..."
+                  else ds.ds_signer
+                in
+                Printf.printf "%-*s  %-*s  %-*s  %s\n"
+                  col_fn ds.ds_name
+                  col_hash hash_short
+                  col_age (format_elapsed_ms ds.ds_activated_at)
+                  signer_short
+              ) slots
+            end;
+            Ok ()
+          with
+          | Failure m -> Error m
+          | Unix_error (e, fn, _) ->
+            Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
+        in
+        close_tunnel tunnel_pid local_socket;
+        result
+      end
+
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
 let build_so ~proj ~output : (string * string, string) result =
@@ -531,4 +637,180 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                 with Sys_error _ -> ())
               | _ -> ());
               result2 |> Result.map ignore
+      end
+
+(* ─── Multi-env fan-out (Phase 7) ─────────────────────────────────────────── *)
+
+let _tunnel_counter = ref 0
+let fresh_sock prefix =
+  incr _tunnel_counter;
+  Printf.sprintf "/tmp/%s_%d_%d.sock" prefix (Unix.getpid ()) !_tunnel_counter
+
+(** Send PING to one server; returns true if PONG received. *)
+let ping_server ~ssh_host ~remote_socket : bool =
+  let local = fresh_sock "march_ping" in
+  let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket:local in
+  let alive =
+    try
+      let fd = connect_socket local in
+      let conn = conn_of_fd fd in
+      send_line conn "PING";
+      let r = recv_line conn in
+      Unix.close fd;
+      r = "PONG"
+    with _ -> false
+  in
+  close_tunnel pid local;
+  alive
+
+(** Deploy the given pre-built artifact to one server entry; print status line. *)
+let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
+    ~old_schemas_path ~new_schemas_path : (int, string) result =
+  let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
+  let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
+  Printf.printf "\n── %s\n%!" label;
+  run
+    ~ssh_host:srv.Project.hre_ssh_host
+    ~remote_socket:srv.Project.hre_socket
+    ~signing_pubkey:pubkey
+    ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path
+    ()
+
+let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
+  if Sys.file_exists new_schemas_path then
+    (try
+      let ic = open_in new_schemas_path in
+      let content = In_channel.input_all ic in
+      close_in ic;
+      let march_dir = Filename.dirname prev_schemas_path in
+      (if not (Sys.file_exists march_dir) then
+         try Unix.mkdir march_dir 0o755 with Unix_error _ -> ());
+      let oc = open_out prev_schemas_path in
+      output_string oc content;
+      close_out oc
+    with Sys_error _ -> ())
+
+(** [deploy_env ~env ~canary ~timeout_ms ~output ~so ()] deploys to one or more servers.
+    - [env]: name of the [[hot-reload.env]] group (empty → use flat [hot-reload] config).
+    - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
+    - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
+let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) () : (unit, string) result =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    match proj.Project.hot_reload with
+    | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
+    | Some hr ->
+      let servers : Project.hot_reload_env list =
+        if env = "" then
+          if hr.Project.hr_ssh_host = "" then []
+          else [{ Project.hre_name = "default";
+                  hre_ssh_host = hr.Project.hr_ssh_host;
+                  hre_socket = hr.Project.hr_socket;
+                  hre_public_key = hr.Project.hr_public_key }]
+        else
+          List.filter (fun e -> e.Project.hre_name = env) hr.Project.hr_envs
+      in
+      if servers = [] then
+        Error (if env = ""
+               then "[hot-reload] ssh_host is required"
+               else Printf.sprintf "no servers found for env '%s'" env)
+      else begin
+        match Cmd_hot_reload.read_sk_raw () with
+        | Error m -> Error m
+        | Ok sk ->
+          let out_prefix =
+            if output <> "" then output
+            else Filename.concat (Filename.concat proj.Project.root ".march")
+                   (proj.Project.name ^ "_hot")
+          in
+          let (so_path, manifest_path) =
+            if so <> "" then (so, so ^ ".hcr_manifest")
+            else (out_prefix ^ ".so", out_prefix ^ ".so.hcr_manifest")
+          in
+          let build_result =
+            if so <> "" then begin
+              if not (Sys.file_exists so_path) then
+                Error (Printf.sprintf "pre-built .so not found: %s" so_path)
+              else if not (Sys.file_exists manifest_path) then
+                Error (Printf.sprintf "manifest not found: %s" manifest_path)
+              else Ok (so_path, manifest_path)
+            end else begin
+              Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
+              build_so ~proj ~output:out_prefix
+            end
+          in
+          match build_result with
+          | Error m -> Error m
+          | Ok (so_path2, manifest_path2) ->
+            match parse_manifest manifest_path2 with
+            | Error m -> Error m
+            | Ok manifest ->
+              let new_schemas_path = so_path2 ^ ".schemas.json" in
+              let prev_schemas_path = out_prefix ^ ".so.schemas.json.prev" in
+
+              let deploy_list srvs =
+                List.map (fun srv ->
+                  (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
+                          ~old_schemas_path:prev_schemas_path
+                          ~new_schemas_path)
+                ) srvs
+              in
+
+              let canary_n = if canary > 0 then min canary (List.length servers) else 0 in
+              if canary_n > 0 then begin
+                (* Canary flow: deploy to first n, health-check, then roll out *)
+                let n_total = List.length servers in
+                let arr = Array.of_list servers in
+                let canary_srvs = Array.to_list (Array.sub arr 0 canary_n) in
+                let rest_srvs   = Array.to_list (Array.sub arr canary_n (n_total - canary_n)) in
+                Printf.printf "==> Canary: deploying to %d/%d server(s)...\n%!" canary_n n_total;
+                let canary_res = deploy_list canary_srvs in
+                let canary_ok = List.for_all (fun (_, r) -> match r with Ok _ -> true | Error _ -> false) canary_res in
+                if not canary_ok then
+                  Error "canary deploy failed — remaining servers untouched"
+                else begin
+                  Printf.printf "\n==> Canary live. Monitoring for %.0fs (PING every 2s)...\n%!"
+                    (float_of_int timeout_ms /. 1000.0);
+                  let deadline = Unix.gettimeofday () +. (float_of_int timeout_ms /. 1000.0) in
+                  let failed_host = ref "" in
+                  while Unix.gettimeofday () < deadline && !failed_host = "" do
+                    let remaining = deadline -. Unix.gettimeofday () in
+                    Unix.sleepf (min 2.0 (max 0.0 remaining));
+                    List.iter (fun (srv : Project.hot_reload_env) ->
+                      if !failed_host = "" then begin
+                        let alive = ping_server ~ssh_host:srv.Project.hre_ssh_host
+                                                ~remote_socket:srv.Project.hre_socket in
+                        if not alive then
+                          failed_host := srv.Project.hre_ssh_host
+                      end
+                    ) canary_srvs
+                  done;
+                  if !failed_host <> "" then
+                    Error (Printf.sprintf "canary health check failed: %s stopped responding — remaining servers untouched" !failed_host)
+                  else begin
+                    Printf.printf "\n==> Canary healthy. Rolling out to %d remaining server(s)...\n%!" (List.length rest_srvs);
+                    let rest_res = deploy_list rest_srvs in
+                    save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                    let failed = List.filter_map (fun (srv, r) -> match r with
+                        | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) rest_res in
+                    if failed = [] then Ok ()
+                    else Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
+                  end
+                end
+              end else begin
+                (* Non-canary fan-out *)
+                if List.length servers > 1 then
+                  Printf.printf "==> Deploying to %d server(s) (env: %s)...\n%!" (List.length servers) env;
+                let results = deploy_list servers in
+                save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                let failed = List.filter_map (fun (srv, r) -> match r with
+                    | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
+                if failed = [] then Ok ()
+                else begin
+                  Printf.eprintf "\nFailed servers:\n";
+                  List.iter (fun (host, m) -> Printf.eprintf "  %s: %s\n" host m) failed;
+                  Error (Printf.sprintf "%d/%d server(s) failed" (List.length failed) (List.length servers))
+                end
+              end
       end

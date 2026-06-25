@@ -19,6 +19,8 @@ typedef struct {
     _Atomic(uint32_t) current;                        /* live ring index */
     MarchFnVersion    ring[MARCH_MAX_LIVE_VERSIONS];
     char              baseline_impl_hash[65];          /* Phase 4: set on first publish, never changed */
+    long long         activated_at_ms;                 /* Phase 7: Unix ms of last ACTIVATE */
+    char              signer_hex[65];                  /* Phase 7: pubkey hex of last ACTIVATE signer */
 } MarchDispatchSlot;
 
 static MarchDispatchSlot  *g_slots      = NULL;
@@ -202,4 +204,27 @@ const char *march_dispatch_baseline_hash(uint32_t name_id) {
 const char *march_dispatch_id_to_name(uint32_t name_id) {
     if (!g_id_to_name || name_id >= g_n_slots) return NULL;
     return g_id_to_name[name_id];
+}
+
+void march_dispatch_set_activation(uint32_t name_id, long long ts_ms,
+                                    const char *signer_hex) {
+    if (name_id >= g_n_slots) return;
+    MarchDispatchSlot *s = &g_slots[name_id];
+    s->activated_at_ms = ts_ms;
+    if (signer_hex) {
+        strncpy(s->signer_hex, signer_hex, 64);
+        s->signer_hex[64] = '\0';
+    } else {
+        s->signer_hex[0] = '\0';
+    }
+}
+
+long long march_dispatch_activated_at(uint32_t name_id) {
+    if (name_id >= g_n_slots) return 0;
+    return g_slots[name_id].activated_at_ms;
+}
+
+const char *march_dispatch_signer_hex(uint32_t name_id) {
+    if (name_id >= g_n_slots) return NULL;
+    return g_slots[name_id].signer_hex;
 }
