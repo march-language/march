@@ -1,5 +1,85 @@
 [
   {
+    "hash": "85b9b4719c71f5b5b00172aae40ace687c96f53b",
+    "short_hash": "85b9b47",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-25T12:28:27-04:00",
+    "message": "feat(dist-otp/p4p5): load gossip, work dispatch, Merkle anti-entropy, cross-node monitors, dist supervisors\n\nP4 — L6 load-aware work dispatch:\n- ClusterLoad.NodeLoad gains sampled_at:Int; to_ints/from_ints updated to 5-element codec\n- SwimDriver: peer_loads map, GossipWithLoad event, SwimGossipLoad wire msg (tag=3\n  piggybacked load array), anti_entropy_peers/bump_anti_entropy/peer_load/fresh_peer_loads\n  public API (anti-entropy timer without changing step's return type)\n- WorkDispatch: pick_dispatch_target (power-of-two-choices), pick_two (caller-sampled\n  indices), dispatch (load-aware RPC with local fallback), dispatch_affine (ConsistentHash\n  affinity with load-aware fallback)\n\nP5a — GlobalRegistry Merkle anti-entropy:\n- root_hash (Merkle.build over sorted name→entry pairs), diff_entries (CRDT join on\n  hash divergence), all_entries (full snapshot), entry_to_bytes serialiser\n\nP5c — Cross-node process monitors:\n- net_kernel.march: MONITOR_REQ (tag=7) + MONITOR_FIRE (tag=8) frame codecs + frame_tag\n- runtime/march_monitor_registry.{h,c}: mutex-guarded per-pid watcher table,\n  register/fire_pid/fire_nodedown/clear_fd, mini msgpack encoder for MONITOR_FIRE frames\n- march_runtime.c: fire_pid hook on actor exit\n- dist_link.march: DownReason, MonitorRef, PendingMonitor, MonitorTable, wire codecs,\n  make_monitor factory, impl Eq(MonitorRef), impl Eq(DownReason)\n\nP5d — Distributed supervisor:\n- dist_supervisor.march: RestartStrategy, SupervisionStrategy, should_restart,\n  restart_indices, find_child_by_ref, update_child, child_count\n\nTests: 49→53 stdlib_march suites (3 new: work_dispatch/dist_link/dist_supervisor;\nswim_driver+global_registry extended). All 53 suites green. Full suite green:\ncompiler 321, eval 224, codegen 320, stdlib 786, stdlib_march 53/53.",
+    "files_changed": 18
+  },
+  {
+    "hash": "1b41aa0e5bfd620555c343bd81ff8d0686e997d9",
+    "short_hash": "1b41aa0",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-25T11:32:12-04:00",
+    "message": "docs: spec HCR Phase 7 (fleet tooling) + Distributed OTP P4+P5\n\nHCR Phase 7 (specs/plans/2026-06-25-hcr-phase7-fleet-spec.md):\n- Multi-server [[hot-reload.env]] forge.toml schema\n- forge deploy hot --env + parallel fan-out with per-server status\n- --canary <n>: activate on n servers, health-check PING loop,\n  rollback (re-activate prior impl_hash) on failure\n- Third CAS tier: s3:// / https:// pull-based artifact distribution;\n  server GET on cas_hash miss; eliminates inline CAS_PUT for fleets\n- forge hot-reload init: git-history analysis → exclude suggestions\n- forge hot-reload keygen --rotate: keypair rotation procedure\n- VERSIONS_DETAIL protocol command: impl_hash + activated_at + signer\n- Append-only audit log: every ACTIVATE → jsonl on the server\n- forge hot-reload status: cross-fleet drift detection dashboard\n- Implementation order: audit log → VERSIONS_DETAIL → status →\n  fleet fan-out → init → rotate → registry tier\n\nDistributed OTP P4+P5 (specs/plans/2026-06-25-distributed-otp-p4p5-spec.md):\n- P4 work dispatch: NodeLoad gossip via SWIM frames (+ staleness\n  decay); stdlib/work_dispatch.march (pick_dispatch_target\n  power-of-two-choices, dispatch with local fallback);\n  dispatch_affine with ConsistentHash; P4b work-stealing deferred\n- P5a GlobalRegistry Merkle anti-entropy: root_hash + diff_entries\n  using Merkle.build/diff; REGISTRY_SYNC_REQ/RESP frame protocol;\n  30s anti-entropy loop in SwimDriver\n- P5b ConsistentHash name-partitioning: authoritative ownership via\n  ConsistentHash.get; non-owner proxies register to owner node\n- P5c cross-node links/monitors: dist_link.march (monitor, link,\n  unlink, demonitor); MONITOR_REQ/FIRE frames; march_monitor_registry.c\n  (per-pid watcher table, fire-on-exit, NodeDown sweep on peer-drop)\n- P5d distributed supervisors: dist_supervisor.march wrapping NodeCall\n  spawn + DistLink.monitor; same restart strategies as local\n- File map, integration test plan, open questions (load gossip freq,\n  dispatch fallback policy, monitor persistence, HCR+OTP interaction)",
+    "files_changed": 2
+  },
+  {
+    "hash": "a1e8c52e4e246454f314573c436279a132e27c97",
+    "short_hash": "a1e8c52",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-25T11:21:55-04:00",
+    "message": "feat(hcr/phase5): actor state migration — end-to-end verified on droplet\n\nPart A — Runtime:\n- MARCH_MIGRATE_TAG system message (march_migrate_msg_t, malloc/free)\n- dispatch_name_id in march_actor_meta; actor_green_thread dispatches\n  MIGRATE before the alive gate, calling migrate_fn to swap state ptr\n- march_actor_broadcast_migrate: two-phase (snapshot under lock,\n  inject outside lock) to avoid deadlock\n- State indirection in --hot-reload actors: $f_state pointer at field 2\n  (handlers load/store via pointer; spawn initialises directly)\n- __migrate_<Actor> LLVM alias exported from .so patches for dlsym\n- ACTIVATE payload extended with migrate_required; march_reload.c\n  dlsyms __migrate_<Actor> and calls broadcast_migrate\n- Spawn wrapper: *_spawn_impl + thin wrapper calling\n  march_actor_set_dispatch_id\n\nPart B — Type guardrails:\n- sig_hash gate exemption for *_dispatch fns with __migrate_* symbol\n- .march/ dir creation before writing prev schemas file (fixes silent\n  failure that prevented schema diff from detecting state changes)\n\nBug fixes:\n- march_sched_recv: MARCH_RECV_NO_MSG sentinel for niche-encoded\n  zero-arg ctors (null pointer is a valid message value)\n- emit_case effective_repr: use niche strategy for concrete\n  TCon(name, []) types matching is_niche_shaped\n- actor_green_thread: MIGRATE dispatch before alive gate to prevent\n  message processing before migration completes\n\nDemo + test:\n- demo/hcr_actor_demo/counter_server.march: persistent actor server\n- counter_v1.march / counter_v2.march: aligned message types (niche-\n  encoded Inc()/PrintCount(String)); v2 adds history + migrate_state\n- scripts/rpc/phase5-actor-test.sh: 10-step E2E test; exits 0 on\n  droplet with pre_migrate count=3 / post_migrate count=3 / count=4\n- docs/cookbook/parallel-data.md: parallelism performance table\n\nTests: compiler 321 / eval 224 / codegen 320 / stdlib 786 (full)",
+    "files_changed": 15
+  },
+  {
+    "hash": "ba52b176d6d9428ccfd641a3fbcc89dd9fa39147",
+    "short_hash": "ba52b17",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-24T12:15:04-04:00",
+    "message": "feat(stdlib): add RRB.Vec and Parallel modules\n\nTwo new stdlib modules for bulk parallel work:\n\n- `stdlib/rrb_vec.march` (mod RRB): persistent sequence backed by List\n  in v1. ptype Vec(a) / ptype Slice(a). Full API: empty, singleton,\n  from_list, from_array, tabulate, range, length, is_empty, get, push,\n  concat, slice, fold, chunk, to_list, to_array, each, map, fold_left.\n  chunk(v, n) returns Array(Slice(a)) with no empty slices; fold over\n  a Slice is O(slice length) with zero allocation.\n\n- `stdlib/parallel.march` (mod Parallel): map-reduce over RRB.Vec via\n  task_spawn/task_await_unwrap. pmap/pmap_n (order-preserving), preduce/\n  preduce_n (associative reduce with explicit zero+merge), and convenience\n  wrappers psum, psum_float, pcount, pany, pall. Sequential in the\n  interpreter, real multi-core when compiled.\n\nTests: test/stdlib/test_rrb_vec.march (47 assertions). Registered in\ntest_stdlib_march.ml; both files added to all_stdlib_decls load list.\nAll 49 stdlib_march Alcotest cases pass; full suite green (321/224/786).\n\nDocs: docs/cookbook/parallel-data.md (new chapter with worked examples:\nword frequency, image filter, statistics, pfilter-via-preduce, perf\nnotes, interpreter vs compiled table). docs/parallelism.md updated with\nRRB/Parallel section and cookbook link. stdlib count updated to 103 in\nCLAUDE.md, docs/stdlib.md, specs/features/standard-library.md, and\nSKILL.md. doc-lint passes.",
+    "files_changed": 13
+  },
+  {
+    "hash": "1e5f18394ea462e55e6881b1b359a6ac76e8ed62",
+    "short_hash": "1e5f183",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-23T07:54:42-04:00",
+    "message": "demo: two-node RPC over TCP (square fn, compiler-emitted stub)\n\ndemo/two_node_rpc.march: node-a connects to node-b and calls\nTwoNodeRpc.square remotely via NodeCall.call. The server uses\nNodeRpc.empty() + serve_loop; dispatch is handled by the C registry\npopulated by the compiler-emitted march_remote_register at @main.\n\nTwo calls over one persistent connection: square(7)=49, square(12)=144.",
+    "files_changed": 2
+  },
+  {
+    "hash": "318306bc72921b8bab2468ca9a33d3aa17ca9fa9",
+    "short_hash": "318306b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-23T03:47:32-04:00",
+    "message": "feat(stdlib): add mutable RingBuf with non-sendable enforcement\n\nAdds RingBuf(a) — a fixed-capacity, mutable, O(1) circular buffer backed\nby the existing internal `ring` OCaml struct in the evaluator.\n\nSemantics:\n- Index 0 = oldest (FIFO drain order); push writes newest, overwrites\n  oldest when full\n- Shared-reference: all aliases see mutations (actor-owned primitive)\n- Non-sendable: the typechecker rejects RingBuf values in send() payloads\n  with a clear error message directing users to pass the buffer as actor\n  init state instead\n\nChanges:\n- lib/eval/eval.ml: move `ring` type before `value` ADT, add VRingBuf\n  constructor, ring_pop_oldest helper, and 10 builtins (make, push, pop,\n  get, peek_oldest, peek_newest, size, cap, clear, to_list)\n- lib/typecheck/typecheck.ml: register RingBuf(a) type signatures for all\n  10 builtins; add check_sendable/non_sendable_types enforcement at ESend\n- stdlib/ring_buf.march: public March API module\n- test/stdlib/test_ring_buf.march: 28 tests covering all operations\n- test/test_stdlib_march.ml: wire ring_buf into the stdlib test suite",
+    "files_changed": 5
+  },
+  {
+    "hash": "90dd338951e979ad0b8f469f26a21e14d48c49ac",
+    "short_hash": "90dd338",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T15:05:09-04:00",
+    "message": "feat(js): Chunk B — raises externs: try/catch → Ok/Err on JS target\n\n`raises fn f(args) : Result(T, E) = \"jsExport\"` from a JS module now\ncorrectly catches JS exceptions and returns `Err` instead of propagating\nthe exception through the March stack.\n\nMechanism (js_emit.ml):\n- `err_payload_ty`: extracts E from Result(T,E) in ed_ret\n- `warn_err_type`: compile-time warning when E is not String (best-effort\n  coercion via String(e?.message ?? e) with a note that full structured\n  marshalling is deferred)\n- `emit_extern_call JsModuleRaises`: emits IIFE with try/catch →\n  `{ $: \"Ok\", _0: jsExport(args) }` / `{ $: \"Err\", _0: __js_err_to(e) }`\n- `emit_extern_clo_str JsModuleRaises`: matching $clo wrapper with\n  try/catch body\n- `emit_module`: emits `const __js_err_to = (e) => String(e?.message ?? e);`\n  in the preamble only when at least one raises extern is used\n\nTested end-to-end under node: Ok branch returns value, Err branch\ncaptures the JS error message as a String.",
+    "files_changed": 1
+  },
+  {
+    "hash": "7dc3fb47c2f3a1751a6a726c58ec0c272b6692a2",
+    "short_hash": "7dc3fb4",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T14:58:59-04:00",
+    "message": "feat(js): Chunk C — diagnostic for C-backed externs on --target js\n\nUsed C-backed externs (extern \"rt\", extern \"c\", etc.) now produce a\nclear compile error on --target js instead of emitting a dangling\n`const alias = c_symbol` that causes a ReferenceError at load time.\n\nMechanism:\n- `exception Js_emit_error of string list` in js_emit.ml\n- After computing `used_ed` in `emit_module`, filter for CBacked externs\n  via `classify_js_extern` and raise `Js_emit_error` with a per-extern\n  diagnostic message\n- `bin/main.ml` wraps `emit_module` in a try/with that catches\n  `Js_emit_error`, prints each message to stderr, and exits non-zero\n\nUnused C-backed externs (already filtered from used_ed) are silently\nignored — same policy as unused JS-module externs.\n\nTested:\n- Used CBacked extern → error message + exit 1\n- Unused CBacked extern → compiles cleanly",
+    "files_changed": 2
+  },
+  {
+    "hash": "95cb353f3c60ba6154586076180c2213591ecbbf",
+    "short_hash": "95cb353",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T14:51:48-04:00",
+    "message": "feat(forge): auto cargo build via [ffi.rust] in forge.toml\n\nGap 3: detect `[ffi.rust]` section in forge.toml and auto-run\n`cargo build --release` in the crate directory before compilation.\n\n- forge/lib/project.ml: add `ffi_rust_crate` type + `ffi_rust` field;\n  parse `[ffi.rust] crate = \"<path>\" lib = \"<name>\"` (lib defaults to\n  basename of crate path); `frc_lib` is the archive base name\n- forge/lib/cmd_build.ml: in App/Tool build path, if `ffi_rust` is\n  set, run `cargo build --release` in the crate dir (printing progress\n  lines) and append `--ffi-link target/release/lib<name>.a` to the\n  existing ffi_flags\n- forge/lib/cmd_ffi.ml: update `add_rust` next-steps guidance to show\n  the new `[ffi.rust]` snippet instead of the manual `[ffi] link` form\n\nSpec updates: c-ffi-gaps.md and todos.md mark all three Rust follow-on\ngaps as done (Option(Float) boxed ABI, ConsumeResourceArc, auto cargo).",
+    "files_changed": 5
+  },
+  {
+    "hash": "1683bbb55aad68b966490eba4a7d013a6d90f67f",
+    "short_hash": "1683bbb",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-22T14:32:48-04:00",
+    "message": "feat(js): Chunk 0 — add js_extern_kind + emit_extern_call/clo seam\n\nFactor the two sites that Chunks A/B both need to touch through a single\nrouted dispatch:\n\n- `js_extern_kind` type: JsModuleSync | JsModuleBlocking | JsModuleRaises | CBacked\n- `classify_js_extern`: routes an extern_decl to its kind\n- `emit_extern_call`: seam for direct call-site emission; all kinds emit a\n  plain synchronous call in Chunk 0 — Chunks A/B add their arms here\n- `emit_extern_clo_str`: seam for $clo wrapper string; same placeholder arms\n- Move `is_js_module` earlier (before the let-rec block) so classify_js_extern\n  can reference it\n- Update `emit_val_impl` general-call arm to dispatch through emit_extern_call\n- Update `emit_extern_bridges` $clo loop to use emit_extern_clo_str\n\nNo observable behaviour change: `js_extern_import` and `js_dom_available`\noutputs are byte-identical before and after.\n\nAlso add specs/plans/2026-06-22-js-ffi-full.md (full JS FFI spec).",
+    "files_changed": 2
+  },
+  {
     "hash": "42724c32158151b658746d6469f82768e1b9146a",
     "short_hash": "42724c3",
     "author": "Matthew Gilliam",
@@ -14,14 +94,6 @@
     "date": "2026-06-22T14:01:48-04:00",
     "message": "feat(js): fix import ordering and add source maps\n\nES import statements for extern modules (e.g. `import { dirname } from\n\"node:path\"`) previously appeared after const builtin declarations.\nSplit emit_extern_bridges to return (imports_str, consts_str) and\nreorder assembly in emit_module so all ES imports precede any const.\n\nAdd source map v3 generation: collect function → source line from the\nuser AST before TIR lowering (avoiding modifying the many fn_def\nconstruction sites), thread through emit_module as fn_lines, record\n(output_line, src_line) segments during emit_fn_decl_impl, then encode\nvia VLQ base64 into a source map v3 JSON file. The map is written\nalongside the .mjs output and referenced via sourceMappingURL.",
     "files_changed": 2
-  },
-  {
-    "hash": "28cde4bba6384974717224714e5d19958cc9a8d1",
-    "short_hash": "28cde4b",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-22T13:22:01-04:00",
-    "message": "Merge branch 'main' into claude/nervous-wescoff-9b1ea4",
-    "files_changed": 0
   },
   {
     "hash": "ecf8678eb969f0f96330d6a16714379c5e42e962",
@@ -2448,16 +2520,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2472,14 +2544,6 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:38:16-04:00",
-    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
-    "files_changed": 3
-  },
-  {
     "hash": "376a668a88cb9f396603a482660f75857ae567ce",
     "short_hash": "376a668",
     "author": "Matthew Gilliam",
@@ -2488,16 +2552,24 @@
     "files_changed": 3
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:38:16-04:00",
+    "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
+    "files_changed": 3
+  },
+  {
+    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
+    "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
-    "short_hash": "36a21bc",
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:28:27-04:00",
     "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
@@ -2552,14 +2624,6 @@
     "files_changed": 3
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
     "short_hash": "5be6787",
     "author": "Matthew Gilliam",
@@ -2568,16 +2632,24 @@
     "files_changed": 7
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2592,16 +2664,16 @@
     "files_changed": 15
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

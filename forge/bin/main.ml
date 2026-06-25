@@ -943,14 +943,36 @@ let deploy_hot_cmd =
            ~doc:"Use a pre-built .so instead of rebuilding (manifest is <FILE.so>.hcr_manifest). \
                  Useful when the target host differs from the build host (e.g. cross-compiled via Docker).")
   in
-  let run o s =
-    match Cmd_deploy_hot.deploy ~output:o ~so:s () with
+  let env_name =
+    Arg.(value & opt string "" &
+         info ["env"] ~docv:"NAME"
+           ~doc:"Deploy to the named [[hot-reload.env]] group in forge.toml.")
+  in
+  let canary =
+    Arg.(value & opt int 0 &
+         info ["canary"] ~docv:"N"
+           ~doc:"Deploy to the first N servers as canary, health-check, then roll out to the rest.")
+  in
+  let timeout =
+    Arg.(value & opt int 30000 &
+         info ["timeout"] ~docv:"MS"
+           ~doc:"Canary health-check window in milliseconds (default: 30000).")
+  in
+  let run o s e c t =
+    let result =
+      if e = "" && c = 0 then
+        (* Single-server fast path (backward compat) *)
+        Cmd_deploy_hot.deploy ~output:o ~so:s ()
+      else
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t ()
+    in
+    match result with
     | Ok () -> ()
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "hot"
-           ~doc:"Build and hot-deploy changed functions to a running server")
-    Term.(const run $ output $ so)
+           ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
+    Term.(const run $ output $ so $ env_name $ canary $ timeout)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
@@ -959,18 +981,57 @@ let deploy_cmd =
 (* -------------------------------------------------------- forge hot-reload *)
 
 let hot_reload_keygen_cmd =
+  let rotate =
+    Arg.(value & flag & info ["rotate"] ~doc:"Generate a versioned rotation keypair")
+  in
+  let run r =
+    if r then Cmd_hot_reload.run_keygen_rotate ()
+    else Cmd_hot_reload.run_keygen ()
+  in
   Cmd.v (Cmd.info "keygen"
-           ~doc:"Generate an ed25519 keypair for forge deploy hot signing")
-    Term.(const Cmd_hot_reload.run_keygen $ const ())
+           ~doc:"Generate an ed25519 keypair for forge deploy hot signing (--rotate for key rotation)")
+    Term.(const run $ rotate)
 
 let hot_reload_show_pubkey_cmd =
   Cmd.v (Cmd.info "show-pubkey"
            ~doc:"Print the public key from the saved ed25519 secret key")
     Term.(const Cmd_hot_reload.run_show_pubkey $ const ())
 
+let hot_reload_use_key_cmd =
+  let path =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"KEY_FILE" ~doc:"Path to the versioned secret key file to activate")
+  in
+  Cmd.v (Cmd.info "use-key"
+           ~doc:"Switch forge deploy hot to sign with a different key file")
+    Term.(const Cmd_hot_reload.run_use_key $ path)
+
+let hot_reload_init_cmd =
+  let lookback =
+    Arg.(value & opt int 90 & info ["lookback"] ~docv:"DAYS"
+           ~doc:"Number of days of git history to analyse (default: 90)")
+  in
+  let threshold =
+    Arg.(value & opt int 3 & info ["threshold"] ~docv:"N"
+           ~doc:"Files with fewer than N commits are candidates for exclusion (default: 3)")
+  in
+  Cmd.v (Cmd.info "init"
+           ~doc:"Analyse git history and suggest hot-reload exclude list for forge.toml")
+    Term.(const (fun lb thr -> Cmd_hot_reload.run_init ~lookback_days:lb ~threshold:thr ())
+          $ lookback $ threshold)
+
+let hot_reload_status_cmd =
+  Cmd.v (Cmd.info "status"
+           ~doc:"Show version status across all registered hot-reload functions")
+    Term.(const (fun () ->
+      match Cmd_deploy_hot.run_status () with
+      | Ok () -> ()
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ const ())
+
 let hot_reload_cmd =
-  Cmd.group (Cmd.info "hot-reload" ~doc:"Manage ed25519 keys for hot code replacement")
-    [hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd]
+  Cmd.group (Cmd.info "hot-reload" ~doc:"Hot code reload key management and status")
+    [ hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd; hot_reload_use_key_cmd;
+      hot_reload_init_cmd; hot_reload_status_cmd ]
 
 (* --------------------------------------------------------- forge completions *)
 
