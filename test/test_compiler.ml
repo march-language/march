@@ -3822,6 +3822,97 @@ let test_cap_body_foreign_blocking () =
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
 
+(* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
+
+(* Helper: run typecheck then the standalone cap_infer pass.
+   Returns the shared error context so callers can inspect both
+   typechecker warnings and cap_infer hints. *)
+let check_cap_infer src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Cap_infer.check_module errors m;
+  errors
+
+let test_cap_infer_random_missing () =
+  (* random_bytes without needs IO.Random → hint from cap_infer *)
+  let ctx = check_cap_infer {|mod M do
+    fn f() : Int do
+      random_bytes(16)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "random_bytes without needs: hint emitted" true
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_random_declared () =
+  (* needs IO.Random declared → no hint from cap_infer *)
+  let ctx = check_cap_infer {|mod M do
+    needs IO.Random
+    fn f() : Int do
+      random_bytes(16)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "random_bytes with needs IO.Random: no hint" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_filewrite_missing () =
+  (* file_write without needs IO.FileWrite → hint *)
+  let ctx = check_cap_infer {|mod M do
+    fn f() : Unit do
+      file_write("x.txt", "hi")
+    end
+  end|} in
+  Alcotest.(check bool) "file_write without needs: hint emitted" true
+    (has_hint_with ctx "IO.FileWrite")
+
+let test_cap_infer_pure_no_hint () =
+  (* Pure function with no capability-requiring calls → no hint *)
+  let ctx = check_cap_infer {|mod M do
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "pure fn with no cap calls: no hint" false
+    (has_hints ctx)
+
+let test_cap_infer_parent_cap_covers () =
+  (* needs IO covers all IO.* children — no hint for random_bytes *)
+  let ctx = check_cap_infer {|mod M do
+    needs IO
+    fn f() : Int do
+      random_bytes(8)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO covers IO.Random child: no hint" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_nested_mod_inner_declared () =
+  (* Inner mod has its own needs IO.Random — no hint for the inner call *)
+  let ctx = check_cap_infer {|mod Outer do
+    mod Inner do
+      needs IO.Random
+      fn f() : Int do
+        random_bytes(4)
+        0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod with declared needs: no hint for inner" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_nested_mod_inner_missing () =
+  (* Inner mod missing needs IO.Random → hint, even though outer might not care *)
+  let ctx = check_cap_infer {|mod Outer do
+    mod Inner do
+      fn f() : Int do
+        random_bytes(4)
+        0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod without declared needs: hint for inner" true
+    (has_hint_with ctx "IO.Random")
+
 let test_record_type_still_parses () =
   (* Disambiguation regression: record types must not be misparsed as refinements. *)
   let m =
@@ -4594,6 +4685,15 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+        ] );
+      ( "cap_infer", [
+          Alcotest.test_case "random_bytes missing needs: hint emitted"     `Quick test_cap_infer_random_missing;
+          Alcotest.test_case "random_bytes with needs IO.Random: no hint"   `Quick test_cap_infer_random_declared;
+          Alcotest.test_case "file_write missing needs: hint emitted"       `Quick test_cap_infer_filewrite_missing;
+          Alcotest.test_case "pure fn with no cap calls: no hint"           `Quick test_cap_infer_pure_no_hint;
+          Alcotest.test_case "needs IO umbrella covers IO.Random: no hint"  `Quick test_cap_infer_parent_cap_covers;
+          Alcotest.test_case "nested mod with declared needs: no hint"      `Quick test_cap_infer_nested_mod_inner_declared;
+          Alcotest.test_case "nested mod missing needs: hint for inner"     `Quick test_cap_infer_nested_mod_inner_missing;
         ] );
       ( "error_improvements", [
           Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;

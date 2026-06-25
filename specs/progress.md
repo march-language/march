@@ -282,6 +282,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, cap_infer refinecheck pass)
+
+- **`lib/refinecheck/cap_infer.ml` (new).** Standalone post-typecheck pass that walks `DFn` clause bodies and `DLet` bind expressions, looks up each direct `EApp(EVar name, ...)` call in a local `cap_table` (~90 entries mirroring `builtin_cap_table` in `typecheck.ml`), and emits `Err.hint` at the call site when the required capability is not covered by the module's `DNeeds` declarations. Deduplication (Hashtbl per pass) suppresses repeated hints for the same cap in the same module. Respects the IO cap hierarchy via `cap_subsumes`/`cap_ancestors` (a declared `needs IO` silences hints for all `IO.*` children). Recurses into `DMod` children with their own `DNeeds` scope. Implementation follows the `division_safety.ml` pattern (module alias + `Err.*` calls).
+- **Wired into `bin/main.ml` (two sites: `--check` / `--compile`).** `Cap_infer.check_module` is called immediately after `Refine_check.check_module` so hints appear in the same diagnostic pass.
+- **`lib/refinecheck/dune` updated.** `modules` field now lists both `refine_check` and `cap_infer` (previously the field was absent, relying on implicit module discovery).
+- **`test/dune` updated.** `march_refinecheck` added to `march_test_compiler` library deps (it was missing; tests that reference `March_refinecheck.*` would have failed to link before).
+- **`has_hints` / `has_hint_with` helpers added to `test/test_helpers.ml`.** Pattern-matched against `Err.Hint` severity; `has_hint_with` mirrors `has_warning_with` (case-insensitive substring search).
+- **7 new `cap_infer` tests in `test/test_compiler.ml`.** `check_cap_infer` helper runs typecheck then `Cap_infer.check_module`. Tests cover: missing `IO.Random` hint, declared `IO.Random` no hint, missing `IO.FileWrite` hint, pure fn no hint, `needs IO` umbrella suppresses child hint, nested mod with declared needs no hint, nested mod missing needs hint.
+- **Verification.** All 328 compiler tests pass (321 pre-existing + 7 new). Eval 224 / codegen 320 unchanged.
+
 ## Current State (as of 2026-06-25, HCR Phase 7 — fleet tooling P1–P6)
 
 - **Audit log (`runtime/march_reload.c`).** `write_audit_log` + `pubkey_to_hex` helper. Every ACTIVATE (sig pass or fail) appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`). Fields: `ts/type/fn/impl_hash/signer/cas_hash/result`. Results: `ok | err_sig | err_abi | err_cas_miss | err_dlopen`.
