@@ -9,6 +9,13 @@
 -- The pure bridge (to_wire / str_to_bytes / bytes_to_str) is unit-tested; the
 -- socket handshake is runtime-exercised (sockets/scheduler are not run by the
 -- eval-based stdlib test harness, matching ChannelServer's convention).
+--
+-- P5 frame types (tag byte prepended before the msgpack payload):
+--   0x05 REGISTRY_SYNC_REQ  [tag=5, root_hash:Str]
+--   0x06 REGISTRY_SYNC_RESP [tag=6, root_hash:Str, leaves:[[name,nid,pid,clock_json,present],...]]
+--   0x07 MONITOR_REQ        [tag=7, watcher_node:Str, watcher_pid:Int, target_pid:Int]
+--   0x08 MONITOR_FIRE       [tag=8, target_pid:Int, reason_tag:Int, reason_msg:Str]
+--     reason_tag: 0=Normal, 1=Killed, 2=Crash, 3=NodeDown
 mod NetKernel do
 
   -- ── byte bridge: List(Int) bytes <-> Socket String ─────────────────────────
@@ -84,6 +91,124 @@ mod NetKernel do
                     end
                 end
             end
+        end
+    end
+  end
+
+  -- ── P5 frame codecs ──────────────────────────────────────────────────────────
+
+  -- REGISTRY_SYNC_REQ: send our root hash, ask peer to diff.
+  fn encode_registry_sync_req(root_hash : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(5), Cons(Msgpack.str(root_hash), Nil))))
+  end
+
+  -- REGISTRY_SYNC_RESP: our root hash + any leaves that differ.
+  -- Each leaf is encoded as [name, node_id, pid, present_int].
+  fn encode_registry_sync_resp(root_hash : String,
+                                leaves : List((String, GlobalRegistry.Entry))) : List(Int) do
+    let leaf_vals = List.map(leaves, fn pair ->
+      match pair do
+        (name, e) ->
+          Msgpack.array(Cons(Msgpack.str(name),
+            Cons(Msgpack.str(e.node_id),
+            Cons(Msgpack.int(e.pid),
+            Cons(Msgpack.int(if e.present do 1 else 0 end), Nil)))))
+      end)
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(6),
+      Cons(Msgpack.str(root_hash),
+      Cons(Msgpack.array(leaf_vals), Nil)))))
+  end
+
+  fn decode_registry_sync_req(bytes : List(Int)) : Result(String, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v)  ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(5), Cons(Msgpack.Str(rh), Nil))) -> Ok(rh)
+          _ -> Err("net_kernel: bad REGISTRY_SYNC_REQ")
+        end
+    end
+  end
+
+  fn decode_registry_sync_resp(bytes : List(Int)) : Result((String, List((String, GlobalRegistry.Entry))), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(6),
+            Cons(Msgpack.Str(rh),
+            Cons(Msgpack.Array(leaf_vals), Nil)))) ->
+              let leaves = List.filter_map(leaf_vals, fn lv ->
+                match lv do
+                  Msgpack.Array(Cons(Msgpack.Str(name),
+                    Cons(Msgpack.Str(nid),
+                    Cons(Msgpack.Int(pid),
+                    Cons(Msgpack.Int(present_int), Nil))))) ->
+                      let entry = { node_id: nid, pid: pid,
+                                    clock: VectorClock.new(),
+                                    present: present_int != 0 }
+                      Some((name, entry))
+                  _ -> None
+                end)
+              Ok((rh, leaves))
+          _ -> Err("net_kernel: bad REGISTRY_SYNC_RESP")
+        end
+    end
+  end
+
+  -- MONITOR_REQ: register a remote watcher on a local target.
+  fn encode_monitor_req(watcher_node : String, watcher_pid : Int, target_pid : Int) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(7),
+      Cons(Msgpack.str(watcher_node),
+      Cons(Msgpack.int(watcher_pid),
+      Cons(Msgpack.int(target_pid), Nil))))))
+  end
+
+  fn decode_monitor_req(bytes : List(Int)) : Result((String, Int, Int), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(7),
+            Cons(Msgpack.Str(wn),
+            Cons(Msgpack.Int(wp),
+            Cons(Msgpack.Int(tp), Nil))))) -> Ok((wn, wp, tp))
+          _ -> Err("net_kernel: bad MONITOR_REQ")
+        end
+    end
+  end
+
+  -- MONITOR_FIRE: remote process died; notify local watcher.
+  -- reason_tag: 0=Normal 1=Killed 2=Crash 3=NodeDown
+  fn encode_monitor_fire(target_pid : Int, reason_tag : Int, reason_msg : String) : List(Int) do
+    Msgpack.encode(Msgpack.array(Cons(Msgpack.int(8),
+      Cons(Msgpack.int(target_pid),
+      Cons(Msgpack.int(reason_tag),
+      Cons(Msgpack.str(reason_msg), Nil))))))
+  end
+
+  fn decode_monitor_fire(bytes : List(Int)) : Result((Int, Int, String), String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(8),
+            Cons(Msgpack.Int(tp),
+            Cons(Msgpack.Int(rt),
+            Cons(Msgpack.Str(rm), Nil))))) -> Ok((tp, rt, rm))
+          _ -> Err("net_kernel: bad MONITOR_FIRE")
+        end
+    end
+  end
+
+  -- Peek at the frame tag (first element of the outer array) without full decode.
+  fn frame_tag(bytes : List(Int)) : Option(Int) do
+    match Msgpack.decode(bytes) do
+      Err(_) -> None
+      Ok(v)  ->
+        match v do
+          Msgpack.Array(Cons(Msgpack.Int(tag), _)) -> Some(tag)
+          _ -> None
         end
     end
   end

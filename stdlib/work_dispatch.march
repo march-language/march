@@ -1,0 +1,158 @@
+-- WorkDispatch: capacity-aware RPC routing (P4 L6).
+--
+-- Routes function calls to the cluster node with the most spare capacity
+-- using the power-of-two-choices algorithm. Falls back to local execution
+-- when no peer is healthier by DISPATCH_THRESHOLD_MILLI (200 millis = 20%
+-- of a core) or when all load readings are stale.
+--
+-- Load readings decay: a NodeLoad sampled_at older than LOAD_STALE_MS (10s)
+-- is excluded from routing candidates.
+--
+-- ConsistentHash affinity: dispatch_affine routes by key hash for
+-- data-local work (same key always hits the same shard node unless it's down,
+-- in which case it falls back to load-aware dispatch).
+mod WorkDispatch do
+
+  pfn load_stale_ms() : Int do 10000 end
+  pfn dispatch_threshold_milli() : Int do 200 end
+
+  -- Power-of-two-choices: pick the better of two random live members.
+  -- Candidates are filtered to those with sampled_at >= now_ms - LOAD_STALE_MS.
+  -- Returns None if fewer than 2 fresh candidates.
+  fn pick_dispatch_target(
+    members : List(NodeLoad),
+    scorer : NodeLoad -> Int,
+    now_ms : Int
+  ) : Option(NodeLoad) do
+    let fresh = List.filter(members, fn nl ->
+      now_ms - nl.sampled_at <= load_stale_ms())
+    let n = List.length(fresh)
+    if n < 2 do
+      None
+    else
+      -- Pick two distinct indices without replacement using list indexing.
+      -- We use the first and last elements of the fresh list as a deterministic
+      -- "random" choice; real usage should pass a shuffled or randomly-sampled
+      -- slice (the transport layer owns the RNG).
+      let a = List.head(fresh)
+      let b = List.last(fresh)
+      if scorer(a) >= scorer(b) do Some(a) else Some(b) end
+    end
+  end
+
+  -- Like pick_dispatch_target but uses an explicit pair of indices for
+  -- the two chosen candidates. Useful when the caller has already sampled
+  -- indices from an RNG.
+  fn pick_two(
+    members : List(NodeLoad),
+    idx_a : Int,
+    idx_b : Int,
+    scorer : NodeLoad -> Int,
+    now_ms : Int
+  ) : Option(NodeLoad) do
+    let fresh = List.filter(members, fn nl ->
+      now_ms - nl.sampled_at <= load_stale_ms())
+    let n = List.length(fresh)
+    if n < 2 do
+      None
+    else
+      let safe_a = idx_a - (idx_a / n) * n
+      let safe_b = idx_b - (idx_b / n) * n
+      match List.nth_opt(fresh, safe_a) do
+        None -> None
+        Some(a) ->
+          match List.nth_opt(fresh, safe_b) do
+            None -> None
+            Some(b) ->
+              if scorer(a) >= scorer(b) do Some(a) else Some(b) end
+          end
+      end
+    end
+  end
+
+  -- Route fn_ref to the best available peer node.
+  --
+  -- 1. pick_dispatch_target over [peers]; if None or target spare CPU is not
+  --    > local spare + DISPATCH_THRESHOLD_MILLI, execute locally (invoke_local).
+  -- 2. If Some(target) and it's sufficiently idle: call NodeCall.call on [fd].
+  -- 3. On NoConnection or DeadlineExceeded: fall back to invoke_local.
+  -- 4. TypeMismatch propagates (programming error, not a routing error).
+  --
+  -- [invoke_local] is a thunk wrapping the actual local function call.
+  -- [fd] is the file descriptor for the target node's RPC connection.
+  -- [local_spare] is spare_cpu_milli for the local node (used for the
+  --   threshold check so we don't dispatch for tiny gains).
+  fn dispatch(
+    peers : List(NodeLoad),
+    now_ms : Int,
+    fn_ref : RemoteRef,
+    args : List(Int),
+    local_pid : Pid,
+    timeout_ms : Int,
+    local_spare : Int,
+    fd_for : NodeLoad -> Option(Int),
+    invoke_local : () -> Result(List(Int), CallError)
+  ) : Result(List(Int), CallError) do
+    match pick_dispatch_target(peers, ClusterLoad.spare_cpu_milli, now_ms) do
+      None -> invoke_local()
+      Some(target) ->
+        let target_spare = ClusterLoad.spare_cpu_milli(target)
+        if target_spare <= local_spare + dispatch_threshold_milli() do
+          invoke_local()
+        else
+          match fd_for(target) do
+            None -> invoke_local()
+            Some(fd) ->
+              let deadline = now_ms + timeout_ms
+              let result = NodeCall.call(fd, fn_ref, args, local_pid, deadline, 1, now_ms)
+              match result do
+                Err(NoConnection)     -> invoke_local()
+                Err(DeadlineExceeded) -> invoke_local()
+                other                 -> other
+              end
+          end
+        end
+    end
+  end
+
+  -- Consistent-hash affinity dispatch: route by key to the ring owner.
+  -- Falls back to load-aware dispatch if the owner's fd is unavailable.
+  fn dispatch_affine(
+    ring : ConsistentHash.HashRing(String),
+    peers : List(NodeLoad),
+    now_ms : Int,
+    fn_ref : RemoteRef,
+    key : String,
+    args : List(Int),
+    local_pid : Pid,
+    timeout_ms : Int,
+    local_spare : Int,
+    fd_for : String -> Option(Int),
+    invoke_local : () -> Result(List(Int), CallError)
+  ) : Result(List(Int), CallError) do
+    match ConsistentHash.get(ring, key) do
+      None -> dispatch(peers, now_ms, fn_ref, args, local_pid, timeout_ms,
+                       local_spare, fn nl -> fd_for(nl.node_id), invoke_local)
+      Some(owner_id) ->
+        match fd_for(owner_id) do
+          None ->
+            -- Owner unreachable; fall back to load-aware dispatch.
+            dispatch(peers, now_ms, fn_ref, args, local_pid, timeout_ms,
+                     local_spare, fn nl -> fd_for(nl.node_id), invoke_local)
+          Some(fd) ->
+            let deadline = now_ms + timeout_ms
+            let result = NodeCall.call(fd, fn_ref, args, local_pid, deadline, 1, now_ms)
+            match result do
+              Err(NoConnection)     ->
+                dispatch(peers, now_ms, fn_ref, args, local_pid, timeout_ms,
+                         local_spare, fn nl -> fd_for(nl.node_id), invoke_local)
+              Err(DeadlineExceeded) ->
+                dispatch(peers, now_ms, fn_ref, args, local_pid, timeout_ms,
+                         local_spare, fn nl -> fd_for(nl.node_id), invoke_local)
+              other -> other
+            end
+        end
+    end
+  end
+
+end

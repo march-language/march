@@ -282,6 +282,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, Distributed OTP P4+P5 — load gossip, work dispatch, anti-entropy, cross-node monitors, dist supervisors)
+
+- **P4 — Load gossip (`stdlib/swim_driver.march`, `stdlib/cluster_load.march`).** `ClusterLoad.NodeLoad` gains `sampled_at : Int`; `to_ints`/`from_ints` updated to 5-element wire codec. `SwimDriver` extended with `peer_loads` map, `GossipWithLoad` event, `SwimGossipLoad` wire msg (tag=3, piggybacked load array), `load_stale_ms()`/`anti_entropy_period_ms()` constants, and public API `anti_entropy_peers`/`bump_anti_entropy`/`peer_load`/`fresh_peer_loads`. Anti-entropy timer exposed as separate functions so `step`'s return type is unchanged.
+- **P4 — Work dispatch (`stdlib/work_dispatch.march`).** `pick_dispatch_target` (power-of-two-choices, filters stale), `pick_two` (caller-sampled indices), `dispatch` (load-aware RPC with local fallback, `NoConnection`/`DeadlineExceeded` retry), `dispatch_affine` (ConsistentHash affinity with load-aware fallback).
+- **P5a — GlobalRegistry Merkle anti-entropy (`stdlib/global_registry.march`).** `root_hash` (Merkle tree over sorted name→entry pairs via `Merkle.build`), `diff_entries` (CRDT join on hash divergence, no-op on match), `all_entries` (full snapshot for wire transfer), `entry_to_bytes` private serialiser.
+- **P5c — Cross-node monitors (`stdlib/net_kernel.march`, `stdlib/dist_link.march`, `runtime/march_monitor_registry.{h,c}`, `runtime/march_runtime.c`).** `net_kernel.march` adds MONITOR_REQ (tag=7) + MONITOR_FIRE (tag=8) frame codecs + `frame_tag`. New C runtime module: mutex-guarded per-pid watcher table, `march_dist_monitor_register`/`fire_pid`/`fire_nodedown`/`clear_fd`. `march_runtime.c` hooks `fire_pid` on actor exit. `dist_link.march`: `DownReason`, `MonitorRef`, `PendingMonitor`, `MonitorTable`, wire codecs, `make_monitor` factory, `impl Eq(MonitorRef)`, `impl Eq(DownReason)`.
+- **P5d — Distributed supervisor (`stdlib/dist_supervisor.march`).** `RestartStrategy = Permanent | Transient | Temporary`, `SupervisionStrategy = OneForOne | OneForAll | RestForOne`, `should_restart`, `restart_indices`, `find_child_by_ref`, `update_child`, `child_count`.
+- **Tests.** `test_stdlib_march` 49 → 53 suites (3 new: work_dispatch, dist_link, dist_supervisor; swim_driver + global_registry existing suites extended with +9 and +8 tests respectively). All 53 suites green.
+- **Verification.** Full suite green — compiler 321, eval 224, codegen 320, stdlib 786, stdlib_march 53/53.
+
 ## Current State (as of 2026-06-24, HCR Phase 5 — actor state migration)
 
 - **Runtime primitives (`runtime/march_runtime.{h,c}`).** `MARCH_MIGRATE_TAG` sentinel (`0x4D494752L`); `march_migrate_msg_t` (malloc/free, not RC); `dispatch_name_id` uint32 field in `march_actor_meta`; `march_actor_set_dispatch_id`; `march_actor_broadcast_migrate` (two-phase: snapshot under `g_tbl_mu` + `march_incrc`, release lock, inject `MARCH_MIGRATE_TAG` messages, `march_decrc`). `actor_green_thread` dispatches MIGRATE before the alive gate, calls `migrate_fn`, swaps state ptr atomically. Dispatch-table path for hot-reload actors via `dispatch_name_id`.

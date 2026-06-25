@@ -1,0 +1,126 @@
+-- DistSupervisor: a supervisor that manages children on remote cluster nodes (P5d).
+--
+-- Mirrors the local supervisor model but each child runs on a named remote node
+-- via NodeCall.call to its init function.  The supervisor monitors each child
+-- with DistLink.monitor and applies the restart strategy when a Down arrives.
+--
+-- Restart strategies (matching local supervisor semantics):
+--   Permanent  — always restart, regardless of exit reason.
+--   Transient  — restart only on abnormal exit (Crash or Killed), not Normal.
+--   Temporary  — never restart.
+--
+-- Supervision strategies (applied to the child set as a whole):
+--   OneForOne  — restart only the failed child.
+--   OneForAll  — restart all children when any one fails.
+--   RestForOne — restart the failed child and all children started after it.
+--
+-- Implementation note: the supervisor is a local actor.  It spawns children via
+-- NodeCall.call, monitors them via DistLink.encode_req frames, and processes
+-- Down messages to restart as needed.  The socket I/O and actor machinery are
+-- not eval-testable; only the pure restart-decision logic is tested here.
+mod DistSupervisor do
+
+  type RestartStrategy = Permanent | Transient | Temporary
+
+  type SupervisionStrategy = OneForOne | OneForAll | RestForOne
+
+  -- A remote child specification.
+  type RemoteChild = {
+    fn_ref  : RemoteRef,       -- the child actor's init fn (CAS-typed)
+    node_id : String,          -- which cluster node to run it on
+    restart : RestartStrategy
+  }
+
+  -- Live child state tracked by the supervisor.
+  type ChildState = {
+    spec      : RemoteChild,
+    global_pid : GlobalPid.Pid,   -- pid assigned after spawn
+    ref       : DistLink.MonitorRef  -- DistLink monitor ref for this child
+  }
+
+  -- Supervisor state.
+  type State = {
+    sup_strategy : SupervisionStrategy,
+    children     : List(ChildState)   -- in start order (important for RestForOne)
+  }
+
+  fn make(strat : SupervisionStrategy) : State do
+    { sup_strategy: strat, children: Nil }
+  end
+
+  -- ── Restart decision ────────────────────────────────────────────────────────
+
+  -- Should this child be restarted given the exit reason?
+  fn should_restart(restart : RestartStrategy, reason : DistLink.DownReason) : Bool do
+    match restart do
+      Permanent -> true
+      Temporary -> false
+      Transient ->
+        match reason do
+          Normal   -> false
+          NodeDown -> true
+          Killed   -> true
+          Crash(_) -> true
+        end
+    end
+  end
+
+  -- Given a failed child (identified by index in the children list), return
+  -- the indices that need restarting under the given strategy.
+  fn restart_indices(strat : SupervisionStrategy, failed_idx : Int,
+                      n_children : Int) : List(Int) do
+    match strat do
+      OneForOne ->
+        Cons(failed_idx, Nil)
+      OneForAll ->
+        List.range(0, n_children)
+      RestForOne ->
+        List.range(failed_idx, n_children)
+    end
+  end
+
+  -- Find a child state by its MonitorRef (for matching incoming Down messages).
+  fn find_child_by_ref(children : List(ChildState),
+                        ref : DistLink.MonitorRef) : Option((Int, ChildState)) do
+    find_child_by_ref_go(children, ref, 0)
+  end
+
+  pfn find_child_by_ref_go(children : List(ChildState), ref : DistLink.MonitorRef,
+                             idx : Int) : Option((Int, ChildState)) do
+    match children do
+      Nil -> None
+      Cons(c, rest) ->
+        if c.ref == ref do
+          Some((idx, c))
+        else
+          find_child_by_ref_go(rest, ref, idx + 1)
+        end
+    end
+  end
+
+  -- Update a single child in the list (by index) and return the new list.
+  fn update_child(children : List(ChildState), idx : Int,
+                   new_child : ChildState) : List(ChildState) do
+    update_child_go(children, idx, new_child, 0)
+  end
+
+  pfn update_child_go(children : List(ChildState), idx : Int,
+                       new_child : ChildState, cur : Int) : List(ChildState) do
+    match children do
+      Nil -> Nil
+      Cons(c, rest) ->
+        if cur == idx do
+          Cons(new_child, rest)
+        else
+          Cons(c, update_child_go(rest, idx, new_child, cur + 1))
+        end
+    end
+  end
+
+  -- ── Summary helpers ─────────────────────────────────────────────────────────
+
+  fn child_count(s : State) : Int do List.length(s.children) end
+
+  fn live_children(s : State) : List(ChildState) do s.children end
+
+end

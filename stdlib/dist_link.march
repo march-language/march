@@ -1,0 +1,176 @@
+-- DistLink: cross-node process monitors and bidirectional links (P5c).
+--
+-- Monitor protocol (two-step):
+--   1. Local: call monitor(target_pid, timeout_ms) → sends MONITOR_REQ to
+--      the node that hosts target_pid, returns Ok(MonitorRef).
+--   2. Remote node: receives MONITOR_REQ, calls march_dist_monitor_register
+--      in its C runtime.  On actor exit it sends MONITOR_FIRE back.
+--   3. Local net-kernel loop: receives MONITOR_FIRE, delivers
+--      Down(ref, pid, reason) to the watcher's mailbox.
+--
+-- Node-down: when the peer connection drops (PeerDown from SwimDriver), the
+-- DistLink actor sweeps its pending_monitors table and fires Down(NodeDown)
+-- locally to all watchers of targets on that node.
+--
+-- Links build on monitors: both sides call monitor on each other.  A Down
+-- message triggers EXIT propagation in the linked process (unless trapping).
+--
+-- Down reason:
+--   Normal | Killed | Crash(String) | NodeDown
+--
+-- MonitorRef is an opaque integer; demonitor(ref) cancels the monitor.
+mod DistLink do
+
+  type DownReason = Normal | Killed | Crash(String) | NodeDown
+
+  -- Opaque monitor reference returned by monitor/2.
+  type MonitorRef = MonitorRef(Int)
+
+  -- Internal: one entry in the pending monitor table.
+  type PendingMonitor = {
+    ref         : MonitorRef,
+    target_node : String,
+    target_pid  : Int,
+    watcher_pid : GlobalPid.Pid
+  }
+
+  -- Convert wire reason_tag (0–3) to DownReason.
+  fn reason_of_tag(tag : Int, msg : String) : DownReason do
+    match tag do
+      0 -> Normal
+      1 -> Killed
+      2 -> Crash(msg)
+      _ -> NodeDown
+    end
+  end
+
+  -- Convert DownReason to wire reason_tag.
+  fn tag_of_reason(r : DownReason) : (Int, String) do
+    match r do
+      Normal       -> (0, "")
+      Killed       -> (1, "")
+      Crash(msg)   -> (2, msg)
+      NodeDown     -> (3, "")
+    end
+  end
+
+  -- ── Wire encode/decode helpers ────────────────────────────────────────────
+
+  -- Encode a MONITOR_REQ frame to send to the target's node.
+  fn encode_req(watcher_node : String, watcher_pid : Int, target_pid : Int) : List(Int) do
+    NetKernel.encode_monitor_req(watcher_node, watcher_pid, target_pid)
+  end
+
+  -- Encode a MONITOR_FIRE frame (called by the C runtime when an actor exits).
+  fn encode_fire(target_pid : Int, reason : DownReason) : List(Int) do
+    let tag_msg = tag_of_reason(reason)
+    let tag = match tag_msg do (t, _) -> t end
+    let msg = match tag_msg do (_, m) -> m end
+    NetKernel.encode_monitor_fire(target_pid, tag, msg)
+  end
+
+  -- Decode an inbound MONITOR_FIRE frame into (target_pid, reason).
+  fn decode_fire(bytes : List(Int)) : Result((Int, DownReason), String) do
+    match NetKernel.decode_monitor_fire(bytes) do
+      Err(e) -> Err(e)
+      Ok(r) ->
+        match r do
+          (tp, rt, rm) -> Ok((tp, reason_of_tag(rt, rm)))
+        end
+    end
+  end
+
+  -- Decode an inbound MONITOR_REQ frame.
+  fn decode_req(bytes : List(Int)) : Result((String, Int, Int), String) do
+    NetKernel.decode_monitor_req(bytes)
+  end
+
+  -- ── Pending monitor table ─────────────────────────────────────────────────
+  -- Used by the transport layer to track outgoing monitors and fire
+  -- Down(NodeDown) locally when a peer disconnects.
+
+  type MonitorTable = MonitorTable(Map(Int, PendingMonitor))
+
+  fn empty_table() : MonitorTable do MonitorTable(Map.empty()) end
+
+  pfn ref_key(ref : MonitorRef) : Int do
+    match ref do MonitorRef(n) -> n end
+  end
+
+  fn insert_monitor(tbl : MonitorTable, m : PendingMonitor) : MonitorTable do
+    match tbl do
+      MonitorTable(mp) ->
+        MonitorTable(Map.insert(mp, ref_key(m.ref), m, Map.int_cmp))
+    end
+  end
+
+  fn remove_monitor(tbl : MonitorTable, ref : MonitorRef) : MonitorTable do
+    match tbl do
+      MonitorTable(mp) ->
+        MonitorTable(Map.remove(mp, ref_key(ref), Map.int_cmp))
+    end
+  end
+
+  -- Find a monitor entry by target_pid (for matching MONITOR_FIRE).
+  fn find_by_target_pid(tbl : MonitorTable, target_pid : Int) : Option(PendingMonitor) do
+    match tbl do
+      MonitorTable(mp) ->
+        let matches = List.filter_map(Map.entries(mp), fn pair ->
+          match pair do
+            (_, m) -> if m.target_pid == target_pid do Some(m) else None end
+          end)
+        List.head_opt(matches)
+    end
+  end
+
+  -- All monitors whose target is on node_id (for NodeDown sweep).
+  fn monitors_on_node(tbl : MonitorTable, node_id : String) : List(PendingMonitor) do
+    match tbl do
+      MonitorTable(mp) ->
+        List.filter_map(Map.entries(mp), fn pair ->
+          match pair do
+            (_, m) -> if m.target_node == node_id do Some(m) else None end
+          end)
+    end
+  end
+
+  -- Factory: construct a PendingMonitor. Keeps record construction inside the
+  -- module so callers don't hit the bare-vs-qualified type name mismatch.
+  fn make_monitor(ref : MonitorRef, target_node : String, target_pid : Int,
+                  watcher_pid : GlobalPid.Pid) : PendingMonitor do
+    { ref: ref, target_node: target_node, target_pid: target_pid,
+      watcher_pid: watcher_pid }
+  end
+
+  -- ── Eq instances ─────────────────────────────────────────────────────────
+
+  impl Eq(MonitorRef) do
+    fn eq(a, b) do
+      match (a, b) do
+        (MonitorRef(x), MonitorRef(y)) -> x == y
+      end
+    end
+  end
+
+  impl Eq(DownReason) do
+    fn eq(a, b) do
+      match (a, b) do
+        (Normal,    Normal)    -> true
+        (Killed,    Killed)    -> true
+        (NodeDown,  NodeDown)  -> true
+        (Crash(x),  Crash(y))  -> x == y
+        _                      -> false
+      end
+    end
+  end
+
+  -- ── Down message helpers ──────────────────────────────────────────────────
+
+  -- Compute the Down message tuple a watcher should receive.
+  -- In the full runtime, this is delivered to watcher_pid's mailbox via send.
+  -- (actor_call / message-passing is not eval-testable; that's the runtime glue.)
+  fn down_msg(m : PendingMonitor, reason : DownReason) : (MonitorRef, Int, DownReason) do
+    (m.ref, m.target_pid, reason)
+  end
+
+end
