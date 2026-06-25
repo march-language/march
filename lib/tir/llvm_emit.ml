@@ -130,6 +130,14 @@ type ctx = {
      Maps qualified fn name ("Math.add") → hex hash string. *)
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
+  (* When true, non-exported function definitions in the patch .so get hidden
+     ELF visibility so intra-.so PLT calls resolve to the .so's own definitions
+     instead of looking up the global symbol table.  Without this, a v2 patch's
+     Counter_dispatch calling Counter_PrintHistory$Counter_Actor$V__ would find
+     the v1 symbol from the already-loaded server binary (same symbol name,
+     loaded first).  On Linux this combines with RTLD_DEEPBIND; on macOS it is
+     the only mechanism because RTLD_DEEPBIND is unavailable. *)
+  compile_so : bool;
 }
 
 (** Compilation target. *)
@@ -219,6 +227,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   rec_shape_globals = Hashtbl.create 16;
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
+  compile_so = false;
 }
 
 (* Shared with the inliner; single source of truth in Hot_reload. *)
@@ -4927,8 +4936,30 @@ let emit_fn ctx (fn : Tir.fn_def) =
       llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
+  (* In --compile-so mode, give every non-exported function hidden ELF
+     visibility so intra-.so PLT calls resolve to the .so's own definitions
+     without going through the process global symbol table (where v1 symbols
+     from the server binary would otherwise win).
+     Exported symbols that must stay default-visible:
+       *_dispatch      — the reload server finds these with dlsym(ACTIVATE)
+       *_migrate_state — the __migrate_* alias points to this function; a
+                         hidden aliasee with a default-visibility alias is not
+                         valid LLVM IR, so keep the migrate_state fn visible *)
+  let vis_prefix =
+    let fname = fn.Tir.fn_name in
+    let flen  = String.length fname in
+    let ends_with sfx =
+      let sl = String.length sfx in
+      flen > sl && String.sub fname (flen - sl) sl = sfx
+    in
+    if ctx.compile_so
+       && not (ends_with "_dispatch")
+       && not (ends_with "_migrate_state")
+    then "hidden "
+    else ""
+  in
   Buffer.add_string ctx.buf
-    (Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n" ret_ty fn_llvm_name params_str);
+    (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str);
 
   (* Alloca + store for each parameter; collect slot info for TCO. *)
   let param_slots = List.map (fun (v : Tir.var) ->
@@ -5057,9 +5088,10 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
         Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) base
       ) all_params)
   in
+  let mutco_vis = if ctx.compile_so then "hidden " else "" in
   Buffer.add_string ctx.buf
-    (Printf.sprintf "\ndefine %s @%s(%s%s) {\nentry:\n"
-       ret_ty (llvm_name combined) tag_param_str rest_params_str);
+    (Printf.sprintf "\ndefine %s%s @%s(%s%s) {\nentry:\n"
+       mutco_vis ret_ty (llvm_name combined) tag_param_str rest_params_str);
 
   (* Alloca the dispatch tag slot. *)
   let tag_slot = "mutco_tag" in
@@ -5163,8 +5195,20 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
         Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) (llvm_name v.Tir.v_name)
       ) fn.Tir.fn_params)
     in
+    let wrap_vis =
+      let fname = fn.Tir.fn_name in
+      let flen  = String.length fname in
+      let ends_with sfx =
+        let sl = String.length sfx in
+        flen > sl && String.sub fname (flen - sl) sl = sfx
+      in
+      if ctx.compile_so
+         && not (ends_with "_dispatch")
+         && not (ends_with "_migrate_state")
+      then "hidden " else ""
+    in
     Buffer.add_string ctx.buf
-      (Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n" ret_ty fn_llvm params_str);
+      (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" wrap_vis ret_ty fn_llvm params_str);
 
     (* Build the call arguments: tag first, then ALL params of ALL group fns.
        For this function's own params, pass the incoming arg.
@@ -5682,6 +5726,10 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
       |> Hot_reload.Name_table.build
   in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
+  (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
+     .so's own definitions over same-named symbols in the server binary.  This
+     is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
+  let ctx = { ctx with compile_so = not emit_main } in
   (* Distributed OTP L4: populate CAS hash maps for remote_ref_hashes constant folding. *)
   Hashtbl.iter (Hashtbl.replace ctx.remote_impl_hashes) remote_impl_hashes;
   Hashtbl.iter (Hashtbl.replace ctx.remote_sig_hashes)  remote_sig_hashes;
