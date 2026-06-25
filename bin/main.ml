@@ -742,6 +742,8 @@ let run_test_cmd args =
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+    (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+    March_refinecheck.Division_safety.check_module errors desugared;
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -1119,6 +1121,8 @@ let compile filename =
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+  (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+  March_refinecheck.Division_safety.check_module errors desugared;
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules

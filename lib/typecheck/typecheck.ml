@@ -5962,7 +5962,10 @@ let reorder_decls (decls : Ast.decl list) : Ast.decl list =
 (* ── Panic-surface analysis for `cap no_panic` ────────────────────────── *)
 
 let panic_surface_direct : StringSet.t = StringSet.of_list [
-  "/"; "%"; "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+  (* Division/modulo operators are handled by the Z3-backed Division_safety
+     pass in march_refinecheck, which can approve them when the divisor has a
+     {v | v != 0} (or v > 0) refinement.  Remove them here so the syntactic
+     no-panic check does not double-report when refinements prove safety. *)
   "panic"; "panic_"; "todo_"; "unreachable_";
 ]
 
@@ -5984,8 +5987,6 @@ let panic_surface_all_direct : StringSet.t =
   StringSet.union panic_surface_direct panic_surface_prelude
 
 let panic_surface_suggestion : string -> string = function
-  | "/" | "%" | "int_div" | "int_mod" | "int_div_euclid" | "int_mod_euclid" ->
-    "\n\nUse `Math.checked_div` or `Math.checked_mod` to return `None` instead of panicking."
   | "List.nth" ->
     "\n\nUse `List.nth_opt` to return `Option(a)` instead of panicking on out-of-bounds."
   | "List.hd" | "List.head" | "head" ->
