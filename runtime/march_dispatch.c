@@ -1,40 +1,100 @@
-/* march_dispatch.c — Hot Code Reload versioned dispatch table (HCR Phase 2).
+/* march_dispatch.c — Hot Code Reload versioned dispatch table (HCR Phase 2/4).
  * See march_dispatch.h and specs/hot-code-reload.md Part 3. */
 #include "march_dispatch.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef struct {
     void              *fn_ptr;          /* native code or trampoline thunk */
     _Atomic(uint64_t)  refs;            /* callers currently pinned to THIS version */
     char               impl_hash[65];   /* 64 hex chars + NUL */
+    char               sig_hash[65];    /* 64 hex chars + NUL (Phase 4) */
     uint8_t            kind;            /* MARCH_NATIVE | MARCH_TRAMPOLINE */
-    uint8_t            live;           /* 1 once this ring slot holds a version */
+    uint8_t            live;            /* 1 once this ring slot holds a version */
 } MarchFnVersion;
 
 typedef struct {
     _Atomic(uint32_t) current;                        /* live ring index */
     MarchFnVersion    ring[MARCH_MAX_LIVE_VERSIONS];
+    char              baseline_impl_hash[65];          /* Phase 4: set on first publish, never changed */
 } MarchDispatchSlot;
 
-static MarchDispatchSlot *g_slots = NULL;
-static uint32_t           g_n_slots = 0;
+static MarchDispatchSlot  *g_slots      = NULL;
+static uint32_t            g_n_slots    = 0;
+static const char        **g_id_to_name = NULL;  /* Phase 4: dense id→name array */
+
+/* ── Name registry ──────────────────────────────────────────────────────── */
+
+#define MARCH_NAME_BUCKETS 64   /* must be power of two */
+
+typedef struct NameEntry {
+    const char       *name;
+    uint32_t          id;
+    struct NameEntry *next;
+} NameEntry;
+
+static NameEntry *g_name_buckets[MARCH_NAME_BUCKETS];
+
+static uint32_t name_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; }
+    return h & (MARCH_NAME_BUCKETS - 1);
+}
+
+void march_dispatch_register_name(uint32_t id, const char *name) {
+    if (!name) return;
+    /* id→name reverse lookup (Phase 4) */
+    if (id < g_n_slots && g_id_to_name)
+        g_id_to_name[id] = name;
+    /* name→id hash table */
+    uint32_t b = name_hash(name);
+    NameEntry *e = (NameEntry *)malloc(sizeof(NameEntry));
+    if (!e) return;
+    e->name = name;   /* points into the binary's rodata — stable lifetime */
+    e->id   = id;
+    e->next = g_name_buckets[b];
+    g_name_buckets[b] = e;
+}
+
+int march_dispatch_name_to_id(const char *name, uint32_t *out_id) {
+    if (!name) return 0;
+    uint32_t b = name_hash(name);
+    for (NameEntry *e = g_name_buckets[b]; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            if (out_id) *out_id = e->id;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void march_dispatch_init(uint32_t n_slots) {
     march_dispatch_shutdown();
-    g_slots = (MarchDispatchSlot *)calloc(n_slots, sizeof(MarchDispatchSlot));
-    g_n_slots = g_slots ? n_slots : 0;
+    g_slots      = (MarchDispatchSlot *)calloc(n_slots, sizeof(MarchDispatchSlot));
+    g_id_to_name = (const char **)calloc(n_slots, sizeof(const char *));
+    g_n_slots    = (g_slots && g_id_to_name) ? n_slots : 0;
+    if (!g_slots || !g_id_to_name) {
+        free(g_slots);      g_slots      = NULL;
+        free(g_id_to_name); g_id_to_name = NULL;
+    }
 }
 
 void march_dispatch_shutdown(void) {
-    free(g_slots);
-    g_slots = NULL;
+    free(g_slots);      g_slots      = NULL;
+    free(g_id_to_name); g_id_to_name = NULL;
     g_n_slots = 0;
+    for (int i = 0; i < MARCH_NAME_BUCKETS; i++) {
+        NameEntry *e = g_name_buckets[i];
+        while (e) { NameEntry *nx = e->next; free(e); e = nx; }
+        g_name_buckets[i] = NULL;
+    }
 }
 
 int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
-                           const char *impl_hash, uint8_t kind) {
+                           const char *impl_hash, const char *sig_hash,
+                           uint8_t kind) {
     if (name_id >= g_n_slots) return -1;
     MarchDispatchSlot *s = &g_slots[name_id];
     uint32_t cur = atomic_load_explicit(&s->current, memory_order_acquire);
@@ -46,6 +106,13 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     int idx;
     if (!any_live) {
         idx = 0;  /* first publish into a fresh slot */
+        /* Capture baseline_impl_hash (never overwritten on subsequent publishes) */
+        if (impl_hash) {
+            strncpy(s->baseline_impl_hash, impl_hash, 64);
+            s->baseline_impl_hash[64] = '\0';
+        } else {
+            s->baseline_impl_hash[0] = '\0';
+        }
     } else {
         /* Reclaim a ring slot that is neither current nor pinned. With a cap of
            2 this is "the other slot, iff its refs have drained". No free slot
@@ -71,6 +138,12 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
         v->impl_hash[64] = '\0';
     } else {
         v->impl_hash[0] = '\0';
+    }
+    if (sig_hash) {
+        strncpy(v->sig_hash, sig_hash, 64);
+        v->sig_hash[64] = '\0';
+    } else {
+        v->sig_hash[0] = '\0';
     }
     /* Publish with release so a reader that acquires `current` sees the fully
        initialised version. */
@@ -114,4 +187,19 @@ uint64_t march_dispatch_refs(uint32_t name_id, uint32_t version) {
 const char *march_dispatch_impl_hash(uint32_t name_id, uint32_t version) {
     if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return NULL;
     return g_slots[name_id].ring[version].impl_hash;
+}
+
+const char *march_dispatch_sig_hash(uint32_t name_id, uint32_t version) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return NULL;
+    return g_slots[name_id].ring[version].sig_hash;
+}
+
+const char *march_dispatch_baseline_hash(uint32_t name_id) {
+    if (name_id >= g_n_slots) return NULL;
+    return g_slots[name_id].baseline_impl_hash;
+}
+
+const char *march_dispatch_id_to_name(uint32_t name_id) {
+    if (!g_id_to_name || name_id >= g_n_slots) return NULL;
+    return g_id_to_name[name_id];
 }

@@ -1,0 +1,77 @@
+-- HCR Phase 3 demo server.
+--
+-- Uses a nested module structure so --hot-reload Server marks Server.square
+-- and Server.report_load as reloadable (functions in the TOP-LEVEL module App
+-- lose their prefix in TIR; nested submodules retain it).
+--
+-- Build with:
+--   march --compile --hot-reload Server -o hcr_server hcr_server.march
+--
+-- Run on the droplet:
+--   MARCH_HOT_RELOAD_SOCKET=/tmp/hcr.sock ./hcr_server
+mod App do
+  needs IO.NetListen
+
+  mod Server do
+    fn square(n : Int) : Int do n * n end
+
+    pfn square__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+      match Msgpack.decode(args) do
+        Err(e) -> Err(e)
+        Ok(v) ->
+          match v do
+            Msgpack.Array(Cons(Msgpack.Int(n), Nil)) ->
+              Ok(Msgpack.encode(Msgpack.int(square(n))))
+            _ -> Err("square: expected one Int argument")
+          end
+      end
+    end
+
+    fn report_load(_tag : Int) : List(Int) do
+      ClusterLoad.to_ints(ClusterLoad.local("node"))
+    end
+
+    pfn report_load__rpc_stub(args : List(Int)) : Result(List(Int), String) do
+      match Msgpack.decode(args) do
+        Err(e) -> Err(e)
+        Ok(v) ->
+          match v do
+            Msgpack.Array(Cons(Msgpack.Int(tag), Nil)) ->
+              let metrics = report_load(tag)
+              let items = List.map(metrics, fn x -> Msgpack.int(x))
+              Ok(Msgpack.encode(Msgpack.array(items)))
+            _ -> Err("report_load: expected one Int argument")
+          end
+      end
+    end
+  end
+
+  pfn serve_loop(listen_fd : Int) do
+    match tcp_accept(listen_fd) do
+      Ok(conn_fd) ->
+        NodeCall.serve_loop(NodeRpc.empty(), conn_fd)
+        tcp_close(conn_fd)
+        serve_loop(listen_fd)
+      Err(e) -> println("accept error: " ++ e)
+    end
+  end
+
+  fn main() do
+    let args = Process.argv()
+    let port = match List.nth_opt(args, 1) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> 29852
+        end
+      None -> 29852
+    end
+    let fd = match tcp_listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    println("hcr-server ready on :" ++ String.from_int(port))
+    serve_loop(fd)
+  end
+
+end

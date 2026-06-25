@@ -1,5 +1,49 @@
 (** March compiler entry point. *)
 
+(* Decode URL-safe base64 (with or without padding) to bytes.
+ * Returns Some bytes_string on success, None on invalid input. *)
+let b64_decode_pubkey b64 =
+  let tbl = Array.make 256 (-1) in
+  let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" in
+  String.iteri (fun i c -> tbl.(Char.code c) <- i) chars;
+  let s = String.map (function '-' -> '+' | '_' -> '/' | c -> c) b64 in
+  let s = match String.length s mod 4 with
+    | 2 -> s ^ "=="
+    | 3 -> s ^ "="
+    | _ -> s in
+  let n = String.length s in
+  if n = 0 || n mod 4 <> 0 then None
+  else begin
+    let buf = Buffer.create (n / 4 * 3) in
+    let ok = ref true in
+    let i = ref 0 in
+    while !i < n && !ok do
+      let v0 = tbl.(Char.code s.[!i]) in
+      let v1 = tbl.(Char.code s.[!i+1]) in
+      let v2 = tbl.(Char.code s.[!i+2]) in
+      let v3 = tbl.(Char.code s.[!i+3]) in
+      if v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0 then ok := false
+      else begin
+        Buffer.add_char buf (Char.chr ((v0 lsl 2) lor (v1 lsr 4)));
+        if s.[!i+2] <> '=' then
+          Buffer.add_char buf (Char.chr (((v1 land 0xf) lsl 4) lor (v2 lsr 2)));
+        if s.[!i+3] <> '=' then
+          Buffer.add_char buf (Char.chr (((v2 land 0x3) lsl 6) lor v3))
+      end;
+      i := !i + 4
+    done;
+    if not !ok then None
+    else begin
+      let bytes = Buffer.contents buf in
+      if String.length bytes <> 32 then None
+      else begin
+        let hex = String.concat "" (List.init 32 (fun j ->
+          Printf.sprintf "%02x" (Char.code bytes.[j]))) in
+        Some hex
+      end
+    end
+  end
+
 (* ------------------------------------------------------------------ *)
 (* Stdlib loader                                                       *)
 (* ------------------------------------------------------------------ *)
@@ -353,6 +397,7 @@ let ensure_runtime_so () =
           (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+      ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
@@ -492,6 +537,8 @@ let no_copy_runtime = ref false    (* --no-copy-runtime: skip auto-copy of march
 (* --hot-reload=<Prefix>: compile boundary modules (under <Prefix>) with the
    versioned dispatch table so their functions can be hot-swapped at runtime. *)
 let hot_reload_prefix = ref None
+let compile_so = ref false   (* --compile-so: emit a shared library patch (no @main) *)
+let signing_pubkey = ref ""  (* --signing-pubkey: base64 ed25519 public key (with --hot-reload) *)
 let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
@@ -941,7 +988,10 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
+          :: Printf.sprintf "pmt%d" !pmap_threshold
+          :: (hr_cas_tag () @ ffi_cas_tag ()
+              @ (if !compile_so then ["compile-so"] else [])
+              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
         let basename = Filename.remove_extension filename in
@@ -1128,7 +1178,7 @@ let compile filename =
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
-    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
+    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared in
     (* Inject IO-module names from the typecheck env so the policy audit can
        identify calls that require Cap(IO) at the TIR level. *)
     let io_modules =
@@ -1144,6 +1194,52 @@ let compile filename =
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
     snap_tir "tir-lower" tir;
     stamp "lower";
+    (* Phase 5: collect actor state schemas for .schemas.json emission.
+       Picks up TDRecord entries named *_State — the state record emitted
+       by lower_actor for every actor definition. Only collected when both
+       --hot-reload and --compile-so are active. *)
+    let rec ty_to_schema_str = function
+      | March_tir.Tir.TInt    -> "Int"
+      | March_tir.Tir.TBool   -> "Bool"
+      | March_tir.Tir.TFloat  -> "Float"
+      | March_tir.Tir.TString -> "String"
+      | March_tir.Tir.TUnit   -> "Unit"
+      | March_tir.Tir.TCon (n, []) -> n
+      | March_tir.Tir.TCon (n, args) ->
+        n ^ "(" ^ String.concat "," (List.map ty_to_schema_str args) ^ ")"
+      | March_tir.Tir.TTuple ts ->
+        "(" ^ String.concat "," (List.map ty_to_schema_str ts) ^ ")"
+      | other -> March_tir.Tir.show_ty other
+    in
+    (* Build actor_name → @compat policy map from the desugared AST.
+       Walks all module-level and nested DActor declarations. *)
+    let rec collect_actor_compat acc (decls : March_ast.Ast.decl list) =
+      List.fold_left (fun acc d ->
+          match d with
+          | March_ast.Ast.DActor (_, name, adef, _) ->
+            (name.March_ast.Ast.txt, adef.March_ast.Ast.actor_compat) :: acc
+          | March_ast.Ast.DMod (_, _, inner, _) ->
+            collect_actor_compat acc inner
+          | _ -> acc
+        ) acc decls
+    in
+    let actor_compat_map : (string * string) list =
+      collect_actor_compat [] desugared.March_ast.Ast.mod_decls in
+    let actor_schemas : (string * (string * March_tir.Tir.ty) list) list =
+      if Option.is_some !hot_reload_prefix && !compile_so then
+        List.filter_map (fun td ->
+            match td with
+            | March_tir.Tir.TDRecord (tname, fields)
+              when let n = String.length tname in
+                   n > 6 && String.sub tname (n - 6) 6 = "_State" ->
+                let actor_name = String.sub tname 0 (String.length tname - 6) in
+                let user_fields = List.filter (fun (nm, _) ->
+                    nm = "" || nm.[0] <> '$') fields in
+                Some (actor_name, user_fields)
+            | _ -> None
+          ) tir.March_tir.Tir.tm_types
+      else []
+    in
     (* Capture the interface-dispatch table before it is cleared by lower_module.
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
@@ -1459,7 +1555,10 @@ let compile filename =
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
-          :: Printf.sprintf "pmt%d" !pmap_threshold :: (hr_cas_tag () @ ffi_cas_tag ()) in
+          :: Printf.sprintf "pmt%d" !pmap_threshold
+          :: (hr_cas_tag () @ ffi_cas_tag ()
+              @ (if !compile_so then ["compile-so"] else [])
+              @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
@@ -1472,7 +1571,7 @@ let compile filename =
         else
           (* Cache miss (or stale artifact / failed copy): emit LLVM IR,
              call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) tir in
           stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
@@ -1589,7 +1688,9 @@ let compile filename =
                 Printf.sprintf "%s%s%s%s%s" (opt_file2 sched_c2) (opt_file2 extras_c2)
                   (opt_file2 compress_c2) (opt_file2 base64_c2) (opt_file2 sha1_c2))
               ^ (opt_file2 ffi_c2)
-              ^ (opt_file2 (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
               ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
@@ -1655,9 +1756,38 @@ let compile filename =
                path so their `#include "march_ffi.h"` resolves with no config. *)
             let ffi_inc = if !ffi_c_files = [] then ""
                           else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
+            let rdynamic_flag =
+              (* Export all symbols so dlopen'd patch .so can resolve back to server.
+                 Pass via -Wl, so the flag goes straight to the linker, not the clang driver.
+                 Linux (GNU ld): --export-dynamic. macOS (ld64): -export_dynamic. *)
+              if !hot_reload_prefix <> None && not !compile_so then
+                if Sys.file_exists "/proc/version" then " -Wl,--export-dynamic"
+                else " -Wl,-export_dynamic"
+              else "" in
+            let so_flag =
+              if !compile_so then
+                (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
+                   macOS: clang uses -undefined dynamic_lookup for the same effect. *)
+                let undef = if Sys.file_exists "/proc/version"
+                            then " -Wl,--allow-shlib-undefined"
+                            else " -undefined dynamic_lookup" in
+                " -shared -fPIC" ^ undef
+              else "" in
+            let reload_ldl =
+              (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
+              if !hot_reload_prefix <> None && not !compile_so
+                 && Sys.file_exists "/proc/version" then " -ldl" else "" in
+            let signing_define =
+              if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
+                match b64_decode_pubkey !signing_pubkey with
+                | Some hex -> Printf.sprintf " -DMARCH_SIGNING_PUBKEY_HEX=\\\"%s\\\"" hex
+                | None ->
+                  Printf.eprintf "march: --signing-pubkey: invalid base64 or not 32 bytes\n";
+                  ""
+              else "" in
             let cmd = Printf.sprintf
-              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s %s%s%s%s%s %s -o %s%s"
-              opt_flag dbg_flag san_flag evloop_flag ffi_inc runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag in
+              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s %s -o %s%s%s"
+              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -1669,7 +1799,50 @@ let compile filename =
                | None -> ());
               Printf.eprintf "compiled %s\n" out_bin
             end
-          end)
+          end);
+        (* When building a hot-reload .so, write a sidecar manifest so that
+           forge deploy hot knows each function's impl_hash and sig_hash
+           without having to dlopen the artifact.  Format:
+             # march-hcr-manifest v1
+             # cas_hash <64-char blake3 hex>
+             <fn_name> <impl_hash> <sig_hash>
+           sig_hash may be empty if the function was not hashed. *)
+        (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
+          let mf = out_bin ^ ".hcr_manifest" in
+          (try
+             let oc = open_out mf in
+             Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch;
+             Hashtbl.iter (fun name impl_h ->
+               let sig_h = Option.value ~default:""
+                   (Hashtbl.find_opt remote_sig_hashes name) in
+               Printf.fprintf oc "%s %s %s\n" name impl_h sig_h
+             ) hr_impl_hashes;
+             close_out oc
+           with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
+        end);
+        (* Phase 5: emit .schemas.json sidecar for actor state schema checking
+           at deploy time.  Each entry records the actor's state field names
+           and types so forge deploy hot can diff old vs new schemas. *)
+        (if !compile_so && actor_schemas <> [] then begin
+          let schema_path = out_bin ^ ".schemas.json" in
+          (try
+            let oc = open_out schema_path in
+            Printf.fprintf oc "{\n";
+            List.iteri (fun i (actor_name, fields) ->
+                let field_json = String.concat ", " (List.map (fun (fname, fty) ->
+                    Printf.sprintf {|{"name":%S,"ty":%S}|} fname (ty_to_schema_str fty)
+                  ) fields) in
+                let compat = Option.value ~default:"full"
+                    (List.assoc_opt actor_name actor_compat_map) in
+                Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n    \"state_fields\": [%s]\n  }%s\n"
+                  actor_name compat field_json
+                  (if i < List.length actor_schemas - 1 then "," else "")
+              ) actor_schemas;
+            Printf.fprintf oc "}\n";
+            close_out oc
+          with Sys_error e ->
+            Printf.eprintf "warning: could not write %s: %s\n" schema_path e)
+        end)
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
@@ -1720,7 +1893,7 @@ let compile filename =
             end
           ) pre_fns
         in
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:rpc_sig_hashes tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
@@ -2241,8 +2414,12 @@ let () =
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--compile-so", Arg.Set compile_so,
+     " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),
      "<Prefix> Compile modules under <Prefix> with the hot-reload dispatch table");
+    ("--signing-pubkey", Arg.Set_string signing_pubkey,
+     "<base64>  ed25519 public key to embed for ACTIVATE signature verification (with --hot-reload)");
     ("--ffi-c",      Arg.String (fun f -> ffi_c_files := f :: !ffi_c_files),
                      "<file.c>  Compile+link an FFI shim C source (forge [[ffi]]); repeatable");
     ("--ffi-link",   Arg.String (fun f -> ffi_link_flags := f :: !ffi_link_flags),

@@ -1,0 +1,16 @@
+; lib/ed25519/dune — OCaml bindings for ed25519 (wraps runtime/tweetnacl.c)
+;
+; tweetnacl.c is vendored from runtime/ via a copy rule so dune can track the
+; dependency.  stubs.c provides the OCaml FFI wrappers; tweetnacl_impl.c is the
+; ed25519 implementation compiled as a separate object in the same library.
+(library
+ (name march_ed25519)
+ (foreign_stubs
+  (language c)
+  (names stubs tweetnacl_impl)
+  (flags (:standard -I %{project_root}/runtime))))
+
+(rule
+ (target tweetnacl_impl.c)
+ (deps %{project_root}/runtime/tweetnacl.c)
+ (action (copy %{deps} %{target})))

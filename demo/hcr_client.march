@@ -1,0 +1,68 @@
+-- HCR Phase 3 demo client.
+--
+-- Calls square(7) on a running hcr_server via the NodeCall RPC stack.
+-- Uses `mod Server do ... end` NESTED inside the top-level module so the
+-- TIR name for `square` is "Server.square" — matching the server's dispatch
+-- registration.  Top-level module names are dropped by the TIR lowering pass;
+-- nested submodule names are preserved.
+--
+-- Usage:
+--   ./hcr_client <host> <port> [n]
+mod HcrClient do
+
+  mod Server do
+    pfn square(n : Int) : Int do n * n end
+  end
+
+  pfn dial(host : String, port : Int) : Int do
+    match Socket.connect(host, port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " failed: " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn nth_str(xs : List(String), i : Int, dflt : String) : String do
+    match List.nth_opt(xs, i) do
+      Some(v) -> v
+      None -> dflt
+    end
+  end
+
+  pfn nth_int(xs : List(String), i : Int, dflt : Int) : Int do
+    match List.nth_opt(xs, i) do
+      Some(s) ->
+        match String.to_int(s) do
+          Ok(n) -> n
+          Err(_) -> dflt
+        end
+      None -> dflt
+    end
+  end
+
+  fn main() do
+    let args  = Process.argv()
+    let host  = nth_str(args, 1, "127.0.0.1")
+    let port  = nth_int(args, 2, 29852)
+    let n     = nth_int(args, 3, 7)
+
+    let fd = dial(host, port)
+
+    let (sigS, implS) = remote_ref_hashes("HcrClient", "Server.square")
+    let fref = RemoteCall.remote_ref("HcrClient", "Server.square", sigS, implS)
+    let payload = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Nil)))
+    let pid = GlobalPid.make("hcr_client", 0, 0)
+
+    let result = match NodeCall.call(fd, fref, payload, pid, 9999999, 1, 0) do
+      Ok(bytes) ->
+        match Msgpack.decode(bytes) do
+          Ok(Msgpack.Int(r)) -> r
+          _ -> panic("square: unexpected response format")
+        end
+      Err(_) -> panic("square: RPC call rejected (impl_hash mismatch?)")
+    end
+
+    println("square(" ++ String.from_int(n) ++ ") = " ++ String.from_int(result))
+    tcp_close(fd)
+  end
+
+end

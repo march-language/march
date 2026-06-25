@@ -1,4 +1,4 @@
-/* march_dispatch.h — Hot Code Reload versioned dispatch table (HCR Phase 2).
+/* march_dispatch.h — Hot Code Reload versioned dispatch table (HCR Phase 2/4).
  *
  * A dense array of dispatch slots, indexed by NAME_ID (see
  * lib/tir/hot_reload.ml Name_table). Each slot holds a small ring of code
@@ -13,6 +13,12 @@
  * Publishing a new version (initial load or a hot reload) advances the slot's
  * "current" pointer; in-flight callers stay pinned to the version they entered.
  * See specs/hot-code-reload.md Part 3.
+ *
+ * Phase 4 additions:
+ *   - sig_hash per version (for ABI compatibility checking)
+ *   - baseline_impl_hash per slot (for crash-restart drift detection)
+ *   - id→name reverse lookup array (for VERSIONS and ABI_QUERY responses)
+ *   - march_dispatch_sig_hash(), march_dispatch_baseline_hash(), march_dispatch_id_to_name()
  */
 #ifndef MARCH_DISPATCH_H
 #define MARCH_DISPATCH_H
@@ -35,11 +41,14 @@ void march_dispatch_init(uint32_t n_slots);
 void march_dispatch_shutdown(void);
 
 /* Publish [fn_ptr] as the new current version of slot [name_id].
+ * [sig_hash] is the ABI signature hash (64 hex chars); stored per-version for
+ * the sig_hash compatibility gate in forge deploy hot.
  * Returns the ring index used, or -1 if [name_id] is out of range or no
  * reclaimable ring slot exists (every other version is still pinned — a purge
  * would be required; deferred to a later phase). */
 int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
-                           const char *impl_hash, uint8_t kind);
+                           const char *impl_hash, const char *sig_hash,
+                           uint8_t kind);
 
 /* Pin the current version of [name_id]; return its fn_ptr and write the pinned
  * ring index to *out_version, so a later leave targets the same version even if
@@ -49,9 +58,18 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version);
 /* Unpin a version previously returned by enter. */
 void march_dispatch_leave(uint32_t name_id, uint32_t version);
 
-/* Introspection (tests / tooling). */
+/* Introspection (tests / tooling / reload server). */
 uint32_t    march_dispatch_current(uint32_t name_id);
 uint64_t    march_dispatch_refs(uint32_t name_id, uint32_t version);
 const char *march_dispatch_impl_hash(uint32_t name_id, uint32_t version);
+const char *march_dispatch_sig_hash(uint32_t name_id, uint32_t version);
+const char *march_dispatch_baseline_hash(uint32_t name_id);  /* Phase 4 */
+const char *march_dispatch_id_to_name(uint32_t name_id);     /* Phase 4 */
+
+/* Name registry: maps function name strings → dispatch slot IDs.
+ * Populated at startup by @main alongside march_dispatch_publish.
+ * Thread-safe for concurrent reads after startup; writes are startup-only. */
+void march_dispatch_register_name(uint32_t id, const char *name);
+int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
 
 #endif /* MARCH_DISPATCH_H */

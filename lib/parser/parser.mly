@@ -235,6 +235,7 @@ decl_list_r:
 
 fn_attr:
   | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { name }
+  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
 
 decl:
   | DOC; s = STRING; d = fn_decl
@@ -244,6 +245,14 @@ decl:
   | attrs = nonempty_list(fn_attr); d = fn_decl
     { match d with
       | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
+      | d -> d }
+  | attrs = nonempty_list(fn_attr); d = actor_decl
+    { let compat = List.fold_left (fun acc a ->
+          let n = String.length a in
+          if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
+        ) "full" attrs in
+      match d with
+      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat }, span)
       | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
@@ -439,7 +448,7 @@ actor_decl:
     END
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup },
+                actor_supervise = sup; actor_compat = "full" },
               mk_span ($loc)) }
 
 (** Application entry point:

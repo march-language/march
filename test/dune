@@ -123,6 +123,7 @@
           ../runtime/march_runtime.c
           ../runtime/march_runtime.h
           ../runtime/march_scheduler.c
+          ../runtime/march_dispatch.c
           ../runtime/march_message.c
           ../runtime/march_heap.c
           ../runtime/march_gc.c
@@ -134,6 +135,7 @@
                ../runtime/march_ffi.c
                ../runtime/march_runtime.c
                ../runtime/march_scheduler.c
+               ../runtime/march_dispatch.c
                ../runtime/march_message.c
                ../runtime/march_heap.c
                ../runtime/march_gc.c

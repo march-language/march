@@ -33,10 +33,12 @@ static void *FN3 = (void *)0x3333;
 
 static const char *H1 = "1111111111111111111111111111111111111111111111111111111111111111";
 static const char *H2 = "2222222222222222222222222222222222222222222222222222222222222222";
+static const char *S1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char *S2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 static void test_first_publish_and_enter(void) {
     march_dispatch_init(4);
-    int idx = march_dispatch_publish(0, FN1, H1, MARCH_NATIVE);
+    int idx = march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);
     CHECK(idx == 0, "first publish uses ring index 0");
     CHECK(march_dispatch_current(0) == 0, "current is 0 after first publish");
 
@@ -51,7 +53,7 @@ static void test_first_publish_and_enter(void) {
 
 static void test_leave_drops_refs(void) {
     march_dispatch_init(4);
-    march_dispatch_publish(0, FN1, H1, MARCH_NATIVE);
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);
     uint32_t v;
     march_dispatch_enter(0, &v);
     march_dispatch_leave(0, v);
@@ -61,8 +63,8 @@ static void test_leave_drops_refs(void) {
 
 static void test_second_publish_advances_current(void) {
     march_dispatch_init(4);
-    march_dispatch_publish(0, FN1, H1, MARCH_NATIVE);
-    int idx2 = march_dispatch_publish(0, FN2, H2, MARCH_NATIVE);
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);
+    int idx2 = march_dispatch_publish(0, FN2, H2, NULL, MARCH_NATIVE);
     CHECK(idx2 == 1, "second publish uses the other ring slot");
     CHECK(march_dispatch_current(0) == 1, "current advanced to 1");
     uint32_t v;
@@ -75,12 +77,12 @@ static void test_second_publish_advances_current(void) {
 
 static void test_old_version_stays_pinned(void) {
     march_dispatch_init(4);
-    march_dispatch_publish(0, FN1, H1, MARCH_NATIVE);
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);
     uint32_t vold;
     void *fnold = march_dispatch_enter(0, &vold);   /* pin v0 */
     CHECK(fnold == FN1, "old caller entered v0");
 
-    march_dispatch_publish(0, FN2, H2, MARCH_NATIVE); /* current -> 1 */
+    march_dispatch_publish(0, FN2, H2, NULL, MARCH_NATIVE); /* current -> 1 */
     uint32_t vnew;
     void *fnnew = march_dispatch_enter(0, &vnew);    /* pin v1 */
     CHECK(fnnew == FN2, "new caller entered v1");
@@ -97,19 +99,19 @@ static void test_old_version_stays_pinned(void) {
 
 static void test_publish_blocked_then_unblocked(void) {
     march_dispatch_init(4);
-    march_dispatch_publish(0, FN1, H1, MARCH_NATIVE); /* v0, current 0 */
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE); /* v0, current 0 */
     uint32_t v0;
     march_dispatch_enter(0, &v0);                     /* pin v0 */
-    march_dispatch_publish(0, FN2, H2, MARCH_NATIVE); /* v1, current 1 */
+    march_dispatch_publish(0, FN2, H2, NULL, MARCH_NATIVE); /* v1, current 1 */
 
     /* Cap is 2; both ring slots are now occupied: slot 1 is current, slot 0 is
        pinned. A third publish has no reclaimable slot -> -1. */
-    int idx3 = march_dispatch_publish(0, FN3, H1, MARCH_NATIVE);
+    int idx3 = march_dispatch_publish(0, FN3, H1, NULL, MARCH_NATIVE);
     CHECK(idx3 == -1, "publish blocked while old version pinned");
     CHECK(march_dispatch_current(0) == 1, "current unchanged after blocked publish");
 
     march_dispatch_leave(0, v0);                      /* free slot 0 */
-    int idx3b = march_dispatch_publish(0, FN3, H1, MARCH_NATIVE);
+    int idx3b = march_dispatch_publish(0, FN3, H1, NULL, MARCH_NATIVE);
     CHECK(idx3b == 0, "publish reclaims the freed slot");
     CHECK(march_dispatch_current(0) == 0, "current advanced to reclaimed slot");
     march_dispatch_shutdown();
@@ -117,18 +119,37 @@ static void test_publish_blocked_then_unblocked(void) {
 
 static void test_impl_hash_stored(void) {
     march_dispatch_init(4);
-    march_dispatch_publish(2, FN1, H1, MARCH_NATIVE);
+    march_dispatch_publish(2, FN1, H1, NULL, MARCH_NATIVE);
     CHECK(strcmp(march_dispatch_impl_hash(2, 0), H1) == 0, "impl_hash stored per version");
     march_dispatch_shutdown();
 }
 
 static void test_out_of_range_is_safe(void) {
     march_dispatch_init(2);
-    CHECK(march_dispatch_publish(5, FN1, H1, MARCH_NATIVE) == -1, "publish out of range -> -1");
+    CHECK(march_dispatch_publish(5, FN1, H1, NULL, MARCH_NATIVE) == -1, "publish out of range -> -1");
     uint32_t v;
     CHECK(march_dispatch_enter(5, &v) == NULL, "enter out of range -> NULL");
     march_dispatch_leave(5, 0); /* must not crash */
     march_dispatch_shutdown();
+}
+
+static void test_name_registry(void) {
+    march_dispatch_init(4);
+    march_dispatch_register_name(0, "App.foo");
+    march_dispatch_register_name(1, "App.bar");
+    march_dispatch_register_name(2, "App.baz");
+
+    uint32_t id = 99;
+    CHECK(march_dispatch_name_to_id("App.foo", &id) == 1 && id == 0, "lookup App.foo -> 0");
+    CHECK(march_dispatch_name_to_id("App.bar", &id) == 1 && id == 1, "lookup App.bar -> 1");
+    CHECK(march_dispatch_name_to_id("App.baz", &id) == 1 && id == 2, "lookup App.baz -> 2");
+    CHECK(march_dispatch_name_to_id("App.missing", &id) == 0, "lookup unknown -> 0");
+    march_dispatch_shutdown();
+    /* After shutdown, registry is cleared. */
+    CHECK(march_dispatch_name_to_id("App.foo", &id) == 0, "after shutdown, registry cleared");
+    march_dispatch_init(0);   /* leave in clean state for subsequent tests */
+    march_dispatch_shutdown();
+    printf("PASS: test_name_registry\n");
 }
 
 int main(void) {
@@ -139,6 +160,7 @@ int main(void) {
     test_publish_blocked_then_unblocked();
     test_impl_hash_stored();
     test_out_of_range_is_safe();
+    test_name_registry();
     if (g_failed == 0) { printf("test_dispatch: all checks passed\n"); return 0; }
     fprintf(stderr, "test_dispatch: %d check(s) failed\n", g_failed);
     return 1;

@@ -97,6 +97,60 @@
  (action
   (run %{exe:../bin/main.exe} --compile -o %{targets} resource_report.march)))
 
+; HCR Phase 3 demo — server compiled with --hot-reload Server, client calls square(7).
+;
+; Build:   dune build demo/hcr_server.exe demo/hcr_client.exe
+; Server:  MARCH_HOT_RELOAD_SOCKET=/tmp/hcr.sock ./_build/default/demo/hcr_server.exe
+; Client:  ./_build/default/demo/hcr_client.exe 127.0.0.1 29852 7
+; Reload:  scripts/march-reload --socket /tmp/hcr.sock --name Server.square --src hcr_server_patch.march
+(rule
+ (targets hcr_server.exe)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file ../runtime/march_dispatch.c) (file ../runtime/march_dispatch.h)
+       (file ../runtime/march_reload.c) (file ../runtime/march_reload.h)
+       (file hcr_server.march)
+       (file ../stdlib/cluster_load.march)
+       (file ../stdlib/system.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (run %{exe:../bin/main.exe} --compile --hot-reload Server -o %{targets} hcr_server.march)))
+
+(rule
+ (targets hcr_client.exe)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_remote_registry.c) (file ../runtime/march_remote_registry.h)
+       (file hcr_client.march)
+       (file ../stdlib/node_call.march)
+       (file ../stdlib/node_rpc.march)
+       (file ../stdlib/remote_call.march)
+       (file ../stdlib/global_pid.march)
+       (file ../stdlib/net_kernel.march)
+       (file ../stdlib/net_frame.march))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o %{targets} hcr_client.march)))
+
 ; Capacity-aware routing demo — server reports CPU/memory headroom, client routes.
 ; (Works cross-binary thanks to the stable RPC CAS impl_hash fix.)
 ;
