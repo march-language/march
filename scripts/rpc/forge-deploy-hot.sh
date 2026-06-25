@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-HOST=${HOST:-root@198.199.121.160}
+HOST=${HOST:-do-march}  # SSH alias in ~/.ssh/config (port 443, no StrictHostKeyChecking)
 PORT=${PORT:-29852}
 IMAGE=${IMAGE:-march-builder:latest}
 BD=${BD:-/lbuild}
@@ -40,6 +40,13 @@ SLUG="$(basename "$ROOT")"
 SOCK_PATH="/tmp/march_hcr_${SLUG}.sock"
 FORGE="$ROOT/_build/default/forge/bin/main.exe"
 CLIENT="$ROOT/_build/default/demo/hcr_client.exe"
+
+TUNNEL1_PID=""
+TUNNEL2_PID=""
+cleanup() {
+  kill "$TUNNEL1_PID" "$TUNNEL2_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 die()     { echo "ERROR: $*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
