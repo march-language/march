@@ -76,9 +76,9 @@ Hashtbl.reset measure_preamble_sorts;
 type_preamble := "";
 ```
 
-- [ ] Add `ctor_field_names`, `type_preamble`, `measure_preamble_sorts` after `measure_preamble` (line 80)
-- [ ] Add three reset lines in `check_module` reset block (alongside existing resets at line 1106)
-- [ ] Build: `dune build --root . 2>&1 | grep -iE "^Error" | head` — must be clean
+- [x] Add `ctor_field_names`, `type_preamble`, `measure_preamble_sorts` after `measure_preamble` (line 80)
+- [x] Add three reset lines in `check_module` reset block (alongside existing resets at line 1106)
+- [x] Build: `dune build --root . 2>&1 | grep -iE "^Error" | head` — must be clean
 
 ---
 
@@ -113,9 +113,9 @@ After the `TDVariant` arm, add:
 
 Field names are stored in **declaration order** (matching `ctor_field_sorts` positional order). `ctor_decl` generates `ctor_0`, `ctor_1`, … by position, so the two tables must agree on field ordering.
 
-- [ ] Add `TDRecord` arm to `register_adt_names`
-- [ ] Add `TDRecord` arm to `register_field_sorts` (both sorts and names)
-- [ ] Smoke check: `type State = { count : Int }` in a test program → `adt_ctors["M_State"] = ["State"]`, `ctor_field_sorts["State"] = [SInt]`, `ctor_field_names["State"] = ["count"]` (verify by inspecting VC output in a test)
+- [x] Add `TDRecord` arm to `register_adt_names`
+- [x] Add `TDRecord` arm to `register_field_sorts` (both sorts and names)
+- [x] Smoke check: `type State = { count : Int }` in a test program → `adt_ctors["M_State"] = ["State"]`, `ctor_field_sorts["State"] = [SInt]`, `ctor_field_names["State"] = ["count"]` (verify by inspecting VC output in a test)
 
 ---
 
@@ -195,11 +195,11 @@ build_measure_preamble mfns;
 build_type_preamble ();
 ```
 
-- [ ] Modify `build_measure_preamble` to capture `covered` and populate `measure_preamble_sorts`
-- [ ] Add `build_type_preamble` function
-- [ ] Add `record_vc_preamble` helper
-- [ ] Call `build_type_preamble ()` in `check_module` after `build_measure_preamble`
-- [ ] Build clean
+- [x] Modify `build_measure_preamble` to capture `covered` and populate `measure_preamble_sorts`
+- [x] Add `build_type_preamble` function
+- [x] Add `record_vc_preamble` helper
+- [x] Call `build_type_preamble ()` in `check_module` after `build_measure_preamble`
+- [x] Build clean
 
 ---
 
@@ -231,10 +231,10 @@ Between the `EVar` case and the arithmetic cases (after line 499):
 
 All 8 existing call sites are unaffected: `?resolve_field` defaults to `fun _ _ -> None`, so they compile without change and all `EField` expressions in existing VCs conservatively return `None` as before.
 
-- [ ] Add `?(resolve_field = fun _ _ -> None)` to `smt_of` signature
-- [ ] Thread `~resolve_field` in the `r` self-recursive binding
-- [ ] Add `EField(EVar x, fname)` case
-- [ ] Build: confirm all 8 existing call sites compile without modification
+- [x] Add `?(resolve_field = fun _ _ -> None)` to `smt_of` signature
+- [x] Thread `~resolve_field` in the `r` self-recursive binding
+- [x] Add `EField(EVar x, fname)` case
+- [x] Build: confirm all 8 existing call sites compile without modification
 
 ---
 
@@ -276,9 +276,9 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
 
 `refined_int_ty` (line 553, precondition gate) is **not changed** in this spike — record param refinements come in Gap #1 proper.
 
-- [ ] Add `is_record_base` predicate
-- [ ] Add `return_refine_ext` (returns `(binder, pred, sort_name option)`)
-- [ ] Build clean
+- [x] Add `is_record_base` predicate
+- [x] Add `return_refine_ext` (returns `(binder, pred, sort_name option)`)
+- [x] Build clean
 
 ---
 
@@ -429,11 +429,11 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
       fd.A.fn_clauses
 ```
 
-- [ ] Add `make_field_resolver` helper
-- [ ] Add `reflect_record_literal` helper
-- [ ] Replace `check_post` with the extended version (add `?record_sort` parameter)
-- [ ] Replace `check_fn_post` to call `return_refine_ext` and thread `~record_sort`
-- [ ] Build clean
+- [x] Add `make_field_resolver` helper
+- [x] Add `reflect_record_literal` helper
+- [x] Replace `check_post` with the extended version (add `?record_sort` parameter)
+- [x] Replace `check_fn_post` to call `return_refine_ext` and thread `~record_sort`
+- [x] Build clean
 
 ---
 
@@ -502,17 +502,17 @@ let record_refinement_tests root =
 
 Wire as a new `("record_refinement", record_refinement_tests root)` entry in the suite list, gated on `Solver.z3_available ()` like the existing solver-dependent groups.
 
-- [ ] Add `record_refinement_tests` function using existing `has_refine_error` helper
-- [ ] Add the group to `refinecheck_suites`, z3-gated
-- [ ] Run: `dune build --root . test/test_refinecheck.exe && _build/default/test/test_refinecheck.exe 2>&1 | grep -E "record_refinement|FAIL|PASS"` — all three cases pass
+- [x] Add `record_refinement_tests` function using existing `has_refine_error` helper
+- [x] Add the group to `refinecheck_suites`, z3-gated
+- [x] Run: `dune build --root . test/test_refinecheck.exe && _build/default/test/test_refinecheck.exe 2>&1 | grep -E "record_refinement|FAIL|PASS"` — all three cases pass
 
 ---
 
 ## Task 8: Full regression
 
-- [ ] `dune build --root .` — clean
-- [ ] `scripts/run-tests.sh -q` — all quick suites green (exit 0)
-- [ ] `_build/default/test/test_refinecheck.exe` — all existing groups pass; `record_refinement` group either passes (z3 present) or skips cleanly (z3 absent)
+- [x] `dune build --root .` — clean
+- [x] `scripts/run-tests.sh -q` — all quick suites green (exit 0)
+- [x] `_build/default/test/test_refinecheck.exe` — all existing groups pass; `record_refinement` group either passes (z3 present) or skips cleanly (z3 absent)
 
 ---
 
