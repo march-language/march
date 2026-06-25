@@ -282,13 +282,9 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-06-25, Z3 division-safety for `cap no_panic`)
+## Current State (as of 2026-06-25, cap_infer refinecheck pass)
 
-- **`lib/refinecheck/division_safety.ml` (new).** Post-typecheck pass that checks every integer division/modulo site inside `cap no_panic` modules. Division ops (`/`, `%`, `int_div`, `int_mod`, `int_div_euclid`, `int_mod_euclid`) removed from `panic_surface_direct` in `typecheck.ml` and handed to this pass instead. Literal divisors: `0` → always error; non-zero → always safe. Variable divisors with `{v : Int | pred}` refinement: syntactic fast-path covers `v > 0`, `v >= 1`, `v < 0`, `v != 0`, `&&`-conjunctions; Z3 discharge (via `Refine.discharge`) for anything else in the linear-arithmetic fragment. Variable divisors without any refinement → always error. Complex expression divisors → always error (conservative). Soundness: `Unverified` (Z3 absent / timeout) raises an error, preserving the `cap no_panic` guarantee.
-- **Wired into `bin/main.ml` (two call-sites: `--check` / `--compile`).** `Division_safety.check_module` is called immediately after `Refine_check.check_module` so division errors are reported in the same diagnostic pass.
-- **Test coverage (6 new divsafety tests in `cap_no_panic` suite).** `v > 0` / `v != 0` / `v >= 1` refinements → no error; `v >= 0` → error (zero not ruled out); literal non-zero → no error; literal zero → error. Three existing division tests updated to use `typecheck_with_divsafety` helper (typecheck + division_safety). All 327 compiler tests pass; eval 224 / codegen 320 unchanged.
-
-> **Authoritative test counts (2026-06-25): 327 compiler / 224 eval / 320 codegen.** +6 divsafety tests in `cap_no_panic` suite; eval and codegen unchanged.
+- **`lib/refinecheck/cap_infer.ml` (new).** Post-typecheck pass emitting `Err.hint` at call sites where a capability-requiring builtin is used without a matching `DNeeds` declaration. ~90-entry cap table mirrors `builtin_cap_table`; deduplicates repeated hints per module; respects the IO cap hierarchy (`needs IO` suppresses all `IO.*` child hints). 7 new `cap_infer` tests. `has_hints`/`has_hint_with` helpers added to `test_helpers.ml`.
 
 ## Current State (as of 2026-06-25, HCR Phase 7 — fleet tooling P1–P6)
 

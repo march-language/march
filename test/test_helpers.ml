@@ -1148,6 +1148,27 @@ let has_warning_with ctx sub =
     !found
   ) ctx.March_errors.Errors.diagnostics
 
+(** Returns true if ANY hint diagnostic is present. *)
+let has_hints ctx =
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Hint
+  ) ctx.March_errors.Errors.diagnostics
+
+(** Returns true if ANY hint diagnostic's message contains [sub] (case-insensitive). *)
+let has_hint_with ctx sub =
+  let sub_lo = String.lowercase_ascii sub in
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Hint &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let sub_len = String.length sub_lo in
+    let m_len   = String.length m in
+    let found   = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub_lo then found := true
+    done;
+    !found
+  ) ctx.March_errors.Errors.diagnostics
+
 (** Returns true if ANY exhaustiveness warning is present. *)
 let has_exhaust_warning ctx =
   has_warning_with ctx "non-exhaustive"
