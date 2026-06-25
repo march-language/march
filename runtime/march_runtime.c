@@ -1,5 +1,6 @@
 #include "march_runtime.h"
 #include "march_scheduler.h"
+#include "march_dispatch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1063,6 +1064,11 @@ typedef struct march_actor_meta {
     int64_t                     supervisor_window_secs;
     /* Capability revocation (used by march_is_cap_valid): */
     int64_t                     epoch;    /* Current epoch; incremented on revocation */
+    /* Phase 5: non-zero for actors compiled with --hot-reload.
+     * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
+     * Used by actor_green_thread for dispatch-table lookup (enabling function
+     * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
+    uint32_t                    dispatch_name_id;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1194,19 +1200,52 @@ static void actor_green_thread(void *arg) {
         void *msg = march_sched_recv();
         if (!msg) break;  /* woken without message (killed) */
 
+        /* ── Phase 5: detect system migrate message ──────────────────────────
+         * Check BEFORE the alive gate so the message is always freed even if
+         * the actor died between injection and receipt.
+         * The migrate message is malloc'd (not march-heap), so free with free(). */
+        if (((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+            march_migrate_msg_t *mm = (march_migrate_msg_t *)msg;
+            if (a[3] && mm->migrate_fn) {
+                /* a[4] is the state record pointer (state indirection layout).
+                 * migrate_fn receives the old state ptr and returns the new one. */
+                void *new_state = mm->migrate_fn((void *)(uintptr_t)a[4]);
+                a[4] = (int64_t)(uintptr_t)new_state;
+            }
+            free(mm);
+            march_sched_tick();
+            continue;
+        }
+
         if (!a[3]) {
             march_decrc(msg);
             break;
         }
 
-        char *closure = (char *)(uintptr_t)a[2];
         typedef void (*closure_fn_t)(void *, void *, void *);
-        closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+        closure_fn_t fn;
+        uint32_t tbl_version = 0;
+
+        if (meta->dispatch_name_id) {
+            /* Hot-reload actor: look up the current dispatch fn in the dispatch table.
+             * Actor dispatch fns ignore their env arg, so passing the (possibly stale)
+             * closure at a[2] as env is safe — the function only uses actor and msg. */
+            void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
+            memcpy(&fn, &fn_raw, sizeof(fn));
+        } else {
+            /* Regular actor: direct closure dispatch. */
+            char *closure = (char *)(uintptr_t)a[2];
+            fn = *(closure_fn_t *)(closure + 16);
+        }
 
         int64_t saved_rc = a[0];
         a[0] = 1;  /* FBIP: force RC=1 for in-place reuse */
-        fn(closure, actor, msg);
+        fn((void *)(uintptr_t)a[2], actor, msg);
         a[0] = saved_rc;
+
+        if (meta->dispatch_name_id) {
+            march_dispatch_leave(meta->dispatch_name_id, tbl_version);
+        }
 
         march_sched_tick();
     }
@@ -1296,6 +1335,11 @@ void *march_spawn(void *actor) {
      * the background thread before returning. */
     march_ensure_sched_started();
     return actor;
+}
+
+void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
+    march_actor_meta *meta = find_meta(actor);
+    if (meta) meta->dispatch_name_id = name_id;
 }
 
 /* ── Lightweight task spawn ──────────────────────────────────────────────── */
