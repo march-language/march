@@ -282,6 +282,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, return-refinement inference)
+
+- **`lib/refinecheck/return_infer.ml` (new).** `March_refinecheck.Return_infer`: single-pass Z3 return-sign inference. Collects Int-refined params → (decls, assumptions); walks block body for let-binding equalities; reflects return expression as SMT; probes 6 sign candidates (`r > 0`, `r >= 0`, `r >= 1`, `r != 0`, `r < 0`, `r <= -1`) via `Refine.discharge`. Public `infer_module ?root m → inferred_return list`. If Z3 is absent, returns `[]`. 6 new `return_refine_infer` tests (guarded with `z3_available()`). **359 compiler tests pass.**
+
 ## Current State (as of 2026-06-25, cap_infer refinecheck pass)
 
 - **`lib/refinecheck/cap_infer.ml` (new).** Post-typecheck pass emitting `Err.hint` at call sites where a capability-requiring builtin is used without a matching `DNeeds` declaration. ~90-entry cap table mirrors `builtin_cap_table`; deduplicates repeated hints per module; respects the IO cap hierarchy (`needs IO` suppresses all `IO.*` child hints). 7 new `cap_infer` tests. `has_hints`/`has_hint_with` helpers added to `test_helpers.ml`.

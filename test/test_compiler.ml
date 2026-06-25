@@ -4124,6 +4124,101 @@ let test_cap_infer_nested_mod_inner_missing () =
   Alcotest.(check bool) "nested mod without declared needs: hint for inner" true
     (has_hint_with ctx "IO.Random")
 
+(* ── return_refine_infer: Z3-based return-sign inference ────────────────── *)
+
+(* Helper: run infer_module on a snippet and return inferred results. *)
+let infer_returns src =
+  let m = Test_helpers.parse_and_desugar src in
+  March_refinecheck.Return_infer.infer_module m
+
+(* Check whether any result matches fn_name and has the given pred string. *)
+let has_pred results fn_name pred =
+  List.exists
+    (fun (r : March_refinecheck.Return_infer.inferred_return) ->
+      r.fn_name = fn_name && List.mem pred r.verified_preds)
+    results
+
+(* Guard: skip test bodies when Z3 is unavailable. *)
+let z3_available () =
+  let vc = March_refine.Smt.{
+    decls = [("x", March_refine.Smt.SInt)];
+    assumptions = [March_refine.Smt.Ge (March_refine.Smt.Const "x", March_refine.Smt.IntLit 1)];
+    goal = March_refine.Smt.Gt (March_refine.Smt.Const "x", March_refine.Smt.IntLit 0) }
+  in
+  match March_refine.Refine.discharge ~root:(Sys.getcwd ()) vc with
+  | March_refine.Refine.Verified -> true
+  | _ -> false
+
+let test_return_infer_identity_positive () =
+  (* fn id(x : {v : Int | v > 0}) : Int = x  →  infers r > 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn id(x : {v : Int | v > 0}) : Int do x end
+    end|} in
+    Alcotest.(check bool) "id: r > 0 inferred" true (has_pred results "id" "r > 0");
+    Alcotest.(check bool) "id: r >= 0 inferred" true (has_pred results "id" "r >= 0")
+  end
+
+let test_return_infer_add_one () =
+  (* fn inc(x : {v : Int | v >= 0}) : Int = x + 1  →  infers r >= 1, r > 0, r >= 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn inc(x : {v : Int | v >= 0}) : Int do x + 1 end
+    end|} in
+    Alcotest.(check bool) "inc: r >= 1 inferred" true (has_pred results "inc" "r >= 1");
+    Alcotest.(check bool) "inc: r > 0 inferred"  true (has_pred results "inc" "r > 0")
+  end
+
+let test_return_infer_no_refined_params () =
+  (* fn plain(x : Int) : Int = x  →  no refinement can be inferred *)
+  let results = infer_returns {|mod M do
+    fn plain(x : Int) : Int do x end
+  end|} in
+  Alcotest.(check bool) "plain: no inferences" true
+    (not (List.exists (fun (r : March_refinecheck.Return_infer.inferred_return) -> r.fn_name = "plain") results))
+
+let test_return_infer_let_propagation () =
+  (* fn f(x : {v : Int | v > 0}) : Int =
+       let y = x + 1
+       y
+     →  infers r > 0 via let-binding propagation *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn f(x : {v : Int | v > 0}) : Int do
+        let y = x + 1
+        y
+      end
+    end|} in
+    Alcotest.(check bool) "f: r > 0 via let" true (has_pred results "f" "r > 0")
+  end
+
+let test_return_infer_literal_return () =
+  (* fn five(x : {v : Int | v > 0}) : Int = 5  →  infers r > 0, r >= 1, r != 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn five(x : {v : Int | v > 0}) : Int do 5 end
+    end|} in
+    Alcotest.(check bool) "five: r > 0"   true (has_pred results "five" "r > 0");
+    Alcotest.(check bool) "five: r >= 1"  true (has_pred results "five" "r >= 1");
+    Alcotest.(check bool) "five: r != 0"  true (has_pred results "five" "r != 0")
+  end
+
+let test_return_infer_negative_param () =
+  (* fn f(x : {v : Int | v < 0}) : Int = x  →  infers r < 0, r <= -1, r != 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn f(x : {v : Int | v < 0}) : Int do x end
+    end|} in
+    Alcotest.(check bool) "f: r < 0"   true (has_pred results "f" "r < 0");
+    Alcotest.(check bool) "f: r <= -1" true (has_pred results "f" "r <= -1");
+    Alcotest.(check bool) "f: r != 0"  true (has_pred results "f" "r != 0")
+  end
+
 let test_record_type_still_parses () =
   (* Disambiguation regression: record types must not be misparsed as refinements. *)
   let m =
@@ -4935,6 +5030,14 @@ let compiler_suites =
           Alcotest.test_case "needs IO umbrella covers IO.Random: no hint"  `Quick test_cap_infer_parent_cap_covers;
           Alcotest.test_case "nested mod with declared needs: no hint"      `Quick test_cap_infer_nested_mod_inner_declared;
           Alcotest.test_case "nested mod missing needs: hint for inner"     `Quick test_cap_infer_nested_mod_inner_missing;
+        ] );
+      ( "return_refine_infer", [
+          Alcotest.test_case "identity fn: positive param → r > 0"           `Quick test_return_infer_identity_positive;
+          Alcotest.test_case "add-one fn: nonneg param → r >= 1"             `Quick test_return_infer_add_one;
+          Alcotest.test_case "no refined params → no inferences"             `Quick test_return_infer_no_refined_params;
+          Alcotest.test_case "let propagation: x+1 bound → r > 0"           `Quick test_return_infer_let_propagation;
+          Alcotest.test_case "literal 5 return → r > 0, r >= 1, r != 0"    `Quick test_return_infer_literal_return;
+          Alcotest.test_case "negative param: x < 0 → r < 0, r <= -1"      `Quick test_return_infer_negative_param;
         ] );
       ( "error_improvements", [
           Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;
