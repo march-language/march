@@ -709,6 +709,19 @@ march/
 - **Browser playground HTTP client requests** — `HttpClient.get`/`post` (and everything funneling through `HttpTransport.request`) now run in the js_of_ocaml playground over `fetch`/XHR. New `http_fetch`/`http_fetch_available` builtins + `http_fetch_hook` ref in `lib/eval/eval.ml` (native inert); browser build (`js/march_browser.ml`) installs a synchronous-`XMLHttpRequest` impl and loads `http`/`http_transport`/`http_client` into the browser stdlib. `HttpTransport.request` branches on `http_fetch_available()`. Server side, streaming, and raw sockets remain native-only; browser requests are CORS-limited and block the page during the request.
 - **5 new eval tests** (`browser http` suite). Test count: **1540** (Phase 3c's 1535 + 5 new `browser http` eval tests; 2 pre-existing `parser gaps` failures). Verified end-to-end via a Node smoke test loading the compiled bundle with a polyfilled sync XHR.
 
+## Current State (as of 2026-06-25, Phase 3d — `cap pure`, `cap no_extern`, `cap deterministic`)
+
+- **Three new module-level capability directives** (`lib/typecheck/typecheck.ml`, `lib/lexer/lexer.mll`, `lib/parser/parser.mly`):
+  - `cap pure`: bans side-effectful builtins (`spawn`, `send`, `print`, `println`, `eprint`, `eprintln`, `read_line`, `exit`, `random_int`, `random_float`, `random_bool`, `uuid_v4`, `now_ms`, `sleep_ms`, vault ops, file ops). Implemented by `check_pure_module` using `pure_banned` StringSet and `calls_in_expr` walker.
+  - `cap no_extern`: structural scan for `DExtern` blocks and `DNeeds` paths containing `IO.Foreign`. Implemented by `check_no_extern_module`.
+  - `cap deterministic`: bans non-deterministic builtins (`random_int`, `random_float`, `random_bool`, `random_bytes`, `uuid_v4`, `now_ms`, `now_ns`, `monotonic_ms`). Implemented by `check_deterministic_module`.
+- **Lexer**: `CAP_PURE`, `CAP_NO_EXTERN`, `CAP_DETERMINISTIC` compound tokens added to `lexer.mll`.
+- **Parser**: Token declarations + `cap_pure_decl`, `cap_no_extern_decl`, `cap_deterministic_decl` grammar rules producing `DOpts(["pure"/"no_extern"/"deterministic"], span)`.
+- **Env fields**: `pure_mod`, `no_extern_mod`, `deterministic_mod : bool` added to typecheck env; initialized `false` in `make_env`.
+- **`check_decl`**: `DOpts` handler extended to set all four cap flags.
+- **Wired** into `check_module_core` at both top-level module and nested `DMod` sites.
+- **11 new tests** in `cap_pure_no_extern_det` suite. **332 compiler tests pass.**
+
 ## Current State (as of 2026-06-18, Phase 3c — `cap no_panic` module directive)
 
 - **`cap no_panic` directive** (`lib/typecheck/typecheck.ml`): `check_no_panic_module` with static `panic_surface_direct` (`/`, `%`, `int_div`, `panic_`, `todo_`, `unreachable_`), `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and `panic_surface_stdlib` (`List.nth`, `Option.unwrap`, `Array.get`, etc.) tables. Seed+fixpoint transitive analysis: direct callers seeded, then propagated to transitive callers within the same module. Errors point at call-site span with per-site suggestion (e.g. use `Math.checked_div` instead of `/`).
