@@ -79,6 +79,20 @@ let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
 let is_axiom_measure m = Hashtbl.mem axiom_measures m
 let measure_preamble : string ref = ref ""
 
+(* ctor name -> field names in declaration order.  Populated for TDRecord
+   1-ctor datatypes; used to map EField/ERecord field names to selector indices. *)
+let ctor_field_names : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(* declare-datatypes preamble for TDRecord types; included in every VC that
+   refines over a record value.  Built after measure_preamble so sort
+   deduplication (measure_preamble_sorts) works. *)
+let type_preamble : string ref = ref ""
+
+(* ADT sort names already declared in measure_preamble; populated by
+   build_measure_preamble so build_type_preamble can skip them and avoid
+   duplicate sort declarations in the same VC (Z3 rejects those). *)
+let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* SMT sort name for a March ADT.  z3 reserves several sort names (`List`,
    `Array`, `Seq`, `Set`, …); keeping our datatype sorts in a private `M_`
    namespace guarantees no user/builtin ADT name collides with a reserved one.
@@ -107,6 +121,9 @@ let rec register_adt_names (decls : A.decl list) : unit =
       | A.DAlwaysLinearType (_, name, _, A.TDVariant variants, _) ->
         Hashtbl.replace adt_ctors (adt_sort_name name.A.txt)
           (List.map (fun (v : A.variant) -> v.A.var_name.A.txt) variants)
+      | A.DType (_, name, _, A.TDRecord _, _)
+      | A.DAlwaysLinearType (_, name, _, A.TDRecord _, _) ->
+        Hashtbl.replace adt_ctors (adt_sort_name name.A.txt) [ name.A.txt ]
       | A.DMod (_, _, ds, _) -> register_adt_names ds
       | _ -> ())
     decls
@@ -122,6 +139,13 @@ let rec register_field_sorts (decls : A.decl list) : unit =
             Hashtbl.replace ctor_field_sorts v.A.var_name.A.txt
               (List.map smt_sort_of_field v.A.var_args))
           variants
+      | A.DType (_, name, _, A.TDRecord fields, _)
+      | A.DAlwaysLinearType (_, name, _, A.TDRecord fields, _) ->
+        let ctor = name.A.txt in
+        Hashtbl.replace ctor_field_sorts ctor
+          (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) fields);
+        Hashtbl.replace ctor_field_names ctor
+          (List.map (fun (f : A.field) -> f.A.fld_name.A.txt) fields)
       | A.DMod (_, _, ds, _) -> register_field_sorts ds
       | _ -> ())
     decls
@@ -325,8 +349,11 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
           (fun arm -> match arm_axiom ~allowed name arm with Some s -> Buffer.add_string buf (s ^ "\n") | None -> ())
           arms)
       axiomatized;
-    let dts = datatype_decls (adt_closure (List.map (fun (_, adt, _) -> adt) axiomatized)) in
-    measure_preamble := "(declare-sort Elem 0)\n" ^ dts ^ "\n" ^ Buffer.contents buf
+    let covered = adt_closure (List.map (fun (_, adt, _) -> adt) axiomatized) in
+    let dts = datatype_decls covered in
+    measure_preamble := "(declare-sort Elem 0)\n" ^ dts ^ "\n" ^ Buffer.contents buf;
+    Hashtbl.reset measure_preamble_sorts;
+    List.iter (fun s -> Hashtbl.replace measure_preamble_sorts s ()) covered
   end
 
 (* The built-in `List(a)` modelled as an ADT so user measures over lists are
@@ -337,6 +364,31 @@ let register_builtin_adts () : unit =
   Hashtbl.replace adt_ctors (adt_sort_name "List") [ "Nil"; "Cons" ];
   Hashtbl.replace ctor_field_sorts "Nil" [];
   Hashtbl.replace ctor_field_sorts "Cons" [ Smt.SData "Elem"; Smt.SData (adt_sort_name "List") ]
+
+(* Build type_preamble from all registered TDRecord sorts, excluding any sorts
+   already declared in measure_preamble (tracked in measure_preamble_sorts). *)
+let build_type_preamble () : unit =
+  let record_sorts =
+    Hashtbl.fold
+      (fun sort _ctors acc ->
+        match Hashtbl.find_opt adt_ctors sort with
+        | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> sort :: acc
+        | _ -> acc)
+      adt_ctors []
+  in
+  if record_sorts = [] then type_preamble := ""
+  else begin
+    let all_sorts = adt_closure record_sorts in
+    let new_sorts = List.filter (fun s -> not (Hashtbl.mem measure_preamble_sorts s)) all_sorts in
+    if new_sorts = [] then type_preamble := ""
+    else type_preamble := "(declare-sort Elem 0)\n" ^ datatype_decls new_sorts
+  end
+
+let record_vc_preamble () : string =
+  match !measure_preamble, !type_preamble with
+  | "", t -> t
+  | m, "" -> m
+  | m, t -> m ^ "\n" ^ t
 
 (* ── M-b: the @[measure] soundness gate ─────────────────────────────────────
    `@[measure]` is a promise that the function is a TOTAL, TERMINATING, PURE
@@ -484,8 +536,9 @@ let measure_gate_errors (fd : A.fn_def) : string list =
 (* [resolve_var] maps a scalar variable to its SMT term; [resolve_measure]
    maps a (measure-name, argument-name) to its measure term.  None => outside
    the supported Int/Bool linear fragment. *)
-let rec smt_of ~resolve_var ~resolve_measure (e : A.expr) : Smt.term option =
-  let r = smt_of ~resolve_var ~resolve_measure in
+let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None) (e : A.expr)
+    : Smt.term option =
+  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field in
   let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
@@ -497,6 +550,10 @@ let rec smt_of ~resolve_var ~resolve_measure (e : A.expr) : Smt.term option =
      | A.EVar { A.txt = x; _ } -> resolve_measure m x
      | _ -> if m = "len" then (match list_len a with Some n -> Some (Smt.IntLit n) | None -> None) else None)
   | A.EVar { A.txt; _ } -> resolve_var txt
+  (* Field access on a bare variable: s.count → selector applied to s.
+     Only EVar receivers are supported; complex receivers conservatively return
+     None — safe under the definite-failure soundness stance. *)
+  | A.EField (A.EVar { A.txt = x; _ }, { A.txt = fname; _ }, _) -> resolve_field x fname
   | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.And (x, y)) a b
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Or (x, y)) a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Option.map (fun x -> Smt.Not x) (r a)
@@ -835,10 +892,29 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
    refinement.  We check each *tail* expression (a return position) under the
    path/scope reaching it, with the same definite-failure soundness stance. ── *)
 
+let is_record_base (t : A.ty) : bool =
+  match t with
+  | A.TyCon ({ A.txt = name; _ }, []) ->
+    (match Hashtbl.find_opt adt_ctors (adt_sort_name name) with
+     | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
+     | _ -> false)
+  | _ -> false
+
 let return_refine (fd : A.fn_def) : (string * A.expr) option =
   match fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred)
+  | _ -> None
+
+(* Like return_refine but also returns the SMT sort name when the return base
+   type is a registered TDRecord, enabling EField reflection in check_post. *)
+let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option =
+  match fd.A.fn_ret_ty with
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred, None)
+  | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
+    when is_record_base base ->
+    Some (binder_name binder, pred, Some (adt_sort_name name))
   | _ -> None
 
 (* Return-position expressions of a body, each with the path reaching it. *)
@@ -867,7 +943,52 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list =
       | None -> (ds, asm))
     ([], []) sc
 
-let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.expr)
+(* Build a resolve_field closure for a known record binder: v.fname becomes the
+   SMT selector applied to the term representing v. *)
+let make_field_resolver (binder : string) (sort_name : string) (binder_term : Smt.term)
+    : string -> string -> Smt.term option =
+  fun varname fname ->
+    if varname <> binder && varname <> "_" then None
+    else
+      match Hashtbl.find_opt adt_ctors sort_name with
+      | Some [ ctor ] ->
+        (match Hashtbl.find_opt ctor_field_names ctor with
+         | None -> None
+         | Some names ->
+           let rec find_idx i = function
+             | [] -> None
+             | n :: _ when n = fname -> Some i
+             | _ :: rest -> find_idx (i + 1) rest
+           in
+           (match find_idx 0 names with
+            | None -> None
+            | Some idx ->
+              Some (Smt.App (Printf.sprintf "%s_%d" ctor idx, [ binder_term ]))))
+      | _ -> None
+
+(* Reflect an ERecord literal as a constructor application in SMT.
+   Fields are reordered to match the declaration order stored in ctor_field_names.
+   Returns None if any field's scalar term is untranslatable (conservative skip). *)
+let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list)
+    (reflect_scalar : A.expr -> Smt.term option) : Smt.term option =
+  match Hashtbl.find_opt adt_ctors sort_name with
+  | Some [ ctor ] ->
+    (match Hashtbl.find_opt ctor_field_names ctor with
+     | None -> None
+     | Some fname_list ->
+       let field_map = List.map (fun (n, e) -> (n.A.txt, e)) fields in
+       let in_order =
+         List.filter_map (fun fname -> List.assoc_opt fname field_map) fname_list
+       in
+       if List.length in_order <> List.length fname_list then None
+       else
+         let reflected = List.map reflect_scalar in_order in
+         if List.exists Option.is_none reflected then None
+         else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
+  | _ -> None
+
+let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : scope)
+    (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
   let base_decls, base_assume = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
@@ -878,31 +999,44 @@ let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.e
     if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
     Some c
   in
-  (* The returned value, reflected (variables become their constants). *)
-  match smt_of ~resolve_var:var_const ~resolve_measure tail_e with
+  let scalar e = smt_of ~resolve_var:var_const ~resolve_measure e in
+  let tail_term_opt =
+    match record_sort with
+    | Some sort_name ->
+      (match tail_e with
+       | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar
+       | _ -> scalar tail_e)
+    | None -> scalar tail_e
+  in
+  match tail_term_opt with
   | None -> ()
   | Some tail_term ->
+    let resolve_field = match record_sort with
+      | Some sort_name -> make_field_resolver binder sort_name tail_term
+      | None -> fun _ _ -> None
+    in
     let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_measure cond with
+        match smt_of ~resolve_var ~resolve_measure ~resolve_field cond with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure ret_pred with
+    (match smt_of ~resolve_var ~resolve_measure ~resolve_field ret_pred with
      | None -> ()
      | Some goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
-       (* Postconditions reflect measures only symbolically (`m$name` Int
-          constants), never as datatype terms, so the axiom preamble is unused
-          here — omit it to avoid the datatype/quantifier setup cost. *)
-       (match Refine.discharge ~root ~preamble:"" vc with
+       let preamble = match record_sort with
+         | Some _ -> record_vc_preamble ()
+         | None -> ""
+       in
+       (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> ()
         | first -> (
-            match Refine.discharge ~root ~preamble:"" { vc with Smt.goal = Smt.Not goal } with
+            match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
             | Refine.Verified ->
               ignore tail_e;
               Err.error errctx ~span
@@ -913,15 +1047,15 @@ let check_post ~root errctx ~span (sc : scope) (binder : string) (ret_pred : A.e
             | _ -> ())))
 
 let check_fn_post ~root errctx (fd : A.fn_def) : unit =
-  match return_refine fd with
+  match return_refine_ext fd with
   | None -> ()
-  | Some (binder, ret_pred) ->
+  | Some (binder, ret_pred, record_sort) ->
     List.iter
       (fun (c : A.fn_clause) ->
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
         List.iter
-          (check_post ~root errctx ~span:c.A.fc_span sc binder ret_pred)
+          (check_post ~root errctx ~span:c.A.fc_span ~record_sort sc binder ret_pred)
           (tails base c.A.fc_body))
       fd.A.fn_clauses
 
@@ -1044,13 +1178,17 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
       [] mfns;
   Hashtbl.reset adt_ctors;
   Hashtbl.reset ctor_field_sorts;
+  Hashtbl.reset ctor_field_names;
   Hashtbl.reset axiom_measures;
+  Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
+  type_preamble := "";
   if measure_axioms then begin
     register_builtin_adts ();
     register_adt_names m.A.mod_decls;
     register_field_sorts m.A.mod_decls;
     build_measure_preamble mfns;
+    build_type_preamble ();
     (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
        function, else its axioms would be unsound.  Emit a hard error per
        violation (filtered to user files by the caller, like every diagnostic). *)

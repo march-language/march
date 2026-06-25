@@ -518,6 +518,35 @@ end|}));
   end
 end|})) ]
 
+(* Gap #1 spike: EField in smt_of + TDRecord as 1-ctor SMT datatype.
+   Proves { v : State | v.count >= 0 } discharges on { count = 1 }, rejects
+   { count = -1 }, and conservatively skips { count = x } (unknown). *)
+let record_suite =
+  let ok_src = {|mod M do
+  type State = { count : Int }
+  fn ok_migrate() : {v : State | v.count >= 0} do
+    { count: 1 }
+  end
+end|} in
+  let bad_src = {|mod M do
+  type State = { count : Int }
+  fn bad_migrate() : {v : State | v.count >= 0} do
+    { count: -1 }
+  end
+end|} in
+  let skip_src = {|mod M do
+  type State = { count : Int }
+  fn unknown_migrate(x : Int) : {v : State | v.count >= 0} do
+    { count: x }
+  end
+end|} in
+  [ gated "record postcondition: literal satisfies" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error ok_src));
+    gated "record postcondition: literal violates" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error bad_src));
+    gated "record postcondition: unknown value skipped conservatively" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error skip_src)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -532,4 +561,6 @@ let () =
       ("list-axioms-mb", list_axiom_suite);
       ("mutual-mc", mutual_suite);
       ("flag-gating", flag_suite);
-      ("resolution", resolution_suite) ]
+      ("resolution", resolution_suite);
+      ("record-postconditions", record_suite) ]
+
