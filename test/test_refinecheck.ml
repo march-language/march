@@ -540,12 +540,58 @@ end|} in
     { count: x }
   end
 end|} in
+  let meas_ok_src = {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn good2() : {v : State | mlength(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|} in
+  let meas_bad_src = {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn bad2() : {v : State | mlength(v.history) == v.count} do
+    { count: 1, history: Nil }
+  end
+end|} in
+  let len_ok_src = {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn good3() : {v : State | len(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|} in
+  let len_bad_src = {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn bad3() : {v : State | len(v.history) == v.count} do
+    { count: 1, history: Nil }
+  end
+end|} in
   [ gated "record postcondition: literal satisfies" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error ok_src));
     gated "record postcondition: literal violates" (fun () ->
         Alcotest.(check bool) "has error" true (has_refine_error bad_src));
     gated "record postcondition: unknown value skipped conservatively" (fun () ->
-        Alcotest.(check bool) "no error" false (has_refine_error skip_src)) ]
+        Alcotest.(check bool) "no error" false (has_refine_error skip_src));
+    gated "measure over field: user @[measure] mlength holds for Nil/0" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error meas_ok_src));
+    gated "measure over field: user @[measure] mlength violated by Nil/1" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error meas_bad_src));
+    gated "measure over field: builtin len holds for Nil/0" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error len_ok_src));
+    gated "measure over field: builtin len violated by Nil/1" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error len_bad_src)) ]
 
 let () =
   Alcotest.run "march-refinecheck"
