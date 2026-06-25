@@ -5203,6 +5203,7 @@ declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr 
 declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare void @march_reload_server_start(ptr)
+declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
 declare ptr  @getenv(ptr)
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
@@ -5744,10 +5745,58 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
      already emitted (as wrappers) by emit_mutual_tco_group above. *)
   let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
                            "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
+  let migrate_suffix = "_migrate_state" in
+  let migrate_suffix_len = String.length migrate_suffix in
+  let spawn_suffix = "_spawn" in
+  let spawn_suffix_len = String.length spawn_suffix in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
       else if List.mem fn.Tir.fn_name mutual_fn_names then ()
-      else emit_fn ctx fn
+      else begin
+        let fname = fn.Tir.fn_name in
+        let flen = String.length fname in
+        (* Phase 5: for hot-reload spawn functions, emit the body as
+           fname_impl, then a thin wrapper that also calls
+           march_actor_set_dispatch_id so the runtime can use the dispatch
+           table for this actor (function updates + migrate walk). *)
+        let spawn_dispatch_slot =
+          if ctx.hr_config <> None && flen > spawn_suffix_len
+             && String.sub fname (flen - spawn_suffix_len) spawn_suffix_len = spawn_suffix
+          then
+            let actor_name = String.sub fname 0 (flen - spawn_suffix_len) in
+            Hot_reload.Name_table.id_of hr_names (actor_name ^ "_dispatch")
+          else None
+        in
+        (match spawn_dispatch_slot with
+        | Some slot_id ->
+          (* Emit body under fname_impl, then a thin wrapper *)
+          emit_fn ctx { fn with Tir.fn_name = fname ^ "_impl" };
+          let mangled_wrapper = mangle_extern fname in
+          let mangled_impl    = mangle_extern (fname ^ "_impl") in
+          Buffer.add_string ctx.buf (Printf.sprintf
+            "\ndefine ptr @%s() {\nentry:\n\
+             \  %%a = call ptr @%s()\n\
+             \  call void @march_actor_set_dispatch_id(ptr %%a, i32 %d)\n\
+             \  ret ptr %%a\n}\n"
+            mangled_wrapper mangled_impl slot_id)
+        | None ->
+          emit_fn ctx fn);
+        (* Phase 5: for migrate_state functions, export a __migrate_<actor>
+           alias so march_reload.c can dlsym it without knowing the full
+           mangled March name. Convention: Mod.Counter_migrate_state →
+           __migrate_Mod_Counter (dots → underscores, strip _migrate_state). *)
+        if flen > migrate_suffix_len
+           && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
+        then begin
+          let actor_qualified = String.sub fname 0 (flen - migrate_suffix_len) in
+          let actor_mangled = String.map (fun c -> if c = '.' then '_' else c) actor_qualified in
+          let alias_name  = "__migrate_" ^ actor_mangled in
+          let llvm_fn_name = mangle_extern fname in
+          (* LLVM alias: same signature as migrate_state (ptr → ptr) *)
+          Buffer.add_string ctx.buf (Printf.sprintf
+            "@%s = alias ptr (ptr), ptr @%s\n" alias_name llvm_fn_name)
+        end
+      end
     ) m.Tir.tm_fns;
 
   let out = Buffer.create 8192 in
