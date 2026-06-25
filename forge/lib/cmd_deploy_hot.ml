@@ -358,6 +358,39 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             raise (Failure "compat violation — deploy aborted")
           end;
 
+          (* Gap #3: migration VC — shell out to march --check-migration.
+             STUB-GAP2: needs_vc_check is false until Gap #2 adds the
+             invariant field to actor_schema; when that lands, replace
+             `false` with:
+               List.exists (fun (_, s) ->
+                 s.Schema_diff.invariant <> None) new_schemas
+             and replace the empty entry_path with the actual source path.
+             The conditional ensures this is dead code until the stub is removed. *)
+          let march_bin =
+            Option.value (Sys.getenv_opt "MARCH_BIN")
+              ~default:(Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe")
+          in
+          let needs_vc_check = false (* STUB-GAP2: invariant field not yet in actor_schema *) in
+          if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> ""
+             && Sys.file_exists march_bin then begin
+            (* entry_path: STUB-GAP2 — will be threaded through from the build step *)
+            let entry_path = "" in
+            let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s %s"
+                (Filename.quote march_bin)
+                (Filename.quote old_schemas_path)
+                (Filename.quote new_schemas_path)
+                (Filename.quote entry_path)
+            in
+            (match Unix.system cmd with
+            | Unix.WEXITED 0 -> ()
+            | Unix.WEXITED _ ->
+              Unix.close fd;
+              raise (Failure "migration VC failed — deploy aborted")
+            | _ ->
+              Unix.close fd;
+              raise (Failure "march --check-migration abnormal exit — deploy aborted"))
+          end;
+
           (* 7. Sign + ACTIVATE each changed function *)
           let _ = signing_pubkey in  (* public key already embedded in server binary *)
           let activated = ref 0 in
