@@ -3134,32 +3134,84 @@ let test_cap_no_panic_lexes () =
   Alcotest.(check bool) "cap no_panic lexes as CAP_NO_PANIC token" true
     (match tok with March_parser.Parser.CAP_NO_PANIC -> true | _ -> false)
 
+(* Run typecheck + division-safety pass together; used for cap no_panic tests
+   that involve division/modulo.  Division is now checked by Division_safety
+   (with Z3), not by the purely syntactic no-panic scan in the typechecker. *)
+let typecheck_with_divsafety src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Division_safety.check_module errors m;
+  errors
+
 let test_cap_no_panic_safe_no_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn add(a : Int, b : Int) : Int do a + b end
   end|} in
   Alcotest.(check bool) "cap no_panic with safe body: no error" false (has_errors ctx)
 
 let test_cap_not_set_div_ok () =
-  let ctx = typecheck {|mod Unsafe do
+  let ctx = typecheck_with_divsafety {|mod Unsafe do
     fn divide(a : Int, b : Int) : Int do a / b end
   end|} in
   Alcotest.(check bool) "no cap no_panic: division is allowed" false (has_errors ctx)
 
 let test_cap_no_panic_div_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn divide(a : Int, b : Int) : Int do a / b end
   end|} in
   Alcotest.(check bool) "cap no_panic + division: error" true (has_errors ctx)
 
 let test_cap_no_panic_mod_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn remainder(a : Int, b : Int) : Int do a % b end
   end|} in
   Alcotest.(check bool) "cap no_panic + modulo: error" true (has_errors ctx)
+
+(* Division-safety Z3 cases *)
+let test_divsafety_positive_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v > 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v > 0 refinement suppresses div error" false (has_errors ctx)
+
+let test_divsafety_nonzero_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v != 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v != 0 refinement suppresses div error" false (has_errors ctx)
+
+let test_divsafety_nonneg_refinement_error () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v >= 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v >= 0 refinement does not suppress (0 is possible)" true (has_errors ctx)
+
+let test_divsafety_literal_nonzero_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn halve(a : Int) : Int do a / 2 end
+  end|} in
+  Alcotest.(check bool) "literal non-zero divisor: no error" false (has_errors ctx)
+
+let test_divsafety_literal_zero_error () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn bad(a : Int) : Int do a / 0 end
+  end|} in
+  Alcotest.(check bool) "literal zero divisor: always an error" true (has_errors ctx)
+
+let test_divsafety_ge1_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v >= 1}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v >= 1 refinement suppresses div error" false (has_errors ctx)
 
 let test_cap_no_panic_explicit_panic_error () =
   let ctx = typecheck {|mod Safe do
@@ -3207,7 +3259,7 @@ let test_cap_no_panic_safe_helper_ok () =
   Alcotest.(check bool) "cap no_panic + safe local helper: no error" false (has_errors ctx)
 
 let test_cap_no_panic_transitive_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     pfn helper(a : Int, b : Int) : Int do a / b end
     fn caller(x : Int) : Int do helper(x, 2) end
@@ -4541,6 +4593,13 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+          (* Division-safety Z3 cases *)
+          Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
+          Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;
+          Alcotest.test_case "divsafety: v >= 0 does not suppress"        `Quick test_divsafety_nonneg_refinement_error;
+          Alcotest.test_case "divsafety: literal non-zero divisor ok"     `Quick test_divsafety_literal_nonzero_ok;
+          Alcotest.test_case "divsafety: literal zero is always error"    `Quick test_divsafety_literal_zero_error;
+          Alcotest.test_case "divsafety: v >= 1 refinement suppresses"    `Quick test_divsafety_ge1_refinement_ok;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;
