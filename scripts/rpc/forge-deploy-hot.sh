@@ -207,7 +207,7 @@ mod App do
     end
 
     fn report_load(_tag : Int) : List(Int) do
-      ClusterLoad.to_ints(ClusterLoad.local("node"))
+      ClusterLoad.to_ints(ClusterLoad.local("node", System.monotonic_time()))
     end
 
     pfn report_load__rpc_stub(args : List(Int)) : Result(List(Int), String) do

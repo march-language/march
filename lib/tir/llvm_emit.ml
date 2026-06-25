@@ -3090,7 +3090,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     then begin
       let name_id =
         match Hot_reload.Name_table.id_of ctx.hr_names resolved_name with
-        | Some i -> i | None -> 0 in
+        | Some i -> i + 1 | None -> 0 in  (* 1-based; 0 = sentinel *)
       let vslot = fresh ctx "hrver" in
       emit ctx (Printf.sprintf "%s = alloca i32" vslot);
       let fp = fresh ctx "hrfp" in

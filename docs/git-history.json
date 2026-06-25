@@ -1,19 +1,27 @@
 [
   {
+    "hash": "1da54519161582c58c70de5edb8b04460f8ce6f6",
+    "short_hash": "1da5451",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-25T12:30:09-04:00",
+    "message": "Merge branch 'claude/pensive-ramanujan-09052d' into main",
+    "files_changed": 0
+  },
+  {
+    "hash": "1da54519161582c58c70de5edb8b04460f8ce6f6",
+    "short_hash": "1da5451",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-25T12:30:09-04:00",
+    "message": "Merge branch 'claude/pensive-ramanujan-09052d' into main",
+    "files_changed": 0
+  },
+  {
     "hash": "85b9b4719c71f5b5b00172aae40ace687c96f53b",
     "short_hash": "85b9b47",
     "author": "Matthew Gilliam",
     "date": "2026-06-25T12:28:27-04:00",
     "message": "feat(dist-otp/p4p5): load gossip, work dispatch, Merkle anti-entropy, cross-node monitors, dist supervisors\n\nP4 — L6 load-aware work dispatch:\n- ClusterLoad.NodeLoad gains sampled_at:Int; to_ints/from_ints updated to 5-element codec\n- SwimDriver: peer_loads map, GossipWithLoad event, SwimGossipLoad wire msg (tag=3\n  piggybacked load array), anti_entropy_peers/bump_anti_entropy/peer_load/fresh_peer_loads\n  public API (anti-entropy timer without changing step's return type)\n- WorkDispatch: pick_dispatch_target (power-of-two-choices), pick_two (caller-sampled\n  indices), dispatch (load-aware RPC with local fallback), dispatch_affine (ConsistentHash\n  affinity with load-aware fallback)\n\nP5a — GlobalRegistry Merkle anti-entropy:\n- root_hash (Merkle.build over sorted name→entry pairs), diff_entries (CRDT join on\n  hash divergence), all_entries (full snapshot), entry_to_bytes serialiser\n\nP5c — Cross-node process monitors:\n- net_kernel.march: MONITOR_REQ (tag=7) + MONITOR_FIRE (tag=8) frame codecs + frame_tag\n- runtime/march_monitor_registry.{h,c}: mutex-guarded per-pid watcher table,\n  register/fire_pid/fire_nodedown/clear_fd, mini msgpack encoder for MONITOR_FIRE frames\n- march_runtime.c: fire_pid hook on actor exit\n- dist_link.march: DownReason, MonitorRef, PendingMonitor, MonitorTable, wire codecs,\n  make_monitor factory, impl Eq(MonitorRef), impl Eq(DownReason)\n\nP5d — Distributed supervisor:\n- dist_supervisor.march: RestartStrategy, SupervisionStrategy, should_restart,\n  restart_indices, find_child_by_ref, update_child, child_count\n\nTests: 49→53 stdlib_march suites (3 new: work_dispatch/dist_link/dist_supervisor;\nswim_driver+global_registry extended). All 53 suites green. Full suite green:\ncompiler 321, eval 224, codegen 320, stdlib 786, stdlib_march 53/53.",
     "files_changed": 18
-  },
-  {
-    "hash": "1b41aa0e5bfd620555c343bd81ff8d0686e997d9",
-    "short_hash": "1b41aa0",
-    "author": "Matthew Gilliam",
-    "date": "2026-06-25T11:32:12-04:00",
-    "message": "docs: spec HCR Phase 7 (fleet tooling) + Distributed OTP P4+P5\n\nHCR Phase 7 (specs/plans/2026-06-25-hcr-phase7-fleet-spec.md):\n- Multi-server [[hot-reload.env]] forge.toml schema\n- forge deploy hot --env + parallel fan-out with per-server status\n- --canary <n>: activate on n servers, health-check PING loop,\n  rollback (re-activate prior impl_hash) on failure\n- Third CAS tier: s3:// / https:// pull-based artifact distribution;\n  server GET on cas_hash miss; eliminates inline CAS_PUT for fleets\n- forge hot-reload init: git-history analysis → exclude suggestions\n- forge hot-reload keygen --rotate: keypair rotation procedure\n- VERSIONS_DETAIL protocol command: impl_hash + activated_at + signer\n- Append-only audit log: every ACTIVATE → jsonl on the server\n- forge hot-reload status: cross-fleet drift detection dashboard\n- Implementation order: audit log → VERSIONS_DETAIL → status →\n  fleet fan-out → init → rotate → registry tier\n\nDistributed OTP P4+P5 (specs/plans/2026-06-25-distributed-otp-p4p5-spec.md):\n- P4 work dispatch: NodeLoad gossip via SWIM frames (+ staleness\n  decay); stdlib/work_dispatch.march (pick_dispatch_target\n  power-of-two-choices, dispatch with local fallback);\n  dispatch_affine with ConsistentHash; P4b work-stealing deferred\n- P5a GlobalRegistry Merkle anti-entropy: root_hash + diff_entries\n  using Merkle.build/diff; REGISTRY_SYNC_REQ/RESP frame protocol;\n  30s anti-entropy loop in SwimDriver\n- P5b ConsistentHash name-partitioning: authoritative ownership via\n  ConsistentHash.get; non-owner proxies register to owner node\n- P5c cross-node links/monitors: dist_link.march (monitor, link,\n  unlink, demonitor); MONITOR_REQ/FIRE frames; march_monitor_registry.c\n  (per-pid watcher table, fire-on-exit, NodeDown sweep on peer-drop)\n- P5d distributed supervisors: dist_supervisor.march wrapping NodeCall\n  spawn + DistLink.monitor; same restart strategies as local\n- File map, integration test plan, open questions (load gossip freq,\n  dispatch fallback policy, monitor persistence, HCR+OTP interaction)",
-    "files_changed": 2
   },
   {
     "hash": "a1e8c52e4e246454f314573c436279a132e27c97",
@@ -2544,16 +2552,16 @@
     "files_changed": 7
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -2576,14 +2584,6 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:06:51-04:00",
-    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
-    "files_changed": 5
-  },
-  {
     "hash": "331665a13c16dfef67c251366ec617b269e8f646",
     "short_hash": "331665a",
     "author": "Matthew Gilliam",
@@ -2592,16 +2592,24 @@
     "files_changed": 5
   },
   {
-    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
-    "short_hash": "3648aa1",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:06:51-04:00",
+    "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
+    "files_changed": 5
+  },
+  {
+    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
+    "short_hash": "771e4f9",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
     "files_changed": 1
   },
   {
-    "hash": "771e4f9705573daab47dcd524a3ad7980966fb12",
-    "short_hash": "771e4f9",
+    "hash": "3648aa175ad706d6ea3df34528643aed5e7ad3cc",
+    "short_hash": "3648aa1",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T21:28:52-04:00",
     "message": "feat: add sigil demo example with ~H HTML template\n\nExample showing string interpolation inside ~H sigil, rendering a\nstyled HTML page with dynamic data via IOList.",
@@ -2640,16 +2648,16 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
@@ -2664,16 +2672,16 @@
     "files_changed": 15
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

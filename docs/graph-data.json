@@ -15245,6 +15245,39 @@
       "created_at": "2026-06-25T12:28:32.575942-04:00",
       "updated_at": "2026-06-25T12:28:32.575942-04:00",
       "metadata_json": "{\"branch\":\"claude/pensive-ramanujan-09052d\",\"commit\":\"85b9b471\",\"confidence\":95}"
+    },
+    {
+      "id": 1387,
+      "change_id": "d80365a9-e7c5-4d3b-8210-2df2f0f90c4f",
+      "node_type": "goal",
+      "title": "Implement HCR Phase 7 fleet tooling",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T12:30:28.453616-04:00",
+      "updated_at": "2026-06-25T12:30:28.453616-04:00",
+      "metadata_json": "{\"branch\":\"claude/pensive-ramanujan-09052d\",\"confidence\":90,\"prompt\":\"the start working on /Users/80197052/code/march/specs/plans/2026-06-25-hcr-phase7-fleet-spec.md\"}"
+    },
+    {
+      "id": 1388,
+      "change_id": "63dd2b2c-309b-447c-9000-a7c1ce88dd7c",
+      "node_type": "action",
+      "title": "Add audit log to march_reload.c ACTIVATE handler",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T12:36:03.892612-04:00",
+      "updated_at": "2026-06-25T12:36:03.892612-04:00",
+      "metadata_json": "{\"branch\":\"claude/pensive-ramanujan-09052d\",\"confidence\":88,\"files\":[\"runtime/march_reload.c\"]}"
+    },
+    {
+      "id": 1389,
+      "change_id": "b346c1f2-a122-4bf6-afcb-a4942e87a57a",
+      "node_type": "outcome",
+      "title": "HCR Phase 7 fleet tooling P1-P6 complete — audit log, VERSIONS_DETAIL, forge hot-reload status/init/keygen --rotate/use-key, multi-env fan-out + --canary; all tests green",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T12:57:53.473380-04:00",
+      "updated_at": "2026-06-25T12:57:53.473380-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"1da54519\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -25587,6 +25620,28 @@
       "weight": 1.0,
       "rationale": "Goal achieved",
       "created_at": "2026-06-25T12:28:46.876765-04:00"
+    },
+    {
+      "id": 950,
+      "from_node_id": 1387,
+      "to_node_id": 1388,
+      "from_change_id": "d80365a9-e7c5-4d3b-8210-2df2f0f90c4f",
+      "to_change_id": "63dd2b2c-309b-447c-9000-a7c1ce88dd7c",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "First implementation step: audit log",
+      "created_at": "2026-06-25T12:36:06.624942-04:00"
+    },
+    {
+      "id": 951,
+      "from_node_id": 1388,
+      "to_node_id": 1389,
+      "from_change_id": "63dd2b2c-309b-447c-9000-a7c1ce88dd7c",
+      "to_change_id": "b346c1f2-a122-4bf6-afcb-a4942e87a57a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Phase 7 implementation complete",
+      "created_at": "2026-06-25T12:57:56.120477-04:00"
     }
   ]
 }

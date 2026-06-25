@@ -218,7 +218,7 @@ static void handle_client(int fd) {
 
         /* ── ABI_QUERY ────────────────────────────────────────────────── */
         } else if (strcmp(line, "ABI_QUERY") == 0) {
-            for (uint32_t i = 0; i < 65536; i++) {
+            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
                 uint32_t cur = march_dispatch_current(i);
                 const char *h = march_dispatch_impl_hash(i, cur);
                 if (!h) break;
@@ -236,7 +236,7 @@ static void handle_client(int fd) {
 
         /* ── VERSIONS ─────────────────────────────────────────────────── */
         } else if (strcmp(line, "VERSIONS") == 0) {
-            for (uint32_t i = 0; i < 65536; i++) {
+            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
                 const char *name = march_dispatch_id_to_name(i);
                 if (!name) break;
                 const char *base = march_dispatch_baseline_hash(i);
@@ -256,7 +256,7 @@ static void handle_client(int fd) {
 
         /* ── VERSIONS_DETAIL ──────────────────────────────────────────── */
         } else if (strcmp(line, "VERSIONS_DETAIL") == 0) {
-            for (uint32_t i = 0; i < 65536; i++) {
+            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
                 const char *name = march_dispatch_id_to_name(i);
                 if (!name) break;
                 uint32_t cur = march_dispatch_current(i);
