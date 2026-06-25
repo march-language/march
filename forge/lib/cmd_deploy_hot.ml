@@ -235,7 +235,7 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
   Sys.command cmd = 0
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
-    ?(old_schemas_path="") ?(new_schemas_path="") () =
+    ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="") () =
   let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
 
   (* 1. SSH tunnel *)
@@ -358,23 +358,16 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             raise (Failure "compat violation — deploy aborted")
           end;
 
-          (* Gap #3: migration VC — shell out to march --check-migration.
-             STUB-GAP2: needs_vc_check is false until Gap #2 adds the
-             invariant field to actor_schema; when that lands, replace
-             `false` with:
-               List.exists (fun (_, s) ->
-                 s.Schema_diff.invariant <> None) new_schemas
-             and replace the empty entry_path with the actual source path.
-             The conditional ensures this is dead code until the stub is removed. *)
+          (* Gap #3: migration VC — shell out to march --check-migration. *)
           let march_bin =
             Option.value (Sys.getenv_opt "MARCH_BIN")
               ~default:(Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe")
           in
-          let needs_vc_check = false (* STUB-GAP2: invariant field not yet in actor_schema *) in
+          let needs_vc_check =
+            List.exists (fun (_, s) -> s.Schema_diff.invariant <> None) new_schemas
+          in
           if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> ""
-             && Sys.file_exists march_bin then begin
-            (* entry_path: STUB-GAP2 — will be threaded through from the build step *)
-            let entry_path = "" in
+             && entry_path <> "" && Sys.file_exists march_bin then begin
             let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s %s"
                 (Filename.quote march_bin)
                 (Filename.quote old_schemas_path)
@@ -641,6 +634,13 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
               let prev_schemas_path = Filename.concat
                   (Filename.concat proj.Project.root ".march")
                   (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+              let entry_path =
+                match proj.Project.entrypoint with
+                | Some e -> Filename.concat proj.Project.root e
+                | None ->
+                  Filename.concat (Filename.concat proj.Project.root "src")
+                    (proj.Project.name ^ ".march")
+              in
               let result2 =
                 run
                   ~ssh_host:hr.Project.hr_ssh_host
@@ -651,6 +651,7 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                   ~so_path:so_path2
                   ~old_schemas_path:prev_schemas_path
                   ~new_schemas_path
+                  ~entry_path
                   ()
               in
               (* After successful deploy, save new schemas as the baseline for next time *)
@@ -698,7 +699,7 @@ let ping_server ~ssh_host ~remote_socket : bool =
 
 (** Deploy the given pre-built artifact to one server entry; print status line. *)
 let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
-    ~old_schemas_path ~new_schemas_path : (int, string) result =
+    ~old_schemas_path ~new_schemas_path ?(entry_path="") () : (int, string) result =
   let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
   let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
   Printf.printf "\n── %s\n%!" label;
@@ -706,7 +707,7 @@ let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
     ~ssh_host:srv.Project.hre_ssh_host
     ~remote_socket:srv.Project.hre_socket
     ~signing_pubkey:pubkey
-    ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path
+    ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path ~entry_path
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -782,11 +783,18 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
               let new_schemas_path = so_path2 ^ ".schemas.json" in
               let prev_schemas_path = out_prefix ^ ".so.schemas.json.prev" in
 
+              let entry_path =
+                match proj.Project.entrypoint with
+                | Some e -> Filename.concat proj.Project.root e
+                | None ->
+                  Filename.concat (Filename.concat proj.Project.root "src")
+                    (proj.Project.name ^ ".march")
+              in
               let deploy_list srvs =
                 List.map (fun srv ->
                   (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                           ~old_schemas_path:prev_schemas_path
-                          ~new_schemas_path)
+                          ~new_schemas_path ~entry_path ())
                 ) srvs
               in
 

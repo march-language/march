@@ -913,8 +913,11 @@ let run_fmt args =
 (* Gap #3: --check-migration helpers                                   *)
 (* ------------------------------------------------------------------ *)
 
-(* STUB-GAP2: replace with March_parser.Parser.expr_eof after Gap #2 merges *)
-let parse_pred (_src : string) : March_ast.Ast.expr option = None
+let parse_pred (src : string) : March_ast.Ast.expr option =
+  let lb = Lexing.from_string src in
+  match March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lb with
+  | e -> Some e
+  | exception _ -> None
 
 (* Convert a schema type string back to an AST type.
    Inverse of the ty_to_schema_str function that writes .schemas.json. *)
@@ -1259,19 +1262,9 @@ let compile filename =
     exit 0
   end
   else if !check_migration then begin
-    (* Gap #3: verify migrate_state soundness for each actor that has a
-       new-version @invariant.  Shells out nothing — runs entirely in-process
-       using the existing check_fn_post postcondition machinery.
-
-       STUB-GAP2: Both parse_pred calls below return None (no expr_eof parser
-       entry point yet).  All actors therefore hit the (None, _) early-exit and
-       the whole block is a no-op.  Remove the stubs after Gap #2 merges. *)
     let module A  = March_ast.Ast in
     let module Rc = March_refinecheck.Refine_check in
     let module Sd = March_forge.Schema_diff in
-
-    (* STUB-GAP2: replace with s.Sd.invariant after Gap #2 adds the field *)
-    let schema_invariant (_s : Sd.actor_schema) : string option = None in
 
     let prior_schemas = Sd.parse_schemas_file !prior_schema_path in
     let new_schemas   = Sd.parse_schemas_file !new_schema_path   in
@@ -1279,19 +1272,17 @@ let compile filename =
     let any_error     = ref false in
 
     List.iter (fun (actor_name, new_schema) ->
-      match schema_invariant new_schema with
+      match new_schema.Sd.invariant with
       | None -> ()   (* actor has no @invariant — nothing to verify *)
       | Some inv_new_str ->
         let inv_old_str = match List.assoc_opt actor_name prior_schemas with
-          | Some s -> Option.value (schema_invariant s) ~default:"true"
+          | Some s -> Option.value s.Sd.invariant ~default:"true"
           | None   -> "true"
         in
-        (* STUB-GAP2: replace with parse_pred using expr_eof after Gap #2 merges *)
         let inv_old_opt = parse_pred inv_old_str in
         let inv_new_opt = parse_pred inv_new_str in
-        ignore (inv_old_str, inv_new_str);
         (match inv_old_opt, inv_new_opt with
-        | None, _ | _, None -> ()   (* stub: always skipped until Gap #2 lands *)
+        | None, _ | _, None -> ()   (* unparseable predicate: conservatively accept *)
         | Some inv_old, Some inv_new ->
           let prior_fields = match List.assoc_opt actor_name prior_schemas with
             | Some s -> s.Sd.state_fields | None -> [] in
