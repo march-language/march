@@ -545,6 +545,20 @@ march/
 
 > **Authoritative test counts (2026-06-25): 321 compiler / 224 eval / 320 codegen / 786 stdlib (full) / 49 stdlib_march.** No new tests added; fixes are in runtime and HCR-specific codegen paths.
 
+## Current State (as of 2026-06-25, HCR Phase 5 — e2e full verification with history field)
+
+- **Schema JSON format fix (`bin/main.ml`).** The compiler's `.schemas.json` writer emitted all `state_fields` entries on a single line (`[{"name":"count","ty":"Int"}]`). `schema_diff.ml`'s hand-written parser expected each field on its own line; it saw `state_fields` but never detected the `{` that starts a field entry, so every actor parsed with 0 fields. `diff_schemas` produced an empty diff → `migrate_required=0` always. Fixed by writing each field on its own indented line (`[\n      {"name":…},\n    ]` format).
+
+- **RTLD_DEEPBIND fix (`runtime/march_reload.c`).** `dlopen` called with `RTLD_NOW|RTLD_GLOBAL` but without `RTLD_DEEPBIND`. PLT calls inside the patch `.so` (e.g. v2's `Counter_dispatch` calling `Counter_PrintHistory$Counter_Actor$V__`) were resolved to the main executable's v1 symbols first (loaded first, visible globally) instead of the v2 symbols in the patch. This caused v2's `PrintHistory` handler to always print `"(none)"` even after migration. Fixed by adding `RTLD_DEEPBIND` (GNU extension, guarded `#ifndef RTLD_DEEPBIND; #define RTLD_DEEPBIND 0; #endif` for portability).
+
+- **E2E fully verified** on DigitalOcean droplet (`do-march`) via `scripts/rpc/forge-deploy-hot-actors.sh`:
+  - `pre_migrate:  count=3, history=(none)` — v1 Counter actor (no history field)
+  - `post_migrate: count=3, history=[]` — `counter_migrate_state` called; history initialized
+  - `post_inc:     count=4, history=[3]` — v2 Inc handler tracks history correctly
+  - All three grep assertions exit 0. Script commits 51933f4e.
+
+> **Authoritative test counts (2026-06-25): unchanged.** Bug fixes in `bin/main.ml` (schema JSON format) and `runtime/march_reload.c` (dlopen flags); no new test cases added.
+
 - **Compiler test count:** 321
 - **Stdlib test count:** 786 (full) / 766 (quick)
 
