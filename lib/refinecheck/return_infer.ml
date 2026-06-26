@@ -126,45 +126,101 @@ let probe ~root ~decls ~assumptions ~return_term (label, mk_goal) =
   | Refine.Refuted _   -> None
   | Refine.Unverified  -> None   (* Z3 absent or timeout -- conservative skip *)
 
+(* -- Return-position traversal --------------------------------------------- *)
+
+(* Mirrors [tails] in refine_check.ml: collects all leaf return positions
+   together with the accumulated path context (guard conditions) at each site. *)
+let rec return_positions (path : (A.expr * bool) list) (e : A.expr)
+    : ((A.expr * bool) list * A.expr) list =
+  match e with
+  | A.EBlock (es, _) ->
+    (match List.rev es with
+     | [] -> [ (path, e) ]
+     | last :: _ -> return_positions path last)
+  | A.EIf (c, t, el, _) ->
+    return_positions ((c, false) :: path) t @
+    return_positions ((c, true) :: path) el
+  | A.ECond (arms, _) ->
+    List.concat_map (fun (c, b) -> return_positions ((c, false) :: path) b) arms
+  | A.EMatch (_, branches, _) ->
+    List.concat_map
+      (fun (br : A.branch) ->
+        let p =
+          match br.A.branch_guard with
+          | Some g -> (g, false) :: path
+          | None -> path
+        in
+        return_positions p br.A.branch_body)
+      branches
+  | other -> [ (path, other) ]
+
 (* -- Per-clause inference -------------------------------------------------- *)
 
-let infer_clause ~root (params : (string * string * A.expr) list) (body : A.expr) :
-    string list =
-  (* Walk EBlock stmts before the final expression to propagate let-bindings.
-     Each ELet whose RHS reflects to an Smt.term extends decls + assumptions. *)
-  let extra_decls       = ref [] in
-  let extra_assumptions = ref [] in
-  let final_expr =
-    match body with
-    | A.EBlock (stmts, _) when stmts <> [] ->
-      let n     = List.length stmts in
-      let heads = List.filteri (fun i _ -> i < n - 1) stmts in
-      let tail  = List.nth stmts (n - 1) in
-      List.iter
-        (function
-          | A.ELet (b, _) ->
-            (match b.A.bind_pat with
-             | A.PatVar { A.txt = vname; _ } ->
-               (match smt_of ~b:"__none__" ~var:"__none__" b.A.bind_expr with
-                | Some t ->
-                  extra_decls       := (vname, Smt.SInt) :: !extra_decls;
-                  extra_assumptions := Smt.Eq (Smt.Const vname, t) :: !extra_assumptions
-                | None -> ())
-             | _ -> ())
-          | _ -> ())
-        heads;
-      tail
-    | e -> e
-  in
-  (* Reflect the return expression.  No binder substitution: variables in the
-     body are already named by their param_name identifiers. *)
-  match smt_of ~b:"__none__" ~var:"__none__" final_expr with
-  | None -> []   (* Body outside the supported fragment -- conservative skip *)
-  | Some return_term ->
+let infer_clause ~root (clause : A.fn_clause) : string list =
+  let params = clause_refined_params clause in
+  if params = [] then []
+  else
     let (base_decls, base_assumptions) = param_vc_base params in
-    let decls       = base_decls       @ List.rev !extra_decls in
-    let assumptions = base_assumptions @ List.rev !extra_assumptions in
-    List.filter_map (probe ~root ~decls ~assumptions ~return_term) candidates
+    (* Collect outer let-binding context from the top-level block prefix. *)
+    let extra_decls       = ref [] in
+    let extra_assumptions = ref [] in
+    (match clause.A.fc_body with
+     | A.EBlock (stmts, _) when stmts <> [] ->
+       let n     = List.length stmts in
+       let heads = List.filteri (fun i _ -> i < n - 1) stmts in
+       List.iter
+         (function
+           | A.ELet (b, _) ->
+             (match b.A.bind_pat with
+              | A.PatVar { A.txt = vname; _ } ->
+                (match smt_of ~b:"__none__" ~var:"__none__" b.A.bind_expr with
+                 | Some t ->
+                   extra_decls       := (vname, Smt.SInt) :: !extra_decls;
+                   extra_assumptions := Smt.Eq (Smt.Const vname, t) :: !extra_assumptions
+                 | None -> ())
+              | _ -> ())
+           | _ -> ())
+         heads
+     | _ -> ());
+    let let_decls       = List.rev !extra_decls in
+    let let_assumptions = List.rev !extra_assumptions in
+    let decls           = base_decls @ let_decls in
+    let base_assumes    = base_assumptions @ let_assumptions in
+    (* Starting path from the function clause guard. *)
+    let clause_path =
+      match clause.A.fc_guard with Some g -> [ (g, false) ] | None -> []
+    in
+    (* Collect all leaf return positions with their accumulated path contexts. *)
+    let positions = return_positions clause_path clause.A.fc_body in
+    (* For each position, add guard-derived assumptions and probe all candidates. *)
+    let per_position =
+      List.filter_map
+        (fun (path, ret_expr) ->
+          let guard_assumes =
+            List.filter_map
+              (fun (cond, negated) ->
+                match smt_of ~b:"__none__" ~var:"__none__" cond with
+                | None -> None
+                | Some t -> Some (if negated then Smt.Not t else t))
+              path
+          in
+          match smt_of ~b:"__none__" ~var:"__none__" ret_expr with
+          | None -> None
+          | Some return_term ->
+            let assumptions = base_assumes @ guard_assumes in
+            Some
+              (List.filter_map
+                 (probe ~root ~decls ~assumptions ~return_term)
+                 candidates))
+        positions
+    in
+    (* Intersect: only predicates verified for ALL return positions survive. *)
+    match per_position with
+    | [] -> []
+    | first :: rest ->
+      List.fold_left
+        (fun acc preds -> List.filter (fun p -> List.mem p preds) acc)
+        first rest
 
 (* -- Per-function inference ------------------------------------------------ *)
 
@@ -177,7 +233,7 @@ let infer_fn ~root (fd : A.fn_def) : inferred_return option =
         if params = [] then []
         else begin
           any_refined := true;
-          infer_clause ~root params clause.A.fc_body
+          infer_clause ~root clause
         end)
       fd.A.fn_clauses
   in

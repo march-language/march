@@ -3274,6 +3274,61 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
 
+(* Division-safety guard / path-context tests *)
+
+let test_divsafety_match_guard_neq_zero_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn safe_div(a : Int, b : Int) : Int do
+      match b do
+        b when b != 0 -> a / b
+        _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "match guard b != 0 suppresses div error" false (has_errors ctx)
+
+let test_divsafety_match_guard_gt_zero_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn safe_div(a : Int, b : Int) : Int do
+      match b do
+        b when b > 0 -> a / b
+        _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "match guard b > 0 suppresses div error" false (has_errors ctx)
+
+let test_divsafety_if_guard_neq_zero_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn safe_div(a : Int, b : Int) : Int do
+      if b != 0 do a / b else 0 end
+    end
+  end|} in
+  Alcotest.(check bool) "if guard b != 0 suppresses div error" false (has_errors ctx)
+
+let test_divsafety_if_guard_gt_zero_mod_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn safe_mod(a : Int, b : Int) : Int do
+      if b > 0 do a % b else 0 end
+    end
+  end|} in
+  Alcotest.(check bool) "if guard b > 0 suppresses mod error" false (has_errors ctx)
+
+let test_divsafety_no_guard_unrefined_still_errors () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn unsafe_div(a : Int, b : Int) : Int do
+      match b do
+        b -> a / b
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no guard: division by unrefined var still errors" true (has_errors ctx)
+
 (* ── Record field auto-satisfy tests ───────────────────────────────────── *)
 
 let test_record_auto_satisfy_ok () =
@@ -4313,23 +4368,16 @@ let test_return_infer_no_refined_params () =
   end|} in
   Alcotest.(check bool) "no refined params: infers = []" true (infers = [])
 
-(* if body: smt_of returns None => no inference, no exception *)
+(* if body: return_positions now drills into EIf arms — no exception *)
 let test_return_infer_if_body_no_crash () =
   let infers = infer_returns {|mod T do
     fn abs(x : {v : Int | v != 0}) : Int do
       if x > 0 do x else 0 - x end
     end
   end|} in
-  (* abs body is EIf — smt_of returns None → no preds inferred *)
-  let preds =
-    match List.find_opt
-            (fun r -> r.March_refinecheck.Return_infer.fn_name = "abs")
-            infers
-    with
-    | None   -> []
-    | Some r -> r.March_refinecheck.Return_infer.verified_preds
-  in
-  Alcotest.(check bool) "if body: no crash and no preds" true (preds = [])
+  (* return_positions traverses EIf: guarantee is no exception, not zero preds *)
+  let length_ok = List.length infers >= 0 in
+  Alcotest.(check bool) "if body: no crash" true length_ok
 
 (* let propagation: y = x + 1, return y * 2  =>  r >= 0 (since y >= 1) *)
 let test_return_infer_let_propagation () =
@@ -4342,6 +4390,47 @@ let test_return_infer_let_propagation () =
   if z3_available () then
     Alcotest.(check bool) "let propagation infers r >= 0" true
       (has_pred "f" "r >= 0" infers)
+
+(* Match-arm guard widens what return_positions can prove: arm1 has guard
+   `x > 0` so r = x satisfies r > 0; arm2 returns 1 which also satisfies r > 0.
+   Without guard threading, arm1 would lack the assumption and r > 0 fails. *)
+let test_return_infer_match_guard_both_arms_pos () =
+  let infers = infer_returns {|mod T do
+    fn f(x : {v : Int | v >= 0}) : Int do
+      match x do
+        x when x > 0 -> x
+        _ -> 1
+      end
+    end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "match guard infers r > 0 (both arms satisfy)" true
+      (has_pred "f" "r > 0" infers)
+
+(* When arms disagree in sign, the intersection kills the predicate. *)
+let test_return_infer_match_guard_intersection_kills () =
+  let infers = infer_returns {|mod T do
+    fn f(x : {v : Int | v != 0}) : Int do
+      match x do
+        x when x > 0 -> x
+        _ -> 0 - 1
+      end
+    end
+  end|} in
+  (* arm1: x > 0 → r > 0; arm2: -1 → r < 0. Intersection ≠ {r > 0}. *)
+  Alcotest.(check bool) "arms disagree: r > 0 not in intersection" false
+    (has_pred "f" "r > 0" infers)
+
+(* EIf path context: abs function infers r > 0 when return_positions drills in *)
+let test_return_infer_if_guard_infers_pos () =
+  let infers = infer_returns {|mod T do
+    fn abs(x : {v : Int | v != 0}) : Int do
+      if x > 0 do x else 0 - x end
+    end
+  end|} in
+  if z3_available () then
+    Alcotest.(check bool) "abs via if-guard infers r > 0" true
+      (has_pred "abs" "r > 0" infers)
 
 let compiler_suites =
   [
@@ -4683,6 +4772,12 @@ let compiler_suites =
           Alcotest.test_case "divsafety: literal non-zero divisor ok"     `Quick test_divsafety_literal_nonzero_ok;
           Alcotest.test_case "divsafety: literal zero is always error"    `Quick test_divsafety_literal_zero_error;
           Alcotest.test_case "divsafety: v >= 1 refinement suppresses"    `Quick test_divsafety_ge1_refinement_ok;
+          (* Guard / path-context cases *)
+          Alcotest.test_case "divsafety: match guard b != 0 suppresses"   `Quick test_divsafety_match_guard_neq_zero_ok;
+          Alcotest.test_case "divsafety: match guard b > 0 suppresses"    `Quick test_divsafety_match_guard_gt_zero_ok;
+          Alcotest.test_case "divsafety: if guard b != 0 suppresses"      `Quick test_divsafety_if_guard_neq_zero_ok;
+          Alcotest.test_case "divsafety: if guard b > 0 suppresses mod"   `Quick test_divsafety_if_guard_gt_zero_mod_ok;
+          Alcotest.test_case "divsafety: no guard unrefined still errors"  `Quick test_divsafety_no_guard_unrefined_still_errors;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;
@@ -4761,11 +4856,14 @@ let compiler_suites =
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
         ] );
       ( "return_refine_infer", [
-          Alcotest.test_case "add_one: infers r >= 1"                  `Quick test_return_infer_add_one;
-          Alcotest.test_case "double: infers r > 0"                    `Quick test_return_infer_double;
-          Alcotest.test_case "negate: infers r < 0"                    `Quick test_return_infer_negate;
-          Alcotest.test_case "no refined params: no inference"         `Quick test_return_infer_no_refined_params;
-          Alcotest.test_case "if body: no crash, no preds"             `Quick test_return_infer_if_body_no_crash;
-          Alcotest.test_case "let propagation: r >= 0"                 `Quick test_return_infer_let_propagation;
+          Alcotest.test_case "add_one: infers r >= 1"                       `Quick test_return_infer_add_one;
+          Alcotest.test_case "double: infers r > 0"                         `Quick test_return_infer_double;
+          Alcotest.test_case "negate: infers r < 0"                         `Quick test_return_infer_negate;
+          Alcotest.test_case "no refined params: no inference"              `Quick test_return_infer_no_refined_params;
+          Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;
+          Alcotest.test_case "let propagation: r >= 0"                      `Quick test_return_infer_let_propagation;
+          Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
+          Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
+          Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
         ] );
   ]

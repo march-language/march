@@ -115,12 +115,16 @@ let clause_refined_params (clause : A.fn_clause) =
 
 (* ── Division-site walker ───────────────────────────────────────────────── *)
 
-(* Calls [f span divisor_expr] for every integer division/modulo site. *)
-let rec iter_div_sites (f : A.span -> A.expr -> unit) (e : A.expr) : unit =
-  let go = iter_div_sites f in
+(* Calls [f span divisor_expr path] for every integer division/modulo site,
+   carrying the accumulated path context (guard conditions) through branches. *)
+let rec iter_div_sites
+    (f : A.span -> A.expr -> (A.expr * bool) list -> unit)
+    (path : (A.expr * bool) list)
+    (e : A.expr) : unit =
+  let go e = iter_div_sites f path e in
   match e with
   | A.EApp (A.EVar { A.txt = op; _ }, [ lhs; rhs ], sp) when List.mem op div_ops ->
-    f sp rhs;
+    f sp rhs path;
     go lhs;
     go rhs
   | A.EApp (fn, args, _) ->
@@ -138,10 +142,23 @@ let rec iter_div_sites (f : A.span -> A.expr -> unit) (e : A.expr) : unit =
     List.iter
       (fun (arm : A.branch) ->
         Option.iter go arm.A.branch_guard;
-        go arm.A.branch_body)
+        let arm_path =
+          match arm.A.branch_guard with
+          | Some g -> (g, false) :: path
+          | None -> path
+        in
+        iter_div_sites f arm_path arm.A.branch_body)
       arms
-  | A.EIf (cond, t, e, _) -> go cond; go t; go e
-  | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+  | A.EIf (cond, t, e, _) ->
+    go cond;
+    iter_div_sites f ((cond, false) :: path) t;
+    iter_div_sites f ((cond, true) :: path) e
+  | A.ECond (arms, _) ->
+    List.iter
+      (fun (c, b) ->
+        go c;
+        iter_div_sites f ((c, false) :: path) b)
+      arms
   | A.EField (inner, _, _) -> go inner
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (inner, _, _) -> go inner
@@ -162,26 +179,70 @@ let division_suggestion =
    instead of panicking, or annotate the divisor parameter with \
    `{v : Int | v != 0}` (or `v > 0`) to prove it is safe."
 
-let check_var_divisor ~root errctx span var_name params =
+(* Syntactically check whether path conditions prove [var] ≠ 0.
+   Only looks at non-negated guards (e.g. `when b != 0`, `when b > 0`). *)
+let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
+  List.exists
+    (fun (cond, negated) ->
+      if negated then false
+      else
+        match cond with
+        | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) ->
+          let is_var e =
+            match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
+          in
+          let int_of e =
+            match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
+          in
+          (match op with
+           | "!=" ->
+             (is_var a && int_of b = Some 0) || (is_var b && int_of a = Some 0)
+           | ">" ->
+             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of b))
+             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of a))
+           | ">=" ->
+             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of b))
+             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of a))
+           | "<" ->
+             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of b))
+             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of a))
+           | "<=" ->
+             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of b))
+             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of a))
+           | _ -> false)
+        | _ -> false)
+    path
+
+let check_var_divisor ~root errctx span var_name params path =
   match List.find_opt (fun (n, _, _) -> n = var_name) params with
   | None ->
-    Err.error errctx ~span
-      (Printf.sprintf
-         "division by `%s` in `cap no_panic` module may be by zero — \
-          no refinement proves `%s ≠ 0`.%s"
-         var_name var_name division_suggestion)
+    if path_proves_nonzero var_name path then ()
+    else
+      Err.error errctx ~span
+        (Printf.sprintf
+           "division by `%s` in `cap no_panic` module may be by zero — \
+            no refinement proves `%s ≠ 0`.%s"
+           var_name var_name division_suggestion)
   | Some (_, bdr, pred) ->
     (* Fast syntactic check — no Z3 needed for obvious cases *)
     if syntactic_nonzero bdr pred then ()
     else
-      (* Try Z3 *)
+      (* Try Z3, adding any path-derived assumptions *)
       match smt_of ~b:bdr ~var:var_name pred with
       | None -> () (* predicate not in supported fragment — skip conservatively *)
       | Some assumption ->
+        let path_assumes =
+          List.filter_map
+            (fun (cond, negated) ->
+              match smt_of ~b:"\x00" ~var:"\x00" cond with
+              | None -> None
+              | Some t -> Some (if negated then Smt.Not t else t))
+            path
+        in
         let vc =
           Smt.
             { decls = [ (var_name, Smt.SInt) ]
-            ; assumptions = [ assumption ]
+            ; assumptions = assumption :: path_assumes
             ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
             }
         in
@@ -205,8 +266,11 @@ let check_var_divisor ~root errctx span var_name params =
 
 let check_clause ~root errctx (clause : A.fn_clause) : unit =
   let params = clause_refined_params clause in
+  let init_path =
+    match clause.A.fc_guard with Some g -> [ (g, false) ] | None -> []
+  in
   iter_div_sites
-    (fun span divisor ->
+    (fun span divisor path ->
       match divisor with
       | A.ELit (A.LitInt 0, _) ->
         Err.error errctx ~span
@@ -214,13 +278,14 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
       | A.EVar { A.txt = var_name; _ } ->
-        check_var_divisor ~root errctx span var_name params
+        check_var_divisor ~root errctx span var_name params path
       | _ ->
         (* Complex expression — always flag conservatively *)
         Err.error errctx ~span
           ("division by a complex expression in `cap no_panic` module: \
             cannot prove divisor is non-zero."
            ^ division_suggestion))
+    init_path
     clause.A.fc_body
 
 let check_fn ~root errctx (fd : A.fn_def) : unit =

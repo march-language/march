@@ -547,6 +547,53 @@ end|} in
     gated "record postcondition: unknown value skipped conservatively" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error skip_src)) ]
 
+(* Guard path sensitivity for EMatch arms: `when` guards establish facts
+   that discharge call-site VCs and postconditions. *)
+let guard_suite =
+  [ gated "match `when n >= 0` lets take_n(n) verify" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(n : Int) : Int do\n\
+                \    match n do\n\
+                \      n when n >= 0 -> take_n(n)\n\
+                \      _ -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "match `when n < 0` contradicts take_n precondition: error" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (decl
+                "  fn g(n : Int) : Int do\n\
+                \    match n do\n\
+                \      n when n < 0 -> take_n(n)\n\
+                \      _ -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "match `when n >= 0` discharges `_ >= 0` postcondition" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn clamp_pos(n : Int) : {Int | _ >= 0} do\n\
+                \    match n do\n\
+                \      n when n >= 0 -> n\n\
+                \      _ -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "arm without guard returning literal -1 still violates postcondition" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn wrong(n : Int) : {Int | _ > 0} do\n\
+                \    match n do\n\
+                \      n when n > 0 -> n\n\
+                \      _ -> 0 - 1\n\
+                \    end\n\
+                \  end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -562,5 +609,6 @@ let () =
       ("mutual-mc", mutual_suite);
       ("flag-gating", flag_suite);
       ("resolution", resolution_suite);
-      ("record-postconditions", record_suite) ]
+      ("record-postconditions", record_suite);
+      ("guard-path-sensitivity", guard_suite) ]
 
