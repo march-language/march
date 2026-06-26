@@ -475,6 +475,10 @@ static void handle_client(int fd) {
                 dlclose(handle);
                 continue;
             }
+            /* Hand the handle to the dispatch table so it can dlclose the .so
+             * when this ring slot is later reclaimed by the next hot deploy.
+             * The dispatch table owns the handle from this point on. */
+            march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
 
             /* Record activation timestamp and signer for VERSIONS_DETAIL. */
             {

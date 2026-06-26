@@ -88,6 +88,12 @@ int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
 void        march_dispatch_set_callers(uint32_t name_id, const char *callers_str);
 const char *march_dispatch_callers(uint32_t name_id);
 
+/* dlclose GC: store the dlopen handle associated with a ring slot so the
+ * dispatch table can release it when the slot is reclaimed.  Call after a
+ * successful march_dispatch_publish / march_dispatch_publish_epoch.
+ * Baseline slots (main binary) never call this; their handle stays NULL. */
+void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle);
+
 /* Phase 9: epoch-tagged dispatch.
  *
  * Each MarchFnVersion now carries a uint32_t epoch (0 = pre-Phase-9 / no epoch).

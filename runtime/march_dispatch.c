@@ -6,6 +6,22 @@
 #include <string.h>
 #include <stdio.h>
 
+/* dlclose for hot-patch handle GC.  Guard so the file compiles on non-POSIX. */
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>
+#define MARCH_HAS_DLCLOSE 1
+#else
+#define MARCH_HAS_DLCLOSE 0
+#endif
+
+static void slot_dlclose(void *handle) {
+#if MARCH_HAS_DLCLOSE
+    if (handle) dlclose(handle);
+#else
+    (void)handle;
+#endif
+}
+
 typedef struct {
     void              *fn_ptr;          /* native code or trampoline thunk */
     _Atomic(uint64_t)  refs;            /* callers currently pinned to THIS version */
@@ -14,6 +30,7 @@ typedef struct {
     uint8_t            kind;            /* MARCH_NATIVE | MARCH_TRAMPOLINE */
     uint8_t            live;            /* 1 once this ring slot holds a version */
     uint32_t           epoch;           /* Phase 9: deploy epoch; 0 = pre-Phase-9 */
+    void              *handle;          /* dlopen handle for this .so; NULL for baseline */
 } MarchFnVersion;
 
 typedef struct {
@@ -89,6 +106,11 @@ void march_dispatch_shutdown(void) {
     for (uint32_t i = 0; i < g_n_slots; i++) {
         free(g_slots[i].callers_str);
         g_slots[i].callers_str = NULL;
+        /* Release any live .so handles (server shutdown path). */
+        for (uint32_t v = 0; v < MARCH_MAX_LIVE_VERSIONS; v++) {
+            slot_dlclose(g_slots[i].ring[v].handle);
+            g_slots[i].ring[v].handle = NULL;
+        }
     }
     free(g_slots);      g_slots      = NULL;
     free(g_id_to_name); g_id_to_name = NULL;
@@ -134,6 +156,14 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
             }
         }
         if (idx < 0) return -1;
+        /* Release the old .so before overwriting the slot.  The refs check above
+         * guarantees no caller is currently inside enter/leave for this slot;
+         * enter_gen may theoretically read the slot concurrently (see Phase 9
+         * TOCTOU note in march_dispatch_enter_gen), but this risk is the same as
+         * the existing fn_ptr overwrite race and is acceptable under March's
+         * cooperative green-thread scheduler. */
+        slot_dlclose(s->ring[idx].handle);
+        s->ring[idx].handle = NULL;
     }
 
     MarchFnVersion *v = &s->ring[idx];
@@ -246,6 +276,15 @@ void march_dispatch_set_callers(uint32_t name_id, const char *callers_str) {
 const char *march_dispatch_callers(uint32_t name_id) {
     if (name_id >= g_n_slots) return NULL;
     return g_slots[name_id].callers_str;
+}
+
+/* Store the dlopen handle for a ring slot so it can be dlclosed when the slot
+ * is reclaimed.  Called by the ACTIVATE handler after a successful publish.
+ * Baseline publishes (from the main binary's startup code) never call this —
+ * their slots keep handle = NULL (calloc'd to zero). */
+void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
+    g_slots[name_id].ring[version].handle = handle;
 }
 
 /* Phase 9: publish with explicit epoch tag. */
