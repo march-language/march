@@ -1,6 +1,6 @@
 # HCR Phase 8 — Cross-Module Function Signature Evolution
 
-**Status:** In progress. Two of the three foundational pieces are done.
+**Status:** Phase 8 complete (commit `20e54959`). All three foundational pieces are done and wired up end-to-end.
 
 **Motivation:** The sig_hash gate in `forge deploy hot` (Phase 4) blocks any deploy where an exported function's signature changes. This is correct for preventing silent ABI mismatches, but it also blocks *intentional* coordinated upgrades where a utility module's API changes and all its callers are updated in the same deploy.
 
@@ -110,14 +110,15 @@ This is a cleaner model but requires threading generation ids through all dispat
 
 ---
 
+## Done (continued)
+
+- ✅ **Server stores callers per slot** (`runtime/march_dispatch.{h,c}`, `runtime/march_reload.c`, commit `20e54959`) — `MarchDispatchSlot` gained a `callers_str` field. `ABI_QUERY` now appends `callers:<a>,<b>` per slot. `ACTIVATE` parses the optional ` callers:` suffix and stores it via `march_dispatch_set_callers`.
+
+- ✅ **Coordinated upgrade gate** (`forge/lib/cmd_deploy_hot.ml`, commit `20e54959`) — `slot` and `fn_manifest` types gained `callers : string list`. `parse_abi_query` and `parse_manifest` both parse the optional callers field. ACTIVATE command now appends ` callers:...` from the new manifest. Hard sig_hash rejection replaced with: "if all server-recorded callers of the changed function are in `to_activate` → allow; else → error naming the uncovered callers."
+
+---
+
 ## Remaining Work
-
-**Near-term (Phase 8):** Wire up the coordinated upgrade gate.
-
-- Parse `callers:` field from the manifest in `forge/lib/cmd_deploy_hot.ml` (`parse_manifest` + `fn_manifest` type extension)
-- Store caller sets in the server at ACTIVATE time (`runtime/march_reload.c` + `runtime/march_dispatch.{h,c}`)
-- Replace the hard sig_hash rejection with the coordinated check: allow sig_hash change only when all recorded callers of the old sig are also in `to_activate`
-- Emit named-caller error when the check fails (see §What Success Looks Like)
 
 **Long-term (Phase 9?):** Move toward module-level versioning.
 
@@ -203,10 +204,9 @@ Spec: specs/plans/2026-06-26-hcr-cross-module-versioning.md
 
 ## Files
 
-- ✅ `forge/lib/cmd_deploy_hot.ml` — actionable error message (commit `ff4cb611`); coordinated gate logic still needed
+- ✅ `forge/lib/cmd_deploy_hot.ml` — actionable error message (commit `ff4cb611`); coordinated gate (commit `20e54959`)
 - ✅ `bin/main.ml` — caller index emitted in `.hcr_manifest` sidecar (commit `b04dc364`)
-- `forge/lib/cmd_deploy_hot.ml` — parse `callers:` field; implement coordinated gate
-- `runtime/march_reload.c` — store caller set per slot at ACTIVATE time
-- `runtime/march_dispatch.{h,c}` — per-slot caller set storage
+- ✅ `runtime/march_reload.c` — stores caller set per slot at ACTIVATE time (commit `20e54959`)
+- ✅ `runtime/march_dispatch.{h,c}` — per-slot callers_str storage + API (commit `20e54959`)
 - `forge/lib/schema_diff.ml` — optional: `sig_evolution` type (breaking vs. compatible) for a more nuanced gate
-- `docs/hot-code-reload.md` — document expand-contract pattern and coordinated upgrade once the gate is live
+- `docs/hot-code-reload.md` — document expand-contract pattern and coordinated upgrade
