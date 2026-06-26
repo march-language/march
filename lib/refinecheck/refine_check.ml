@@ -679,25 +679,72 @@ let rec pred_str (e : A.expr) : string =
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
   | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m -> m ^ "(" ^ pred_str a ^ ")"
   | A.EVar { A.txt; _ } -> txt
+  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
   | _ -> "<predicate>"
 
-(* Render an SMT counterexample model for humans: a measure symbol `m$x` is
-   shown as `m(x)`.  Empty model => "". *)
+(* Split a rendered S-expression string into its top-level tokens,
+   respecting nested parentheses.  "1 (as nil (List Int))" → ["1";"(as nil (List Int))"] *)
+let sexp_tokens (s : string) : string list =
+  let n = String.length s in
+  let depth = ref 0 in
+  let start = ref 0 in
+  let acc = ref [] in
+  for i = 0 to n - 1 do
+    (match s.[i] with
+     | '(' -> incr depth
+     | ')' -> decr depth
+     | ' ' when !depth = 0 ->
+       if i > !start then
+         acc := String.sub s !start (i - !start) :: !acc;
+       start := i + 1
+     | _ -> ())
+  done;
+  if !start < n then acc := String.sub s !start (n - !start) :: !acc;
+  List.rev !acc
+
+(* Pretty-print an SMT value string for human-readable counterexamples.
+   "(RawRecord 1)" → "{ count: 1 }" when ctor_field_names["RawRecord"] = ["count"].
+   "(as nil ...)" → "[]".  Falls back to the raw string for unknown shapes. *)
+let rec pretty_smt_value (v : string) : string =
+  let n = String.length v in
+  if n >= 2 && v.[0] = '(' && v.[n - 1] = ')' then begin
+    let inner = String.sub v 1 (n - 2) in
+    match sexp_tokens inner with
+    | "as" :: "nil" :: _ -> "[]"
+    | ctor :: args ->
+      (match Hashtbl.find_opt ctor_field_names ctor with
+       | Some fields when List.length fields = List.length args ->
+         "{ " ^ String.concat ", "
+           (List.map2 (fun f a -> f ^ ": " ^ pretty_smt_value a) fields args) ^ " }"
+       | _ -> v)
+    | _ -> v
+  end else v
+
+(* Render one model entry: "m(x) = v" for measure symbols, "k = v" otherwise. *)
+let render_model_entry (k, v) : string =
+  let v' = pretty_smt_value v in
+  match String.index_opt k '$' with
+  | Some i ->
+    Printf.sprintf "%s(%s) = %s"
+      (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v'
+  | None -> Printf.sprintf "%s = %s" k v'
+
+(* Inline counterexample suffix for call-site errors (e.g. precondition checks).
+   Returns "" when the model is empty. *)
 let format_cx (model : (string * string) list) : string =
   if model = [] then ""
+  else " (e.g. " ^ String.concat ", " (List.map render_model_entry model) ^ ")"
+
+(* Multi-line counterexample block for return-type constraint errors. Returns "" when empty. *)
+let cx_block (model : (string * string) list) : string =
+  if model = [] then ""
   else
-    let entry (k, v) =
-      match String.index_opt k '$' with
-      | Some i ->
-        Printf.sprintf "%s(%s) = %s"
-          (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v
-      | None -> Printf.sprintf "%s = %s" k v
-    in
-    " (counterexample: " ^ String.concat ", " (List.map entry model) ^ ")"
+    "\n\nA counterexample was found:\n\n    " ^
+    String.concat "\n    " (List.map render_model_entry model)
 
 let model_of = function Refine.Refuted m -> m | _ -> []
 
@@ -1160,7 +1207,8 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
          else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
   | _ -> None
 
-let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : scope)
+let check_post ~root errctx ~span ?(record_sort : string option = None)
+    ?(fn_name : string option = None) (sc : scope)
     (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
   let base_decls, base_assume, scope_has_record = scope_facts sc in
@@ -1269,11 +1317,22 @@ let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : sc
         | first ->
           let emit_error () =
             ignore tail_e;
-            Err.error errctx ~span
-              (Printf.sprintf
-                 "refinement violation: return value cannot satisfy postcondition `%s`%s\n\
-                  note: every return path of this function must satisfy `%s`"
-                 (pred_str ret_pred) (format_cx (model_of first)) (pred_str ret_pred))
+            let pred = pred_str ret_pred in
+            let fn_prefix = match fn_name with
+              | Some n -> Printf.sprintf "`%s` does not satisfy" n
+              | None   -> "The return value does not satisfy"
+            in
+            let msg = Printf.sprintf
+              "%s its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s%s"
+              fn_prefix pred (cx_block (model_of first))
+            in
+            let hint = Printf.sprintf
+              "Every branch must produce a return value satisfying `%s`." pred
+            in
+            Err.report errctx
+              { March_errors.Errors.severity = March_errors.Errors.Error
+              ; span; message = msg; labels = []
+              ; notes = [hint]; code = None; fix = None }
           in
           if scope_has_record then
             (* With concrete record preconditions in scope, a SAT counterexample
@@ -1293,7 +1352,8 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
         List.iter
-          (check_post ~root errctx ~span:c.A.fc_span ~record_sort sc binder ret_pred)
+          (check_post ~root errctx ~span:c.A.fc_span ~record_sort
+             ~fn_name:(Some fd.A.fn_name.A.txt) sc binder ret_pred)
           (tails base c.A.fc_body))
       fd.A.fn_clauses
 
@@ -1382,6 +1442,29 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
         visit_decls ~root errctx defs { ctx with modpath } ds
       | _ -> ())
     decls
+
+(** Register ADT/record sorts for a list of declarations without running the full
+    VC pass.  Called by [--check-migration] mode to prime the type tables before
+    invoking [check_fn_post] on a synthesised migrate_state signature.
+
+    Clears all tables first to avoid stale accumulation from prior calls.
+    Must be called with the prior-version record decls (e.g. [RawRecord]) so
+    that their selectors are available when check_post reflects field projections. *)
+let register_types_for_check (decls : A.decl list) : unit =
+  Hashtbl.clear adt_ctors;
+  Hashtbl.clear ctor_field_sorts;
+  Hashtbl.clear ctor_field_names;
+  Hashtbl.clear axiom_measures;
+  Hashtbl.clear measure_base_cases;
+  Hashtbl.clear measure_preamble_sorts;
+  registered_measures := [];
+  measure_nonneg := [];
+  measure_preamble := "";
+  type_preamble := "";
+  register_builtin_adts ();
+  register_adt_names decls;
+  register_field_sorts decls;
+  build_type_preamble ()
 
 (** Entry point: check refinement preconditions across [m], emitting
     diagnostics into [errctx].  [root] is the project root for the VC cache. *)
