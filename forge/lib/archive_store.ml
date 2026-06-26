@@ -259,6 +259,19 @@ let read_tasks_from_toml toml_path =
         end else None
       ) doc.Toml.sections
 
+(** Recursively collect a directory and all its subdirectories (sorted). *)
+let rec walk_dirs acc d =
+  if not (Sys.file_exists d && Sys.is_directory d) then acc
+  else begin
+    let acc = d :: acc in
+    let entries = Sys.readdir d in
+    Array.sort compare entries;
+    Array.fold_left (fun acc name ->
+        let path = Filename.concat d name in
+        if Sys.is_directory path then walk_dirs acc path else acc)
+      acc entries
+  end
+
 (** Lib paths to add to MARCH_LIB_PATH for tasks running from an archive root.
     Includes lib/ AND all of its descendant directories (so tasks can import
     modules that live in lib/ subfolders, e.g. march_doc's lib/march_doc/
@@ -267,20 +280,42 @@ let read_tasks_from_toml toml_path =
 let lib_paths_for_root archive_root =
   let lib_dir   = Filename.concat archive_root "lib" in
   let forge_dir = Filename.concat archive_root "forge" in
-  let rec walk acc d =
-    if not (Sys.file_exists d && Sys.is_directory d) then acc
-    else begin
-      let acc = d :: acc in
-      let entries = Sys.readdir d in
-      Array.sort compare entries;
-      Array.fold_left (fun acc name ->
-          let path = Filename.concat d name in
-          if Sys.is_directory path then walk acc path else acc)
-        acc entries
-    end
-  in
-  let lib_dirs = List.rev (walk [] lib_dir) in
+  let lib_dirs = List.rev (walk_dirs [] lib_dir) in
   lib_dirs @ List.filter Sys.file_exists [forge_dir]
+
+(** Collect lib paths from an archive's [deps] entries.
+    Mirrors cmd_build's dep_to_lib_paths so archive tasks can import dep modules
+    (e.g. Router, Static from bastion) just like a normal forge build. *)
+let dep_lib_paths_for_archive archive_root =
+  let toml_path = Filename.concat archive_root "forge.toml" in
+  if not (Sys.file_exists toml_path) then []
+  else
+    let ic = open_in toml_path in
+    let n = in_channel_length ic in
+    let buf = Bytes.create n in
+    really_input ic buf 0 n;
+    close_in ic;
+    let doc = Toml.parse (Bytes.to_string buf) in
+    let inline_deps = Project.parse_deps_section (Toml.get_section doc "deps") in
+    let section_deps = Project.parse_section_deps "deps" doc in
+    let deps = inline_deps @ section_deps in
+    List.concat_map (fun (dep_name, dep) ->
+        match dep with
+        | Project.PathDep rel_path ->
+          let abs_path = if Filename.is_relative rel_path
+            then Filename.concat archive_root rel_path
+            else rel_path
+          in
+          let lib_dir = Filename.concat abs_path "lib" in
+          if Sys.file_exists lib_dir then List.rev (walk_dirs [] lib_dir)
+          else if Sys.file_exists abs_path then List.rev (walk_dirs [] abs_path)
+          else []
+        | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+          (match Project.git_dep_lib_path dep_name with
+           | Some p -> List.rev (walk_dirs [] p)
+           | None   -> [])
+        | _ -> []
+      ) deps
 
 (** Given a command like "bastion.new", return (task_file, lib_paths) or None.
     Checks project-local deps first, then global archives. *)
@@ -304,7 +339,9 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat dep_dir rel_module in
             if Sys.file_exists full_path then
-              Some (full_path, lib_paths_for_root dep_dir)
+              let lib_paths = lib_paths_for_root dep_dir
+                              @ dep_lib_paths_for_archive dep_dir in
+              Some (full_path, lib_paths)
             else None
         end else None
     in
@@ -327,7 +364,9 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat archive_root rel_module in
             if Sys.file_exists full_path then
-              Some (full_path, lib_paths_for_root archive_root)
+              let lib_paths = lib_paths_for_root archive_root
+                              @ dep_lib_paths_for_archive archive_root in
+              Some (full_path, lib_paths)
             else None))
 
 (** Return all (command, module_path, doc) triples for an archive directory. *)
