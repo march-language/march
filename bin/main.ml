@@ -225,6 +225,10 @@ let stdlib_file_list = [
   "uri.march";
   "forge_nb.march";
   "handle.march";
+  (* CRDT primitives — loaded before distributed OTP modules that depend on them *)
+  "vector_clock.march";
+  "crdt.march";
+  "merkle.march";
   (* Distributed OTP — added after all other stdlib deps are loaded *)
   "net_frame.march";
   "cluster_auth.march";
