@@ -5287,7 +5287,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     in
     let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps
               || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) body_cap_uses
-              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses in
+              || List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) extern_cap_uses
+              || List.exists (fun (_, req_caps) ->
+                   List.exists (fun req_cap -> cap_subsumes need req_cap) req_caps
+                 ) env.module_caps in
     if not used then
       Err.warning_with_fix env.errors ~span:need_sp
         ~fix:(Err.FDelete {

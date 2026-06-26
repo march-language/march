@@ -4110,6 +4110,51 @@ let test_cap_body_foreign_blocking () =
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
 
+(* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
+
+(* A module that declares `needs IO.Mut` only to satisfy transitive enforcement
+   (because a sibling DMod requires IO.Mut) should NOT get an "unused
+   capability" warning.  Regression test for the Check 2 suppression.
+   The sibling DMod pattern matches how `import Vault` bundles Vault.march as a
+   sibling DMod before the consuming module. *)
+let test_cap_propagation_no_unused_warn () =
+  (* Lib and Consumer are sibling DMods inside Outer.  When Consumer is
+     checked, env.module_caps already contains ("Lib", ["IO.Mut"]) from
+     the earlier Lib check, so Check 2 suppresses the unused-cap warning
+     for Consumer's `needs IO.Mut`. *)
+  let ctx = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Mut
+      fn setup() do
+        let _ = vault_new("t")
+        ()
+      end
+    end
+    mod Consumer do
+      needs IO.Mut
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO.Mut suppressed when required by sibling DMod" false
+    (has_warning_with ctx "unused capability")
+
+(* The suppression is selective: a declared needs that is NEITHER used directly
+   NOR required by any sibling still warns. *)
+let test_cap_propagation_still_warns_unrelated () =
+  let ctx = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Mut
+      fn setup() do
+        let _ = vault_new("t")
+        ()
+      end
+    end
+    mod Consumer do
+      needs IO.Console
+    end
+  end|} in
+  Alcotest.(check bool) "unrelated needs IO.Console still warns when unused" true
+    (has_warning_with ctx "unused capability")
+
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
 (* Helper: run typecheck then the standalone cap_infer pass.
@@ -5159,6 +5204,10 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+        ] );
+      ( "cap_propagation", [
+          Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
+          Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "random_bytes missing needs: hint emitted"     `Quick test_cap_infer_random_missing;
