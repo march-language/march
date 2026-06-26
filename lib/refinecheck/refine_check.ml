@@ -686,19 +686,59 @@ let rec pred_str (e : A.expr) : string =
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
   | _ -> "<predicate>"
 
+(* Split a rendered S-expression string into its top-level tokens,
+   respecting nested parentheses.  "1 (as nil (List Int))" → ["1";"(as nil (List Int))"] *)
+let sexp_tokens (s : string) : string list =
+  let n = String.length s in
+  let depth = ref 0 in
+  let start = ref 0 in
+  let acc = ref [] in
+  for i = 0 to n - 1 do
+    (match s.[i] with
+     | '(' -> incr depth
+     | ')' -> decr depth
+     | ' ' when !depth = 0 ->
+       if i > !start then
+         acc := String.sub s !start (i - !start) :: !acc;
+       start := i + 1
+     | _ -> ())
+  done;
+  if !start < n then acc := String.sub s !start (n - !start) :: !acc;
+  List.rev !acc
+
+(* Pretty-print an SMT value string for human-readable counterexamples.
+   "(RawRecord 1)" → "{ count: 1 }" when ctor_field_names["RawRecord"] = ["count"].
+   "(as nil ...)" → "[]".  Falls back to the raw string for unknown shapes. *)
+let rec pretty_smt_value (v : string) : string =
+  let n = String.length v in
+  if n >= 2 && v.[0] = '(' && v.[n - 1] = ')' then begin
+    let inner = String.sub v 1 (n - 2) in
+    match sexp_tokens inner with
+    | "as" :: "nil" :: _ -> "[]"
+    | ctor :: args ->
+      (match Hashtbl.find_opt ctor_field_names ctor with
+       | Some fields when List.length fields = List.length args ->
+         "{ " ^ String.concat ", "
+           (List.map2 (fun f a -> f ^ ": " ^ pretty_smt_value a) fields args) ^ " }"
+       | _ -> v)
+    | _ -> v
+  end else v
+
 (* Render an SMT counterexample model for humans: a measure symbol `m$x` is
-   shown as `m(x)`.  Empty model => "". *)
+   shown as `m(x)`.  Record values are expanded to `{ field: val }` form.
+   Empty model => "". *)
 let format_cx (model : (string * string) list) : string =
   if model = [] then ""
   else
     let entry (k, v) =
+      let v' = pretty_smt_value v in
       match String.index_opt k '$' with
       | Some i ->
         Printf.sprintf "%s(%s) = %s"
-          (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v
-      | None -> Printf.sprintf "%s = %s" k v
+          (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v'
+      | None -> Printf.sprintf "%s = %s" k v'
     in
-    " (counterexample: " ^ String.concat ", " (List.map entry model) ^ ")"
+    "\ncounterexample: " ^ String.concat ", " (List.map entry model)
 
 let model_of = function Refine.Refuted m -> m | _ -> []
 
@@ -1272,9 +1312,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : sc
             ignore tail_e;
             Err.error errctx ~span
               (Printf.sprintf
-                 "refinement violation: return value cannot satisfy postcondition `%s`%s\n\
-                  note: every return path of this function must satisfy `%s`"
-                 (pred_str ret_pred) (format_cx (model_of first)) (pred_str ret_pred))
+                 "refinement violation: return value cannot satisfy postcondition `%s`%s"
+                 (pred_str ret_pred) (format_cx (model_of first)))
           in
           if scope_has_record then
             (* With concrete record preconditions in scope, a SAT counterexample

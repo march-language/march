@@ -1396,7 +1396,6 @@ let compile filename =
           Printf.eprintf "%s\n\n"
             (March_errors.Errors.render_diagnostic ~src d))
         diags;
-      Printf.eprintf "deploy aborted: migrate_state is not provably sound\n";
       exit 1
     end else
       exit 0
