@@ -2,8 +2,11 @@
 -- Cross-compile for linux/amd64 and run on a remote host to confirm the
 -- resource builtins read real values on that platform.
 mod ResourceReport do
+
+  needs IO.Clock
+
   fn main() do
-    let nl = ClusterLoad.local("this-node")
+    let nl = ClusterLoad.local("this-node", float_to_int(unix_time(()) *. 1000.0))
     println("=== node resources ===")
     println("cpu_count       = " ++ String.from_int(nl.cpu_count))
     println("cpu_load_milli  = " ++ String.from_int(nl.cpu_load_milli))

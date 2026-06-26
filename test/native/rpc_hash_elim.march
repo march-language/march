@@ -4,7 +4,10 @@
 -- impl_hash than the server.  The padding functions perturb the temp counter to
 -- prove name-independence.  Its printed hash must equal rpc_hash_live's.
 mod RpcHashElim do
-  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n")) end
+
+  needs IO.Clock
+
+  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n", float_to_int(unix_time(()) *. 1000.0))) end
   fn pad1(x : Int) : Int do x + 1 end
   fn pad2(x : Int) : Int do x + 2 end
   fn main() do

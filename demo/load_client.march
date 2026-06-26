@@ -9,13 +9,15 @@
 --   ./load_client 127.0.0.1 29853 127.0.0.1 29852
 mod LoadClient do
 
+  needs IO.Clock
+
   -- Mirrored from the server with identical bodies so the CAS impl_hashes match
   -- (admission compares content hashes; the stable-hash fix makes non-trivial
   -- bodies like report_load match across separate compilations).
   pfn square(n : Int) : Int do n * n end
 
   fn report_load(_tag : Int) : List(Int) do
-    ClusterLoad.to_ints(ClusterLoad.local("node"))
+    ClusterLoad.to_ints(ClusterLoad.local("node", float_to_int(unix_time(()) *. 1000.0)))
   end
 
   pfn nth_str(xs : List(String), i : Int, dflt : String) : String do

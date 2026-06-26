@@ -3,7 +3,10 @@
 -- stdlib functions (ClusterLoad/List/Msgpack), so its impl_hash must still
 -- match the caller-side compilation (rpc_hash_elim).  Prints only the hash.
 mod RpcHashLive do
-  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n")) end
+
+  needs IO.Clock
+
+  fn probe(t : Int) : List(Int) do ClusterLoad.to_ints(ClusterLoad.local("n", float_to_int(unix_time(()) *. 1000.0))) end
   pfn probe__rpc_stub(args : List(Int)) : Result(List(Int), String) do
     match Msgpack.decode(args) do
       Err(e) -> Err(e)

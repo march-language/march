@@ -127,6 +127,8 @@
           ../runtime/march_message.c
           ../runtime/march_heap.c
           ../runtime/march_gc.c
+          ../runtime/march_monitor_registry.c
+          ../runtime/march_monitor_registry.h
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -I../runtime -O2
@@ -139,6 +141,7 @@
                ../runtime/march_message.c
                ../runtime/march_heap.c
                ../runtime/march_gc.c
+               ../runtime/march_monitor_registry.c
                -lpthread -lm)))
 
 (rule
