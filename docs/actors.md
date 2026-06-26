@@ -425,5 +425,6 @@ The concurrency and distribution docs form a journey — actors are the foundati
 - [Flow & Backpressure]({{ site.baseurl }}/docs/flow/) — bounded streaming pipelines when a fast producer outruns a slow consumer.
 - [Session Types]({{ site.baseurl }}/docs/session-types/) — typed two-party protocols whose message order the compiler enforces.
 - [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) — take a supervised actor app from one node to a cluster with cross-node calls.
+- [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) — deploy new code to a running server without restarting; actors migrate their state on the fly.
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/) — how linear types interact with message passing.
 - [Task stdlib]({{ site.baseurl }}/docs/stdlib/Task.html) — full Task API reference.

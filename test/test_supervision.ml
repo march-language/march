@@ -20,6 +20,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_handlers  = [];
   actor_supervise = None;
   actor_compat    = "full";
+  actor_invariant = None;
 }
 
 let mk_actor_inst name alive st = March_eval.Eval.{

@@ -554,6 +554,33 @@ forge notebook --no-open
 
 ---
 
+## Hot Code Reload
+
+`forge deploy hot` deploys new code to a running server without restarting the process. Actors keep running and their state is preserved; only changed functions are uploaded and activated.
+
+```sh
+# Build and deploy to the configured remote server
+forge deploy hot
+
+# Deploy a pre-built artifact (e.g. cross-compiled for Linux)
+forge deploy hot --so /path/to/my_app.so
+```
+
+Configure the target server in `forge.toml`:
+
+```toml
+[hot-reload]
+ssh_host   = "my-server"      # SSH host alias
+socket     = "/tmp/app.sock"  # Unix socket path on the remote
+public_key = "base64key="     # ed25519 public key
+```
+
+When actor state changes, provide a `<actor>_migrate_state` function to upgrade live actors. If the actor carries an `@invariant`, the compiler verifies the migration preserves it before anything is uploaded.
+
+See [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) for the full guide.
+
+---
+
 ## Versioning and Release
 
 ### Inspect and Bump Versions

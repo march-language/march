@@ -2,7 +2,7 @@
 
 > **⚠️ HISTORICAL SNAPSHOT — NOT THE CURRENT REFERENCE.**
 > This document is a frozen 21-module snapshot from March 2026. The standard
-> library has since grown to **104 modules** (`ls stdlib/*.march | wc -l`), so the
+> library has since grown to **104 modules** (`ls stdlib/*.march | wc -l`), so the <!-- doc-lint:ignore-count -->
 > counts and module list below no longer reflect current truth.
 >
 > **The canonical, up-to-date stdlib reference is the generated docs at
@@ -13,7 +13,7 @@
 ## Overview
 
 > Historical note: figures in this section describe the March 2026 snapshot (21 modules). <!-- doc-lint:ignore-count -->
-> The current stdlib has 104 modules — see `docs/docs/stdlib/` for the live reference.
+> The current stdlib has 104 modules — see `docs/docs/stdlib/` for the live reference. <!-- doc-lint:ignore-count -->
 
 The March standard library consisted of **21 modules** totaling **~4,894 lines of code** (as of March 22, 2026). <!-- doc-lint:ignore-count --> The library is auto-loaded by the compiler into every March program and provides:
 

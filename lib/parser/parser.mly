@@ -143,7 +143,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -157,7 +157,7 @@
 %token <string> INTERP_MID
 %token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
-%token AT
+%token AT INVARIANT
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
@@ -254,6 +254,20 @@ decl:
       match d with
       | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat }, span)
       | d -> d }
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
+    { match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_invariant = Some inv }, span)
+      | d -> d }
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN; attrs = nonempty_list(fn_attr); d = actor_decl
+    { let compat = List.fold_left (fun acc a ->
+          let n = String.length a in
+          if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7) else acc
+        ) "full" attrs in
+      match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat }, span)
+      | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
   | d = type_decl      { d }
@@ -269,9 +283,13 @@ decl:
   | d = alias_decl_rule { d }
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
-  | d = proof_cap_decl    { d }
-  | d = cap_no_panic_decl { d }
-  | d = transitions_decl  { d }
+  | d = proof_cap_decl         { d }
+  | d = cap_no_panic_decl      { d }
+  | d = cap_pure_decl          { d }
+  | d = cap_no_extern_decl     { d }
+  | d = cap_deterministic_decl { d }
+  | d = cap_no_alloc_decl      { d }
+  | d = transitions_decl       { d }
   | d = app_decl          { d }
   | d = derive_decl    { d }
   | d = satisfy_decl   { d }
@@ -448,7 +466,7 @@ actor_decl:
     END
     { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup; actor_compat = "full" },
+                actor_supervise = sup; actor_compat = "full"; actor_invariant = None },
               mk_span ($loc)) }
 
 (** Application entry point:
@@ -682,6 +700,22 @@ proof_cap_decl:
 cap_no_panic_decl:
   | CAP_NO_PANIC
     { DOpts (["no_panic"], mk_span ($loc)) }
+
+cap_pure_decl:
+  | CAP_PURE
+    { DOpts (["pure"], mk_span ($loc)) }
+
+cap_no_extern_decl:
+  | CAP_NO_EXTERN
+    { DOpts (["no_extern"], mk_span ($loc)) }
+
+cap_deterministic_decl:
+  | CAP_DETERMINISTIC
+    { DOpts (["deterministic"], mk_span ($loc)) }
+
+cap_no_alloc_decl:
+  | CAP_NO_ALLOC
+    { DOpts (["no_alloc"], mk_span ($loc)) }
 
 (** Compiler-enforced state-machine transitions:
     transitions Handle do

@@ -9,6 +9,7 @@ type field = { name: string; ty: string }
 
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
+  invariant: string option;  (* @invariant predicate text, if any *)
   state_fields: field list;
 }
 
@@ -34,6 +35,7 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
     let schemas = ref [] in
     let current_actor = ref "" in
     let current_compat = ref "full" in
+    let current_invariant : string option ref = ref None in
     let current_fields : field list ref = ref [] in
     let in_fields = ref false in
     List.iter (fun line ->
@@ -44,14 +46,17 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
           (* Detect actor key: "ActorName": { — first char is '"', not in a fields array *)
           if line.[0] = '"' && not !in_fields then begin
             (match String.split_on_char '"' line with
-            | "" :: name :: _ when name <> "compat" && name <> "state_fields"
+            | "" :: name :: _ when name <> "compat" && name <> "invariant"
+                                 && name <> "state_fields"
                                  && name <> "name" && name <> "ty" ->
               if !current_actor <> "" then
                 schemas := (!current_actor,
                   { compat = !current_compat;
+                    invariant = !current_invariant;
                     state_fields = List.rev !current_fields }) :: !schemas;
               current_actor := name;
               current_compat := "full";
+              current_invariant := None;
               current_fields := []
             | _ -> ())
           end;
@@ -61,10 +66,36 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
             | _ :: "compat" :: _ :: v :: _ -> current_compat := v
             | _ -> ())
           end;
-          (* Detect state_fields array start *)
-          if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then
+          (* Detect "invariant": "value" — extract between the first '"'
+             after ':' and the last '"' on the line, so embedded characters
+             written by %S (e.g. escaped operators) don't break the parse. *)
+          if llen > 13 && String.sub line 0 12 = "\"invariant\":" then begin
+            (try
+              let after_colon = String.index line ':' + 1 in
+              let first_q = String.index_from line after_colon '"' + 1 in
+              let last_q  = String.rindex line '"' in
+              if first_q <= last_q then
+                current_invariant := Some (String.sub line first_q (last_q - first_q))
+            with Not_found -> ())
+          end;
+          (* Detect state_fields array start; also scan for inline field entries
+             on the same line (e.g. "state_fields": [{"name":"x","ty":"Y"}]) *)
+          if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then begin
             in_fields := true;
-          (* Detect field entry: {"name":"x","ty":"Int"} *)
+            (* Scan rest of line for any {…} field objects *)
+            let rec scan_for_entries pos =
+              match String.index_from_opt line pos '{' with
+              | None -> ()
+              | Some brace ->
+                (match String.split_on_char '"' (String.sub line brace (llen - brace)) with
+                 | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->
+                   current_fields := { name = n; ty = t } :: !current_fields
+                 | _ -> ());
+                scan_for_entries (brace + 1)
+            in
+            scan_for_entries 0
+          end;
+          (* Detect field entry on its own line: {"name":"x","ty":"Int"} *)
           if !in_fields && llen > 0 && line.[0] = '{' then begin
             (match String.split_on_char '"' line with
             | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->
@@ -79,6 +110,7 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
     if !current_actor <> "" then
       schemas := (!current_actor,
         { compat = !current_compat;
+          invariant = !current_invariant;
           state_fields = List.rev !current_fields }) :: !schemas;
     List.rev !schemas
   end

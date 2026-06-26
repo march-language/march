@@ -26,6 +26,14 @@ Source Code
     ↓
 [Refinement Check] (lib/refinecheck/refine_check.ml — Refine_check.check_module, post-typecheck)
     ↓
+[Division Safety Check] (lib/refinecheck/division_safety.ml — Division_safety.check_module, `cap no_panic` modules only)
+    ↓
+[No-Alloc Check] (lib/refinecheck/no_alloc.ml — No_alloc.check_module, `cap no_alloc` modules only)
+    ↓
+[Capability Inference Hints] (lib/refinecheck/cap_infer.ml — Cap_infer.check_module, emits `needs` hints)
+    ↓
+[Return Refinement Inference] (lib/refinecheck/return_infer.ml — Return_infer.infer_module, Z3 sign probing)
+    ↓
 [AST → TIR Lowering] (lib/tir/lower.ml — Lower.lower_module)
     ↓
 [Monomorphization] (lib/tir/mono.ml — Mono.monomorphize)
@@ -814,6 +822,10 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Beta-ADT | `lib/tir/beta_adt.ml` | — | ✓ Complete |
 | Join points | `lib/tir/join_points.ml` | — | ✓ Complete |
 | Refinement check | `lib/refinecheck/refine_check.ml` | ~1069 | ✓ Complete (post-typecheck) |
+| Division safety | `lib/refinecheck/division_safety.ml` | ~307 | ✓ Complete (`cap no_panic`: proves divisors ≠ 0 via Z3) |
+| No-alloc check | `lib/refinecheck/no_alloc.ml` | ~87 | ✓ Complete (`cap no_alloc`: bans heap-allocating exprs) |
+| Capability inference | `lib/refinecheck/cap_infer.ml` | ~120 | ✓ Complete (emits `needs` hint at call sites missing cap decl) |
+| Return refinement inference | `lib/refinecheck/return_infer.ml` | ~238 | ✓ Complete (Z3 sign-candidate probing for return type hints) |
 | Inlining | `lib/tir/inline.ml` | 179 | ✓ Complete |
 | Constant Folding | `lib/tir/fold.ml` | 91 | ✓ Complete |
 | Simplification | `lib/tir/simplify.ml` | 107 | ✓ Complete |

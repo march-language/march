@@ -213,16 +213,72 @@ let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
         | _ -> false)
     path
 
-let check_var_divisor ~root errctx span var_name params path =
+(* Collect let-bound (name, rhs_expr) pairs visible at division sites.
+   Walks EBlock prefix statements; stops at the first non-let expression. *)
+let collect_let_values (body : A.expr) : (string * A.expr) list =
+  match body with
+  | A.EBlock (es, _) ->
+    List.filter_map
+      (function
+        | A.ELet (b, _) ->
+          (match b.A.bind_pat with
+           | A.PatVar n -> Some (n.A.txt, b.A.bind_expr)
+           | _ -> None)
+        | _ -> None)
+      es
+  | _ -> []
+
+let check_var_divisor ~root errctx span var_name params path let_values =
   match List.find_opt (fun (n, _, _) -> n = var_name) params with
   | None ->
     if path_proves_nonzero var_name path then ()
     else
-      Err.error errctx ~span
-        (Printf.sprintf
-           "division by `%s` in `cap no_panic` module may be by zero — \
-            no refinement proves `%s ≠ 0`.%s"
-           var_name var_name division_suggestion)
+      (* Not a refined parameter — check let-binding scope. *)
+      (match List.assoc_opt var_name let_values with
+       | Some (A.ELit (A.LitInt 0, _)) ->
+         Err.error errctx ~span
+           "division by zero literal in `cap no_panic` module."
+       | Some (A.ELit (A.LitInt _, _)) ->
+         () (* non-zero literal let-binding: trivially safe *)
+       | Some rhs ->
+         (match smt_of ~b:"\x00" ~var:"\x00" rhs with
+          | None ->
+            Err.error errctx ~span
+              (Printf.sprintf
+                 "division by `%s` in `cap no_panic` module may be by zero — \
+                  bound expression cannot be verified non-zero.%s"
+                 var_name division_suggestion)
+          | Some rhs_term ->
+            let param_decls =
+              List.map (fun (n, _, _) -> (n, Smt.SInt)) params
+            in
+            let param_assumes =
+              List.filter_map
+                (fun (n, bdr, pred) -> smt_of ~b:bdr ~var:n pred)
+                params
+            in
+            let vc =
+              Smt.
+                { decls = (var_name, Smt.SInt) :: param_decls
+                ; assumptions =
+                    Smt.Eq (Smt.Const var_name, rhs_term) :: param_assumes
+                ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
+                }
+            in
+            (match Refine.discharge ~root vc with
+             | Refine.Verified -> ()
+             | _ ->
+               Err.error errctx ~span
+                 (Printf.sprintf
+                    "division by `%s` in `cap no_panic` module may be by zero — \
+                     cannot prove bound expression is non-zero.%s"
+                    var_name division_suggestion)))
+       | None ->
+         Err.error errctx ~span
+           (Printf.sprintf
+              "division by `%s` in `cap no_panic` module may be by zero — \
+               no refinement proves `%s ≠ 0`.%s"
+              var_name var_name division_suggestion))
   | Some (_, bdr, pred) ->
     (* Fast syntactic check — no Z3 needed for obvious cases *)
     if syntactic_nonzero bdr pred then ()
@@ -269,6 +325,7 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
   let init_path =
     match clause.A.fc_guard with Some g -> [ (g, false) ] | None -> []
   in
+  let let_values = collect_let_values clause.A.fc_body in
   iter_div_sites
     (fun span divisor path ->
       match divisor with
@@ -278,7 +335,7 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
       | A.EVar { A.txt = var_name; _ } ->
-        check_var_divisor ~root errctx span var_name params path
+        check_var_divisor ~root errctx span var_name params path let_values
       | _ ->
         (* Complex expression — always flag conservatively *)
         Err.error errctx ~span

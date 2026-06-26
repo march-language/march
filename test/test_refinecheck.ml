@@ -540,12 +540,94 @@ end|} in
     { count: x }
   end
 end|} in
+  let meas_ok_src = {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn good2() : {v : State | mlength(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|} in
+  let meas_bad_src = {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn bad2() : {v : State | mlength(v.history) == v.count} do
+    { count: 1, history: Nil }
+  end
+end|} in
+  let len_ok_src = {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn good3() : {v : State | len(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|} in
+  let len_bad_src = {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn bad3() : {v : State | len(v.history) == v.count} do
+    { count: 1, history: Nil }
+  end
+end|} in
   [ gated "record postcondition: literal satisfies" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error ok_src));
     gated "record postcondition: literal violates" (fun () ->
         Alcotest.(check bool) "has error" true (has_refine_error bad_src));
     gated "record postcondition: unknown value skipped conservatively" (fun () ->
-        Alcotest.(check bool) "no error" false (has_refine_error skip_src)) ]
+        Alcotest.(check bool) "no error" false (has_refine_error skip_src));
+    gated "measure over field: user @[measure] mlength holds for Nil/0" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error meas_ok_src));
+    gated "measure over field: user @[measure] mlength violated by Nil/1" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error meas_bad_src));
+    gated "measure over field: builtin len holds for Nil/0" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error len_ok_src));
+    gated "measure over field: builtin len violated by Nil/1" (fun () ->
+        Alcotest.(check bool) "has error" true (has_refine_error len_bad_src));
+
+    (* B1: record-typed parameter refinements as preconditions *)
+    gated "record precondition: carried invariant verifies" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int }
+  fn keep(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0} do
+    { count: old.count }
+  end
+end|}));
+    gated "record precondition: violating migration refuted" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type State = { count : Int }
+  fn drop(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0} do
+    { count: old.count - 1 }
+  end
+end|}));
+
+    (* B3: end-to-end migration shape — param + return + measure *)
+    gated "migration shape: count=0/history=Nil sound" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|}));
+    gated "migration shape: count=old/history=Nil unsound" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
+    { count: old.count, history: Nil }
+  end
+end|})) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
    that discharge call-site VCs and postconditions. *)

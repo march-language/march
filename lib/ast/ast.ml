@@ -275,6 +275,7 @@ and actor_def = {
   actor_handlers : actor_handler list;
   actor_supervise : supervise_config option;   (** Some = supervisor actor *)
   actor_compat   : string;                     (** @compat policy: "full" | "forward" | "any" *)
+  actor_invariant : expr option;               (** @invariant predicate, if any *)
 }
 
 and actor_handler = {
