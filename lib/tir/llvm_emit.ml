@@ -5742,11 +5742,14 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
   let ctx = { ctx with compile_so = not emit_main } in
-  (* Phase 9: in .so patch mode, emit the file-static epoch cell into the preamble.
-     static (private) linkage keeps it out of the global symbol table so multiple
-     deployed .so files don't collide.  @__march_init (exported, no `private`) lets
-     the reload server stamp the epoch after dlopen via dlsym(handle,"__march_init"). *)
-  if ctx.compile_so then
+  (* Phase 9: in .so patch mode WITH hot-reload enabled, emit the file-static
+     epoch cell into the preamble.  Static (private) linkage keeps it out of
+     the global symbol table so multiple deployed .so files don't collide.
+     @__march_init (exported) lets the reload server stamp the epoch after
+     dlopen via dlsym(handle,"__march_init").
+     Guard on hr_config <> None: a --compile-so build without --hot-reload
+     must not export a spurious epoch entry point. *)
+  if ctx.compile_so && hot_reload <> None then
     Buffer.add_string ctx.preamble
       "@__march_hcr_epoch = private global i32 0\n";
   (* Distributed OTP L4: populate CAS hash maps for remote_ref_hashes constant folding. *)
@@ -6153,8 +6156,10 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
    | _ ->
      (* Native / WASI: test-runner @main (when tm_tests populated) or standard @main.
         Suppressed when emit_main=false (--compile-so: patch shared library). *)
-     if not emit_main then begin
-       (* Phase 9: exported init function so the reload server can stamp the epoch. *)
+     if not emit_main && hot_reload <> None then begin
+       (* Phase 9: exported init function so the reload server can stamp the epoch.
+          Only emitted when --hot-reload is active; a plain --compile-so build
+          without --hot-reload must not export a spurious epoch entry point. *)
        Buffer.add_string out
          "\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
           \  store i32 %epoch, ptr @__march_hcr_epoch\n\

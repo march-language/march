@@ -135,6 +135,17 @@ static uint32_t load_next_epoch(void) {
 
 /* ── CAS path helpers ────────────────────────────────────────────────── */
 
+/* Validate that s is exactly 64 lowercase-hex characters (CAS hash format). */
+static int is_hex64(const char *s) {
+    if (!s || s[CAS_HASH_LEN] != '\0') return 0;
+    for (int i = 0; i < CAS_HASH_LEN; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    return 1;
+}
+
 static void cas_artifact_path(char *out, size_t outsz, const char *hash) {
     snprintf(out, outsz, "%s/artifacts/%.2s/%.62s", g_cas_root, hash, hash + 2);
 }
@@ -148,19 +159,22 @@ static void mkdir_p(const char *path) {
 }
 
 /* Read a newline-terminated line into buf (NUL-terminated, newline stripped).
- * Returns bytes read (>=0), or -1 on error. */
+ * Returns bytes read (>=0), -1 on EOF/error, or -(max-1) if the line was
+ * truncated (too long).  On truncation the stream is drained to the next '\n'
+ * so subsequent commands are not desynced. */
 static int read_line(int fd, char *buf, int max) {
     int n = 0;
-    while (n < max - 1) {
+    while (1) {
         char c;
         int r = (int)read(fd, &c, 1);
-        if (r <= 0) return r;
+        if (r <= 0) return r ? r : -1;
         if (c == '\n') break;
         if (c == '\r') continue;
-        buf[n++] = c;
+        if (n < max - 1) buf[n++] = c;
+        /* else: buffer full — keep draining until '\n' to avoid desync */
     }
     buf[n] = '\0';
-    return n;
+    return (n < max - 1) ? n : -(max - 1);
 }
 
 /* Read exactly nbytes from fd into buf. Returns 0 on success, -1 on error/EOF. */
@@ -175,6 +189,15 @@ static int read_exact(int fd, unsigned char *buf, size_t nbytes) {
 }
 
 static void wresp(int fd, const char *s) { write(fd, s, strlen(s)); }
+
+/* Write the result of snprintf safely: clamp to bufsz-1 to guard against
+ * the snprintf+write overread (snprintf returns would-have-written, not
+ * actually-written; writing that many bytes reads off the end of the buffer
+ * when the format string's inputs exceed bufsz). */
+static void write_safe(int fd, const char *buf, int snprintf_ret, size_t bufsz) {
+    int n = snprintf_ret < (int)bufsz ? snprintf_ret : (int)bufsz - 1;
+    if (n > 0) write(fd, buf, (size_t)n);
+}
 
 /* ── Audit log ───────────────────────────────────────────────────────────── */
 
@@ -267,7 +290,7 @@ static void handle_client(int fd) {
                                  h[0] ? h : "(none)",
                                  sig && sig[0] ? sig : "(none)");
                 }
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
             }
             wresp(fd, "END\n");
 
@@ -282,11 +305,11 @@ static void handle_client(int fd) {
                 char resp[512];
                 int n = snprintf(resp, sizeof(resp), "VERSION %s baseline %s\n",
                                  name, base && base[0] ? base : "(none)");
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
                 /* Emit "hot" line only when impl_hash differs from baseline */
                 if (hot && hot[0] && base && base[0] && strcmp(hot, base) != 0) {
                     n = snprintf(resp, sizeof(resp), "VERSION %s hot %s\n", name, hot);
-                    write(fd, resp, (size_t)n);
+                    write_safe(fd, resp, n, sizeof(resp));
                 }
             }
             wresp(fd, "END\n");
@@ -310,15 +333,15 @@ static void handle_client(int fd) {
                                  ts,
                                  sig && sig[0] ? sig : "(none)",
                                  ep);
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
             }
             wresp(fd, "END\n");
 
         /* ── CAS_CHECK ────────────────────────────────────────────────── */
         } else if (strncmp(line, "CAS_CHECK ", 10) == 0) {
             const char *hash = line + 10;
-            if (strlen(hash) != CAS_HASH_LEN) {
-                wresp(fd, "ERR bad_hash_length\n"); continue;
+            if (!is_hex64(hash)) {
+                wresp(fd, "ERR bad_hash\n"); continue;
             }
             char path[640]; cas_artifact_path(path, sizeof(path), hash);
             wresp(fd, (access(path, F_OK) == 0) ? "PRESENT\n" : "MISSING\n");
@@ -327,7 +350,7 @@ static void handle_client(int fd) {
         } else if (strncmp(line, "CAS_PUT ", 8) == 0) {
             char hash[65]; long long size_ll;
             if (sscanf(line + 8, "%64s %lld", hash, &size_ll) != 2
-                || strlen(hash) != CAS_HASH_LEN
+                || !is_hex64(hash)
                 || size_ll <= 0 || size_ll > CAS_MAX_ARTIFACT) {
                 wresp(fd, "ERR bad_format\n"); continue;
             }
@@ -336,7 +359,8 @@ static void handle_client(int fd) {
             if (!buf) { wresp(fd, "ERR oom\n"); continue; }
             wresp(fd, "READY\n");
             if (read_exact(fd, buf, sz) != 0) {
-                free(buf); wresp(fd, "ERR read_failed\n"); continue;
+                /* Stream is desynced — close rather than trying to recover. */
+                free(buf); close(fd); return;
             }
             /* Write to CAS */
             char path[640]; cas_artifact_path(path, sizeof(path), hash);
@@ -353,7 +377,7 @@ static void handle_client(int fd) {
             if (rename(tmp, path) != 0) { unlink(tmp); wresp(fd, "ERR rename_failed\n"); continue; }
             char resp[128];
             int n = snprintf(resp, sizeof(resp), "OK %s\n", hash);
-            write(fd, resp, (size_t)n);
+            write_safe(fd, resp, n, sizeof(resp));
 
         /* ── ACTIVATE ─────────────────────────────────────────────────── */
         } else if (strncmp(line, "ACTIVATE ", 9) == 0) {
@@ -364,6 +388,9 @@ static void handle_client(int fd) {
                                 migrate_required_str);
             if (parsed < 4) {
                 wresp(fd, "ERR bad_format\n"); continue;
+            }
+            if (!is_hex64(cas_hash)) {
+                wresp(fd, "ERR bad_cas_hash\n"); continue;
             }
             int migrate_required = (parsed >= 5 && migrate_required_str[0] == '1') ? 1 : 0;
 
@@ -413,7 +440,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, "err_abi");
                 char resp[512];
                 int n = snprintf(resp, sizeof(resp), "ERR unknown_name %s\n", name);
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
                 continue;
             }
 
@@ -439,7 +466,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
                 char resp[512];
                 int n = snprintf(resp, sizeof(resp), "ERR dlopen_failed %s\n", dlerror());
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
                 continue;
             }
 
@@ -448,7 +475,7 @@ static void handle_client(int fd) {
                 char resp[512];
                 int n = snprintf(resp, sizeof(resp), "ERR dlsym_failed %s\n", name);
                 dlclose(handle);
-                write(fd, resp, (size_t)n);
+                write_safe(fd, resp, n, sizeof(resp));
                 continue;
             }
 
@@ -554,7 +581,7 @@ static void handle_client(int fd) {
             write_audit_log(name, impl_hash, cas_hash, "ok");
             char resp[256];
             int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
-            write(fd, resp, (size_t)n);
+            write_safe(fd, resp, n, sizeof(resp));
 
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
         } else if (strcmp(line, "GET_EPOCH") == 0) {
@@ -563,7 +590,7 @@ static void handle_client(int fd) {
             persist_next_epoch(e + 1);
             char resp[64];
             int n = snprintf(resp, sizeof(resp), "EPOCH %u\n", e);
-            write(fd, resp, (size_t)n);
+            write_safe(fd, resp, n, sizeof(resp));
 
         } else {
             wresp(fd, "ERR unknown_command\n");

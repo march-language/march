@@ -291,7 +291,8 @@ let get_epoch_from_server ~ssh_host ~remote_socket : int =
 
 (* Check if a symbol is exported from a shared library (for migrate_state presence check). *)
 let so_exports_symbol (so_path : string) (sym : string) : bool =
-  let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'" so_path sym in
+  let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'"
+    (Filename.quote so_path) (Filename.quote sym) in
   Sys.command cmd = 0
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
@@ -308,16 +309,21 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
       let fd = connect_socket local_socket in
       let conn = conn_of_fd fd in
 
-      (* 2. VERSIONS — drift check *)
+      (* 2. VERSIONS — active hot-patch check.
+         ve_current <> None means this function's running impl_hash differs from
+         the compiled-in baseline, i.e. a prior hot deploy is active. This is the
+         normal state after any successful deploy; it does NOT indicate crash-restart
+         drift (a restart would reset to baseline, making ve_current = None). *)
       send_line conn "VERSIONS";
       let versions = parse_versions conn in
-      let drifted = List.filter (fun ve -> ve.ve_current <> None) versions in
-      if drifted <> [] then begin
-        Printf.printf "WARNING: crash-restart drift detected in %d function(s):\n" (List.length drifted);
+      let patched = List.filter (fun ve -> ve.ve_current <> None) versions in
+      if patched <> [] then begin
+        Printf.printf "NOTE: %d function(s) have active hot patches (differ from compiled-in baseline):\n"
+          (List.length patched);
         List.iter (fun ve ->
           Printf.printf "  %s: baseline=%s, running=%s\n"
             ve.ve_name ve.ve_baseline (Option.value ~default:"?" ve.ve_current)
-        ) drifted
+        ) patched
       end;
 
       (* 3. ABI_QUERY — current slot state *)
@@ -342,14 +348,25 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
       in
 
       (* 4. Set-diff: functions where new impl_hash ≠ current *)
+      let not_registered = List.filter (fun fm ->
+        not (Hashtbl.mem slot_map fm.fn_name)
+      ) manifest.functions in
+      if not_registered <> [] then begin
+        Printf.printf "NOTE: %d function(s) are new and require a server restart to register:\n"
+          (List.length not_registered);
+        List.iter (fun fm -> Printf.printf "  %s\n" fm.fn_name) not_registered
+      end;
       let to_activate = List.filter (fun fm ->
         match Hashtbl.find_opt slot_map fm.fn_name with
-        | None -> false  (* not registered on server yet — skip *)
+        | None -> false  (* new function — needs restart, not a hot deploy *)
         | Some slot -> slot.slot_impl_hash <> fm.fn_impl_hash
       ) manifest.functions in
 
       if to_activate = [] then begin
-        Printf.printf "No changes detected — server is already up to date.\n%!";
+        if not_registered <> [] then
+          Printf.printf "No hot-deployable changes detected (new functions require a restart).\n%!"
+        else
+          Printf.printf "No changes detected — server is already up to date.\n%!";
         Unix.close fd;
         Ok 0
       end else begin
@@ -1004,7 +1021,9 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
               let strategy = hr.Project.hr_strategy in
               let health_url = hr.Project.hr_health_check_url in
 
-              (* Simultaneous: fan-out to all servers in parallel (same as legacy canary=0). *)
+              (* Simultaneous: deploy to all servers without the rolling stop-on-failure gate.
+                 NOTE: List.map is left-to-right sequential in OCaml — this is NOT parallel.
+                 The distinction vs rolling is the absence of health-check stops, not concurrency. *)
               let simultaneous_deploy srvs =
                 List.map (fun srv ->
                   (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
@@ -1035,6 +1054,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                           Printf.eprintf "failed!\n%!";
                           Printf.eprintf "  Health check failed after %s — stopping deploy.\n%!"
                             srv.Project.hre_ssh_host;
+                          results := (srv, Error "health_check_failed") :: !results;
                           stop := true
                         end
                       | None -> ()))
@@ -1079,11 +1099,13 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                   else begin
                     Printf.printf "\n==> Canary healthy. Rolling out to %d remaining server(s)...\n%!" (List.length rest_srvs);
                     let rest_res = simultaneous_deploy rest_srvs in
-                    save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                     let failed = List.filter_map (fun (srv, r) -> match r with
                         | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) rest_res in
-                    if failed = [] then Ok ()
-                    else Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
+                    if failed = [] then begin
+                      save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                      Ok ()
+                    end else
+                      Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
                   end
                 end
               end else if strategy = "simultaneous" then begin

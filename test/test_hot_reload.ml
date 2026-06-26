@@ -178,12 +178,14 @@ let boundary_module_with_main () : Tir.tir_module =
 let test_startup_registers_boundary_fns () =
   let ir = LE.emit_module ~hot_reload:(Some (HR.default_config "MyApp"))
              (boundary_module_with_main ()) in
-  check "table sized to the 2 boundary fns" true
-    (contains ir "call void @march_dispatch_init(i32 2)");
-  check "MyApp.A published" true
-    (contains ir "@march_dispatch_publish(i32 0, ptr @MyApp.A");
-  check "MyApp.B published" true
-    (contains ir "@march_dispatch_publish(i32 1, ptr @MyApp.B");
+  (* Slot IDs are 1-based (slot 0 reserved as "not set" sentinel).
+     dispatch_init receives n+1 where n=2 boundary fns. *)
+  check "table sized to 2 boundary fns (n+1 = 3)" true
+    (contains ir "call void @march_dispatch_init(i32 3)");
+  check "MyApp.A published at slot 1" true
+    (contains ir "@march_dispatch_publish(i32 1, ptr @MyApp.A");
+  check "MyApp.B published at slot 2" true
+    (contains ir "@march_dispatch_publish(i32 2, ptr @MyApp.B");
   check "bare main not published (not on boundary)" false
     (contains ir "ptr @main,")
 

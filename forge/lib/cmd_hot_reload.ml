@@ -9,28 +9,6 @@ let secret_key_path () =
   let home = match Sys.getenv_opt "HOME" with Some h -> h | None -> "." in
   Filename.concat home (Filename.concat ".march" "ed25519_secret.key")
 
-let read_sk () : (bytes, string) result =
-  let path = secret_key_path () in
-  if not (Sys.file_exists path) then
-    Error (Printf.sprintf "no secret key at %s — run: forge hot-reload keygen" path)
-  else begin
-    try
-      let ic = open_in path in
-      let line = input_line ic in
-      close_in ic;
-      let s = String.trim line in
-      match March_ed25519.Ed25519.pk_of_base64 s with
-      | None -> Error "secret key file is corrupt (bad base64)"
-      | Some bytes ->
-        if Bytes.length bytes = 32 then
-          (* The secret key is 64 bytes; but we stored it as base64 of 64 bytes.
-             pk_of_base64 trims to 32 — use raw decode for 64-byte keys. *)
-          Error "unexpected: secret key should be 64 bytes, got 32"
-        else
-          Error "unexpected key length"
-    with Sys_error m -> Error m
-  end
-
 (* Raw base64 decode for 64-byte keys (bypasses the pk_of_base64 32-byte check). *)
 let b64_decode_raw (s : string) : bytes option =
   let tbl = Array.make 256 (-1) in
