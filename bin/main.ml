@@ -746,6 +746,12 @@ let run_test_cmd args =
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+    (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+    March_refinecheck.Division_safety.check_module errors desugared;
+    (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
+    March_refinecheck.No_alloc.check_module errors desugared;
+    (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
+    March_refinecheck.Cap_infer.check_module errors desugared;
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -1000,34 +1006,42 @@ let find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
   in
   walk decls
 
-(* Patch a migrate_state fn_def with refined param/return types for the VC.
-   - First param gets type  { old : RawRecord | inv_old(old) }
-   - Return type becomes    { v : <state_name> | inv_new(v) } *)
-(* Rewrite EField receivers so they match the canonical binder name.
-   If the user wrote @invariant(state.count >= 0), pred_to_string serialises
-   "state.count >= 0" and parse_pred rebuilds EField(EVar "state", "count").
-   The TyRefine binder is always "s", so EVar "state" would not resolve.
-   We normalise all EField/EVar receivers to "s" here before injection. *)
-let rec normalize_inv_receiver (binder : string) (e : March_ast.Ast.expr) : March_ast.Ast.expr =
+(* Rewrite bare field-name EVar references to EField projections so smt_of
+   can emit SMT selectors.  @invariant predicates use bare names — e.g.
+   `count >= 0` has EVar "count", not EField(EVar "s", "count").
+   We also handle the case where the user wrote `state.count` — an existing
+   EField whose receiver is renamed to the canonical binder. *)
+let qualify_bare_field_refs
+    (binder : string) (field_names : string list)
+    (e : March_ast.Ast.expr) : March_ast.Ast.expr =
   let module A = March_ast.Ast in
-  let go = normalize_inv_receiver binder in
-  match e with
-  | A.EField (A.EVar v, f, sp) ->
-    A.EField (A.EVar { v with A.txt = binder }, f, sp)
-  | A.EField (base, f, sp) -> A.EField (go base, f, sp)
-  | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
-  | other -> other
+  let rec go e = match e with
+    | A.EVar v when List.mem v.A.txt field_names ->
+      A.EField (A.EVar { v with A.txt = binder }, v, v.A.span)
+    | A.EField (A.EVar v, f, sp) ->
+      A.EField (A.EVar { v with A.txt = binder }, f, sp)
+    | A.EField (base, f, sp) -> A.EField (go base, f, sp)
+    | A.EApp (f, args, sp)  -> A.EApp (go f, List.map go args, sp)
+    | other -> other
+  in go e
 
+(* Patch a migrate_state fn_def with refined param/return types for the VC.
+   - First param gets type  { s : RawRecord | inv_old(s) }
+   - Return type becomes    { v : State      | inv_new(v) }
+   prior_field_names and new_field_names are used to rewrite bare field-name
+   EVar refs to EField projections before SMT reflection. *)
 let patch_migrate_fn (fd : March_ast.Ast.fn_def)
     ~(inv_old : March_ast.Ast.expr) ~(inv_new : March_ast.Ast.expr)
-    ~(state_name : string) : March_ast.Ast.fn_def =
+    ~(state_name : string)
+    ~(prior_field_names : string list)
+    ~(new_field_names   : string list) : March_ast.Ast.fn_def =
   let module A = March_ast.Ast in
   let sp = fd.A.fn_name.A.span in
   let rawrec_ty = A.TyCon ({ A.txt = "RawRecord"; A.span = sp }, []) in
   let state_ty  = A.TyCon ({ A.txt = state_name;  A.span = sp }, []) in
   let mk_binder name = Some { A.txt = name; A.span = sp } in
-  let inv_old = normalize_inv_receiver "s" inv_old in
-  let inv_new = normalize_inv_receiver "v" inv_new in
+  let inv_old = qualify_bare_field_refs "s" prior_field_names inv_old in
+  let inv_new = qualify_bare_field_refs "v" new_field_names   inv_new in
   let patch_clause (c : A.fn_clause) =
     let params = match c.A.fc_params with
       | [] -> []
@@ -1264,6 +1278,12 @@ let compile filename =
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+  (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
+  March_refinecheck.Division_safety.check_module errors desugared;
+  (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
+  March_refinecheck.No_alloc.check_module errors desugared;
+  (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
+  March_refinecheck.Cap_infer.check_module errors desugared;
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
@@ -1347,14 +1367,24 @@ let compile filename =
           (* Register both RawRecord (prior shape) and State (new shape) so
              refine_check can build SMT selectors for both param and return
              field projections.  Actors use inline state, not DType, so
-             these declarations must be synthesised here. *)
-          Rc.register_types_for_check
-            [make_rawrecord_decl prior_fields; make_newstate_decl new_fields];
+             these declarations must be synthesised here.
+             register_adt_names / register_field_sorts ADD to the tables already
+             populated by the earlier check_module call; that is exactly what we
+             want — the synthesised types are simply two extra ADTs. *)
+          let extra_decls =
+            [make_rawrecord_decl prior_fields; make_newstate_decl new_fields] in
+          Rc.register_adt_names extra_decls;
+          Rc.register_field_sorts extra_decls;
           (match find_migrate_fn actor_name desugared.A.mod_decls with
           | None -> ()   (* no migrate_state for this actor — nothing to verify *)
           | Some fd ->
+            let prior_field_names =
+              List.map (fun (f : Sd.field) -> f.Sd.name) prior_fields in
+            let new_field_names =
+              List.map (fun (f : Sd.field) -> f.Sd.name) new_fields in
             let patched = patch_migrate_fn fd ~inv_old ~inv_new
-                            ~state_name:"State" in
+                            ~state_name:"State"
+                            ~prior_field_names ~new_field_names in
             Rc.check_fn_post ~root:(Sys.getcwd ()) mig_errctx patched;
             if March_errors.Errors.has_errors mig_errctx then
               any_error := true))

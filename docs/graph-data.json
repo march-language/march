@@ -15278,6 +15278,116 @@
       "created_at": "2026-06-25T12:57:53.473380-04:00",
       "updated_at": "2026-06-25T12:57:53.473380-04:00",
       "metadata_json": "{\"branch\":\"main\",\"commit\":\"1da54519\",\"confidence\":95}"
+    },
+    {
+      "id": 1390,
+      "change_id": "06c1dda4-8cbc-4fbf-a185-c06be400f31a",
+      "node_type": "goal",
+      "title": "Spike: EField in smt_of + TDRecord→1-ctor datatype registration",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T13:42:11.916995-04:00",
+      "updated_at": "2026-06-25T13:42:11.916995-04:00",
+      "metadata_json": "{\"branch\":\"claude/competent-zhukovsky-5e4b90\",\"confidence\":90,\"prompt\":\"for risk 1, let's do A\\nfor risk 2 let's do c\\n\\nContext: We explored the refine_check.ml codebase for the spike described in specs/2026-06-25-refinement-verified-state-migration-design.md. The spike needs:\\n- Risk 1 (field name→index mapping): Option A — new ctor_field_names hashtable parallel to ctor_field_sorts\\n- Risk 2 (preamble scoping): Option C — unified type_preamble ref built during register_field_sorts, with sort-name deduplication when combined with measure_preamble\\n\\nThe goal is to prove that { s : State | s.count >= 0 } discharges on { count = 1 } and rejects { count = -1 }.\"}"
+    },
+    {
+      "id": 1391,
+      "change_id": "046da32b-1cf5-4b37-9e1a-59618432fe49",
+      "node_type": "action",
+      "title": "Add ctor_field_names hashtable, TDRecord registration, and type_preamble ref to refine_check.ml",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T13:42:21.998105-04:00",
+      "updated_at": "2026-06-25T13:42:21.998105-04:00",
+      "metadata_json": "{\"branch\":\"claude/competent-zhukovsky-5e4b90\",\"confidence\":88,\"files\":[\"lib/refinecheck/refine_check.ml\"]}"
+    },
+    {
+      "id": 1392,
+      "change_id": "3e18c33f-7da0-425b-93ef-dfe4009d97e3",
+      "node_type": "outcome",
+      "title": "Spike complete: EField/TDRecord record refinements land in refine_check.ml; all 3 VC cases verified; 54 tests pass",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T14:25:16.523807-04:00",
+      "updated_at": "2026-06-25T14:25:16.523807-04:00",
+      "metadata_json": "{\"branch\":\"claude/competent-zhukovsky-5e4b90\",\"commit\":\"e1f02166\",\"confidence\":95}"
+    },
+    {
+      "id": 1393,
+      "change_id": "1cc48a0e-70f4-40c1-9827-99bf27a7bef0",
+      "node_type": "goal",
+      "title": "cap no_panic Z3 division-safety",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T16:58:20.387318-04:00",
+      "updated_at": "2026-06-25T16:58:20.387318-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90,\"prompt\":\"whichever is easiest, spec it out and build it\"}"
+    },
+    {
+      "id": 1394,
+      "change_id": "ea16e3e4-94f4-418f-a83c-42b00ac0ad91",
+      "node_type": "action",
+      "title": "Implement Division_safety module + wire into no_panic check",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T17:01:55.901340-04:00",
+      "updated_at": "2026-06-25T17:01:55.901340-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":85,\"files\":[\"lib/refinecheck/division_safety.ml\",\"lib/refinecheck/dune\",\"lib/typecheck/typecheck.ml\",\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1395,
+      "change_id": "ea513cfe-10a1-4a66-9f3e-0238ff949b1b",
+      "node_type": "outcome",
+      "title": "Z3 division-safety pass shipped for cap no_panic modules",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T17:15:20.288146-04:00",
+      "updated_at": "2026-06-25T17:15:20.288146-04:00",
+      "metadata_json": "{\"branch\":\"claude/happy-ritchie-81ea80\",\"commit\":\"2627f597\",\"confidence\":95}"
+    },
+    {
+      "id": 1396,
+      "change_id": "a2bf52dd-e5eb-4ac0-b38a-01d8dbb29e88",
+      "node_type": "goal",
+      "title": "Implement Gap #3: --check-migration CLI mode",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T18:13:49.420735-04:00",
+      "updated_at": "2026-06-25T18:13:49.420735-04:00",
+      "metadata_json": "{\"branch\":\"worktree-agent-a0c4c21d83f0e3b73\",\"confidence\":90,\"prompt\":\"Implement Gap #3 of the March compiler's refinement type checker: a `--check-migration` CLI mode that verifies `migrate_state` soundness across actor versions using SMT. This runs in parallel with Gap #2 (which adds `@invariant` syntax and `schema_diff.ml` invariant field). Handle Gap #2 dependencies with stubs.\\n\\nSteps:\\n1. Export `register_types_for_check` from refine_check.ml\\n2. Add schema_str_to_ty, make_rawrecord_decl, find_migrate_fn, patch_migrate_fn helpers to bin/main.ml\\n3. Add CLI flags --check-migration, --prior-schema, --new-schema\\n4. Add --check-migration dispatch block in bin/main.ml\\n5. Add shell-out in cmd_deploy_hot.ml\\n6. Build and test\\n7. Commit\"}"
+    },
+    {
+      "id": 1397,
+      "change_id": "8e0552c4-d0e3-4db1-9952-f87e74784db0",
+      "node_type": "action",
+      "title": "Add register_types_for_check to refine_check.ml",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T18:13:53.122613-04:00",
+      "updated_at": "2026-06-25T18:13:53.122613-04:00",
+      "metadata_json": "{\"branch\":\"worktree-agent-a0c4c21d83f0e3b73\",\"confidence\":90}"
+    },
+    {
+      "id": 1398,
+      "change_id": "58a0299f-92a2-490d-8bfd-81acb07b4d78",
+      "node_type": "outcome",
+      "title": "All builds clean; 321 compiler + 224 eval + 320 codegen + 58 refinecheck tests pass",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T18:26:34.864260-04:00",
+      "updated_at": "2026-06-25T18:26:34.864260-04:00",
+      "metadata_json": "{\"branch\":\"worktree-agent-a0c4c21d83f0e3b73\",\"confidence\":95}"
+    },
+    {
+      "id": 1399,
+      "change_id": "441636f9-792a-4192-af97-cd06fdef75cd",
+      "node_type": "action",
+      "title": "Committed Gap #3 implementation",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-25T18:27:03.141350-04:00",
+      "updated_at": "2026-06-25T18:27:03.141350-04:00",
+      "metadata_json": "{\"branch\":\"worktree-agent-a0c4c21d83f0e3b73\",\"commit\":\"4cf74f69\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -25642,6 +25752,83 @@
       "weight": 1.0,
       "rationale": "Phase 7 implementation complete",
       "created_at": "2026-06-25T12:57:56.120477-04:00"
+    },
+    {
+      "id": 952,
+      "from_node_id": 1390,
+      "to_node_id": 1391,
+      "from_change_id": "06c1dda4-8cbc-4fbf-a185-c06be400f31a",
+      "to_change_id": "046da32b-1cf5-4b37-9e1a-59618432fe49",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation step 1: data structures + registration",
+      "created_at": "2026-06-25T13:42:26.189572-04:00"
+    },
+    {
+      "id": 953,
+      "from_node_id": 1391,
+      "to_node_id": 1392,
+      "from_change_id": "046da32b-1cf5-4b37-9e1a-59618432fe49",
+      "to_change_id": "3e18c33f-7da0-425b-93ef-dfe4009d97e3",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-25T14:25:16.534813-04:00"
+    },
+    {
+      "id": 954,
+      "from_node_id": 1393,
+      "to_node_id": 1394,
+      "from_change_id": "1cc48a0e-70f4-40c1-9827-99bf27a7bef0",
+      "to_change_id": "ea16e3e4-94f4-418f-a83c-42b00ac0ad91",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-25T17:01:55.933013-04:00"
+    },
+    {
+      "id": 955,
+      "from_node_id": 1394,
+      "to_node_id": 1395,
+      "from_change_id": "ea16e3e4-94f4-418f-a83c-42b00ac0ad91",
+      "to_change_id": "ea513cfe-10a1-4a66-9f3e-0238ff949b1b",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-25T17:15:23.326616-04:00"
+    },
+    {
+      "id": 956,
+      "from_node_id": 1396,
+      "to_node_id": 1397,
+      "from_change_id": "a2bf52dd-e5eb-4ac0-b38a-01d8dbb29e88",
+      "to_change_id": "8e0552c4-d0e3-4db1-9952-f87e74784db0",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implements goal",
+      "created_at": "2026-06-25T18:13:53.132735-04:00"
+    },
+    {
+      "id": 957,
+      "from_node_id": 1397,
+      "to_node_id": 1398,
+      "from_change_id": "8e0552c4-d0e3-4db1-9952-f87e74784db0",
+      "to_change_id": "58a0299f-92a2-490d-8bfd-81acb07b4d78",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implemented successfully",
+      "created_at": "2026-06-25T18:26:34.876048-04:00"
+    },
+    {
+      "id": 958,
+      "from_node_id": 1398,
+      "to_node_id": 1399,
+      "from_change_id": "58a0299f-92a2-490d-8bfd-81acb07b4d78",
+      "to_change_id": "441636f9-792a-4192-af97-cd06fdef75cd",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "committed",
+      "created_at": "2026-06-25T18:27:03.152029-04:00"
     }
   ]
 }

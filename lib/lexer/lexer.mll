@@ -173,7 +173,11 @@ rule token = parse
   | '~' (['A'-'Z'] as c) { SIGIL_PREFIX (String.make 1 c) }
   | '~' (['a'-'z'] ['a'-'z' '0'-'9' '_']* as name) { SIGIL_PREFIX name }
   | "proof" [' ' '\t']+ "cap" { PROOFCAP }
-  | "cap" [' ' '\t']+ "no_panic" { CAP_NO_PANIC }
+  | "cap" [' ' '\t']+ "no_panic"      { CAP_NO_PANIC }
+  | "cap" [' ' '\t']+ "pure"          { CAP_PURE }
+  | "cap" [' ' '\t']+ "no_extern"     { CAP_NO_EXTERN }
+  | "cap" [' ' '\t']+ "deterministic" { CAP_DETERMINISTIC }
+  | "cap" [' ' '\t']+ "no_alloc"      { CAP_NO_ALLOC }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

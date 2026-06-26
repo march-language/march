@@ -36,6 +36,12 @@ let create () : t option =
       let ic = Unix.in_channel_of_descr stdout_r in
       (* print-success off: we only read explicit (check-sat)/(get-model) output *)
       output_string oc "(set-option :print-success false)\n";
+      (* Scope declarations (declare-sort, declare-datatypes, declare-fun) inside
+         push/pop so they are undone by pop. Without this, Z3 keeps declarations
+         globally even after pop, causing "sort already declared" errors when the
+         same preamble is sent again in a subsequent query (e.g. across test
+         modules in the same process). *)
+      output_string oc "(set-option :global-decls false)\n";
       (* Per-query wall-clock cap: a hard (e.g. quantified-datatype) query returns
          `unknown` instead of looping — definite-failure then treats it as skip. *)
       output_string oc "(set-option :timeout 3000)\n";

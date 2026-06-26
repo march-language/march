@@ -3134,32 +3134,84 @@ let test_cap_no_panic_lexes () =
   Alcotest.(check bool) "cap no_panic lexes as CAP_NO_PANIC token" true
     (match tok with March_parser.Parser.CAP_NO_PANIC -> true | _ -> false)
 
+(* Run typecheck + division-safety pass together; used for cap no_panic tests
+   that involve division/modulo.  Division is now checked by Division_safety
+   (with Z3), not by the purely syntactic no-panic scan in the typechecker. *)
+let typecheck_with_divsafety src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Division_safety.check_module errors m;
+  errors
+
 let test_cap_no_panic_safe_no_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn add(a : Int, b : Int) : Int do a + b end
   end|} in
   Alcotest.(check bool) "cap no_panic with safe body: no error" false (has_errors ctx)
 
 let test_cap_not_set_div_ok () =
-  let ctx = typecheck {|mod Unsafe do
+  let ctx = typecheck_with_divsafety {|mod Unsafe do
     fn divide(a : Int, b : Int) : Int do a / b end
   end|} in
   Alcotest.(check bool) "no cap no_panic: division is allowed" false (has_errors ctx)
 
 let test_cap_no_panic_div_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn divide(a : Int, b : Int) : Int do a / b end
   end|} in
   Alcotest.(check bool) "cap no_panic + division: error" true (has_errors ctx)
 
 let test_cap_no_panic_mod_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     fn remainder(a : Int, b : Int) : Int do a % b end
   end|} in
   Alcotest.(check bool) "cap no_panic + modulo: error" true (has_errors ctx)
+
+(* Division-safety Z3 cases *)
+let test_divsafety_positive_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v > 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v > 0 refinement suppresses div error" false (has_errors ctx)
+
+let test_divsafety_nonzero_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v != 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v != 0 refinement suppresses div error" false (has_errors ctx)
+
+let test_divsafety_nonneg_refinement_error () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v >= 0}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v >= 0 refinement does not suppress (0 is possible)" true (has_errors ctx)
+
+let test_divsafety_literal_nonzero_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn halve(a : Int) : Int do a / 2 end
+  end|} in
+  Alcotest.(check bool) "literal non-zero divisor: no error" false (has_errors ctx)
+
+let test_divsafety_literal_zero_error () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn bad(a : Int) : Int do a / 0 end
+  end|} in
+  Alcotest.(check bool) "literal zero divisor: always an error" true (has_errors ctx)
+
+let test_divsafety_ge1_refinement_ok () =
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn divide(a : Int, d : {v : Int | v >= 1}) : Int do a / d end
+  end|} in
+  Alcotest.(check bool) "v >= 1 refinement suppresses div error" false (has_errors ctx)
 
 let test_cap_no_panic_explicit_panic_error () =
   let ctx = typecheck {|mod Safe do
@@ -3207,12 +3259,34 @@ let test_cap_no_panic_safe_helper_ok () =
   Alcotest.(check bool) "cap no_panic + safe local helper: no error" false (has_errors ctx)
 
 let test_cap_no_panic_transitive_error () =
-  let ctx = typecheck {|mod Safe do
+  let ctx = typecheck_with_divsafety {|mod Safe do
     cap no_panic
     pfn helper(a : Int, b : Int) : Int do a / b end
     fn caller(x : Int) : Int do helper(x, 2) end
   end|} in
   Alcotest.(check bool) "cap no_panic + transitive panic via helper: error" true (has_errors ctx)
+
+let test_divsafety_let_bound_literal_ok () =
+  (* let d = 2; a / d  — d is a non-zero literal let-binding, must NOT error *)
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn halve(a : Int) : Int do
+      let d = 2
+      a / d
+    end
+  end|} in
+  Alcotest.(check bool) "divsafety: let-bound non-zero literal divisor ok" false (has_errors ctx)
+
+let test_divsafety_let_bound_zero_error () =
+  (* let d = 0; a / d  — let-bound zero literal must error *)
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn bad(a : Int) : Int do
+      let d = 0
+      a / d
+    end
+  end|} in
+  Alcotest.(check bool) "divsafety: let-bound zero literal divisor errors" true (has_errors ctx)
 
 let test_cap_no_panic_two_safe_sibling_fns_ok () =
   let ctx = typecheck {|mod Safe do
@@ -3221,6 +3295,165 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
     fn pong(n : Int) : Int do n end
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
+
+(* ── cap pure, cap no_extern, cap deterministic tests ───────────────────── *)
+
+let test_cap_pure_spawn_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn bad() : Unit do spawn(fn _ -> 0) end
+  end|} in
+  Alcotest.(check bool) "cap pure + spawn: error" true (has_errors ctx)
+
+let test_cap_pure_println_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn greet() : Unit do println("hello") end
+  end|} in
+  Alcotest.(check bool) "cap pure + println: error" true (has_errors ctx)
+
+let test_cap_pure_arithmetic_ok () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap pure + pure arithmetic: no error" false (has_errors ctx)
+
+let test_cap_pure_now_ms_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn ts() : Int do now_ms() end
+  end|} in
+  Alcotest.(check bool) "cap pure + now_ms: error" true (has_errors ctx)
+
+let test_cap_pure_random_int_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn roll() : Int do random_int(6) end
+  end|} in
+  Alcotest.(check bool) "cap pure + random_int: error" true (has_errors ctx)
+
+let test_cap_pure_uuid_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn gen() : String do uuid_v4() end
+  end|} in
+  Alcotest.(check bool) "cap pure + uuid_v4: error" true (has_errors ctx)
+
+let test_cap_no_extern_regular_fn_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_extern
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap no_extern + regular fn: no error" false (has_errors ctx)
+
+let test_cap_deterministic_random_int_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn roll() : Int do random_int(6) end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + random_int: error" true (has_errors ctx)
+
+let test_cap_deterministic_uuid_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn gen() : String do uuid_v4() end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + uuid_v4: error" true (has_errors ctx)
+
+let test_cap_deterministic_now_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn ts() : Int do now_ms() end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + now_ms: error" true (has_errors ctx)
+
+let test_cap_deterministic_arithmetic_ok () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
+
+(* ── cap no_alloc tests ─────────────────────────────────────────────────── *)
+
+(* Helper: run typecheck + no_alloc pass together. *)
+let check_no_alloc src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.No_alloc.check_module errors m;
+  errors
+
+let test_cap_no_alloc_lexes () =
+  let lexbuf = Lexing.from_string "cap no_alloc" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "cap no_alloc lexes as CAP_NO_ALLOC token" true
+    (match tok with March_parser.Parser.CAP_NO_ALLOC -> true | _ -> false)
+
+let test_cap_no_alloc_tuple_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Int do
+      let _ = (1, 2)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + tuple: error" true (has_errors ctx)
+
+let test_cap_no_alloc_record_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Bool do
+      let _ = {x: 1}
+      true
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + record: error" true (has_errors ctx)
+
+let test_cap_no_alloc_some_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f(x : Int) : Int do
+      let _ = Some(x)
+      x
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + Some(x): error" true (has_errors ctx)
+
+let test_cap_no_alloc_lambda_error () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn f() : Int do
+      let g = fn x -> x
+      g(1)
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + lambda: error" true (has_errors ctx)
+
+let test_cap_no_alloc_arithmetic_ok () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + pure arithmetic: no error" false (has_errors ctx)
+
+let test_cap_no_alloc_if_ok () =
+  let ctx = check_no_alloc {|mod M do
+    cap no_alloc
+    fn abs(x : Int) : Int do
+      if x >= 0 do x else 0 - x end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_alloc + if/match: no error" false (has_errors ctx)
+
+let test_cap_not_set_tuple_ok () =
+  let ctx = check_no_alloc {|mod M do
+    fn f() : Int do
+      let _ = (1, 2)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "no cap no_alloc + tuple: no error" false (has_errors ctx)
 
 (* ── Record field auto-satisfy tests ───────────────────────────────────── *)
 
@@ -3821,6 +4054,192 @@ let test_cap_body_foreign_blocking () =
   end|} in
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
+
+(* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
+
+(* Helper: run typecheck then the standalone cap_infer pass.
+   Returns the shared error context so callers can inspect both
+   typechecker warnings and cap_infer hints. *)
+let check_cap_infer src =
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  March_refinecheck.Cap_infer.check_module errors m;
+  errors
+
+let test_cap_infer_random_missing () =
+  (* random_bytes without needs IO.Random → hint from cap_infer *)
+  let ctx = check_cap_infer {|mod M do
+    fn f() : Int do
+      random_bytes(16)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "random_bytes without needs: hint emitted" true
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_random_declared () =
+  (* needs IO.Random declared → no hint from cap_infer *)
+  let ctx = check_cap_infer {|mod M do
+    needs IO.Random
+    fn f() : Int do
+      random_bytes(16)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "random_bytes with needs IO.Random: no hint" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_filewrite_missing () =
+  (* file_write without needs IO.FileWrite → hint *)
+  let ctx = check_cap_infer {|mod M do
+    fn f() : Unit do
+      file_write("x.txt", "hi")
+    end
+  end|} in
+  Alcotest.(check bool) "file_write without needs: hint emitted" true
+    (has_hint_with ctx "IO.FileWrite")
+
+let test_cap_infer_pure_no_hint () =
+  (* Pure function with no capability-requiring calls → no hint *)
+  let ctx = check_cap_infer {|mod M do
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check bool) "pure fn with no cap calls: no hint" false
+    (has_hints ctx)
+
+let test_cap_infer_parent_cap_covers () =
+  (* needs IO covers all IO.* children — no hint for random_bytes *)
+  let ctx = check_cap_infer {|mod M do
+    needs IO
+    fn f() : Int do
+      random_bytes(8)
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO covers IO.Random child: no hint" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_nested_mod_inner_declared () =
+  (* Inner mod has its own needs IO.Random — no hint for the inner call *)
+  let ctx = check_cap_infer {|mod Outer do
+    mod Inner do
+      needs IO.Random
+      fn f() : Int do
+        random_bytes(4)
+        0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod with declared needs: no hint for inner" false
+    (has_hint_with ctx "IO.Random")
+
+let test_cap_infer_nested_mod_inner_missing () =
+  (* Inner mod missing needs IO.Random → hint, even though outer might not care *)
+  let ctx = check_cap_infer {|mod Outer do
+    mod Inner do
+      fn f() : Int do
+        random_bytes(4)
+        0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested mod without declared needs: hint for inner" true
+    (has_hint_with ctx "IO.Random")
+
+(* ── return_refine_infer: Z3-based return-sign inference ────────────────── *)
+
+(* Helper: run infer_module on a snippet and return inferred results. *)
+let infer_returns src =
+  let m = Test_helpers.parse_and_desugar src in
+  March_refinecheck.Return_infer.infer_module m
+
+(* Check whether any result matches fn_name and has the given pred string. *)
+let has_pred results fn_name pred =
+  List.exists
+    (fun (r : March_refinecheck.Return_infer.inferred_return) ->
+      r.fn_name = fn_name && List.mem pred r.verified_preds)
+    results
+
+(* Guard: skip test bodies when Z3 is unavailable. *)
+let z3_available () =
+  let vc = March_refine.Smt.{
+    decls = [("x", March_refine.Smt.SInt)];
+    assumptions = [March_refine.Smt.Ge (March_refine.Smt.Const "x", March_refine.Smt.IntLit 1)];
+    goal = March_refine.Smt.Gt (March_refine.Smt.Const "x", March_refine.Smt.IntLit 0) }
+  in
+  match March_refine.Refine.discharge ~root:(Sys.getcwd ()) vc with
+  | March_refine.Refine.Verified -> true
+  | _ -> false
+
+let test_return_infer_identity_positive () =
+  (* fn id(x : {v : Int | v > 0}) : Int = x  →  infers r > 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn id(x : {v : Int | v > 0}) : Int do x end
+    end|} in
+    Alcotest.(check bool) "id: r > 0 inferred" true (has_pred results "id" "r > 0");
+    Alcotest.(check bool) "id: r >= 0 inferred" true (has_pred results "id" "r >= 0")
+  end
+
+let test_return_infer_add_one () =
+  (* fn inc(x : {v : Int | v >= 0}) : Int = x + 1  →  infers r >= 1, r > 0, r >= 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn inc(x : {v : Int | v >= 0}) : Int do x + 1 end
+    end|} in
+    Alcotest.(check bool) "inc: r >= 1 inferred" true (has_pred results "inc" "r >= 1");
+    Alcotest.(check bool) "inc: r > 0 inferred"  true (has_pred results "inc" "r > 0")
+  end
+
+let test_return_infer_no_refined_params () =
+  (* fn plain(x : Int) : Int = x  →  no refinement can be inferred *)
+  let results = infer_returns {|mod M do
+    fn plain(x : Int) : Int do x end
+  end|} in
+  Alcotest.(check bool) "plain: no inferences" true
+    (not (List.exists (fun (r : March_refinecheck.Return_infer.inferred_return) -> r.fn_name = "plain") results))
+
+let test_return_infer_let_propagation () =
+  (* fn f(x : {v : Int | v > 0}) : Int =
+       let y = x + 1
+       y
+     →  infers r > 0 via let-binding propagation *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn f(x : {v : Int | v > 0}) : Int do
+        let y = x + 1
+        y
+      end
+    end|} in
+    Alcotest.(check bool) "f: r > 0 via let" true (has_pred results "f" "r > 0")
+  end
+
+let test_return_infer_literal_return () =
+  (* fn five(x : {v : Int | v > 0}) : Int = 5  →  infers r > 0, r >= 1, r != 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn five(x : {v : Int | v > 0}) : Int do 5 end
+    end|} in
+    Alcotest.(check bool) "five: r > 0"   true (has_pred results "five" "r > 0");
+    Alcotest.(check bool) "five: r >= 1"  true (has_pred results "five" "r >= 1");
+    Alcotest.(check bool) "five: r != 0"  true (has_pred results "five" "r != 0")
+  end
+
+let test_return_infer_negative_param () =
+  (* fn f(x : {v : Int | v < 0}) : Int = x  →  infers r < 0, r <= -1, r != 0 *)
+  if not (z3_available ()) then ()
+  else begin
+    let results = infer_returns {|mod M do
+      fn f(x : {v : Int | v < 0}) : Int do x end
+    end|} in
+    Alcotest.(check bool) "f: r < 0"   true (has_pred results "f" "r < 0");
+    Alcotest.(check bool) "f: r <= -1" true (has_pred results "f" "r <= -1");
+    Alcotest.(check bool) "f: r != 0"  true (has_pred results "f" "r != 0")
+  end
 
 let test_record_type_still_parses () =
   (* Disambiguation regression: record types must not be misparsed as refinements. *)
@@ -4541,6 +4960,38 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+          (* Division-safety Z3 cases *)
+          Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
+          Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;
+          Alcotest.test_case "divsafety: v >= 0 does not suppress"        `Quick test_divsafety_nonneg_refinement_error;
+          Alcotest.test_case "divsafety: literal non-zero divisor ok"     `Quick test_divsafety_literal_nonzero_ok;
+          Alcotest.test_case "divsafety: literal zero is always error"    `Quick test_divsafety_literal_zero_error;
+          Alcotest.test_case "divsafety: v >= 1 refinement suppresses"    `Quick test_divsafety_ge1_refinement_ok;
+          Alcotest.test_case "divsafety: let-bound non-zero literal ok"   `Quick test_divsafety_let_bound_literal_ok;
+          Alcotest.test_case "divsafety: let-bound zero literal errors"   `Quick test_divsafety_let_bound_zero_error;
+        ] );
+      ( "cap_pure_no_extern_det", [
+          Alcotest.test_case "cap pure + spawn: error"                `Quick test_cap_pure_spawn_error;
+          Alcotest.test_case "cap pure + println: error"              `Quick test_cap_pure_println_error;
+          Alcotest.test_case "cap pure + pure arithmetic: no error"   `Quick test_cap_pure_arithmetic_ok;
+          Alcotest.test_case "cap pure + now_ms: error"               `Quick test_cap_pure_now_ms_error;
+          Alcotest.test_case "cap pure + random_int: error"           `Quick test_cap_pure_random_int_error;
+          Alcotest.test_case "cap pure + uuid_v4: error"              `Quick test_cap_pure_uuid_error;
+          Alcotest.test_case "cap no_extern + regular fn: no error"   `Quick test_cap_no_extern_regular_fn_ok;
+          Alcotest.test_case "cap deterministic + random_int: error"  `Quick test_cap_deterministic_random_int_error;
+          Alcotest.test_case "cap deterministic + uuid_v4: error"     `Quick test_cap_deterministic_uuid_error;
+          Alcotest.test_case "cap deterministic + now_ms: error"      `Quick test_cap_deterministic_now_ms_error;
+          Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+        ] );
+      ( "cap_no_alloc", [
+          Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
+          Alcotest.test_case "cap no_alloc + tuple: error"                 `Quick test_cap_no_alloc_tuple_error;
+          Alcotest.test_case "cap no_alloc + record: error"                `Quick test_cap_no_alloc_record_error;
+          Alcotest.test_case "cap no_alloc + Some(x): error"              `Quick test_cap_no_alloc_some_error;
+          Alcotest.test_case "cap no_alloc + lambda: error"                `Quick test_cap_no_alloc_lambda_error;
+          Alcotest.test_case "cap no_alloc + pure arithmetic: no error"   `Quick test_cap_no_alloc_arithmetic_ok;
+          Alcotest.test_case "cap no_alloc + if/match: no error"           `Quick test_cap_no_alloc_if_ok;
+          Alcotest.test_case "no cap no_alloc + tuple: no error"           `Quick test_cap_not_set_tuple_ok;
         ] );
       ( "record_auto_satisfy", [
           Alcotest.test_case "matching field auto-satisfies"    `Quick test_record_auto_satisfy_ok;
@@ -4594,6 +5045,23 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+        ] );
+      ( "cap_infer", [
+          Alcotest.test_case "random_bytes missing needs: hint emitted"     `Quick test_cap_infer_random_missing;
+          Alcotest.test_case "random_bytes with needs IO.Random: no hint"   `Quick test_cap_infer_random_declared;
+          Alcotest.test_case "file_write missing needs: hint emitted"       `Quick test_cap_infer_filewrite_missing;
+          Alcotest.test_case "pure fn with no cap calls: no hint"           `Quick test_cap_infer_pure_no_hint;
+          Alcotest.test_case "needs IO umbrella covers IO.Random: no hint"  `Quick test_cap_infer_parent_cap_covers;
+          Alcotest.test_case "nested mod with declared needs: no hint"      `Quick test_cap_infer_nested_mod_inner_declared;
+          Alcotest.test_case "nested mod missing needs: hint for inner"     `Quick test_cap_infer_nested_mod_inner_missing;
+        ] );
+      ( "return_refine_infer", [
+          Alcotest.test_case "identity fn: positive param → r > 0"           `Quick test_return_infer_identity_positive;
+          Alcotest.test_case "add-one fn: nonneg param → r >= 1"             `Quick test_return_infer_add_one;
+          Alcotest.test_case "no refined params → no inferences"             `Quick test_return_infer_no_refined_params;
+          Alcotest.test_case "let propagation: x+1 bound → r > 0"           `Quick test_return_infer_let_propagation;
+          Alcotest.test_case "literal 5 return → r > 0, r >= 1, r != 0"    `Quick test_return_infer_literal_return;
+          Alcotest.test_case "negative param: x < 0 → r < 0, r <= -1"      `Quick test_return_infer_negative_param;
         ] );
       ( "error_improvements", [
           Alcotest.test_case "#1 label rendered in render_diagnostic"       `Quick test_label_rendered_in_output;

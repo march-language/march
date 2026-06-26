@@ -78,10 +78,24 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
                 current_invariant := Some (String.sub line first_q (last_q - first_q))
             with Not_found -> ())
           end;
-          (* Detect state_fields array start *)
-          if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then
+          (* Detect state_fields array start; also scan for inline field entries
+             on the same line (e.g. "state_fields": [{"name":"x","ty":"Y"}]) *)
+          if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then begin
             in_fields := true;
-          (* Detect field entry: {"name":"x","ty":"Int"} *)
+            (* Scan rest of line for any {…} field objects *)
+            let rec scan_for_entries pos =
+              match String.index_from_opt line pos '{' with
+              | None -> ()
+              | Some brace ->
+                (match String.split_on_char '"' (String.sub line brace (llen - brace)) with
+                 | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->
+                   current_fields := { name = n; ty = t } :: !current_fields
+                 | _ -> ());
+                scan_for_entries (brace + 1)
+            in
+            scan_for_entries 0
+          end;
+          (* Detect field entry on its own line: {"name":"x","ty":"Int"} *)
           if !in_fields && llen > 0 && line.[0] = '{' then begin
             (match String.split_on_char '"' line with
             | _ :: "name" :: _ :: n :: _ :: "ty" :: _ :: t :: _ when n <> "" ->

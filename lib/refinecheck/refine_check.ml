@@ -106,6 +106,17 @@ let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
    renamed. *)
 let adt_sort_name (march_name : string) : string = "M_" ^ march_name
 
+(* True when [t] is a bare TyCon that maps to a registered 1-constructor
+   TDRecord sort — used to gate record-typed refinements on both the param
+   and return sides. *)
+let is_record_base (t : A.ty) : bool =
+  match t with
+  | A.TyCon ({ A.txt = name; _ }, []) ->
+    (match Hashtbl.find_opt adt_ctors (adt_sort_name name) with
+     | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
+     | _ -> false)
+  | _ -> false
+
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,
    M-c) its datatype sort, everything else (type params, unmodelled types) the
@@ -190,6 +201,8 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
              (fun (br : A.branch) ->
                match br.A.branch_pat with
                | A.PatCon (ctor, pats) ->
+                 (* Counter is per-arm so _w1/_w2/… are unique within an arm's
+                    scope; cross-arm collisions are harmless (vars are per-arm). *)
                  let wildcard_ctr = ref 0 in
                  let vars =
                    List.map
@@ -346,14 +359,14 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
     (fun (name, _, arms) ->
       let bases =
         List.filter_map
-          (fun (ctor, vars, body) ->
-            (* A base case arm has a body that is a concrete integer (no recursion,
-               no bound variables needed).  We capture it for OCaml-level evaluation. *)
-            if vars = [] then
-              match body with
-              | A.ELit (A.LitInt n, _) -> Some (ctor, n)
-              | _ -> None
-            else None)
+          (fun (ctor, _vars, body) ->
+            (* A base case arm has a concrete-integer body.  We do not guard on
+               vars=[] because wildcard arms (e.g. Leaf(_)) now produce generated
+               names (_w1, …) in vars — but an ELit body is always variable-free
+               regardless of how many wildcards appear in the pattern. *)
+            match body with
+            | A.ELit (A.LitInt n, _) -> Some (ctor, n)
+            | _ -> None)
           arms
       in
       if bases <> [] then Hashtbl.replace measure_base_cases name bases)
@@ -437,7 +450,23 @@ let type_only_preamble () : string =
   else
     let all_sorts = adt_closure record_sorts in
     if all_sorts = [] then ""
-    else "(declare-sort Elem 0)\n" ^ datatype_decls all_sorts
+    else
+      (* Only emit `(declare-sort Elem 0)` when a sort in the closure actually
+         uses Elem-typed fields (i.e. a List ADT is reachable).  Pure record
+         types with no list fields don't need Elem and emitting it is harmless
+         but inconsistent with build_type_preamble's deduplication logic. *)
+      let needs_elem =
+        List.exists
+          (fun sort ->
+            List.exists
+              (fun ctor ->
+                List.exists
+                  (fun s -> s = Smt.SData "Elem")
+                  (try Hashtbl.find ctor_field_sorts ctor with Not_found -> []))
+              (try Hashtbl.find adt_ctors sort with Not_found -> []))
+          all_sorts
+      in
+      (if needs_elem then "(declare-sort Elem 0)\n" else "") ^ datatype_decls all_sorts
 
 let record_vc_preamble () : string =
   match !measure_preamble, !type_preamble with
@@ -650,6 +679,7 @@ let rec pred_str (e : A.expr) : string =
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
   | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m -> m ^ "(" ^ pred_str a ^ ")"
   | A.EVar { A.txt; _ } -> txt
+  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
@@ -673,15 +703,25 @@ let format_cx (model : (string * string) list) : string =
 let model_of = function Refine.Refuted m -> m | _ -> []
 
 (* ── Scope of refined locals/params: name -> (binder, predicate) ─────────── *)
-type scope = (string * (string * A.expr)) list
+type scope = (string * (string * A.expr * string option)) list
 
 let refined_int_ty : A.ty option -> (string * A.expr) option = function
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred)
   | _ -> None
 
+(* Like refined_int_ty but also admits record TyCon params.
+   Returns (binder, pred, sort_opt) where sort_opt = Some "M_…" for record params. *)
+let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred, None)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
+    when is_record_base base ->
+    Some (binder_name binder, pred, Some (adt_sort_name name))
+  | _ -> None
+
 let scope_add_param (sc : scope) (p : A.param) : scope =
-  match refined_int_ty p.A.param_ty with
+  match refined_scope_ty p.A.param_ty with
   | Some r -> (p.A.param_name.A.txt, r) :: sc
   | None -> sc
 
@@ -690,7 +730,7 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPPat _ -> sc
 
 let scope_add_binding (sc : scope) (b : A.binding) : scope =
-  match b.A.bind_pat, refined_int_ty b.A.bind_ty with
+  match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | _ -> sc
 
@@ -811,8 +851,8 @@ let reflect_scalar (sc : scope) (actual : A.expr)
   | A.EVar { A.txt = x; _ } ->
     let xc = Smt.Const x in
     (match List.assoc_opt x sc with
-     | Some (b, q) ->
-       (* A refined local: carry its own refinement as an assumption. *)
+     | Some (b, q, None) ->
+       (* A refined local (Int): carry its own refinement as an assumption. *)
        let rv n = if n = b || n = "_" then Some xc else None in
        let assumptions =
          match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
@@ -820,7 +860,7 @@ let reflect_scalar (sc : scope) (actual : A.expr)
          | None -> []
        in
        Some (xc, [ (x, Smt.SInt) ], assumptions)
-     | None ->
+     | Some _ | None ->
        (* An ordinary variable: reflect it as a constant so a path-context
           guard about it can constrain it.  Without a guard it stays
           unconstrained and the definite-failure check keeps us silent. *)
@@ -961,14 +1001,6 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
    refinement.  We check each *tail* expression (a return position) under the
    path/scope reaching it, with the same definite-failure soundness stance. ── *)
 
-let is_record_base (t : A.ty) : bool =
-  match t with
-  | A.TyCon ({ A.txt = name; _ }, []) ->
-    (match Hashtbl.find_opt adt_ctors (adt_sort_name name) with
-     | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
-     | _ -> false)
-  | _ -> false
-
 let return_refine (fd : A.fn_def) : (string * A.expr) option =
   match fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
@@ -1000,17 +1032,63 @@ let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list
       branches
   | _ -> [ (path, e) ]
 
+(* Build a resolve_field closure for a known record binder: v.fname becomes the
+   SMT selector applied to the term representing v. *)
+let make_field_resolver (binder : string) (sort_name : string) (binder_term : Smt.term)
+    : string -> string -> Smt.term option =
+  fun varname fname ->
+    if varname <> binder && varname <> "_" then None
+    else
+      match Hashtbl.find_opt adt_ctors sort_name with
+      | Some [ ctor ] ->
+        (match Hashtbl.find_opt ctor_field_names ctor with
+         | None -> None
+         | Some names ->
+           let rec find_idx i = function
+             | [] -> None
+             | n :: _ when n = fname -> Some i
+             | _ :: rest -> find_idx (i + 1) rest
+           in
+           (match find_idx 0 names with
+            | None -> None
+            | Some idx ->
+              Some (Smt.App (Printf.sprintf "%s_%d" ctor idx, [ binder_term ]))))
+      | _ -> None
+
 (* Facts true throughout the body: each refined param contributes its predicate. *)
-let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list =
+(* Returns (decls, assumptions, has_record).
+   Int entries: declare an SInt const, reflect predicate over it.
+   Record entries: declare a datatype const (SData sort_name), reflect the
+   predicate with a field resolver so `s.field` becomes the SMT selector
+   applied to the opaque const.  `has_record` is true when any record entry
+   is present — signals check_post to include the datatype preamble. *)
+let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool =
   List.fold_left
-    (fun (ds, asm) (name, (b, q)) ->
-      let c = Smt.Const name in
-      let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
-      let ds = (name, Smt.SInt) :: ds in
-      match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
-      | Some qa -> (ds, qa :: asm)
-      | None -> (ds, asm))
-    ([], []) sc
+    (fun (ds, asm, has_rec) (name, (b, q, sort)) ->
+      match sort with
+      | None ->
+        let c = Smt.Const name in
+        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let ds = (name, Smt.SInt) :: ds in
+        (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         | Some qa -> (ds, qa :: asm, has_rec)
+         | None -> (ds, asm, has_rec))
+      | Some sort_name ->
+        let c = Smt.Const name in
+        let ds = (name, Smt.SData sort_name) :: ds in
+        let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
+        let rf = make_field_resolver b sort_name c in
+        let rma m arg =
+          if is_axiom_measure m then Some (Smt.App (m, [ arg ])) else None
+        in
+        (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
+                 ~resolve_field:rf ~resolve_measure_app:rma q with
+         | Some qa -> (ds, qa :: asm, true)
+         (* Predicate untranslatable: declare the const but don't set has_rec.
+            Without a loaded assumption, scope_has_record would trigger the
+            "SAT = definite error" path with an unconstrained cex — unsound. *)
+         | None -> (ds, asm, has_rec)))
+    ([], [], false) sc
 
 (* Evaluate a field-selector application on a concrete constructor term.
    <ctor>_<idx>(App(ctor, args)) → args[idx] — enables concrete len evaluation
@@ -1045,10 +1123,8 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
   match Hashtbl.find_opt measure_base_cases name with
   | None -> None
   | Some bases ->
-    let rec go depth term =
-      if depth > 32 then None
-      else
-        match selector_reduce term with
+    let go term =
+      match selector_reduce term with
         | Smt.App (ctor, []) ->
           (* Zero-arg constructor: look up in base cases *)
           List.assoc_opt ctor bases
@@ -1056,32 +1132,13 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
           (* Multi-arg constructor: not a base case for simple measures;
              would need the step case — give up for now *)
           None
-        | _ -> go (depth + 1) (selector_reduce term)
+        | _ ->
+          (* Non-App after selector_reduce: opaque (variable, literal, etc.).
+             selector_reduce is a fixed point on non-App terms, so further
+             recursion cannot reduce it — return None immediately. *)
+          None
     in
-    go 0 arg_term
-
-(* Build a resolve_field closure for a known record binder: v.fname becomes the
-   SMT selector applied to the term representing v. *)
-let make_field_resolver (binder : string) (sort_name : string) (binder_term : Smt.term)
-    : string -> string -> Smt.term option =
-  fun varname fname ->
-    if varname <> binder && varname <> "_" then None
-    else
-      match Hashtbl.find_opt adt_ctors sort_name with
-      | Some [ ctor ] ->
-        (match Hashtbl.find_opt ctor_field_names ctor with
-         | None -> None
-         | Some names ->
-           let rec find_idx i = function
-             | [] -> None
-             | n :: _ when n = fname -> Some i
-             | _ :: rest -> find_idx (i + 1) rest
-           in
-           (match find_idx 0 names with
-            | None -> None
-            | Some idx ->
-              Some (Smt.App (Printf.sprintf "%s_%d" ctor idx, [ binder_term ]))))
-      | _ -> None
+    go arg_term
 
 (* Reflect an ERecord literal as a constructor application in SMT.
    Fields are reordered to match the declaration order stored in ctor_field_names.
@@ -1107,7 +1164,7 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
 let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : scope)
     (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
-  let base_decls, base_assume = scope_facts sc in
+  let base_decls, base_assume, scope_has_record = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   let post_measure_ctr = ref 0 in
   (* Set when resolve_measure_app emits App(m, arg) — the VC then needs the full
@@ -1153,7 +1210,22 @@ let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : sc
       Some (Smt.Const nm)
     end
   in
-  let scalar e = smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app e in
+  (* Field resolver covering record-typed scope params: resolves `old.field` in
+     the return expression via the SMT selector for the opaque param const. *)
+  let scope_field_resolver : string -> string -> Smt.term option =
+    List.fold_left
+      (fun rf (name, (_b, _q, sort)) ->
+        match sort with
+        | None -> rf
+        | Some sort_name ->
+          let rf_param = make_field_resolver name sort_name (Smt.Const name) in
+          fun varname fname ->
+            match rf varname fname with
+            | Some _ as r -> r
+            | None -> rf_param varname fname)
+      (fun _ _ -> None) sc
+  in
+  let scalar e = smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app ~resolve_field:scope_field_resolver e in
   let tail_term_opt =
     match record_sort with
     | Some sort_name ->
@@ -1183,28 +1255,35 @@ let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : sc
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
-       let preamble = match record_sort with
-         | None -> ""
-         | Some _ ->
+       let preamble =
+         if record_sort <> None || scope_has_record then
            (* When all measure apps were evaluated concretely (needs_axiom_preamble=false),
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
               cause Z3 to return `unknown` for SAT queries even when the goal is trivial
               and measures no longer appear in it.  Type preamble alone suffices. *)
            if !needs_axiom_preamble then record_vc_preamble ()
            else type_only_preamble ()
+         else ""
        in
        (match Refine.discharge ~root ~preamble vc with
         | Refine.Verified -> ()
-        | first -> (
+        | first ->
+          let emit_error () =
+            ignore tail_e;
+            Err.error errctx ~span
+              (Printf.sprintf
+                 "refinement violation: return value cannot satisfy postcondition `%s`%s\n\
+                  note: every return path of this function must satisfy `%s`"
+                 (pred_str ret_pred) (format_cx (model_of first)) (pred_str ret_pred))
+          in
+          if scope_has_record then
+            (* With concrete record preconditions in scope, a SAT counterexample
+               satisfying those preconditions IS a real violation — report it. *)
+            (match first with Refine.Refuted _ -> emit_error () | _ -> ())
+          else
             match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
-            | Refine.Verified ->
-              ignore tail_e;
-              Err.error errctx ~span
-                (Printf.sprintf
-                   "refinement violation: return value cannot satisfy postcondition `%s`%s\n\
-                    note: every return path of this function must satisfy `%s`"
-                   (pred_str ret_pred) (format_cx (model_of first)) (pred_str ret_pred))
-            | _ -> ())))
+            | Refine.Verified -> emit_error ()
+            | _ -> ()))
 
 let check_fn_post ~root errctx (fd : A.fn_def) : unit =
   match return_refine_ext fd with

@@ -591,7 +591,43 @@ end|} in
     gated "measure over field: builtin len holds for Nil/0" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error len_ok_src));
     gated "measure over field: builtin len violated by Nil/1" (fun () ->
-        Alcotest.(check bool) "has error" true (has_refine_error len_bad_src)) ]
+        Alcotest.(check bool) "has error" true (has_refine_error len_bad_src));
+
+    (* B1: record-typed parameter refinements as preconditions *)
+    gated "record precondition: carried invariant verifies" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int }
+  fn keep(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0} do
+    { count: old.count }
+  end
+end|}));
+    gated "record precondition: violating migration refuted" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type State = { count : Int }
+  fn drop(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0} do
+    { count: old.count - 1 }
+  end
+end|}));
+
+    (* B3: end-to-end migration shape — param + return + measure *)
+    gated "migration shape: count=0/history=Nil sound" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
+    { count: 0, history: Nil }
+  end
+end|}));
+    gated "migration shape: count=old/history=Nil unsound" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
+    { count: old.count, history: Nil }
+  end
+end|})) ]
 
 let () =
   Alcotest.run "march-refinecheck"
