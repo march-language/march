@@ -1,6 +1,6 @@
 # HCR Phase 8 — Cross-Module Function Signature Evolution
 
-**Status:** Loose spec / design document. Not yet scheduled.
+**Status:** In progress. Two of the three foundational pieces are done.
 
 **Motivation:** The sig_hash gate in `forge deploy hot` (Phase 4) blocks any deploy where an exported function's signature changes. This is correct for preventing silent ABI mismatches, but it also blocks *intentional* coordinated upgrades where a utility module's API changes and all its callers are updated in the same deploy.
 
@@ -18,14 +18,14 @@ v1: B.foo(a: Int, b: String, c: List) -> Result
 v2: B.foo(a: Float, b: String, c: List, d: List) -> Result
 ```
 
-With phases 1–7, `forge deploy hot` rejects this:
+With phases 1–7, `forge deploy hot` rejected this with a terse, unhelpful message:
 
 ```
 error: ABI mismatch — sig_hash changed for:
   B.foo: old=abc123 new=def456
 ```
 
-The gate has no way to know whether old callers of `B.foo` are also being replaced. It treats every sig_hash change as potentially dangerous (correct) but also terminal (too strict).
+As of commit `ff4cb611`, the error is now actionable (see §Done below). The gate itself is still too strict — it has no way to know whether old callers of `B.foo` are also being replaced. It treats every sig_hash change as potentially dangerous (correct) but also terminal (too strict).
 
 The *correct* behavior: allow the sig_hash change when **all callers of the old signature are also being replaced in this deploy batch**.
 
@@ -63,21 +63,23 @@ The gap: there's currently no enforcement that A is in the deploy batch when B.f
 
 The simplest version: if any server-loaded function calls old B.foo *and is not in the current deploy*, reject. This is slightly over-strict (it rejects cases where the caller has already been updated) but safe.
 
-**Manifest extension needed:**
+**Manifest extension — DONE (commit `b04dc364`):**
 
-The `.hcr_manifest` file currently carries:
+The `.hcr_manifest` sidecar now includes optional `callers:` annotations:
 ```
-<name> <impl_hash> <sig_hash> <cas_hash>
-```
-
-Extend with optional caller annotations:
-```
-<name> <impl_hash> <sig_hash> <cas_hash> [callers: <name1>,<name2>...]
+<name> <impl_hash> <sig_hash>
+<name> <impl_hash> <sig_hash> callers:<caller1>,<caller2>
 ```
 
-The compiler has the full call graph during `--compile-so` — it already walks SCCs to compute impl_hashes. Recording direct callers at the dispatch boundary is a small addition.
+The compiler scans the pre-opt TIR for `EApp` calls between boundary functions and writes a reverse index (callee → callers) per manifest entry. The forge parser ignores trailing fields so the format is forward-compatible — no forge change was needed alongside the compiler change.
 
-**Server-side state:** the server needs to track, for each loaded function slot, which other dispatch slots call it. This is a reverse index built at ACTIVATE time from the manifest.
+Example (verified against a live test case):
+```
+B.foo  <impl_h> <sig_h>
+A.bar  <impl_h> <sig_h> callers:B.foo
+```
+
+**Server-side state (still needed):** the server needs to store the caller set from each manifest at ACTIVATE time so that at the next deploy it can answer "who currently calls B.foo?" This is the remaining runtime piece before the gate can be wired up.
 
 ---
 
@@ -100,14 +102,22 @@ This is a cleaner model but requires threading generation ids through all dispat
 
 ---
 
-## Recommended Path
+## Done
 
-**Near-term (Phase 8):** Implement the coordinated upgrade gate.
+- ✅ **Actionable error message** (`forge/lib/cmd_deploy_hot.ml`, commit `ff4cb611`) — the sig_hash rejection now names the offending functions (not raw hashes), explains why the deploy was blocked, and gives step-by-step expand-contract instructions plus a reference to this spec for Option 2.
 
-- Extend the manifest with a caller index
-- Add server-side reverse call graph tracking (built from manifests at ACTIVATE time)
-- Replace the hard sig_hash rejection with the coordinated check
-- Emit clear error messages naming which callers are missing from the batch
+- ✅ **Caller index in manifest** (`bin/main.ml`, commit `b04dc364`) — `--compile-so` manifests now include `callers:` annotations per function. Implemented as a pre-opt TIR scan in `bin/main.ml` that builds a reverse boundary-call index before writing the manifest. Verified with a live `B.foo`/`A.bar` test: `B.foo` has no callers entry; `A.bar` has `callers:B.foo`.
+
+---
+
+## Remaining Work
+
+**Near-term (Phase 8):** Wire up the coordinated upgrade gate.
+
+- Parse `callers:` field from the manifest in `forge/lib/cmd_deploy_hot.ml` (`parse_manifest` + `fn_manifest` type extension)
+- Store caller sets in the server at ACTIVATE time (`runtime/march_reload.c` + `runtime/march_dispatch.{h,c}`)
+- Replace the hard sig_hash rejection with the coordinated check: allow sig_hash change only when all recorded callers of the old sig are also in `to_activate`
+- Emit named-caller error when the check fails (see §What Success Looks Like)
 
 **Long-term (Phase 9?):** Move toward module-level versioning.
 
@@ -191,12 +201,12 @@ Spec: specs/plans/2026-06-26-hcr-cross-module-versioning.md
 
 ---
 
-## Files That Will Change
+## Files
 
-- `forge/lib/cmd_deploy_hot.ml` — coordinated upgrade gate, replaces hard sig_hash rejection
-- `runtime/march_reload.c` — build reverse call graph from manifest at ACTIVATE time
-- `runtime/march_dispatch.{h,c}` — per-slot caller set storage (names of callers, for the reverse index)
-- `bin/main.ml` — emit caller list in `.hcr_manifest` sidecar
-- `lib/tir/llvm_emit.ml` or `lib/cas/pipeline.ml` — extract caller graph for boundary functions
-- `forge/lib/schema_diff.ml` — extend with `sig_evolution` type (breaking vs. compatible)
-- `docs/hot-code-reload.md` — document the coordinated upgrade pattern and expand-contract fallback
+- ✅ `forge/lib/cmd_deploy_hot.ml` — actionable error message (commit `ff4cb611`); coordinated gate logic still needed
+- ✅ `bin/main.ml` — caller index emitted in `.hcr_manifest` sidecar (commit `b04dc364`)
+- `forge/lib/cmd_deploy_hot.ml` — parse `callers:` field; implement coordinated gate
+- `runtime/march_reload.c` — store caller set per slot at ACTIVATE time
+- `runtime/march_dispatch.{h,c}` — per-slot caller set storage
+- `forge/lib/schema_diff.ml` — optional: `sig_evolution` type (breaking vs. compatible) for a more nuanced gate
+- `docs/hot-code-reload.md` — document expand-contract pattern and coordinated upgrade once the gate is live
