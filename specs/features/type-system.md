@@ -268,9 +268,22 @@ After `Typecheck.check_module`, `bin/main.ml` calls `Refine_check.check_module ~
 
 Failed VCs are reported as diagnostics. The VC cache (`vc_cache.ml`) avoids re-solving unchanged obligations.
 
+### Additional post-typecheck passes (`lib/refinecheck/`)
+
+Four sibling passes run after `Refine_check`:
+
+| Pass | File | Trigger | Purpose |
+|------|------|---------|---------|
+| Division safety | `division_safety.ml` | `cap no_panic` in module decls | Proves every integer divisor ≠ 0 via Z3; errors when unverifiable |
+| No-alloc check | `no_alloc.ml` | `cap no_alloc` in module decls | Bans ETuple (non-empty), ERecord, ECon (non-empty args), ELam |
+| Capability inference hints | `cap_infer.ml` | all modules | Emits `Err.hint` at call sites missing a `needs` declaration |
+| Return refinement inference | `return_infer.ml` | functions with Int-refined params | Probes 6 sign candidates (r>0, r≥0, r≥1, r≠0, r<0, r≤−1) via Z3; informational only |
+
+`cap no_panic` and `cap no_alloc` are expressed as `DOpts(["no_panic"], span)` / `DOpts(["no_alloc"], span)` AST nodes, detected by checking module-level declarations.
+
 ### Tests
 
-`test/test_refinecheck.ml` exercises the refinement checker end-to-end; `test/test_refine.ml` covers the SMT bridge. There are on the order of 46–51 refinement tests.
+`test/test_refinecheck.ml` exercises the refinement checker end-to-end; `test/test_refine.ml` covers the SMT bridge. There are on the order of 46–51 refinement tests. Additional tests for the sibling passes live in `test/test_compiler.ml` (suites `no_alloc`, `division_safety`, `cap_infer`, `return_refine_infer`).
 
 ---
 
@@ -806,6 +819,10 @@ String does not implement Num (only Int and Float do).
 
 - **Type Checker:** `lib/typecheck/typecheck.ml` (~7700 lines, 16 sections)
 - **Refinement Checker:** `lib/refinecheck/refine_check.ml` + `lib/refine/` (Z3 bridge)
+- **Division Safety:** `lib/refinecheck/division_safety.ml` (`cap no_panic` divisor proofs)
+- **No-Alloc Check:** `lib/refinecheck/no_alloc.ml` (`cap no_alloc` allocation ban)
+- **Cap Inference Hints:** `lib/refinecheck/cap_infer.ml` (missing `needs` hints)
+- **Return Refinement Inference:** `lib/refinecheck/return_infer.ml` (Z3 sign candidates)
 - **TIR Definition:** `lib/tir/tir.ml` (monomorphic IR types)
 - **Monomorphization:** `lib/tir/mono.ml` (specialization algorithm)
 - **Tests:** `test/test_compiler.ml` (type-system tests), `test/test_refinecheck.ml` / `test/test_refine.ml` (refinement)

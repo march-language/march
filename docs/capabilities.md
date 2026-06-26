@@ -240,6 +240,84 @@ end
 
 ---
 
+## Behavioral module caps — `cap no_panic` and `cap no_alloc`
+
+Beyond IO permission caps and proof caps, March has two *behavioral* capability declarations that trigger static analysis passes rather than type-system enforcement. They live in the module body alongside `needs` declarations.
+
+### `cap no_panic` — guaranteed panic-free
+
+```march
+mod SafeMath do
+  cap no_panic
+
+  fn divide(a : {v : Int | v >= 0}, d : {v : Int | v > 0}) : Int do
+    a / d
+  end
+end
+```
+
+A module with `cap no_panic` must not contain any expression that can panic at runtime. The compiler enforces this with two sub-checks:
+
+1. **Panic-surface ban** — `refine_check.ml` flags calls to functions that can panic (`assert`, `error`, etc.) when reachable without a proof of non-panic.
+2. **Division safety** — `division_safety.ml` proves every integer divisor is non-zero via the Z3 SMT solver. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
+   - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
+   - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.
+   - No refinement or unsupported expression: conservative error.
+
+When Z3 is absent, `cap no_panic` is still conservatively enforced — `Unverified` outcomes are treated as errors.
+
+**Use `Math.checked_div` / `Math.checked_mod`** when you cannot prove the divisor non-zero statically; they return `Option(Int)` instead of panicking.
+
+### `cap no_alloc` — no heap allocation
+
+```march
+mod RealTimeDSP do
+  cap no_alloc
+
+  fn mix(a : Float, b : Float, gain : Float) : Float do
+    (a + b) * gain
+  end
+end
+```
+
+`no_alloc.ml` walks every function body and flags heap-allocating expressions:
+
+| Allocating expression | Error |
+|-----------------------|-------|
+| `ETuple` with ≥1 items | tuple construction allocates |
+| `ERecord` | record construction allocates |
+| `ECon` with ≥1 args (e.g. `Some(x)`) | boxed constructor allocates |
+| `ELam` | lambda/closure allocates |
+
+Nullary constructors (`None`, `True`, `False`, custom zero-arg tags) and unit `()` are safe — they compile to immediate integer tags with no heap allocation.
+
+The check recurses into sub-expressions inside `if`, `match`, `let`, blocks, etc.
+
+### Choosing between the two
+
+| I want to… | Use |
+|------------|-----|
+| Prove no integer division can panic | `cap no_panic` + Int refinements on divisor params |
+| Guarantee safe use in a realtime audio callback | `cap no_alloc` (+ `Tagged(DSP, Realtime)` for the calling site) |
+| Both — pure, panic-free, zero-alloc | `cap no_panic` and `cap no_alloc` together |
+
+Both declarations can coexist in the same module. Each is checked by its own independent pass.
+
+---
+
+## Capability inference hints
+
+If you call a function that requires a `needs X` declaration but your module doesn't have one, the compiler emits a **hint** (not an error) pointing to the call site:
+
+```
+hint: this call uses IO.FileRead but mod Config does not declare `needs IO.FileRead`.
+hint: add `needs IO.FileRead` to the module body.
+```
+
+This is informational — the type checker already enforces `needs` as an error. The hint pass (`cap_infer.ml`) runs after typechecking and gives an actionable fix message in addition to the type error.
+
+---
+
 ## Putting it together
 
 Here's how capability declarations compose across a small web application. Reading the `needs` list of each module answers "what does this module do to the world?" without opening the implementation:
@@ -566,4 +644,6 @@ end
 | Track that a file handle is open vs closed | `always_linear type` + `transitions` (typestate) |
 | Exclude allocation/IO from a realtime callback | `Tagged(DSP, Realtime)` |
 | Thread many caps without adding parameters | Capability environment record |
+| Prove integer division can never panic | `cap no_panic` + Int refinements on divisor params |
+| Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` |
 | Small script, just want it to work | `needs IO` — don't overthink it |
