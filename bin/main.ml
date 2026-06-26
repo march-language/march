@@ -2052,9 +2052,71 @@ let compile filename =
            without having to dlopen the artifact.  Format:
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
-             <fn_name> <impl_hash> <sig_hash>
-           sig_hash may be empty if the function was not hashed. *)
+             <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>]
+           sig_hash may be empty if the function was not hashed.
+           callers: lists other boundary functions that call this one (omitted
+           when empty).  The deploy tool uses this to verify that all callers
+           of a sig-changed function are also being updated. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
+          (* Build a reverse caller index: callee_name → sorted list of
+             boundary caller names.  Walk the pre-opt TIR so that calls which
+             the optimizer inlined away are still captured. *)
+          let callee_to_callers : (string, string list) Hashtbl.t =
+            Hashtbl.create 16
+          in
+          let add_caller ~callee ~caller =
+            let prev = Option.value ~default:[]
+                (Hashtbl.find_opt callee_to_callers callee) in
+            Hashtbl.replace callee_to_callers callee (caller :: prev)
+          in
+          (* Recursively scan an expr for EApp calls to boundary functions. *)
+          let rec scan_expr caller e =
+            let open March_tir.Tir in
+            match e with
+            | EApp (callee_var, args) ->
+              let cn = callee_var.v_name in
+              if Hashtbl.mem hr_impl_hashes cn && cn <> caller then
+                add_caller ~callee:cn ~caller;
+              List.iter (scan_atom caller) args
+            | ECallPtr (f, args) ->
+              scan_atom caller f;
+              List.iter (scan_atom caller) args
+            | ELet (_, e1, e2) ->
+              scan_expr caller e1; scan_expr caller e2
+            | ELetRec (fns, body) ->
+              List.iter (fun fd -> scan_expr caller fd.fn_body) fns;
+              scan_expr caller body
+            | ECase (a, brs, def) ->
+              scan_atom caller a;
+              List.iter (fun br -> scan_expr caller br.br_body) brs;
+              Option.iter (scan_expr caller) def
+            | ESeq (e1, e2) -> scan_expr caller e1; scan_expr caller e2
+            | EAtom a -> scan_atom caller a
+            | ETuple atoms -> List.iter (scan_atom caller) atoms
+            | ERecord fields -> List.iter (fun (_, a) -> scan_atom caller a) fields
+            | EField (a, _) -> scan_atom caller a
+            | EUpdate (a, fields) ->
+              scan_atom caller a;
+              List.iter (fun (_, av) -> scan_atom caller av) fields
+            | EAlloc (_, args) -> List.iter (scan_atom caller) args
+            | EStackAlloc (_, args) -> List.iter (scan_atom caller) args
+            | EFree a | EIncRC a | EDecRC a
+            | EAtomicIncRC a | EAtomicDecRC a -> scan_atom caller a
+            | EReuse (a, _, args) ->
+              scan_atom caller a;
+              List.iter (scan_atom caller) args
+          and scan_atom _caller _a = ()
+          in
+          (* Scan every boundary function's body in pre-opt TIR. *)
+          List.iter (fun (fd : March_tir.Tir.fn_def) ->
+            if Hashtbl.mem hr_impl_hashes fd.fn_name then
+              scan_expr fd.fn_name fd.fn_body
+          ) pre_opt_tir.March_tir.Tir.tm_fns;
+          (* Deduplicate and sort each callers list for deterministic output. *)
+          Hashtbl.iter (fun callee callers ->
+            let deduped = List.sort_uniq String.compare callers in
+            Hashtbl.replace callee_to_callers callee deduped
+          ) callee_to_callers;
           let mf = out_bin ^ ".hcr_manifest" in
           (try
              let oc = open_out mf in
@@ -2062,7 +2124,12 @@ let compile filename =
              Hashtbl.iter (fun name impl_h ->
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in
-               Printf.fprintf oc "%s %s %s\n" name impl_h sig_h
+               let callers_field =
+                 match Hashtbl.find_opt callee_to_callers name with
+                 | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
+                 | _ -> ""
+               in
+               Printf.fprintf oc "%s %s %s%s\n" name impl_h sig_h callers_field
              ) hr_impl_hashes;
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
