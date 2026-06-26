@@ -270,6 +270,60 @@ All three fields are required. The deploy uses `ssh` from the system PATH; your 
 
 ---
 
+## Deploying signature changes
+
+When a function's signature changes between deploys — for example, `B.foo` gains a new parameter — the server needs to know that every existing caller of the old signature is also being replaced in the same deploy batch. Otherwise old callers would pass the wrong number or type of arguments to new code.
+
+`forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
+
+- **All callers covered:** the deploy proceeds with a message like:
+  ```
+  Coordinated upgrade: sig_hash changed, all callers covered.
+    B.foo: old sig abc123 → new sig def456
+    A.Worker_dispatch: present in deploy (impl_hash changed) ✓
+  ```
+
+- **A caller is missing:** the deploy is rejected with a named-caller error:
+  ```
+  error: B.foo signature changed but the following callers are not included in this deploy:
+    A.Worker_dispatch calls B.foo — must also be updated in this batch
+  hint: add Module A to the deploy batch or use expand-contract:
+    1. Add B.foo_v2 alongside B.foo, update A to call B.foo_v2, deploy together
+    2. In a later deploy, remove B.foo
+  ```
+
+If neither module in a pair has ever been deployed with caller tracking enabled (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy — the caller set is empty, so there are no recorded callers to check.
+
+---
+
+## Independent deploy pace (epoch-tagged dispatch)
+
+The coordinated upgrade gate works well when you can batch all callers into one deploy. But sometimes you want to deploy `B.foo` v2 today and migrate the callers next sprint — without blocking the deploy or risking ABI mismatches.
+
+**Epoch-tagged dispatch** (Phase 9) makes this safe. The compiler bakes a per-file-static epoch cell (`@__march_hcr_epoch`) and an exported init function (`@__march_init(i32)`) into every `.so` output. The reload server assigns a monotonic epoch number per deploy batch via the `GET_EPOCH` protocol command and stamps it into the loaded `.so` by calling `__march_init` after `dlopen`.
+
+At runtime, boundary call sites call `march_dispatch_enter_gen(NAME_ID, epoch, &v)` instead of the simpler `march_dispatch_enter`. This function routes to the **newest ring slot whose epoch ≤ the caller's epoch**, rather than always picking the newest slot. The effect:
+
+- Old deployed `A.so` (epoch 5) calls `B.foo` → gets the `B.foo` that was active at epoch 5 (old version)
+- New deployed `A.so` (epoch 7) calls `B.foo` → gets the newest `B.foo` (new version)
+
+Old callers naturally see the old function until they are redeployed. No coordination, no batching required.
+
+When Phase 9 is active, the Phase 8 gate downgrades from a hard error to an advisory warning — the deploy proceeds regardless, because epoch routing guarantees old callers cannot reach new code.
+
+The deploy flow gains one step: forge calls `GET_EPOCH` to receive the batch's epoch number, which the server increments atomically for each deploy. If the server does not support `GET_EPOCH`, forge falls back to epoch 0 and the Phase 8 gate applies as normal.
+
+### Compatibility table
+
+| Server supports epoch | Forge supports epoch | Result |
+|---|---|---|
+| No | No | Phase 8 gate only |
+| Yes | No | Phase 8 gate (forge never calls GET_EPOCH) |
+| No | Yes | Forge calls GET_EPOCH → ERR → epoch 0 → Phase 8 gate |
+| Yes | Yes | Full Phase 9: epoch-tagged routing, gate becomes advisory |
+
+---
+
 ## Next Steps
 
 - [Actors]({{ site.baseurl }}/docs/actors/) — the actor model hot reload builds on

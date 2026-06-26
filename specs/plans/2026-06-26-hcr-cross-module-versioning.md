@@ -1,6 +1,6 @@
 # HCR Phase 8 — Cross-Module Function Signature Evolution
 
-**Status:** Phase 8 complete (commit `20e54959`). All three foundational pieces are done and wired up end-to-end.
+**Status:** Phase 8 complete (commit `20e54959`). Phase 9 (epoch-tagged dispatch) also complete (commit `f86f9b66`) — see `specs/plans/2026-06-26-hcr-phase9-epoch-dispatch.md` for the full Phase 9 design. All foundational pieces are done and wired up end-to-end.
 
 **Motivation:** The sig_hash gate in `forge deploy hot` (Phase 4) blocks any deploy where an exported function's signature changes. This is correct for preventing silent ABI mismatches, but it also blocks *intentional* coordinated upgrades where a utility module's API changes and all its callers are updated in the same deploy.
 
