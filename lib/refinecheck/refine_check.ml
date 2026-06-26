@@ -1319,6 +1319,8 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear axiom_measures;
   Hashtbl.clear measure_base_cases;
   Hashtbl.clear measure_preamble_sorts;
+  registered_measures := [];
+  measure_nonneg := [];
   measure_preamble := "";
   type_preamble := "";
   register_builtin_adts ();

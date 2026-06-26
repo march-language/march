@@ -66,14 +66,17 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
             | _ :: "compat" :: _ :: v :: _ -> current_compat := v
             | _ -> ())
           end;
-          (* Detect "invariant": "value" *)
+          (* Detect "invariant": "value" — extract between the first '"'
+             after ':' and the last '"' on the line, so embedded characters
+             written by %S (e.g. escaped operators) don't break the parse. *)
           if llen > 13 && String.sub line 0 12 = "\"invariant\":" then begin
-            (* The value is a JSON string; extract between the first pair of
-               quotes after the colon.  Split on '"' gives:
-               ["\"invariant\": "; ""; " "; "<value>"; ...] *)
-            (match String.split_on_char '"' line with
-            | _ :: "invariant" :: _ :: v :: _ -> current_invariant := Some v
-            | _ -> ())
+            (try
+              let after_colon = String.index line ':' + 1 in
+              let first_q = String.index_from line after_colon '"' + 1 in
+              let last_q  = String.rindex line '"' in
+              if first_q <= last_q then
+                current_invariant := Some (String.sub line first_q (last_q - first_q))
+            with Not_found -> ())
           end;
           (* Detect state_fields array start *)
           if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then

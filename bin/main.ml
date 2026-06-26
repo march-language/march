@@ -956,10 +956,11 @@ let rec find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
     : March_ast.Ast.fn_def option =
   let module A = March_ast.Ast in
   List.find_map (fun d -> match d with
-    | A.DFn (fd, _) when fd.A.fn_name.A.txt = "migrate_state" ->
-      Some fd
     | A.DMod (name, _, inner, _) when name.A.txt = actor ->
-      find_migrate_fn actor inner
+      (* Only search for migrate_state inside the named actor's own module *)
+      List.find_map (fun d2 -> match d2 with
+        | A.DFn (fd, _) when fd.A.fn_name.A.txt = "migrate_state" -> Some fd
+        | _ -> None) inner
     | A.DMod (_, _, inner, _) ->
       find_migrate_fn actor inner
     | _ -> None) decls
@@ -967,6 +968,23 @@ let rec find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
 (* Patch a migrate_state fn_def with refined param/return types for the VC.
    - First param gets type  { old : RawRecord | inv_old(old) }
    - Return type becomes    { v : <state_name> | inv_new(v) } *)
+(* Rewrite EField receivers so they match the canonical binder name.
+   If the user wrote @invariant(state.count >= 0), pred_to_string serialises
+   "state.count >= 0" and parse_pred rebuilds EField(EVar "state", "count").
+   The TyRefine binder is always "s", so EVar "state" would not resolve.
+   We normalise all EField/EVar receivers to "s" here before injection. *)
+let rec normalize_inv_receiver (binder : string) (e : March_ast.Ast.expr) : March_ast.Ast.expr =
+  let module A = March_ast.Ast in
+  let go = normalize_inv_receiver binder in
+  match e with
+  | A.EField (A.EVar v, f, sp) ->
+    A.EField (A.EVar { v with A.txt = binder }, f, sp)
+  | A.EField (base, f, sp) -> A.EField (go base, f, sp)
+  | A.EBinOp (op, l, r, sp) -> A.EBinOp (op, go l, go r, sp)
+  | A.EUnOp (op, x, sp) -> A.EUnOp (op, go x, sp)
+  | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
+  | other -> other
+
 let patch_migrate_fn (fd : March_ast.Ast.fn_def)
     ~(inv_old : March_ast.Ast.expr) ~(inv_new : March_ast.Ast.expr)
     ~(state_name : string) : March_ast.Ast.fn_def =
@@ -975,6 +993,8 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
   let rawrec_ty = A.TyCon ({ A.txt = "RawRecord"; A.span = sp }, []) in
   let state_ty  = A.TyCon ({ A.txt = state_name;  A.span = sp }, []) in
   let mk_binder name = Some { A.txt = name; A.span = sp } in
+  let inv_old = normalize_inv_receiver "s" inv_old in
+  let inv_new = normalize_inv_receiver "v" inv_new in
   let patch_clause (c : A.fn_clause) =
     let params = match c.A.fc_params with
       | [] -> []
@@ -1262,6 +1282,10 @@ let compile filename =
     exit 0
   end
   else if !check_migration then begin
+    if !prior_schema_path = "" || !new_schema_path = "" then begin
+      Printf.eprintf "error: --check-migration requires --prior-schema and --new-schema\n";
+      exit 2
+    end;
     let module A  = March_ast.Ast in
     let module Rc = March_refinecheck.Refine_check in
     let module Sd = March_forge.Schema_diff in
@@ -2000,7 +2024,7 @@ let compile filename =
               "(" ^ pred_to_string l ^ " " ^ op ^ " " ^ pred_to_string r ^ ")"
             (* Unary operators *)
             | EApp (EVar { txt = "not"; _ }, [inner], _) ->
-              "not " ^ pred_to_string inner
+              "!(" ^ pred_to_string inner ^ ")"
             | EApp (EVar { txt = "negate"; _ }, [inner], _) ->
               "-" ^ pred_to_string inner
             (* Single-argument measure/function calls *)
