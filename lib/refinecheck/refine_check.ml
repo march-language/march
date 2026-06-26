@@ -724,21 +724,27 @@ let rec pretty_smt_value (v : string) : string =
     | _ -> v
   end else v
 
-(* Render an SMT counterexample model for humans: a measure symbol `m$x` is
-   shown as `m(x)`.  Record values are expanded to `{ field: val }` form.
-   Empty model => "". *)
+(* Render one model entry: "m(x) = v" for measure symbols, "k = v" otherwise. *)
+let render_model_entry (k, v) : string =
+  let v' = pretty_smt_value v in
+  match String.index_opt k '$' with
+  | Some i ->
+    Printf.sprintf "%s(%s) = %s"
+      (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v'
+  | None -> Printf.sprintf "%s = %s" k v'
+
+(* Inline counterexample suffix for call-site errors (e.g. precondition checks).
+   Returns "" when the model is empty. *)
 let format_cx (model : (string * string) list) : string =
   if model = [] then ""
+  else " (e.g. " ^ String.concat ", " (List.map render_model_entry model) ^ ")"
+
+(* Multi-line counterexample block for return-type constraint errors. Returns "" when empty. *)
+let cx_block (model : (string * string) list) : string =
+  if model = [] then ""
   else
-    let entry (k, v) =
-      let v' = pretty_smt_value v in
-      match String.index_opt k '$' with
-      | Some i ->
-        Printf.sprintf "%s(%s) = %s"
-          (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v'
-      | None -> Printf.sprintf "%s = %s" k v'
-    in
-    "\ncounterexample: " ^ String.concat ", " (List.map entry model)
+    "\n\nA counterexample was found:\n\n    " ^
+    String.concat "\n    " (List.map render_model_entry model)
 
 let model_of = function Refine.Refuted m -> m | _ -> []
 
@@ -1201,7 +1207,8 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
          else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
   | _ -> None
 
-let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : scope)
+let check_post ~root errctx ~span ?(record_sort : string option = None)
+    ?(fn_name : string option = None) (sc : scope)
     (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
   let base_decls, base_assume, scope_has_record = scope_facts sc in
@@ -1310,10 +1317,22 @@ let check_post ~root errctx ~span ?(record_sort : string option = None) (sc : sc
         | first ->
           let emit_error () =
             ignore tail_e;
-            Err.error errctx ~span
-              (Printf.sprintf
-                 "refinement violation: return value cannot satisfy postcondition `%s`%s"
-                 (pred_str ret_pred) (format_cx (model_of first)))
+            let pred = pred_str ret_pred in
+            let fn_prefix = match fn_name with
+              | Some n -> Printf.sprintf "`%s` does not satisfy" n
+              | None   -> "The return value does not satisfy"
+            in
+            let msg = Printf.sprintf
+              "%s its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s%s"
+              fn_prefix pred (cx_block (model_of first))
+            in
+            let hint = Printf.sprintf
+              "Every branch must produce a return value satisfying `%s`." pred
+            in
+            Err.report errctx
+              { March_errors.Errors.severity = March_errors.Errors.Error
+              ; span; message = msg; labels = []
+              ; notes = [hint]; code = None; fix = None }
           in
           if scope_has_record then
             (* With concrete record preconditions in scope, a SAT counterexample
@@ -1333,7 +1352,8 @@ let check_fn_post ~root errctx (fd : A.fn_def) : unit =
         let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
         let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
         List.iter
-          (check_post ~root errctx ~span:c.A.fc_span ~record_sort sc binder ret_pred)
+          (check_post ~root errctx ~span:c.A.fc_span ~record_sort
+             ~fn_name:(Some fd.A.fn_name.A.txt) sc binder ret_pred)
           (tails base c.A.fc_body))
       fd.A.fn_clauses
 
