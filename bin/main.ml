@@ -980,8 +980,6 @@ let rec normalize_inv_receiver (binder : string) (e : March_ast.Ast.expr) : Marc
   | A.EField (A.EVar v, f, sp) ->
     A.EField (A.EVar { v with A.txt = binder }, f, sp)
   | A.EField (base, f, sp) -> A.EField (go base, f, sp)
-  | A.EBinOp (op, l, r, sp) -> A.EBinOp (op, go l, go r, sp)
-  | A.EUnOp (op, x, sp) -> A.EUnOp (op, go x, sp)
   | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
   | other -> other
 

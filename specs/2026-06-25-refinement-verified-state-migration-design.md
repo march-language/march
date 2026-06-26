@@ -1,7 +1,7 @@
 # Refinement-Verified Actor State Migration for Hot Code Reload
 
 **Date:** 2026-06-25
-**Status:** In progress — §7 step 1 (Gap #1 spike) done; steps 2–5 pending
+**Status:** Complete — all three gaps implemented (2026-06-25)
 **Depends on:** HCR Phase 5 (actor state migration; `_migrate_state` recognition in TIR + `__migrate_<Actor>` export); refinement checking A0–A2 (`lib/refine/`, `lib/refinecheck/`); refinement postconditions (`refine_check.ml:834`)
 **Spec parents:** `specs/plans/2026-06-24-hcr-phase5-design.md`, `specs/2026-06-21-refinement-types-state-and-forward-design.md`
 
@@ -137,11 +137,193 @@ No new VC builder, solver wiring, cache, or counterexample formatter is needed �
 }
 ```
 
-- **Emit** (`bin/main.ml:1823–1845`): read the actor's `@invariant` attribute (new `actor_invariant` field on `DActor`, sibling to `actor_compat`) and write the `"invariant"` line. Absent attribute ⟹ omit the key (treated as `true`).
+- **Emit** (`bin/main.ml:1823–1845`): read the actor's `@invariant` attribute (new `actor_invariant` field on `actor_def`, sibling to `actor_compat`) and write the `"invariant"` line. Absent attribute ⟹ omit the key (treated as `true`).
 - **Parse** (`schema_diff.ml:28`): add an `invariant : string option` field to `actor_schema` and a line-detector mirroring the existing `"compat":` one (`:59`).
 - **Provenance:** unchanged plumbing — the prior schema (now including `inv_old`) already rides the local `.prev` sidecar (`cmd_deploy_hot.ml:502`). **[CORRECTION vs. summary]** there is no CAS-by-`impl_hash` fetch to extend; the predicate travels in the file that already travels.
 
 **Sizing note:** the existing `.schemas.json` parser is a hand-rolled line scanner (`schema_diff.ml:39–78`). Adding one key is small and matches the existing `"compat"` handling exactly; no JSON library is introduced.
+
+### 3a. Detailed implementation spec
+
+#### Syntax decision: `@invariant` on the actor declaration, not the State type
+
+The spec §9 example shows `@invariant` on `type State` inside a module. The implementation places it on the **`actor` declaration** (parallel to `@compat`), because:
+- `actor_def` already has `actor_compat : string` — `actor_invariant : expr option` is a one-field extension
+- The parser already handles `nonempty_list(fn_attr); actor_decl` — we extend this path
+- `DType` nodes have no attribute slot today; adding one for a single use is more invasive
+
+Surface syntax:
+```march
+@invariant(count >= 0 && len(history) == count)
+@compat(full)
+actor Counter do ... end
+```
+
+Attributes can appear in either order. Multiple `@invariant` annotations are a parse error (last one wins would be silently wrong; rejecting at the semantic action is safer).
+
+#### Parser conflict: why `@invariant` needs a new token
+
+The existing `fn_attr` production only accepts `value = LOWER_IDENT` as the argument:
+```menhir
+fn_attr:
+  | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { name ^ ":" ^ value }
+```
+This works for `@compat(full)` but not `@invariant(count >= 0)` — a general expression, not a bare identifier. An `actor_attr` nonterminal that switches on the position cannot resolve the conflict: `AT; LOWER_IDENT("invariant"); LPAREN; LOWER_IDENT("count")` is a 4-token prefix that could be either an `fn_attr` (`count` as the complete value) or the start of an expression (`count >= 0`).
+
+**Fix: add `invariant` as a reserved keyword token.** This is the minimal, unambiguous solution:
+
+**`lib/lexer/lexer.mll`** — add one line to the keyword table (alphabetical position between `in` and `let` or wherever the list sits):
+```
+| "invariant" -> INVARIANT
+```
+
+**`lib/parser/parser.mly`** — declare `%token INVARIANT` and add two new `decl` productions (one with only `@invariant`, one with both):
+```menhir
+%token INVARIANT
+
+decl:
+  (* ... existing productions ... *)
+
+  (* @invariant(expr) alone before an actor decl *)
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
+    { match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_invariant = Some inv }, span)
+      | d -> d }
+
+  (* @invariant(expr) followed by other fn_attrs (e.g. @compat) *)
+  | AT; INVARIANT; LPAREN; inv = expr; RPAREN;
+    attrs = nonempty_list(fn_attr); d = actor_decl
+    { let compat = List.fold_left (fun acc a ->
+          let n = String.length a in
+          if n > 7 && String.sub a 0 7 = "compat:" then String.sub a 7 (n - 7)
+          else acc) "full" attrs in
+      match d with
+      | DActor (vis, name, adef, span) ->
+        DActor (vis, name, { adef with actor_compat = compat;
+                                       actor_invariant = Some inv }, span)
+      | d -> d }
+```
+
+The existing `nonempty_list(fn_attr); actor_decl` production handles `@compat` (and any future single-word attrs) unchanged. The two new productions handle `@invariant` as a syntactically distinct prefix because `INVARIANT` is now a different token from `LOWER_IDENT`.
+
+**Also add an expression-level start symbol** (needed by Gap #3 for re-parsing stored predicate strings):
+```menhir
+%start <March_ast.Ast.expr> expr_eof
+%%
+expr_eof: e = expr; EOF { e }
+```
+Menhir generates `March_parser.Parser.expr_eof` automatically from this declaration.
+
+#### AST change (`lib/ast/ast.ml`)
+
+Add `actor_invariant` to `actor_def` (line ~277):
+```ocaml
+and actor_def = {
+  actor_state     : field list;
+  actor_init      : expr;
+  actor_handlers  : actor_handler list;
+  actor_supervise : supervise_config option;
+  actor_compat    : string;
+  actor_invariant : expr option;   (* @invariant predicate; None means inv = true *)
+}
+```
+Default in every existing `actor_def` construction site: `actor_invariant = None`. The desugar pass does not touch it.
+
+#### Predicate serializer (`bin/main.ml`, near schema emit)
+
+A local `pred_to_string` covers the expression subset that can appear in refinement predicates. It raises `Invalid_argument` on anything outside the subset (in which case the `"invariant"` key is omitted with a warning, conservatively treating the invariant as absent):
+
+```ocaml
+let rec pred_to_string (e : March_ast.Ast.expr) : string =
+  let module A = March_ast.Ast in
+  match e with
+  | A.ELit (A.LitInt n, _)  -> string_of_int n
+  | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
+  | A.EVar { A.txt = x; _ } -> x
+  | A.EField (r, { A.txt = f; _ }, _) -> pred_to_string r ^ "." ^ f
+  | A.EApp (A.EVar { A.txt = m; _ }, [a], _) ->
+    m ^ "(" ^ pred_to_string a ^ ")"
+  | A.EBinOp (op, l, r, _) ->
+    let s = match op with
+      | A.Add -> "+" | A.Sub -> "-" | A.Mul -> "*"
+      | A.Eq  -> "==" | A.Neq -> "!=" | A.Lt -> "<" | A.Le -> "<="
+      | A.Gt  -> ">"  | A.Ge  -> ">="
+      | A.And -> "&&" | A.Or  -> "||"
+      | _ -> raise (Invalid_argument "pred_to_string") in
+    "(" ^ pred_to_string l ^ " " ^ s ^ " " ^ pred_to_string r ^ ")"
+  | A.EUnOp (A.Not, e, _) -> "!" ^ pred_to_string e
+  | A.EUnOp (A.Neg, e, _) -> "-" ^ pred_to_string e
+  | _ -> raise (Invalid_argument "pred_to_string: unsupported node")
+```
+
+The generated string is round-trippable: it uses only operator characters that the March expression parser accepts.
+
+#### Collection (`bin/main.ml`, after `collect_actor_compat`)
+
+```ocaml
+let rec collect_actor_invariant acc decls =
+  List.fold_left (fun acc d ->
+      match d with
+      | A.DActor (_, name, adef, _) ->
+        (match adef.A.actor_invariant with
+         | None -> acc
+         | Some e -> (name.A.txt, e) :: acc)
+      | A.DMod (_, _, inner, _) -> collect_actor_invariant acc inner
+      | _ -> acc) acc decls
+in
+let actor_invariant_map =
+  collect_actor_invariant [] desugared.A.mod_decls
+```
+
+#### Schema emit change (`bin/main.ml:1847`)
+
+Replace the existing `Printf.fprintf` inside the `List.iteri` body with:
+```ocaml
+let invariant_opt = List.assoc_opt actor_name actor_invariant_map in
+let invariant_line = match invariant_opt with
+  | None -> ""
+  | Some e ->
+    (try Printf.sprintf {|    "invariant": %S,|} ^ "\n" (pred_to_string e)
+     with Invalid_argument _ ->
+       Printf.eprintf "warning: @invariant on %s contains unsupported expression; \
+                       omitting from schema\n" actor_name;
+       "")
+in
+Printf.fprintf oc "  %S: {\n    \"compat\": %S,\n%s    \"state_fields\": %s\n  }%s\n"
+  actor_name compat invariant_line field_lines sep
+```
+The `"invariant"` key appears between `"compat"` and `"state_fields"` so the hand-rolled parser in `schema_diff.ml` can scan for it in document order.
+
+#### Schema diff change (`forge/lib/schema_diff.ml`)
+
+**Type** (line ~16, add field):
+```ocaml
+type actor_schema = {
+  compat       : string;
+  invariant    : string option;   (* new *)
+  state_fields : field list;
+}
+```
+
+**Parser** (inside `parse_schemas_file`, after the `"compat":` detection, line ~59):
+```ocaml
+| line when starts_with {|"invariant":| } line ->
+  let v = (* extract string value between first pair of "..." after the colon *)
+    let i = String.index line ':' + 1 in
+    let s = String.trim (String.sub line i (String.length line - i)) in
+    (* strip leading/trailing quotes; unescape \" *)
+    String.sub s 1 (String.length s - 2)
+    |> String.split_on_char '\\' |> String.concat ""  (* crude unescape; ok for pred strings *)
+  in
+  current_invariant := Some v
+```
+
+The existing `actor_schema` construction at the end of each actor block gains `invariant = !current_invariant` and resets `current_invariant := None` alongside the other fields.
+
+#### Test (`forge/test/test_forge.ml`)
+
+One new test case: build a March source with `@invariant(count >= 0)` on an actor, run `--compile-so --hot-reload`, check that the emitted `.schemas.json` contains `"invariant": "(count >= 0)"` (with the parentheses from `pred_to_string`'s binary-op wrapper), and parse it back via `Schema_diff.parse_schemas_file` to verify `invariant = Some "(count >= 0)"`.
 
 ---
 
@@ -163,6 +345,243 @@ The mode: (a) parses/typechecks current source as usual; (b) for each actor with
 `forge deploy hot` runs this between the schema-diff/`check_compat` step and CAS_PUT/ACTIVATE (`cmd_deploy_hot.ml:336–356`): a non-zero exit aborts the deploy with the compiler's diagnostic, exactly as a `check_compat` violation already aborts (`:351–358`).
 
 **Tradeoff (why not move the check into forge):** forge would need to link `lib/refine` + `lib/refinecheck` + parse predicates + reconstruct the prior record type — i.e. half the front end. The compiler already has all of it, plus the parser for the predicate strings, plus the VC cache rooted at the project. Shelling out keeps one SMT reasoner, one cache, one diagnostic format, and lets the predicate parser stay where the lexer/parser live. The cost is one extra `march` invocation per deploy (cached VCs make repeats instant). This mirrors how forge already shells out to the compiler for builds rather than embedding it.
+
+### 4a. Detailed implementation spec
+
+#### New CLI flags (`bin/main.ml`)
+
+Three new refs alongside the existing hot-reload flags:
+```ocaml
+let check_migration  = ref false
+let prior_schema_path = ref ""
+let new_schema_path   = ref ""
+```
+
+Argument spec additions:
+```ocaml
+"--check-migration", Arg.Set check_migration,
+  " Verify migrate_state soundness; requires --prior-schema and --new-schema";
+"--prior-schema",    Arg.Set_string prior_schema_path,
+  "<path>  Prior .schemas.json for --check-migration";
+"--new-schema",      Arg.Set_string new_schema_path,
+  "<path>  New .schemas.json for --check-migration";
+```
+
+`--check-migration` runs after the normal parse→desugar→typecheck pipeline but **skips codegen** (same as `--check`). It does not modify any compiled artifact and is not in the CAS cache key.
+
+#### New `refine_check.ml` exports
+
+Two functions need to be callable from `bin/main.ml` in `--check-migration` mode:
+
+**`register_types_for_check : A.decl list -> unit`** — runs only the type-registration phase of `check_module` (the two-pass `register_adt_names`/`register_field_sorts` + rebuild preambles) without running any VCs. Used to inject the synthetic `RawRecord` type before calling `check_fn_post`.
+
+Implementation: factor the existing `check_module` top section (currently inlined) into a named helper; call it from both `check_module` and from the new export. Must **reset** the relevant hashtables (`adt_ctors`, `ctor_field_sorts`, `ctor_field_names`, `axiom_measures`) before re-registering, just as `check_module` does at its end, so repeated calls don't accumulate stale entries.
+
+**`check_fn_post`** — already public (called from `check_module`); confirm it is accessible from `bin/main.ml` by adding it to the module interface.
+
+#### `RawRecord` type synthesis
+
+The prior field list comes from `Schema_diff.actor_schema.state_fields : Schema_diff.field list` where `field = { name : string; ty : string }`. Convert to a synthetic `A.DType` declaration using `schema_str_to_ty`:
+
+```ocaml
+(* Inverse of ty_to_schema_str in bin/main.ml *)
+let rec schema_str_to_ty (s : string) : A.ty =
+  let sp = A.dummy_span (* or any span; not used by refine_check *) in
+  let con name args = A.TyCon ({ A.txt = name; A.span = sp }, args) in
+  match s with
+  | "Int"    -> con "Int"    []
+  | "Bool"   -> con "Bool"   []
+  | "String" -> con "String" []
+  | "Float"  -> con "Float"  []
+  | _ when String.length s > 5 && String.sub s 0 5 = "List(" ->
+    let inner = String.sub s 5 (String.length s - 6) in
+    con "List" [schema_str_to_ty inner]
+  | other -> con other []  (* unknown type → opaque TyCon; fields will be Elem-sorted *)
+
+let make_rawrecord_decl (prior_fields : Schema_diff.field list) : A.decl =
+  let sp = A.dummy_span in
+  let ast_fields = List.map (fun f ->
+      { A.fld_name = { A.txt = f.Schema_diff.name; A.span = sp };
+        A.fld_ty   = schema_str_to_ty f.Schema_diff.ty;
+        A.fld_lin  = false })
+    prior_fields
+  in
+  A.DType (A.Public, { A.txt = "RawRecord"; A.span = sp },
+           [], A.TDRecord ast_fields, sp)
+```
+
+Pass `[make_rawrecord_decl prior_fields]` to `Refine_check.register_types_for_check` before calling `check_fn_post`. This registers `M_RawRecord` as an SMT datatype with the prior field selectors (`RawRecord_0`, `RawRecord_1`, …) so that `old.field` in the predicate and return expression resolve correctly.
+
+**Name collision guard:** `RawRecord` must not collide with a user-defined type. Since it is only registered transiently inside `--check-migration` mode (outside any user compilation), and the type name is intentionally synthetic, this is safe. If the user's source happens to also define a type named `RawRecord`, `register_types_for_check` would overwrite it — add a check and emit a compile error if so.
+
+#### Parsing `inv_old` from a stored string
+
+Use the `expr_eof` entry point added to the parser in §3a:
+```ocaml
+let parse_pred (src : string) : A.expr option =
+  let lb = Lexing.from_string src in
+  match March_parser.Parser.expr_eof March_lexer.Lexer.token lb with
+  | e      -> Some e
+  | exception _ -> None  (* parse failure → predicate skip; conservatively accept *)
+```
+
+The predicate string stored in `.schemas.json` was produced by `pred_to_string` (§3a), which always emits valid March expression syntax. `parse_pred` failing is possible only if the schema file was hand-edited; in that case the predicate is skipped (conservatively accept, matching `z3`-unavailable behaviour).
+
+#### Synthesising the refined `fn_def`
+
+`check_fn_post` reads the refined return type from `fd.fn_ret_ty` and the param types from `c.fc_params[i].param_ty`. Rather than calling `check_post` directly (which would require reconstructing all its internal arguments), patch the `fn_def` AST in-place before passing it in:
+
+```ocaml
+(* Find migrate_state for this actor in the desugared AST.
+   After desugar, it is a DFn named "migrate_state" inside a DMod whose
+   dotted path ends with the actor name.  Walk recursively. *)
+let rec find_migrate_fn (actor : string) (decls : A.decl list) : A.fn_def option =
+  List.find_map (fun d -> match d with
+    | A.DFn (fd, _) when fd.A.fn_name.A.txt = "migrate_state" ->
+      Some fd  (* TODO: also check enclosing module path = actor *)
+    | A.DMod (_, _, inner, _) -> find_migrate_fn actor inner
+    | _ -> None) decls
+
+let patch_migrate_fn (fd : A.fn_def)
+    ~(inv_old : A.expr) ~(inv_new : A.expr)
+    ~(state_name : string) : A.fn_def =
+  let sp = fd.A.fn_span in
+  let rawrec_ty = A.TyCon ({ A.txt = "RawRecord"; A.span = sp }, []) in
+  let state_ty  = A.TyCon ({ A.txt = state_name;  A.span = sp }, []) in
+  let mk_binder name = Some { A.txt = name; A.span = sp } in
+  (* Patch each clause's first parameter to carry the refined RawRecord type *)
+  let patch_clause (c : A.fn_clause) =
+    let params = match c.A.fc_params with
+      | [] -> []
+      | p :: rest ->
+        let refined = A.TyRefine (rawrec_ty, mk_binder "s", inv_old) in
+        { p with A.param_ty = Some refined } :: rest
+    in
+    { c with A.fc_params = params }
+  in
+  (* Patch the return type with the new invariant *)
+  let ret_ty = A.TyRefine (state_ty, mk_binder "v", inv_new) in
+  { fd with
+    A.fn_clauses = List.map patch_clause fd.A.fn_clauses;
+    A.fn_ret_ty  = Some ret_ty }
+```
+
+`state_name` is the actor's state type name. In the current compiler, after desugar the local type alias `State` inside an actor is typically referred to just as `State` (unqualified inside its module scope). Passing `"State"` here is correct for the scope `refine_check` sees.
+
+#### `--check-migration` mode entry point (`bin/main.ml`)
+
+After the normal `parse → desugar → typecheck` pipeline, gate on `!check_migration`:
+
+```ocaml
+if !check_migration then begin
+  let module A   = March_ast.Ast in
+  let module Rc  = March_refinecheck.Refine_check in
+  let module Sd  = Forge_lib.Schema_diff in
+
+  let prior_schemas = Sd.parse_schemas_file !prior_schema_path in
+  let new_schemas   = Sd.parse_schemas_file !new_schema_path   in
+  let errctx = March_errors.Errors.make_errctx source_text in
+  let any_error = ref false in
+
+  List.iter (fun (actor_name, new_schema) ->
+    match new_schema.Sd.invariant with
+    | None -> ()   (* no new invariant: nothing to check *)
+    | Some inv_new_str ->
+      let inv_old_str = match List.assoc_opt actor_name prior_schemas with
+        | Some s -> Option.value s.Sd.invariant ~default:"true"
+        | None   -> "true"   (* first deploy: vacuous precondition *)
+      in
+      let inv_old_opt = parse_pred inv_old_str in
+      let inv_new_opt = parse_pred inv_new_str in
+      (match inv_old_opt, inv_new_opt with
+      | None, _ | _, None -> ()   (* unparseable predicate: conservatively accept *)
+      | Some inv_old, Some inv_new ->
+        (* Register RawRecord type from prior schema fields *)
+        let prior_fields = match List.assoc_opt actor_name prior_schemas with
+          | Some s -> s.Sd.state_fields | None -> [] in
+        Rc.register_types_for_check [make_rawrecord_decl prior_fields];
+
+        (* Find and patch the migrate_state function *)
+        (match find_migrate_fn actor_name desugared.A.mod_decls with
+        | None -> ()   (* no migrate_state: nothing to check *)
+        | Some fd ->
+          let patched = patch_migrate_fn fd ~inv_old ~inv_new
+                          ~state_name:(actor_name ^ "_State") in
+          (* run postcondition VC; errors accumulate in errctx *)
+          Rc.check_fn_post ~root:project_root errctx patched;
+          if March_errors.Errors.has_errors errctx then
+            any_error := true))
+  ) new_schemas;
+
+  (* Print diagnostics and exit *)
+  if !any_error then begin
+    let diags = March_errors.Errors.get_errors errctx in
+    List.iter (fun d ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_diagnostic d source_text)) diags;
+    Printf.eprintf "deploy aborted: migration_state is not provably sound\n";
+    exit 1
+  end else
+    exit 0
+end;
+```
+
+`project_root` is the `.march/` root used for the VC cache — same value passed to `check_module` during normal compilation (already a ref in `bin/main.ml`).
+
+**State type name:** `actor_name ^ "_State"` is the TIR-mangled name that `refine_check` registered during the type-check phase (e.g. `"Counter_State"`). The patched `fn_def`'s return type `TyCon("Counter_State", [])` will therefore find `M_Counter_State` in the refine-check hashtables, which were populated by the normal `check_module` call that ran before this block.
+
+#### `cmd_deploy_hot.ml` change
+
+Insert after the compat-check block (after line 359, before the ACTIVATE loop at line 361):
+
+```ocaml
+(* Gap #3: migration VC check — shell out to march --check-migration *)
+(let march_bin = Option.value (Sys.getenv_opt "MARCH_BIN")
+    ~default:(Filename.concat (Sys.getcwd ()) "_build/default/bin/main.exe") in
+let needs_vc_check = List.exists (fun (_, s) ->
+    s.Schema_diff.invariant <> None) new_schemas in
+if needs_vc_check && old_schemas_path <> "" && Sys.file_exists march_bin then begin
+  let cmd = Printf.sprintf "%s --check-migration --prior-schema %s --new-schema %s %s"
+      (Filename.quote march_bin)
+      (Filename.quote old_schemas_path)
+      (Filename.quote new_schemas_path)
+      (Filename.quote entry_source)
+  in
+  match Unix.system cmd with
+  | Unix.WEXITED 0   -> ()
+  | Unix.WEXITED _   ->
+    (* compiler already printed the diagnostic *)
+    Unix.close fd;
+    raise (Failure "migration VC failed — deploy aborted")
+  | _ ->
+    Unix.close fd;
+    raise (Failure "march --check-migration abnormal exit — deploy aborted")
+end);
+```
+
+`entry_source` is the path to the `.march` source file being compiled — already known to `cmd_deploy_hot` from the build step that produced the `.so`. `MARCH_BIN` environment variable lets users point at a specific compiler binary (useful in CI where `_build/` may not be local). The check is skipped gracefully if `old_schemas_path = ""` (first deploy, no prior schema exists) or if the march binary isn't found.
+
+#### Error format contract
+
+`check_fn_post` → `check_post` → `Err.error errctx` already produces diagnostics in the standard March format, including the `format_cx` counterexample line. No new diagnostic infrastructure is needed. The `--check-migration` mode simply collects these errors and re-prints them to stderr before exit.
+
+Example output when the VC is refuted:
+```
+error: refinement violation: return value cannot satisfy postcondition
+       `count >= 0 && len(history) == count`
+       (counterexample: count = 1)
+note: every return path of migrate_state must satisfy
+      `count >= 0 && len(history) == count`
+deploy aborted: migration_state is not provably sound
+```
+
+#### Tests (`test/test_refinecheck.ml`)
+
+The B3 tests already in `record-postconditions` (tests 9–10) exercise the identical `check_post` path that `--check-migration` uses. No new unit tests are needed for `check_post` itself.
+
+Integration tests (one each, in a new forge test or shell script):
+1. Build a two-version Counter example; `deploy hot` with the sound v2 migration → exit 0, ACTIVATE sent.
+2. Same but with the unsound migration (`history = Nil`) → exit non-zero, "deploy aborted" printed, no ACTIVATE sent.
 
 ---
 
@@ -187,9 +606,9 @@ Once gap #1 lands, `@invariant(I)` on `State` can be enforced on *ordinary* code
 ## 7. Phased implementation plan (vertical slice first)
 
 1. ✅ **Spike (gap #1 core, finding D) — DONE (2026-06-25, commit `e1f02166`):** `A.EField` selector case added to `smt_of` (via optional `~resolve_field` hook); `TDRecord` registered as 1-ctor SMT datatype with `ctor_field_names` hashtable; `type_preamble`/`record_vc_preamble()` dedup with `measure_preamble`; `reflect_record_literal` reflects `ERecord` return values; `check_post` extended with `?record_sort`. Verified: `{ s : State | s.count >= 0 }` discharges on `{ count: 1 }` and rejects `{ count: -1 }` (3 new tests in `record-postconditions` group, 54 total in `test/test_refinecheck.ml`). Plan: `specs/plans/2026-06-25-refine-check-record-spike.md`.
-2. **Gap #1 full:** lift both `is_int_base` gates; reflect `ERecord` return literals; broaden the `len` measure to accept field-projection arguments. Land with refinecheck unit tests over a record param/return.
-3. **Gap #2:** `actor_invariant` AST field + emit/parse the `"invariant"` key. Round-trip test through `.schemas.json`.
-4. **Gap #3:** `--check-migration` CLI mode reusing `check_fn_post`; then the `cmd_deploy_hot.ml` shell-out + exit-code gate.
+2. ✅ **Gap #1 full — DONE (2026-06-25):** lifted both `is_int_base` gates; `scope_facts` produces record-sorted scope entries; `check_post` builds composite field resolver from param + return scopes; `scope_has_record` flag gates counterexample reporting. Record param refinements in postcondition VCs fully operational. 62 tests (61 pass; `resolution.0` pre-existing).
+3. ✅ **Gap #2 — DONE (2026-06-25):** `actor_invariant : expr option` AST field; `INVARIANT` keyword token; two new parser `decl` productions; `pred_to_string` serializer; `collect_actor_invariant`; schema emit writes `"invariant"` key; `schema_diff.ml` extended with `invariant : string option` field and robust first/last-quote scanner.
+4. ✅ **Gap #3 — DONE (2026-06-25):** `--check-migration`, `--prior-schema`, `--new-schema` CLI flags; `register_types_for_check` export from `refine_check.ml`; `schema_str_to_ty`/`make_rawrecord_decl`; `parse_pred` via `expr_eof`; `find_migrate_fn` (scoped to named actor's DMod); `patch_migrate_fn` with `normalize_inv_receiver`; full `--check-migration` dispatch block in `bin/main.ml`; `cmd_deploy_hot.ml` shell-out with `entry_path` threading.
 5. **End-to-end:** the Counter v1→v2 example below, proven and rejected (§9), on the droplet harness already used for Phase 5.
 
 ---

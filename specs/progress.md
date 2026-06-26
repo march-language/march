@@ -282,6 +282,17 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-06-25, refinement types Gap #1 full + Gap #2 + Gap #3)
+
+- **Gap #3 — `--check-migration` compiler mode (`bin/main.ml`).** New CLI flags `--check-migration`, `--prior-schema`, `--new-schema`. After normal parse→desugar→typecheck, for each actor with a new `@invariant` and a prior `"invariant"` in `--prior-schema`: synthesises a `DType(RawRecord)` from prior schema fields, registers it via `register_types_for_check`, finds `migrate_state` inside the named actor's `DMod`, patches it with `TyRefine` param/return types via `normalize_inv_receiver`, then calls `check_fn_post`. Exits 1 with refinement diagnostic + "deploy aborted" on refuted VC; exits 0 on all-pass or conservatively-skipped. Guard exits 2 if schema path flags missing.
+- **Gap #3 — `cmd_deploy_hot.ml` shell-out.** `entry_path` optional parameter threaded through `run` and `deploy_one`, computed from `proj.Project.entrypoint`. `needs_vc_check` wired to real `List.exists ... .invariant` check; shells out to `march --check-migration` between compat-check and ACTIVATE; non-zero exit aborts deploy.
+- **Gap #3 — `refine_check.ml` exports.** `register_types_for_check` resets all hashtables (`adt_ctors`, `ctor_field_sorts`, `ctor_field_names`, `axiom_measures`, `measure_base_cases`, `measure_preamble_sorts`) and `registered_measures`/`measure_nonneg` refs before re-registering, so repeated calls stay clean. `check_fn_post` confirmed public.
+- **Gap #2 — `@invariant` syntax.** `lib/lexer/lexer.mll`: `"invariant" -> INVARIANT` keyword. `lib/parser/parser.mly`: `%token INVARIANT`; two new `decl` productions; `expr_eof` start symbol for round-trip re-parsing. `lib/ast/ast.ml`: `actor_invariant : expr option` on `actor_def`. `bin/main.ml`: `pred_to_string` (operators as `EApp` patterns), `collect_actor_invariant`, `normalize_inv_receiver`, schema emit with `"invariant"` key.
+- **Gap #2 — `forge/lib/schema_diff.ml`.** `invariant : string option` field on `actor_schema`; robust scanner uses first/last-quote index extraction so `%S`-escaped chars in predicates don't corrupt parsing.
+- **Gap #1 Part B — record param refinements.** `scope` entry gains optional record-sort tag; `refined_scope_ty` admits `TyCon` record refinements; `scope_facts` produces record-typed scope entries with opaque `SData` const + field resolver; `check_post` uses composite field resolver across param scope + return; `scope_has_record` gates counterexample reporting.
+- **`normalize_inv_receiver` fix.** Removed dead `A.EBinOp`/`A.EUnOp` cases (no such constructors in March AST — operators are `EApp`); `EApp` catch-all handles them.
+- **Authoritative test counts (2026-06-25): compiler 321 / eval 224 / codegen 320 / refinecheck 58 (57 pass; `resolution.0` pre-existing).** Spec: `specs/2026-06-25-refinement-verified-state-migration-design.md`.
+
 ## Current State (as of 2026-06-25, HCR Phase 7 — fleet tooling P1–P6)
 
 - **Audit log (`runtime/march_reload.c`).** `write_audit_log` + `pubkey_to_hex` helper. Every ACTIVATE (sig pass or fail) appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`). Fields: `ts/type/fn/impl_hash/signer/cas_hash/result`. Results: `ok | err_sig | err_abi | err_cas_miss | err_dlopen`.
