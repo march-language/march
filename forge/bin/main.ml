@@ -1021,12 +1021,17 @@ let hot_reload_init_cmd =
           $ lookback $ threshold)
 
 let hot_reload_status_cmd =
+  let env_name =
+    Arg.(value & opt string "" &
+         info ["env"] ~docv:"NAME"
+           ~doc:"Query only the named [[hot-reload.env]] group (default: all).")
+  in
   Cmd.v (Cmd.info "status"
-           ~doc:"Show version status across all registered hot-reload functions")
-    Term.(const (fun () ->
-      match Cmd_deploy_hot.run_status () with
+           ~doc:"Show version + epoch status across all registered hot-reload functions")
+    Term.(const (fun e ->
+      match Cmd_deploy_hot.run_status ~env:e () with
       | Ok () -> ()
-      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ const ())
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ env_name)
 
 let hot_reload_cmd =
   Cmd.group (Cmd.info "hot-reload" ~doc:"Hot code reload key management and status")

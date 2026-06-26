@@ -1,6 +1,6 @@
 # HCR Phase 10 — Cluster-Aware Hot Deploy
 
-**Status:** Design. Prerequisites: Phase 9 complete (`f86f9b66`), dlclose GC (`26ddc4e4`).
+**Status:** Complete. Prerequisites: Phase 9 (`f86f9b66`), dlclose GC (`26ddc4e4`).
 
 **Motivation:** `forge deploy hot` currently deploys to a single server. A production cluster runs N nodes behind a load balancer. Today you must script N separate `forge deploy hot` invocations, each with a different SSH host, and manage ordering, health checks, and partial failures yourself. Epoch routing (Phase 9) already makes partial rollouts *safe* — old callers on un-updated nodes keep working — but forge has no first-class concept of a node set, shared epoch assignment across nodes, or cross-node observability.
 
@@ -8,13 +8,21 @@
 
 ## What Clustering Adds
 
-1. **`[[hot-reload.nodes]]` in forge.toml** — declare the cluster as a named node list.
-2. **Shared epoch per batch** — forge calls `GET_EPOCH` on one node and uses the same epoch for all ACTIVATEs across all nodes in a single deploy run. Cross-node epoch comparisons become meaningful.
-3. **Rolling deploy** (default) — one node at a time, with an optional health check between.
-4. **Simultaneous deploy** (`--simultaneous`) — all nodes in parallel, for fast low-traffic windows.
-5. **`forge deploy hot status`** — connect to all nodes and print a per-node / per-function version + epoch table, highlighting drift.
-6. **`VERSIONS_DETAIL` epoch field** — add epoch to the server response so `forge status` can read it.
-7. **Partial failure semantics** — clearly defined, exploiting epoch routing.
+The Phase 7 multi-server infrastructure (`[[hot-reload.env]]`, `--env`, `--canary`) already
+existed.  Phase 10 adds the missing pieces:
+
+1. **Shared epoch per batch** — forge calls `GET_EPOCH` once on the first server (epoch master)
+   and uses the same epoch for all ACTIVATEs across every node in a single deploy run.
+   Cross-node epoch routing becomes meaningful.
+2. **Rolling deploy strategy** (`strategy = "rolling"`, the default) — one node at a time,
+   with an optional HTTP health-check URL between each step.
+3. **`health_check_url`** in `[hot-reload]` — forge GETs this URL after each rolling step and
+   stops if it returns non-200.
+4. **`VERSIONS_DETAIL` epoch field** — epoch is now included in the server response (6th token).
+5. **Multi-node `forge hot-reload status`** — connects to all nodes in the env, shows a
+   per-node / per-function epoch + impl_hash table, marks cross-node drift with `← drift`.
+   `--env` filter added.
+6. **Partial failure semantics** — clearly defined, exploiting epoch routing.
 
 ---
 
@@ -29,40 +37,33 @@ socket     = "/tmp/my_app.sock"
 public_key = "base64encodedkey="
 ```
 
-Multi-node config adds `[[hot-reload.nodes]]`. The top-level `public_key` (ed25519 signing key) is shared across all nodes — the same compiled binary runs everywhere, so the embedded pubkey is the same.
+Multi-node config uses `[[hot-reload.env]]` (already existed from Phase 7).
 
 ```toml
 [hot-reload]
-public_key = "base64encodedkey="
+public_key       = "base64encodedkey="
+strategy         = "rolling"                           # (default) | "simultaneous"
+health_check_url = "http://localhost:8080/healthz"     # GET'd after each rolling step
 
-[[hot-reload.nodes]]
+[[hot-reload.env]]
 name     = "web-1"
 ssh_host = "web-1.prod"
 socket   = "/tmp/my_app.sock"
 
-[[hot-reload.nodes]]
+[[hot-reload.env]]
 name     = "web-2"
 ssh_host = "web-2.prod"
 socket   = "/tmp/my_app.sock"
 
-[[hot-reload.nodes]]
+[[hot-reload.env]]
 name     = "web-3"
 ssh_host = "web-3.prod"
 socket   = "/tmp/my_app.sock"
 ```
 
-If `[[hot-reload.nodes]]` is present, `[hot-reload].ssh_host` and `[hot-reload].socket` are ignored. If absent, forge falls back to the single-node path (existing behavior, no changes).
-
-Optional per-node and cluster-level settings:
-
-```toml
-[hot-reload]
-public_key  = "base64encodedkey="
-strategy    = "rolling"        # "rolling" (default) | "simultaneous"
-health_check_url   = "http://localhost:8080/healthz"  # checked after each rolling step
-health_check_delay = 5         # seconds to wait even without a URL (default 0)
-health_check_timeout = 10      # HTTP timeout in seconds (default 5)
-```
+`[[hot-reload.env]]` already supported from Phase 7.  Phase 10 adds `strategy` and
+`health_check_url` to the `[hot-reload]` top-level section.  `strategy` defaults to
+`"rolling"` so existing multi-env configs automatically get the new rolling behavior.
 
 ---
 
@@ -231,12 +232,19 @@ Add `hr_nodes : (string * string * string) list` to `hot_reload_config` (name, s
 
 ---
 
-## Open Questions
+## Open Questions — Resolved
 
-1. **CAS_PUT to all nodes before rolling start, or on-demand per node?** Uploading to all nodes before the first ACTIVATE means a node failure mid-upload doesn't leave some nodes with the artifact and some without. Recommended: parallel CAS_PUT to all nodes upfront, then begin rolling ACTIVATEs.
+1. **CAS_PUT timing** — on-demand per server (current behavior). Content-addressed artifact
+   is the same file; canary-first means you discover unreachable nodes on the canary node
+   before wasting upload bandwidth to the rest. No change needed.  **Resolved.**
 
-2. **Health check failure handling.** If the health check URL returns non-200 after deploying node[i], should forge (a) stop and leave i+1…N on old code, (b) attempt to continue anyway, or (c) surface an actionable error message and let the operator decide? Recommended: (a) stop + error message. Health check failure is evidence the deploy is bad; don't spread a bad deploy to remaining nodes.
+2. **Health check failure handling** — stop, leave remaining nodes on old code.  Implemented:
+   `rolling_deploy` sets `stop := true` and prints an explanatory message; subsequent nodes
+   are skipped.  **Resolved.**
 
-3. **Epoch master failure.** If node[0] (epoch master) fails between GET_EPOCH and the ACTIVATEs, forge should retry GET_EPOCH on node[1]. The increment on node[0] is lost (next_epoch on node[0] is now N+1, but N was never used). This is fine — a gap in epoch sequence doesn't break routing (ring selection is "newest slot ≤ caller_epoch", so gaps are transparent).
+3. **Epoch master failure** — first node in the `[[hot-reload.env]]` list is the epoch master.
+   `get_epoch_from_server` returns 0 on connection failure, which falls back to Phase 8
+   behavior (no epoch).  A gap in the epoch sequence is transparent to routing.  **Resolved.**
 
-4. **Forge.toml `[[hot-reload.nodes]]` TOML parsing.** The forge TOML parser may or may not support array-of-tables. Verify before implementing; if not, add support or use an alternative schema (`[hot-reload.nodes.web-1]`, etc.).
+4. **`[[hot-reload.nodes]]` TOML parsing** — moot.  `[[hot-reload.env]]` already existed and
+   `get_all_sections` already works.  Spec updated to use existing schema.  **Resolved.**

@@ -252,6 +252,41 @@ let cas_put conn hash path =
   if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
     failwith (Printf.sprintf "CAS_PUT failed: %s" final)
 
+(* ─── Transient socket naming (shared by Phase 7 fan-out and Phase 10 helpers) *)
+
+let _tunnel_counter = ref 0
+let fresh_sock prefix =
+  incr _tunnel_counter;
+  Printf.sprintf "/tmp/%s_%d_%d.sock" prefix (Unix.getpid ()) !_tunnel_counter
+
+(* ─── Phase 10 clustering helpers ────────────────────────────────────────── *)
+
+(** HTTP GET [url] with a [timeout_s]-second limit; returns true iff status 200. *)
+let http_health_check ~url ~timeout_s : bool =
+  let cmd = Printf.sprintf "curl -sf -o /dev/null --max-time %d %s 2>/dev/null"
+    timeout_s (Filename.quote url) in
+  Sys.command cmd = 0
+
+(** Open a transient tunnel, send GET_EPOCH to one server, return the epoch (0
+    on failure or when server predates Phase 9). *)
+let get_epoch_from_server ~ssh_host ~remote_socket : int =
+  let local = fresh_sock "march_epoch" in
+  let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket:local in
+  let epoch =
+    try
+      let fd = connect_socket local in
+      let conn = conn_of_fd fd in
+      send_line conn "GET_EPOCH";
+      let resp = recv_line conn in
+      Unix.close fd;
+      match String.split_on_char ' ' resp with
+      | ["EPOCH"; n] -> (match int_of_string_opt n with Some v -> v | None -> 0)
+      | _ -> 0
+    with _ -> 0
+  in
+  close_tunnel pid local;
+  epoch
+
 (* ─── Main deploy flow ───────────────────────────────────────────────────── *)
 
 (* Check if a symbol is exported from a shared library (for migrate_state presence check). *)
@@ -260,7 +295,8 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
   Sys.command cmd = 0
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
-    ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="") () =
+    ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
+    ?(provided_epoch=0) () =
   let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
 
   (* 1. SSH tunnel *)
@@ -291,12 +327,18 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
       List.iter (fun s -> Hashtbl.replace slot_map s.slot_name s) slots;
 
       (* Phase 9: GET_EPOCH — assign a monotonic epoch for this deploy batch.
-         Old servers respond ERR unknown_command; fall back to epoch 0 (Phase 8 only). *)
-      send_line conn "GET_EPOCH";
+         When provided_epoch > 0 (cluster deploy), the caller already fetched a
+         shared epoch from the epoch-master node; skip the round-trip so all
+         nodes in the batch share the same epoch.
+         Old servers respond ERR unknown_command; fall back to epoch 0 (Phase 8). *)
       let hcr_epoch =
-        match String.split_on_char ' ' (recv_line conn) with
-        | ["EPOCH"; n] -> (match int_of_string_opt n with Some v -> v | None -> 0)
-        | _            -> 0  (* old server without Phase 9 *)
+        if provided_epoch > 0 then provided_epoch
+        else begin
+          send_line conn "GET_EPOCH";
+          match String.split_on_char ' ' (recv_line conn) with
+          | ["EPOCH"; n] -> (match int_of_string_opt n with Some v -> v | None -> 0)
+          | _            -> 0
+        end
       in
 
       (* 4. Set-diff: functions where new impl_hash ≠ current *)
@@ -532,6 +574,7 @@ type detail_slot = {
   ds_impl_hash    : string;
   ds_activated_at : int64;   (* Unix ms; 0 = never activated (baseline) *)
   ds_signer       : string;  (* 64-char hex pubkey, or "(none)" if baseline *)
+  ds_epoch        : int;     (* Phase 9: deploy epoch; 0 = pre-Phase-9 or baseline *)
 }
 
 let parse_versions_detail conn =
@@ -541,11 +584,16 @@ let parse_versions_detail conn =
     if line = "END" then List.rev !slots
     else begin
       (match String.split_on_char ' ' line with
-       | ["SLOT"; id_s; name; impl_h; ts_s; signer] ->
+       | "SLOT" :: id_s :: name :: impl_h :: ts_s :: signer :: rest ->
+         let epoch = match rest with
+           | [ep_s] -> (match int_of_string_opt ep_s with Some v -> v | None -> 0)
+           | _ -> 0
+         in
          (match int_of_string_opt id_s, Int64.of_string_opt ts_s with
           | Some id, Some ts ->
             slots := { ds_id = id; ds_name = name; ds_impl_hash = impl_h;
-                       ds_activated_at = ts; ds_signer = signer } :: !slots
+                       ds_activated_at = ts; ds_signer = signer;
+                       ds_epoch = epoch } :: !slots
           | _ -> ())
        | _ -> ());
       loop ()
@@ -566,41 +614,94 @@ let format_elapsed_ms (ts_ms : int64) : string =
     else Printf.sprintf "%dd ago" (diff_s / 86400)
   end
 
-let run_status () : (unit, string) result =
+let run_status ?(env="") () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml"
     | Some hr ->
-      if hr.Project.hr_ssh_host = "" then
+      (* Collect the server list to query: env filter → hr_envs → single host *)
+      let servers : Project.hot_reload_env list =
+        if env <> "" then
+          List.filter (fun e -> e.Project.hre_name = env) hr.Project.hr_envs
+        else if hr.Project.hr_envs <> [] then hr.Project.hr_envs
+        else if hr.Project.hr_ssh_host <> "" then
+          [{ Project.hre_name = "default";
+             hre_ssh_host = hr.Project.hr_ssh_host;
+             hre_socket   = hr.Project.hr_socket;
+             hre_public_key = hr.Project.hr_public_key }]
+        else []
+      in
+      if servers = [] then
         Error "[hot-reload] ssh_host is required"
       else begin
-        let local_socket =
-          Printf.sprintf "/tmp/march_status_%d.sock" (Unix.getpid ())
+        let multi_node = List.length servers > 1 in
+        let query_server (srv : Project.hot_reload_env) =
+          let local = fresh_sock "march_status" in
+          Printf.printf "Connecting to %s...\n%!" srv.Project.hre_ssh_host;
+          let (pid, _) = open_tunnel ~ssh_host:srv.Project.hre_ssh_host
+                                     ~remote_socket:srv.Project.hre_socket
+                                     ~local_socket:local in
+          let result =
+            try
+              let fd = connect_socket local in
+              let conn = conn_of_fd fd in
+              send_line conn "VERSIONS_DETAIL";
+              let slots = parse_versions_detail conn in
+              Unix.close fd;
+              Ok (srv.Project.hre_name, slots)
+            with
+            | Failure m -> Error m
+            | Unix_error (e, fn, _) ->
+              Error (Printf.sprintf "%s: %s" fn (Unix.error_message e))
+          in
+          close_tunnel pid local;
+          result
         in
-        Printf.printf "Connecting to %s...\n%!" hr.Project.hr_ssh_host;
-        let (tunnel_pid, _) =
-          open_tunnel ~ssh_host:hr.Project.hr_ssh_host
-                      ~remote_socket:hr.Project.hr_socket
-                      ~local_socket
-        in
-        let result =
-          (try
-            let fd = connect_socket local_socket in
-            let conn = conn_of_fd fd in
-            send_line conn "VERSIONS_DETAIL";
-            let slots = parse_versions_detail conn in
-            Unix.close fd;
-            if slots = [] then
-              Printf.printf "(no registered functions)\n%!"
-            else begin
-              let col_fn   = 48 in
-              let col_hash = 14 in
-              let col_age  = 20 in
-              Printf.printf "%-*s  %-*s  %-*s  %s\n"
-                col_fn "Function" col_hash "impl_hash" col_age "activated" "signer";
-              Printf.printf "%s\n" (String.make (col_fn + col_hash + col_age + 30) '-');
+        let node_results = List.map query_server servers in
+        let errors = List.filter_map (function Error m -> Some m | Ok _ -> None) node_results in
+        if errors <> [] then
+          Error (String.concat "; " errors)
+        else begin
+          let nodes = List.filter_map (function Ok x -> Some x | Error _ -> None) node_results in
+          let all_slots = List.concat_map (fun (_, slots) -> slots) nodes in
+          if all_slots = [] then
+            Printf.printf "(no registered functions)\n%!"
+          else begin
+            (* Detect cross-node drift: functions where impl_hash differs between nodes *)
+            let drifted = Hashtbl.create 8 in
+            if multi_node then begin
+              let fn_names = List.sort_uniq compare (List.map (fun ds -> ds.ds_name) all_slots) in
+              List.iter (fun fn_name ->
+                let hashes = List.filter_map
+                  (fun ds -> if ds.ds_name = fn_name then Some ds.ds_impl_hash else None)
+                  all_slots in
+                let unique = List.sort_uniq compare hashes in
+                if List.length unique > 1 then Hashtbl.replace drifted fn_name ()
+              ) fn_names
+            end;
+            let n_drifted = Hashtbl.length drifted in
+
+            let col_node = if multi_node then 12 else 0 in
+            let col_fn   = 42 in
+            let col_hash = 14 in
+            let col_ep   = 6 in
+            let col_age  = 18 in
+            let sep_w = col_fn + col_hash + col_ep + col_age + 20
+                        + (if multi_node then col_node + 2 else 0) in
+
+            if multi_node then
+              Printf.printf "%-*s  %-*s  %-*s  %-*s  %-*s  %s\n"
+                col_node "Node" col_fn "Function" col_hash "impl_hash"
+                col_ep "epoch" col_age "activated" "signer"
+            else
+              Printf.printf "%-*s  %-*s  %-*s  %-*s  %s\n"
+                col_fn "Function" col_hash "impl_hash" col_ep "epoch"
+                col_age "activated" "signer";
+            Printf.printf "%s\n" (String.make sep_w '-');
+
+            List.iter (fun (node_name, slots) ->
               List.iter (fun ds ->
                 let hash_short =
                   if String.length ds.ds_impl_hash >= 8
@@ -613,21 +714,29 @@ let run_status () : (unit, string) result =
                        then String.sub ds.ds_signer 0 8 ^ "..."
                   else ds.ds_signer
                 in
-                Printf.printf "%-*s  %-*s  %-*s  %s\n"
-                  col_fn ds.ds_name
-                  col_hash hash_short
-                  col_age (format_elapsed_ms ds.ds_activated_at)
-                  signer_short
+                let drift_marker =
+                  if Hashtbl.mem drifted ds.ds_name then "  ← drift" else ""
+                in
+                if multi_node then
+                  Printf.printf "%-*s  %-*s  %-*s  %-*d  %-*s  %s%s\n"
+                    col_node node_name col_fn ds.ds_name
+                    col_hash hash_short col_ep ds.ds_epoch
+                    col_age (format_elapsed_ms ds.ds_activated_at)
+                    signer_short drift_marker
+                else
+                  Printf.printf "%-*s  %-*s  %-*d  %-*s  %s\n"
+                    col_fn ds.ds_name col_hash hash_short col_ep ds.ds_epoch
+                    col_age (format_elapsed_ms ds.ds_activated_at) signer_short
               ) slots
-            end;
-            Ok ()
-          with
-          | Failure m -> Error m
-          | Unix_error (e, fn, _) ->
-            Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
-        in
-        close_tunnel tunnel_pid local_socket;
-        result
+            ) nodes;
+
+            if n_drifted > 0 then begin
+              Printf.printf "\n%d function(s) show cross-node drift (← marker).\n%!" n_drifted;
+              Printf.printf "Run `forge deploy hot --env <name>` to bring nodes into sync.\n%!"
+            end
+          end;
+          Ok ()
+        end
       end
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
@@ -758,11 +867,6 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
 
 (* ─── Multi-env fan-out (Phase 7) ─────────────────────────────────────────── *)
 
-let _tunnel_counter = ref 0
-let fresh_sock prefix =
-  incr _tunnel_counter;
-  Printf.sprintf "/tmp/%s_%d_%d.sock" prefix (Unix.getpid ()) !_tunnel_counter
-
 (** Send PING to one server; returns true if PONG received. *)
 let ping_server ~ssh_host ~remote_socket : bool =
   let local = fresh_sock "march_ping" in
@@ -780,9 +884,12 @@ let ping_server ~ssh_host ~remote_socket : bool =
   close_tunnel pid local;
   alive
 
-(** Deploy the given pre-built artifact to one server entry; print status line. *)
+(** Deploy the given pre-built artifact to one server entry; print status line.
+    Pass [~provided_epoch] to use a pre-fetched cluster-wide epoch (Phase 10)
+    instead of calling GET_EPOCH on the server. *)
 let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
-    ~old_schemas_path ~new_schemas_path ?(entry_path="") () : (int, string) result =
+    ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(provided_epoch=0) ()
+    : (int, string) result =
   let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
   let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
   Printf.printf "\n── %s\n%!" label;
@@ -791,6 +898,7 @@ let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
     ~remote_socket:srv.Project.hre_socket
     ~signing_pubkey:pubkey
     ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path ~entry_path
+    ~provided_epoch
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -873,23 +981,79 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                   Filename.concat (Filename.concat proj.Project.root "src")
                     (proj.Project.name ^ ".march")
               in
-              let deploy_list srvs =
+              (* Phase 10: shared epoch — call GET_EPOCH once on the first server
+                 so all nodes in this batch get the same epoch N, making epoch a
+                 deploy-batch identifier rather than a per-node counter.
+                 Single-server deploys skip this and let `run` call GET_EPOCH
+                 itself (the old behavior). *)
+              let shared_epoch =
+                match servers with
+                | _ :: _ :: _ ->
+                  let first = List.hd servers in
+                  let e = get_epoch_from_server
+                    ~ssh_host:first.Project.hre_ssh_host
+                    ~remote_socket:first.Project.hre_socket in
+                  if e > 0 then begin
+                    Printf.printf "==> Shared epoch %d (epoch master: %s)\n%!"
+                      e first.Project.hre_ssh_host
+                  end;
+                  e
+                | _ -> 0
+              in
+
+              let strategy = hr.Project.hr_strategy in
+              let health_url = hr.Project.hr_health_check_url in
+
+              (* Simultaneous: fan-out to all servers in parallel (same as legacy canary=0). *)
+              let simultaneous_deploy srvs =
                 List.map (fun srv ->
                   (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                           ~old_schemas_path:prev_schemas_path
-                          ~new_schemas_path ~entry_path ())
+                          ~new_schemas_path ~entry_path ~provided_epoch:shared_epoch ())
                 ) srvs
+              in
+
+              (* Rolling: one server at a time; optional HTTP health-check between. *)
+              let rolling_deploy srvs =
+                let results = ref [] in
+                let stop = ref false in
+                List.iter (fun srv ->
+                  if not !stop then begin
+                    let r = deploy_one ~srv ~sk ~manifest ~so_path:so_path2
+                        ~old_schemas_path:prev_schemas_path
+                        ~new_schemas_path ~entry_path ~provided_epoch:shared_epoch () in
+                    results := (srv, r) :: !results;
+                    (match r with
+                    | Error _ -> stop := true
+                    | Ok _ ->
+                      (match health_url with
+                      | Some url ->
+                        Printf.printf "  health check %s ... %!" url;
+                        if http_health_check ~url ~timeout_s:10 then
+                          Printf.printf "ok\n%!"
+                        else begin
+                          Printf.eprintf "failed!\n%!";
+                          Printf.eprintf "  Health check failed after %s — stopping deploy.\n%!"
+                            srv.Project.hre_ssh_host;
+                          stop := true
+                        end
+                      | None -> ()))
+                  end else
+                    Printf.printf "  skipping %s (prior step failed)\n%!"
+                      srv.Project.hre_ssh_host
+                ) srvs;
+                List.rev !results
               in
 
               let canary_n = if canary > 0 then min canary (List.length servers) else 0 in
               if canary_n > 0 then begin
-                (* Canary flow: deploy to first n, health-check, then roll out *)
+                (* Canary flow: deploy to first n, health-check via PING, then roll out *)
                 let n_total = List.length servers in
                 let arr = Array.of_list servers in
                 let canary_srvs = Array.to_list (Array.sub arr 0 canary_n) in
                 let rest_srvs   = Array.to_list (Array.sub arr canary_n (n_total - canary_n)) in
                 Printf.printf "==> Canary: deploying to %d/%d server(s)...\n%!" canary_n n_total;
-                let canary_res = deploy_list canary_srvs in
+                let canary_res = simultaneous_deploy canary_srvs in
                 let canary_ok = List.for_all (fun (_, r) -> match r with Ok _ -> true | Error _ -> false) canary_res in
                 if not canary_ok then
                   Error "canary deploy failed — remaining servers untouched"
@@ -914,7 +1078,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                     Error (Printf.sprintf "canary health check failed: %s stopped responding — remaining servers untouched" !failed_host)
                   else begin
                     Printf.printf "\n==> Canary healthy. Rolling out to %d remaining server(s)...\n%!" (List.length rest_srvs);
-                    let rest_res = deploy_list rest_srvs in
+                    let rest_res = simultaneous_deploy rest_srvs in
                     save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                     let failed = List.filter_map (fun (srv, r) -> match r with
                         | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) rest_res in
@@ -922,19 +1086,33 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                     else Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
                   end
                 end
-              end else begin
-                (* Non-canary fan-out *)
+              end else if strategy = "simultaneous" then begin
+                (* Simultaneous fan-out to all servers *)
                 if List.length servers > 1 then
-                  Printf.printf "==> Deploying to %d server(s) (env: %s)...\n%!" (List.length servers) env;
-                let results = deploy_list servers in
+                  Printf.printf "==> Deploying to %d server(s) simultaneously (env: %s)...\n%!"
+                    (List.length servers) env;
+                let results = simultaneous_deploy servers in
                 let failed = List.filter_map (fun (srv, r) -> match r with
                     | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
                 if failed = [] then begin
-                  (* Only advance the schema baseline when all servers succeeded.
-                     Saving before the error check would permanently advance the
-                     baseline even on a complete failure, making the next retry
-                     see no schema diff and send migrate_required=0 to servers
-                     still running the old dispatch. *)
+                  save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                  Ok ()
+                end else begin
+                  Printf.eprintf "\nFailed servers:\n";
+                  List.iter (fun (host, m) -> Printf.eprintf "  %s: %s\n" host m) failed;
+                  Error (Printf.sprintf "%d/%d server(s) failed" (List.length failed) (List.length servers))
+                end
+              end else begin
+                (* Rolling deploy (default): one server at a time with health check *)
+                if List.length servers > 1 then
+                  Printf.printf "==> Rolling deploy to %d server(s) (env: %s)%s...\n%!"
+                    (List.length servers) env
+                    (match health_url with Some u -> Printf.sprintf " with health check %s" u | None -> "");
+                let results = rolling_deploy servers in
+                let failed = List.filter_map (fun (srv, r) -> match r with
+                    | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
+                if failed = [] then begin
+                  (* Only advance the schema baseline when all servers succeeded. *)
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   Ok ()
                 end else begin

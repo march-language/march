@@ -109,11 +109,16 @@ void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle)
  * march_dispatch_enter_gen — epoch-aware enter.
  *   Scans both ring slots; returns the fn_ptr from the newest live slot whose
  *   epoch <= caller_epoch.  Falls back to the current slot when caller_epoch == 0
- *   or no slot matches (backward-compat with pre-Phase-9 code). */
-int    march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
-                                    const char *impl_hash, const char *sig_hash,
-                                    uint8_t kind, uint32_t epoch);
-void  *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
-                                uint32_t *out_version);
+ *   or no slot matches (backward-compat with pre-Phase-9 code).
+ *
+ * march_dispatch_epoch — read the epoch of a specific ring slot version.
+ *   Returns 0 if name_id or version is out of range.
+ *   Used by VERSIONS_DETAIL to include the epoch in the server response. */
+int      march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
+                                      const char *impl_hash, const char *sig_hash,
+                                      uint8_t kind, uint32_t epoch);
+void    *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
+                                  uint32_t *out_version);
+uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
 
 #endif /* MARCH_DISPATCH_H */

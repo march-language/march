@@ -300,14 +300,16 @@ static void handle_client(int fd) {
                 const char *h   = march_dispatch_impl_hash(i, cur);
                 long long   ts  = march_dispatch_activated_at(i);
                 const char *sig = march_dispatch_signer_hex(i);
+                uint32_t    ep  = march_dispatch_epoch(i, cur);
                 char resp[512];
                 int n = snprintf(resp, sizeof(resp),
-                                 "SLOT %u %s %s %lld %s\n",
+                                 "SLOT %u %s %s %lld %s %u\n",
                                  i,
                                  name,
                                  h && h[0] ? h : "(none)",
                                  ts,
-                                 sig && sig[0] ? sig : "(none)");
+                                 sig && sig[0] ? sig : "(none)",
+                                 ep);
                 write(fd, resp, (size_t)n);
             }
             wresp(fd, "END\n");

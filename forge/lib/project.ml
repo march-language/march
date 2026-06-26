@@ -52,10 +52,12 @@ type hot_reload_env = {
 }
 
 type hot_reload_config = {
-  hr_socket     : string;             (** Unix socket path on the server *)
-  hr_ssh_host   : string;             (** SSH target for tunnel, e.g. "root@1.2.3.4" *)
-  hr_public_key : string option;      (** base64-encoded ed25519 public key *)
-  hr_envs       : hot_reload_env list; (** multi-server environments ([[hot-reload.env]]) *)
+  hr_socket           : string;             (** Unix socket path on the server *)
+  hr_ssh_host         : string;             (** SSH target for tunnel, e.g. "root@1.2.3.4" *)
+  hr_public_key       : string option;      (** base64-encoded ed25519 public key *)
+  hr_envs             : hot_reload_env list; (** multi-server environments ([[hot-reload.env]]) *)
+  hr_health_check_url : string option;      (** Phase 10: HTTP URL polled after each rolling step *)
+  hr_strategy         : string;             (** "rolling" (default) | "simultaneous" *)
 }
 
 type project = {
@@ -301,11 +303,14 @@ let load_from root =
     in
     if hr = [] && hr_envs = [] then None
     else begin
-      let socket     = Option.value ~default:"/tmp/march_hcr.sock" (Toml.get_string hr "socket") in
-      let ssh_host   = Option.value ~default:""                    (Toml.get_string hr "ssh_host") in
-      let public_key = Toml.get_string hr "public_key" in
+      let socket           = Option.value ~default:"/tmp/march_hcr.sock" (Toml.get_string hr "socket") in
+      let ssh_host         = Option.value ~default:""                    (Toml.get_string hr "ssh_host") in
+      let public_key       = Toml.get_string hr "public_key" in
+      let hr_health_check_url = Toml.get_string hr "health_check_url" in
+      let hr_strategy      = Option.value ~default:"rolling"             (Toml.get_string hr "strategy") in
       Some { hr_socket = socket; hr_ssh_host = ssh_host;
-             hr_public_key = public_key; hr_envs }
+             hr_public_key = public_key; hr_envs;
+             hr_health_check_url; hr_strategy }
     end
   in
   { name; version; project_type = project_type_of_string type_str;

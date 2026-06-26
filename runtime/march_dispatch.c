@@ -297,6 +297,13 @@ int march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
     return idx;
 }
 
+/* Phase 9: read the deploy epoch stored in a ring slot version.
+ * Used by VERSIONS_DETAIL to include the epoch in the server response. */
+uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return 0;
+    return g_slots[name_id].ring[version].epoch;
+}
+
 /* Phase 9: epoch-aware enter.
  * Find the newest live slot whose epoch <= caller_epoch.
  * If caller_epoch == 0 or no such slot, fall back to march_dispatch_enter. */
