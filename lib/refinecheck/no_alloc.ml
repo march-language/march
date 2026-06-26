@@ -22,9 +22,10 @@ let rec check_expr (errctx : Err.ctx) (e : A.expr) : unit =
     Err.error errctx ~span:sp
       "tuple construction allocates in a `cap no_alloc` module.";
     List.iter go items
-  | A.ERecord (_, sp) ->
+  | A.ERecord (fields, sp) ->
     Err.error errctx ~span:sp
-      "record construction allocates in a `cap no_alloc` module."
+      "record construction allocates in a `cap no_alloc` module.";
+    List.iter (fun (_, e) -> go e) fields
   | A.ECon (_, [], _) -> () (* nullary constructor — no heap allocation *)
   | A.ECon (_, args, sp) ->
     Err.error errctx ~span:sp

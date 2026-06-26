@@ -3266,6 +3266,28 @@ let test_cap_no_panic_transitive_error () =
   end|} in
   Alcotest.(check bool) "cap no_panic + transitive panic via helper: error" true (has_errors ctx)
 
+let test_divsafety_let_bound_literal_ok () =
+  (* let d = 2; a / d  — d is a non-zero literal let-binding, must NOT error *)
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn halve(a : Int) : Int do
+      let d = 2
+      a / d
+    end
+  end|} in
+  Alcotest.(check bool) "divsafety: let-bound non-zero literal divisor ok" false (has_errors ctx)
+
+let test_divsafety_let_bound_zero_error () =
+  (* let d = 0; a / d  — let-bound zero literal must error *)
+  let ctx = typecheck_with_divsafety {|mod Safe do
+    cap no_panic
+    fn bad(a : Int) : Int do
+      let d = 0
+      a / d
+    end
+  end|} in
+  Alcotest.(check bool) "divsafety: let-bound zero literal divisor errors" true (has_errors ctx)
+
 let test_cap_no_panic_two_safe_sibling_fns_ok () =
   let ctx = typecheck {|mod Safe do
     cap no_panic
@@ -4945,6 +4967,8 @@ let compiler_suites =
           Alcotest.test_case "divsafety: literal non-zero divisor ok"     `Quick test_divsafety_literal_nonzero_ok;
           Alcotest.test_case "divsafety: literal zero is always error"    `Quick test_divsafety_literal_zero_error;
           Alcotest.test_case "divsafety: v >= 1 refinement suppresses"    `Quick test_divsafety_ge1_refinement_ok;
+          Alcotest.test_case "divsafety: let-bound non-zero literal ok"   `Quick test_divsafety_let_bound_literal_ok;
+          Alcotest.test_case "divsafety: let-bound zero literal errors"   `Quick test_divsafety_let_bound_zero_error;
         ] );
       ( "cap_pure_no_extern_det", [
           Alcotest.test_case "cap pure + spawn: error"                `Quick test_cap_pure_spawn_error;

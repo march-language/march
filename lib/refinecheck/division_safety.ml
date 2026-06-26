@@ -162,49 +162,109 @@ let division_suggestion =
    instead of panicking, or annotate the divisor parameter with \
    `{v : Int | v != 0}` (or `v > 0`) to prove it is safe."
 
-let check_var_divisor ~root errctx span var_name params =
+(* Collect let-bound (name, rhs_expr) pairs visible at division sites.
+   Walks EBlock prefix statements; stops at the first non-let expression. *)
+let collect_let_values (body : A.expr) : (string * A.expr) list =
+  match body with
+  | A.EBlock (es, _) ->
+    List.filter_map
+      (function
+        | A.ELet (b, _) ->
+          (match b.A.bind_pat with
+           | A.PatVar n -> Some (n.A.txt, b.A.bind_expr)
+           | _ -> None)
+        | _ -> None)
+      es
+  | _ -> []
+
+let check_var_divisor ~root errctx span var_name params let_values =
   match List.find_opt (fun (n, _, _) -> n = var_name) params with
-  | None ->
-    Err.error errctx ~span
-      (Printf.sprintf
-         "division by `%s` in `cap no_panic` module may be by zero — \
-          no refinement proves `%s ≠ 0`.%s"
-         var_name var_name division_suggestion)
   | Some (_, bdr, pred) ->
     (* Fast syntactic check — no Z3 needed for obvious cases *)
     if syntactic_nonzero bdr pred then ()
     else
       (* Try Z3 *)
-      match smt_of ~b:bdr ~var:var_name pred with
-      | None -> () (* predicate not in supported fragment — skip conservatively *)
-      | Some assumption ->
-        let vc =
-          Smt.
-            { decls = [ (var_name, Smt.SInt) ]
-            ; assumptions = [ assumption ]
-            ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
-            }
-        in
-        (match Refine.discharge ~root vc with
-         | Refine.Verified -> () (* Z3: refinement proves divisor ≠ 0 *)
-         | Refine.Refuted _ ->
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: refinement \
-                 does not rule out zero.%s"
-                var_name division_suggestion)
-         | Refine.Unverified ->
-           (* Z3 absent or unknown — be conservative *)
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: cannot verify \
-                 divisor is non-zero (Z3 unavailable or VC unknown).%s"
-                var_name division_suggestion))
+      (match smt_of ~b:bdr ~var:var_name pred with
+       | None -> () (* predicate not in supported fragment — skip conservatively *)
+       | Some assumption ->
+         let vc =
+           Smt.
+             { decls = [ (var_name, Smt.SInt) ]
+             ; assumptions = [ assumption ]
+             ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
+             }
+         in
+         (match Refine.discharge ~root vc with
+          | Refine.Verified -> () (* Z3: refinement proves divisor ≠ 0 *)
+          | Refine.Refuted _ ->
+            Err.error errctx ~span
+              (Printf.sprintf
+                 "division by `%s` in `cap no_panic` module: refinement \
+                  does not rule out zero.%s"
+                 var_name division_suggestion)
+          | Refine.Unverified ->
+            (* Z3 absent or unknown — be conservative *)
+            Err.error errctx ~span
+              (Printf.sprintf
+                 "division by `%s` in `cap no_panic` module: cannot verify \
+                  divisor is non-zero (Z3 unavailable or VC unknown).%s"
+                 var_name division_suggestion)))
+  | None ->
+    (* Not a refined parameter — check let-binding scope. *)
+    (match List.assoc_opt var_name let_values with
+     | Some (A.ELit (A.LitInt 0, _)) ->
+       Err.error errctx ~span
+         "division by zero literal in `cap no_panic` module."
+     | Some (A.ELit (A.LitInt _, _)) ->
+       () (* non-zero literal let-binding: trivially safe *)
+     | Some rhs ->
+       (* Reflect the bound expression; build VC `var_name = rhs, var_name ≠ 0`.
+          Also thread in param refinements as assumptions. *)
+       (match smt_of ~b:"\x00" ~var:"\x00" rhs with
+        | None ->
+          (* Cannot reflect — conservative error *)
+          Err.error errctx ~span
+            (Printf.sprintf
+               "division by `%s` in `cap no_panic` module may be by zero — \
+                bound expression cannot be verified non-zero.%s"
+               var_name division_suggestion)
+        | Some rhs_term ->
+          let param_decls =
+            List.map (fun (n, _, _) -> (n, Smt.SInt)) params
+          in
+          let param_assumes =
+            List.filter_map
+              (fun (n, bdr, pred) -> smt_of ~b:bdr ~var:n pred)
+              params
+          in
+          let vc =
+            Smt.
+              { decls = (var_name, Smt.SInt) :: param_decls
+              ; assumptions =
+                  Smt.Eq (Smt.Const var_name, rhs_term) :: param_assumes
+              ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
+              }
+          in
+          (match Refine.discharge ~root vc with
+           | Refine.Verified -> ()
+           | _ ->
+             Err.error errctx ~span
+               (Printf.sprintf
+                  "division by `%s` in `cap no_panic` module may be by zero — \
+                   cannot prove bound expression is non-zero.%s"
+                  var_name division_suggestion)))
+     | None ->
+       Err.error errctx ~span
+         (Printf.sprintf
+            "division by `%s` in `cap no_panic` module may be by zero — \
+             no refinement proves `%s ≠ 0`.%s"
+            var_name var_name division_suggestion))
 
 (* ── Per-clause check ───────────────────────────────────────────────────── *)
 
 let check_clause ~root errctx (clause : A.fn_clause) : unit =
   let params = clause_refined_params clause in
+  let let_values = collect_let_values clause.A.fc_body in
   iter_div_sites
     (fun span divisor ->
       match divisor with
@@ -214,7 +274,7 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
       | A.EVar { A.txt = var_name; _ } ->
-        check_var_divisor ~root errctx span var_name params
+        check_var_divisor ~root errctx span var_name params let_values
       | _ ->
         (* Complex expression — always flag conservatively *)
         Err.error errctx ~span

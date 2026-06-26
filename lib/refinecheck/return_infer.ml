@@ -67,9 +67,33 @@ let rec smt_of ~b ~var (e : A.expr) : Smt.term option =
     Option.map (fun t -> Smt.Neg t) (go a)
   | _ -> None
 
-(* Reflect [e] with no binder substitution. *)
-let smt_term (e : A.expr) : Smt.term option =
-  smt_of ~b:"\x00" ~var:"\x00" e
+(* Reflect [e] with no binder substitution: every EVar maps to its own name. *)
+let rec smt_term (e : A.expr) : Smt.term option =
+  let bin op a b = match smt_term a, smt_term b with Some ta, Some tb -> Some (op ta tb) | _ -> None in
+  match e with
+  | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
+  | A.ELit (A.LitBool v, _) -> Some (Smt.BoolLit v)
+  | A.EVar { A.txt = x; _ } -> Some (Smt.Const x)
+  | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) ->
+    (match op with
+     | "+"  -> bin (fun a b -> Smt.Add (a, b)) a b
+     | "-"  -> bin (fun a b -> Smt.Sub (a, b)) a b
+     | "*"  ->
+       (match smt_term a, smt_term b with
+        | Some (Smt.IntLit k), Some t | Some t, Some (Smt.IntLit k) -> Some (Smt.MulLit (k, t))
+        | _ -> None)
+     | "==" -> bin (fun a b -> Smt.Eq  (a, b)) a b
+     | "!=" -> bin (fun a b -> Smt.Ne  (a, b)) a b
+     | "<"  -> bin (fun a b -> Smt.Lt  (a, b)) a b
+     | "<=" -> bin (fun a b -> Smt.Le  (a, b)) a b
+     | ">"  -> bin (fun a b -> Smt.Gt  (a, b)) a b
+     | ">=" -> bin (fun a b -> Smt.Ge  (a, b)) a b
+     | "&&" -> bin (fun a b -> Smt.And (a, b)) a b
+     | "||" -> bin (fun a b -> Smt.Or  (a, b)) a b
+     | _    -> None)
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Option.map (fun t -> Smt.Not t) (smt_term a)
+  | A.EApp (A.EVar { A.txt = "-"; _ }, [ a ], _) -> Option.map (fun t -> Smt.Neg t) (smt_term a)
+  | _ -> None
 
 (* ── Param collection (mirrors division_safety.ml) ──────────────────────── *)
 
