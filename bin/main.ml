@@ -950,6 +950,20 @@ let make_rawrecord_decl (prior_fields : March_forge.Schema_diff.field list) : Ma
   A.DType (A.Public, { A.txt = "RawRecord"; A.span = sp },
            [], A.TDRecord ast_fields, sp)
 
+(* Synthesise a DType named "State" from the NEW actor schema fields so
+   register_types_for_check can build SMT selectors for the return type. *)
+let make_newstate_decl (new_fields : March_forge.Schema_diff.field list) : March_ast.Ast.decl =
+  let module A = March_ast.Ast in
+  let sp = A.dummy_span in
+  let ast_fields = List.map (fun (f : March_forge.Schema_diff.field) ->
+      { A.fld_name = { A.txt = f.March_forge.Schema_diff.name; A.span = sp };
+        A.fld_ty   = schema_str_to_ty f.March_forge.Schema_diff.ty;
+        A.fld_lin  = A.Unrestricted })
+    new_fields
+  in
+  A.DType (A.Public, { A.txt = "State"; A.span = sp },
+           [], A.TDRecord ast_fields, sp)
+
 (* Search the desugared AST for the migration fn for a named actor.
    Convention (from TIR/llvm_emit): user writes `fn {actor_lower}_migrate_state`
    as a top-level DFn; TIR picks it up by suffix and exports @__migrate_<Actor>.
@@ -1329,14 +1343,18 @@ let compile filename =
         | Some inv_old, Some inv_new ->
           let prior_fields = match List.assoc_opt actor_name prior_schemas with
             | Some s -> s.Sd.state_fields | None -> [] in
-          (* Register the prior-version record shape as RawRecord so
-             field selectors are available in the SMT context. *)
-          Rc.register_types_for_check [make_rawrecord_decl prior_fields];
+          let new_fields = new_schema.Sd.state_fields in
+          (* Register both RawRecord (prior shape) and State (new shape) so
+             refine_check can build SMT selectors for both param and return
+             field projections.  Actors use inline state, not DType, so
+             these declarations must be synthesised here. *)
+          Rc.register_types_for_check
+            [make_rawrecord_decl prior_fields; make_newstate_decl new_fields];
           (match find_migrate_fn actor_name desugared.A.mod_decls with
           | None -> ()   (* no migrate_state for this actor — nothing to verify *)
           | Some fd ->
             let patched = patch_migrate_fn fd ~inv_old ~inv_new
-                            ~state_name:(actor_name ^ "_State") in
+                            ~state_name:"State" in
             Rc.check_fn_post ~root:(Sys.getcwd ()) mig_errctx patched;
             if March_errors.Errors.has_errors mig_errctx then
               any_error := true))
