@@ -190,15 +190,15 @@ Spec: specs/plans/2026-06-26-hcr-cross-module-versioning.md
 
 ## Open Questions
 
-1. **Caller graph storage on the server.** Where does the server keep the reverse call graph? Options: in-memory (rebuilt from manifests at ACTIVATE time), or persisted to a file alongside the audit log. In-memory is simpler.
+1. ~~**Caller graph storage on the server.**~~ **Resolved** — in-memory, rebuilt from the `callers:` field in each ACTIVATE command. Implemented in `runtime/march_dispatch.c` (`callers_str` field per slot, commit `20e54959`).
 
-2. **Cross-binary caller detection.** If Module A and Module B are compiled in separate `forge deploy hot` invocations, the server may not have the caller graph for A at the time B is deployed. The gate would fall back to rejecting unless A is in the same batch. Is this acceptable? Probably yes for V1.
+2. ~~**Cross-binary caller detection.**~~ **Resolved for V1** — if Module A and Module B are compiled in separate invocations, the server has no caller data for A at the time B deploys (slot_callers is empty). The gate conservatively allows the deploy. This is the correct V1 behavior: the user explicitly opted out of caller tracking by splitting the deploy. Phase 9 (epoch-tagged dispatch) removes the need for this check entirely.
 
-3. **Expand-contract ergonomics.** Until Phase 8 lands, users must use expand-contract manually. Should `forge` provide a `forge hot-reload expand B.foo` subcommand that scaffolds the two-deploy pattern automatically?
+3. **Expand-contract ergonomics.** Now that Phase 8 is live and the error message names uncovered callers explicitly, the manual expand-contract path is clear. A `forge deploy hot expand B.foo` subcommand that scaffolds the two-deploy pattern (generate `B.foo_v2`, update caller stubs, emit the two deploy manifests) would be ergonomic but is not blocking anything.
 
-4. **Generation ids vs. ring slots.** If we go to module-level versioning (Option B), the ring buffer needs to map a caller's generation to a slot. Today the ring maps `{0, 1}` (two versions); generation ids would be monotonically increasing. The ring is still bounded at 2 — we just need to be able to say "version G maps to slot 0; version G+1 maps to slot 1; once G drains, reclaim slot 0."
+4. ~~**Generation ids vs. ring slots.**~~ **Deferred to Phase 9** — see `specs/plans/2026-06-26-hcr-phase9-epoch-dispatch.md` for the full design.
 
-5. **Sig-compatible changes.** Adding an optional parameter with a default is backward-compatible. The gate today treats any sig_hash change as breaking. A more nuanced gate could allow truly backward-compatible changes (same arity, same param types, widened return type) without requiring all callers to be in the batch.
+5. ~~**Sig-compatible changes.**~~ **Superseded by Phase 9** — epoch-tagged dispatch makes this moot. Old callers naturally route to old B.foo regardless of sig change. Until Phase 9 lands, the gate is intentionally conservative: any sig_hash change requires caller coverage. Tracking which changes are truly ABI-compatible (same arity + widened return) without Phase 9 would require shipping type info in the manifest, which is more complexity than it's worth right now.
 
 ---
 
