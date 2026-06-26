@@ -307,13 +307,23 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             not (has_migrate_exemption fm.fn_name)
         ) to_activate in
         if abi_violations <> [] then begin
-          Printf.eprintf "error: ABI mismatch — sig_hash changed for:\n";
+          Printf.eprintf "error: function signature changed — cannot deploy without breaking live callers\n\n";
           List.iter (fun fm ->
-            let old_sig = (Hashtbl.find slot_map fm.fn_name).slot_sig_hash in
-            Printf.eprintf "  %s: old=%s new=%s\n" fm.fn_name old_sig fm.fn_sig_hash
+            Printf.eprintf "  %s\n" fm.fn_name
           ) abi_violations;
+          Printf.eprintf "\nThese functions have callers still live on the server that depend on the old\n";
+          Printf.eprintf "signature. To safely make this change:\n\n";
+          Printf.eprintf "  Option 1 — expand-contract (works today):\n";
+          Printf.eprintf "    1. Add new functions alongside the old (e.g. B.foo_v2 with the new signature)\n";
+          Printf.eprintf "    2. Update callers to call the new functions\n";
+          Printf.eprintf "    3. Deploy old + new + updated callers together\n";
+          Printf.eprintf "    4. In a later deploy, remove the old functions\n\n";
+          Printf.eprintf "  Option 2 — coordinated upgrade (not yet implemented):\n";
+          Printf.eprintf "    Include all callers of the changed functions in this deploy batch.\n";
+          Printf.eprintf "    See specs/plans/2026-06-26-hcr-cross-module-versioning.md\n\n";
+          Printf.eprintf "error: deploy aborted\n";
           Unix.close fd;
-          Error "ABI mismatch — refusing to deploy"
+          Error "function signature changed — refusing to deploy"
         end else begin
           (* 6. CAS_PUT the .so if not already present *)
           let cas_hash = manifest.cas_hash in
