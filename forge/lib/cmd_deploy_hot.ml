@@ -21,6 +21,7 @@ type fn_manifest = {
   fn_name      : string;
   fn_impl_hash : string;
   fn_sig_hash  : string;
+  fn_callers   : string list;  (* Phase 8: functions that call this one *)
 }
 
 type manifest = {
@@ -40,12 +41,24 @@ let parse_manifest path : (manifest, string) result =
          if String.length line > 10 && String.sub line 0 10 = "# cas_hash" then
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
        end else begin
-         match String.split_on_char ' ' line with
+         let parse_callers field =
+           if String.length field > 8 && String.sub field 0 8 = "callers:" then
+             let s = String.sub field 8 (String.length field - 8) in
+             if s = "" then [] else String.split_on_char ',' s
+           else []
+         in
+         (match String.split_on_char ' ' line with
+         | name :: impl_h :: sig_h :: callers_field :: _ ->
+           let callers = parse_callers callers_field in
+           fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
+                    fn_callers = callers } :: !fns
          | [name; impl_h; sig_h] ->
-           fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h } :: !fns
+           fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
+                    fn_callers = [] } :: !fns
          | [name; impl_h] ->
-           fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "" } :: !fns
-         | _ -> ()  (* skip malformed lines *)
+           fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
+                    fn_callers = [] } :: !fns
+         | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
     close_in ic;
@@ -153,20 +166,32 @@ type slot = {
   slot_name      : string;
   slot_impl_hash : string;
   slot_sig_hash  : string;
+  slot_callers   : string list;  (* Phase 8: callers recorded at last ACTIVATE *)
 }
 
 let parse_abi_query conn =
   let slots = ref [] in
+  let parse_slot_callers field =
+    if String.length field > 8 && String.sub field 0 8 = "callers:" then
+      let s = String.sub field 8 (String.length field - 8) in
+      if s = "" then [] else String.split_on_char ',' s
+    else []
+  in
   let rec loop () =
     let line = recv_line conn in
     if line = "END" then List.rev !slots
     else begin
       (match String.split_on_char ' ' line with
-       | ["SLOT"; id_s; name; impl_h; sig_h] ->
+       | "SLOT" :: id_s :: name :: impl_h :: sig_h :: rest ->
+         let callers = match rest with
+           | [cf] -> parse_slot_callers cf
+           | _    -> []
+         in
          (match int_of_string_opt id_s with
           | Some id ->
             slots := { slot_id = id; slot_name = name;
-                       slot_impl_hash = impl_h; slot_sig_hash = sig_h } :: !slots
+                       slot_impl_hash = impl_h; slot_sig_hash = sig_h;
+                       slot_callers = callers } :: !slots
           | None -> ())
        | _ -> ());
       loop ()
@@ -306,25 +331,42 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             slot.slot_sig_hash <> fm.fn_sig_hash &&
             not (has_migrate_exemption fm.fn_name)
         ) to_activate in
-        if abi_violations <> [] then begin
-          Printf.eprintf "error: function signature changed — cannot deploy without breaking live callers\n\n";
-          List.iter (fun fm ->
-            Printf.eprintf "  %s\n" fm.fn_name
-          ) abi_violations;
-          Printf.eprintf "\nThese functions have callers still live on the server that depend on the old\n";
-          Printf.eprintf "signature. To safely make this change:\n\n";
-          Printf.eprintf "  Option 1 — expand-contract (works today):\n";
-          Printf.eprintf "    1. Add new functions alongside the old (e.g. B.foo_v2 with the new signature)\n";
-          Printf.eprintf "    2. Update callers to call the new functions\n";
-          Printf.eprintf "    3. Deploy old + new + updated callers together\n";
-          Printf.eprintf "    4. In a later deploy, remove the old functions\n\n";
-          Printf.eprintf "  Option 2 — coordinated upgrade (not yet implemented):\n";
-          Printf.eprintf "    Include all callers of the changed functions in this deploy batch.\n";
-          Printf.eprintf "    See specs/plans/2026-06-26-hcr-cross-module-versioning.md\n\n";
+        (* Phase 8 — coordinated upgrade gate.
+           For each sig-changed function, check whether all server-recorded callers
+           are also being replaced in this deploy.  If the server has no caller data
+           for a slot (old server / first deploy), we allow the change conservatively. *)
+        let to_activate_set =
+          List.fold_left (fun h fm -> Hashtbl.replace h fm.fn_name (); h)
+            (Hashtbl.create 8) to_activate
+        in
+        let missing_callers = List.filter_map (fun fm ->
+          match Hashtbl.find_opt slot_map fm.fn_name with
+          | None -> None
+          | Some slot ->
+            let uncovered = List.filter
+                (fun c -> not (Hashtbl.mem to_activate_set c))
+                slot.slot_callers
+            in
+            if uncovered = [] then None
+            else Some (fm.fn_name, uncovered)
+        ) abi_violations in
+        if missing_callers <> [] then begin
+          Printf.eprintf "error: function signature changed but not all callers are in this deploy:\n\n";
+          List.iter (fun (fn_name, callers) ->
+            Printf.eprintf "  %s — uncovered caller(s):\n" fn_name;
+            List.iter (fun c -> Printf.eprintf "    %s\n" c) callers
+          ) missing_callers;
+          Printf.eprintf "\nInclude the missing modules in this deploy, or use expand-contract:\n";
+          Printf.eprintf "  1. Add B.foo_v2 alongside B.foo, update callers, deploy together\n";
+          Printf.eprintf "  2. In a later deploy, remove B.foo\n\n";
+          Printf.eprintf "See specs/plans/2026-06-26-hcr-cross-module-versioning.md\n\n";
           Printf.eprintf "error: deploy aborted\n";
           Unix.close fd;
           Error "function signature changed — refusing to deploy"
         end else begin
+          if abi_violations <> [] then
+            Printf.printf "Coordinated upgrade: sig_hash changed, all callers covered.\n%!";
+
           (* 6. CAS_PUT the .so if not already present *)
           let cas_hash = manifest.cas_hash in
           if not (cas_check conn cas_hash) then begin
@@ -421,8 +463,13 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             let msg = Printf.sprintf "%s %s %s" fm.fn_name fm.fn_impl_hash cas_hash in
             let sig_bytes = March_ed25519.Ed25519.sign_str msg sk in
             let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d"
-              fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required in
+            let callers_suffix = match fm.fn_callers with
+              | [] -> ""
+              | cs -> " callers:" ^ String.concat "," cs
+            in
+            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d%s"
+              fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required
+              callers_suffix in
             send_line conn cmd;
             let resp = recv_line conn in
             if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin

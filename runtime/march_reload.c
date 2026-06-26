@@ -222,14 +222,25 @@ static void handle_client(int fd) {
                 uint32_t cur = march_dispatch_current(i);
                 const char *h = march_dispatch_impl_hash(i, cur);
                 if (!h) break;
-                const char *name = march_dispatch_id_to_name(i);
-                const char *sig  = march_dispatch_sig_hash(i, cur);
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s\n",
+                const char *name    = march_dispatch_id_to_name(i);
+                const char *sig     = march_dispatch_sig_hash(i, cur);
+                const char *callers = march_dispatch_callers(i);
+                char resp[1024];
+                int n;
+                if (callers && callers[0]) {
+                    n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s callers:%s\n",
+                                 i,
+                                 name ? name : "(none)",
+                                 h[0] ? h : "(none)",
+                                 sig && sig[0] ? sig : "(none)",
+                                 callers);
+                } else {
+                    n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s\n",
                                  i,
                                  name ? name : "(none)",
                                  h[0] ? h : "(none)",
                                  sig && sig[0] ? sig : "(none)");
+                }
                 write(fd, resp, (size_t)n);
             }
             wresp(fd, "END\n");
@@ -479,6 +490,15 @@ static void handle_client(int fd) {
                             migrate_sym);
                 }
                 march_actor_broadcast_migrate(slot_id, migrate_fn);
+            }
+
+            /* Phase 8: store caller set for coordinated upgrade gate.
+             * The forge client appends " callers:<a>,<b>" when the new
+             * manifest has a callers field for this function. */
+            {
+                const char *callers_ptr = strstr(line, " callers:");
+                march_dispatch_set_callers(slot_id,
+                    callers_ptr ? callers_ptr + 9 : NULL);
             }
 
             write_audit_log(name, impl_hash, cas_hash, "ok");

@@ -21,6 +21,7 @@ typedef struct {
     char              baseline_impl_hash[65];          /* Phase 4: set on first publish, never changed */
     long long         activated_at_ms;                 /* Phase 7: Unix ms of last ACTIVATE */
     char              signer_hex[65];                  /* Phase 7: pubkey hex of last ACTIVATE signer */
+    char             *callers_str;                     /* Phase 8: comma-separated caller names, or NULL */
 } MarchDispatchSlot;
 
 static MarchDispatchSlot  *g_slots      = NULL;
@@ -84,6 +85,10 @@ void march_dispatch_init(uint32_t n_slots) {
 }
 
 void march_dispatch_shutdown(void) {
+    for (uint32_t i = 0; i < g_n_slots; i++) {
+        free(g_slots[i].callers_str);
+        g_slots[i].callers_str = NULL;
+    }
     free(g_slots);      g_slots      = NULL;
     free(g_id_to_name); g_id_to_name = NULL;
     g_n_slots = 0;
@@ -227,4 +232,17 @@ long long march_dispatch_activated_at(uint32_t name_id) {
 const char *march_dispatch_signer_hex(uint32_t name_id) {
     if (name_id >= g_n_slots) return NULL;
     return g_slots[name_id].signer_hex;
+}
+
+/* Phase 8: per-slot caller-set storage for coordinated upgrade gate. */
+void march_dispatch_set_callers(uint32_t name_id, const char *callers_str) {
+    if (name_id >= g_n_slots) return;
+    free(g_slots[name_id].callers_str);
+    g_slots[name_id].callers_str = (callers_str && callers_str[0])
+        ? strdup(callers_str) : NULL;
+}
+
+const char *march_dispatch_callers(uint32_t name_id) {
+    if (name_id >= g_n_slots) return NULL;
+    return g_slots[name_id].callers_str;
 }

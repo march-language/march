@@ -82,4 +82,10 @@ const char *march_dispatch_signer_hex(uint32_t name_id);
 void march_dispatch_register_name(uint32_t id, const char *name);
 int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
 
+/* Phase 8: per-slot caller-set for coordinated upgrade gate.
+ * set_callers stores a comma-separated caller-name string (strdup'd internally).
+ * Pass NULL or "" to clear. callers() returns NULL when no callers are stored. */
+void        march_dispatch_set_callers(uint32_t name_id, const char *callers_str);
+const char *march_dispatch_callers(uint32_t name_id);
+
 #endif /* MARCH_DISPATCH_H */
