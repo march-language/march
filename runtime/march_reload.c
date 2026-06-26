@@ -23,6 +23,7 @@
 #include "march_dispatch.h"
 #include "march_runtime.h"
 #include "tweetnacl.h"
+#include <stdatomic.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -106,6 +107,31 @@ static int b64_decode(const char *in, size_t inlen, unsigned char *out) {
 
 static char g_socket_path[256];
 static char g_cas_root[512];    /* ~/.march/cas */
+
+/* Phase 9: monotonic deploy epoch counter, persisted across server restarts. */
+static _Atomic(uint32_t) g_next_epoch;  /* initialised in reload_server_thread */
+
+static void persist_next_epoch(uint32_t next) {
+    char path[640], tmp[660];
+    snprintf(path, sizeof(path), "%s/next_epoch", g_cas_root);
+    snprintf(tmp,  sizeof(tmp),  "%s.tmp",        path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%u\n", next);
+    fclose(f);
+    rename(tmp, path);  /* atomic on POSIX */
+}
+
+static uint32_t load_next_epoch(void) {
+    char path[640];
+    snprintf(path, sizeof(path), "%s/next_epoch", g_cas_root);
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;  /* first run: start at epoch 1 */
+    uint32_t v = 1;
+    fscanf(f, "%u", &v);
+    fclose(f);
+    return v > 0 ? v : 1;
+}
 
 /* ── CAS path helpers ────────────────────────────────────────────────── */
 
@@ -424,8 +450,26 @@ static void handle_client(int fd) {
                 continue;
             }
 
-            int idx = march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
-                                             (uint8_t)MARCH_NATIVE);
+            /* Phase 9: parse optional "epoch:<N>" field from the ACTIVATE line.
+             * If present, stamp the .so with the epoch via __march_init before
+             * publishing so call sites inside the .so read the right epoch value. */
+            uint32_t activate_epoch = 0;
+            {
+                const char *ep_ptr = strstr(line, " epoch:");
+                if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
+            }
+            if (activate_epoch > 0) {
+                void (*init_fn)(uint32_t) = NULL;
+                void *raw_init = dlsym(handle, "__march_init");
+                if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
+                if (init_fn) init_fn(activate_epoch);
+            }
+
+            int idx = (activate_epoch > 0)
+                ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
+                                               (uint8_t)MARCH_NATIVE, activate_epoch)
+                : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
+                                        (uint8_t)MARCH_NATIVE);
             if (idx < 0) {
                 wresp(fd, "ERR publish_failed all_slots_pinned\n");
                 dlclose(handle);
@@ -506,6 +550,15 @@ static void handle_client(int fd) {
             int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
             write(fd, resp, (size_t)n);
 
+        /* ── GET_EPOCH ────────────────────────────────────────────────── */
+        } else if (strcmp(line, "GET_EPOCH") == 0) {
+            uint32_t e = atomic_fetch_add_explicit(&g_next_epoch, 1,
+                                                    memory_order_acq_rel);
+            persist_next_epoch(e + 1);
+            char resp[64];
+            int n = snprintf(resp, sizeof(resp), "EPOCH %u\n", e);
+            write(fd, resp, (size_t)n);
+
         } else {
             wresp(fd, "ERR unknown_command\n");
         }
@@ -519,6 +572,8 @@ static void *reload_server_thread(void *arg) {
 #if HAVE_SIGNING_KEY
     load_pubkey_from_hex();
 #endif
+    /* Phase 9: restore epoch counter from disk (g_cas_root already set). */
+    atomic_store_explicit(&g_next_epoch, load_next_epoch(), memory_order_relaxed);
 
     int srv = socket(AF_UNIX, SOCK_STREAM, 0);
     if (srv < 0) { perror("march_reload: socket"); return NULL; }

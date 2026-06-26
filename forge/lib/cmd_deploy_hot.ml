@@ -290,6 +290,15 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
       let slot_map = Hashtbl.create 16 in
       List.iter (fun s -> Hashtbl.replace slot_map s.slot_name s) slots;
 
+      (* Phase 9: GET_EPOCH — assign a monotonic epoch for this deploy batch.
+         Old servers respond ERR unknown_command; fall back to epoch 0 (Phase 8 only). *)
+      send_line conn "GET_EPOCH";
+      let hcr_epoch =
+        match String.split_on_char ' ' (recv_line conn) with
+        | ["EPOCH"; n] -> (match int_of_string_opt n with Some v -> v | None -> 0)
+        | _            -> 0  (* old server without Phase 9 *)
+      in
+
       (* 4. Set-diff: functions where new impl_hash ≠ current *)
       let to_activate = List.filter (fun fm ->
         match Hashtbl.find_opt slot_map fm.fn_name with
@@ -350,7 +359,9 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             if uncovered = [] then None
             else Some (fm.fn_name, uncovered)
         ) abi_violations in
-        if missing_callers <> [] then begin
+        if missing_callers <> [] && hcr_epoch = 0 then begin
+          (* Phase 8 hard block: Phase 9 not active, so old callers will see the new
+             sig immediately.  Require all callers to be in this batch. *)
           Printf.eprintf "error: function signature changed but not all callers are in this deploy:\n\n";
           List.iter (fun (fn_name, callers) ->
             Printf.eprintf "  %s — uncovered caller(s):\n" fn_name;
@@ -364,7 +375,18 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           Unix.close fd;
           Error "function signature changed — refusing to deploy"
         end else begin
-          if abi_violations <> [] then
+          (* Phase 9 active (hcr_epoch > 0): missing callers are safe — old callers
+             route to the previous ring slot via epoch-tagged dispatch until their
+             next deploy.  Emit a warning naming the in-flight callers. *)
+          if missing_callers <> [] then begin
+            Printf.eprintf "Warning: function signature changed — old callers will continue\n";
+            Printf.eprintf "  calling the previous version until they are redeployed:\n";
+            List.iter (fun (fn_name, callers) ->
+              Printf.eprintf "  %s — old caller(s): %s\n"
+                fn_name (String.concat ", " callers)
+            ) missing_callers
+          end;
+          if abi_violations <> [] && missing_callers = [] then
             Printf.printf "Coordinated upgrade: sig_hash changed, all callers covered.\n%!";
 
           (* 6. CAS_PUT the .so if not already present *)
@@ -467,9 +489,13 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               | [] -> ""
               | cs -> " callers:" ^ String.concat "," cs
             in
-            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d%s"
+            let epoch_suffix = if hcr_epoch > 0
+              then Printf.sprintf " epoch:%d" hcr_epoch
+              else ""
+            in
+            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d%s%s"
               fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required
-              callers_suffix in
+              epoch_suffix callers_suffix in
             send_line conn cmd;
             let resp = recv_line conn in
             if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin

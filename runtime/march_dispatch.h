@@ -88,4 +88,26 @@ int  march_dispatch_name_to_id(const char *name, uint32_t *out_id);
 void        march_dispatch_set_callers(uint32_t name_id, const char *callers_str);
 const char *march_dispatch_callers(uint32_t name_id);
 
+/* Phase 9: epoch-tagged dispatch.
+ *
+ * Each MarchFnVersion now carries a uint32_t epoch (0 = pre-Phase-9 / no epoch).
+ * The epoch is assigned by the reload server at ACTIVATE time and stamped into
+ * the deployed .so via __march_init(epoch).  Boundary call sites in .so files
+ * read the per-.so __march_hcr_epoch cell (set by __march_init) and pass it to
+ * march_dispatch_enter_gen so they always call the newest compatible version.
+ *
+ * march_dispatch_publish_epoch — same as march_dispatch_publish but also sets
+ *   ring[idx].epoch = epoch.  Use this when the epoch is known (ACTIVATE with
+ *   an "epoch:<N>" field).  The plain march_dispatch_publish leaves epoch = 0.
+ *
+ * march_dispatch_enter_gen — epoch-aware enter.
+ *   Scans both ring slots; returns the fn_ptr from the newest live slot whose
+ *   epoch <= caller_epoch.  Falls back to the current slot when caller_epoch == 0
+ *   or no slot matches (backward-compat with pre-Phase-9 code). */
+int    march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
+                                    const char *impl_hash, const char *sig_hash,
+                                    uint8_t kind, uint32_t epoch);
+void  *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
+                                uint32_t *out_version);
+
 #endif /* MARCH_DISPATCH_H */

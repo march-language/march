@@ -13,6 +13,7 @@ typedef struct {
     char               sig_hash[65];    /* 64 hex chars + NUL (Phase 4) */
     uint8_t            kind;            /* MARCH_NATIVE | MARCH_TRAMPOLINE */
     uint8_t            live;            /* 1 once this ring slot holds a version */
+    uint32_t           epoch;           /* Phase 9: deploy epoch; 0 = pre-Phase-9 */
 } MarchFnVersion;
 
 typedef struct {
@@ -245,4 +246,48 @@ void march_dispatch_set_callers(uint32_t name_id, const char *callers_str) {
 const char *march_dispatch_callers(uint32_t name_id) {
     if (name_id >= g_n_slots) return NULL;
     return g_slots[name_id].callers_str;
+}
+
+/* Phase 9: publish with explicit epoch tag. */
+int march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
+                                 const char *impl_hash, const char *sig_hash,
+                                 uint8_t kind, uint32_t epoch) {
+    int idx = march_dispatch_publish(name_id, fn_ptr, impl_hash, sig_hash, kind);
+    if (idx >= 0)
+        g_slots[name_id].ring[idx].epoch = epoch;
+    return idx;
+}
+
+/* Phase 9: epoch-aware enter.
+ * Find the newest live slot whose epoch <= caller_epoch.
+ * If caller_epoch == 0 or no such slot, fall back to march_dispatch_enter. */
+void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
+                               uint32_t *out_version) {
+    if (caller_epoch == 0)
+        return march_dispatch_enter(name_id, out_version);
+    if (name_id >= g_n_slots) {
+        if (out_version) *out_version = 0;
+        return NULL;
+    }
+    MarchDispatchSlot *s = &g_slots[name_id];
+
+    /* Scan the 2-slot ring for the best match: live, epoch <= caller_epoch,
+     * maximum epoch value.  This is 2 iterations, no lock needed. */
+    int    best_idx   = -1;
+    uint32_t best_ep = 0;
+    for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) {
+        if (!s->ring[i].live) continue;
+        uint32_t ep = s->ring[i].epoch;
+        if (ep <= caller_epoch && (best_idx < 0 || ep > best_ep)) {
+            best_idx = (int)i;
+            best_ep  = ep;
+        }
+    }
+    if (best_idx < 0)
+        return march_dispatch_enter(name_id, out_version);  /* no match: use current */
+
+    uint32_t v = (uint32_t)best_idx;
+    atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
+    if (out_version) *out_version = v;
+    return s->ring[v].fn_ptr;
 }
