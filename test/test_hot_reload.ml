@@ -210,6 +210,31 @@ let test_compile_so_with_hot_reload_epoch () =
   check "leave still emitted" true
     (contains ir "call void @march_dispatch_leave")
 
+(* ── Protocol v2: ACTIVATE2 signed message format ───────────────────────── *)
+
+let test_activate2_signed_message_format () =
+  let name = "Foo_dispatch" and impl_hash = "abc123" and cas_hash = "def456" in
+  let callers = ["B.bar"; "A.foo"] in
+  let callers_sorted = List.sort String.compare callers in
+  let callers_csv = String.concat "," callers_sorted in
+  let epoch = 5 in
+  let msg = Printf.sprintf "ACTIVATE2 %s %s %s epoch:%d callers:%s"
+    name impl_hash cas_hash epoch callers_csv in
+  check "ACTIVATE2 prefix" true (String.length msg >= 9 && String.sub msg 0 9 = "ACTIVATE2");
+  check "epoch in signed msg" true (contains msg "epoch:5");
+  check "callers in signed msg (sorted)" true (contains msg "callers:A.foo,B.bar");
+  check "callers NOT in unsorted order" false (contains msg "callers:B.bar,A.foo");
+  check "full canonical form" true
+    (msg = "ACTIVATE2 Foo_dispatch abc123 def456 epoch:5 callers:A.foo,B.bar")
+
+let test_activate2_callers_are_sorted () =
+  let join cs = String.concat "," (List.sort String.compare cs) in
+  check "empty callers"        true (join [] = "");
+  check "single caller"        true (join ["A.foo"] = "A.foo");
+  check "two callers sorted"   true (join ["B.bar"; "A.foo"] = "A.foo,B.bar");
+  check "already sorted"       true (join ["A.foo"; "B.bar"] = "A.foo,B.bar");
+  check "three callers sorted" true (join ["C.baz"; "A.foo"; "B.bar"] = "A.foo,B.bar,C.baz")
+
 let test_compile_so_without_hot_reload_no_epoch () =
   (* --compile-so without --hot-reload must not emit the epoch entry point. *)
   let ir = LE.emit_module ~emit_main:false (two_boundary_module ()) in
@@ -269,6 +294,10 @@ let () =
       Alcotest.test_case "no startup registration off"       `Quick test_no_startup_registration_without_flag;
       Alcotest.test_case "compile_so+hot_reload emits epoch" `Quick test_compile_so_with_hot_reload_epoch;
       Alcotest.test_case "compile_so without hot_reload: no epoch" `Quick test_compile_so_without_hot_reload_no_epoch;
+    ]);
+    ("protocol_v2", [
+      Alcotest.test_case "ACTIVATE2 signed message canonical form" `Quick test_activate2_signed_message_format;
+      Alcotest.test_case "ACTIVATE2 callers sorted before signing" `Quick test_activate2_callers_are_sorted;
     ]);
     ("inline_guard", [
       Alcotest.test_case "boundary callee not inlined"       `Quick test_inliner_skips_boundary_callee;

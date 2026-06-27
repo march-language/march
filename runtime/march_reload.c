@@ -8,7 +8,9 @@
  *   CAS_CHECK <compilation_hash>                  → PRESENT | MISSING
  *   CAS_PUT <compilation_hash> <size_bytes>\n     → READY\n
  *     <binary data, exactly size_bytes>           → OK <hash> | ERR <reason>
- *   ACTIVATE <name> <impl_hash> <cas_hash> <sig64>  → OK <impl_hash> | ERR <reason>
+ *   ACTIVATE  <name> <impl_hash> <cas_hash> <sig64>  → OK <impl_hash> | ERR <reason>  (v1, legacy)
+ *   ACTIVATE2 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
+ *                                                   → OK <impl_hash> | ERR <reason>  (v2, signed epoch+callers)
  *
  * Artifact CAS layout (server side):
  *   ~/.march/cas/artifacts/<2>/<62>
@@ -255,6 +257,124 @@ static void write_audit_log(const char *fn, const char *impl_hash,
     fclose(f);
 }
 
+/* RTLD_DEEPBIND: prefer this .so's own symbols over the main executable's.
+ * Without it, a hot-patched function resolves PLT calls to the compiled-in v1
+ * instead of the v2 copies in the patch .so.  GNU extension; guard it. */
+#ifndef RTLD_DEEPBIND
+#define RTLD_DEEPBIND 0
+#endif
+
+/* Common activation body shared by ACTIVATE (v1) and ACTIVATE2 (v2).
+ * callers_csv: comma-separated caller list (already sorted for v2; raw for v1),
+ *              or NULL if absent. */
+static void do_activate(int fd, const char *name, const char *impl_hash,
+                        const char *cas_hash, int migrate_required,
+                        uint32_t activate_epoch, const char *callers_csv) {
+    uint32_t slot_id;
+    if (!march_dispatch_name_to_id(name, &slot_id)) {
+        write_audit_log(name, impl_hash, cas_hash, "err_abi");
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp), "ERR unknown_name %s\n", name);
+        write_safe(fd, resp, n, sizeof(resp));
+        return;
+    }
+
+    char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
+    if (access(path, F_OK) != 0) {
+        write_audit_log(name, impl_hash, cas_hash, "err_cas_miss");
+        wresp(fd, "ERR missing_artifact\n"); return;
+    }
+
+    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
+    if (!handle) {
+        write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp), "ERR dlopen_failed %s\n", dlerror());
+        write_safe(fd, resp, n, sizeof(resp));
+        return;
+    }
+
+    void *fn_ptr = dlsym(handle, name);
+    if (!fn_ptr) {
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp), "ERR dlsym_failed %s\n", name);
+        dlclose(handle);
+        write_safe(fd, resp, n, sizeof(resp));
+        return;
+    }
+
+    if (activate_epoch > 0) {
+        void (*init_fn)(uint32_t) = NULL;
+        void *raw_init = dlsym(handle, "__march_init");
+        if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
+        if (init_fn) init_fn(activate_epoch);
+    }
+
+    int idx = (activate_epoch > 0)
+        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
+                                       (uint8_t)MARCH_NATIVE, activate_epoch)
+        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
+                                (uint8_t)MARCH_NATIVE);
+    if (idx < 0) {
+        wresp(fd, "ERR publish_failed all_slots_pinned\n");
+        dlclose(handle);
+        return;
+    }
+    /* Dispatch table owns the handle from this point; it will dlclose when the
+     * ring slot is reclaimed by the next hot deploy. */
+    march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
+
+    {
+        struct timeval atv; gettimeofday(&atv, NULL);
+        long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
+        char asigner[65]; pubkey_to_hex(asigner);
+        march_dispatch_set_activation(slot_id, ats, asigner);
+    }
+
+    /* Optional actor migration: dlsym __migrate_<Actor> and broadcast. */
+    if (migrate_required) {
+        char migrate_sym[320];
+        const char *dispatch_sfx = "_dispatch";
+        size_t name_len = strlen(name);
+        size_t dsfx_len = strlen(dispatch_sfx);
+        char actor_short[256];
+        if (name_len > dsfx_len &&
+            strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
+            size_t alen = name_len - dsfx_len;
+            if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
+            strncpy(actor_short, name, alen);
+            actor_short[alen] = '\0';
+        } else {
+            strncpy(actor_short, name, sizeof(actor_short) - 1);
+            actor_short[sizeof(actor_short) - 1] = '\0';
+        }
+        snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
+        for (char *p = migrate_sym + 10; *p; p++) {
+            if (*p == '.') *p = '_';
+        }
+        void *raw_sym = dlsym(handle, migrate_sym);
+        void *(*migrate_fn)(void *) = NULL;
+        if (raw_sym) {
+            memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
+            fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
+                    migrate_sym, slot_id);
+        } else {
+            /* Symbol absent but migrate_required=1 (e.g. @compat(any) with schema
+             * changes and no migrate_state fn).  Log to stderr only — writing WARN
+             * before OK would desync the client's response parser. */
+            fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
+                    migrate_sym);
+        }
+        march_actor_broadcast_migrate(slot_id, migrate_fn);
+    }
+
+    march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
+    write_audit_log(name, impl_hash, cas_hash, "ok");
+    char resp[256];
+    int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
+    write_safe(fd, resp, n, sizeof(resp));
+}
+
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
     while (1) {
@@ -429,159 +549,119 @@ static void handle_client(int fd) {
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
 #else
-            /* No signing configured: reject all ACTIVATE commands. */
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
-
-            uint32_t slot_id;
-            if (!march_dispatch_name_to_id(name, &slot_id)) {
-                write_audit_log(name, impl_hash, cas_hash, "err_abi");
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp), "ERR unknown_name %s\n", name);
-                write_safe(fd, resp, n, sizeof(resp));
-                continue;
-            }
-
-            /* Resolve artifact from CAS */
-            char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
-            if (access(path, F_OK) != 0) {
-                write_audit_log(name, impl_hash, cas_hash, "err_cas_miss");
-                wresp(fd, "ERR missing_artifact\n"); continue;
-            }
-
-            /* RTLD_DEEPBIND: prefer this .so's own symbols over the main
-             * executable's when resolving PLT calls inside the patch.
-             * Without it, a hot-patched Counter_dispatch calling
-             * Counter_PrintHistory$Counter_Actor$V__ would find the v1
-             * version compiled into the server binary instead of the v2
-             * version in the patch .so. RTLD_DEEPBIND is a GNU extension;
-             * guard it for portability. */
-#ifndef RTLD_DEEPBIND
-#define RTLD_DEEPBIND 0
-#endif
-            void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
-            if (!handle) {
-                write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp), "ERR dlopen_failed %s\n", dlerror());
-                write_safe(fd, resp, n, sizeof(resp));
-                continue;
-            }
-
-            void *fn_ptr = dlsym(handle, name);
-            if (!fn_ptr) {
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp), "ERR dlsym_failed %s\n", name);
-                dlclose(handle);
-                write_safe(fd, resp, n, sizeof(resp));
-                continue;
-            }
-
-            /* Phase 9: parse optional "epoch:<N>" field from the ACTIVATE line.
-             * If present, stamp the .so with the epoch via __march_init before
-             * publishing so call sites inside the .so read the right epoch value. */
-            uint32_t activate_epoch = 0;
             {
+                uint32_t activate_epoch = 0;
                 const char *ep_ptr = strstr(line, " epoch:");
                 if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
-            }
-            if (activate_epoch > 0) {
-                void (*init_fn)(uint32_t) = NULL;
-                void *raw_init = dlsym(handle, "__march_init");
-                if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
-                if (init_fn) init_fn(activate_epoch);
-            }
-
-            int idx = (activate_epoch > 0)
-                ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
-                                               (uint8_t)MARCH_NATIVE, activate_epoch)
-                : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
-                                        (uint8_t)MARCH_NATIVE);
-            if (idx < 0) {
-                wresp(fd, "ERR publish_failed all_slots_pinned\n");
-                dlclose(handle);
-                continue;
-            }
-            /* Hand the handle to the dispatch table so it can dlclose the .so
-             * when this ring slot is later reclaimed by the next hot deploy.
-             * The dispatch table owns the handle from this point on. */
-            march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
-
-            /* Record activation timestamp and signer for VERSIONS_DETAIL. */
-            {
-                struct timeval atv; gettimeofday(&atv, NULL);
-                long long ats = (long long)atv.tv_sec * 1000LL
-                              + (long long)atv.tv_usec / 1000;
-                char asigner[65]; pubkey_to_hex(asigner);
-                march_dispatch_set_activation(slot_id, ats, asigner);
-            }
-
-            /* ── Phase 5: optional actor migration ───────────────────────────
-             * If migrate_required=1, dlsym the __migrate_<name> function from
-             * the newly-loaded .so and broadcast migrate messages to all live
-             * actors registered with this dispatch slot. */
-            if (migrate_required) {
-                char migrate_sym[320];
-                /* Strip "_dispatch" suffix from the ACTIVATE name to get the
-                 * actor short-name, matching the __migrate_<Actor> alias emitted
-                 * by the compiler for fn counter_migrate_state functions.
-                 * E.g. "Counter_dispatch" → "Counter" → "__migrate_Counter". */
-                const char *dispatch_sfx = "_dispatch";
-                size_t name_len = strlen(name);
-                size_t dsfx_len = strlen(dispatch_sfx);
-                char actor_short[256];
-                if (name_len > dsfx_len &&
-                    strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
-                    size_t alen = name_len - dsfx_len;
-                    if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
-                    strncpy(actor_short, name, alen);
-                    actor_short[alen] = '\0';
-                } else {
-                    strncpy(actor_short, name, sizeof(actor_short) - 1);
-                    actor_short[sizeof(actor_short) - 1] = '\0';
-                }
-                snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
-                /* Replace dots with underscores (safety: actor names normally have none) */
-                for (char *p = migrate_sym + 10; *p; p++) {
-                    if (*p == '.') *p = '_';
-                }
-                void *raw_sym = dlsym(handle, migrate_sym);
-                void *(*migrate_fn)(void *) = NULL;
-                if (raw_sym) {
-                    memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
-                    fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
-                            migrate_sym, slot_id);
-                } else {
-                    /* Symbol absent but migrate_required=1 (e.g. @compat(any) with
-                     * schema changes and no migrate_state fn).  Log to stderr only —
-                     * do NOT write WARN to the socket.  Writing WARN then OK would
-                     * cause the client to read the WARN line, treat it as a failure,
-                     * and report the function as unactivated even though
-                     * march_dispatch_publish below will atomically install v2.
-                     * This split-brain would cause save_schemas_baseline to be
-                     * skipped on a partial-success deploy, permanently poisoning the
-                     * schema diff for the next retry. */
-                    fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
-                            migrate_sym);
-                }
-                march_actor_broadcast_migrate(slot_id, migrate_fn);
-            }
-
-            /* Phase 8: store caller set for coordinated upgrade gate.
-             * The forge client appends " callers:<a>,<b>" when the new
-             * manifest has a callers field for this function. */
-            {
                 const char *callers_ptr = strstr(line, " callers:");
-                march_dispatch_set_callers(slot_id,
-                    callers_ptr ? callers_ptr + 9 : NULL);
+                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                            activate_epoch, callers_ptr ? callers_ptr + 9 : NULL);
             }
 
-            write_audit_log(name, impl_hash, cas_hash, "ok");
-            char resp[256];
-            int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
-            write_safe(fd, resp, n, sizeof(resp));
+        /* ── ACTIVATE2 ─────────────────────────────────────────────────── */
+        /* Protocol v2: epoch and callers are included in the signed payload,
+         * preventing replay attacks that forge the epoch or caller list.
+         * Signed message: "ACTIVATE2 <name> <impl_hash> <cas_hash> epoch:<N> callers:<sorted-csv>" */
+        } else if (strncmp(line, "ACTIVATE2 ", 10) == 0) {
+            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+            char migrate_str[8] = {0};
+            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+                wresp(fd, "ERR bad_format\n"); continue;
+            }
+            if (!is_hex64(cas_hash)) {
+                wresp(fd, "ERR bad_cas_hash\n"); continue;
+            }
+            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+
+            /* Parse mandatory epoch:<N>. */
+            uint32_t activate_epoch = 0;
+            {
+                const char *ep = strstr(line, " epoch:");
+                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
+                activate_epoch = (uint32_t)atoi(ep + 7);
+            }
+
+            /* Parse mandatory callers:<csv>, then sort for canonical form. */
+            char callers_sorted[1024] = {0};
+            {
+                const char *cp = strstr(line, " callers:");
+                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
+                const char *csv = cp + 9;
+                char tmp[1024]; size_t tlen = 0;
+                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                       && tlen < sizeof(tmp) - 1)
+                    tlen++;
+                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+                if (tmp[0] != '\0') {
+                    char *tokens[256]; int ntok = 0;
+                    char *p = tmp;
+                    while (*p && ntok < 255) {
+                        tokens[ntok++] = p;
+                        char *c = strchr(p, ',');
+                        if (!c) break;
+                        *c = '\0'; p = c + 1;
+                    }
+                    for (int i = 1; i < ntok; i++) {
+                        char *key = tokens[i]; int j = i - 1;
+                        while (j >= 0 && strcmp(tokens[j], key) > 0)
+                            { tokens[j+1] = tokens[j]; j--; }
+                        tokens[j+1] = key;
+                    }
+                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                    for (int i = 0; i < ntok && rem > 1; i++) {
+                        if (i > 0) { *out++ = ','; rem--; }
+                        size_t sl = strlen(tokens[i]);
+                        if (sl >= rem) sl = rem - 1;
+                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                    }
+                    *out = '\0';
+                }
+            }
+
+#if HAVE_SIGNING_KEY
+            if (!g_pubkey_loaded) {
+                wresp(fd, "ERR signing_not_configured\n"); continue;
+            }
+            int all_zero = 1;
+            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
+
+            /* Reconstruct the canonical signed message from parsed values. */
+            char signed_msg[1024];
+            int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                                 "ACTIVATE2 %s %s %s epoch:%u callers:%s",
+                                 name, impl_hash, cas_hash, activate_epoch, callers_sorted);
+
+            unsigned char sigbytes[64];
+            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
+
+            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
+            memcpy(sm, sigbytes, 64);
+            memcpy(sm + 64, signed_msg, (size_t)smlen);
+            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+            unsigned long long m_out_len = 0;
+            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                       (unsigned long long)(smlen + 64), g_pubkey);
+            free(sm); free(m_out);
+            if (vrc != 0) {
+                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                wresp(fd, "ERR bad_signature\n"); continue;
+            }
+#else
+            (void)sig_b64;
+            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            wresp(fd, "ERR signing_not_configured\n"); continue;
+#endif
+            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                        activate_epoch, callers_sorted);
 
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
         } else if (strcmp(line, "GET_EPOCH") == 0) {

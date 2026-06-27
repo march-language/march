@@ -541,25 +541,28 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                   | Error _ -> 1)
               else 0
             in
-            let msg = Printf.sprintf "%s %s %s" fm.fn_name fm.fn_impl_hash cas_hash in
+            (* Protocol v2 (ACTIVATE2): epoch and callers are included in the
+               signed payload so they can't be forged in a replay attack. *)
+            let callers_sorted = List.sort String.compare fm.fn_callers in
+            let callers_csv = String.concat "," callers_sorted in
+            let epoch_n = if hcr_epoch > 0 then hcr_epoch else 0 in
+            let msg = Printf.sprintf "ACTIVATE2 %s %s %s epoch:%d callers:%s"
+              fm.fn_name fm.fn_impl_hash cas_hash epoch_n callers_csv in
             let sig_bytes = March_ed25519.Ed25519.sign_str msg sk in
             let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-            let callers_suffix = match fm.fn_callers with
-              | [] -> ""
-              | cs -> " callers:" ^ String.concat "," cs
-            in
-            let epoch_suffix = if hcr_epoch > 0
-              then Printf.sprintf " epoch:%d" hcr_epoch
-              else ""
-            in
-            let cmd = Printf.sprintf "ACTIVATE %s %s %s %s %d%s%s"
+            let cmd = Printf.sprintf "ACTIVATE2 %s %s %s %s %d epoch:%d callers:%s"
               fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required
-              epoch_suffix callers_suffix in
+              epoch_n callers_csv in
             send_line conn cmd;
             let resp = recv_line conn in
             if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
               Printf.printf "  activated: %s\n%!" fm.fn_name;
               incr activated
+            end else if resp = "ERR unknown_command" then begin
+              Printf.eprintf
+                "  FAILED %s: server predates protocol v2 — restart the server binary\n%!"
+                fm.fn_name;
+              incr failed
             end else begin
               Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
               incr failed
