@@ -6,8 +6,8 @@
  *   VERSIONS                                      → VERSION <name> baseline <h> [hot <h>] …, END
  *   VERSIONS_DETAIL                               → SLOT <id> <name> <impl_hash> <activated_at_ms> <signer_hex> …, END
  *   CAS_CHECK <compilation_hash>                  → PRESENT | MISSING
- *   CAS_PUT <compilation_hash> <size_bytes>\n     → OK <hash> | ERR <reason>
- *     <binary data, exactly size_bytes>
+ *   CAS_PUT <compilation_hash> <size_bytes>\n     → READY\n
+ *     <binary data, exactly size_bytes>           → OK <hash> | ERR <reason>
  *   ACTIVATE <name> <impl_hash> <cas_hash> <sig64>  → OK <impl_hash> | ERR <reason>
  *
  * Artifact CAS layout (server side):

@@ -32,23 +32,25 @@ let named_passes = [
 let run ?(snap = fun _label _m -> ()) ?(hot_reload = None)
     (m : Tir.tir_module) : Tir.tir_module =
   (* Hot Code Reload: keep boundary functions out of the inliner for this run
-     so their call sites survive to codegen as dispatch-table edges. *)
+     so their call sites survive to codegen as dispatch-table edges.
+     Fun.protect ensures the global is reset even if a pass raises. *)
   Inline.boundary_config := hot_reload;
-  let changed = ref false in
-  let apply iter p =
-    changed := false;
-    List.fold_left (fun acc (label, pass) ->
-      let acc' = pass ~changed acc in
-      snap (Printf.sprintf "tir-opt-%d-%s" iter label) acc';
-      acc'
-    ) p named_passes
-  in
-  let rec loop p n =
-    if n = 0 then p
-    else
-      let iter = 6 - n in
-      let p' = apply iter p in
-      if not !changed then p'
-      else loop p' (n - 1)
-  in
-  loop m 5
+  Fun.protect ~finally:(fun () -> Inline.boundary_config := None) (fun () ->
+    let changed = ref false in
+    let apply iter p =
+      changed := false;
+      List.fold_left (fun acc (label, pass) ->
+        let acc' = pass ~changed acc in
+        snap (Printf.sprintf "tir-opt-%d-%s" iter label) acc';
+        acc'
+      ) p named_passes
+    in
+    let rec loop p n =
+      if n = 0 then p
+      else
+        let iter = 6 - n in
+        let p' = apply iter p in
+        if not !changed then p'
+        else loop p' (n - 1)
+    in
+    loop m 5)

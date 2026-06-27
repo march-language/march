@@ -194,6 +194,30 @@ let test_no_startup_registration_without_flag () =
   check "no dispatch_init when flag off" false
     (contains ir "call void @march_dispatch_init")
 
+(* ── Phase 9: .so patch mode (emit_main=false) + hot-reload epoch path ──────── *)
+
+let test_compile_so_with_hot_reload_epoch () =
+  (* emit_main=false simulates --compile-so; hot_reload=Some cfg enables Phase 9. *)
+  let ir = LE.emit_module ~emit_main:false
+             ~hot_reload:(Some (HR.default_config "MyApp"))
+             (two_boundary_module ()) in
+  check "epoch cell emitted in .so mode" true
+    (contains ir "@__march_hcr_epoch = private global i32 0");
+  check "__march_init exported for reload server" true
+    (contains ir "define void @__march_init(i32 %epoch)");
+  check "epoch-aware enter used in .so (not bare enter)" true
+    (contains ir "march_dispatch_enter_gen");
+  check "leave still emitted" true
+    (contains ir "call void @march_dispatch_leave")
+
+let test_compile_so_without_hot_reload_no_epoch () =
+  (* --compile-so without --hot-reload must not emit the epoch entry point. *)
+  let ir = LE.emit_module ~emit_main:false (two_boundary_module ()) in
+  check "no epoch cell without --hot-reload" false
+    (contains ir "@__march_hcr_epoch");
+  check "no __march_init without --hot-reload" false
+    (contains ir "__march_init")
+
 (* ── inliner no-inline guard for boundary edges ───────────────────────────── *)
 
 let a_body_after_inline (cfg : HR.config option) : Tir.expr =
@@ -243,6 +267,8 @@ let () =
       Alcotest.test_case "no flag keeps direct call"         `Quick test_no_flag_keeps_direct_call;
       Alcotest.test_case "startup registers boundary fns"    `Quick test_startup_registers_boundary_fns;
       Alcotest.test_case "no startup registration off"       `Quick test_no_startup_registration_without_flag;
+      Alcotest.test_case "compile_so+hot_reload emits epoch" `Quick test_compile_so_with_hot_reload_epoch;
+      Alcotest.test_case "compile_so without hot_reload: no epoch" `Quick test_compile_so_without_hot_reload_no_epoch;
     ]);
     ("inline_guard", [
       Alcotest.test_case "boundary callee not inlined"       `Quick test_inliner_skips_boundary_callee;
