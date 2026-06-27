@@ -9,6 +9,7 @@
     [.march/search-index.json]. *)
 
 module Ast = March_ast.Ast
+module TC  = March_typecheck.Typecheck
 
 (* ------------------------------------------------------------------ *)
 (* Types                                                               *)
@@ -86,6 +87,52 @@ let rec pp_ast_ty = function
   | Ast.TyRefine (base, _, _) -> pp_ast_ty base
 
 (* ------------------------------------------------------------------ *)
+(* Canonical type printer (clean a/b/c variable names)                *)
+(* ------------------------------------------------------------------ *)
+
+(** Create a printer that assigns clean variable names (a, b, c, …) in order
+    of first appearance, shared across multiple calls — so all parts of one
+    function signature use the same name mapping. *)
+let make_ty_printer () : TC.ty -> string =
+  let tbl  : (int, string) Hashtbl.t = Hashtbl.create 8 in
+  let next = ref 0 in
+  let varname id =
+    match Hashtbl.find_opt tbl id with
+    | Some n -> n
+    | None ->
+      let n = if !next < 26 then String.make 1 (Char.chr (97 + !next))
+              else "t" ^ string_of_int (!next - 25) in
+      incr next; Hashtbl.add tbl id n; n
+  in
+  let rec go ty =
+    match TC.repr ty with
+    | TC.TVar r ->
+      (match !r with
+       | TC.Unbound (id, _) -> varname id
+       | TC.Link t          -> go t)
+    | TC.TCon (name, [])   -> name
+    | TC.TCon (name, args) ->
+      name ^ "(" ^ String.concat ", " (List.map go args) ^ ")"
+    | TC.TArrow (a, b) ->
+      let a_str = match TC.repr a with
+        | TC.TArrow _ -> "(" ^ go a ^ ")"
+        | _           -> go a
+      in
+      a_str ^ " -> " ^ go b
+    | TC.TTuple []  -> "()"
+    | TC.TTuple ts  -> "(" ^ String.concat ", " (List.map go ts) ^ ")"
+    | TC.TRecord flds ->
+      "{ " ^ String.concat ", " (List.map (fun (n, t) -> n ^ ": " ^ go t) flds) ^ " }"
+    | TC.TLin (_, t)        -> go t
+    | TC.TRefine (base, _,_)-> go base
+    | TC.TError             -> "<error>"
+    | _                     -> TC.pp_ty ty
+  in
+  go
+
+let pp_ty_canonical (ty : TC.ty) : string = make_ty_printer () ty
+
+(* ------------------------------------------------------------------ *)
 (* Index building from AST declarations                                *)
 (* ------------------------------------------------------------------ *)
 
@@ -100,8 +147,50 @@ let extract_fn_params (fn : Ast.fn_def) : (string * string) list =
       | Ast.FPDefault (p, _) ->
         (p.param_name.txt,
          match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+      | Ast.FPPat (Ast.PatVar n) -> (n.txt, "_")
       | Ast.FPPat _ -> ("_", "_")
     ) clause.fc_params
+
+(** Split a curried arrow type into [n] parameter types + a return type. *)
+let rec split_arrows n ty =
+  let ty = TC.repr ty in
+  if n = 0 then ([], ty)
+  else match ty with
+  | TC.TArrow (a, b) ->
+    let (rest, ret) = split_arrows (n - 1) b in
+    (TC.repr a :: rest, ret)
+  | _ -> ([], ty)
+
+(** Resolve inferred param types + return type from the type_map.
+    Falls back to AST-annotated strings when the span isn't in the map. *)
+let rec has_error ty =
+  match TC.repr ty with
+  | TC.TError         -> true
+  | TC.TCon (_, args) -> List.exists has_error args
+  | TC.TArrow (a, b)  -> has_error a || has_error b
+  | TC.TTuple ts      -> List.exists has_error ts
+  | TC.TRecord flds   -> List.exists (fun (_, t) -> has_error t) flds
+  | TC.TLin (_, t)    -> has_error t
+  | _                 -> false
+
+let resolve_fn_types type_map (fn : Ast.fn_def) (ast_params : (string * string) list) ast_ret =
+  match Hashtbl.find_opt type_map fn.fn_name.span with
+  | None -> (ast_params, ast_ret)
+  | Some fn_ty when has_error fn_ty -> (ast_params, ast_ret)
+  | Some fn_ty ->
+    let n = List.length ast_params in
+    let (param_tys, ret_ty) = split_arrows n fn_ty in
+    (* One shared printer so variable names are consistent across params and return. *)
+    let pp = make_ty_printer () in
+    let params = List.mapi (fun i (name, ast_ty) ->
+      let ty = match List.nth_opt param_tys i with
+        | Some t -> pp t
+        | None   -> ast_ty
+      in
+      (name, ty)
+    ) ast_params in
+    let ret = Some (pp ret_ty) in
+    (params, ret)
 
 let make_fn_signature ~module_name (fn : Ast.fn_def) (params : (string * string) list) (ret : string option) =
   let prefix = if module_name = "" then "" else module_name ^ "." in
@@ -112,11 +201,12 @@ let make_fn_signature ~module_name (fn : Ast.fn_def) (params : (string * string)
   "(" ^ param_sig ^ ")" ^
   (match ret with Some r -> " -> " ^ r | None -> "")
 
-let rec collect_entries ~module_name ~file acc (decl : Ast.decl) =
+let rec collect_entries ~module_name ~file ~type_map acc (decl : Ast.decl) =
   match decl with
   | Ast.DFn (fn, span) ->
-    let params = extract_fn_params fn in
-    let ret = Option.map pp_ast_ty fn.fn_ret_ty in
+    let ast_params = extract_fn_params fn in
+    let ast_ret = Option.map pp_ast_ty fn.fn_ret_ty in
+    let (params, ret) = resolve_fn_types type_map fn ast_params ast_ret in
     let signature = make_fn_signature ~module_name fn params ret in
     let entry = {
       name        = fn.fn_name.txt;
@@ -173,16 +263,19 @@ let rec collect_entries ~module_name ~file acc (decl : Ast.decl) =
       if module_name = "" then mname.txt
       else module_name ^ "." ^ mname.txt
     in
-    List.fold_left (collect_entries ~module_name:sub ~file) acc decls
+    List.fold_left (collect_entries ~module_name:sub ~file ~type_map) acc decls
 
   | _ -> acc
 
-(** Build an index from a list of (decls, source_file) pairs. *)
-let build_index (decl_lists : Ast.decl list list) ~(source_files : string list) : index =
+(** Build an index from parsed decl lists, enriched with inferred types
+    from an optional typechecker type_map. *)
+let build_index (decl_lists : Ast.decl list list) ~(source_files : string list)
+    ?(type_map = Hashtbl.create 0) () : index =
+  let tm = type_map in
   let entries =
     List.fold_left2
       (fun acc decls file ->
-        List.fold_left (collect_entries ~module_name:"" ~file) acc decls)
+        List.fold_left (collect_entries ~module_name:"" ~file ~type_map:tm) acc decls)
       []
       decl_lists
       source_files
@@ -201,11 +294,13 @@ let build_index (decl_lists : Ast.decl list list) ~(source_files : string list) 
 (* ------------------------------------------------------------------ *)
 
 let find_stdlib_dir () =
+  let exe_dir = Filename.dirname Sys.executable_name in
   let candidates = [
+    Filename.concat exe_dir "../stdlib";
+    Filename.concat exe_dir "../../stdlib";
+    Filename.concat exe_dir "../share/march/stdlib";
+    Filename.concat exe_dir "../share/march";
     "stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../../stdlib";
   ] in
   List.find_opt Sys.file_exists candidates
 
@@ -258,10 +353,39 @@ let load_stdlib () : Ast.decl list list * string list =
     let decls = List.map parse_file paths in
     (decls, paths)
 
-(** Build a search index from all stdlib files. *)
+(** Typecheck a flat list of stdlib decls and return the span→type map. *)
+let typecheck_decls (all_decls : Ast.decl list) : (Ast.span, TC.ty) Hashtbl.t =
+  let synth : Ast.module_ = {
+    mod_name  = { txt = "__stdlib__"; span = Ast.dummy_span };
+    mod_decls = all_decls;
+  } in
+  let (_errors, type_map) = TC.check_module synth in
+  type_map
+
+(** Build a search index from all stdlib files, with typechecker-inferred types. *)
 let build_stdlib_index () : index =
   let (decl_lists, source_files) = load_stdlib () in
-  build_index decl_lists ~source_files
+  let type_map = typecheck_decls (List.concat decl_lists) in
+  build_index decl_lists ~source_files ~type_map ()
+
+(** Build an index from all .march files found in [dirs] (non-recursive). *)
+let build_index_from_dirs (dirs : string list) : index =
+  let march_files_in dir =
+    try
+      Sys.readdir dir
+      |> Array.to_list
+      |> List.filter (fun f -> Filename.check_suffix f ".march")
+      |> List.sort String.compare
+      |> List.map (Filename.concat dir)
+    with Sys_error _ -> []
+  in
+  let paths = List.concat_map march_files_in dirs in
+  let decls = List.map parse_file paths in
+  build_index decls ~source_files:paths ()
+
+(** Merge two indices into one. *)
+let merge_indices (a : index) (b : index) : index =
+  { a with entries = a.entries @ b.entries }
 
 (* ------------------------------------------------------------------ *)
 (* Search helpers                                                      *)
@@ -469,62 +593,65 @@ let index_from_json (s : string) : index =
 (* Output formatting                                                   *)
 (* ------------------------------------------------------------------ *)
 
-(** Format an entry as a human-readable terminal line. *)
+(** Format an entry as plain text (no color). Used for piped/LLM output. *)
 let format_entry (e : entry) : string =
   let loc = Printf.sprintf "%s:%d" e.file e.line in
-  let padding =
-    let sig_len = String.length e.signature in
-    let loc_len = String.length loc in
-    let width = 72 in
-    let gap = width - sig_len - loc_len in
-    if gap > 1 then String.make gap ' ' else "  "
+  let name_part =
+    if e.module_name = "" then e.name
+    else e.module_name ^ "." ^ e.name
   in
-  let headline = e.signature ^ padding ^ loc in
+  let headline = Printf.sprintf "%s  %s  %s" name_part e.signature loc in
   match e.doc with
   | None     -> headline
   | Some doc ->
-    (* Wrap doc at 72 chars with 2-space indent *)
-    headline ^ "\n  " ^ doc
+    let first = match String.split_on_char '\n' doc with l :: _ -> l | [] -> "" in
+    if first = "" then headline else headline ^ "\n  " ^ first
 
-(** Format results as a colored, aligned table for terminal output. *)
-let format_results_pretty (results : (entry * float) list) : unit =
+(** Format results as colored cards for terminal output. *)
+let format_results_colored (results : (entry * float) list) : unit =
   if results = [] then
-    print_endline "no results found"
+    Printf.printf "\027[2mno results found\027[0m\n"
   else begin
     let cyan  = "\027[36m" in
     let bold  = "\027[1m"  in
     let green = "\027[32m" in
     let dim   = "\027[2m"  in
     let reset = "\027[0m"  in
-    let pad s n = s ^ String.make (max 0 (n - String.length s)) ' ' in
-    let rows = List.map (fun (e, _) ->
-      let loc = Printf.sprintf "%s:%d" e.file e.line in
-      (e.module_name, e.name, e.signature, loc, e.doc)
-    ) results in
-    let w1 = List.fold_left (fun acc (m, _, _, _, _) ->
-      max acc (String.length m)) (String.length "Module") rows in
-    let w2 = List.fold_left (fun acc (_, n, _, _, _) ->
-      max acc (String.length n)) (String.length "Name") rows in
-    let w3 = List.fold_left (fun acc (_, _, s, _, _) ->
-      max acc (String.length s)) (String.length "Signature") rows in
-    Printf.printf "%s  %s  %s  %s\n"
-      (pad "Module" w1) (pad "Name" w2) (pad "Signature" w3) "Location";
-    Printf.printf "%s  %s  %s  %s\n"
-      (String.make w1 '-') (String.make w2 '-')
-      (String.make w3 '-') "--------";
-    List.iter (fun (modname, name, sig_, loc, doc) ->
-      Printf.printf "%s%s%s  %s%s%s  %s%s%s  %s%s%s\n"
-        cyan  (pad modname w1) reset
-        bold  (pad name   w2) reset
-        green (pad sig_   w3) reset
-        dim   loc             reset;
-      (match doc with
+    let term_width =
+      match Sys.getenv_opt "COLUMNS" with
+      | Some s -> (try int_of_string s with _ -> 80)
+      | None   -> 80
+    in
+    List.iter (fun (e, _) ->
+      let loc = Printf.sprintf "%s:%d" (Filename.basename e.file) e.line in
+      let name_visible =
+        (if e.module_name = "" then "" else e.module_name ^ ".") ^ e.name
+      in
+      let name_colored =
+        if e.module_name = "" then
+          Printf.sprintf "%s%s%s" bold e.name reset
+        else
+          Printf.sprintf "%s%s%s.%s%s%s" cyan e.module_name reset bold e.name reset
+      in
+      let gap = max 2 (term_width - String.length name_visible - String.length loc) in
+      Printf.printf "%s%s%s%s%s\n"
+        name_colored (String.make gap ' ') dim loc reset;
+      Printf.printf "  %s%s%s\n" green e.signature reset;
+      (match e.doc with
        | None -> ()
        | Some d ->
-         let first_line =
-           match String.split_on_char '\n' d with l :: _ -> l | [] -> ""
-         in
-         if first_line <> "" then
-           Printf.printf "  %s%s%s\n" dim first_line reset)
-    ) rows
+         let first = match String.split_on_char '\n' d with l :: _ -> l | [] -> "" in
+         if first <> "" then Printf.printf "  %s%s%s\n" dim first reset);
+      print_newline ()
+    ) results
   end
+
+(** Format results as plain text for piped/LLM/tool output. *)
+let format_results_plain (results : (entry * float) list) : unit =
+  if results = [] then
+    print_endline "no results found"
+  else
+    List.iter (fun (e, _) ->
+      print_endline (format_entry e);
+      print_newline ()
+    ) results

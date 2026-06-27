@@ -6,14 +6,60 @@
 module Search = March_search.Search
 
 (* ------------------------------------------------------------------ *)
+(* Dependency source directories                                       *)
+(* ------------------------------------------------------------------ *)
+
+(** Collect every directory (including nested subdirs) under [dir]. *)
+let rec collect_dirs acc dir =
+  match Sys.is_directory dir with
+  | exception Sys_error _ -> acc
+  | false -> acc
+  | true ->
+    let children =
+      try Sys.readdir dir |> Array.to_list
+          |> List.map (Filename.concat dir)
+          |> List.sort String.compare
+      with Sys_error _ -> []
+    in
+    List.fold_left collect_dirs (dir :: acc) children
+
+(** All source directories contributed by project dependencies. *)
+let dep_source_dirs ~root (all_deps : (string * Project.dep) list) =
+  let dep_dirs (name, dep) =
+    match dep with
+    | Project.PathDep rel ->
+      let abs = if Filename.is_relative rel
+        then Filename.concat root rel
+        else rel
+      in
+      let lib = Filename.concat abs "lib" in
+      if Sys.file_exists lib then collect_dirs [] lib
+      else if Sys.file_exists abs then collect_dirs [] abs
+      else []
+    | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+      (match Project.git_dep_lib_path name with
+       | Some p -> collect_dirs [] p
+       | None -> [])
+    | _ -> []
+  in
+  List.concat_map dep_dirs all_deps
+
+(* ------------------------------------------------------------------ *)
 (* Index cache                                                         *)
 (* ------------------------------------------------------------------ *)
 
 let index_cache_path root =
   Filename.concat root (Filename.concat ".march" "search-index.json")
 
-(** Load cached index if it exists, otherwise build from stdlib. *)
-let load_or_build_index ~verbose root =
+(** Build a combined index from stdlib + project dep sources. *)
+let build_combined_index ~root all_deps =
+  let stdlib_idx = Search.build_stdlib_index () in
+  let dirs = dep_source_dirs ~root all_deps in
+  if dirs = [] then stdlib_idx
+  else Search.merge_indices stdlib_idx (Search.build_index_from_dirs dirs)
+
+(** Load cached index if it exists, otherwise build from stdlib + deps. *)
+let load_or_build_index ~verbose ~root all_deps =
   let cache = index_cache_path root in
   if Sys.file_exists cache then begin
     (if verbose then
@@ -28,8 +74,8 @@ let load_or_build_index ~verbose root =
        Error (Printf.sprintf "failed to parse search index: %s" msg))
   end else begin
     (if verbose then
-       Printf.eprintf "forge search: building index from stdlib...\n%!");
-    let idx = Search.build_stdlib_index () in
+       Printf.eprintf "forge search: building index from stdlib and deps...\n%!");
+    let idx = build_combined_index ~root all_deps in
     (* Save for future use *)
     (try
        Project.mkdir_p (Filename.dirname cache);
@@ -47,49 +93,43 @@ let load_or_build_index ~verbose root =
 (* Output                                                              *)
 (* ------------------------------------------------------------------ *)
 
-let print_results ~as_json ~pretty ~limit results =
-  let results = if limit > 0 then
-    let rec take n = function
-      | [] -> []
-      | _ when n = 0 -> []
-      | x :: xs -> x :: take (n - 1) xs
-    in
-    take limit results
-  else results
+let take n xs =
+  let rec go n = function
+    | [] -> []
+    | _ when n = 0 -> []
+    | x :: rest -> x :: go (n - 1) rest
   in
+  if n > 0 then go n xs else xs
+
+let print_results ~as_json ~plain ~limit results =
+  let results = take limit results in
   if as_json then begin
-    let entries = List.map fst results in
-    let j : Yojson.Basic.t = `List
-        (List.map Search.entry_to_json entries)
+    let j : Yojson.Basic.t =
+      `List (List.map (fun (e, _) -> Search.entry_to_json e) results)
     in
     print_string (Yojson.Basic.pretty_to_string j);
     print_newline ()
-  end else if pretty then
-    Search.format_results_pretty results
-  else begin
-    if results = [] then
-      print_endline "no results found"
-    else
-      List.iter (fun (entry, _score) ->
-        print_endline (Search.format_entry entry);
-        print_newline ()
-      ) results
-  end
+  end else if plain || not (Unix.isatty Unix.stdout) then
+    Search.format_results_plain results
+  else
+    Search.format_results_colored results
 
 (* ------------------------------------------------------------------ *)
 (* Command                                                             *)
 (* ------------------------------------------------------------------ *)
 
-let run ~query ~type_sig ~doc_query ~limit ~as_json ~pretty ~rebuild () =
-  let root = match Project.load () with
-    | Ok p  -> p.Project.root
-    | Error _ -> Filename.current_dir_name
+let run ~query ~type_sig ~doc_query ~limit ~as_json ~plain ~rebuild () =
+  let (root, all_deps) = match Project.load () with
+    | Ok p  ->
+      let deps = p.Project.deps @ p.Project.dev_deps @ p.Project.dev_only_deps in
+      (p.Project.root, deps)
+    | Error _ -> (Filename.current_dir_name, [])
   in
   (if rebuild then begin
      let cache = index_cache_path root in
      if Sys.file_exists cache then Sys.remove cache
    end);
-  match load_or_build_index ~verbose:false root with
+  match load_or_build_index ~verbose:false ~root all_deps with
   | Error msg -> Printf.eprintf "error: %s\n%!" msg; exit 1
   | Ok idx ->
     let name_q     = if String.length query    > 0 then Some query    else None in
@@ -98,10 +138,10 @@ let run ~query ~type_sig ~doc_query ~limit ~as_json ~pretty ~rebuild () =
     let results =
       if name_q = None && type_q = None && doc_q = None then
         (* No query — print a summary *)
-        (Printf.printf "index contains %d entries (stdlib)\n%!"
+        (Printf.printf "index contains %d entries (stdlib + deps)\n%!"
            (List.length idx.Search.entries);
          [])
       else
         Search.search_combined idx ?name:name_q ?type_sig:type_q ?doc_query:doc_q ()
     in
-    print_results ~as_json ~pretty ~limit results
+    print_results ~as_json ~plain ~limit results

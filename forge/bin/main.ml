@@ -504,21 +504,21 @@ let search_cmd =
          info ["limit"; "n"] ~docv:"N" ~doc:"Maximum number of results (default 20)")
   in
   let as_json =
-    Arg.(value & flag & info ["json"] ~doc:"Output results as JSON")
+    Arg.(value & flag & info ["json"] ~doc:"Output results as JSON (for tooling)")
   in
-  let pretty =
-    Arg.(value & flag & info ["pretty"; "p"] ~doc:"Output results as a colored, aligned table")
+  let plain =
+    Arg.(value & flag & info ["plain"] ~doc:"Plain text output, no colors (for piping or LLM use)")
   in
   let rebuild =
     Arg.(value & flag & info ["rebuild"] ~doc:"Rebuild the search index before searching")
   in
   let run q t d n j p r =
-    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~pretty:p ~rebuild:r ()
+    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~plain:p ~rebuild:r ()
   in
   Cmd.v
     (Cmd.info "search"
        ~doc:"Search stdlib and dependencies for functions, types, and constructors")
-    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ pretty $ rebuild)
+    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ plain $ rebuild)
 
 (* --------------------------------------------------------------- forge publish *)
 
