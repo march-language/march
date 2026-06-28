@@ -102,6 +102,13 @@ type ctx = {
   mutable tco_fn_name   : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
+  (* True while emitting an expression in TAIL position of the current TCO
+     function.  A self-EApp only becomes a loop back-edge when this holds;
+     a self-call in non-tail position (an ELet rhs / ESeq prefix, e.g. the
+     recursive call inside `Cons(x, f(t))`) must emit an ordinary call so the
+     surrounding construction is not discarded.  Cleared by emit_expr around
+     non-tail sub-expressions and restored afterwards. *)
+  mutable tco_in_tail   : bool;
   (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
      mutual_tco_group: names of all functions in the current mutual group (empty = not active).
      mutual_tco_tag_slot: alloca slot name for the dispatch tag.
@@ -217,6 +224,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   tco_fn_name    = None;
   tco_loop_label = "";
   tco_param_info = [];
+  tco_in_tail    = true;
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
   mutual_tco_loop_label = "";
@@ -2218,7 +2226,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
+    (* The rhs is in non-tail position: a self-call here must be an ordinary
+       call, not a TCO back-edge (else the let body would be dropped). *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
     let (rhs_ty, rhs_val) = emit_expr ctx rhs in
+    ctx.tco_in_tail <- saved_tail;
     (* When the variable has an unresolved type (TVar), trust the actual
        LLVM type produced by the rhs expression.  This prevents type confusion
        where e.g. an Int field loaded as i64 gets coerced to ptr. *)
@@ -2235,7 +2248,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Sequence ──────────────────────────────────────────────────────── *)
   | Tir.ESeq (e1, e2) ->
+    (* e1 is evaluated for effect (non-tail); only e2 is in tail position. *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
     let result1 = emit_expr ctx e1 in
+    ctx.tco_in_tail <- saved_tail;
     (match e2 with
      | Tir.EDecRC _ | Tir.EIncRC _
      | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _ ->
@@ -2804,7 +2821,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      (from the calling emit_case / emit_fn context) land in a dead block —
      valid LLVM IR but never executed; the optimizer removes them. *)
   | Tir.EApp (f, args)
-    when (match ctx.tco_fn_name with
+    when ctx.tco_in_tail
+         && (match ctx.tco_fn_name with
           | Some n -> String.equal n f.Tir.v_name
           | None   -> false)
          && List.length args = List.length ctx.tco_param_info ->
@@ -4935,7 +4953,13 @@ let emit_fn ctx (fn : Tir.fn_def) =
   in
 
   (* Detect self-tail-recursion: only do TCO when the function calls itself
-     in tail position and is not a closure apply fn (those have a clo arg). *)
+     in tail position and is not a closure apply fn (those have a clo arg).
+     TCO is enabled whenever ANY self-call is in tail position; the back-edge
+     transform in emit_expr is gated on [ctx.tco_in_tail] so that NON-tail
+     self-calls (which also occur in mixed functions, e.g. the recursive call
+     inside `Cons(x, f(t))`) emit an ordinary call instead of a loop back-edge.
+     Without that gate the non-tail call would be turned into a back-edge and
+     the surrounding construction silently dropped — a miscompile. *)
   let is_tco =
     has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
     && not (is_builtin_fn fn.Tir.fn_name)
@@ -5000,6 +5024,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
     ctx.tco_fn_name    <- Some fn.Tir.fn_name;
     ctx.tco_loop_label <- loop_lbl;
     ctx.tco_param_info <- param_slots;
+    ctx.tco_in_tail    <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     (* Clear TCO state before emitting any other function. *)
     ctx.tco_fn_name <- None;

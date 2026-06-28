@@ -10058,6 +10058,65 @@ let test_compiled_sortby_heap_capturing_comparator () =
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
+(* Regression: a TOML [section] with 4+ keys returned the WRONG value from
+   Toml.get_str when COMPILED (e.g. get_str(pkg,"k1") = "k4", a sibling key's
+   NAME) and could crash with OOM / RC underflow.  The interpreter was always
+   correct, so only a compiled test catches it.  Three independent compiler
+   bugs combined to corrupt the (String, TomlValue) pair list:
+     (a) TCO wrongly applied the loop back-edge to a NON-tail self-call inside
+         Cons(x, f(t)), dropping the construction;
+     (b) niche/newtype scrutinee double-free (get_str's Some(TStr(s)));
+     (c) borrow inference over-owned table_get/tget (a `let p = field` alias
+         was read as an owning use), so the linear search consumed and freed
+         the list spine/elements that set_nested/table_has then reused.
+   Guard: parse a 4-key [package], assert every get_str returns its own value;
+   process_exit(1) on any mismatch. *)
+let test_compiled_toml_section_4keys () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_toml4" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "toml4.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod Toml4Regress do\n\
+      \  pfn check(opt, want) : Unit do\n\
+      \    match opt do\n\
+      \      Some(s) -> if s == want do () else process_exit(1) end\n\
+      \      None -> process_exit(1)\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    let src = \"[package]\\nk1 = \\\"v1\\\"\\nk2 = \\\"v2\\\"\\nk3 = \\\"v3\\\"\\nk4 = \\\"v4\\\"\\n\"\n\
+      \    match Toml.parse(src) do\n\
+      \      Ok(root) ->\n\
+      \        match Toml.get_table(root, \"package\") do\n\
+      \          Some(pkg) ->\n\
+      \            check(Toml.get_str(pkg, \"k1\"), \"v1\")\n\
+      \            check(Toml.get_str(pkg, \"k2\"), \"v2\")\n\
+      \            check(Toml.get_str(pkg, \"k3\"), \"v3\")\n\
+      \            check(Toml.get_str(pkg, \"k4\"), \"v4\")\n\
+      \          None -> process_exit(1)\n\
+      \        end\n\
+      \      Err(_) -> process_exit(1)\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "toml4bin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled Toml 4-key [package]: every get_str returns its own value"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
+
 (* End-to-end guard for Hot Code Reload (HCR) Phase 2 versioned dispatch.
    `--hot-reload <Prefix>` compiles modules under <Prefix> with a versioned
    dispatch table: boundary→boundary calls route through march_dispatch_enter/
@@ -11353,6 +11412,8 @@ let stdlib_suites =
           test_compiled_pmap_matches_map;
         Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
           test_compiled_sortby_heap_capturing_comparator;
+        Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
+          test_compiled_toml_section_4keys;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
       ]);

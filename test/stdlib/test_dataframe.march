@@ -58,12 +58,12 @@ end
 
 describe "col_name and col_len" do
   test "col_name returns column name" do
-    let col = IntCol("myCol", typed_array_from_list([1, 2, 3]))
+    let col = IntCol("myCol", native_int_arr_from_list([1, 2, 3]))
     assert (DataFrame.col_name(col) == "myCol")
   end
 
   test "col_len returns column length" do
-    let col = FloatCol("vals", typed_array_from_list([1.0, 2.0]))
+    let col = FloatCol("vals", native_float_arr_from_list([1.0, 2.0]))
     assert (DataFrame.col_len(col) == 2)
   end
 end
@@ -73,7 +73,7 @@ end
 describe "schema and row_count" do
   test "schema returns column names in order" do
     let df = DataFrame.make_df([
-      IntCol("a", typed_array_from_list([1, 2])),
+      IntCol("a", native_int_arr_from_list([1, 2])),
       StrCol("b", typed_array_from_list(["x", "y"]))
     ])
     assert (DataFrame.schema(df) == ["a", "b"])
@@ -91,7 +91,7 @@ end
 describe "get_column" do
   test "get_column retrieves existing column" do
     let df = DataFrame.make_df([
-      IntCol("age", typed_array_from_list([25, 30])),
+      IntCol("age", native_int_arr_from_list([25, 30])),
       StrCol("name", typed_array_from_list(["Alice", "Bob"]))
     ])
     match DataFrame.get_column(df, "age") do
@@ -111,7 +111,7 @@ end
 
 describe "get_int_col" do
   test "get_int_col returns Int data" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([10, 20, 30]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([10, 20, 30]))])
     match DataFrame.get_int_col(df, "n") do
     Err(_) -> assert false
     Ok(lst) -> assert (lst == [10, 20, 30])
@@ -129,7 +129,7 @@ end
 
 describe "get_float_col" do
   test "get_float_col returns Float data" do
-    let df = DataFrame.make_df([FloatCol("f", typed_array_from_list([1.5, 2.5]))])
+    let df = DataFrame.make_df([FloatCol("f", native_float_arr_from_list([1.5, 2.5]))])
     match DataFrame.get_float_col(df, "f") do
     Err(_) -> assert false
     Ok(lst) ->
@@ -143,7 +143,7 @@ end
 describe "get_row and to_rows" do
   test "get_row returns Row with correct values" do
     let df = DataFrame.make_df([
-      IntCol("x", typed_array_from_list([1, 2, 3])),
+      IntCol("x", native_int_arr_from_list([1, 2, 3])),
       StrCol("y", typed_array_from_list(["a", "b", "c"]))
     ])
     let row = DataFrame.get_row(df, 1)
@@ -158,7 +158,7 @@ describe "get_row and to_rows" do
   end
 
   test "to_rows returns all rows" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([10, 20]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([10, 20]))])
     let rows = DataFrame.to_rows(df)
     assert (List.length(rows) == 2)
   end
@@ -168,7 +168,7 @@ end
 
 describe "add_column and drop_column" do
   test "add_column appends a new column" do
-    let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1, 2]))])
+    let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1, 2]))])
     match DataFrame.add_column(df, StrCol("b", typed_array_from_list(["x", "y"]))) do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -179,8 +179,8 @@ describe "add_column and drop_column" do
   end
 
   test "add_column errors on length mismatch" do
-    let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1, 2]))])
-    match DataFrame.add_column(df, IntCol("b", typed_array_from_list([1]))) do
+    let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1, 2]))])
+    match DataFrame.add_column(df, IntCol("b", native_int_arr_from_list([1]))) do
     Err(_) -> assert true
     Ok(_)  -> assert false
     end
@@ -188,8 +188,8 @@ describe "add_column and drop_column" do
 
   test "drop_column removes a column" do
     let df = DataFrame.make_df([
-      IntCol("a", typed_array_from_list([1])),
-      IntCol("b", typed_array_from_list([2]))
+      IntCol("a", native_int_arr_from_list([1])),
+      IntCol("b", native_int_arr_from_list([2]))
     ])
     let df2 = DataFrame.drop_column(df, "a")
     assert (DataFrame.col_count(df2) == 1)
@@ -199,7 +199,7 @@ end
 
 describe "rename_column" do
   test "rename_column renames an existing column" do
-    let df = DataFrame.make_df([IntCol("old", typed_array_from_list([1, 2]))])
+    let df = DataFrame.make_df([IntCol("old", native_int_arr_from_list([1, 2]))])
     match DataFrame.rename_column(df, "old", "new") do
     Err(_) -> assert false
     Ok(df2) -> assert (DataFrame.schema(df2) == ["new"])
@@ -218,9 +218,9 @@ end
 describe "select_columns" do
   test "select_columns keeps requested columns in order" do
     let df = DataFrame.make_df([
-      IntCol("a", typed_array_from_list([1])),
-      IntCol("b", typed_array_from_list([2])),
-      IntCol("c", typed_array_from_list([3]))
+      IntCol("a", native_int_arr_from_list([1])),
+      IntCol("b", native_int_arr_from_list([2])),
+      IntCol("c", native_int_arr_from_list([3]))
     ])
     match DataFrame.select_columns(df, ["c", "a"]) do
     Err(_) -> assert false
@@ -234,7 +234,7 @@ end
 
 describe "head and tail" do
   test "head returns first n rows" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([1, 2, 3, 4, 5]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([1, 2, 3, 4, 5]))])
     let h = DataFrame.head(df, 3)
     assert (DataFrame.row_count(h) == 3)
     match DataFrame.get_int_col(h, "n") do
@@ -244,7 +244,7 @@ describe "head and tail" do
   end
 
   test "tail returns last n rows" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([1, 2, 3, 4, 5]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([1, 2, 3, 4, 5]))])
     let t = DataFrame.tail(df, 2)
     assert (DataFrame.row_count(t) == 2)
     match DataFrame.get_int_col(t, "n") do
@@ -319,7 +319,7 @@ describe "to_csv_string" do
   test "round-trips a simple DataFrame through CSV" do
     let df = DataFrame.make_df([
       StrCol("name", typed_array_from_list(["Alice", "Bob"])),
-      IntCol("age", typed_array_from_list([30, 25]))
+      IntCol("age", native_int_arr_from_list([30, 25]))
     ])
     let csv = DataFrame.to_csv_string(df)
     match DataFrame.from_csv_string(csv) do
@@ -364,9 +364,9 @@ end
 describe "LazyFrame select" do
   test "select keeps only requested columns" do
     let df = DataFrame.make_df([
-      IntCol("a", typed_array_from_list([1, 2])),
-      IntCol("b", typed_array_from_list([3, 4])),
-      IntCol("c", typed_array_from_list([5, 6]))
+      IntCol("a", native_int_arr_from_list([1, 2])),
+      IntCol("b", native_int_arr_from_list([3, 4])),
+      IntCol("c", native_int_arr_from_list([5, 6]))
     ])
     let result = DataFrame.lazy(df)
       |> DataFrame.select(["a", "c"])
@@ -383,7 +383,7 @@ end
 
 describe "LazyFrame filter" do
   test "filter keeps rows matching ColExpr predicate" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([1, 2, 3, 4, 5]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([1, 2, 3, 4, 5]))])
     let result = DataFrame.lazy(df)
       |> DataFrame.filter(Gt(Col("n"), LitInt(3)))
       |> DataFrame.collect()
@@ -411,7 +411,7 @@ describe "LazyFrame filter" do
   end
 
   test "filter with And" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([1, 2, 3, 4, 5]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([1, 2, 3, 4, 5]))])
     let result = DataFrame.lazy(df)
       |> DataFrame.filter(And(Gt(Col("n"), LitInt(1)), Lt(Col("n"), LitInt(5))))
       |> DataFrame.collect()
@@ -424,7 +424,7 @@ end
 
 describe "LazyFrame limit and offset" do
   test "limit returns first n rows" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10, 20, 30, 40]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10, 20, 30, 40]))])
     let result = DataFrame.lazy(df) |> DataFrame.limit(2) |> DataFrame.collect()
     match result do
     Err(_) -> assert false
@@ -439,7 +439,7 @@ describe "LazyFrame limit and offset" do
   end
 
   test "offset skips first n rows" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10, 20, 30, 40]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10, 20, 30, 40]))])
     let result = DataFrame.lazy(df) |> DataFrame.offset(2) |> DataFrame.collect()
     match result do
     Err(_) -> assert false
@@ -456,7 +456,7 @@ end
 
 describe "LazyFrame sort_by" do
   test "sort_by sorts ascending" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([3, 1, 2]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([3, 1, 2]))])
     let result = DataFrame.lazy(df)
       |> DataFrame.sort_by([("n", Asc)])
       |> DataFrame.collect()
@@ -472,7 +472,7 @@ describe "LazyFrame sort_by" do
   end
 
   test "sort_by sorts descending" do
-    let df = DataFrame.make_df([IntCol("n", typed_array_from_list([3, 1, 2]))])
+    let df = DataFrame.make_df([IntCol("n", native_int_arr_from_list([3, 1, 2]))])
     let result = DataFrame.lazy(df)
       |> DataFrame.sort_by([("n", Desc)])
       |> DataFrame.collect()
@@ -490,7 +490,7 @@ end
 
 describe "LazyFrame rename" do
   test "rename renames a column in the pipeline" do
-    let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1, 2]))])
+    let df = DataFrame.make_df([IntCol("a", native_int_arr_from_list([1, 2]))])
     let result = DataFrame.lazy(df)
       |> DataFrame.rename("a", "b")
       |> DataFrame.collect()
@@ -507,7 +507,7 @@ describe "group_by and agg" do
   test "group_by Count gives frequency counts" do
     let df = DataFrame.make_df([
       StrCol("cat", typed_array_from_list(["a", "b", "a", "b", "a"])),
-      IntCol("val", typed_array_from_list([1, 2, 3, 4, 5]))
+      IntCol("val", native_int_arr_from_list([1, 2, 3, 4, 5]))
     ])
     match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Count]) do
     Err(_)  -> assert false
@@ -518,7 +518,7 @@ describe "group_by and agg" do
   test "group_by Sum aggregates correctly" do
     let df = DataFrame.make_df([
       StrCol("cat", typed_array_from_list(["a", "a", "b"])),
-      IntCol("val", typed_array_from_list([10, 20, 5]))
+      IntCol("val", native_int_arr_from_list([10, 20, 5]))
     ])
     match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Sum("val")]) do
     Err(_)  -> assert false
@@ -532,12 +532,12 @@ end
 describe "inner_join" do
   test "inner_join on matching key returns matched rows" do
     let left = DataFrame.make_df([
-      IntCol("id", typed_array_from_list([1, 2, 3])),
+      IntCol("id", native_int_arr_from_list([1, 2, 3])),
       StrCol("name", typed_array_from_list(["Alice", "Bob", "Charlie"]))
     ])
     let right = DataFrame.make_df([
-      IntCol("id", typed_array_from_list([1, 3])),
-      IntCol("score", typed_array_from_list([90, 85]))
+      IntCol("id", native_int_arr_from_list([1, 3])),
+      IntCol("score", native_int_arr_from_list([90, 85]))
     ])
     let result = DataFrame.lazy(left)
       |> DataFrame.inner_join(right, ["id"])
@@ -585,7 +585,7 @@ end
 describe "drop_nulls" do
   test "drop_nulls removes rows with any null" do
     let df = DataFrame.make_df([
-      NullableIntCol("x", typed_array_from_list([1, 2, 3]), typed_array_from_list([false, true, false])),
+      NullableIntCol("x", native_int_arr_from_list([1, 2, 3]), typed_array_from_list([false, true, false])),
       StrCol("y", typed_array_from_list(["a", "b", "c"]))
     ])
     let cleaned = DataFrame.drop_nulls(df)
@@ -593,14 +593,14 @@ describe "drop_nulls" do
   end
 
   test "drop_nulls on fully non-nullable DataFrame is identity" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1, 2, 3]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2, 3]))])
     let cleaned = DataFrame.drop_nulls(df)
     assert (DataFrame.row_count(cleaned) == 3)
   end
 
   test "drop_nulls_in only checks specified columns" do
     let df = DataFrame.make_df([
-      NullableIntCol("x", typed_array_from_list([1, 2, 3]), typed_array_from_list([false, true, false])),
+      NullableIntCol("x", native_int_arr_from_list([1, 2, 3]), typed_array_from_list([false, true, false])),
       NullableStrCol("y", typed_array_from_list(["a", "b", "c"]), typed_array_from_list([true, false, false]))
     ])
     -- drop nulls only in "y" → removes row 0 (y is null), keeps row 1 (x null, y ok)
@@ -611,15 +611,15 @@ end
 
 describe "fill_null" do
   test "fill_null fills Int nulls with scalar" do
-    let col = NullableIntCol("n", typed_array_from_list([0, 0, 5]), typed_array_from_list([true, true, false]))
+    let col = NullableIntCol("n", native_int_arr_from_list([0, 0, 5]), typed_array_from_list([true, true, false]))
     match DataFrame.fill_null(col, IntVal(99)) do
     Err(_) -> assert false
     Ok(filled) -> do
       match filled do
       IntCol(_, data) -> do
-        assert (typed_array_get(data, 0) == 99)
-        assert (typed_array_get(data, 1) == 99)
-        assert (typed_array_get(data, 2) == 5)
+        assert (native_int_arr_get(data, 0) == 99)
+        assert (native_int_arr_get(data, 1) == 99)
+        assert (native_int_arr_get(data, 2) == 5)
         end
       _ -> assert false
       end
@@ -628,7 +628,7 @@ describe "fill_null" do
   end
 
   test "fill_null type mismatch returns Err" do
-    let col = NullableIntCol("n", typed_array_from_list([0]), typed_array_from_list([true]))
+    let col = NullableIntCol("n", native_int_arr_from_list([0]), typed_array_from_list([true]))
     match DataFrame.fill_null(col, StrVal("oops")) do
     Ok(_)  -> assert false
     Err(_) -> assert true
@@ -637,7 +637,7 @@ describe "fill_null" do
 
   test "fill_null_df replaces column in-place" do
     let df = DataFrame.make_df([
-      NullableFloatCol("v", typed_array_from_list([1.0, 0.0]), typed_array_from_list([false, true])),
+      NullableFloatCol("v", native_float_arr_from_list([1.0, 0.0]), typed_array_from_list([false, true])),
       StrCol("tag", typed_array_from_list(["a", "b"]))
     ])
     match DataFrame.fill_null_df(df, "v", FloatVal(0.0)) do
@@ -655,38 +655,38 @@ end
 
 describe "fill_null_forward and fill_null_backward" do
   test "fill_null_forward propagates last non-null value" do
-    let col = NullableIntCol("x", typed_array_from_list([1, 0, 0, 4]), typed_array_from_list([false, true, true, false]))
+    let col = NullableIntCol("x", native_int_arr_from_list([1, 0, 0, 4]), typed_array_from_list([false, true, true, false]))
     let filled = DataFrame.fill_null_forward(col)
     match filled do
     IntCol(_, data) -> do
-      assert (typed_array_get(data, 0) == 1)
-      assert (typed_array_get(data, 1) == 1)
-      assert (typed_array_get(data, 2) == 1)
-      assert (typed_array_get(data, 3) == 4)
+      assert (native_int_arr_get(data, 0) == 1)
+      assert (native_int_arr_get(data, 1) == 1)
+      assert (native_int_arr_get(data, 2) == 1)
+      assert (native_int_arr_get(data, 3) == 4)
       end
     _ -> assert false
     end
   end
 
   test "fill_null_backward propagates next non-null value" do
-    let col = NullableIntCol("x", typed_array_from_list([0, 0, 4, 0]), typed_array_from_list([true, true, false, true]))
+    let col = NullableIntCol("x", native_int_arr_from_list([0, 0, 4, 0]), typed_array_from_list([true, true, false, true]))
     let filled = DataFrame.fill_null_backward(col)
     match filled do
     IntCol(_, data) -> do
-      assert (typed_array_get(data, 0) == 4)
-      assert (typed_array_get(data, 1) == 4)
-      assert (typed_array_get(data, 2) == 4)
-      assert (typed_array_get(data, 3) == 0)
+      assert (native_int_arr_get(data, 0) == 4)
+      assert (native_int_arr_get(data, 1) == 4)
+      assert (native_int_arr_get(data, 2) == 4)
+      assert (native_int_arr_get(data, 3) == 0)
       end
     _ -> assert false
     end
   end
 
   test "fill_null_forward on non-nullable column is no-op" do
-    let col = IntCol("x", typed_array_from_list([1, 2, 3]))
+    let col = IntCol("x", native_int_arr_from_list([1, 2, 3]))
     let result = DataFrame.fill_null_forward(col)
     match result do
-    IntCol(_, data) -> assert (typed_array_get(data, 1) == 2)
+    IntCol(_, data) -> assert (native_int_arr_get(data, 1) == 2)
     _ -> assert false
     end
   end
@@ -716,7 +716,7 @@ end
 describe "window Rank" do
   test "Rank assigns 1-based ranks with gaps on ties" do
     -- values [3, 1, 1, 2] sorted asc → [1,1,2,3], ranks → [4,1,1,3]
-    let df = DataFrame.make_df([IntCol("v", typed_array_from_list([3, 1, 1, 2]))])
+    let df = DataFrame.make_df([IntCol("v", native_int_arr_from_list([3, 1, 1, 2]))])
     match DataFrame.window(df, Rank("v", Asc), "rk") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -735,7 +735,7 @@ describe "window Rank" do
   end
 
   test "DenseRank assigns 1-based ranks without gaps" do
-    let df = DataFrame.make_df([IntCol("v", typed_array_from_list([3, 1, 1, 2]))])
+    let df = DataFrame.make_df([IntCol("v", native_int_arr_from_list([3, 1, 1, 2]))])
     match DataFrame.window(df, DenseRank("v", Asc), "dr") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -755,7 +755,7 @@ end
 
 describe "window RunningSum and RunningMean" do
   test "RunningSum computes cumulative Int sum" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1, 2, 3, 4]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2, 3, 4]))])
     match DataFrame.window(df, RunningSum("x"), "cs") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -773,7 +773,7 @@ describe "window RunningSum and RunningMean" do
   end
 
   test "RunningMean computes cumulative mean" do
-    let df = DataFrame.make_df([FloatCol("x", typed_array_from_list([2.0, 4.0, 6.0]))])
+    let df = DataFrame.make_df([FloatCol("x", native_float_arr_from_list([2.0, 4.0, 6.0]))])
     match DataFrame.window(df, RunningMean("x"), "cm") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -792,7 +792,7 @@ end
 
 describe "window Lag and Lead" do
   test "Lag n=1 shifts values down" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10, 20, 30]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10, 20, 30]))])
     match DataFrame.window(df, Lag("x", 1, IntVal(0)), "prev") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -809,7 +809,7 @@ describe "window Lag and Lead" do
   end
 
   test "Lead n=1 shifts values up" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10, 20, 30]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([10, 20, 30]))])
     match DataFrame.window(df, Lead("x", 1, IntVal(0)), "nxt") do
     Err(_) -> assert false
     Ok(df2) -> do
@@ -831,9 +831,9 @@ end
 describe "melt" do
   test "melt unpivots value columns into rows" do
     let df = DataFrame.make_df([
-      IntCol("id", typed_array_from_list([1, 2])),
-      IntCol("jan", typed_array_from_list([10, 15])),
-      IntCol("feb", typed_array_from_list([20, 25]))
+      IntCol("id", native_int_arr_from_list([1, 2])),
+      IntCol("jan", native_int_arr_from_list([10, 15])),
+      IntCol("feb", native_int_arr_from_list([20, 25]))
     ])
     match DataFrame.melt(df, ["id"], ["jan", "feb"], "month", "val") do
     Err(_) -> assert false
@@ -848,8 +848,8 @@ describe "melt" do
   test "melt preserves id_vars in every output row" do
     let df = DataFrame.make_df([
       StrCol("name", typed_array_from_list(["Alice"])),
-      IntCol("q1", typed_array_from_list([100])),
-      IntCol("q2", typed_array_from_list([200]))
+      IntCol("q1", native_int_arr_from_list([100])),
+      IntCol("q2", native_int_arr_from_list([200]))
     ])
     match DataFrame.melt(df, ["name"], ["q1", "q2"], "quarter", "score") do
     Err(_) -> assert false
@@ -871,7 +871,7 @@ describe "pivot" do
     let df = DataFrame.make_df([
       StrCol("region",  typed_array_from_list(["East", "East", "West"])),
       StrCol("product", typed_array_from_list(["A",    "B",    "A"])),
-      IntCol("revenue", typed_array_from_list([100,    200,    150]))
+      IntCol("revenue", native_int_arr_from_list([100,    200,    150]))
     ])
     match DataFrame.pivot(df, "region", "product", "revenue") do
     Err(_) -> assert false
@@ -887,7 +887,7 @@ describe "pivot" do
     let df = DataFrame.make_df([
       StrCol("r", typed_array_from_list(["X", "X", "Y"])),
       StrCol("c", typed_array_from_list(["a", "b", "a"])),
-      IntCol("v", typed_array_from_list([1,   2,   3]))
+      IntCol("v", native_int_arr_from_list([1,   2,   3]))
     ])
     match DataFrame.pivot(df, "r", "c", "v") do
     Err(_) -> assert false
@@ -905,7 +905,7 @@ describe "pivot" do
   end
 
   test "pivot missing column returns Err" do
-    let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1, 2]))])
+    let df = DataFrame.make_df([IntCol("x", native_int_arr_from_list([1, 2]))])
     match DataFrame.pivot(df, "missing", "x", "x") do
     Ok(_)  -> assert false
     Err(_) -> assert true

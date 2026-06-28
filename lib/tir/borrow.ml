@@ -241,6 +241,21 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        use — it is just an indirect reference, treated as borrowing. *)
 
   (* ── Binding forms ────────────────────────────────────────────────────── *)
+  (* Pure alias [let v = name in e2]: [v] carries [name]'s value forward with
+     no refcount change.  Whether [name] is *owned* therefore depends solely on
+     whether the alias [v] escapes in [e2] — NOT on the alias binding itself.
+     Treating the rhs [EAtom(AVar name)] as an owning use (the generic [ELet]
+     case below would, via the [EAtom(AVar)]="returned" rule) falsely marks the
+     source owned.  Lower emits exactly this for destructured fields
+     (`let p = $f1 in …`, often behind sibling field/join-point bindings), which
+     over-owned linear-search helpers (table_get/tget) — making them consume the
+     list and corrupt callers that reuse it after the search (Toml
+     set_nested/table_has).  Honour shadowing: if [v] shadows [name], [name] is
+     no longer in scope in [e2]. *)
+  | Tir.ELet (v, Tir.EAtom (Tir.AVar src), e2)
+    when String.equal src.Tir.v_name name
+         && not (String.equal v.Tir.v_name name) ->
+    owned_in v.Tir.v_name bm e2
   | Tir.ELet (v, e1, e2) ->
     owned_in name bm e1
     || (not (String.equal v.Tir.v_name name) && owned_in name bm e2)

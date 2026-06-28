@@ -531,6 +531,43 @@ port = 9000
 
   end
 
+  -- ── Regression: sections with 4+ keys ──────────────────────────────────────
+  -- A nested [section] with four or more keys exercised a compiled-backend RC
+  -- bug: get_str returned a sibling key's name instead of the value (and could
+  -- crash with OOM / RC underflow).  The corruption only appeared in the
+  -- compiled (LLVM) backend, so this eval-level test documents the expected
+  -- behaviour; the authoritative guard is the compiled regression test in
+  -- test/test_stdlib_suite.ml ("Toml [section] with 4 keys: get_str returns
+  -- correct values when compiled").
+  describe "Section with many keys (RC regression)" do
+
+    test "4-key section: each get_str returns its own value" do
+      let v = parse_ok("[package]\nk1 = \"v1\"\nk2 = \"v2\"\nk3 = \"v3\"\nk4 = \"v4\"\n")
+      let pkg = get_table(v, "package")
+      Test.assert_eq(get_str(pkg, "k1"), "v1", "k1")
+      Test.assert_eq(get_str(pkg, "k2"), "v2", "k2")
+      Test.assert_eq(get_str(pkg, "k3"), "v3", "k3")
+      Test.assert_eq(get_str(pkg, "k4"), "v4", "k4")
+    end
+
+    test "forge.toml-shaped 5-key [package]" do
+      let v = parse_ok("[package]\nname = \"demo\"\nversion = \"1.0.0\"\ntype = \"app\"\ndescription = \"a demo\"\nauthor = \"me\"\n")
+      let pkg = get_table(v, "package")
+      Test.assert_eq(get_str(pkg, "name"), "demo", "name")
+      Test.assert_eq(get_str(pkg, "version"), "1.0.0", "version")
+      Test.assert_eq(get_str(pkg, "type"), "app", "type")
+      Test.assert_eq(get_str(pkg, "description"), "a demo", "description")
+      Test.assert_eq(get_str(pkg, "author"), "me", "author")
+    end
+
+    test "flat document with 4 keys" do
+      let v = parse_ok("k1 = \"v1\"\nk2 = \"v2\"\nk3 = \"v3\"\nk4 = \"v4\"\n")
+      Test.assert_eq(get_str(v, "k1"), "v1", "flat k1")
+      Test.assert_eq(get_str(v, "k4"), "v4", "flat k4")
+    end
+
+  end
+
   fn main() do () end
 
 end

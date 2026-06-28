@@ -42,6 +42,23 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
     the helpers' signatures unchanged and avoids pervasive API churn. *)
 let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
 
+(** Module type definitions, used to query whether a matched scrutinee's
+    constructor shares its heap object with the bound payload (newtype/niche
+    representations). *)
+let _type_defs : Tir.type_def list ref = ref []
+
+(** True when a value of type [ty] shares its heap object with the payload of
+    its single relevant constructor — i.e. newtype- (S(x)≡x) or niche-
+    (Some(x)≡x, None≡0) represented.  For such types a pattern match does NOT
+    project a child out of a distinct container cell: the bound branch variable
+    IS the scrutinee object.  Freeing the scrutinee separately would therefore
+    double-free the object the branch variable now owns — the cause of the
+    Toml get_str / nested-Option RC underflow. *)
+let scrutinee_shares_payload_storage (ty : Tir.ty) : bool =
+  match Repr.repr_of_ty !_type_defs ty with
+  | Repr.Newtype _ | Repr.Niche _ -> true
+  | Repr.Boxed -> false
+
 (** Names of user-defined extern (FFI) functions.  These are called via
     [ECallPtr] (not [EApp]) but, unlike opaque closures, their parameter
     ownership is known from the borrow map (seeded in [Borrow.infer_module]).
@@ -899,7 +916,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       match a with
       | Tir.AVar v when needs_rc v.Tir.v_ty
                      && not (StringSet.mem v.Tir.v_name live_after)
-                     && not (name_free_in v.Tir.v_name body) ->
+                     && not (name_free_in v.Tir.v_name body)
+                     (* Newtype/niche scrutinees share storage with their payload
+                        branch variable (S(x)≡x, Some(x)≡x); the variable's own
+                        RC lifecycle frees the shared object, so emitting a
+                        separate scrutinee free here would double-free it. *)
+                     && not (scrutinee_shares_payload_storage v.Tir.v_ty) ->
         (* Use the concrete ctor type so FBIP can recognise the tag.
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
@@ -968,6 +990,17 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           StringSet.mem v.Tir.v_name live_after
           || (needs_rc v.Tir.v_ty
               && name_free_in v.Tir.v_name br.Tir.br_body)
+          (* Tuples/records are [needs_rc = false]: Perceus never emits a
+             DecRC/free for the aggregate itself, so its extracted fields are
+             effectively borrowed from a value whose lifetime the match does
+             not control (e.g. a tuple element of a BORROWED list).  Treat the
+             aggregate as a borrowed scrutinee so escaping fields get an EIncRC
+             and dead fields are NOT decremented — decrementing a field of a
+             borrowed-derived tuple corrupts the structure the caller reuses
+             (Toml table_get's discarded value / returned element). *)
+          || (match v.Tir.v_ty with
+              | Tir.TTuple _ | Tir.TRecord _ -> true
+              | _ -> false)
         | _ -> false
       in
       let la = if scrutinee_borrowed then
@@ -1709,6 +1742,7 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
   _borrow_map := borrow_map;
+  _type_defs := m.Tir.tm_types;
   _extern_names :=
     List.fold_left (fun s (ed : Tir.extern_decl) ->
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs;
