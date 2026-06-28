@@ -13,6 +13,9 @@
  *                                                   → OK <impl_hash> | ERR <reason>  (v2, signed epoch+callers)
  *   ACTIVATE3 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
  *                                                   → OK <impl_hash> | ERR <reason>  (v3, migrate_required signed)
+ *   BEGIN_BATCH                                       → OK
+ *   COMMIT_BATCH                                      → OK <n>  (n committed)
+ *   ROLLBACK_BATCH                                    → OK
  *
  * Artifact CAS layout (server side):
  *   ~/.march/cas/artifacts/<2>/<62>
@@ -266,6 +269,107 @@ static void write_audit_log(const char *fn, const char *impl_hash,
 #define RTLD_DEEPBIND 0
 #endif
 
+/* Shared activation body: dlopen, dlsym, publish, set metadata, run migration.
+ * Returns 0 on success, -1 on error (does NOT write to fd).
+ * On error, handle (if non-NULL) has already been dlclosed. */
+static int do_activate_inner(const char *name, const char *impl_hash,
+                             const char *cas_hash, int migrate_required,
+                             uint32_t activate_epoch, const char *callers_csv,
+                             void **out_handle) {
+    if (out_handle) *out_handle = NULL;
+
+    uint32_t slot_id;
+    if (!march_dispatch_name_to_id(name, &slot_id)) {
+        write_audit_log(name, impl_hash, cas_hash, "err_abi");
+        return -1;
+    }
+
+    char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
+    if (access(path, F_OK) != 0) {
+        write_audit_log(name, impl_hash, cas_hash, "err_cas_miss");
+        return -1;
+    }
+
+    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
+    if (!handle) {
+        write_audit_log(name, impl_hash, cas_hash, "err_dlopen");
+        return -1;
+    }
+
+    void *fn_ptr = dlsym(handle, name);
+    if (!fn_ptr) {
+        dlclose(handle);
+        return -1;
+    }
+
+    if (activate_epoch > 0) {
+        void (*init_fn)(uint32_t) = NULL;
+        void *raw_init = dlsym(handle, "__march_init");
+        if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
+        if (init_fn) init_fn(activate_epoch);
+    }
+
+    int idx = (activate_epoch > 0)
+        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
+                                       (uint8_t)MARCH_NATIVE, activate_epoch)
+        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
+                                (uint8_t)MARCH_NATIVE);
+    if (idx < 0) {
+        dlclose(handle);
+        return -1;
+    }
+    march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
+    if (out_handle) *out_handle = handle;  /* table owns it now */
+
+    {
+        struct timeval atv; gettimeofday(&atv, NULL);
+        long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
+        char asigner[65]; pubkey_to_hex(asigner);
+        march_dispatch_set_activation(slot_id, ats, asigner);
+    }
+
+    /* Optional actor migration: dlsym __migrate_<Actor> and broadcast. */
+    if (migrate_required) {
+        char migrate_sym[320];
+        const char *dispatch_sfx = "_dispatch";
+        size_t name_len = strlen(name);
+        size_t dsfx_len = strlen(dispatch_sfx);
+        char actor_short[256];
+        if (name_len > dsfx_len &&
+            strcmp(name + name_len - dsfx_len, dispatch_sfx) == 0) {
+            size_t alen = name_len - dsfx_len;
+            if (alen >= sizeof(actor_short)) alen = sizeof(actor_short) - 1;
+            strncpy(actor_short, name, alen);
+            actor_short[alen] = '\0';
+        } else {
+            strncpy(actor_short, name, sizeof(actor_short) - 1);
+            actor_short[sizeof(actor_short) - 1] = '\0';
+        }
+        snprintf(migrate_sym, sizeof(migrate_sym), "__migrate_%s", actor_short);
+        for (char *p = migrate_sym + 10; *p; p++) {
+            if (*p == '.') *p = '_';
+        }
+        void *raw_sym = dlsym(handle, migrate_sym);
+        void *(*migrate_fn)(void *) = NULL;
+        if (raw_sym) {
+            memcpy(&migrate_fn, &raw_sym, sizeof(migrate_fn));
+            fprintf(stderr, "[hcr] migrate: found %s, broadcasting to slot %u\n",
+                    migrate_sym, slot_id);
+        } else {
+            /* Symbol absent but migrate_required=1 (e.g. @compat(any) with schema
+             * changes and no migrate_state fn).  Log to stderr only — writing WARN
+             * before OK would desync the client's response parser. */
+            fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
+                    migrate_sym);
+        }
+        march_actor_broadcast_migrate(slot_id, migrate_fn);
+    }
+
+    march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
+    write_audit_log(name, impl_hash, cas_hash, "ok");
+    return 0;
+}
+
 /* Common activation body shared by ACTIVATE (v1) and ACTIVATE2 (v2).
  * callers_csv: comma-separated caller list (already sorted for v2; raw for v1),
  *              or NULL if absent. */
@@ -379,6 +483,20 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
 
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
+
+    /* Per-session batch state (BEGIN_BATCH / COMMIT_BATCH / ROLLBACK_BATCH) */
+#define MARCH_MAX_BATCH 256
+    struct march_staged {
+        char     name[256];
+        char     impl_hash[128];
+        char     cas_hash[128];
+        char     callers[1024];
+        uint32_t epoch;
+        int      migrate_required;
+    } staged[MARCH_MAX_BATCH];
+    int n_staged  = 0;
+    int in_batch  = 0;
+
     while (1) {
         int r = read_line(fd, line, RELOAD_LINE_MAX);
         if (r <= 0) break;
@@ -764,8 +882,29 @@ static void handle_client(int fd) {
             write_audit_log(name, impl_hash, cas_hash, "err_sig");
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
-            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_sorted);
+            if (in_batch) {
+                /* Stage: verify sig and record for COMMIT_BATCH */
+                if (n_staged >= MARCH_MAX_BATCH) {
+                    wresp(fd, "ERR batch_full\n"); continue;
+                }
+                strncpy(staged[n_staged].name,      name,            255);
+                strncpy(staged[n_staged].impl_hash, impl_hash,       127);
+                strncpy(staged[n_staged].cas_hash,  cas_hash,        127);
+                strncpy(staged[n_staged].callers,   callers_sorted, 1023);
+                staged[n_staged].epoch           = activate_epoch;
+                staged[n_staged].migrate_required = migrate_required;
+                staged[n_staged].name[255]      = '\0';
+                staged[n_staged].impl_hash[127] = '\0';
+                staged[n_staged].cas_hash[127]  = '\0';
+                staged[n_staged].callers[1023]  = '\0';
+                n_staged++;
+                char resp[256];
+                int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
+                write_safe(fd, resp, n, sizeof(resp));
+            } else {
+                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                            activate_epoch, callers_sorted);
+            }
 
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
         } else if (strcmp(line, "GET_EPOCH") == 0) {
@@ -776,10 +915,42 @@ static void handle_client(int fd) {
             int n = snprintf(resp, sizeof(resp), "EPOCH %u\n", e);
             write_safe(fd, resp, n, sizeof(resp));
 
+        /* ── BEGIN_BATCH ──────────────────────────────────────────────── */
+        } else if (strcmp(line, "BEGIN_BATCH") == 0) {
+            if (in_batch) { wresp(fd, "ERR already_in_batch\n"); continue; }
+            n_staged = 0; in_batch = 1;
+            wresp(fd, "OK\n");
+
+        /* ── COMMIT_BATCH ─────────────────────────────────────────────── */
+        } else if (strcmp(line, "COMMIT_BATCH") == 0) {
+            if (!in_batch) { wresp(fd, "ERR not_in_batch\n"); continue; }
+            int committed = 0;
+            for (int i = 0; i < n_staged; i++) {
+                if (do_activate_inner(staged[i].name, staged[i].impl_hash,
+                                      staged[i].cas_hash,
+                                      staged[i].migrate_required,
+                                      staged[i].epoch,
+                                      staged[i].callers[0] ? staged[i].callers : NULL,
+                                      NULL) == 0) {
+                    committed++;
+                }
+            }
+            in_batch = 0; n_staged = 0;
+            char resp[64];
+            int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
+            write_safe(fd, resp, n, sizeof(resp));
+
+        /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
+        } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
+            in_batch = 0; n_staged = 0;
+            wresp(fd, "OK\n");
+
         } else {
             wresp(fd, "ERR unknown_command\n");
         }
     }
+    /* Discard any uncommitted staged activations (connection dropped mid-batch) */
+    (void)staged; (void)n_staged; (void)in_batch;
     close(fd);
 }
 

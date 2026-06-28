@@ -529,6 +529,15 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           let _ = signing_pubkey in  (* public key already embedded in server binary *)
           let activated = ref 0 in
           let failed = ref 0 in
+
+          (* Send BEGIN_BATCH so the server stages activations atomically *)
+          send_line conn (Printf.sprintf "BEGIN_BATCH %d" (List.length to_activate));
+          let begin_resp = recv_line conn in
+          let batch_mode = String.length begin_resp >= 2 && String.sub begin_resp 0 2 = "OK" in
+          if not batch_mode then
+            Printf.eprintf
+              "  warning: server does not support BEGIN_BATCH — activations are non-atomic\n%!";
+
           List.iter (fun fm ->
             (* Phase 5: determine migrate_required for actor dispatch functions *)
             let dispatch_suffix = "_dispatch" in
@@ -576,6 +585,23 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               incr failed
             end
           ) to_activate;
+
+          (* Commit or rollback the batch *)
+          if batch_mode then begin
+            if !failed = 0 then begin
+              send_line conn "COMMIT_BATCH";
+              let commit_resp = recv_line conn in
+              if String.length commit_resp < 2 || String.sub commit_resp 0 2 <> "OK" then begin
+                Printf.eprintf "  COMMIT_BATCH failed: %s\n%!" commit_resp;
+                failed := !activated  (* mark all as failed *)
+              end
+            end else begin
+              send_line conn "ROLLBACK_BATCH";
+              ignore (recv_line conn);
+              Printf.eprintf
+                "  Rolled back: %d function(s) failed, server state unchanged.\n%!" !failed
+            end
+          end;
 
           Unix.close fd;
 
