@@ -305,6 +305,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
   let (tunnel_pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket in
 
   let result =
+    Fun.protect ~finally:(fun () -> close_tunnel tunnel_pid local_socket) (fun () ->
     (try
       let fd = connect_socket local_socket in
       let conn = conn_of_fd fd in
@@ -449,6 +450,13 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             Printf.printf "Coordinated upgrade: sig_hash changed, all callers covered.\n%!";
 
           (* 6. CAS_PUT the .so if not already present *)
+          (* Verify the .so on disk matches the manifest's cas_hash before
+             signing or uploading — catches manifest/binary skew. *)
+          let actual_hash = sha256_file so_path in
+          if actual_hash <> manifest.cas_hash then
+            raise (Failure (Printf.sprintf
+              "so file hash mismatch: manifest has %s but %s hashes to %s"
+              manifest.cas_hash so_path actual_hash));
           let cas_hash = manifest.cas_hash in
           if not (cas_check conn cas_hash) then begin
             Printf.printf "Uploading artifact %s...\n%!" so_path;
@@ -541,16 +549,16 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                   | Error _ -> 1)
               else 0
             in
-            (* Protocol v2 (ACTIVATE2): epoch and callers are included in the
-               signed payload so they can't be forged in a replay attack. *)
+            (* Protocol v3 (ACTIVATE3): migrate_required is also signed so it
+               can't be forged between the signature and the server. *)
             let callers_sorted = List.sort String.compare fm.fn_callers in
             let callers_csv = String.concat "," callers_sorted in
             let epoch_n = if hcr_epoch > 0 then hcr_epoch else 0 in
-            let msg = Printf.sprintf "ACTIVATE2 %s %s %s epoch:%d callers:%s"
-              fm.fn_name fm.fn_impl_hash cas_hash epoch_n callers_csv in
+            let msg = Printf.sprintf "ACTIVATE3 %s %s %s %d epoch:%d callers:%s"
+              fm.fn_name fm.fn_impl_hash cas_hash migrate_required epoch_n callers_csv in
             let sig_bytes = March_ed25519.Ed25519.sign_str msg sk in
             let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-            let cmd = Printf.sprintf "ACTIVATE2 %s %s %s %s %d epoch:%d callers:%s"
+            let cmd = Printf.sprintf "ACTIVATE3 %s %s %s %s %d epoch:%d callers:%s"
               fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required
               epoch_n callers_csv in
             send_line conn cmd;
@@ -560,7 +568,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               incr activated
             end else if resp = "ERR unknown_command" then begin
               Printf.eprintf
-                "  FAILED %s: server predates protocol v2 — restart the server binary\n%!"
+                "  FAILED %s: server predates protocol v3 — restart the server binary\n%!"
                 fm.fn_name;
               incr failed
             end else begin
@@ -581,9 +589,8 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     with
     | Failure m -> Error m
     | Unix_error (e, fn, _) ->
-      Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
+      Error (Printf.sprintf "%s: %s" fn (Unix.error_message e))))
   in
-  close_tunnel tunnel_pid local_socket;
   result
 
 (* ─── Status: VERSIONS_DETAIL dashboard ─────────────────────────────────── *)

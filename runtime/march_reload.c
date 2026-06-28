@@ -11,6 +11,8 @@
  *   ACTIVATE  <name> <impl_hash> <cas_hash> <sig64>  → OK <impl_hash> | ERR <reason>  (v1, legacy)
  *   ACTIVATE2 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
  *                                                   → OK <impl_hash> | ERR <reason>  (v2, signed epoch+callers)
+ *   ACTIVATE3 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
+ *                                                   → OK <impl_hash> | ERR <reason>  (v3, migrate_required signed)
  *
  * Artifact CAS layout (server side):
  *   ~/.march/cas/artifacts/<2>/<62>
@@ -637,6 +639,108 @@ static void handle_client(int fd) {
             int smlen = snprintf(signed_msg, sizeof(signed_msg),
                                  "ACTIVATE2 %s %s %s epoch:%u callers:%s",
                                  name, impl_hash, cas_hash, activate_epoch, callers_sorted);
+
+            unsigned char sigbytes[64];
+            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
+
+            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
+            memcpy(sm, sigbytes, 64);
+            memcpy(sm + 64, signed_msg, (size_t)smlen);
+            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+            unsigned long long m_out_len = 0;
+            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                       (unsigned long long)(smlen + 64), g_pubkey);
+            free(sm); free(m_out);
+            if (vrc != 0) {
+                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                wresp(fd, "ERR bad_signature\n"); continue;
+            }
+#else
+            (void)sig_b64;
+            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            wresp(fd, "ERR signing_not_configured\n"); continue;
+#endif
+            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                        activate_epoch, callers_sorted);
+
+        /* ── ACTIVATE3 ─────────────────────────────────────────────────── */
+        /* Protocol v3: migrate_required is now included in the signed payload,
+         * preventing unsigned modification of the migration flag.
+         * Signed message: "ACTIVATE3 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> callers:<sorted-csv>" */
+        } else if (strncmp(line, "ACTIVATE3 ", 10) == 0) {
+            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+            char migrate_str[8] = {0};
+            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+                wresp(fd, "ERR bad_format\n"); continue;
+            }
+            if (!is_hex64(cas_hash)) {
+                wresp(fd, "ERR bad_cas_hash\n"); continue;
+            }
+            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+
+            /* Parse mandatory epoch:<N>. */
+            uint32_t activate_epoch = 0;
+            {
+                const char *ep = strstr(line, " epoch:");
+                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
+                activate_epoch = (uint32_t)atoi(ep + 7);
+            }
+
+            /* Parse mandatory callers:<csv>, then sort for canonical form. */
+            char callers_sorted[1024] = {0};
+            {
+                const char *cp = strstr(line, " callers:");
+                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
+                const char *csv = cp + 9;
+                char tmp[1024]; size_t tlen = 0;
+                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                       && tlen < sizeof(tmp) - 1)
+                    tlen++;
+                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+                if (tmp[0] != '\0') {
+                    char *tokens[256]; int ntok = 0;
+                    char *p = tmp;
+                    while (*p && ntok < 255) {
+                        tokens[ntok++] = p;
+                        char *c = strchr(p, ',');
+                        if (!c) break;
+                        *c = '\0'; p = c + 1;
+                    }
+                    for (int i = 1; i < ntok; i++) {
+                        char *key = tokens[i]; int j = i - 1;
+                        while (j >= 0 && strcmp(tokens[j], key) > 0)
+                            { tokens[j+1] = tokens[j]; j--; }
+                        tokens[j+1] = key;
+                    }
+                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                    for (int i = 0; i < ntok && rem > 1; i++) {
+                        if (i > 0) { *out++ = ','; rem--; }
+                        size_t sl = strlen(tokens[i]);
+                        if (sl >= rem) sl = rem - 1;
+                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                    }
+                    *out = '\0';
+                }
+            }
+
+#if HAVE_SIGNING_KEY
+            if (!g_pubkey_loaded) {
+                wresp(fd, "ERR signing_not_configured\n"); continue;
+            }
+            int all_zero = 1;
+            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
+
+            /* Reconstruct the canonical signed message — now includes migrate_required. */
+            char signed_msg[1024];
+            int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                                 "ACTIVATE3 %s %s %s %d epoch:%u callers:%s",
+                                 name, impl_hash, cas_hash, migrate_required,
+                                 activate_epoch, callers_sorted);
 
             unsigned char sigbytes[64];
             int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
