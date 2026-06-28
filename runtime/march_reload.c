@@ -298,6 +298,7 @@ static int do_activate_inner(const char *name, const char *impl_hash,
 
     void *fn_ptr = dlsym(handle, name);
     if (!fn_ptr) {
+        write_audit_log(name, impl_hash, cas_hash, "err_dlsym");
         dlclose(handle);
         return -1;
     }
@@ -854,11 +855,14 @@ static void handle_client(int fd) {
             if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
 
             /* Reconstruct the canonical signed message — now includes migrate_required. */
-            char signed_msg[1024];
+            char signed_msg[2048];
             int smlen = snprintf(signed_msg, sizeof(signed_msg),
                                  "ACTIVATE3 %s %s %s %d epoch:%u callers:%s",
                                  name, impl_hash, cas_hash, migrate_required,
                                  activate_epoch, callers_sorted);
+            if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
+                wresp(fd, "ERR signed_msg_truncated\n"); continue;
+            }
 
             unsigned char sigbytes[64];
             int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
@@ -925,6 +929,7 @@ static void handle_client(int fd) {
         } else if (strcmp(line, "COMMIT_BATCH") == 0) {
             if (!in_batch) { wresp(fd, "ERR not_in_batch\n"); continue; }
             int committed = 0;
+            int commit_ok = 1;
             for (int i = 0; i < n_staged; i++) {
                 if (do_activate_inner(staged[i].name, staged[i].impl_hash,
                                       staged[i].cas_hash,
@@ -933,12 +938,19 @@ static void handle_client(int fd) {
                                       staged[i].callers[0] ? staged[i].callers : NULL,
                                       NULL) == 0) {
                     committed++;
+                } else {
+                    commit_ok = 0;
+                    break;
                 }
             }
             in_batch = 0; n_staged = 0;
-            char resp[64];
-            int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
-            write_safe(fd, resp, n, sizeof(resp));
+            if (commit_ok) {
+                char resp[64];
+                int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
+                write_safe(fd, resp, n, sizeof(resp));
+            } else {
+                wresp(fd, "ERR commit_partial_failure\n");
+            }
 
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {

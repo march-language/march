@@ -591,7 +591,13 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             if !failed = 0 then begin
               send_line conn "COMMIT_BATCH";
               let commit_resp = recv_line conn in
-              if String.length commit_resp < 2 || String.sub commit_resp 0 2 <> "OK" then begin
+              let n_expected = List.length to_activate in
+              let commit_ok =
+                try
+                  Scanf.sscanf commit_resp "OK %d" (fun n -> n = n_expected)
+                with _ -> false
+              in
+              if not commit_ok then begin
                 Printf.eprintf "  COMMIT_BATCH failed: %s\n%!" commit_resp;
                 failed := !activated  (* mark all as failed *)
               end
