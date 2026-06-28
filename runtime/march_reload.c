@@ -950,7 +950,6 @@ static void handle_client(int fd) {
         }
     }
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
-    (void)staged; (void)n_staged; (void)in_batch;
     close(fd);
 }
 

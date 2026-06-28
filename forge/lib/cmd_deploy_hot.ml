@@ -531,7 +531,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           let failed = ref 0 in
 
           (* Send BEGIN_BATCH so the server stages activations atomically *)
-          send_line conn (Printf.sprintf "BEGIN_BATCH %d" (List.length to_activate));
+          send_line conn "BEGIN_BATCH";
           let begin_resp = recv_line conn in
           let batch_mode = String.length begin_resp >= 2 && String.sub begin_resp 0 2 = "OK" in
           if not batch_mode then
