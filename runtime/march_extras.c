@@ -2167,3 +2167,90 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
     if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
     return (void *)(intptr_t)raw;
 }
+
+/* ── ~H sigil: html_auto_escape ──────────────────────────────────────────────
+ * The ~H template sigil lowers each ${expr} interpolation to html_auto_escape(v).
+ * Auto-escaping rules (mirror the interpreter in lib/eval/eval.ml):
+ *   - immediate int (low-bit tagged) → decimal text (no escaping)
+ *   - String (tag == MARCH_STRING_TAG) → HTML-escape & < > " '
+ *   - IOList constructor (tag >= 0)     → flatten verbatim (already HTML)
+ * Field layout: tag is int32 at offset +8; constructor fields at +16, +24.
+ * IOList variant tags: 0=Empty, 1=Str(String) @+16, 2=Segments(List) @+16.
+ * List tags: 0=Nil, 1=Cons(head @+16, tail @+24). */
+
+static int64_t mh_iolist_size(void *iolist) {
+    if (!iolist) return 0;
+    int32_t tag = *(int32_t *)((char *)iolist + 8);
+    if (tag == 1) {
+        march_string *str = (march_string *)*(void **)((char *)iolist + 16);
+        return str ? str->len : 0;
+    } else if (tag == 2) {
+        void *list = *(void **)((char *)iolist + 16);
+        int64_t total = 0;
+        while (list) {
+            if (*(int32_t *)((char *)list + 8) == 0) break; /* Nil */
+            void *head = *(void **)((char *)list + 16);
+            list = *(void **)((char *)list + 24);
+            total += mh_iolist_size(head);
+        }
+        return total;
+    }
+    return 0;
+}
+
+static int64_t mh_iolist_copy(void *iolist, char *buf, int64_t off) {
+    if (!iolist) return off;
+    int32_t tag = *(int32_t *)((char *)iolist + 8);
+    if (tag == 1) {
+        march_string *str = (march_string *)*(void **)((char *)iolist + 16);
+        if (str) { for (int64_t i = 0; i < str->len; i++) buf[off++] = str->data[i]; }
+        return off;
+    } else if (tag == 2) {
+        void *list = *(void **)((char *)iolist + 16);
+        while (list) {
+            if (*(int32_t *)((char *)list + 8) == 0) break; /* Nil */
+            void *head = *(void **)((char *)list + 16);
+            list = *(void **)((char *)list + 24);
+            off = mh_iolist_copy(head, buf, off);
+        }
+        return off;
+    }
+    return off;
+}
+
+void *march_html_auto_escape(void *v) {
+    /* Immediate (tagged int / nullary constructor): low bit set. */
+    if (((uintptr_t)v & 1u) != 0) {
+        int64_t n = (intptr_t)v >> 1;
+        char b[32];
+        int len = snprintf(b, sizeof(b), "%lld", (long long)n);
+        return march_string_lit(b, (int64_t)len);
+    }
+    if (!v) return march_string_lit("", 0);
+    int32_t tag = ((march_hdr *)v)->tag;
+    if (tag == MARCH_STRING_TAG) {
+        march_string *s = (march_string *)v;
+        int64_t n = s->len;
+        char *out = (char *)malloc((size_t)(n * 6 + 1));
+        int64_t o = 0;
+        for (int64_t i = 0; i < n; i++) {
+            char c = s->data[i];
+            if (c == '&') { memcpy(out + o, "&amp;", 5); o += 5; }
+            else if (c == '<') { memcpy(out + o, "&lt;", 4); o += 4; }
+            else if (c == '>') { memcpy(out + o, "&gt;", 4); o += 4; }
+            else if (c == '"') { memcpy(out + o, "&quot;", 6); o += 6; }
+            else if (c == '\'') { memcpy(out + o, "&#39;", 5); o += 5; }
+            else { out[o++] = c; }
+        }
+        void *r = march_string_lit(out, o);
+        free(out);
+        return r;
+    }
+    /* Constructor with tag >= 0: treat as IOList and flatten verbatim. */
+    int64_t sz = mh_iolist_size(v);
+    char *buf = (char *)malloc((size_t)(sz + 1));
+    mh_iolist_copy(v, buf, 0);
+    void *r = march_string_lit(buf, sz);
+    free(buf);
+    return r;
+}

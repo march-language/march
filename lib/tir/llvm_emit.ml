@@ -677,6 +677,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "string_split_first"          -> Some (Tir.TCon ("Option", [Tir.TTuple [Tir.TString; Tir.TString]]))
   | "string_replace"              -> Some Tir.TString
   | "string_replace_all"          -> Some Tir.TString
+  | "html_auto_escape"            -> Some Tir.TString
   | "string_to_lowercase"         -> Some Tir.TString
   | "string_to_uppercase"         -> Some Tir.TString
   | "string_trim"                 -> Some Tir.TString
@@ -884,6 +885,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
 (** Mangle a March builtin name to the C runtime function name. *)
 let mangle_extern : string -> string = function
   | "panic"         -> "march_panic"
+  | "html_auto_escape" -> "march_html_auto_escape"
   (* Record introspection builtins.  record_put maps to the 3-arg variant
      (kind defaults to generic) for first-class / closure-wrapper call paths;
      the direct EApp path in emit_expr calls the 4-arg march_record_put with
@@ -2475,6 +2477,23 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     else
       emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
     (ty, r)
+
+  (* ── ~H sigil: html_auto_escape(v) ────────────────────────────────────
+     The runtime `march_html_auto_escape` takes a single generic `ptr` and
+     dispatches on its representation (low-bit-tagged immediate int, String,
+     or IOList constructor).  The argument is polymorphic (`∀a. a -> String`)
+     so it may arrive as a raw scalar — an Int interpolation `${n}` lowers to
+     `html_auto_escape(n)` with `n : i64`.  The general call path would emit
+     `call ptr @march_html_auto_escape(i64 42)`, passing the untagged scalar
+     where the runtime expects a tagged ptr; the runtime then treats `42` as a
+     heap address and segfaults.  Coerce the argument to a tagged `ptr` first
+     (i64→ptr applies the `(n<<1)|1` immediate tag) so the runtime's int path
+     fires correctly. *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
+    let v = emit_atom_as ctx "ptr" a in
+    let r = fresh ctx "hae" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_html_auto_escape(ptr %s)" r v);
+    ("ptr", r)
 
   (* ── Bitwise integer builtins ─────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->
@@ -5355,6 +5374,7 @@ declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare ptr  @march_html_auto_escape(ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
 declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
 declare ptr  @march_record_keys(ptr %rec)

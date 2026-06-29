@@ -417,6 +417,42 @@ let emit_actor_ir src =
   let tir = March_tir.Perceus.perceus tir in
   March_tir.Llvm_emit.emit_module tir
 
+(** Emit LLVM IR for [src] with the string + iolist stdlib modules prepended.
+    Used by the ~H sigil codegen regression tests, which need IOList.from_strings
+    and the List ADT in scope. *)
+let emit_ir_with_iolist src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let m = parse_and_desugar src in
+  let m = { m with March_ast.Ast.mod_decls =
+                     [string_decl; iolist_decl] @ m.March_ast.Ast.mod_decls } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  March_tir.Llvm_emit.emit_module tir
+
+(** Emit the lowered TIR (as text) for [src] with the string + iolist stdlib
+    modules prepended.  The TIR pretty-printer renders constructor allocations
+    as `alloc TypeName.Ctor`, which lets the ~H regression test assert the
+    desugared list lowers to `List.Cons`/`List.Nil` (not the bogus
+    `IOList.Cons`/`IOList.Nil`). *)
+let emit_tir_with_iolist src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let m = parse_and_desugar src in
+  let m = { m with March_ast.Ast.mod_decls =
+                     [string_decl; iolist_decl] @ m.March_ast.Ast.mod_decls } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let buf = Buffer.create 4096 in
+  List.iter (fun fn ->
+      Buffer.add_string buf (March_tir.Pp.string_of_fn_def fn);
+      Buffer.add_char buf '\n')
+    tir.March_tir.Tir.tm_fns;
+  Buffer.contents buf
+
 let ir_contains ir pat =
   try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
   with Not_found -> false

@@ -384,9 +384,28 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
       EApp (EVar { txt = "html_auto_escape"; span = psp }, [inner], psp)
     | _ -> part  (* String literals and island_ssr calls — leave as-is *)
   ) parts in
+  (* Build the cons-list of parts.
+     CRITICAL: every generated node must carry a DISTINCT span.  The
+     typechecker records each expression's inferred type in a type_map keyed
+     by its span, and the TIR lowerer reads that map to decide which ADT a
+     bare constructor belongs to (`ty_of_span span` → "TypeName.Ctor").
+     If the inner `Cons`/`Nil` nodes shared the sigil span with the outer
+     `IOList.from_strings(...)` application, the application's result type
+     (`IOList`) would clobber the list's `List(String)` type in the map, and
+     every `Cons`/`Nil` would lower to the non-existent `IOList.Cons`/`Nil`
+     tags — rendering the template as the empty string.  We derive a unique
+     span per node by offsetting the columns so the map entries never collide
+     while still pointing at (roughly) the sigil's source location. *)
+  let uid = ref 1 in
+  let uniq_span () =
+    let n = !uid in
+    incr uid;
+    { sp with start_col = sp.start_col + n; end_col = sp.end_col + n }
+  in
   let list_expr = List.fold_right (fun e acc ->
-    ECon ({ txt = "Cons"; span = sp }, [e; acc], sp)
-  ) parts (ECon ({ txt = "Nil"; span = sp }, [], sp)) in
+    let s = uniq_span () in
+    ECon ({ txt = "Cons"; span = s }, [e; acc], s)
+  ) parts (let s = uniq_span () in ECon ({ txt = "Nil"; span = s }, [], s)) in
   EApp (EVar { txt = "IOList.from_strings"; span = sp }, [list_expr], sp)
 
 (* ---- Pipe desugaring ---- *)

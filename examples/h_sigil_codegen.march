@@ -1,0 +1,32 @@
+-- examples/h_sigil_codegen.march
+--
+-- Regression test for the ~H sigil in COMPILED/native mode.
+--
+-- Bug (fixed): the ~H desugar built its cons-list of parts with every
+-- generated Cons/Nil node sharing the sigil's source span.  The typechecker
+-- keys its type_map by span, so the outer `IOList.from_strings(...)`
+-- application's result type (`IOList`) clobbered the inner list's
+-- `List(String)` type.  The TIR lowerer reads that map to pick a bare
+-- constructor's owning ADT, so Cons/Nil lowered to the non-existent
+-- `IOList.Cons`/`IOList.Nil` tags and the template rendered the empty string.
+--
+-- Separately, `${int}` interpolation lowered to html_auto_escape(n) with a
+-- raw i64 arg passed where the runtime expects a tagged ptr, segfaulting.
+--
+-- This program exercises all four cases and prints deterministic output, so
+-- the oracle test (interpreter vs compiled) catches any regression.
+mod Main do
+  fn main() do
+    -- 1. Fully static template — must NOT render empty.
+    println(IOList.to_string(~H"<p>HHH</p>"))
+    -- 2. String interpolation — must HTML-escape.
+    let s = "a<b"
+    println(IOList.to_string(~H"<p>${s}</p>"))
+    -- 3. Int interpolation — must render the decimal, no segfault.
+    let n = 42
+    println(IOList.to_string(~H"<p>n=${n}</p>"))
+    -- 4. Embedded IOList partial — must flatten verbatim (no double-escape).
+    let rows = ~H"<li>x</li>"
+    println(IOList.to_string(~H"<ul>${rows}</ul>"))
+  end
+end

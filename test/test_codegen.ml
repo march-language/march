@@ -3736,6 +3736,42 @@ let test_iolist_byte_size () =
   Alcotest.(check int) "IOList.byte_size" 5
     (vint (call_fn env "f" []))
 
+(* ── ~H sigil codegen regression ──────────────────────────────────────────
+   Regression for the bidirectional-inference / span-collision bug that broke
+   the ~H HTML template sigil in compiled mode.  The desugar built its
+   cons-list of parts with every generated Cons/Nil node sharing the sigil's
+   span; the typechecker keys its type_map by span, so the outer
+   IOList.from_strings(...) application's IOList type clobbered the list's
+   List(String) type.  The TIR lowerer reads that map to choose a bare
+   constructor's owning ADT, so the list lowered to the non-existent
+   IOList.Cons / IOList.Nil tags and the template rendered "".
+   These tests assert the desugared list lowers to List.Cons / List.Nil, and
+   that the int-interpolation html_auto_escape arg is coerced to a tagged ptr
+   (not passed as a raw i64, which segfaulted the runtime). *)
+
+let test_h_sigil_static_lowers_to_list_cons () =
+  let tir = emit_tir_with_iolist {|mod Test do
+    fn render() : String do IOList.to_string(~H"<p>HHH</p>") end
+  end|} in
+  Alcotest.(check bool) "~H list uses List.Cons (real List ctor)" true
+    (ir_contains tir "List.Cons");
+  Alcotest.(check bool) "~H list does NOT use bogus IOList.Cons" false
+    (ir_contains tir "IOList.Cons");
+  Alcotest.(check bool) "~H list does NOT use bogus IOList.Nil" false
+    (ir_contains tir "IOList.Nil")
+
+let test_h_sigil_int_interp_coerces_arg_to_ptr () =
+  let ir = emit_ir_with_iolist {|mod Test do
+    fn render(n : Int) : String do IOList.to_string(~H"<p>n=${n}</p>") end
+  end|} in
+  (* The runtime march_html_auto_escape takes a tagged ptr; an int arg must be
+     tagged via i64->ptr coercion, never passed as `i64 N` against the `ptr`
+     declaration (which segfaulted). *)
+  Alcotest.(check bool) "html_auto_escape called with a ptr arg" true
+    (ir_contains ir "call ptr @march_html_auto_escape(ptr");
+  Alcotest.(check bool) "html_auto_escape NOT called with a raw i64 arg" false
+    (ir_contains ir "@march_html_auto_escape(i64")
+
 (* ── Http stdlib module tests ──────────────────────────────────────────── *)
 
 let test_http_parse_url () =
@@ -5265,6 +5301,12 @@ let codegen_suites =
         Alcotest.test_case "from_string"   `Quick test_iolist_from_string;
         Alcotest.test_case "append"        `Quick test_iolist_append;
         Alcotest.test_case "byte_size"     `Quick test_iolist_byte_size;
+      ]);
+      ("~H sigil codegen", [
+        Alcotest.test_case "static ~H lowers to List.Cons"
+          `Quick test_h_sigil_static_lowers_to_list_cons;
+        Alcotest.test_case "int interp coerces arg to ptr"
+          `Quick test_h_sigil_int_interp_coerces_arg_to_ptr;
       ]);
       ("http stdlib", [
         Alcotest.test_case "parse_url"          `Quick test_http_parse_url;
