@@ -1,0 +1,167 @@
+mod T do
+
+-- ── Conn-like record (borrowed source for ct/body) ───────────────────────────
+type Conn = { hdrs : List((String, String)), body : String }
+
+pfn lookup(pairs, key) do
+  match pairs do
+  Nil -> None
+  Cons((k, v), rest) -> if k == key then Some(v) else lookup(rest, key)
+  end
+end
+
+pfn get_req_header(conn, name) do lookup(conn.hdrs, name) end
+pfn req_body(conn) do conn.body end
+
+-- ── Faithful copy of Forgepm.Api.Upload ──────────────────────────────────────
+fn boundary(content_type) do
+  match String.split_first(content_type, "boundary=") do
+  None             -> None
+  Some((_, after)) ->
+    let raw = match String.split_first(after, ";") do
+              Some((b, _)) -> b
+              None         -> after
+              end
+    let t = String.trim(raw)
+    let n = String.byte_size(t)
+    if n >= 2 && String.starts_with(t, "\"") && String.ends_with(t, "\"") do
+      Some(String.slice_bytes(t, 1, n - 2))
+    else if n == 0 do
+      None
+    else
+      Some(t)
+    end end
+  end
+end
+
+fn cd_param(cd, param) do
+  match String.split_first(cd, param ++ "=\"") do
+  None             -> None
+  Some((_, after)) ->
+    match String.split_first(after, "\"") do
+    None         -> None
+    Some((v, _)) -> Some(v)
+    end
+  end
+end
+
+pfn is_part_seg(seg) do
+  String.byte_size(seg) > 0 && !String.starts_with(seg, "--")
+end
+
+pfn strip_trailing_crlf(s) do
+  if String.ends_with(s, "\r\n") do
+    String.slice_bytes(s, 0, String.byte_size(s) - 2)
+  else
+    s
+  end
+end
+
+pfn has_filename(headers) do
+  match cd_param(headers, "filename") do
+  Some(_) -> true
+  None    -> false
+  end
+end
+
+pfn scan_field(segs, name) do
+  match segs do
+  Nil -> None
+  Cons(seg, rest) ->
+    if is_part_seg(seg) do
+      match String.split_first(seg, "\r\n\r\n") do
+      None -> scan_field(rest, name)
+      Some((headers, after)) ->
+        match cd_param(headers, "name") do
+        None     -> scan_field(rest, name)
+        Some(pn) ->
+          if pn == name && !has_filename(headers) do
+            Some(strip_trailing_crlf(after))
+          else
+            scan_field(rest, name)
+          end
+        end
+      end
+    else
+      scan_field(rest, name)
+    end
+  end
+end
+
+fn get_field(body, bnd, name) do
+  scan_field(String.split(body, "--" ++ bnd), name)
+end
+
+pfn scan_file(segs, name) do
+  match segs do
+  Nil -> None
+  Cons(seg, rest) ->
+    if is_part_seg(seg) do
+      match String.split_first(seg, "\r\n\r\n") do
+      None -> scan_file(rest, name)
+      Some((headers, after)) ->
+        match cd_param(headers, "name") do
+        None     -> scan_file(rest, name)
+        Some(pn) ->
+          if pn == name && has_filename(headers) do
+            Some(strip_trailing_crlf(after))
+          else
+            scan_file(rest, name)
+          end
+        end
+      end
+    else
+      scan_file(rest, name)
+    end
+  end
+end
+
+fn get_file(body, bnd, name) do
+  scan_file(String.split(body, "--" ++ bnd), name)
+end
+
+-- ── Faithful copy of run_publish's match nesting ─────────────────────────────
+fn do_publish(conn, name, tarball, checksum) do
+  -- Reference conn.body to keep `conn` live here, like the real send_resp does.
+  let _keep = String.byte_size(conn.body)
+  "ok name=" ++ name ++ " tarball=[" ++ tarball ++ "] ck=[" ++ checksum ++ "]"
+end
+
+pfn run_publish(conn, name) do
+  match get_req_header(conn, "content-type") do
+  None -> "400 ct required"
+  Some(ct) ->
+    match boundary(ct) do
+    None -> "400 expected multipart"
+    Some(b) ->
+      let body = req_body(conn)
+      match get_file(body, b, "tarball") do
+      None -> "422 missing tarball"
+      Some(tarball) ->
+        match get_field(body, b, "checksum") do
+        None              -> "422 missing checksum"
+        Some(client_cksum) -> do_publish(conn, name, tarball, client_cksum)
+        end
+      end
+    end
+  end
+end
+
+fn make_body(bnd) do
+  let d = "--" ++ bnd
+  d ++ "\r\nContent-Disposition: form-data; name=\"tarball\"; filename=\"x.tar\"\r\n\r\n"
+    ++ "TARBALLDATA" ++ "\r\n" ++ d
+    ++ "\r\nContent-Disposition: form-data; name=\"checksum\"\r\n\r\n"
+    ++ "abc123" ++ "\r\n" ++ d ++ "--\r\n"
+end
+
+fn main() do
+  let bnd = String.trim("  WebKitBoundaryXYZ  ")
+  let conn = {
+    hdrs : Cons(("content-type", "multipart/form-data; boundary=" ++ bnd), Nil),
+    body : make_body(bnd)
+  }
+  println(run_publish(conn, "mypkg"))
+end
+
+end

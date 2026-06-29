@@ -1,0 +1,49 @@
+mod T do
+
+type Conn = { hdrs : List((String, String)) }
+
+pfn lookup(pairs, key) do
+  match pairs do
+  Nil -> None
+  Cons((k, v), rest) -> if k == key then Some(v) else lookup(rest, key)
+  end
+end
+
+pfn get_req_header(conn, name) do lookup(conn.hdrs, name) end
+
+fn boundary(content_type) do
+  match String.split_first(content_type, "boundary=") do
+  None             -> None
+  Some((_, after)) ->
+    let raw = match String.split_first(after, ";") do
+              Some((b, _)) -> b
+              None         -> after
+              end
+    let t = String.trim(raw)
+    let n = String.byte_size(t)
+    if n == 0 do None else Some(t) end
+  end
+end
+
+fn run(conn) do
+  match get_req_header(conn, "content-type") do
+  None -> "no-ct"
+  Some(ct) ->
+    match boundary(ct) do
+    None -> "no-b"
+    Some(b) ->
+      let d1 = "--" ++ b
+      let d2 = "==" ++ b
+      "[" ++ d1 ++ "|" ++ d2 ++ "]"
+    end
+  end
+end
+
+fn main() do
+  let conn = {
+    hdrs : Cons(("content-type", "multipart/form-data; boundary=" ++ String.trim("  Xbnd  ")), Nil)
+  }
+  println(run(conn))
+end
+
+end

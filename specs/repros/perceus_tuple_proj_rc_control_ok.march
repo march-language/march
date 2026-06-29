@@ -1,0 +1,30 @@
+mod T do
+
+type Conn = { ct : String }
+
+fn boundary(content_type) do
+  match String.split_first(content_type, "boundary=") do
+  None             -> None
+  Some((_, after)) ->
+    let t = String.trim(after)
+    let n = String.byte_size(t)
+    if n == 0 do None else Some(t) end
+  end
+end
+
+fn run(conn) do
+  match boundary(conn.ct) do   -- ct via DIRECT field access (req_body did inc_rc)
+  None -> "no-b"
+  Some(b) ->
+    let d1 = "--" ++ b
+    let d2 = "==" ++ b
+    "[" ++ d1 ++ "|" ++ d2 ++ "]"
+  end
+end
+
+fn main() do
+  let conn = { ct : "multipart/form-data; boundary=" ++ String.trim("  Xbnd  ") }
+  println(run(conn))
+end
+
+end

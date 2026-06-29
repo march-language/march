@@ -3530,7 +3530,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        (match args with
         | [] ->
           (* Nullary ctor (None) = raw 0 *)
-          let z = fresh ctx "niche_none" in
+          (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
+             "niche_none").  fresh/fresh_block use independent counters, so a
+             shared prefix can mint an SSA value and a block label with the same
+             name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
+             value/label namespace, so the branch target then resolves to the
+             value: "'%niche_none10' is not a basic block". *)
+          let z = fresh ctx "niche_nullval" in
           emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
           ("ptr", z)
         | [arg] ->
@@ -3698,7 +3704,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        in
        (match args with
         | [] ->
-          let z = fresh ctx "niche_none" in
+          (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
+             "niche_none").  fresh/fresh_block use independent counters, so a
+             shared prefix can mint an SSA value and a block label with the same
+             name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
+             value/label namespace, so the branch target then resolves to the
+             value: "'%niche_none10' is not a basic block". *)
+          let z = fresh ctx "niche_nullval" in
           emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
           ("ptr", z)
         | [arg] ->
