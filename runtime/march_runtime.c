@@ -222,12 +222,22 @@ void march_free(void *p) {
  * sees the dead bytes — without that the GC trigger never fires.  Tracked
  * by march_heap_record_death's existence; this comment is the marker for
  * where the call needs to land. */
+/* Set on OS threads that run compiled March code OUTSIDE the scheduler
+ * (e.g. HTTP thread-pool workers in runtime/march_http.c).  When set, the
+ * "local" refcount ops below take the atomic path so values shared across
+ * those threads (the pipeline closure, module-level string constants) are not
+ * raced.  Without it, concurrent pool workers corrupt the heap (use-after-free,
+ * SIGSEGV in march_string_concat). */
+_Thread_local int march_tls_concurrent_rc = 0;
+void march_rc_set_thread_concurrent(int on) { march_tls_concurrent_rc = on; }
+
 void march_incrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     /* When called from a scheduler worker thread, multiple tasks may share the
      * same heap object (e.g. an Array backing parallel chunks).  Use atomic
-     * increment to avoid a data race on the RC field. */
-    if (march_sched_in_scheduler()) {
+     * increment to avoid a data race on the RC field.  Same for non-scheduler
+     * threads explicitly flagged as running March code concurrently. */
+    if (march_sched_in_scheduler() || march_tls_concurrent_rc) {
         march_incrc(p);
         return;
     }
@@ -239,7 +249,7 @@ void march_incrc_local(void *p) {
 void march_decrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     /* Matching atomic path for the scheduler context (see march_incrc_local). */
-    if (march_sched_in_scheduler()) {
+    if (march_sched_in_scheduler() || march_tls_concurrent_rc) {
         march_decrc(p);
         return;
     }

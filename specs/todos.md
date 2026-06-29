@@ -6,6 +6,11 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Compiled-backend codegen bugs in HTTP handler paths (2026-06-29, IN PROGRESS)
+
+- [ ] **Publish-path Perceus UAF** — `Forgepm.Api.Upload.get_file` evaluates `"--" ++ boundary` where `boundary` (a String derived from the request Content-Type header) is a corrupted near-zero pointer in compiled mode. UBSan pins it to `march_string_concat` (`runtime/march_runtime.c`). Deterministic, single-threaded. Interpreter is fine. The boundary string is freed/reused before its consuming use — a Perceus ownership/borrow bug, same family as commit `390dff00`. Fix in `lib/tir/perceus.ml` (or `lib/tir/llvm_emit.ml` if TCO).
+- [ ] **Home-route empty render** — compiled `GET /` returns a 200 with an EMPTY body (`octet-stream`); isolated to `list_popular(8)` / `home_page(...)`. `/packages` (also DB+HTML) and `registry_stats()` (in `forge test`) are fine. Likely the same codegen class. Repro: forgepm compiled binary, single curl.
+
 ## P0 — Blocking / Active
 
 *(No active P0 blockers)*

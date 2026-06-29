@@ -435,7 +435,14 @@ let ensure_runtime_so () =
     in
     let evloop_flag =
       let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
-      if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
+      (* Event-loop HTTP server is opt-in: it runs handlers on non-blocking
+         loop threads that cannot perform blocking I/O (e.g. a synchronous DB
+         connect), which hangs DB-backed apps. Default to thread-per-connection
+         (blocking sockets, works on any worker thread); set MARCH_HTTP_EVLOOP=1
+         to opt back into the event-loop server. *)
+      if Sys.file_exists evloop_c
+         && (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
+      then " -DMARCH_HTTP_USE_EVLOOP" else ""
     in
     (* Compression flags: always link -lz (system zlib), optionally zstd/brotli *)
     let compress_flags =
@@ -1973,7 +1980,14 @@ let compile filename =
             in
             let evloop_flag =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
-              if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
+              (* Event-loop HTTP server is opt-in: it runs handlers on non-blocking
+         loop threads that cannot perform blocking I/O (e.g. a synchronous DB
+         connect), which hangs DB-backed apps. Default to thread-per-connection
+         (blocking sockets, works on any worker thread); set MARCH_HTTP_EVLOOP=1
+         to opt back into the event-loop server. *)
+      if Sys.file_exists evloop_c
+         && (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
+      then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
             let compress_flags2 =
               if not (Sys.file_exists compress_c2) then ""

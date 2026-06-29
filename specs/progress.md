@@ -1366,3 +1366,11 @@ First-ever compilation of a full March program (HTTP server with stdlib dependen
 - [x] Dir module — directory operations (list, mkdir, mkdir_p, rmdir, rm_rf)
 - [x] FileError ADT — NotFound, Permission, IsDirectory, NotEmpty, IoError
 - [x] Step(a) type — Continue/Halt for fold_while early termination
+
+## Compiled HTTP Server Reliability for DB-backed apps (2026-06-29)
+- [x] Mask SIGUSR1 preemption around blocking socket builtins (`march_tcp_connect`/`recv_exact`/`send_all`) — `getaddrinfo` is async-signal-unsafe on macOS, so a 1ms preemption signal aborted DB routes (SIGILL); also retry on EINTR
+- [x] Event-loop HTTP server (`-DMARCH_HTTP_USE_EVLOOP`) made **opt-in** via `MARCH_HTTP_EVLOOP=1` — its non-blocking loop threads cannot perform blocking DB I/O; default is thread-per-connection
+- [x] `MARCH_NUM_SCHEDULERS=N` runtime override on the scheduler OS-thread count
+- [x] `march_rc_set_thread_concurrent()` — forces atomic local refcounts on flagged non-scheduler threads (HTTP pool workers) so shared closures/constants aren't raced
+- [x] `MARCH_HTTP_SEQUENTIAL=1` serial handler model — handle each connection inline on the accept-loop scheduler green thread; pool workers are raw pthreads lacking scheduler-thread context (TLS scratch / green stack), which both races refcounts AND yields wrong output even single-threaded
+- [ ] **OPEN — compiled-backend codegen bugs in HTTP handler paths** (Phase 4): Perceus/codegen UAF on the multipart publish path (`Upload.get_file`: boundary string freed before `"--" ++ boundary`) and an empty-body render on the home route (`list_popular`/`home_page`); both pass in the interpreter. Investigate `lib/tir/perceus.ml` / `lib/tir/llvm_emit.ml`.

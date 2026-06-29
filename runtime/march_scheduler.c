@@ -347,6 +347,18 @@ void march_sched_init(void) {
     g_proc_count = 0;
 
     g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
+    /* Runtime override: MARCH_NUM_SCHEDULERS=N caps the number of OS scheduler
+     * threads, clamped to [1, compile-time max].  Setting it to 1 serializes
+     * all green-thread execution onto a single OS thread (no concurrent March
+     * code), which is the only configuration under which the current
+     * non-atomic local refcounting is race-free. */
+    {
+        const char *env = getenv("MARCH_NUM_SCHEDULERS");
+        if (env && *env) {
+            int n = atoi(env);
+            if (n >= 1 && n <= MARCH_NUM_SCHEDULERS) g_num_scheds = n;
+        }
+    }
     for (int i = 0; i < g_num_scheds; i++) {
         memset(&g_scheds[i], 0, sizeof(march_scheduler));
         march_deque_init(&g_scheds[i].local_queue);

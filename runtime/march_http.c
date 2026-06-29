@@ -58,6 +58,33 @@
 void sha1(const uint8_t *msg, size_t len, uint8_t out[20]);
 int  base64_encode(const uint8_t *in, size_t len, char *out, size_t out_sz);
 
+/* ── Preemption-signal guard ───────────────────────────────────────────
+ * The scheduler preempts green threads by delivering SIGUSR1 to every
+ * scheduler thread roughly every MARCH_QUANTUM_US (1ms); see
+ * runtime/march_scheduler.c.  That signal must NOT interrupt the blocking
+ * libc calls used by the socket builtins below:
+ *
+ *   - getaddrinfo() runs through libdispatch/libsystem_info on macOS and is
+ *     not async-signal-safe.  A SIGUSR1 landing inside it (very likely, since
+ *     resolving "localhost" takes several ms while preemption fires every 1ms)
+ *     corrupts the dispatch state and aborts the whole process with SIGILL.
+ *   - recv()/send()/connect() would return EINTR, which these builtins do not
+ *     retry, surfacing as spurious "connection closed" errors or wedged reads.
+ *
+ * Blocking SIGUSR1 for the duration of the call leaves the signal pending; the
+ * kernel delivers it the instant the mask is lifted, so preemption is merely
+ * deferred past the syscall, never lost.  A thread parked in a blocking syscall
+ * is not burning its scheduling quantum anyway, so deferral is harmless. */
+static inline void march_block_preempt(sigset_t *saved) {
+    sigset_t blk;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &blk, saved);
+}
+static inline void march_unblock_preempt(const sigset_t *saved) {
+    pthread_sigmask(SIG_SETMASK, saved, NULL);
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 /* Build a Result(Ok) value: tag=0, one pointer field. */
@@ -342,17 +369,25 @@ void *march_tcp_send_all(int64_t fd, void *data) {
     march_string *s = (march_string *)data;
     const char *buf = s->data;
     int64_t remaining = s->len;
+    sigset_t saved;
+    march_block_preempt(&saved);
     while (remaining > 0) {
         ssize_t sent = send((int)fd, buf, (size_t)remaining, 0);
         if (sent < 0) {
+            if (errno == EINTR) continue;   /* preemption signal — retry */
             char errbuf[64];
             snprintf(errbuf, sizeof(errbuf), "send: %s", strerror(errno));
+            march_unblock_preempt(&saved);
             return make_err(errbuf);
         }
-        if (sent == 0) return make_err("send: connection closed");
+        if (sent == 0) {
+            march_unblock_preempt(&saved);
+            return make_err("send: connection closed");
+        }
         buf += sent;
         remaining -= sent;
     }
+    march_unblock_preempt(&saved);
     return make_ok(make_unit());
 }
 
@@ -437,14 +472,19 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     uint8_t *buf = (uint8_t *)malloc((size_t)n);
     if (!buf) return make_err("tcp_recv_exact: OOM");
     size_t received = 0;
+    sigset_t saved;
+    march_block_preempt(&saved);
     while ((int64_t)received < n) {
         ssize_t r = recv((int)fd, buf + received, (size_t)(n - (int64_t)received), 0);
+        if (r < 0 && errno == EINTR) continue;   /* preemption signal — retry */
         if (r <= 0) {
+            march_unblock_preempt(&saved);
             free(buf);
             return make_err("tcp_recv_exact: connection closed");
         }
         received += (size_t)r;
     }
+    march_unblock_preempt(&saved);
     /* The March-side declaration is `tcp_recv_exact : Int -> Int -> Result(Bytes, String)`,
      * where `type Bytes = Bytes(List(Int))`.  Return a proper Bytes wrapper
      * (NOT a march_string) so that `match Ok(header) -> Bytes.get(header, 0)`
@@ -545,7 +585,13 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
+    /* Mask preemption (SIGUSR1) across getaddrinfo()/connect(): see
+     * march_block_preempt().  getaddrinfo on macOS is not async-signal-safe
+     * and a preemption signal landing inside it crashes the process (SIGILL). */
+    sigset_t saved;
+    march_block_preempt(&saved);
     if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        march_unblock_preempt(&saved);
         void *s = march_string_lit("tcp_connect: getaddrinfo failed", 31);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
@@ -554,6 +600,7 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     }
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
+        march_unblock_preempt(&saved);
         freeaddrinfo(res);
         void *s = march_string_lit("tcp_connect: socket failed", 26);
         void *r = march_alloc(24);
@@ -561,7 +608,11 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
         *(void **)((char *)r + 16) = s;
         return r;
     }
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+    int crc;
+    do { crc = connect(fd, res->ai_addr, res->ai_addrlen); }
+    while (crc < 0 && errno == EINTR);   /* preemption signal — retry */
+    if (crc < 0) {
+        march_unblock_preempt(&saved);
         close(fd);
         freeaddrinfo(res);
         void *s = march_string_lit("tcp_connect: connection refused", 31);
@@ -570,6 +621,7 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
         *(void **)((char *)r + 16) = s;
         return r;
     }
+    march_unblock_preempt(&saved);
     freeaddrinfo(res);
     /* Return Ok(fd) — fd stored as i64 field 0, Ok=tag0.
      * Pre-tag the Int payload with (n<<1)|1 per the uniform low-bit
@@ -1424,6 +1476,11 @@ static void *connection_thread(void *arg) {
     void *pipeline = a->pipeline;
     free(a);
 
+    /* This pool worker is a non-scheduler OS thread that runs compiled March
+     * code; force atomic "local" refcounts so concurrent workers don't race
+     * shared closures/constants (see march_rc_set_thread_concurrent). */
+    march_rc_set_thread_concurrent(1);
+
     /* Disable Nagle — we send complete responses with writev(). */
 #if defined(IPPROTO_TCP) && defined(TCP_NODELAY)
     {
@@ -1767,8 +1824,31 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         return;
     }
 
-    march_http_pool_start(0 /* auto-detect from CPU count */, pipeline);
-    fprintf(stderr, "march: HTTP server listening on port %lld\n", (long long)port);
+    /* Handler execution model.
+     *
+     * Compiled March handlers must run with a scheduler-thread context: the
+     * runtime's "local" refcount ops, TLS scratch buffers, and green-stack
+     * setup all assume it.  Raw pthread-pool workers lack that context, which
+     * (a) races non-atomic refcounts across concurrent workers -> heap
+     * corruption / SIGSEGV, and (b) produces wrong output even single-threaded
+     * (e.g. empty body / default content-type for HTML pages).
+     *
+     * Default: the historical thread pool (workers flag themselves via
+     * march_rc_set_thread_concurrent(1) to at least make refcounts atomic).
+     * MARCH_HTTP_SEQUENTIAL=1: serialize — handle each connection inline on
+     * this accept loop, which IS a scheduler green thread, so handlers get the
+     * correct context.  Combined with MARCH_NUM_SCHEDULERS=1 this matches the
+     * interpreter's proven-correct single-threaded model.  Throughput is
+     * bounded (extra connections wait in the listen backlog) but correctness
+     * holds. */
+    int sequential = (getenv("MARCH_HTTP_SEQUENTIAL") != NULL);
+    if (!sequential) {
+        march_http_pool_start(0 /* auto-detect from CPU count */, pipeline);
+        fprintf(stderr, "march: HTTP server listening on port %lld\n", (long long)port);
+    } else {
+        fprintf(stderr, "march: HTTP server listening on port %lld (sequential)\n",
+                (long long)port);
+    }
 
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
         fd_set rfds;
@@ -1785,7 +1865,17 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         int64_t client_fd = tcp_accept_raw(listen_fd);
         if (client_fd < 0) continue;
 
-        /* Enqueue the accepted fd for a pool worker.
+        if (sequential) {
+            /* Handle inline on this (scheduler green-thread) accept loop. */
+            conn_thread_arg_t *a = malloc(sizeof(conn_thread_arg_t));
+            if (!a) { close((int)client_fd); continue; }
+            a->client_fd = (int)client_fd;
+            a->pipeline  = pipeline;
+            connection_thread(a);   /* handles fd and frees a */
+            continue;
+        }
+
+        /* Pool path: enqueue the accepted fd for a worker.
          * Block if the queue is full rather than dropping the connection. */
         pthread_mutex_lock(&g_pool.queue.lock);
         while (g_pool.queue.count == MARCH_HTTP_QUEUE_CAPACITY &&
@@ -1804,7 +1894,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     }
 
     close((int)listen_fd);
-    march_http_pool_stop();
+    if (!sequential) march_http_pool_stop();
 }
 
 /* ── spawn_n / wait ──────────────────────────────────────────────────── */

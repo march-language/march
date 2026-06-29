@@ -31,6 +31,12 @@ int64_t march_decrc_freed(void *p);
 void  march_incrc_local(void *p);
 void  march_decrc_local(void *p);
 
+/* Flag the calling OS thread as running compiled March code outside the
+ * scheduler (e.g. an HTTP thread-pool worker), forcing atomic "local"
+ * refcount ops on that thread.  See march_rc_set_thread_concurrent in
+ * march_runtime.c. */
+void  march_rc_set_thread_concurrent(int on);
+
 void  march_free(void *p);
 
 /* I/O builtins. */
