@@ -210,22 +210,110 @@ let lib_path_env ?(release=false) proj =
   let quoted = String.concat ":" (List.map Filename.quote all_lib_paths) in
   Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx quoted
 
+(** Run [cmd] with its stderr captured to a temp file.
+    Re-emits the captured content to forge's own stderr (with colour when the
+    terminal supports it), then returns [(exit_code, captured_content)]. *)
+let run_capturing_stderr cmd =
+  let color_env =
+    if Unix.isatty Unix.stderr then "MARCH_COLOR=always " else ""
+  in
+  let tmp = Filename.temp_file "forge_diag" ".tmp" in
+  let rc =
+    Sys.command (Printf.sprintf "%s%s 2>%s" color_env cmd (Filename.quote tmp))
+  in
+  let content =
+    try
+      let ic = open_in tmp in
+      let n  = in_channel_length ic in
+      let s  = Bytes.create n in
+      really_input ic s 0 n;
+      close_in ic;
+      Bytes.to_string s
+    with Sys_error _ -> ""
+  in
+  output_string stderr content;
+  flush stderr;
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (rc, content)
+
+(** Count ERROR/WARNING diagnostic headers in captured compiler stderr.
+    Handles both the rich block format ("-- ERROR --- file") and the simple
+    one-liner format ("file:line:col: error: msg"). *)
+let count_diagnostics content =
+  let strip_ansi s =
+    let b = Buffer.create (String.length s) in
+    let i = ref 0 and n = String.length s in
+    while !i < n do
+      if s.[!i] = '\027' && !i + 1 < n && s.[!i + 1] = '[' then begin
+        i := !i + 2;
+        while !i < n && s.[!i] <> 'm' do incr i done;
+        if !i < n then incr i
+      end else begin
+        Buffer.add_char b s.[!i]; incr i
+      end
+    done;
+    Buffer.contents b
+  in
+  let has_sub s sub =
+    let sl = String.length s and bl = String.length sub in
+    let found = ref false and i = ref 0 in
+    while not !found && !i + bl <= sl do
+      if String.sub s !i bl = sub then found := true;
+      incr i
+    done;
+    !found
+  in
+  List.fold_left (fun (e, w) raw ->
+    let l = strip_ansi raw in
+    let n = String.length l in
+    if   n >= 8  && String.sub l 0 8  = "-- ERROR"   then (e + 1, w)
+    else if n >= 10 && String.sub l 0 10 = "-- WARNING" then (e, w + 1)
+    else if has_sub l ": error: "   then (e + 1, w)
+    else if has_sub l ": warning: " then (e, w + 1)
+    else (e, w)
+  ) (0, 0) (String.split_on_char '\n' content)
+
+(** Print the build/check summary line: wall time plus counts when non-zero.
+    Example outputs:
+      "  0.23s"
+      "  3 errors, 1 warning — 0.47s" *)
+let print_build_summary ~t0 ~errors ~warnings =
+  let elapsed  = Unix.gettimeofday () -. t0 in
+  let time_str = Printf.sprintf "%.2fs" elapsed in
+  let parts =
+    (if errors   > 0 then
+       [Printf.sprintf "%d error%s"   errors   (if errors   = 1 then "" else "s")]
+     else [])
+    @
+    (if warnings > 0 then
+       [Printf.sprintf "%d warning%s" warnings (if warnings = 1 then "" else "s")]
+     else [])
+  in
+  if parts = [] then
+    Printf.printf "  %s\n%!" time_str
+  else
+    Printf.printf "  %s \xe2\x80\x94 %s\n%!" (String.concat ", " parts) time_str
+
 (** Typecheck [file] via [march --check].
-    Returns [true] on clean exit, [false] on any compiler error.
-    The compiler itself prints diagnostics to stderr — we don't intercept. *)
+    Returns [(ok, n_errors, n_warnings)]; the compiler's stderr is re-emitted
+    to forge's own stderr. *)
 let check_file ~lib_path_env file =
   let cmd =
     Printf.sprintf "%smarch --check %s"
       lib_path_env (Filename.quote file)
   in
-  Sys.command cmd = 0
+  let (rc, content) = run_capturing_stderr cmd in
+  let (e, w) = count_diagnostics content in
+  (rc = 0, e, w)
 
 (** Typecheck every .march file in [files] individually.
-    Returns the number of files that failed (0 means clean). *)
+    Returns [(n_failed, total_errors, total_warnings)]. *)
 let check_all ~lib_path_env files =
-  List.fold_left (fun failed f ->
-    if check_file ~lib_path_env f then failed else failed + 1
-  ) 0 files
+  List.fold_left (fun (failed, te, tw) f ->
+    let (ok, e, w) = check_file ~lib_path_env f in
+    if ok then (failed, te + e, tw + w)
+    else (failed + 1, te + e, tw + w)
+  ) (0, 0, 0) files
 
 (** FFI shim flags from forge.toml [[ffi]]: --ffi-c per source (resolved to an
     absolute path under [root]) and --ffi-link per linker flag. *)
@@ -237,7 +325,8 @@ let ffi_flags_of ~root (proj : Project.project) =
   String.concat "" (srcs @ links)
 
 (** Compile the entry file to [output]. [target] is passed as --target <t>;
-    omitting it compiles to a native binary. *)
+    omitting it compiles to a native binary.
+    Returns [(exit_code, n_errors, n_warnings)]. *)
 let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry =
   let opt_flag    = if release then " --opt 2" else " --opt 0" in
   let dump_flag   = if dump_phases then " --dump-phases" else "" in
@@ -254,7 +343,9 @@ let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
     Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s %s"
       lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag dump_flag ffi_flags (Filename.quote entry)
   in
-  Sys.command cmd
+  let (rc, content) = run_capturing_stderr cmd in
+  let (e, w) = count_diagnostics content in
+  (rc, e, w)
 
 (** Find files matching a given extension under [dir], recursively. *)
 let find_files_with_ext ext dir =
@@ -386,6 +477,7 @@ let ensure_js_deps ~root (proj : Project.project) =
   end
 
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
+  let t0 = Unix.gettimeofday () in
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -458,7 +550,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
       in
       match proj.Project.project_type with
       | Project.Lib ->
-        let failed = check_all ~lib_path_env files in
+        let (failed, errors, warnings) = check_all ~lib_path_env files in
+        print_build_summary ~t0 ~errors ~warnings;
         if failed > 0 then
           Error "typecheck failed"
         else begin
@@ -477,10 +570,11 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
             abs_f <> abs_entry
           ) files
         in
-        let orphan_failed = check_all ~lib_path_env orphan_files in
-        if orphan_failed > 0 then
+        let (orphan_failed, te, tw) = check_all ~lib_path_env orphan_files in
+        if orphan_failed > 0 then begin
+          print_build_summary ~t0 ~errors:te ~warnings:tw;
           Error "typecheck failed"
-        else begin
+        end else begin
           let output_ext = match target with
             | Some ("js" | "javascript") -> ".mjs"
             | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
@@ -491,9 +585,9 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
              Runs `cargo build --release` in the crate directory and appends
              the resulting archive to the --ffi-link flags.
              An offline flag lets CI pass CARGO_NET_OFFLINE=true through the env. *)
-          let rust_link_flags =
+          let rust_link_flags_result =
             match proj.Project.ffi_rust with
-            | None -> ""
+            | None -> Ok ""
             | Some frc ->
               let crate_dir =
                 if Filename.is_relative frc.Project.frc_path then
@@ -511,27 +605,30 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
                 (Printf.sprintf "cd %s && cargo build --release 2>&1"
                    (Filename.quote crate_dir))
               in
-              if rc <> 0 then begin
-                Printf.eprintf "  [ffi.rust] cargo build failed (exit %d)\n%!" rc;
-                ""
-              end else if not (Sys.file_exists archive) then begin
-                Printf.eprintf
-                  "  [ffi.rust] expected archive not found: %s\n%!" archive;
-                ""
-              end else begin
+              if rc <> 0 then
+                Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
+              else if not (Sys.file_exists archive) then
+                Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
+              else begin
                 Printf.printf "  [ffi.rust] linked %s\n%!" archive;
-                " --ffi-link " ^ Filename.quote archive
+                Ok (" --ffi-link " ^ Filename.quote archive)
               end
           in
+          match rust_link_flags_result with
+          | Error msg -> Error msg
+          | Ok rust_link_flags ->
           let ffi_flags = ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags in
           (* Install npm packages declared in [js_deps] before JS compilation. *)
-          (match target with
-           | Some ("js" | "javascript") ->
-             (match ensure_js_deps ~root:proj.Project.root proj with
-              | Error e -> Printf.eprintf "  [js_deps] warning: %s\n%!" e
-              | Ok () -> ())
-           | _ -> ());
-          let rc = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry_path in
+          let npm_result = match target with
+            | Some ("js" | "javascript") ->
+              ensure_js_deps ~root:proj.Project.root proj
+            | _ -> Ok ()
+          in
+          match npm_result with
+          | Error e -> Error e
+          | Ok () ->
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry_path in
+          print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin
             do_islands ();
             Ok output

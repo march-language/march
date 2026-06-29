@@ -10,6 +10,7 @@
     produces the binary and island sidecars. *)
 
 let check ?(_quiet = false) () =
+  let t0 = Unix.gettimeofday () in
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -37,7 +38,8 @@ let check ?(_quiet = false) () =
           ) files in
           if already_included then files else entry_path :: files
       in
-      let failed = Cmd_build.check_all ~lib_path_env all_files in
+      let (failed, errors, warnings) = Cmd_build.check_all ~lib_path_env all_files in
+      Cmd_build.print_build_summary ~t0 ~errors ~warnings;
       if failed > 0 then
         Error "typecheck failed"
       else
