@@ -345,6 +345,32 @@ int march_http_parse_request_simd(const char *buf, size_t len,
 
 /* ── Pipelined request parser ────────────────────────────────────────── */
 
+/* Content-Length of a parsed request, or 0 if the header is absent/invalid.
+ * Header values are slices (not NUL-terminated), so parse digits directly. */
+static size_t simd_content_length(const march_http_request_t *req) {
+    for (size_t i = 0; i < req->num_headers; i++) {
+        const march_http_header_t *h = &req->headers[i];
+        if (h->name_len != 14) continue;
+        int match = 1;
+        for (size_t j = 0; j < 14; j++) {
+            char c = h->name[j];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != "content-length"[j]) { match = 0; break; }
+        }
+        if (!match) continue;
+        size_t j = 0;
+        while (j < h->value_len && (h->value[j] == ' ' || h->value[j] == '\t')) j++;
+        size_t v = 0;
+        for (; j < h->value_len; j++) {
+            char c = h->value[j];
+            if (c < '0' || c > '9') break;
+            v = v * 10 + (size_t)(c - '0');
+        }
+        return v;
+    }
+    return 0;
+}
+
 int march_http_parse_pipelined(const char *buf, size_t len,
                                 march_http_request_t *reqs, int max_reqs,
                                 size_t *consumed) {
@@ -362,9 +388,20 @@ int march_http_parse_pipelined(const char *buf, size_t len,
             break;
         }
 
-        /* Adjust all pointers in req to be relative to buf (they already
-         * point into the original buffer since cur is a slice of buf). */
-        *consumed += (size_t)result;
+        /* [result] == header_end (bytes for request line + headers, relative
+         * to cur).  Attach the body slice: Content-Length bytes following the
+         * headers.  If the full body has not arrived yet, treat the whole
+         * request as incomplete and wait for more data — otherwise the body
+         * bytes would be left in the buffer and mis-parsed as the next
+         * request, desyncing keep-alive. */
+        size_t body_len = simd_content_length(req);
+        size_t total    = (size_t)result + body_len;
+        if (total > remaining) break;   /* body not fully received yet */
+        req->body     = body_len > 0 ? cur + (size_t)result : NULL;
+        req->body_len = body_len;
+
+        /* All req pointers already point into buf (cur is a slice of buf). */
+        *consumed += total;
         count++;
     }
 

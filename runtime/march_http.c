@@ -1398,12 +1398,13 @@ void *march_conn_from_parsed(const march_http_request_t *req,
         headers     = make_cons(make_header(hname, hval), headers);
     }
 
-    /* Body (everything after headers, within this request's slice) */
-    size_t body_offset = req->header_end;
-    /* For GET/HEAD pipelined requests there is usually no body. */
+    /* Request body — the Content-Length-bounded slice attached by
+     * march_http_parse_pipelined (NULL/0 when there is no body). */
+    (void)buf;
     (void)buf_len;
-    void *req_body = march_string_lit("", 0);
-    (void)body_offset;
+    void *req_body = (req->body && req->body_len > 0)
+        ? march_string_lit(req->body, (int64_t)req->body_len)
+        : march_string_lit("", 0);
 
     return make_conn(
         (int64_t)fd, method, path_str, path_info, query_str,

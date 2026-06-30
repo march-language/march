@@ -43,6 +43,12 @@ typedef struct {
      * Set to the number of bytes consumed to parse the request line +
      * all headers + the final \r\n\r\n terminator. */
     size_t header_end;
+
+    /* Request body slice (Content-Length bytes following header_end), set by
+     * march_http_parse_pipelined.  NULL/0 when there is no body.  Like the
+     * other fields, [body] points into the caller-owned input buffer. */
+    const char *body;
+    size_t      body_len;
 } march_http_request_t;
 
 /* ── Single-request API ──────────────────────────────────────────────── */
