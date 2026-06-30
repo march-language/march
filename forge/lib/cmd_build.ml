@@ -324,6 +324,46 @@ let ffi_flags_of ~root (proj : Project.project) =
   let links = List.map (fun l -> " --ffi-link " ^ Filename.quote l) proj.Project.ffi_link in
   String.concat "" (srcs @ links)
 
+(** Full FFI flags for [proj]: the [[ffi]] C sources/links from [ffi_flags_of]
+    plus, if [[ffi.rust]] is declared, a `cargo build --release` of the crate and
+    a --ffi-link to its staticlib archive.  Shared by [forge build] and
+    [forge test] so both link the same native shims.  Returns [Error] if the
+    Rust build fails or its archive is missing. *)
+let ffi_flags_full (proj : Project.project) : (string, string) result =
+  let rust_link_flags_result =
+    match proj.Project.ffi_rust with
+    | None -> Ok ""
+    | Some frc ->
+      let crate_dir =
+        if Filename.is_relative frc.Project.frc_path then
+          Filename.concat proj.Project.root frc.Project.frc_path
+        else frc.Project.frc_path
+      in
+      let archive =
+        Filename.concat crate_dir
+          (Filename.concat "target"
+             (Filename.concat "release"
+                ("lib" ^ frc.Project.frc_lib ^ ".a")))
+      in
+      Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
+      let rc = Sys.command
+        (Printf.sprintf "cd %s && cargo build --release 2>&1"
+           (Filename.quote crate_dir))
+      in
+      if rc <> 0 then
+        Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
+      else if not (Sys.file_exists archive) then
+        Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
+      else begin
+        Printf.printf "  [ffi.rust] linked %s\n%!" archive;
+        Ok (" --ffi-link " ^ Filename.quote archive)
+      end
+  in
+  match rust_link_flags_result with
+  | Error _ as e -> e
+  | Ok rust_link_flags ->
+    Ok (ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags)
+
 (** Compile the entry file to [output]. [target] is passed as --target <t>;
     omitting it compiles to a native binary.
     Returns [(exit_code, n_errors, n_warnings)]. *)
@@ -581,43 +621,11 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
             | _ -> ""
           in
           let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
-          (* [ffi.rust]: auto-build the Rust staticlib crate before compilation.
-             Runs `cargo build --release` in the crate directory and appends
-             the resulting archive to the --ffi-link flags.
-             An offline flag lets CI pass CARGO_NET_OFFLINE=true through the env. *)
-          let rust_link_flags_result =
-            match proj.Project.ffi_rust with
-            | None -> Ok ""
-            | Some frc ->
-              let crate_dir =
-                if Filename.is_relative frc.Project.frc_path then
-                  Filename.concat proj.Project.root frc.Project.frc_path
-                else frc.Project.frc_path
-              in
-              let archive =
-                Filename.concat crate_dir
-                  (Filename.concat "target"
-                     (Filename.concat "release"
-                        ("lib" ^ frc.Project.frc_lib ^ ".a")))
-              in
-              Printf.printf "  [ffi.rust] cargo build --release in %s\n%!" crate_dir;
-              let rc = Sys.command
-                (Printf.sprintf "cd %s && cargo build --release 2>&1"
-                   (Filename.quote crate_dir))
-              in
-              if rc <> 0 then
-                Error (Printf.sprintf "ffi.rust: cargo build failed (exit %d)" rc)
-              else if not (Sys.file_exists archive) then
-                Error (Printf.sprintf "ffi.rust: expected archive not found: %s" archive)
-              else begin
-                Printf.printf "  [ffi.rust] linked %s\n%!" archive;
-                Ok (" --ffi-link " ^ Filename.quote archive)
-              end
-          in
-          match rust_link_flags_result with
+          (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
+             [[ffi.rust]] staticlib archive (shared with [forge test]). *)
+          match ffi_flags_full proj with
           | Error msg -> Error msg
-          | Ok rust_link_flags ->
-          let ffi_flags = ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags in
+          | Ok ffi_flags ->
           (* Install npm packages declared in [js_deps] before JS compilation. *)
           let npm_result = match target with
             | Some ("js" | "javascript") ->

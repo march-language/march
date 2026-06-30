@@ -42,7 +42,7 @@ let find_test_dir () =
     [entry] is the single test entrypoint file (the one with test blocks).
     [lib_path_env] is the MARCH_LIB_PATH prefix (same as forge build).
     [seed] forwards to property tests via MARCH_PROP_SEED env var. *)
-let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=false) ?(release=false) ~lib_path_env ~output test_entry =
+let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=false) ?(release=false) ?(ffi_flags="") ~lib_path_env ~output test_entry =
   let verbose_flag = if verbose then " --verbose" else "" in
   let filter_flag  = if filter = "" then ""
                      else Printf.sprintf " --filter=%s" (Filename.quote filter) in
@@ -52,10 +52,13 @@ let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=f
   (* Tests use -O0 by default for fast compilation; --release enables -O2.
      The CAS cache stores separate artifacts for each opt level. *)
   let opt_flag = if release then "--opt 2" else "--opt 0" in
-  (* Build: compile test entry with --compile --test *)
+  (* Build: compile test entry with --compile --test.  [ffi_flags] carries the
+     [[ffi]] C sources / link flags (and any [[ffi.rust]] archive) so the test
+     binary links the same native shims as `forge build` — without them the
+     link fails on undefined FFI symbols. *)
   let build_cmd =
-    Printf.sprintf "%smarch --compile --test %s -o %s %s"
-      lib_path_env opt_flag (Filename.quote output) (Filename.quote test_entry)
+    Printf.sprintf "%smarch --compile --test %s -o %s%s %s"
+      lib_path_env opt_flag (Filename.quote output) ffi_flags (Filename.quote test_entry)
   in
   let build_rc = Sys.command build_cmd in
   if build_rc <> 0 then
@@ -156,7 +159,12 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       in
       (* Use first test file as entry; MARCH_LIB_PATH provides the rest. *)
       let entry = List.hd test_files in
-      invoke_compiled ~verbose ~filter ~seed ~skip_properties ~release ~lib_path_env:lib_path_with_test ~output entry
+      (* Link the same FFI shims as `forge build` so native tests that call
+         into [[ffi]] code (e.g. the sqlite shim) don't fail at link time. *)
+      match Cmd_build.ffi_flags_full proj with
+      | Error msg -> Error msg
+      | Ok ffi_flags ->
+        invoke_compiled ~verbose ~filter ~seed ~skip_properties ~release ~ffi_flags ~lib_path_env:lib_path_with_test ~output entry
     end
 
 let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(release=false) ?(files=[]) () =
