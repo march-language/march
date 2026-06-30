@@ -4614,9 +4614,12 @@ let base_env : env =
   ; ("uuid_v4", VBuiltin ("uuid_v4", function
         | [] ->
           let buf = Bytes.create 16 in
-          for i = 0 to 15 do
-            Bytes.set buf i (Char.chr (Random.int 256))
-          done;
+          (try
+            let ic = open_in_bin "/dev/urandom" in
+            Fun.protect ~finally:(fun () -> close_in_noerr ic)
+              (fun () -> really_input ic buf 0 16)
+          with Sys_error msg ->
+            eval_error "uuid_v4: cannot read /dev/urandom: %s" msg);
           (* Set version 4: high nibble of byte 6 = 0x4 *)
           Bytes.set buf 6 (Char.chr ((Char.code (Bytes.get buf 6) land 0x0f) lor 0x40));
           (* Set variant bits: top 2 bits of byte 8 = 0b10 *)
