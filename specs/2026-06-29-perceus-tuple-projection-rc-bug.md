@@ -1,7 +1,52 @@
 # Perceus tuple-field-projection RC under-count — evidence, fix path, alternative
 
-**Status:** root-caused with a minimal reproducer; first fix attempt failed (broke
-codegen). Compiler fix not yet landed. forgepm's compiled binary is blocked on it.
+**Status: RESOLVED (2026-06-29).** The true root cause was NOT a Perceus RC
+under-count — it was a **monomorphization gap** that produced a `Boxed` vs
+`Niche` `Option` representation mismatch. All three committed repros (`min`,
+`full`, `control_ok`) pass compiled, stable across 100 runs; full `dune runtest`
+green; a compiled regression test was added.
+
+## Resolution (what actually fixed it)
+
+The repros crash because a generic helper projects a record field whose element
+type is polymorphic and feeds it to another generic function:
+
+```
+get_req_header(conn, name) = lookup(conn.hdrs, name)
+```
+
+The typechecker types `conn` as a bare *row-polymorphic* var, so the projection
+`conn.hdrs` gets a FRESH type var unrelated to `conn`. Monomorphising the call
+`get_req_header(conn : Conn)` makes the *parameter* concrete but leaves that
+projection var unresolved, so `lookup`'s value type `V` stays abstract. An
+abstract `Option('V)` is emitted **Boxed** (`Repr.niche_payload_ok (TVar _) =
+false`) while the concrete caller reads it as a **Niche** (`Some(x) ≡ x`). The
+caller then dereferences the Some-box pointer **as** the payload `String` →
+`SIGSEGV` in `march_string_concat` / `string_split_first` (the `"--" ++ boundary`
+that §3 blamed on RC — `boundary`'s argument was never the looked-up string, it
+was a heap `Some` box read as a string).
+
+**Fix (`lib/tir/mono.ml`):**
+1. `Mono.refine_field_types` — a pass run AFTER `subst_fn_def` and BEFORE
+   `rewrite_calls`: for every `let v = a.fld` where `a` resolves to a concrete
+   record, retype `v` to the field's concrete type and propagate it to `v`'s
+   uses, so callees fed the projection specialise on the concrete type. With
+   `V = String`, `lookup` is `lookup$List_T_String_String$String` and `Option`
+   is consistently Niche.
+2. `match_ty` gained a `TRecord` case (it previously fell through `_ -> acc`
+   alongside the existing `TTuple`/`TCon`/`TFn` cases), so a *record-typed*
+   parameter carrying a type var in a field also binds it.
+
+The Perceus/lower changes proposed below (Tracks A/B, §4–6) are NOT needed and
+were not landed — the §3 "no `inc_rc v`" observation was a real but harmless
+secondary detail (the shallow box free does not corrupt the eagerly-loaded
+fields); it was not the crash. Regression test in `test/test_stdlib_suite.ml`:
+"record-field poly projection: Option niche/box repr consistent (compiled, no
+SIGSEGV)".
+
+---
+
+## Original investigation (superseded — kept for the evidence trail)
 
 **Owner needed:** someone fluent in `lib/tir/perceus.ml` ↔ `lib/tir/llvm_emit.ml`
 FBIP/niche codegen. This is not a safe drive-by edit.

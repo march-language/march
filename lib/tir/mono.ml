@@ -163,6 +163,21 @@ let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
     List.fold_left2 (fun acc p c -> match_ty p c acc) acc ps1 ps2
   | Tir.TTuple ps1, Tir.TTuple ps2 when List.length ps1 = List.length ps2 ->
     List.fold_left2 (fun acc p c -> match_ty p c acc) acc ps1 ps2
+  | Tir.TRecord fs1, Tir.TRecord fs2 ->
+    (* Match field types by NAME (records may differ in field order between the
+       polymorphic param and the concrete arg).  Without this, a generic helper
+       whose parameter is a record carrying a type var in a field — e.g.
+       [get_req_header(conn : { hdrs : List((String, 'a)) })] called with a
+       concrete [{ hdrs : List((String, String)) }] — never binds ['a→String],
+       so a callee it invokes ([lookup]) stays monomorphized with an abstract
+       value type.  An abstract [Option('a)] is then [Boxed] while the concrete
+       caller reads it as a [Niche] — a representation mismatch that reads the
+       Some-box pointer as the payload (SIGSEGV).  Mirrors the TTuple/TCon
+       cases. *)
+    List.fold_left (fun acc (n, p) ->
+        match List.assoc_opt n fs2 with
+        | Some c -> match_ty p c acc
+        | None   -> acc) acc fs1
   | Tir.TFn (ps1, r1), Tir.TFn (ps2, r2) when List.length ps1 = List.length ps2 ->
     let acc = List.fold_left2 (fun acc p c -> match_ty p c acc) acc ps1 ps2 in
     match_ty r1 r2 acc
@@ -663,6 +678,79 @@ let rec rewrite_calls
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename e2)
   | other -> other
 
+(** Resolve record-field-projection result types from a now-concrete record.
+
+    A generic helper like [get_req_header(conn, name) = lookup(conn.hdrs, name)]
+    types [conn] as a bare row-polymorphic var and gives the projection
+    [conn.hdrs] a FRESH type var unrelated to [conn]'s.  Substituting
+    [conn → ConcreteRecord] (in [subst_fn_def]) makes the parameter concrete but
+    leaves the projection's let-binding typed with that stale var.  Downstream
+    [rewrite_calls] then derives an ABSTRACT type for any callee fed the
+    projection (e.g. [lookup]'s value type stays ['_NNNN]), so [Option('_NNNN)]
+    is emitted [Boxed] while the concrete caller reads it as a [Niche] — an ABI
+    mismatch that reads the Some-box pointer as the payload (SIGSEGV).
+
+    Run AFTER [subst_fn_def] (the record is concrete) and BEFORE [rewrite_calls]
+    (so callees specialise on the resolved type): for every [let v = a.fld] where
+    [a] resolves to a concrete record, retype [v] to the field's type and
+    propagate it to [v]'s uses.  Conservative — only adopts a [has_tvar]-free
+    field type, so it never introduces a worse type than was already present. *)
+let refine_field_types (body : Tir.expr) : Tir.expr =
+  let env : (string, Tir.ty) Hashtbl.t = Hashtbl.create 16 in
+  let rv (v : Tir.var) : Tir.var =
+    match Hashtbl.find_opt env v.Tir.v_name with
+    | Some t -> { v with Tir.v_ty = t }
+    | None   -> v
+  in
+  let ra : Tir.atom -> Tir.atom = function
+    | Tir.AVar v -> Tir.AVar (rv v)
+    | a          -> a
+  in
+  let ral = List.map ra in
+  let rec go (e : Tir.expr) : Tir.expr =
+    match e with
+    | Tir.ELet (v, Tir.EField (a, n), body) ->
+      let a' = ra a in
+      let v' =
+        if has_tvar v.Tir.v_ty then
+          (match atom_ty a' with
+           | Tir.TRecord fs ->
+             (match List.assoc_opt n fs with
+              | Some fty when not (has_tvar fty) ->
+                Hashtbl.replace env v.Tir.v_name fty;
+                { v with Tir.v_ty = fty }
+              | _ -> v)
+           | _ -> v)
+        else v
+      in
+      Tir.ELet (v', Tir.EField (a', n), go body)
+    | Tir.EAtom a              -> Tir.EAtom (ra a)
+    | Tir.EApp (f, args)       -> Tir.EApp (rv f, ral args)
+    | Tir.ECallPtr (f, args)   -> Tir.ECallPtr (ra f, ral args)
+    | Tir.ELet (v, e1, e2)     -> Tir.ELet (rv v, go e1, go e2)
+    | Tir.ELetRec (fns, b)     ->
+      Tir.ELetRec
+        (List.map (fun fn -> { fn with Tir.fn_body = go fn.Tir.fn_body }) fns, go b)
+    | Tir.ECase (a, brs, def)  ->
+      Tir.ECase (ra a,
+        List.map (fun br -> { br with Tir.br_body = go br.Tir.br_body }) brs,
+        Option.map go def)
+    | Tir.ETuple atoms         -> Tir.ETuple (ral atoms)
+    | Tir.ERecord fs           -> Tir.ERecord (List.map (fun (n, a) -> (n, ra a)) fs)
+    | Tir.EField (a, n)        -> Tir.EField (ra a, n)
+    | Tir.EUpdate (a, fs)      -> Tir.EUpdate (ra a, List.map (fun (n, x) -> (n, ra x)) fs)
+    | Tir.EAlloc (t, args)     -> Tir.EAlloc (t, ral args)
+    | Tir.EStackAlloc (t, args)-> Tir.EStackAlloc (t, ral args)
+    | Tir.EFree a              -> Tir.EFree (ra a)
+    | Tir.EIncRC a             -> Tir.EIncRC (ra a)
+    | Tir.EDecRC a             -> Tir.EDecRC (ra a)
+    | Tir.EAtomicIncRC a       -> Tir.EAtomicIncRC (ra a)
+    | Tir.EAtomicDecRC a       -> Tir.EAtomicDecRC (ra a)
+    | Tir.EReuse (a, t, args)  -> Tir.EReuse (ra a, t, ral args)
+    | Tir.ESeq (e1, e2)        -> Tir.ESeq (go e1, go e2)
+  in
+  go body
+
 (** Main entry point. Returns a new [tir_module] with no [TVar] in
     any fn_def that is reachable from a monomorphic root. Polymorphic
     fn_defs with no monomorphic callers are dropped (unreachable).
@@ -758,9 +846,13 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         (* Apply substitution to get the specialized version *)
         let fn' = subst_fn_def subst orig_fn in
         let fn' = { fn' with Tir.fn_name = target_name } in
+        (* Resolve record-field projections against the now-concrete record so
+           callees fed a projection specialise on the concrete field type rather
+           than a stale row-poly var (see [refine_field_types]). *)
+        let refined_body = refine_field_types fn'.Tir.fn_body in
         (* Rewrite calls in the body, enqueuing new specializations *)
         let body' = rewrite_calls fn_table done_set worklist
-                      iface_methods record_to_typename fn'.Tir.fn_body in
+                      iface_methods record_to_typename refined_body in
         result := { fn' with Tir.fn_body = body' } :: !result
       end
     end

@@ -10117,6 +10117,65 @@ let test_compiled_toml_section_4keys () =
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
+(* Regression: a generic helper that projects a record field carrying a
+   polymorphic element and feeds it to another generic function under-specialised
+   that callee, producing a representation mismatch that crashed when COMPILED.
+   Concretely (forgepm publish/home routes):
+     get_req_header(conn, name) = lookup(conn.hdrs, name)
+   types [conn] as a bare row-poly var, so the projection [conn.hdrs] gets a
+   FRESH type var unrelated to [conn].  Monomorphising [conn → Conn] left that
+   var unresolved, so [lookup]'s value type stayed abstract and [Option(V)] was
+   emitted Boxed while the concrete caller read it as a Niche (Some(x)≡x) — the
+   Some-box pointer was then dereferenced as the payload String (SIGSEGV in
+   march_string_concat / split_first).  The interpreter was always correct, so
+   only a compiled test catches it.  Fix: [Mono.refine_field_types] resolves
+   record-field projections against the now-concrete record before call
+   specialisation (plus a TRecord case in [match_ty]).  Guard: compile the
+   minimal lookup/get_req_header shape and assert it exits 0 with correct output.
+   See specs/2026-06-29-perceus-tuple-projection-rc-bug.md. *)
+let test_compiled_record_field_poly_mono () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_fieldpoly" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "fp.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod FieldPolyMono do\n\
+      \  type Conn = { hdrs : List((String, String)) }\n\
+      \  pfn lookup(pairs, key) do\n\
+      \    match pairs do\n\
+      \    Nil -> None\n\
+      \    Cons((k, v), rest) -> if k == key do Some(v) else lookup(rest, key) end\n\
+      \    end\n\
+      \  end\n\
+      \  pfn get_req_header(conn, name) do lookup(conn.hdrs, name) end\n\
+      \  fn run(conn) do\n\
+      \    match get_req_header(conn, \"ct\") do\n\
+      \    None     -> \"no-ct\"\n\
+      \    Some(ct) -> String.concat(\"--\", ct)\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
+      \    if run(conn) == \"--boundaryval\" do () else process_exit(1) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "fpbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled record-field poly projection: Option niche/box repr consistent (no SIGSEGV)"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
+
 (* End-to-end guard for Hot Code Reload (HCR) Phase 2 versioned dispatch.
    `--hot-reload <Prefix>` compiles modules under <Prefix> with a versioned
    dispatch table: boundary→boundary calls route through march_dispatch_enter/
@@ -11414,6 +11473,8 @@ let stdlib_suites =
           test_compiled_sortby_heap_capturing_comparator;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
+        Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
+          test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
       ]);
