@@ -2321,7 +2321,14 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     let lower_test_body ~mod_prefix ~direct_fn_names display_name body =
       let fn_name = Printf.sprintf "__march_test_%d__" !test_counter in
       incr test_counter;
-      let body' = lower_expr body in
+      (* Register the enclosing module's own function names as current-module
+         locals while lowering the test body, so [resolve_use_alias] does NOT
+         rewrite a reference to a local function (e.g. a test-file-local
+         [fn list_len(lst)]) into an import alias of the same bare name (e.g. the
+         2-arg stdlib [Bytes.list_len]).  Without this the local def is shadowed
+         by the import BEFORE [qualify_locals] can prefix it, producing a call to
+         the wrong-arity stdlib function (arg dropped → uninitialized param). *)
+      let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
       let fn : Tir.fn_def = {
         fn_name;
         fn_params = [];
@@ -2347,7 +2354,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           collect_tests new_prefix ~mod_prefix ~direct_fn_names inner
         | Ast.DSetup (body, _) ->
           (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
-          let body' = lower_expr body in
+          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
           let fn : Tir.fn_def = {
             fn_name   = "__march_setup__";
             fn_params = [];
@@ -2356,7 +2363,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           } in
           fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DSetupAll (body, _) ->
-          let body' = lower_expr body in
+          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
           let fn : Tir.fn_def = {
             fn_name   = "__march_setup_all__";
             fn_params = [];
