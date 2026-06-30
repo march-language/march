@@ -166,6 +166,18 @@ let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
 let resolve_use_alias (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
   else if Hashtbl.mem !_current_module_fns name then name
+  (* A bulk `import Mod` registers every public fn of Mod as an unqualified
+     alias (see [register_aliases] / the DUse cases).  When one of those short
+     names is a compiler builtin — e.g. [to_string], which has a generic
+     value→string impl AND type-specific functions like [Bytes.to_string] — the
+     alias would hijack the builtin PROGRAM-WIDE (the alias table is global): a
+     later polymorphic call such as [to_string(v)] in an unrelated module would
+     be rewritten to that one concrete impl and then crash on a value of the
+     wrong type (e.g. a String matched as a Bytes(List(Int))).  The builtin must
+     always win — matching the typechecker (which binds the polymorphic builtin)
+     and the interpreter — so never resolve a builtin name through the alias
+     table. *)
+  else if Defun.StringSet.mem name Defun.builtin_names then name
   else match Hashtbl.find_opt !_use_aliases name with
   | Some qualified -> qualified
   | None -> name
