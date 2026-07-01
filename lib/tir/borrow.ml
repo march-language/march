@@ -198,28 +198,56 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     || List.exists (fun fn -> has_matching_alloc base_type fn.Tir.fn_body) fns
   | _ -> false
 
-(** True iff [e] passes the variable named [clo] as an argument to the
-    [__try_call] / [__try_call_val] builtins.  Those builtins invoke the thunk
-    closure and free it WITHIN the call (march_decrc after use, see
-    runtime/march_runtime.c) without retaining its captured free variables
-    afterwards — so a value captured by such a thunk is only *borrowed* for the
-    duration of the call, not owned. *)
-let rec used_as_try_call_thunk (clo : string) (e : Tir.expr) : bool =
+(** True iff [ty] is a defunctionalised closure environment struct (its ctor
+    name is minted as ["$Clo_…"] by defun.ml).  Used to distinguish a closure
+    allocation from an ordinary data allocation. *)
+let is_closure_ty : Tir.ty -> bool = function
+  | Tir.TCon (n, _) -> String.length n >= 5 && String.sub n 0 5 = "$Clo_"
+  | _ -> false
+
+(** True iff the closure variable [clo] ESCAPES the current function in [e] —
+    i.e. it is returned, stored in another allocation/record, or passed as a
+    DATA argument to a call.  It does NOT escape when it is only:
+    - the CALLEE of an indirect call ([ECallPtr(clo, …)]) — a local invocation
+      (join points, immediately-applied lambdas), or
+    - the thunk argument of [__try_call] / [__try_call_val], which invoke it and
+      free it within the call (march_decrc, march_runtime.c) without retaining it.
+    A non-escaping closure does not transfer ownership of its captured free
+    variables to any longer-lived value — so those captures are borrowing dups
+    (Perceus IncRC's them for the closure's owned ref, perceus.ml:425), not
+    ownership transfers of the caller's reference. *)
+let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
   let is_try f = String.equal f "__try_call" || String.equal f "__try_call_val" in
   match e with
-  | Tir.EApp (f, args) -> is_try f.Tir.v_name && List.exists (atom_is clo) args
+  | Tir.EAtom a -> atom_is clo a                              (* returned *)
+  | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) | Tir.ETuple args ->
+    List.exists (atom_is clo) args                           (* stored in a structure *)
+  | Tir.ERecord fields -> List.exists (fun (_, a) -> atom_is clo a) fields
+  | Tir.EUpdate (_, fields) -> List.exists (fun (_, a) -> atom_is clo a) fields
   | Tir.ECallPtr (fn_a, args) ->
     (match fn_a with
-     | Tir.AVar v -> is_try v.Tir.v_name && List.exists (atom_is clo) args
-     | _ -> false)
-  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
-    used_as_try_call_thunk clo e1 || used_as_try_call_thunk clo e2
+     (* __try_call / __try_call_val lower to an ECallPtr whose thunk is the
+        ARGUMENT; they invoke it and free it within the call (march_decrc) without
+        retaining it — so passing [clo] there is NOT an escape. *)
+     | Tir.AVar v when is_try v.Tir.v_name -> false
+     (* Otherwise: [clo] as the CALLEE ([fn_a]) is a local invocation (join
+        points, immediately-applied lambdas) — not an escape; [clo] as a DATA
+        ARGUMENT escapes. *)
+     | _ -> List.exists (atom_is clo) args)
+  | Tir.EApp (callee, args) ->
+    (* __try_call* consume-and-free the thunk locally → not an escape. Any other
+       call receiving [clo] as a data argument is treated as an escape. *)
+    if is_try callee.Tir.v_name then false else List.exists (atom_is clo) args
+  | Tir.ELet (v, e1, e2) ->
+    closure_escapes clo e1
+    || (not (String.equal v.Tir.v_name clo) && closure_escapes clo e2)
   | Tir.ELetRec (fns, body) ->
-    used_as_try_call_thunk clo body
-    || List.exists (fun fn -> used_as_try_call_thunk clo fn.Tir.fn_body) fns
+    closure_escapes clo body
+    || List.exists (fun fn -> closure_escapes clo fn.Tir.fn_body) fns
   | Tir.ECase (_, branches, default) ->
-    List.exists (fun br -> used_as_try_call_thunk clo br.Tir.br_body) branches
-    || Option.fold ~none:false ~some:(used_as_try_call_thunk clo) default
+    List.exists (fun br -> closure_escapes clo br.Tir.br_body) branches
+    || Option.fold ~none:false ~some:(closure_escapes clo) default
+  | Tir.ESeq (e1, e2) -> closure_escapes clo e1 || closure_escapes clo e2
   | _ -> false
 
 (** Returns true iff [name] has at least one *owning* use in [e].
@@ -281,21 +309,26 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
          && not (String.equal v.Tir.v_name name) ->
     owned_in v.Tir.v_name bm e2
 
-  (* [name] is captured (as a closure free variable) by [v = EAlloc(closure,
-     [fn_ptr; …captures…])], and [v] is then handed to __try_call /
-     __try_call_val.  Those builtins call the thunk and free it within the call
-     WITHOUT retaining its captures, so the capture is a borrowing dup (Perceus
-     IncRC's the FV for the closure's owned ref — perceus.ml:425), NOT a transfer
-     of the caller's reference.  Classify [name] by its remaining uses in [e2]
-     only — do NOT let the EAlloc capture (the generic case below) mark it owned.
-     Without this, a resource captured by a transaction/property guard
-     (`__try_call_val(fn _ -> cb(conn))`) is wrongly inferred :own, so the entire
-     call chain frees it while the caller still holds and uses it — a
-     use-after-free (Depot Transaction.run → Migration.run → Db.close(conn)). *)
-  | Tir.ELet (v, Tir.EAlloc (_, args), e2)
-    when List.exists (atom_is name) args
+  (* [name] is captured (as a free variable) by a CLOSURE [v = EAlloc($Clo_…,
+     [fn_ptr; …captures…])] that does NOT escape the current function — it is
+     only invoked locally ([ECallPtr(v, …)]: join points minted by join_points,
+     immediately-applied lambdas) or consumed by [__try_call*].  A non-escaping
+     closure never transfers ownership of its captured FVs to a longer-lived
+     value, so the capture is a borrowing dup (Perceus IncRC's the FV for the
+     closure's owned ref — perceus.ml:425), NOT a transfer of the caller's
+     reference.  Classify [name] by its remaining uses in [e2] only — do NOT let
+     the EAlloc capture (the generic case below) mark it owned.  Without this, a
+     resource captured by a shared match continuation or a transaction/property
+     guard (`__try_call_val(fn _ -> cb(conn))`, `match d do … Db.query(conn,…) …`
+     whose branches share a conn-capturing join point) is wrongly inferred :own,
+     so the whole call chain frees it while the caller still holds and uses it —
+     a use-after-free (Depot Transaction.run/tx_begin → Migration.run →
+     Db.close(conn)). *)
+  | Tir.ELet (v, Tir.EAlloc (ty, args), e2)
+    when is_closure_ty ty
+         && List.exists (atom_is name) args
          && not (String.equal v.Tir.v_name name)
-         && used_as_try_call_thunk v.Tir.v_name e2 ->
+         && not (closure_escapes v.Tir.v_name e2) ->
     owned_in name bm e2
 
   | Tir.ELet (v, e1, e2) ->
