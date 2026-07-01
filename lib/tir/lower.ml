@@ -717,7 +717,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         | Tir.TCon (type_name, _) -> type_name ^ "." ^ short_tag
         | _ -> short_tag
       in
-      Tir.EAlloc (Tir.TCon (ctor_key, []), arg_atoms))
+      (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's
+         parameters into the EAlloc so codegen can decide the value's
+         representation — a niche-shaped type applied to a niche-UNSAFE payload
+         (e.g. Option(Option(_))) must box its nullary ctor rather than emit a
+         raw-0 niche, to stay consistent with the boxed non-nullary ctor and the
+         match's Boxed strategy.  Non-nullary ctors get the payload type from
+         their arguments, so this is only needed when there are none. *)
+      let ctor_params = match ty_of_span span, arg_atoms with
+        | Tir.TCon (_, params), [] -> params
+        | _ -> []
+      in
+      Tir.EAlloc (Tir.TCon (ctor_key, ctor_params), arg_atoms))
 
   (* --- Lambda → ELetRec with a single fn_def --- *)
   | Ast.ELam (params, body, lam_span) ->

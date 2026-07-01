@@ -3642,7 +3642,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
   (* ── Heap allocation ───────────────────────────────────────────────── *)
-  | Tir.EAlloc (Tir.TCon (ctor, _), args) ->
+  | Tir.EAlloc (Tir.TCon (ctor, alloc_params), args) ->
     (* EAlloc ctor key is "TypeName.CtorName"; repr_of_ty needs the TypeName. *)
     let alloc_type_name = match String.rindex_opt ctor '.' with
       | Some i -> String.sub ctor 0 i
@@ -3701,16 +3701,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        in
        (match args with
         | [] ->
-          (* Nullary ctor (None) = raw 0 *)
-          (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
-             "niche_none").  fresh/fresh_block use independent counters, so a
-             shared prefix can mint an SSA value and a block label with the same
-             name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
-             value/label namespace, so the branch target then resolves to the
-             value: "'%niche_none10' is not a basic block". *)
-          let z = fresh ctx "niche_nullval" in
-          emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
-          ("ptr", z)
+          (* Nullary ctor (None).  For a niche-SAFE payload it is raw 0 (null).
+             But when the payload is niche-UNSAFE (e.g. Option(Option(_)) or
+             Option(Float)), the Some case above is emitted BOXED (its
+             emit_niche_payload returns None → the boxed-Some fallthrough), so
+             None must ALSO be boxed — otherwise the value is inconsistently
+             encoded (Some=heap cell, None=null) and the match, which uses the
+             concrete Boxed repr, loads a ctor tag from the null None → SIGSEGV
+             (Preload.extract_values_at over Option(Option(String)) rows). The
+             EAlloc ctor key has no payload, so use the TCon type params. *)
+          let payload_niche_safe = match alloc_params with
+            | [p] -> Repr.niche_payload_ok !cur_type_defs p
+            | _   -> true  (* no payload info — keep the historical null encoding *)
+          in
+          if payload_niche_safe then begin
+            (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
+               "niche_none").  fresh/fresh_block use independent counters, so a
+               shared prefix can mint an SSA value and a block label with the same
+               name (e.g. %niche_none10 and block niche_none10) — LLVM shares the
+               value/label namespace, so the branch target then resolves to the
+               value: "'%niche_none10' is not a basic block". *)
+            let z = fresh ctx "niche_nullval" in
+            emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
+            ("ptr", z)
+          end else begin
+            (* Boxed None: a tag-0 heap cell with no fields, matching the boxed
+               Some encoding for this niche-unsafe Option. *)
+            let entry = ctor_entry ctx ctor 0 in
+            let ptr = emit_heap_alloc ctx entry.ce_tag 0 in
+            ("ptr", ptr)
+          end
         | [arg] ->
           (match emit_niche_payload arg with
            | Some result -> result

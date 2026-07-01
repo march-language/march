@@ -1453,12 +1453,14 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
      not one of the constructor args (which would create a self-referential
      object when dec_v's memory is reused to store dec_v itself). *)
   | Tir.EAlloc (ty, args)
-    when same_arity dec_v.Tir.v_ty (List.length args)
+    when List.length args > 0
+      && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
   (* EAlloc bound to a result variable *)
   | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
-    when same_arity dec_v.Tir.v_ty (List.length args)
+    when List.length args > 0
+      && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
   (* dec_v not used in rhs — safe to sink past this binding *)
@@ -1476,7 +1478,8 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
      constructor args (which would create a self-referential object). *)
   | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
               Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when same_arity dec_v.Tir.v_ty (List.length args)
+    when List.length args > 0
+      && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     let rest' = fbip_expr rest in
     Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
