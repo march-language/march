@@ -102,6 +102,17 @@ type ctx = {
   mutable tco_fn_name   : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
+  (* SSA value (e.g. "%sp.save42") holding the llvm.stacksave() result taken at
+     the top of the TCO loop body.  Every back-edge must call
+     llvm.stackrestore on this value before branching back to the loop header
+     — otherwise any `alloca` textually inside the loop body (case-branch
+     bindings, struct/closure construction, etc.) allocates a NEW stack slot
+     on every iteration that is never freed until the function returns,
+     since LLVM only auto-pops alloca-from-loop stack growth at `ret`, not at
+     back-edges. With large iteration counts (e.g. a 10k-element list fold)
+     this silently exhausts the stack and crashes with SIGBUS/SIGSEGV even
+     though the loop itself is O(1) stack via the back-edge. *)
+  mutable tco_stack_save : string;
   (* True while emitting an expression in TAIL position of the current TCO
      function.  A self-EApp only becomes a loop back-edge when this holds;
      a self-call in non-tail position (an ELet rhs / ESeq prefix, e.g. the
@@ -120,6 +131,8 @@ type ctx = {
   mutable mutual_tco_loop_label : string;
   mutable mutual_tco_fn_params  : (string * (string * string * string) list) list;
   mutable mutual_tco_fn_tags    : (string * int) list;
+  (* Same purpose as tco_stack_save but for the combined mutual-TCO loop. *)
+  mutable mutual_tco_stack_save : string;
   (* When true, skip the reduction-budget check (march_tls_reductions load/store).
      ORC JIT on macOS cannot resolve TLS variables via emutls; the REPL is
      always single-threaded so the check is unnecessary there anyway. *)
@@ -225,11 +238,13 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   tco_loop_label = "";
   tco_param_info = [];
   tco_in_tail    = true;
+  tco_stack_save = "";
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
   mutual_tco_loop_label = "";
   mutual_tco_fn_params  = [];
   mutual_tco_fn_tags    = [];
+  mutual_tco_stack_save = "";
   repl;
   shape_meta = true;
   rec_shape_globals = Hashtbl.create 16;
@@ -1769,6 +1784,17 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
         if Repr.is_niche_shaped !cur_type_defs type_name then
           match ty_args with
           | [p] when Repr.niche_payload_ok !cur_type_defs p -> Some p
+          | [p] when (match p with Tir.TVar _ -> true | _ -> false) ->
+            (* Abstract (erased) payload — e.g. Option(Any) from record_get.
+               EAlloc and emit_case both niche-encode a niche-shaped type applied
+               to a type variable (None=null, Some(x)=x; see emit_case's
+               "abstract-arg niche path"), so the eq fn MUST use the null-check
+               strategy too.  The boxed path would load a ctor tag at offset 8 and
+               dereference the null None value (or a tagged-scalar Some) → SIGSEGV
+               (crash observed as __march_eq_Option_Any @ 0x8).  The both-Some arm
+               below falls back to a raw pointer compare for the un-eq-able
+               erased payload — safe, though only pointer-identity precise. *)
+            Some p
           | _ -> None
         else None
       in
@@ -2174,6 +2200,40 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
               result eres err_lbl ores ok_lbl);
   ("ptr", result)
 
+(* Forward declaration needed by emit_expr's Perceus-wrapped TCO case.
+   The authoritative definition + doc-comment lives later in this file
+   (the mutual-TCO analysis section); this copy must stay identical. *)
+let rec is_trivial_dec_chain_returning (tmp_name : string) (body : Tir.expr) : bool =
+  match body with
+  | Tir.EAtom (Tir.AVar v) -> String.equal v.Tir.v_name tmp_name
+  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _), rest) ->
+    is_trivial_dec_chain_returning tmp_name rest
+  | _ -> false
+
+(* Sibling of is_trivial_dec_chain_returning for the no-temp ESeq shape:
+   Perceus emits ESeq(EApp(self,args), dec_chain) — WITHOUT an ELet binding
+   the call's result — when the tail call's result needs no further
+   post-call field-level bookkeeping beyond decrementing/incrementing
+   already-materialised local values (e.g. a wildcarded `Cons(_, t)` pattern
+   decrements the local `t` after passing it on, since March's calling
+   convention borrows arguments and the caller is responsible for releasing
+   its own reference once the call returns). emit_expr's generic ESeq case
+   relies on the "e2 is Dec/IncRC → propagate e1's value" rule (see ESeq
+   below) to make e1's result the seq's value, but it also unconditionally
+   clears tco_in_tail before emitting e1 — so a self-call here compiles as
+   an ordinary (non-tail) call even though it is semantically a tail call.
+   This predicate recognises that dec_chain consists solely of trivial
+   RC bookkeeping, so the dedicated ESeq-TCO case below can intercept it
+   and emit a back-edge instead. *)
+let rec is_trivial_dec_chain (e : Tir.expr) : bool =
+  match e with
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+  | Tir.EIncRC _ | Tir.EAtomicIncRC _ -> true
+  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+              | Tir.EIncRC _ | Tir.EAtomicIncRC _), rest) ->
+    is_trivial_dec_chain rest
+  | _ -> false
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -2225,6 +2285,110 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
     Hashtbl.replace ctx.var_llvm_ty slot field_ty;
     emit_expr ctx body
+
+  (* ── Perceus-wrapped TCO self-call ────────────────────────────────── *)
+  (* Perceus may wrap a self-tail-call as ELet(tmp, EApp(self, args), decrcs→tmp)
+     to emit post-call RC decrements after consuming pattern-matched containers.
+     has_self_tail_call recognises this as a self-tail-call and sets is_tco=true,
+     but the general ELet handler below sets tco_in_tail=false for the RHS, so
+     the EApp never reaches the TCO back-edge emitter.
+     We intercept it here: emit the DecRC/Free side-effects from the body BEFORE
+     overwriting the parameter slots, then issue the back-edge. This is correct
+     because Perceus only inserts an EDecRC for the consumed container wrapper
+     (e.g. the Cons cell) — not for its fields, which were moved out as the new
+     argument values.  The fields are therefore still valid when we store them
+     into the parameter slots after the decrement. *)
+  | Tir.ELet (tmp_v, Tir.EApp (f, args), body)
+    when ctx.tco_in_tail
+         && (match ctx.tco_fn_name with Some n -> String.equal n f.Tir.v_name | None -> false)
+         && List.length args = List.length ctx.tco_param_info
+         && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) ctx.tco_param_info args in
+    (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
+          old slot values (the consumed container wrappers) which are still valid.
+          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire. *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
+    let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
+        ignore (emit_expr ctx op);
+        emit_dec_chain rest
+      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
+    in
+    emit_dec_chain body;
+    ctx.tco_in_tail <- saved_tail;
+    (* 3. Store each new argument into the corresponding parameter alloca slot. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
+      ) ctx.tco_param_info new_vals;
+    (* 4. Free any per-iteration `alloca` stack space before looping back —
+          see tco_stack_save's doc comment for why this is required. *)
+    if ctx.tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
+    (* 5. Back-edge to the TCO loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
+    emit_label ctx (fresh_block ctx "tco_perceus_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
+
+  (* ── Perceus-wrapped TCO self-call, no-temp ESeq shape ──────────────── *)
+  (* Sibling of the ELet-wrapped case above: when the consumed pattern only
+     needs to release already-materialised local values (no field-level
+     decrements requiring the call's result to be re-examined), Perceus
+     emits ESeq(EApp(self,args), dec_chain) directly instead of wrapping
+     the call in an ELet. See is_trivial_dec_chain's doc comment for the
+     concrete example (a wildcarded `Cons(_, t)` pattern). Without this
+     case, the call falls through to the generic ESeq handler below, which
+     unconditionally treats e1 as non-tail — silently downgrading what is
+     semantically a tail call into real (stack-growing) recursion. *)
+  | Tir.ESeq (Tir.EApp (f, args), dec_chain)
+    when ctx.tco_in_tail
+         && (match ctx.tco_fn_name with Some n -> String.equal n f.Tir.v_name | None -> false)
+         && List.length args = List.length ctx.tco_param_info
+         && is_trivial_dec_chain dec_chain ->
+    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) ctx.tco_param_info args in
+    (* 2. Emit the dec/inc-RC chain before overwriting slots — same
+          ordering rationale as the ELet-wrapped case above. *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
+    let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
+        ignore (emit_expr ctx op);
+        emit_dec_chain rest
+      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
+        ignore (emit_expr ctx op)
+      | _ -> ()
+    in
+    emit_dec_chain dec_chain;
+    ctx.tco_in_tail <- saved_tail;
+    (* 3. Store each new argument into the corresponding parameter alloca slot. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
+      ) ctx.tco_param_info new_vals;
+    (* 4. Free any per-iteration `alloca` stack space before looping back. *)
+    if ctx.tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
+    (* 5. Back-edge to the TCO loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
+    emit_label ctx (fresh_block ctx "tco_seq_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
@@ -2823,9 +2987,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
           param_ty new_v slot)
       ) target_slots new_vals;
-    (* 4. Branch back to the shared loop header. *)
+    (* 4. Free any per-iteration `alloca` stack space before looping back —
+          see tco_stack_save's doc comment for why this is required. *)
+    if ctx.mutual_tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
+    (* 5. Branch back to the shared loop header. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
-    (* 5. Open a dead continuation block for syntactic validity. *)
+    (* 6. Open a dead continuation block for syntactic validity. *)
     emit_label ctx (fresh_block ctx "mutco_cont");
     let dummy_ty = llvm_ret_ty ctx.ret_ty in
     (match dummy_ty with
@@ -2855,9 +3023,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     List.iter2 (fun (_vname, slot, param_ty) new_v ->
         emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
       ) ctx.tco_param_info new_vals;
-    (* 3. Loop back — this is the terminator for the current basic block. *)
+    (* 3. Free any per-iteration `alloca` stack space before looping back —
+          see tco_stack_save's doc comment for why this is required. *)
+    if ctx.tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.tco_stack_save);
+    (* 4. Loop back — this is the terminator for the current basic block. *)
     emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
-    (* 4. Open a dead block so that any instructions the caller emits after
+    (* 5. Open a dead block so that any instructions the caller emits after
           us (e.g., emit_case's store-to-result-slot + br-to-merge) are
           syntactically valid LLVM IR even though they are unreachable. *)
     emit_label ctx (fresh_block ctx "tco_cont");
@@ -4137,6 +4309,19 @@ and emit_case ctx scrut_atom branches default_opt =
         (match scrut_tir_ty_init with
          | Tir.TCon (name, []) -> Repr.is_niche_shaped !cur_type_defs name
          | _ -> false)
+        ||
+        (* Abstract-arg niche path: niche-shaped type name applied to abstract
+           (TVar) type arguments -- e.g. TCon("Option", [TVar "_1234"]) produced
+           when the scrutinee's typemap entry has an unresolved type variable.
+           repr_of_ty conservatively returns Boxed because niche_payload_ok(TVar)
+           is false, but the concrete callee decided Niche by its return type.
+           The ctor shape is determined by the type name alone, so trust
+           is_niche_shaped and emit Niche. *)
+        (match scrut_tir_ty_init with
+         | Tir.TCon (name, args) when args <> [] ->
+           (List.exists (function Tir.TVar _ -> true | _ -> false) args)
+           && Repr.is_niche_shaped !cur_type_defs name
+         | _ -> false)
       ) ->
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
     | r -> r
@@ -4745,7 +4930,38 @@ and emit_case ctx scrut_atom branches default_opt =
   let snap_default = snapshot_var_slot () in
   emit_label ctx default_lbl;
   (match default_opt with
-   | None -> emit_term ctx "unreachable"
+   | None ->
+     (* Is the scrutinee's runtime SHAPE statically unproven?  After
+        monomorphization a concrete type has been specialized away, so a type
+        variable left in the scrutinee type (bare, or as a tuple/record element)
+        means the value is GENUINELY erased at runtime — the fingerprint of a
+        reflection builtin like [record_entries], whose element values are typed
+        as an unconstrained [a] and may not actually be the tuple/record/ctor the
+        pattern assumes.  In that case emitting `unreachable` for the switch
+        default lets LLVM prove the default dead and fold the tag check away, so
+        a wrong-shaped value (a String reaching a tuple pattern) silently falls
+        into the field-load arm → destructured as garbage → SIGSEGV downstream.
+        Panic cleanly like the interpreter's "Non-exhaustive pattern match"
+        instead; the side-effecting call also keeps the tag check live so the
+        mismatch is actually caught.  Concrete scrutinees keep `unreachable`
+        (LLVM folds the single-arm switch — no runtime cost). *)
+     let rec shape_unproven = function
+       | Tir.TVar _        -> true
+       | Tir.TTuple ts     -> List.exists shape_unproven ts
+       | Tir.TRecord fs    -> List.exists (fun (_, t) -> shape_unproven t) fs
+       | _                 -> false
+     in
+     if shape_unproven scrut_tir_ty_init then begin
+       let msg = "match failure: value did not match any pattern arm" in
+       let gname = intern_string ctx msg in
+       let slit = fresh ctx "mfail" in
+       emit ctx (Printf.sprintf
+         "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+         slit gname (String.length msg));
+       emit ctx (Printf.sprintf "call void @march_panic(ptr %s)" slit);
+       emit_term ctx "unreachable"
+     end else
+       emit_term ctx "unreachable"
    | Some d ->
      let (d_ty, d_val) = emit_expr ctx d in
      let stored = coerce ctx d_ty d_val "ptr" in
@@ -5051,14 +5267,27 @@ let emit_fn ctx (fn : Tir.fn_def) =
        TCO functions are never leaf (they call themselves), so the check is
        always needed here. *)
     emit_reduction_check ctx;
+    (* Snapshot the stack pointer at the top of each iteration so that any
+       `alloca` textually inside the loop body (case-branch bindings, struct
+       construction, etc.) — which LLVM must treat as a fresh dynamic
+       allocation on every dynamic execution of the alloca instruction, since
+       it cannot prove the loop runs once — gets freed before the next
+       iteration via llvm.stackrestore at each back-edge. Without this, stack
+       space accumulates unboundedly across iterations and large loops
+       (e.g. folding a 10k-element list) crash with a stack overflow despite
+       the loop itself being O(1) stack via the back-edge. *)
+    let stack_save = fresh ctx "sp.save" in
+    emit ctx (Printf.sprintf "%s = call ptr @llvm.stacksave()" stack_save);
     (* Install TCO context so EApp to self emits a back-edge instead of a call. *)
     ctx.tco_fn_name    <- Some fn.Tir.fn_name;
     ctx.tco_loop_label <- loop_lbl;
     ctx.tco_param_info <- param_slots;
     ctx.tco_in_tail    <- true;
+    ctx.tco_stack_save <- stack_save;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     (* Clear TCO state before emitting any other function. *)
     ctx.tco_fn_name <- None;
+    ctx.tco_stack_save <- "";
     if ret_ty = "void" then
       emit_term ctx "ret void"
     else begin
@@ -5184,6 +5413,12 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
   emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
   emit_label ctx loop_lbl;
 
+  (* Snapshot the stack pointer at the top of each iteration — see
+     tco_stack_save's doc comment for why this is required. Every case body's
+     back-edge restores to this point before re-entering the loop header. *)
+  let mutual_stack_save = fresh ctx "mutco_sp.save" in
+  emit ctx (Printf.sprintf "%s = call ptr @llvm.stacksave()" mutual_stack_save);
+
   (* Load the dispatch tag and emit a switch. *)
   let tag_v    = fresh ctx "mutco_tag_v" in
   let dead_lbl = fresh_block ctx "mutco_dead" in
@@ -5210,6 +5445,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
   ctx.mutual_tco_loop_label <- loop_lbl;
   ctx.mutual_tco_fn_params  <- fn_param_slots;
   ctx.mutual_tco_fn_tags    <- fn_tags;
+  ctx.mutual_tco_stack_save <- mutual_stack_save;
 
   (* Emit each case body. *)
   List.iter (fun (fn, case_lbl) ->
@@ -5249,6 +5485,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
 
   (* Clear mutual TCO context. *)
   ctx.mutual_tco_group <- [];
+  ctx.mutual_tco_stack_save <- "";
 
   (* ── Emit wrapper functions ──────────────────────────────────────── *)
   (* Each original function name becomes a thin wrapper that sets the
@@ -5552,6 +5789,8 @@ declare i64  @march_int_pow(i64 %base, i64 %exp)
 ; LLVM intrinsics
 declare i64  @llvm.ctpop.i64(i64 %val)
 declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
+declare ptr  @llvm.stacksave()
+declare void @llvm.stackrestore(ptr %ptr)
 ; Logger builtins
 declare ptr  @march_logger_set_level(i64 %level)
 declare i64  @march_logger_get_level()
