@@ -53,6 +53,10 @@ static void *ws_handler_thread(void *arg) {
     void *ws_closure = a->ws_closure;
     free(a);
 
+    /* This OS thread runs compiled March code outside the scheduler — force
+     * atomic "local" refcounts so it doesn't race shared closures/constants. */
+    march_rc_set_thread_concurrent(1);
+
     /* Switch fd back to blocking — WS send/recv use blocking syscalls. */
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
@@ -500,6 +504,11 @@ static void *evloop_run(void *arg) {
     int    listener_fd = targ->listener_fd;
     void  *pipeline    = targ->pipeline;
     free(targ);
+
+    /* This OS thread runs compiled March code outside the scheduler — force
+     * atomic "local" refcounts so concurrent evloop threads don't race on
+     * shared closures/constants (pipeline closure, string literals). */
+    march_rc_set_thread_concurrent(1);
 
 #if EVLOOP_USE_KQUEUE
     int evfd = kqueue();

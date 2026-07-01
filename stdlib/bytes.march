@@ -50,14 +50,15 @@ mod Bytes do
       end end
   end
 
-  pfn list_append(xs, ys) do
-    fn go(rxs, acc) do
-      match rxs do
-      Nil -> acc
-      Cons(h, t) -> go(t, Cons(h, acc))
-      end
+  pfn list_append_go(rxs, acc) do
+    match rxs do
+    Nil -> acc
+    Cons(h, t) -> list_append_go(t, Cons(h, acc))
     end
-    go(rev(xs, Nil), ys)
+  end
+
+  pfn list_append(xs, ys) do
+    list_append_go(rev(xs, Nil), ys)
   end
 
   pfn join_strings(xs) do
@@ -81,30 +82,29 @@ mod Bytes do
   doc "An empty Bytes value."
   fn empty() do Bytes(Nil) end
 
+  pfn from_string_go(cs, acc) do
+    match cs do
+    Nil -> rev(acc, Nil)
+    Cons(c, rest) -> from_string_go(rest, Cons(char_to_int(c), acc))
+    end
+  end
+
   doc "Convert a String to Bytes (raw UTF-8 byte values, each 0–255)."
   fn from_string(s) do
-    let chars = string_chars(s)
-    fn go(cs, acc) do
-      match cs do
-      Nil -> rev(acc, Nil)
-      Cons(c, rest) -> go(rest, Cons(char_to_int(c), acc))
-      end
+    Bytes(from_string_go(string_chars(s), Nil))
+  end
+
+  pfn to_string_go(bs, acc) do
+    match bs do
+    Nil -> rev(acc, Nil)
+    Cons(n, rest) -> to_string_go(rest, Cons(byte_to_char(n), acc))
     end
-    Bytes(go(chars, Nil))
   end
 
   doc "Convert Bytes back to a String (bytes interpreted as UTF-8)."
   fn to_string(b) do
     match b do
-    Bytes(xs) -> do
-      fn go(bs, acc) do
-        match bs do
-        Nil -> rev(acc, Nil)
-        Cons(n, rest) -> go(rest, Cons(byte_to_char(n), acc))
-        end
-      end
-      string_from_chars(go(xs, Nil))
-    end
+    Bytes(xs) -> string_from_chars(to_string_go(xs, Nil))
     end
   end
 
@@ -170,18 +170,17 @@ mod Bytes do
     hex_digit(n / 16) ++ hex_digit(n % 16)
   end
 
+  pfn to_hex_go(bs, acc) do
+    match bs do
+    Nil -> rev(acc, Nil)
+    Cons(n, rest) -> to_hex_go(rest, Cons(byte_to_hex_str(n), acc))
+    end
+  end
+
   doc "Encode Bytes as a lowercase hexadecimal string."
   fn to_hex(b) do
     match b do
-    Bytes(xs) -> do
-      fn go(bs, acc) do
-        match bs do
-        Nil -> rev(acc, Nil)
-        Cons(n, rest) -> go(rest, Cons(byte_to_hex_str(n), acc))
-        end
-      end
-      join_strings(go(xs, Nil))
-    end
+    Bytes(xs) -> join_strings(to_hex_go(xs, Nil))
     end
   end
 
@@ -193,22 +192,22 @@ mod Bytes do
     else -1 end end end
   end
 
+  pfn from_hex_go(cs, acc) do
+    match cs do
+    Nil -> Ok(Bytes(rev(acc, Nil)))
+    Cons(hi_c, Cons(lo_c, rest)) -> do
+      let hi = hex_val(hi_c)
+      let lo = hex_val(lo_c)
+      if hi < 0 || lo < 0 do Err("invalid hex character")
+      else from_hex_go(rest, Cons(hi * 16 + lo, acc)) end
+    end
+    _ -> Err("hex string must have even length")
+    end
+  end
+
   doc "Parse a hex string to Bytes. Returns Err if the input is not valid hex."
   fn from_hex(s) do
-    let chars = string_chars(s)
-    fn go(cs, acc) do
-      match cs do
-      Nil -> Ok(Bytes(rev(acc, Nil)))
-      Cons(hi_c, Cons(lo_c, rest)) -> do
-        let hi = hex_val(hi_c)
-        let lo = hex_val(lo_c)
-        if hi < 0 || lo < 0 do Err("invalid hex character")
-        else go(rest, Cons(hi * 16 + lo, acc)) end
-      end
-      _ -> Err("hex string must have even length")
-      end
-    end
-    go(chars, Nil)
+    from_hex_go(string_chars(s), Nil)
   end
 
   -- ---- Base64 encoding ----
@@ -219,36 +218,35 @@ mod Bytes do
     string_slice(b64_alphabet, n, 1)
   end
 
+  pfn encode_base64_go(bs, acc) do
+    match bs do
+    Nil ->
+      join_strings(rev(acc, Nil))
+    Cons(b0, Cons(b1, Cons(b2, rest))) -> do
+      let c0 = b64_char(b0 / 4)
+      let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
+      let c2 = b64_char((b1 % 16) * 4 + b2 / 64)
+      let c3 = b64_char(b2 % 64)
+      encode_base64_go(rest, Cons(c3, Cons(c2, Cons(c1, Cons(c0, acc)))))
+    end
+    Cons(b0, Cons(b1, Nil)) -> do
+      let c0 = b64_char(b0 / 4)
+      let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
+      let c2 = b64_char((b1 % 16) * 4)
+      join_strings(rev(Cons("=", Cons(c2, Cons(c1, Cons(c0, acc)))), Nil))
+    end
+    Cons(b0, Nil) -> do
+      let c0 = b64_char(b0 / 4)
+      let c1 = b64_char((b0 % 4) * 16)
+      join_strings(rev(Cons("=", Cons("=", Cons(c1, Cons(c0, acc)))), Nil))
+    end
+    end
+  end
+
   doc "Encode Bytes as a Base64 string (with padding)."
   fn encode_base64(b) do
     match b do
-    Bytes(xs) -> do
-      fn go(bs, acc) do
-        match bs do
-        Nil ->
-          join_strings(rev(acc, Nil))
-        Cons(b0, Cons(b1, Cons(b2, rest))) -> do
-          let c0 = b64_char(b0 / 4)
-          let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
-          let c2 = b64_char((b1 % 16) * 4 + b2 / 64)
-          let c3 = b64_char(b2 % 64)
-          go(rest, Cons(c3, Cons(c2, Cons(c1, Cons(c0, acc)))))
-        end
-        Cons(b0, Cons(b1, Nil)) -> do
-          let c0 = b64_char(b0 / 4)
-          let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
-          let c2 = b64_char((b1 % 16) * 4)
-          join_strings(rev(Cons("=", Cons(c2, Cons(c1, Cons(c0, acc)))), Nil))
-        end
-        Cons(b0, Nil) -> do
-          let c0 = b64_char(b0 / 4)
-          let c1 = b64_char((b0 % 4) * 16)
-          join_strings(rev(Cons("=", Cons("=", Cons(c1, Cons(c0, acc)))), Nil))
-        end
-        end
-      end
-      go(xs, Nil)
-    end
+    Bytes(xs) -> encode_base64_go(xs, Nil)
     end
   end
 
@@ -262,47 +260,47 @@ mod Bytes do
     else -1 end end end end end
   end
 
-  doc "Decode a Base64 string to Bytes. Returns Err on invalid input."
-  fn decode_base64(s) do
-    let chars = string_chars(s)
-    fn go(cs, acc) do
-      match cs do
-      Nil -> Ok(Bytes(rev(acc, Nil)))
-      Cons(c0, Cons(c1, Cons(c2, Cons(c3, rest)))) -> do
-        let v0 = b64_val(c0)
-        let v1 = b64_val(c1)
-        if v0 < 0 || v1 < 0 do Err("invalid base64 character")
-        else if c2 == "=" && c3 == "=" do
-          Ok(Bytes(rev(Cons((v0 * 4 + v1 / 16) % 256, acc), Nil)))
-        else if c3 == "=" do
-          let v2 = b64_val(c2)
-          if v2 < 0 do Err("invalid base64 character")
-          else do
-            let byte0 = (v0 * 4 + v1 / 16) % 256
-            let byte1 = ((v1 % 16) * 16 + v2 / 4) % 256
-            Ok(Bytes(rev(Cons(byte1, Cons(byte0, acc)), Nil)))
-          end
-          end
+  pfn decode_base64_go(cs, acc) do
+    match cs do
+    Nil -> Ok(Bytes(rev(acc, Nil)))
+    Cons(c0, Cons(c1, Cons(c2, Cons(c3, rest)))) -> do
+      let v0 = b64_val(c0)
+      let v1 = b64_val(c1)
+      if v0 < 0 || v1 < 0 do Err("invalid base64 character")
+      else if c2 == "=" && c3 == "=" do
+        Ok(Bytes(rev(Cons((v0 * 4 + v1 / 16) % 256, acc), Nil)))
+      else if c3 == "=" do
+        let v2 = b64_val(c2)
+        if v2 < 0 do Err("invalid base64 character")
         else do
-          let v2 = b64_val(c2)
-          let v3 = b64_val(c3)
-          if v2 < 0 || v3 < 0 do Err("invalid base64 character")
-          else do
-            let byte0 = (v0 * 4 + v1 / 16) % 256
-            let byte1 = ((v1 % 16) * 16 + v2 / 4) % 256
-            let byte2 = ((v2 % 4) * 64 + v3) % 256
-            go(rest, Cons(byte2, Cons(byte1, Cons(byte0, acc))))
-          end
-          end
+          let byte0 = (v0 * 4 + v1 / 16) % 256
+          let byte1 = ((v1 % 16) * 16 + v2 / 4) % 256
+          Ok(Bytes(rev(Cons(byte1, Cons(byte0, acc)), Nil)))
         end
+        end
+      else do
+        let v2 = b64_val(c2)
+        let v3 = b64_val(c3)
+        if v2 < 0 || v3 < 0 do Err("invalid base64 character")
+        else do
+          let byte0 = (v0 * 4 + v1 / 16) % 256
+          let byte1 = ((v1 % 16) * 16 + v2 / 4) % 256
+          let byte2 = ((v2 % 4) * 64 + v3) % 256
+          decode_base64_go(rest, Cons(byte2, Cons(byte1, Cons(byte0, acc))))
         end
         end
       end
       end
-      _ -> Err("invalid base64: length must be a multiple of 4")
       end
     end
-    go(chars, Nil)
+    end
+    _ -> Err("invalid base64: length must be a multiple of 4")
+    end
+  end
+
+  doc "Decode a Base64 string to Bytes. Returns Err on invalid input."
+  fn decode_base64(s) do
+    decode_base64_go(string_chars(s), Nil)
   end
 
   impl Eq(Bytes) do

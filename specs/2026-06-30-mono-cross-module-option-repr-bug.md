@@ -1,6 +1,30 @@
 # Residual Boxed-vs-Niche `Option` repr mismatch across module boundaries
 
-**Status:** OPEN, root-caused to a hypothesis with decisive crash evidence. This is the
+**Status: RESOLVED (2026-06-30).** Fixed by the combination already committed on this
+branch — `4c4762ad` (native ops over type-erased values), `4fdeda08` (builtins no longer
+hijacked by import aliases), `fd520110` (closure FVs for `__try_call*` borrowed not owned)
+— plus `march_rc_set_thread_concurrent()` forcing atomic local refcounts on evloop/HTTP-pool
+threads (`runtime/march_http_evloop.c`, uncommitted at the time this doc was written, landed
+in the same commit as this status update).
+
+**Validation:** removed forgepm's `force_copy` workaround in the isolated `fp-investigate`
+worktree (not the main forgepm repo — that workaround stays until forgepm's own maintainers
+remove it there), rebuilt with this compiler, and ran the full Playwright suite against the
+live server: **7/7 `publish.spec.ts` tests pass, 29/30 overall** (the one skip is a
+pre-existing unrelated fixture condition — `detail.spec.ts`'s "no packages have versions"
+guard — not a regression). No SIGSEGV, no hang, across repeated publish round-trips.
+
+While validating this fix at scale (large tarballs), a second, unrelated compiler bug was
+found and fixed in the same session: see
+`specs/2026-06-30-tco-loop-stack-overflow.md` (missing `llvm.stacksave`/`stackrestore`
+around TCO loop bodies, and a second gap in Perceus-wrapped tail-call detection). Both are
+in `lib/tir/llvm_emit.ml`.
+
+---
+
+*Original bug report follows, preserved for context.*
+
+**Status (historical):** OPEN, root-caused to a hypothesis with decisive crash evidence. This is the
 *residual* of the bug `373932d3` (mono `refine_field_types`) fixed: that commit fixed the
 **single-compilation-unit** case; forgepm's real publish path still crashes identically
 because the same generic helper (`get_req_header`) lives in a **separately-compiled**
