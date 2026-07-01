@@ -100,6 +100,9 @@ type ctx = {
      tco_param_info: (tir_var_name, alloca_slot, llvm_ty) for each parameter,
        in declaration order — used to store new argument values before looping. *)
   mutable tco_fn_name   : string option;
+  (* TIR name of the function currently being emitted — for diagnostics
+     (e.g. the shape-mismatch match-failure panic message). *)
+  mutable cur_emit_fn   : string;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
   (* SSA value (e.g. "%sp.save42") holding the llvm.stacksave() result taken at
@@ -204,6 +207,61 @@ let target_int_ty = function
 (* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
 let cur_type_defs : Tir.type_def list ref = ref []
 
+(* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
+   Every site that COMMITS to a value representation (EAlloc, EReuse,
+   emit_case, ensure_adt_eq_fn) records its decision here, keyed by
+   "TypeName(payload)" — payload "?" when the site has no type params (the
+   dangerous case: it guessed).  At end of emit_module, any type whose
+   recorded encodings mix families (Boxed vs Niche vs Newtype) is reported:
+   * same payload key, different families  → definite inconsistency;
+   * a "?"-payload site disagreeing with a concrete one → the exact shape of
+     the Option(Option(_)) None-null-vs-boxed bug (86c62b98).
+   Records the ACTUAL decisions as they are made (not a re-derivation), so it
+   cannot diverge from codegen.  Diagnostic only — no behavior change. *)
+let repr_audit_on = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+(* type_name -> (payload_key, family, site) list, deduped *)
+let _repr_audit : (string, (string * string * string) list ref) Hashtbl.t =
+  Hashtbl.create 64
+let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
+    ~(site : string) : unit =
+  if Lazy.force repr_audit_on then begin
+    let l = match Hashtbl.find_opt _repr_audit ty with
+      | Some l -> l
+      | None -> let l = ref [] in Hashtbl.add _repr_audit ty l; l
+    in
+    let entry = (payload, family, site) in
+    if not (List.mem entry !l) then l := entry :: !l
+  end
+let repr_audit_report () =
+  if Lazy.force repr_audit_on then begin
+    let flagged = ref 0 in
+    Hashtbl.iter (fun ty entries ->
+      let es = !entries in
+      let families = List.sort_uniq compare (List.map (fun (_, f, _) -> f) es) in
+      if List.length families > 1 then begin
+        (* Mixed families for this type: definite if within one concrete
+           payload key; suspicious if via a "?" site. Legitimate when two
+           DIFFERENT concrete payloads pick different reprs (Option(Int) niche
+           vs Option(Float) boxed) — only flag same-key or ?-key conflicts. *)
+        let same_key_conflict =
+          List.exists (fun (p1, f1, _) ->
+            List.exists (fun (p2, f2, _) -> p1 = p2 && f1 <> f2) es) es in
+        let unknown_conflict =
+          List.exists (fun (p, _, _) -> p = "?") es in
+        if same_key_conflict || unknown_conflict then begin
+          incr flagged;
+          Printf.eprintf "[repr-audit] %s: MIXED %s%s\n" ty
+            (String.concat "/" families)
+            (if same_key_conflict then " (same-payload conflict)"
+             else " (unknown-payload site disagrees)");
+          List.iter (fun (p, f, s) ->
+            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es
+        end
+      end
+    ) _repr_audit;
+    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" !flagged
+  end
+
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
     ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build []) () = {
   buf      = Buffer.create 4096;
@@ -235,6 +293,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   hr_cur_module = "";
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
+  cur_emit_fn    = "";
   tco_loop_label = "";
   tco_param_info = [];
   tco_in_tail    = true;
@@ -1798,6 +1857,14 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
           | _ -> None
         else None
       in
+      (* Repr audit hook — the equality function is a third commitment site
+         (after alloc and match); record which strategy it picks. *)
+      repr_audit_record ~ty:type_name
+        ~payload:(match ty_args with
+          | [] -> "?"
+          | _ -> String.concat "," (List.map mangle_ty_for_eq ty_args))
+        ~family:(if niche_payload_opt <> None then "Niche" else "Boxed")
+        ~site:("eq:" ^ fn_name);
       match niche_payload_opt with
       | Some payload_ty ->
         Hashtbl.add ctx.emitted_eq_fns fn_name ();
@@ -3648,8 +3715,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
+    (* Repr audit hook — records the encoding this alloc site commits to. *)
+    let audit fam site =
+      repr_audit_record ~ty:alloc_type_name
+        ~payload:(match alloc_params with
+          | [] -> "?"
+          | ps -> String.concat "," (List.map mangle_ty_for_eq ps))
+        ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
+    in
     (match Repr.repr_of_ty !cur_type_defs (Tir.TCon (alloc_type_name, [])) with
      | Repr.Newtype payload ->
+       audit "Newtype" "alloc";
        (* Newtype: no allocation. Emit the single payload atom directly. *)
        if List.length args <> 1 then
          failwith (Printf.sprintf
@@ -3683,7 +3759,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
            | _ -> Tir.TUnit
          in
-         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         let arg_niche_ok =
+           Repr.niche_payload_ok !cur_type_defs arg_tir_ty
+           (* Erased (TVar) payload: the rest of the erased convention —
+              emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
+              nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
+              slot value is already uniform (heap ptr raw / scalar tagged), so
+              pass it through raw.  Boxing here made e.g. alist_get's
+              Some(field) a heap cell that its niche-matching callers read as
+              the payload itself (caught by MARCH_REPR_AUDIT:
+              alloc-some-boxed(?) vs case=Niche(Any)). *)
+           || (match arg_tir_ty with Tir.TVar _ -> true | _ -> false)
+         in
+         if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
            if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
@@ -3711,10 +3799,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              (Preload.extract_values_at over Option(Option(String)) rows). The
              EAlloc ctor key has no payload, so use the TCon type params. *)
           let payload_niche_safe = match alloc_params with
-            | [p] -> Repr.niche_payload_ok !cur_type_defs p
+            | [p] ->
+              Repr.niche_payload_ok !cur_type_defs p
+              (* Abstract (erased) payload: emit_case's abstract-arg niche path
+                 and ensure_adt_eq_fn both treat Option(TVar) as NICHE, so the
+                 alloc must too — boxing None here would make a niche match read
+                 the non-null cell as Some (caught by MARCH_REPR_AUDIT:
+                 case=Niche(Any) vs alloc-none-boxed=Boxed(Any)). *)
+              || (match p with Tir.TVar _ -> true | _ -> false)
             | _   -> true  (* no payload info — keep the historical null encoding *)
           in
           if payload_niche_safe then begin
+            audit "Niche" "alloc-none";
             (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
                "niche_none").  fresh/fresh_block use independent counters, so a
                shared prefix can mint an SSA value and a block label with the same
@@ -3725,6 +3821,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             emit ctx (Printf.sprintf "%s = inttoptr i64 0 to ptr" z);
             ("ptr", z)
           end else begin
+            audit "Boxed" "alloc-none-boxed";
             (* Boxed None: a tag-0 heap cell with no fields, matching the boxed
                Some encoding for this niche-unsafe Option. *)
             let entry = ctor_entry ctx ctor 0 in
@@ -3732,9 +3829,24 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             ("ptr", ptr)
           end
         | [arg] ->
+          (* Key the audit by the ARG's type — for a single-field ctor that IS
+             the payload, and far more attributable than the "?" the paramless
+             EAlloc key would give. *)
+          let audit_arg fam site =
+            let arg_key = mangle_ty_for_eq (match arg with
+              | Tir.AVar v -> v.Tir.v_ty
+              | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+              | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
+              | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
+              | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+              | _ -> Tir.TUnit) in
+            repr_audit_record ~ty:alloc_type_name ~payload:arg_key
+              ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
+          in
           (match emit_niche_payload arg with
-           | Some result -> result
+           | Some result -> audit_arg "Niche" "alloc-some"; result
            | None ->
+             audit_arg "Boxed" "alloc-some-boxed";
              (* Payload not niche-safe (Float/Unit/Bool) — fall through to boxed *)
              let entry = ctor_entry ctx ctor (List.length args) in
              let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -3744,6 +3856,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              emit_store_field ctx ptr 0 field_ty (coerce ctx v_ty v_val field_ty);
              ("ptr", ptr))
         | _ ->
+          audit "Boxed" "alloc-multi";
           (* Multi-arg ctor that happens to share the type name — boxed *)
           let entry = ctor_entry ctx ctor (List.length args) in
           let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -3755,6 +3868,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           ) args;
           ("ptr", ptr))
      | _ ->
+       audit "Boxed" "alloc";
        let entry = ctor_entry ctx ctor (List.length args) in
        let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
        List.iteri (fun i atom ->
@@ -3878,7 +3992,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
            | _ -> Tir.TUnit
          in
-         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         let arg_niche_ok =
+           Repr.niche_payload_ok !cur_type_defs arg_tir_ty
+           (* Erased (TVar) payload: the rest of the erased convention —
+              emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
+              nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
+              slot value is already uniform (heap ptr raw / scalar tagged), so
+              pass it through raw.  Boxing here made e.g. alist_get's
+              Some(field) a heap cell that its niche-matching callers read as
+              the payload itself (caught by MARCH_REPR_AUDIT:
+              alloc-some-boxed(?) vs case=Niche(Any)). *)
+           || (match arg_tir_ty with Tir.TVar _ -> true | _ -> false)
+         in
+         if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
            if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
@@ -4346,6 +4472,22 @@ and emit_case ctx scrut_atom branches default_opt =
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
     | r -> r
   in
+  (* Repr audit hook — record the DECODING this match commits to, so mixed
+     encode/decode families for a type surface in the MARCH_REPR_AUDIT report.
+     Only TCon scrutinees are attributable to a type name; the TVar niche-
+     recovery path has no name and is skipped. *)
+  (match scrut_tir_ty_init with
+   | Tir.TCon (nm, ps) ->
+     repr_audit_record ~ty:nm
+       ~payload:(match ps with
+         | [] -> "?"
+         | _ -> String.concat "," (List.map mangle_ty_for_eq ps))
+       ~family:(match effective_repr with
+         | Repr.Newtype _ -> "Newtype"
+         | Repr.Niche _   -> "Niche"
+         | Repr.Boxed     -> "Boxed")
+       ~site:("case in " ^ ctx.cur_emit_fn)
+   | _ -> ());
   (* Fast path: newtype scrutinee — the value IS the payload; no tag/alloc. *)
   match effective_repr with
   | Repr.Newtype payload ->
@@ -4972,7 +5114,12 @@ and emit_case ctx scrut_atom branches default_opt =
        | _                 -> false
      in
      if shape_unproven scrut_tir_ty_init then begin
-       let msg = "match failure: value did not match any pattern arm" in
+       (* Include the enclosing function so a suite-wide failure report can be
+          clustered by root cause without a debugger (77 identical anonymous
+          messages in the first depot inventory run were unattributable). *)
+       let msg = Printf.sprintf
+         "match failure: value did not match any pattern arm (in %s)"
+         (if ctx.cur_emit_fn = "" then "?" else ctx.cur_emit_fn) in
        let gname = intern_string ctx msg in
        let slit = fresh ctx "mfail" in
        emit ctx (Printf.sprintf
@@ -5207,6 +5354,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.var_slot;
   Hashtbl.clear ctx.var_llvm_ty;
   ctx.ret_ty <- fn.Tir.fn_ret_ty;
+  ctx.cur_emit_fn <- fn.Tir.fn_name;
   ctx.hr_cur_module <- module_of_name fn.Tir.fn_name;
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
@@ -6029,6 +6177,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(emit_main=true)
     (m : Tir.tir_module) : string =
   cur_type_defs := m.Tir.tm_types;
+  Hashtbl.reset _repr_audit;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
      into NAME_IDs for the dispatch table.
      Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
@@ -6557,6 +6706,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.extra_fns;
 
+  repr_audit_report ();
   Buffer.contents out
 
 (* ── REPL emission helpers ──────────────────────────────────────────────── *)
