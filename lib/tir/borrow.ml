@@ -198,6 +198,30 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     || List.exists (fun fn -> has_matching_alloc base_type fn.Tir.fn_body) fns
   | _ -> false
 
+(** True iff [e] passes the variable named [clo] as an argument to the
+    [__try_call] / [__try_call_val] builtins.  Those builtins invoke the thunk
+    closure and free it WITHIN the call (march_decrc after use, see
+    runtime/march_runtime.c) without retaining its captured free variables
+    afterwards — so a value captured by such a thunk is only *borrowed* for the
+    duration of the call, not owned. *)
+let rec used_as_try_call_thunk (clo : string) (e : Tir.expr) : bool =
+  let is_try f = String.equal f "__try_call" || String.equal f "__try_call_val" in
+  match e with
+  | Tir.EApp (f, args) -> is_try f.Tir.v_name && List.exists (atom_is clo) args
+  | Tir.ECallPtr (fn_a, args) ->
+    (match fn_a with
+     | Tir.AVar v -> is_try v.Tir.v_name && List.exists (atom_is clo) args
+     | _ -> false)
+  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
+    used_as_try_call_thunk clo e1 || used_as_try_call_thunk clo e2
+  | Tir.ELetRec (fns, body) ->
+    used_as_try_call_thunk clo body
+    || List.exists (fun fn -> used_as_try_call_thunk clo fn.Tir.fn_body) fns
+  | Tir.ECase (_, branches, default) ->
+    List.exists (fun br -> used_as_try_call_thunk clo br.Tir.br_body) branches
+    || Option.fold ~none:false ~some:(used_as_try_call_thunk clo) default
+  | _ -> false
+
 (** Returns true iff [name] has at least one *owning* use in [e].
 
     An owning use is any position where the value is stored, returned, or
@@ -256,6 +280,24 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
     when String.equal src.Tir.v_name name
          && not (String.equal v.Tir.v_name name) ->
     owned_in v.Tir.v_name bm e2
+
+  (* [name] is captured (as a closure free variable) by [v = EAlloc(closure,
+     [fn_ptr; …captures…])], and [v] is then handed to __try_call /
+     __try_call_val.  Those builtins call the thunk and free it within the call
+     WITHOUT retaining its captures, so the capture is a borrowing dup (Perceus
+     IncRC's the FV for the closure's owned ref — perceus.ml:425), NOT a transfer
+     of the caller's reference.  Classify [name] by its remaining uses in [e2]
+     only — do NOT let the EAlloc capture (the generic case below) mark it owned.
+     Without this, a resource captured by a transaction/property guard
+     (`__try_call_val(fn _ -> cb(conn))`) is wrongly inferred :own, so the entire
+     call chain frees it while the caller still holds and uses it — a
+     use-after-free (Depot Transaction.run → Migration.run → Db.close(conn)). *)
+  | Tir.ELet (v, Tir.EAlloc (_, args), e2)
+    when List.exists (atom_is name) args
+         && not (String.equal v.Tir.v_name name)
+         && used_as_try_call_thunk v.Tir.v_name e2 ->
+    owned_in name bm e2
+
   | Tir.ELet (v, e1, e2) ->
     owned_in name bm e1
     || (not (String.equal v.Tir.v_name name) && owned_in name bm e2)
