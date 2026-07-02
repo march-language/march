@@ -2417,6 +2417,126 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      | "void"   -> ("i64",    "0")
      | _        -> ("i64",    "0"))
 
+  (* ── Perceus-wrapped mutual-TCO tail call ───────────────────────────── *)
+  (* Mutual-group twin of the self-TCO ELet-wrapped case above (B7). Perceus
+     does not distinguish "self" from "mutual group member" when deciding how
+     to wrap a tail call's post-call DecRC/Free chain: is_self_call in
+     perceus.ml only checks f.v_name = _current_fn_name, so a tail call from
+     one group member to ANOTHER (e.g. build_loop -> consume_loop) takes the
+     same ELet(tmp, EApp(f,args), dec_chain) wrapping as a genuine self-call
+     whenever a borrowed argument's last use is this call (see
+     is_trivial_dec_chain_returning's doc comment and perceus.ml's EApp case).
+     Without this arm, the shape falls through to the mutual-TCO EApp
+     interception below via the generic ELet handler — which clears
+     tco_in_tail/emits the back-edge for the EApp, then opens a dead
+     continuation block for the ELet's own body — stranding the dec-chain in
+     unreachable code and leaking one heap cell every loop iteration.
+     Mirrors the self-TCO arm's ordering exactly (dec-chain BEFORE the
+     back-edge, including stacksave handling), redirecting to the mutual
+     group's shared loop header instead of the self tco_loop_label. *)
+  | Tir.ELet (tmp_v, Tir.EApp (f, args), body)
+    when ctx.mutual_tco_group <> []
+         && List.mem f.Tir.v_name ctx.mutual_tco_group
+         && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    let target     = f.Tir.v_name in
+    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
+    let target_slots =
+      try List.assoc target ctx.mutual_tco_fn_params
+      with Not_found -> [] in
+    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) target_slots args in
+    (* 2. Emit the DecRC/Free chain before overwriting slots — same ordering
+          rationale as the self-TCO ELet-wrapped case. *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
+    let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
+        ignore (emit_expr ctx op);
+        emit_dec_chain rest
+      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
+    in
+    emit_dec_chain body;
+    ctx.tco_in_tail <- saved_tail;
+    (* 3. Update the dispatch tag. *)
+    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
+      target_tag ctx.mutual_tco_tag_slot);
+    (* 4. Store new argument values into the target function's param slots. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
+          param_ty new_v slot)
+      ) target_slots new_vals;
+    (* 5. Free any per-iteration `alloca` stack space before looping back. *)
+    if ctx.mutual_tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
+    (* 6. Back-edge to the shared mutual-TCO loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
+    emit_label ctx (fresh_block ctx "mutco_perceus_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
+
+  (* ── Perceus-wrapped mutual-TCO tail call, no-temp ESeq shape ───────── *)
+  (* Mutual-group twin of the self-TCO no-temp ESeq case above (B7): sibling
+     of the ELet-wrapped mutual case, for the shape Perceus uses when the
+     dec-chain needs no re-examination of the call's result (see
+     is_trivial_dec_chain's doc comment). Without this arm the call falls
+     through to the generic ESeq handler, which unconditionally treats e1 as
+     non-tail — silently downgrading a mutual tail call into real recursion. *)
+  | Tir.ESeq (Tir.EApp (f, args), dec_chain)
+    when ctx.mutual_tco_group <> []
+         && List.mem f.Tir.v_name ctx.mutual_tco_group
+         && is_trivial_dec_chain dec_chain ->
+    let target     = f.Tir.v_name in
+    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
+    let target_slots =
+      try List.assoc target ctx.mutual_tco_fn_params
+      with Not_found -> [] in
+    (* 1. Evaluate every new argument value while old parameter slots are valid. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) target_slots args in
+    (* 2. Emit the dec/inc-RC chain before overwriting slots — same ordering
+          rationale as the ELet-wrapped case above. *)
+    let saved_tail = ctx.tco_in_tail in
+    ctx.tco_in_tail <- false;
+    let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
+        ignore (emit_expr ctx op);
+        emit_dec_chain rest
+      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
+        ignore (emit_expr ctx op)
+      | _ -> ()
+    in
+    emit_dec_chain dec_chain;
+    ctx.tco_in_tail <- saved_tail;
+    (* 3. Update the dispatch tag. *)
+    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
+      target_tag ctx.mutual_tco_tag_slot);
+    (* 4. Store new argument values into the target function's param slots. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
+          param_ty new_v slot)
+      ) target_slots new_vals;
+    (* 5. Free any per-iteration `alloca` stack space before looping back. *)
+    if ctx.mutual_tco_stack_save <> "" then
+      emit ctx (Printf.sprintf "call void @llvm.stackrestore(ptr %s)" ctx.mutual_tco_stack_save);
+    (* 6. Back-edge to the shared mutual-TCO loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
+    emit_label ctx (fresh_block ctx "mutco_seq_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
+
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
     (* The rhs is in non-tail position: a self-call here must be an ordinary

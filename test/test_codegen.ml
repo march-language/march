@@ -234,6 +234,74 @@ let test_mutual_tco_self_tco_unaffected () =
   Alcotest.(check bool) "self TCO still works: back-edge branch emitted" true
     (ir_contains ir "br label %tco_loop")
 
+(** B7 regression: Perceus wraps a borrow-induced post-call DecRC around a
+    MUTUAL (non-self) tail call — [let tmp = other_member(args) in (dec_rc v;
+    tmp)] — exactly as it does for self-tail-calls (see
+    is_trivial_dec_chain_returning's doc comment). The mutual-TCO EApp
+    interception arm has no ELet/ESeq counterparts, so this dec-chain used to
+    land in the dead "mutco_cont" block opened after the back-edge branch:
+    the DecRC never executes, leaking one heap cell every loop iteration.
+
+    build_loop/consume_loop mirror examples/rc_mutual_tco_borrowed.march:
+    `prefix` is a fresh local passed to consume_loop's BORROWED position 0
+    and is dead after that call, so Perceus emits the ELet-wrapped dec-chain
+    around the mutual tail call. Assert the DecRC executes on the live
+    back-edge path (before the branch to mutual_loop), not only in the
+    unreachable continuation block after it. *)
+let test_mutual_tco_borrowed_arg_decref_on_live_path () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    fn build_loop(seed, n) do
+      let prefix = String.repeat("a", 1)
+      if n == 0 do
+        String.byte_size(seed) + String.byte_size(prefix)
+      else
+        consume_loop(prefix, n - 1)
+      end
+    end
+    fn consume_loop(s, n) do
+      if n == 0 do
+        String.byte_size(s)
+      else
+        build_loop(s, n - 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(build_loop("z", 1000))) end
+  end|} in
+  Alcotest.(check bool) "mutual-tco borrowed-arg: mutual_loop emitted" true
+    (ir_contains ir "mutual_loop");
+  (* For each "br label %mutual_loop..." back-edge, find the LLVM basic block
+     that contains it (the text since the nearest preceding "label:") and
+     require a live "march_decrc" call inside that same block — i.e. on the
+     reachable path, executed before the branch. Before the fix, the
+     mutual-tail-call back-edge block has NO decrc (it is stranded in the
+     unreachable "mutco_cont" block emitted just after the branch instead). *)
+  let re_label = Str.regexp "\n[A-Za-z_][A-Za-z0-9_.]*:" in
+  let re_backedge = Str.regexp "br label %mutual_loop[0-9]*" in
+  let block_start_before pos =
+    let rec find_last start acc =
+      match Str.search_forward re_label ir start with
+      | exception Not_found -> acc
+      | i when i >= pos -> acc
+      | i -> find_last (i + 1) (Str.match_end ())
+    in
+    find_last 0 0
+  in
+  let rec scan_backedges start acc =
+    match Str.search_forward re_backedge ir start with
+    | exception Not_found -> acc
+    | i ->
+      let block_start = block_start_before i in
+      let block = String.sub ir block_start (i - block_start) in
+      scan_backedges (Str.match_end ()) (block :: acc)
+  in
+  let backedge_blocks = scan_backedges 0 [] in
+  Alcotest.(check bool) "mutual-tco borrowed-arg: at least one back-edge found" true
+    (List.length backedge_blocks > 0);
+  let live_decrefs = List.filter (fun b -> ir_contains b "march_decrc") backedge_blocks in
+  Alcotest.(check bool)
+    "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
+    true (List.length live_decrefs > 0)
+
 (* ── Phase 4: Reduction Counting in Compiled Code ─────────────────────── *)
 
 (** Non-leaf, non-TCO function: reduction check IR must appear. *)
@@ -5398,6 +5466,8 @@ let codegen_suites =
           Alcotest.test_case "state machine mutual TCO" `Quick test_mutual_tco_state_machine;
           Alcotest.test_case "non-tail mutual: no loop" `Quick test_mutual_tco_non_tail_no_loop;
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
+          Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
+            `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
         ] );
       ( "phase4_reduction_codegen", [
           Alcotest.test_case "non-leaf has reduction check"      `Quick test_phase4_nonleaf_has_reduction_check;
