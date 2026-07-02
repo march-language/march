@@ -16851,6 +16851,28 @@
       "created_at": "2026-07-02T14:48:12.849792-04:00",
       "updated_at": "2026-07-02T14:48:12.849792-04:00",
       "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"926b14f4\",\"confidence\":95}"
+    },
+    {
+      "id": 1533,
+      "change_id": "5bddbbd0-c313-4d62-9ea5-9a508fedec94",
+      "node_type": "outcome",
+      "title": "Merged claude/eager-proskuriakova-2fbbe3 into local main (b665d7c6) via in-worktree merge of main + ff main ref (main repo checkout busy on fix/h-sigil-compiled); full five-runner suite on merged tree exit 0 (381/224/325/791/53); main now 17 ahead of origin/main, not pushed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-02T15:06:03.002799-04:00",
+      "updated_at": "2026-07-02T15:06:03.002799-04:00",
+      "metadata_json": "{\"branch\":\"claude/eager-proskuriakova-2fbbe3\",\"commit\":\"b665d7c6\",\"confidence\":95}"
+    },
+    {
+      "id": 1534,
+      "change_id": "30b8ba63-d03f-470b-b2c4-b16e52b8adff",
+      "node_type": "outcome",
+      "title": "Wave 1 merged to main (ff444c29): 14 P0 fixes + final-review fixes + 2 semantic merges (repr-audit x ctx.type_defs; extra_fns sibling); five runners green post-merge",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-02T15:15:21.619059-04:00",
+      "updated_at": "2026-07-02T15:15:21.619059-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"ff444c29\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -28700,6 +28722,28 @@
       "weight": 1.0,
       "rationale": "Wave complete",
       "created_at": "2026-07-02T14:48:12.860713-04:00"
+    },
+    {
+      "id": 1091,
+      "from_node_id": 1528,
+      "to_node_id": 1533,
+      "from_change_id": "5cb05aa1-5786-4d81-b822-257c4ce3c774",
+      "to_change_id": "5bddbbd0-c313-4d62-9ea5-9a508fedec94",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "merge to main",
+      "created_at": "2026-07-02T15:06:03.018811-04:00"
+    },
+    {
+      "id": 1092,
+      "from_node_id": 1514,
+      "to_node_id": 1533,
+      "from_change_id": "8b73c5da-4826-4091-9fb0-f2276c521933",
+      "to_change_id": "5bddbbd0-c313-4d62-9ea5-9a508fedec94",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Merged to main",
+      "created_at": "2026-07-02T15:15:21.633818-04:00"
     }
   ]
 }
