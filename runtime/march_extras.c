@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
@@ -2166,6 +2167,83 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
     int64_t raw = rec_field_raw(rec, i);
     if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
     return (void *)(intptr_t)raw;
+}
+
+/* Record update (`{ r with f: v, ... }`) for statically-unknown record types
+ * (the EUpdate counterpart of march_record_field_dyn above): one allocation,
+ * the base cell's fields copied, the named fields overwritten.  Varargs are
+ * [n] quadruples of (const char *name, int64_t name_len, void *value, int64_t
+ * kind); values arrive in natural representation with the call site's static
+ * kind char, exactly like march_record_put.  PANICS if any update name is
+ * missing from the base shape (mirroring march_record_field_dyn): unlike a
+ * statically-known update, the typechecker cannot validate names against a
+ * type-erased base, and silently extending the record (march_record_put's
+ * new-key behavior) would fabricate fields the program never declared.
+ * Update semantics on duplicate names: the LAST occurrence wins (matches the
+ * interpreter's assoc-override order). */
+void *march_record_update_dyn(void *rec, int64_t n, ...) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record update");
+    const char **names = calloc(n > 0 ? (size_t)n : 1, sizeof(char *));
+    int64_t *lens  = calloc(n > 0 ? (size_t)n : 1, sizeof(int64_t));
+    void   **vals  = calloc(n > 0 ? (size_t)n : 1, sizeof(void *));
+    char    *kins  = calloc(n > 0 ? (size_t)n : 1, 1);
+    int32_t *idx   = calloc(n > 0 ? (size_t)n : 1, sizeof(int32_t));
+    va_list ap;
+    va_start(ap, n);
+    for (int64_t j = 0; j < n; j++) {
+        names[j] = va_arg(ap, const char *);
+        lens[j]  = va_arg(ap, int64_t);
+        vals[j]  = va_arg(ap, void *);
+        kins[j]  = (char)va_arg(ap, int64_t);
+    }
+    va_end(ap);
+    /* Resolve every name FIRST — fail loudly before touching refcounts. */
+    for (int64_t j = 0; j < n; j++) {
+        idx[j] = rec_find_field(s, names[j], lens[j]);
+        if (idx[j] < 0) {
+            char buf[160];
+            snprintf(buf, sizeof buf, "record update: no field \"%.*s\" in record",
+                     (int)(lens[j] < 100 ? lens[j] : 100), names[j]);
+            rec_panic(buf);
+        }
+    }
+    /* Normalize the winning update per field (walk in reverse so the LAST
+     * duplicate wins and only the winner takes its +1 reference). */
+    char    *is_upd    = calloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1, 1);
+    int64_t *upd_bits  = calloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1,
+                                sizeof(int64_t));
+    char    *new_kinds = malloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1);
+    memcpy(new_kinds, s->kinds, (size_t)s->nfields);
+    for (int64_t j = n - 1; j >= 0; j--) {
+        int32_t fi = idx[j];
+        if (is_upd[fi]) continue;
+        char k = kins[j];
+        upd_bits[fi]  = rec_field_norm_in((int64_t)(intptr_t)vals[j], &k);
+        new_kinds[fi] = k;
+        is_upd[fi]    = 1;
+    }
+    /* Single allocation: copy untouched fields (+1 ref on heap children,
+     * matching march_record_put), write the updated ones. */
+    void *out = march_alloc(16 + (size_t)s->nfields * 8);
+    for (int32_t i = 0; i < s->nfields; i++) {
+        if (is_upd[i]) rec_field_set(out, i, upd_bits[i]);
+        else           rec_field_set(out, i, rec_field_copy(rec, i, s->kinds[i]));
+    }
+    /* Shape: unchanged kinds reuse the base's id; otherwise intern the
+     * kind-adjusted descriptor (same policy as march_record_put). */
+    if (memcmp(new_kinds, s->kinds, (size_t)s->nfields) == 0) {
+        ((march_hdr *)out)->pad = ((march_hdr *)rec)->pad;
+    } else {
+        char *desc = malloc(strlen(s->desc) + 1);
+        size_t w = 0;
+        for (int32_t i = 0; i < s->nfields; i++)
+            w += (size_t)sprintf(desc + w, "%s:%c;", s->names[i], new_kinds[i]);
+        ((march_hdr *)out)->pad = march_record_shape_intern(desc);
+        free(desc);
+    }
+    free(names); free(lens); free(vals); free(kins); free(idx);
+    free(is_upd); free(upd_bits); free(new_kinds);
+    return out;
 }
 
 /* ── ~H sigil: html_auto_escape ──────────────────────────────────────────────

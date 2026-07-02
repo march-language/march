@@ -5253,6 +5253,132 @@ let test_float_lit_no_wildcard_panics_compiled () =
        && ir_contains run_out "EXIT:1")
   end
 
+(* ── EUpdate on type-erased records (B5) ─────────────────────────────────
+   `{ base with f: v }` where the base's static shape is unknown
+   (get_record_fields = [], e.g. a record_from_list/record_put result) used
+   to allocate a header-only cell and write every update past it via
+   field_index_for's (0, TVar "_") fallback.  The fix lowers the whole
+   update to ONE march_record_update_dyn call (single allocation, base
+   fields copied, named fields overwritten, runtime panic on a name missing
+   from the base shape — the typechecker's TVar branch cannot validate
+   names against an erased base). *)
+
+(** IR shape: a 3-field erased update must emit exactly ONE
+    march_record_update_dyn call — not a chain of per-field
+    march_record_put calls (which would allocate an intermediate record per
+    field and leak every non-final one: compiler-emitted temporaries are
+    invisible to Perceus). *)
+let test_erased_update_single_dyn_call_ir () =
+  let src = {|mod ErasedUpd do
+    fn get_a(r) do r.a end
+    fn main() do
+      let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
+      let u = { built with a: 10, b: 20, c: 30 }
+      println(int_to_string(get_a(u)))
+    end
+  end|} in
+  let ir = emit_actor_ir src in
+  (* Match CALL SITES only — the preamble also carries a
+     `declare ptr @march_record_update_dyn(...)` line. *)
+  Alcotest.(check int)
+    "exactly ONE march_record_update_dyn call for a 3-field erased update"
+    1 (ir_count ir "call ptr (ptr, i64, ...) @march_record_update_dyn(");
+  Alcotest.(check int)
+    "no chained march_record_put calls emitted for the update"
+    0 (ir_count ir "call ptr @march_record_put(")
+
+(** Compiled missing-field update on an erased base must PANIC (nonzero
+    exit, clear message), not silently fabricate the field.  The typechecker
+    cannot catch this: its TVar branch builds a partial record constraint
+    from the update's own field names, never checking them against the
+    base's actual fields — so `{ record_from_list([("a",1)]) with z: 99 }`
+    typechecks.  march_record_put semantics (extend on new key) would
+    silently produce a 2-field record here.  NOTE: the interpreter currently
+    diverges — eval.ml's ERecordUpdate appends missing update fields as new
+    fields — so no interpreter-parity check is made; the compiled fail-loud
+    behavior is the safer contract (documented in the B5 report). *)
+let test_erased_update_missing_field_panics_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_miss"
+    "mod ErasedUpdMiss do\n\
+    \  fn main() do\n\
+    \    let built = record_from_list([(\"a\", 1)])\n\
+    \    let bad = { built with z: 99 }\n\
+    \    match record_get(bad, \"z\") do\n\
+    \      Some(v) -> println(\"FABRICATED \" ++ int_to_string(v))\n\
+    \      None -> println(\"no z\")\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    (* Compile from the SOURCE root (the parent of _build): the new
+       march_record_update_dyn symbol must come from the live runtime/*.c
+       sources, not _build/default's runtime copies (refreshed only when a
+       dune rule that lists them as deps runs).  write_march_source's
+       project_root is .../_build, so its parent is the source tree. *)
+    let src_root = Filename.dirname project_root in
+    let bin = Filename.concat tmp "erasedupdmissbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote src_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check int) "compiles ok" 0 compile_rc;
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased update with a missing field name panics with a \
+       no-field message (not exit 0 with a silently fabricated field)"
+      true
+      (ir_contains run_out "no field"
+       && ir_contains run_out "EXIT:1"
+       && not (ir_contains run_out "FABRICATED"))
+  end
+
+(** Compiled multi-field (3-field) erased update: every updated field must
+    carry its own value (pre-fix, all updates collided on slot 0 of a
+    header-only cell) and untouched reads must not crash. *)
+let test_erased_update_multi_field_values_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_multi"
+    "mod ErasedUpdMulti do\n\
+    \  fn get_i(r, k) do\n\
+    \    match record_get(r, k) do\n\
+    \      Some(v) -> v\n\
+    \      None -> 0 - 1\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+    \    let u = { built with a: 11, b: 22, c: 33 }\n\
+    \    println(int_to_string(get_i(u, \"a\")) ++ \" \" ++\n\
+    \            int_to_string(get_i(u, \"b\")) ++ \" \" ++\n\
+    \            int_to_string(get_i(u, \"c\")))\n\
+    \  end\n\
+     end\n"
+  in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    (* --- interpreter baseline --- *)
+    let interp_out = read_cmd_output (Printf.sprintf
+      "cd %s && %s %s 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
+    (* --- compiled must agree (compile from the source root — see the
+       missing-field test above for why) --- *)
+    let src_root = Filename.dirname project_root in
+    let bin = Filename.concat tmp "erasedupdmultibin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote src_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check int) "compiles ok" 0 compile_rc;
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled 3-field erased update: each field carries its own value \
+       (no slot-0 collision, no corruption)"
+      "11 22 33" run_out
+  end
+
 let codegen_suites =
   [
       ( "nested_lit_pattern_codegen", [
@@ -5690,6 +5816,14 @@ let codegen_suites =
             test_float_lit_match_arm_compiled;
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "erased_record_update_codegen", [
+          Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick
+            test_erased_update_single_dyn_call_ir;
+          Alcotest.test_case "compiled missing-field update panics (B5)" `Quick
+            test_erased_update_missing_field_panics_compiled;
+          Alcotest.test_case "compiled multi-field update values (B5)" `Quick
+            test_erased_update_multi_field_values_compiled;
         ] );
   ]
 

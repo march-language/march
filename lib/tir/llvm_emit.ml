@@ -4258,8 +4258,54 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.ALit _    -> Tir.TVar "_"
     in
     let all_fields = get_record_fields ctx base_ty in
-    let n = List.length all_fields in
     let (_, base_val) = emit_atom ctx base_atom in
+    if all_fields = [] && updates <> [] then begin
+      (* Statically-unknown record shape (type-erased generic flow, e.g. the
+         result of record_put/record_from_list): field offsets can't be
+         computed at compile time, so [field_index_for]'s "(0, TVar _)"
+         fallback would make every update write field 0 of a header-only
+         cell (n=0 from emit_heap_alloc) — corrupting memory past the
+         allocation.  Mirror the EField dyn fallback above: a single call
+         to march_record_update_dyn (by-name, shape-registry-aware), which
+         copies the base cell ONCE and overwrites the named fields — no
+         per-field intermediate allocations.  NOTE: unlike the
+         statically-known case, the typechecker CANNOT validate the update
+         names here (its TVar branch builds a partial record constraint
+         from the update's own names — it never sees the base's actual
+         fields), so the runtime panics on a missing name (mirroring
+         march_record_field_dyn) instead of silently fabricating a new
+         field (march_record_put's new-key behavior) or writing out of
+         bounds. *)
+      let args = List.concat_map (fun (fname, atom) ->
+        let ng = intern_string ctx fname in
+        let (vt, vv) = emit_atom ctx atom in
+        (* Pass the value in NATURAL representation, matching record_put's
+           EApp call convention: raw i64 for scalars (not low-bit tagged),
+           raw bits for floats, ptr as-is. *)
+        let vp = (match vt with
+          | "i64" ->
+            let t = fresh ctx "ruv" in
+            emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+          | "double" ->
+            let b = fresh ctx "ruv" in
+            let t = fresh ctx "ruv" in
+            emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b vv);
+            emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
+            t
+          | _ -> vv) in
+        let kind = shape_kind_char (atom_tir_ty atom) in
+        [ Printf.sprintf "ptr %s" ng;
+          Printf.sprintf "i64 %d" (String.length fname);
+          Printf.sprintf "ptr %s" vp;
+          Printf.sprintf "i64 %d" (Char.code kind) ]
+      ) updates in
+      let res = fresh ctx "ru" in
+      emit ctx (Printf.sprintf
+        "%s = call ptr (ptr, i64, ...) @march_record_update_dyn(ptr %s, i64 %d, %s)"
+        res base_val (List.length updates) (String.concat ", " args));
+      ("ptr", res)
+    end else begin
+    let n = List.length all_fields in
     (* Allocate new record of same size *)
     let ptr = emit_heap_alloc ctx 0 n in
     (* Copy all fields from base *)
@@ -4289,6 +4335,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       end
     end;
     ("ptr", ptr)
+    end
 
   (* ── Case expression ───────────────────────────────────────────────── *)
   | Tir.ECase (scrut_atom, branches, default_opt) ->
@@ -5722,6 +5769,7 @@ declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)
 declare ptr  @march_record_from_list(ptr %list)
 declare ptr  @march_record_from_list_k(ptr %list, i64 %kind)
 declare ptr  @march_record_field_dyn(ptr %rec, ptr %name, i64 %len)
+declare ptr  @march_record_update_dyn(ptr %rec, i64 %n, ...)
 declare ptr  @march_int_to_string(i64 %n)
 declare ptr    @march_float_to_string(double %f)
 declare ptr    @march_bool_to_string(i64 %b)
