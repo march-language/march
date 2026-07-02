@@ -226,11 +226,22 @@ let is_literal_scrutinee_ty = function
       PatLit(LitBool b)   -> "true" / "false"    (lowercase)
       PatLit(LitString s) -> "\"s\""             (OCaml-quoted)
       PatLit(LitAtom a)   -> ":a"
+      PatLit(LitFloat f)  -> "#<hex-float>"      e.g. "#0x1.8p+0" for 1.5
       ECase on bool (if-lowering) -> "True" / "False"   (uppercase) *)
 let literal_tag_js br_tag =
   match br_tag with
   | "True"  | "true"  -> "true"
   | "False" | "false" -> "false"
+  | _ when br_tag <> "" && br_tag.[0] = '#' ->
+    (* Decode the "%h" hex-float tag back to the exact double (same decode as
+       llvm_emit.ml's emit_case float-chain), then re-encode with "%.17g" — a
+       plain decimal JS number literal.  JS numbers are IEEE-754 doubles too,
+       so "%.17g" (which always carries enough significant digits to
+       round-trip a double exactly) parses back to the identical bit pattern
+       in both OCaml and JS; unlike the hex form, it's also valid JS syntax
+       (JS numeric literals don't support C99 hex-float notation). *)
+    let hex = String.sub br_tag 1 (String.length br_tag - 1) in
+    Printf.sprintf "%.17g" (float_of_string hex)
   | _ when br_tag <> "" && (br_tag.[0] = '-'
                              || (br_tag.[0] >= '0' && br_tag.[0] <= '9')) ->
     br_tag  (* numeric literal — emit as-is *)

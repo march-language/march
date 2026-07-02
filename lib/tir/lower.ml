@@ -931,9 +931,36 @@ and bind_trivial_pat (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : 
     bind_trivial_pat scrut inner named_body
   | _ -> body
 
+(** Format an [Ast.span] as "file:line:col" for a fail-loudly diagnostic. *)
+and string_of_pat_span (sp : Ast.span) : string =
+  Printf.sprintf "%s:%d:%d" sp.Ast.file sp.Ast.start_line sp.Ast.start_col
+
+(** Extract the span of any pattern, for fail-loudly diagnostics. *)
+and span_of_pat : Ast.pattern -> Ast.span = function
+  | Ast.PatWild sp         -> sp
+  | Ast.PatVar  name       -> name.Ast.span
+  | Ast.PatCon  (name, _)  -> name.Ast.span
+  | Ast.PatAtom (_, _, sp) -> sp
+  | Ast.PatTuple (_, sp)   -> sp
+  | Ast.PatLit  (_, sp)    -> sp
+  | Ast.PatRecord (_, sp)  -> sp
+  | Ast.PatAs   (_, _, sp) -> sp
+
 (** Return the string tag and sub-pattern list for a pattern that discriminates.
     PatCon → (tag, subs); PatTuple → ("$Tuple", subs); PatLit → (repr, []).
-    Returns None for trivial patterns. *)
+    Returns None for trivial patterns.
+
+    [br_tag] namespace (see also llvm_emit.ml's [emit_case] decoder, which
+    must be kept in sync with every case below):
+      - ADT ctor / atom-ctor tags  → bare or dotted name, first char 'A'-'Z'
+        (e.g. "Some", "Inline.Text")
+      - Tuple                      → "$TupleN"           (leading '$')
+      - Int literal                → decimal digits, optional leading '-'
+      - Bool literal                → "true" / "false"   (lowercase)
+      - String literal              → "\"..\""            (leading '"')
+      - Atom literal / pattern     → ":name"             (leading ':')
+      - Float literal (NEW)        → "#<hex-float>"      (leading '#') —
+        see below. *)
 and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   match pat with
   | Ast.PatCon ({ txt = tag; _ }, subs) ->
@@ -951,12 +978,32 @@ and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   | Ast.PatLit (Ast.LitBool b, _)   -> Some (string_of_bool b, [])
   | Ast.PatLit (Ast.LitString s, _) -> Some ("\"" ^ s ^ "\"", [])
   | Ast.PatLit (Ast.LitAtom a, _)   -> Some (":" ^ a, [])
+  | Ast.PatLit (Ast.LitFloat f, _)  ->
+    (* Encode as "#" ^ OCaml hex-float ("%h"), e.g. "#0x1.8p+0" for 1.5.
+       Unlike "%g"/[Float.to_string] (which round to ~12 significant decimal
+       digits and can map two distinct doubles to the same string, or fail to
+       parse back to the exact original bit pattern), "%h" is an exact,
+       lossless base-2 encoding of the IEEE-754 bits — round-trips via
+       [float_of_string] for every finite/subnormal/zero value, and the
+       leading '#' does not collide with any other tag form (ctor names start
+       uppercase, tuples '$', ints digits/'-', bools true/false, strings '"',
+       atoms ':'). The decoder (llvm_emit.ml's [emit_case], float-chain
+       branch) must parse this exact form back with [Int64.bits_of_float] /
+       the equivalent LLVM hex-double literal. *)
+    Some (Printf.sprintf "#%h" f, [])
   (* The parser emits PatAtom for bare atom patterns (:get) and atom
      constructor patterns (:Tag(x)).  PatLit(LitAtom) is never generated
      by the parser; it would only appear if constructed directly in tests. *)
   | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
   | Ast.PatAtom (a, subs, _) -> Some (a, subs)
-  | _ -> None
+  | Ast.PatRecord (_, sp) ->
+    failwith (Printf.sprintf
+      "lower: record patterns are not yet compilable (%s) — PatRecord has no \
+       {...} pattern production in the grammar today, so this indicates a \
+       pattern constructed directly rather than parsed; implement record \
+       destructuring in pat_tag_and_subs before enabling it"
+      (string_of_pat_span sp))
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ -> None
 
 (* Compile a pattern matrix to a TIR expression (decision tree).
 
@@ -1092,7 +1139,21 @@ and compile_matrix_impl
           match pats with
           | fp :: rest_pats ->
             (match pat_tag_and_subs fp with
-             | None -> ()   (* trivial — should not appear here *)
+             | None ->
+               (* [ctor_rows] only ever contains non-trivial first-column
+                  patterns (split_at_trivial routed every PatWild/PatVar/PatAs
+                  row into default_rows above), so pat_tag_and_subs returning
+                  None here means a discriminating pattern kind it doesn't
+                  know how to tag — e.g. before this fix, LitFloat and
+                  PatRecord.  Silently discarding the row (as this branch
+                  used to) makes the arm's body unreachable with no
+                  diagnostic — the exact B4 bug (float-literal match arms
+                  silently dropped in compiled mode).  Fail loudly instead. *)
+               failwith (Printf.sprintf
+                 "lower: unhandled pattern kind in match compilation at %s — \
+                  pat_tag_and_subs does not know how to tag this pattern, so \
+                  the arm would be silently dropped instead of compiled"
+                 (string_of_pat_span (span_of_pat fp)))
              | Some (tag, subs) ->
                let arity = List.length subs in
                let row_entry = (subs @ rest_pats, body) in
@@ -1123,6 +1184,24 @@ and compile_matrix_impl
       if tir_branches = [] then
         (match default with Some d -> d | None -> nonexhaustive_panic ())
       else
+        (* A [None] default here reaches llvm_emit's [emit_case] as
+           [default_opt = None], which — for the literal-chain (int/atom/
+           bool/string/float) and switch encodings alike — emits a bare LLVM
+           `unreachable` terminator on the fallthrough edge.  `unreachable` is
+           undefined behaviour if actually executed at runtime: on this
+           target it was observed to silently fall through to whichever arm
+           the optimizer happened to place last, printing a WRONG matched
+           value with exit 0 — worse than a crash, and a second compiled/
+           interpreter divergence beyond B4's dropped-arm bug (the
+           interpreter panics via its own exhaustiveness check).  Ensure
+           every non-exhaustive [ECase] gets a real panic on the fallback
+           edge instead of relying on the typechecker's (incomplete, e.g. for
+           Float/String, which have no finite exhaustiveness check) static
+           guarantee. *)
+        let default = match default with
+          | Some _ -> default
+          | None -> Some (nonexhaustive_panic ())
+        in
         Tir.ECase (scrut, tir_branches, default)
 
 (** Collect the (name, span) of every variable binding in a pattern,

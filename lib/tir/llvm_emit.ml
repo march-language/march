@@ -4506,6 +4506,11 @@ and emit_case ctx scrut_atom branches default_opt =
     | Tir.AVar v ->
       (match v.Tir.v_ty with
        | Tir.TBool | Tir.TInt -> false
+       | Tir.TFloat -> false  (* floats are raw `double` scalars, never heap ptrs
+                                 at this representation — see the float-chain
+                                 branch below (analogous to the string chain),
+                                 which fcmp's the coerced-to-double scrutinee
+                                 directly rather than loading a ctor tag. *)
        | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars *)
        | Tir.TVar _ -> scrut_ty = "ptr"  (* unknown type: trust actual loaded LLVM type.
                                             Pattern-bound vars get TVar "_" from lower.ml;
@@ -4514,6 +4519,7 @@ and emit_case ctx scrut_atom branches default_opt =
        | _ -> true)
     | Tir.ALit (March_ast.Ast.LitBool _) | Tir.ALit (March_ast.Ast.LitInt _)
     | Tir.ALit (March_ast.Ast.LitAtom _) -> false
+    | Tir.ALit (March_ast.Ast.LitFloat _) -> false
     | _ -> scrut_ty = "ptr"
   in
   (* Immediate-literal tags override the repr guess: the value cannot be a
@@ -4568,6 +4574,17 @@ and emit_case ctx scrut_atom branches default_opt =
       String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = ':'
     ) branches in
 
+  (* Detect float-literal case: br_tag starts with '#' (lower.ml's
+     pat_tag_and_subs encoding for [Ast.LitFloat], "#<hex-float>" via "%h" —
+     see that function's doc comment for why hex rather than decimal).
+     Floats cannot participate in an integer `switch` (no total, exact int
+     encoding of an arbitrary double — unlike Int/Bool/Atom, which reuse the
+     low-bit-tagged immediate representation), so — exactly like the
+     string-literal case — this is an if/else fcmp chain, not a switch. *)
+  let is_float_case = List.exists (fun br ->
+      String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = '#'
+    ) branches in
+
   (* The scrutinee's TIR type — needed both for the switch tag lookup and for
      branch field binding.  Defined early so both uses see it. *)
   let scrut_tir_ty =
@@ -4613,7 +4630,36 @@ and emit_case ctx scrut_atom branches default_opt =
       end
   in
 
-  if is_string_case then begin
+  if is_float_case then begin
+    (* Float-literal pattern matching: if-else chain of `fcmp oeq double`
+       comparisons, analogous to the string chain immediately below (an
+       exact-equality if/else cascade rather than a switch).  Unlike the
+       string chain, no coerce-to-ptr issue applies here — the scrutinee is
+       explicitly coerced to `double` up front (below), so every comparison
+       operates on a genuine LLVM `double` value regardless of whether the
+       scrutinee arrived as a raw double or (e.g. inside a polymorphic slot)
+       a tagged-immediate ptr. *)
+    let scrut_dbl = coerce ctx scrut_ty scrut_val "double" in
+    let rec emit_chain brs lbls =
+      match brs, lbls with
+      | [], [] -> emit_term ctx (Printf.sprintf "br label %%%s" default_lbl)
+      | br :: rest_brs, lbl :: rest_lbls ->
+        let next_lbl = fresh_block ctx "flt_next" in
+        (* Decode "#<hex-float>" back to the exact double via the same "%h"
+           hex form the encoder used — see pat_tag_and_subs's doc comment. *)
+        let hex = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
+        let f = float_of_string hex in
+        let bits = Int64.bits_of_float f in
+        let lit = Printf.sprintf "0x%016LX" bits in
+        let cmp = fresh ctx "fcmp" in
+        emit ctx (Printf.sprintf "%s = fcmp oeq double %s, %s" cmp scrut_dbl lit);
+        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp lbl next_lbl);
+        emit_label ctx next_lbl;
+        emit_chain rest_brs rest_lbls
+      | _ -> ()
+    in
+    emit_chain branches branch_lbls
+  end else if is_string_case then begin
     (* String pattern matching: emit if-else chain with march_string_eq *)
     let rec emit_chain brs lbls =
       match brs, lbls with

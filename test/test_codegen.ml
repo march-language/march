@@ -5069,6 +5069,123 @@ let test_guard_exhaustion_panics_compiled () =
        && ir_contains run_out "EXIT:1")
   end
 
+(* ── Float-literal match arms (B4) ──────────────────────────────────────
+   `pat_tag_and_subs` returned `None` for `Ast.LitFloat` patterns, and the
+   match-matrix grouping loop silently discarded rows it couldn't tag — so a
+   float-literal match arm compiled to nothing, silently falling through to
+   whatever the next (typically wildcard) arm was.  The interpreter (which
+   matches on the AST directly) got this right; only the compiled backend
+   diverged.  These tests compile and *run* the binary, because the bug's
+   symptom is a wrong *value*, not a shape in the emitted IR (same rationale
+   as the guard-exhaustion test above). *)
+
+(* Read the whole stdout+stderr of a command (trimmed). Shared helper for the
+   compile-and-run regression tests in this section. *)
+let read_cmd_output cmd =
+  let ic = Unix.open_process_in cmd in
+  let buf = Buffer.create 64 in
+  (try
+     while true do Buffer.add_channel buf ic 1 done
+   with End_of_file -> ());
+  ignore (Unix.close_process_in ic);
+  String.trim (Buffer.contents buf)
+
+(** Write [src_text] to a fresh temp dir and return (project_root, main_exe,
+    src_path, tmp_dir). Shared setup for the compile-and-run tests below. *)
+let write_march_source ~name src_text =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  let tmp = Filename.temp_file name "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (name ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (project_root, main_exe, src, tmp)
+
+let test_float_lit_match_arm_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat"
+    "mod FloatPat do\n\
+    \  fn name(x) do\n\
+    \    match x do\n\
+    \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\" | _ -> \"other\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    println(name(2.5))\n\
+    \  end\n\
+     end\n"
+  in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    (* --- interpreter: matches the float literal correctly (baseline) --- *)
+    let interp_out = read_cmd_output (Printf.sprintf
+      "cd %s && %s %s 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check string) "interpreter matches float literal arm"
+      "two-and-a-half" interp_out;
+    (* --- compiled: must match too — this is the B4 regression --- *)
+    let bin = Filename.concat tmp "floatpatbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check int) "compiles ok" 0 compile_rc;
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled float literal match arm produces the SAME value as the \
+       interpreter (not silently falling through to a later/wildcard arm)"
+      "two-and-a-half" run_out
+  end
+
+(** Float arm with NO wildcard: a non-exhaustive float match must panic (the
+    Task 1 / B3 `nonexhaustive_panic` fallback), not silently fall through to
+    LLVM `unreachable` (undefined behaviour — observed, pre-fix, to print a
+    WRONG matched value with exit 0 instead of crashing). The scrutinee must
+    NOT be a compile-time constant, or the optimizer folds the whole match to
+    its statically-known arm and never reaches the fallback path at all. *)
+let test_float_lit_no_wildcard_panics_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat_nowild"
+    "mod FloatPatNoWild do\n\
+    \  fn name(x) do\n\
+    \    match x do\n\
+    \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let n = int_to_float(List.length(process_argv())) +. 3.7\n\
+    \    println(name(n))\n\
+    \  end\n\
+     end\n"
+  in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    (* --- interpreter: must already panic (parity check) --- *)
+    let interp_out = read_cmd_output (Printf.sprintf
+      "cd %s && %s %s 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check bool) "interpreter panics on float non-exhaustive match" true
+      (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+    (* --- compiled: must panic (exit 1), not exit 0 with a wrong value --- *)
+    let bin = Filename.concat tmp "floatpatnowildbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check int) "compiles ok" 0 compile_rc;
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled float non-exhaustive match panics with a non-exhaustive-match \
+       message (not exit 0 with a wrong value, and not a segfault)"
+      true
+      ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
+       && ir_contains run_out "EXIT:1")
+  end
+
 let codegen_suites =
   [
       ( "nested_lit_pattern_codegen", [
@@ -5498,6 +5615,12 @@ let codegen_suites =
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
             test_guard_exhaustion_panics_compiled;
+        ] );
+      ( "float_lit_match_codegen", [
+          Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
+            test_float_lit_match_arm_compiled;
+          Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
+            test_float_lit_no_wildcard_panics_compiled;
         ] );
   ]
 
