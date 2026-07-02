@@ -1640,6 +1640,25 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("stdlib_hmac_sha256",    Mono (TArrow (t_string, TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    (* Compress builtins — gzip, deflate, zstd, brotli C-level shims.
+       Called directly by stdlib/compress.march and any code that needs
+       compression without `import Compress` (not in stdlib_file_list). *)
+    ("stdlib_gzip_encode",    Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_gzip_decode",    Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_deflate_encode", Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_deflate_decode", Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_zstd_encode",    Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_zstd_decode",    Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_brotli_decode",  Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
        NativeIntArr / NativeFloatArr are opaque types (0-arity constructors).
        These builtins are interpreter-path only; compiled mode support is
