@@ -1431,11 +1431,38 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        function — fall through to the local-load path in that case. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v when (let n = v.Tir.v_name in
-                     String.length n >= 7 && String.sub n 0 7 = "march_") ->
+                     String.length n >= 6 && String.sub n 0 6 = "march_") ->
     (* C-runtime extern used as a first-class value (e.g. march_compare_int passed
        to a HOF).  These are declared in emit_preamble — never in var_slot or
        compiled_fns — so the alloca-bridge path would generate an invalid
-       "%march_*.addr" load.  Emit the global address directly instead. *)
+       "%march_*.addr" load.  Emit the global address directly instead.
+
+       Guard length note (B9, fixed 2026-07-01): was `>= 7 && sub n 0 7`, a
+       7-char substring compared to the 6-char literal "march_" — always
+       false, so this arm was permanently dead and every march_*-named AVar
+       fell through to later arms (in the worst case the 0-arg call-to-
+       materialise path, which CALLS the extern with 0 args). Fixed to `>= 6
+       && sub n 0 6`, matching the three sibling checks (see :575, :3243,
+       :3481 in this file).
+
+       Reachability status: NOT reachable from current surface March syntax
+       as of this fix. march_* extern names (march_compare_int/float/string,
+       march_hash_int/float/string/bool) are compiler-internal — injected
+       only as direct EApp callees inside lower.ml's synthesized
+       Ord$T.compare / Hash$T.hash wrapper bodies. mono.ml's interface
+       dispatch (rewrite_calls) only rewrites direct calls to an interface
+       method name; it never rewrites a bare AVar reference to the method,
+       so a march_* name can never escape as a first-class value through
+       legitimate resolution, and there is no global binding exposing
+       march_compare_int etc. by name to user code (confirmed: referencing
+       `march_compare_int` from surface syntax is an unresolved-identifier
+       type error). This arm is therefore currently untested by any
+       surface-syntax program; it guards against a future lowering change
+       (e.g. Ord/Hash impls passed as first-class dictionary values) that
+       would make march_* atoms reachable as values. If such a change lands,
+       add an ir_contains regression test alongside it exercising this arm
+       specifically (not just the EApp direct-call path already covered by
+       test_string_ord_uses_compare_string in test/test_stdlib_suite.ml). *)
     ("ptr", "@" ^ llvm_name v.Tir.v_name)
   | Tir.AVar v when is_builtin_fn v.Tir.v_name
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
