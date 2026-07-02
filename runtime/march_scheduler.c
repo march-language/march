@@ -158,9 +158,28 @@ static void *stack_alloc_lazy(size_t *alloc_size, void **mmap_base_out) {
  */
 #define MARCH_SIGALTSTACK_SIZE  (64 * 1024)   /* 64 KiB — plenty for the handler */
 
+/* ASAN installs its own mmap'd alternate signal stack on every thread and, at
+ * thread exit, AsanThread::Destroy → UnsetAlternateSignalStack blindly
+ * munmap()s whatever altstack is then current.  If we replace it with our
+ * malloc'd (non-page-aligned) buffer, that munmap fails with EINVAL and ASAN
+ * aborts the process (SIGTRAP, exit 133) — after correct output, at teardown.
+ * Under ASAN we therefore keep ASAN's altstack: it is SA_ONSTACK-capable and
+ * large enough for the stack-growth handler, so lazy growth still works. */
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define MARCH_ASAN 1
+#  endif
+#endif
+#if !defined(MARCH_ASAN) && defined(__SANITIZE_ADDRESS__)
+#  define MARCH_ASAN 1
+#endif
+
 static _Thread_local char *tl_alt_stack = NULL;
 
 static void setup_alt_stack(void) {
+#ifdef MARCH_ASAN
+    return;   /* use ASAN's per-thread altstack; ours would break its teardown */
+#else
     if (tl_alt_stack) return;   /* already set up for this thread */
     char *alt = (char *)malloc(MARCH_SIGALTSTACK_SIZE);
     if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); abort(); }
@@ -174,6 +193,7 @@ static void setup_alt_stack(void) {
          * scheduler itself still works for shallow stacks. */
     }
     tl_alt_stack = alt;
+#endif
 }
 
 /*
