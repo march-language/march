@@ -302,6 +302,56 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
     true (List.length live_decrefs > 0)
 
+(** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
+    arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
+    at ANY position without checking [in_tail], so a Perceus-wrapped group
+    call sitting in a genuinely NON-tail spot (its result is bound and fed
+    into further arithmetic) would be invisible to the "does this SCC have
+    any non-tail group call" check.
+
+    [tail_calls_in] (which builds the Tarjan SCC edges) only recognises the
+    dec-chain wrapper as a tail call when it IS the fn's tail expression —
+    so a group edge needs at least one genuine tail call between the two
+    functions. [build_loop] below supplies that in its odd-n branch
+    (`consume_loop(prefix, n - 1)` as the branch's tail expr — the SCC forms).
+    Its even-n branch ALSO calls [consume_loop] on the very same borrowed
+    [prefix] (dead after the call, so Perceus wraps it in the same
+    post-call-DecRC dec-chain), but here the result is bound to [r] and
+    [r + 1] is returned — a genuinely non-tail group call. Pre-fix,
+    [has_non_tail_group_call] ignored [in_tail] in the dec-chain-wrapper arm
+    and reported no non-tail call, so the group was wrongly accepted; the
+    mutual-TCO back-edge emitted for this pair then stranded the `+ 1`
+    continuation in a dead block. Post-fix the group must be rejected (no
+    mutual_loop for this pair), and the program must still compile and run
+    correctly via ordinary (non-TCO) calls. *)
+let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    fn build_loop(seed, n) do
+      let prefix = String.repeat("a", 1)
+      if n == 0 do
+        String.byte_size(seed) + String.byte_size(prefix)
+      else
+        if n % 2 == 0 do
+          let r = consume_loop(prefix, n - 1)
+          r + 1
+        else
+          consume_loop(prefix, n - 1)
+        end
+      end
+    end
+    fn consume_loop(s, n) do
+      if n == 0 do
+        String.byte_size(s)
+      else
+        build_loop(s, n - 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(build_loop("z", 5))) end
+  end|} in
+  Alcotest.(check bool)
+    "non-tail dec-chain-wrapped group call: no mutual_loop formed for this pair"
+    false (ir_contains ir "mutual_loop")
+
 (** B8 regression: a pure mutually-recursive loop (is_even/is_odd style) never
     calls a builtin and never returns to the scheduler on its own — unlike
     emit_fn's self-TCO path (which calls emit_reduction_check at the top of
@@ -5721,6 +5771,8 @@ let codegen_suites =
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
           Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
             `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
+            `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"
             `Quick test_mutual_tco_has_reduction_check;
         ] );

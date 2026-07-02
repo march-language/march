@@ -6,8 +6,8 @@
 -- work in compiled binaries, including records EXTENDED at runtime by
 -- record_put and records built dynamically from record_from_list([]).
 -- Also covers EUpdate (`{ x with f: v }`) on the same type-erased records
--- (B5): the erased-shape fallback routes through march_record_put instead
--- of writing at a hardcoded offset into a header-only allocation.
+-- (B5): the erased-shape fallback routes through march_record_update_dyn
+-- instead of writing at a hardcoded offset into a header-only allocation.
 mod RnEntry do
 
 fn check(name, cond) do

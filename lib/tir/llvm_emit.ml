@@ -5286,14 +5286,22 @@ let rec has_non_tail_group_call (group : string list) ~(in_tail : bool)
     (expr : Tir.expr) : bool =
   match expr with
   | Tir.EApp (f, _) -> List.mem f.Tir.v_name group && not in_tail
-  | Tir.ELet (tmp_v, Tir.EApp (_, _), body)
+  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
     when is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    (* Borrow-induced post-DecRC wrapper: the EApp is the tail call.  Body
-       contains only DecRC/Free ops + the trailing EAtom — no further calls
-       that could be non-tail.  Returning false here keeps the wrapped call
-       eligible for mutual TCO; before this guard the rhs was always treated
-       as non-tail and TCO was silently dropped. *)
-    has_non_tail_group_call group ~in_tail body
+    (* Borrow-induced post-DecRC wrapper: the EApp is semantically the tail
+       call IFF this whole ELet is itself in tail position.  Body contains
+       only DecRC/Free ops + the trailing EAtom — no further calls that
+       could be non-tail on their own, so once we know the wrapped call is
+       disqualifying we don't need to recurse into body.  Mirror the bare
+       EApp arm above: a wrapped call to a group member is a non-tail group
+       call whenever [in_tail] is false here (e.g. this ELet is the rhs of
+       an outer ELet/ESeq).  Before this guard, the wrapped call was always
+       treated as the tail call regardless of [in_tail], so a non-tail
+       Perceus-wrapped group call could slip a mutual SCC through group
+       formation, and the mutual-TCO emission then stranded the
+       continuation in a dead block. *)
+    (List.mem f.Tir.v_name group && not in_tail)
+    || has_non_tail_group_call group ~in_tail body
   | Tir.ELet (_, rhs, body) ->
     has_non_tail_group_call group ~in_tail:false rhs
     || has_non_tail_group_call group ~in_tail body

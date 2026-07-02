@@ -303,6 +303,11 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
      always go through the interpreter — otherwise JIT-compiled calls hit
      the runtime's C scheduler, which has no actor registered. *)
   let actors_declared = ref false in
+  (* Tracks the raw source of the form currently being processed so the
+     outer catch-all (below) can render a ParseError diagnostic (e.g. the
+     B6 pipe-into-match desugar check) the same way the batch driver does,
+     instead of falling through to a bare "internal error: ...". *)
+  let last_src    = ref "" in
 
   let print_diag (d : March_errors.Errors.diagnostic) =
     let src = Buffer.contents buf in
@@ -424,6 +429,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
           let contents = Buffer.contents buf in
           if Multiline.is_complete contents && String.trim line <> "" then begin
             let src = contents in
+            last_src := src;
             Buffer.clear buf;
             first_line := true;
             incr prompt_num;
@@ -1032,6 +1038,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
      | March_lexer.Lexer.Lexer_error msg ->
        Buffer.clear buf; first_line := true;
        Printf.eprintf "lexer error: %s\n%!" msg
+     | March_errors.Errors.ParseError (msg, hint, _) ->
+       (* Desugar-time diagnostics (e.g. B6 pipe-into-match) raise ParseError
+          outside the parser's own try/with, so they land here rather than
+          at the parse-error handler above.  Render the same way the batch
+          driver (bin/main.ml) does instead of falling through to a bare
+          "internal error: ...". *)
+       Buffer.clear buf; first_line := true;
+       let rendered =
+         March_errors.Errors.render_parse_error ~src:!last_src ?hint ~msg
+           (Lexing.from_string !last_src) in
+       Printf.eprintf "%s\n%!" rendered
      | exn ->
        Buffer.clear buf; first_line := true;
        Printf.eprintf "internal error: %s\n%!" (Printexc.to_string exn))

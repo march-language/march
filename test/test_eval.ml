@@ -1184,6 +1184,50 @@ let test_repl_inspect_type_and_value () =
     Alcotest.(check string) ":inspect value" "43" vs
   | _ -> Alcotest.fail ":inspect parse failed"
 
+(** Final-review regression: a desugar-time diagnostic (e.g. the B6
+    pipe-into-match check, which raises [March_errors.Errors.ParseError]
+    from [Desugar.desugar_expr] rather than from the parser) used to escape
+    [run_simple]'s per-form handling entirely — [desugar_expr] is called
+    outside any local try/with in the [ReplExpr] branch — and land in the
+    loop's outermost catch-all, which rendered it as a bare
+    "internal error: March_errors.Errors.ParseError(...)" instead of the
+    same span-rendered diagnostic the batch driver (bin/main.ml) shows.
+    This exercises the real [run_simple] loop (via `march repl` under a
+    non-tty stdin, exactly as the manual repro does), since the lightweight
+    [repl_eval_exprs] helper used by the other "repl integration" tests
+    calls [desugar_expr] directly and would not reproduce the escape. *)
+let test_repl_renders_desugar_parse_error () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      Buffer.contents buf
+    in
+    let out = read_cmd (Printf.sprintf
+      "cd %s && echo %s | %s repl 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote {|1 |> (match 2 do 1 -> "one" | 2 -> "two" | _ -> "x" end)|})
+      (Filename.quote main_exe)) in
+    Alcotest.(check bool)
+      "REPL does not render the B6 diagnostic as a bare internal error"
+      false
+      (let re = Str.regexp_string "internal error: March_errors.Errors.ParseError" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false);
+    Alcotest.(check bool)
+      "REPL renders the desugar diagnostic's message text"
+      true
+      (let re = Str.regexp_string
+         "piping into a match discards its scrutinee" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false)
+  end
+
 (** Parity: same features work in interpreter mode *)
 let test_repl_parity_closures () =
   match repl_eval_exprs [
@@ -4202,6 +4246,8 @@ let eval_suites =
           Alcotest.test_case "pretty: record"          `Quick test_repl_pretty_record;
           Alcotest.test_case "pretty: depth truncation" `Quick test_repl_pretty_depth_truncation;
           Alcotest.test_case ":inspect type+value"     `Quick test_repl_inspect_type_and_value;
+          Alcotest.test_case "final-review: renders desugar ParseError, not internal error"
+            `Quick test_repl_renders_desugar_parse_error;
         ] );
       ( "repl parity",
         [
