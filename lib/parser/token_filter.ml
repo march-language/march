@@ -111,14 +111,26 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     } buffer
   in
 
-  (* Check if a token could start a match arm pattern *)
+  (* Check if a token could start a match arm pattern.
+
+     Kept in sync with the grammar's `pattern` / `simple_pattern` rules
+     (parser.mly): `pattern` accepts qualified_upper (UPPER_IDENT), ATOM,
+     and simple_pattern; `simple_pattern` accepts UNDERSCORE,
+     soft_lower_name (LOWER_IDENT plus the soft keywords below), INT,
+     MINUS INT, FLOAT, MINUS FLOAT, STRING, BOOL, LPAREN, and LBRACKET.
+     There is no CHAR token in this grammar. *)
   let is_pattern_start tok =
     match tok with
     | Parser.UPPER_IDENT _ | Parser.LOWER_IDENT _
-    | Parser.UNDERSCORE | Parser.INT _ | Parser.STRING _
+    | Parser.UNDERSCORE | Parser.INT _ | Parser.FLOAT _ | Parser.STRING _
     | Parser.BOOL _
     | Parser.LPAREN | Parser.LBRACKET | Parser.MINUS
-    | Parser.ATOM _ -> true
+    | Parser.ATOM _
+    (* soft_lower_name keywords also usable as a var-pattern binder *)
+    | Parser.STATE | Parser.INIT | Parser.LOOP | Parser.ON
+    | Parser.PROTOCOL | Parser.APP | Parser.AS | Parser.WITH
+    | Parser.WHEN | Parser.USE | Parser.IN | Parser.FOR
+    | Parser.TAG -> true
     | _ -> false
   in
 

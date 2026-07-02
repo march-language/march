@@ -4819,6 +4819,65 @@ let test_string_interp_raw_newline_tracks_line () =
   | decls ->
     Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
 
+(* FLOAT missing from token filter's pattern-start set (token_filter.ml
+   is_pattern_start). Without FLOAT in the set, the contextual newline
+   filter treats a newline-led float-literal match arm as a body
+   continuation rather than the start of a new arm, so the parser sees a
+   malformed arm and fails with "expecting `end`" at the float token. *)
+let test_float_literal_match_arm_parses () =
+  let src = {|mod FloatArms do
+  fn name(x) do
+    match x do
+      1.5 -> "a"
+      2.5 -> "b"
+      _ -> "c"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Negative float-literal patterns (`MINUS; FLOAT` in simple_pattern) must
+   also be recognized as a pattern start — MINUS was already in the set, but
+   cover it explicitly alongside FLOAT so a newline-led `-1.5 -> ...` arm
+   parses too. *)
+let test_negative_float_literal_match_arm_parses () =
+  let src = {|mod NegFloatArms do
+  fn sign(x) do
+    match x do
+      -1.5 -> "neg"
+      1.5 -> "pos"
+      _ -> "zero"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "negative float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Audit of simple_pattern (parser.mly ~1289-1308) against is_pattern_start:
+   simple_pattern's id = soft_lower_name case accepts several keyword tokens
+   as variable-pattern starters (STATE, INIT, LOOP, ON, PROTOCOL, APP, AS,
+   WITH, WHEN, USE, IN, FOR, TAG), none of which were in is_pattern_start.
+   A newline-led arm bound to one of these soft keywords as a var pattern
+   would suffer the same "treated as body continuation" bug as FLOAT. Cover
+   one representative case per missing token family: a soft-keyword var
+   pattern used as a catch-all binder. (CHAR does not exist as a token in
+   this grammar, so there is nothing to add for it.) *)
+let test_soft_keyword_var_pattern_match_arm_parses () =
+  let src = {|mod SoftKwArms do
+  fn describe(x) do
+    match x do
+      0 -> "zero"
+      state -> state
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -5297,6 +5356,11 @@ let compiler_suites =
       ( "lexer_line_tracking", [
           Alcotest.test_case "B15: raw newline in string literal tracks line"      `Quick test_string_literal_raw_newline_tracks_line;
           Alcotest.test_case "B15: raw newline in string interp tracks line"       `Quick test_string_interp_raw_newline_tracks_line;
+        ] );
+      ( "token_filter_pattern_start", [
+          Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
+          Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
+          Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
         ] );
   ]
 
