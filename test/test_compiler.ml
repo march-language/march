@@ -4865,6 +4865,66 @@ end|} in
    one representative case per missing token family: a soft-keyword var
    pattern used as a catch-all binder. (CHAR does not exist as a token in
    this grammar, so there is nothing to add for it.) *)
+(* B6: `x |> (match scrut do ... end)` used to desugar by silently throwing
+   away `scrut` and matching on `x` — verified silent wrong code. It must be
+   a compile-time diagnostic instead. Uses the diagnostics-capture pattern
+   (desugar_module ~errors) like the satisfy/derive desugar error tests. *)
+let test_pipe_into_match_reports_error () =
+  let src = {|mod PipeMatch do
+  fn go() do
+    1 |> (match 2 do 1 -> "one" | 2 -> "two" | _ -> "x" end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe into match: desugar error" true (has_errors errors);
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "message names the discarded scrutinee" true
+    (List.exists (fun m ->
+         try ignore (Str.search_forward (Str.regexp_string "discards its scrutinee") m 0); true
+         with Not_found -> false) msgs);
+  (* Diagnostic must be positioned at the offending match, not dummy. *)
+  let spans = List.map (fun (d : March_errors.Errors.diagnostic) -> d.span)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "diagnostic carries a real span" true
+    (List.exists (fun (s : March_ast.Ast.span) -> s.start_line = 3) spans)
+
+(* B6 sibling: the ECond pipe branch's expr→pattern conversion used a bare
+   `failwith` (uncaught Failure in entry points without a handler). It must
+   go through the same diagnostic mechanism. `foo(1)` is not convertible to
+   a pattern, so this arm triggers the conversion failure. *)
+let test_pipe_into_cond_bad_pattern_reports_error () =
+  let src = {|mod PipeCondBad do
+  fn go(x) do
+    x |> (match do
+      foo(1) -> "a"
+      other -> "b"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe cond bad pattern: desugar error (not Failure)" true
+    (has_errors errors)
+
+(* Positive control: the scrutinee-less `x |> (match do pat -> ... end)` form
+   is the supported pipe-match syntax and must keep desugaring cleanly.
+   (A variable arm becomes a PatVar catch-all through expr_to_pat.) *)
+let test_pipe_into_scrutineeless_match_still_works () =
+  let src = {|mod PipeCondOk do
+  fn go(x) do
+    x |> (match do
+      1 -> "one"
+      other -> "other"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "scrutinee-less pipe match: no desugar error" false
+    (has_errors errors)
+
 let test_soft_keyword_var_pattern_match_arm_parses () =
   let src = {|mod SoftKwArms do
   fn describe(x) do
@@ -5361,6 +5421,11 @@ let compiler_suites =
           Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
           Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
           Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
+        ] );
+      ( "pipe_into_match", [
+          Alcotest.test_case "B6: pipe into match reports desugar error"           `Quick test_pipe_into_match_reports_error;
+          Alcotest.test_case "B6: pipe cond bad pattern reports desugar error"     `Quick test_pipe_into_cond_bad_pattern_reports_error;
+          Alcotest.test_case "B6: scrutinee-less pipe match still works"           `Quick test_pipe_into_scrutineeless_match_still_works;
         ] );
   ]
 
