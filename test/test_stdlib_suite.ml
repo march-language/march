@@ -10409,6 +10409,55 @@ let test_compiled_hot_reload_dispatch () =
     end
   end
 
+(* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
+   arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
+   scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
+   stack with a malloc'd (non-page-aligned) buffer; at thread exit ASAN's
+   AsanThread::Destroy → UnsetAlternateSignalStack munmap()s whatever altstack
+   is current, which fails with EINVAL on our buffer and CHECK-aborts.  Fix:
+   under ASAN the runtime keeps ASAN's own altstack (march_scheduler.c).
+   Guard: a sanitized hello-world must print its output AND exit 0. *)
+let test_compiled_sanitize_clean_exit () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_sanexit" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "sanexit.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod SanExit do\n\
+      \  fn main() do println(\"sanitize ok\") end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "sanexit_bin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "MARCH_SANITIZE=1 %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    (* Skip when the sanitized compile can't complete here (no clang, or no
+       ASAN runtime for this toolchain) — matches the other Slow compiled
+       regression tests. *)
+    if compile_rc <> 0 then ()
+    else begin
+      let out_file = Filename.concat tmp "out.txt" in
+      let run_rc = Sys.command (Printf.sprintf
+        "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+      Alcotest.(check int)
+        "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
+        0 run_rc;
+      let output =
+        let ic = open_in out_file in
+        let n = in_channel_length ic in
+        let s = really_input_string ic n in
+        close_in ic; String.trim s
+      in
+      Alcotest.(check string)
+        "sanitized binary prints its output" "sanitize ok" output
+    end
+  end
+
 (* Regression: a user top-level function whose name collides with a stdlib
    internal helper (the canonical accumulator name `go`) silently broke the
    stdlib function.  Root cause: a local recursive fn's name was excluded from
@@ -11615,5 +11664,7 @@ let stdlib_suites =
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
+        Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
+          test_compiled_sanitize_clean_exit;
       ]);
     ]
