@@ -4938,6 +4938,61 @@ end|} in
   Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
     (List.length m.March_ast.Ast.mod_decls >= 1)
 
+(* B14: group_fn_clauses merges only ADJACENT same-name fn clauses; a
+   same-name group appearing again later at the same level (interleaved
+   with another decl) used to compile with the earlier group silently
+   dead. It must be a positioned parse-time error naming the function and
+   both locations. *)
+let test_interleaved_fn_clauses_error () =
+  let src = {|mod Interleaved do
+  fn f(0) do 0 end
+  fn other() do 1 end
+  fn f(n) do n end
+end|} in
+  let result =
+    try ignore (parse_module src); None
+    with March_errors.Errors.ParseError (msg, _hint, pos) -> Some (msg, pos)
+  in
+  match result with
+  | None -> Alcotest.fail "interleaved same-name fn clause groups must not parse"
+  | Some (msg, pos) ->
+    let contains needle hay =
+      try ignore (Str.search_forward (Str.regexp_string needle) hay 0); true
+      with Not_found -> false in
+    Alcotest.(check bool) "message names `f`" true (contains "`f`" msg);
+    (* both locations: earlier group's line in the message, second group's
+       line as the error position *)
+    Alcotest.(check bool) "message points at earlier clauses (line 2)" true
+      (contains "line 2" msg);
+    Alcotest.(check int) "error positioned at the second group (line 4)" 4
+      pos.Lexing.pos_lnum
+
+(* Adjacent multi-head clauses (the supported form) must keep parsing,
+   including when another decl FOLLOWS the group. *)
+let test_adjacent_fn_clauses_still_parse () =
+  let src = {|mod Adjacent do
+  fn f(0) do 0 end
+  fn f(n) do n end
+  fn other() do 1 end
+end|} in
+  let m = parse_module src in
+  (* f's clauses merged into one DFn; other is separate *)
+  Alcotest.(check int) "two decls after grouping" 2
+    (List.length m.March_ast.Ast.mod_decls)
+
+(* The check is per module level: the same fn name in a NESTED module is a
+   different scope and must not trip the adjacency validation. *)
+let test_same_fn_name_in_nested_mod_ok () =
+  let src = {|mod Outer do
+  fn f(x) do x end
+  mod Inner do
+    fn f(y) do y end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check int) "outer fn + nested mod parse" 2
+    (List.length m.March_ast.Ast.mod_decls)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -5426,6 +5481,11 @@ let compiler_suites =
           Alcotest.test_case "B6: pipe into match reports desugar error"           `Quick test_pipe_into_match_reports_error;
           Alcotest.test_case "B6: pipe cond bad pattern reports desugar error"     `Quick test_pipe_into_cond_bad_pattern_reports_error;
           Alcotest.test_case "B6: scrutinee-less pipe match still works"           `Quick test_pipe_into_scrutineeless_match_still_works;
+        ] );
+      ( "fn_clause_grouping", [
+          Alcotest.test_case "B14: interleaved same-name fn groups error"          `Quick test_interleaved_fn_clauses_error;
+          Alcotest.test_case "B14: adjacent multi-head clauses still parse"        `Quick test_adjacent_fn_clauses_still_parse;
+          Alcotest.test_case "B14: same fn name in nested mod is fine"             `Quick test_same_fn_name_in_nested_mod_ok;
         ] );
   ]
 

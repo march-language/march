@@ -30,9 +30,6 @@
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
-  (** Group consecutive fn clauses with the same name into a single DFn.
-      Clauses must be adjacent — interleaving with other decls is an error
-      that we can catch later in a validation pass. *)
   (* Desugar a string interpolation into concatenation + to_string calls.
      desugar_interp prefix [(e1, s1); (e2, s2); ...] sp  produces:
        prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
@@ -56,6 +53,17 @@
       let txt = String.concat "." (List.map (fun (n : name) -> n.txt) names) in
       { txt; span = first.span }
 
+  (** Group consecutive fn clauses with the same name into a single DFn.
+
+      Clauses must be adjacent (B14): the merger below keys on the function
+      NAME only and merges only ADJACENT same-name clauses, so a same-name
+      group reappearing later at the same level (interleaved with another
+      decl) would leave the earlier group silently shadowed/unreachable.
+      The validation pass after grouping rejects that with a positioned
+      error. The check deliberately uses the same name-only key as the
+      merger: same-name different-arity fns are not separate functions in
+      March — adjacent ones merge into one multi-head def — so a repeated
+      name at one level is always an adjacency mistake. *)
   let group_fn_clauses (decls : decl list) : decl list =
     let rec go acc = function
       | [] -> List.rev acc
@@ -74,7 +82,34 @@
         go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses; fn_bounds = def.fn_bounds }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
-    go [] decls
+    let grouped = go [] decls in
+    (* Validation: a DFn name occurring twice in the grouped output means
+       the clause groups were non-adjacent at this level. *)
+    let seen : (string, span) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (fun d ->
+        match d with
+        | DFn (def, span) ->
+          let name = def.fn_name.txt in
+          (match Hashtbl.find_opt seen name with
+           | Some first_span ->
+             let pos = { Lexing.pos_fname = span.file;
+                         pos_lnum = span.start_line;
+                         pos_bol  = 0;
+                         pos_cnum = span.start_col } in
+             error_raise
+               (Printf.sprintf
+                  "clauses of `%s` must be adjacent; earlier clauses at line %d \
+                   would be silently unreachable"
+                  name first_span.start_line)
+               (Some (Printf.sprintf
+                        "Move the clauses next to each other:\n\
+                         fn %s(...) do ... end\n\
+                         fn %s(...) do ... end"
+                        name name))
+               pos
+           | None -> Hashtbl.add seen name span)
+        | _ -> ()) grouped;
+    grouped
 
   (** Build a lambda from a pattern and body for comprehension desugaring.
       PatVar names become a simple named param.
