@@ -48,16 +48,50 @@ type t = {
 }
 
 let create ~runtime_so ?(clang="clang") () =
-  let tmp_dir = Filename.concat
-    (Filename.get_temp_dir_name ()) "march_jit" in
+  (* Per-process artifact dir.  A single shared "march_jit" dir raced when
+     several JIT sessions ran concurrently (dune executes the test runners in
+     parallel): one process's cleanup rmdir'd the dir while another's clang
+     was still writing repl_<n>.so into it. *)
+  let tmp_base = Filename.get_temp_dir_name () in
+  let dir_prefix = "march_jit." in
+  let tmp_dir = Filename.concat tmp_base
+    (dir_prefix ^ string_of_int (Unix.getpid ())) in
+  (* Sweep per-pid dirs left by SIGKILL'd sessions (cleanup only runs on
+     clean exit): a dir is stale when its pid is no longer alive.
+     MARCH_KEEP_LL opts out. *)
+  if Sys.getenv_opt "MARCH_KEEP_LL" = None then begin
+    try
+      Array.iter (fun entry ->
+        let plen = String.length dir_prefix in
+        if String.length entry > plen && String.sub entry 0 plen = dir_prefix then
+          match int_of_string_opt
+                  (String.sub entry plen (String.length entry - plen)) with
+          | Some pid when pid <> Unix.getpid () ->
+            let alive =
+              try Unix.kill pid 0; true
+              with Unix.Unix_error (Unix.ESRCH, _, _) -> false
+                 | Unix.Unix_error _ -> true (* EPERM etc: assume alive *)
+            in
+            if not alive then begin
+              let dir = Filename.concat tmp_base entry in
+              (try
+                 Array.iter (fun f ->
+                   try Sys.remove (Filename.concat dir f) with _ -> ()
+                 ) (Sys.readdir dir)
+               with _ -> ());
+              (try Unix.rmdir dir with _ -> ())
+            end
+          | _ -> ()
+      ) (Sys.readdir tmp_base)
+    with _ -> ()
+  end;
   (try Unix.mkdir tmp_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-  (* Clean stale artifacts from prior sessions (SIGKILL leaves repl_*.ll/.so
-     behind because cleanup only runs on clean exit).  MARCH_KEEP_LL opts out. *)
+  (* Clean artifacts left in our own dir by a prior session in this process
+     whose cleanup didn't run (cleanup only runs on clean exit). *)
   if Sys.getenv_opt "MARCH_KEEP_LL" = None then begin
     try
       Array.iter (fun f ->
-        let full = Filename.concat tmp_dir f in
-        try Sys.remove full with _ -> ()
+        try Sys.remove (Filename.concat tmp_dir f) with _ -> ()
       ) (Sys.readdir tmp_dir)
     with _ -> ()
   end;
@@ -858,10 +892,13 @@ let cleanup ctx =
   List.iter (fun h -> try Jit.dlclose h with _ -> ()) ctx.handles;
   if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
   else begin
-    (* Remove tmp_dir contents *)
-    let entries = Sys.readdir ctx.tmp_dir in
-    Array.iter (fun f ->
-      try Sys.remove (Filename.concat ctx.tmp_dir f) with _ -> ()
-    ) entries;
+    (* Remove tmp_dir contents.  Never raise: cleanup runs inside exception
+       handlers, and a Sys_error here (dir already gone) would mask the
+       original exception. *)
+    (try
+       Array.iter (fun f ->
+         try Sys.remove (Filename.concat ctx.tmp_dir f) with _ -> ()
+       ) (Sys.readdir ctx.tmp_dir)
+     with _ -> ());
     (try Unix.rmdir ctx.tmp_dir with _ -> ())
   end

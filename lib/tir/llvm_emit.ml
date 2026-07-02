@@ -7211,6 +7211,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
+  Buffer.add_buffer out ctx.extra_fns;
   Buffer.contents out
 
 (* Emit a REPL let-binding as a .ll fragment.
@@ -7256,6 +7257,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
+  Buffer.add_buffer out ctx.extra_fns;
   Buffer.contents out
 
 (** Emit a REPL function declaration as a .ll fragment.
