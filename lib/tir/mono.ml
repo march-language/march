@@ -296,6 +296,54 @@ let rec rewrite_calls
        | March_ast.Ast.LitAtom _   -> Tir.TUnit)
     | _ -> Tir.TUnit
   in
+  (* Enqueue a resolved interface impl (e.g. "Show$List.show") for emission,
+     specializing it under the substitution derived from THIS call site's
+     concrete argument types — exactly like the ordinary generic-fn
+     specialization a few lines below (build_subst + mangle_name).
+
+     CRITICAL (Wave 2 Task 1 — println-of-list miscompile): an impl body can
+     itself be generic — e.g. `impl Show(List(a)) when Show(a)` has an
+     element-level `show(x : a)` inside it.  The three call sites below used
+     to enqueue such impls with an EMPTY substitution, so the impl was
+     emitted once, still generic, and its nested `show(x)` call stayed an
+     unresolved bare reference all the way to llvm_emit — which then mis-bound
+     it via the `unqualified_fns` dot-suffix fallback to an arbitrary
+     same-named impl (the actual bug: Int → SIGSEGV, String → non-exhaustive
+     panic, Option → SIGSEGV/SIGBUS, depending on which impl DCE kept first).
+
+     Returns the name the CALLER should use as the callee (either the
+     original [mangled_name] when no further specialization was needed —
+     the impl was already monomorphic, e.g. Show$Int.show — or a further
+     doubly-mangled name, e.g. "Show$List.show$List_Int", when it was).
+
+     Name convention (local to mono.ml only; matches the pre-existing
+     mangle_name scheme used for ordinary generic fns; no shared
+     Tir_names-style helper exists yet — that's Wave 3): the impl name gets
+     an extra "$"-separated suffix built from its OWN concrete parameter
+     types after substitution, e.g. "Show$List.show" + [List(Int)] ->
+     "Show$List.show$List_Int".  Recursion (List(List(Int)) etc.) terminates
+     via the existing worklist [done_set] dedup: once a given specialized
+     name has been enqueued/emitted, subsequent calls just reuse it. *)
+  let enqueue_specialized_impl
+      (mangled_name : string) (args : Tir.atom list) : string =
+    match Hashtbl.find_opt fn_table mangled_name with
+    | None -> mangled_name  (* not in fn_table (e.g. a builtin-backed impl) *)
+    | Some orig_impl ->
+      let arg_tys = List.map atom_ty args in
+      let subst = build_subst orig_impl arg_tys in
+      if subst = [] then begin
+        if not (Hashtbl.mem done_set mangled_name) then
+          Queue.add (mangled_name, orig_impl, []) worklist;
+        mangled_name
+      end else begin
+        let param_tys_concrete =
+          List.map (fun v -> subst_ty subst v.Tir.v_ty) orig_impl.Tir.fn_params in
+        let specialized_name = mangle_name mangled_name param_tys_concrete in
+        if not (Hashtbl.mem done_set specialized_name) then
+          Queue.add (specialized_name, orig_impl, subst) worklist;
+        specialized_name
+      end
+  in
   (* If [name] is an interface method, resolve it to the impl for the concrete
      first-argument type.  Returns the mangled impl function name, or None.
      Mirrors the inline resolution in the [None] branch below; used to fix the
@@ -410,12 +458,11 @@ let rec rewrite_calls
                 (match resolve_impl_by_type impls tname with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
-                   (* Resolved!  Enqueue the impl so DCE keeps it alive. *)
-                   (match Hashtbl.find_opt fn_table mangled_name with
-                    | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-                      Queue.add (mangled_name, orig_impl, []) worklist
-                    | _ -> ());
-                   let f_var' = { f_var with Tir.v_name = mangled_name } in
+                   (* Resolved!  Enqueue the impl (specialized under this
+                      call's concrete arg types — see enqueue_specialized_impl
+                      above for why this must NOT be an empty substitution). *)
+                   let final_name = enqueue_specialized_impl mangled_name args in
+                   let f_var' = { f_var with Tir.v_name = final_name } in
                    Tir.EApp (f_var', args)))))
      | Some orig_fn
        when (* Interface-method-name collision: the callee name is a user
@@ -435,11 +482,11 @@ let rec rewrite_calls
              | _ -> false) ->
        (match iface_impl_name orig_name args with
         | Some mangled_name ->
-          (match Hashtbl.find_opt fn_table mangled_name with
-           | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-             Queue.add (mangled_name, orig_impl, []) worklist
-           | _ -> ());
-          Tir.EApp ({ f_var with Tir.v_name = mangled_name }, args)
+          (* Specialize under this call's concrete arg types — see
+             enqueue_specialized_impl for why an empty substitution is wrong
+             (Wave 2 Task 1: println-of-list miscompile). *)
+          let final_name = enqueue_specialized_impl mangled_name args in
+          Tir.EApp ({ f_var with Tir.v_name = final_name }, args)
         | None -> expr)
      | Some orig_fn
        when not (List.exists (fun v ->
@@ -544,15 +591,17 @@ let rec rewrite_calls
                    (match resolve_impl_by_type impls tname with
                     | None -> expr
                     | Some mangled_name ->
-                      (match Hashtbl.find_opt fn_table mangled_name with
-                       | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-                         Queue.add (mangled_name, orig_impl, []) worklist
-                       | _ -> ());
+                      (* Specialize under this call's concrete arg types —
+                         see enqueue_specialized_impl for why an empty
+                         substitution is wrong (Wave 2 Task 1: println-of-list
+                         miscompile — this is the ECallPtr twin of the EApp
+                         site above). *)
+                      let final_name = enqueue_specialized_impl mangled_name args in
                       (* Rewrite ECallPtr to use the resolved impl name.
                          Switch to EApp so that the call goes through the direct
                          call path in llvm_emit rather than the closure-dispatch
                          path, which would try to load a fn_ptr from a struct. *)
-                      let f_var' = { v with Tir.v_name = mangled_name } in
+                      let f_var' = { v with Tir.v_name = final_name } in
                       Tir.EApp (f_var', args)))))
         | Some orig_fn ->
           (* If callee is polymorphic, try to build a substitution from args *)

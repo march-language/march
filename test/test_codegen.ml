@@ -5821,6 +5821,115 @@ let test_erased_update_multi_field_values_compiled () =
       "11 22 33" run_out
   end
 
+(* ── Interface-impl monomorphization: compiled println/show on generic
+   containers (Wave 2, Task 1) ──────────────────────────────────────────
+   Root cause (see specs/analysis or .superpowers/sdd/sortby-diagnosis.md):
+   inside `impl Show(List(a)) when Show(a)` (stdlib/prelude.march), the
+   element-level `show(x)` types as a TVar, so lower.ml defers resolution.
+   mono.ml resolves the OUTER call (`show(xs : List(Int))`) to the mangled
+   impl `Show$List.show`, but historically enqueued that impl with an EMPTY
+   substitution — so the impl body stayed generic and the nested `show(x)`
+   call survived to llvm_emit unresolved.  llvm_emit's `unqualified_fns`
+   dot-suffix fallback then resolved the bare `show` to whatever `*.show`
+   impl happened to be registered first (typically `Show$List.show`
+   itself) — the list-impl applied to a raw element.  Symptom varies by
+   element type: Int → SIGSEGV (tag-load on an erased-int treated as a
+   heap pointer), String → non-exhaustive-match panic, Option → SIGSEGV/
+   SIGBUS (varies by which impl DCE keeps first).
+
+   These four variants (Int list, String list, Option list, nested list)
+   must all produce IDENTICAL stdout in compiled and interpreted mode, and
+   the compiled binary must exit 0. *)
+
+(** Shared parity assertion: interpreter and compiled binary must print the
+    exact same stdout and the compiled binary must exit 0. Returns the
+    compiled run's raw "stdout;EXIT:n" string on failure paths so callers
+    can still assert on it directly if useful. *)
+let assert_compiled_interp_parity ~name ~src ~expected () =
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let interp_out = read_cmd_output (Printf.sprintf
+      "cd %s && %s %s 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check string) (name ^ ": interpreter output") expected interp_out;
+    let bin = Filename.concat tmp (name ^ "bin") in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src_path)) in
+    Alcotest.(check int) (name ^ ": compiles ok") 0 compile_rc;
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
+      (Filename.quote bin)) in
+    Alcotest.(check bool)
+      (name ^ ": compiled output matches interpreter AND exits 0 \
+       (got: " ^ run_out ^ ")")
+      true
+      (ir_contains run_out (expected ^ "\nEXIT:0")
+       || run_out = expected ^ "\nEXIT:0")
+  end
+
+(** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
+    erased-int tag (2n+1) got passed as a fresh Show$List.show's list
+    argument and the match-scrutinee tag load faulted. *)
+let test_compiled_println_int_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_intlist"
+    ~src:"mod IfaceImplIntList do\n\
+         \  fn main() do\n\
+         \    println([1, 2, 3, 4, 5])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[1, 2, 3, 4, 5]"
+    ()
+
+(** Variant 2: List(String) — pre-fix symptom was a non-exhaustive-match
+    panic (exit 1): the bogus tag load landed inside a valid string heap
+    object and hit the match's default arm. *)
+let test_compiled_println_string_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_stringlist"
+    ~src:"mod IfaceImplStringList do\n\
+         \  fn main() do\n\
+         \    println([\"a\", \"b\"])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[a, b]"
+    ()
+
+(** Variant 3: List(Option(Int)) — pre-fix symptom was SIGSEGV/SIGBUS
+    (varies with DCE impl ordering): the erased-Option payload's tag byte
+    was read through the wrong impl's scrutinee layout. *)
+let test_compiled_println_option_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_optionlist"
+    ~src:"mod IfaceImplOptionList do\n\
+         \  fn main() do\n\
+         \    println([Some(42), None])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[Some(42), None]"
+    ()
+
+(** Variant 4: List(List(Int)) — nested container. Exercises recursive
+    impl specialization (Show$List.show for the outer List must itself
+    specialize the inner Show$List.show for List(Int), which specializes
+    Show$Int.show) AND is the recursion-guard check: mono's worklist
+    dedup (done_set keyed by the fully mangled name) must terminate this
+    without looping, since Show$List's own impl calls Show$List again at
+    one level deeper. *)
+let test_compiled_println_nested_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_nestedlist"
+    ~src:"mod IfaceImplNestedList do\n\
+         \  fn main() do\n\
+         \    println([[1, 2], [3]])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[[1, 2], [3]]"
+    ()
+
 let codegen_suites =
   [
       ( "nested_lit_pattern_codegen", [
@@ -6277,6 +6386,16 @@ let codegen_suites =
             test_erased_update_missing_field_panics_compiled;
           Alcotest.test_case "compiled multi-field update values (B5)" `Quick
             test_erased_update_multi_field_values_compiled;
+        ] );
+      ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
+            test_compiled_println_int_list_parity;
+          Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
+            test_compiled_println_string_list_parity;
+          Alcotest.test_case "compiled println(List(Option(Int))) parity (Wave2 T1)" `Quick
+            test_compiled_println_option_list_parity;
+          Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
+            test_compiled_println_nested_list_parity;
         ] );
   ]
 

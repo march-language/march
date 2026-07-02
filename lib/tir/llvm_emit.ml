@@ -2403,6 +2403,43 @@ let rec is_trivial_dec_chain (e : Tir.expr) : bool =
     is_trivial_dec_chain rest
   | _ -> false
 
+(* Wave 2 Task 1 defense-in-depth: a bare (unqualified, unresolved) callee
+   name that exactly matches the dot-suffix of one or more registered
+   interface-impl-mangled names ("Iface$Type.method") is the exact
+   recurrence signature of the println-of-list miscompile — mono.ml failed
+   to resolve a nested interface-method call (e.g. the `show(x)` inside
+   `impl Show(List(a)) when Show(a)`), and it survived to codegen as a bare
+   call.  unqualified_fns deliberately excludes these mangled names (see
+   the population site in emit_module), so such a call would otherwise
+   silently fall through to an unresolved `declare` that either fails at
+   link time with a cryptic "undefined symbol" or — worse — coincidentally
+   resolves against some unrelated same-named top-level fn.  Fail LOUDLY
+   instead, naming the unresolved symbol and the candidate impls, so this
+   can never again silently mis-bind to the wrong impl.
+
+   Called from BOTH unqualified_fns consumers — the general EApp call path
+   and the ECallPtr no-var-slot catch-all — with the same message, so any
+   future refinement of this check lands in both. *)
+let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
+  let candidates =
+    Hashtbl.fold (fun name _ acc ->
+        match String.rindex_opt name '.' with
+        | Some i when (match String.index_opt name '$' with
+                       | Some j -> j < i | None -> false) ->
+          let suffix = String.sub name (i + 1) (String.length name - i - 1) in
+          if suffix = bare_name then name :: acc else acc
+        | _ -> acc)
+      ctx.top_fns []
+  in
+  if candidates <> [] then
+    failwith (Printf.sprintf
+      "llvm_emit: unresolved interface-method call to `%s` reached codegen \
+       unspecialized (mono.ml should have rewritten this to a concrete impl). \
+       Candidate impls found (dispatch is ambiguous / was never resolved): %s. \
+       This is a monomorphization bug, not a linker issue — refusing to \
+       silently bind to an arbitrary one of these impls."
+      bare_name (String.concat ", " candidates))
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -3541,6 +3578,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
           | _ -> false)
     in
+    (* Unresolved bare interface-method guard — see
+       [fail_if_unresolved_iface_method]; the ECallPtr no-var-slot catch-all
+       applies the identical guard. *)
+    if not is_known_fn then
+      fail_if_unresolved_iface_method ctx f.Tir.v_name;
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
       Hashtbl.replace ctx.unknown_decls fname ();
       let param_strs = List.mapi (fun i (ty, _) ->
@@ -3779,6 +3821,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
           | _ -> false)
     in
+    (* Unresolved bare interface-method guard — see
+       [fail_if_unresolved_iface_method]; the EApp general-call path applies
+       the identical guard. *)
+    if not is_known_fn then
+      fail_if_unresolved_iface_method ctx f.Tir.v_name;
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
       Hashtbl.replace ctx.unknown_decls fname ();
       let param_strs = List.mapi (fun i (ty, _) ->
@@ -6662,13 +6709,36 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
          collisions between modules sharing an unqualified name.
          NOTE: we do NOT add the unqualified name to top_fns — that would
          shadow local variables with the same name (e.g. a boolean variable
-         named "abs" would incorrectly resolve to @Math.abs). *)
+         named "abs" would incorrectly resolve to @Math.abs).
+
+         EXCLUDE interface-impl-mangled names ("Iface$Type.method", e.g.
+         "Show$List.show" or a further-specialized "Show$List.show$List_Int")
+         from this map (Wave 2 Task 1 — defense in depth for the
+         println-of-list miscompile).  mono.ml now propagates the
+         substitution when it enqueues a resolved impl, so a nested
+         `show(x)` call inside `impl Show(List(a)) when Show(a)` should
+         ALWAYS be resolved to the concrete impl (e.g. Show$Int.show) by
+         mono before reaching llvm_emit.  If mono ever regresses and leaves
+         a bare interface-method call unresolved again, this map must NOT
+         silently rebind it to an arbitrary same-named impl (that was the
+         actual bug — a bare `show` got hijacked to `Show$List.show`,
+         the LIST impl applied to a raw element).  Detected by checking for
+         a '$' before the LAST '.' — ordinary qualified names ("Crypto.
+         base64_encode", "App.Core.b") never contain '$', so they are
+         unaffected. *)
       (match String.rindex_opt fn.Tir.fn_name '.' with
        | Some i ->
-         let unq = String.sub fn.Tir.fn_name (i+1)
-                     (String.length fn.Tir.fn_name - i - 1) in
-         if not (Hashtbl.mem ctx.unqualified_fns unq) then begin
-           Hashtbl.replace ctx.unqualified_fns unq fn.Tir.fn_name
+         let is_iface_mangled =
+           match String.index_opt fn.Tir.fn_name '$' with
+           | Some j -> j < i
+           | None -> false
+         in
+         if not is_iface_mangled then begin
+           let unq = String.sub fn.Tir.fn_name (i+1)
+                       (String.length fn.Tir.fn_name - i - 1) in
+           if not (Hashtbl.mem ctx.unqualified_fns unq) then begin
+             Hashtbl.replace ctx.unqualified_fns unq fn.Tir.fn_name
+           end
          end
        | None -> ()))
     m.Tir.tm_fns;
