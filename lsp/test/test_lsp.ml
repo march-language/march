@@ -230,6 +230,36 @@ end|} in
   in
   Alcotest.(check bool) "arity mismatch has relatedInformation" true has_related
 
+let test_analyse_desugar_error_produces_diagnostic () =
+  (* Desugar-time user errors (pipe-into-match, B6) must surface as
+     positioned LSP diagnostics. Before the ~errors wiring, desugar raised
+     a ParseError that escaped analyse — the editor showed no squiggle at
+     all because the publishDiagnostics notification was dropped. *)
+  let src = {|mod Test do
+  fn go() : String do
+    1 |> (match 2 do
+      1 -> "one"
+      _ -> "x"
+    end)
+  end
+end|} in
+  let a = analyse src in
+  let positioned =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        d.severity = Some Lsp.Types.DiagnosticSeverity.Error
+        && d.range.Lsp.Types.Range.start.line = 2
+        && (match d.message with
+            | `String s ->
+              (try ignore (Str.search_forward
+                             (Str.regexp_string "discards its scrutinee") s 0);
+                 true
+               with Not_found -> false)
+            | _ -> false))
+      a.diagnostics
+  in
+  Alcotest.(check bool) "pipe-into-match yields positioned error diagnostic"
+    true positioned
+
 (* ------------------------------------------------------------------ *)
 (* 3. Analysis — document symbols                                      *)
 (* ------------------------------------------------------------------ *)
@@ -6159,6 +6189,7 @@ let () =
       Alcotest.test_case "type error → diagnostic"               `Quick test_analyse_type_error_produces_diagnostic;
       Alcotest.test_case "parse error → diagnostic"              `Quick test_analyse_parse_error_produces_diagnostic;
       Alcotest.test_case "multiple errors all reported"          `Quick test_analyse_multiple_errors_all_reported;
+      Alcotest.test_case "desugar error → positioned diagnostic" `Quick test_analyse_desugar_error_produces_diagnostic;
       Alcotest.test_case "warning severity"                      `Quick test_analyse_warning_severity;
       Alcotest.test_case "notes appended to message"             `Quick test_analyse_notes_appended_to_message;
       Alcotest.test_case "type mismatch has relatedInformation"  `Quick test_analyse_related_information_on_type_mismatch;
