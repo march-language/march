@@ -173,6 +173,71 @@ let test_verify_detects_tampering () =
                | Ok ()   -> Alcotest.fail "expected verify to fail on tampered archive")))
 
 (* ------------------------------------------------------------------ *)
+(*  Archive task lib paths (MARCH_LIB_PATH assembly)                    *)
+(* ------------------------------------------------------------------ *)
+
+let canon p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+(** [paths] contains [expected] up to symlink/`..` normalisation. *)
+let mem_canon expected paths =
+  let e = canon expected in
+  List.exists (fun p -> canon p = e) paths
+
+let test_lib_paths_include_config_and_generated () =
+  with_temp_dir (fun d ->
+      make_package d [
+        ("lib/main.march", "mod Main do end");
+        ("forge/task.march", "mod Task do end");
+        ("config/config.march", "mod Config do end");
+        (".forge/generated/gen.march", "mod Gen do end");
+      ];
+      let paths = Archive_store.lib_paths_for_root d in
+      let has sub = mem_canon (Filename.concat d sub) paths in
+      Alcotest.(check bool) "lib/ on path"             true (has "lib");
+      Alcotest.(check bool) "forge/ on path"           true (has "forge");
+      Alcotest.(check bool) "config/ on path"          true (has "config");
+      Alcotest.(check bool) ".forge/generated on path" true (has ".forge/generated"))
+
+let test_lib_paths_omit_missing_dirs () =
+  with_temp_dir (fun d ->
+      make_package d [("lib/main.march", "mod Main do end")];
+      let paths = Archive_store.lib_paths_for_root d in
+      List.iter (fun p ->
+          Alcotest.(check bool) (p ^ " exists") true (Sys.file_exists p))
+        paths)
+
+let test_dep_lib_paths_transitive () =
+  with_temp_dir (fun d ->
+      make_package d [
+        ("a/forge.toml", "[package]\nname = \"a\"\n\n[deps]\nb = { path = \"../b\" }\n");
+        ("a/lib/a.march", "mod A do end");
+        ("b/forge.toml", "[package]\nname = \"b\"\n\n[deps]\nc = { path = \"../c\" }\n");
+        ("b/lib/b.march", "mod B do end");
+        ("c/forge.toml", "[package]\nname = \"c\"\n");
+        ("c/lib/c.march", "mod C do end");
+      ];
+      let paths = Archive_store.dep_lib_paths_for_archive (Filename.concat d "a") in
+      Alcotest.(check bool) "direct dep lib on path" true
+        (mem_canon (Filename.concat d "b/lib") paths);
+      Alcotest.(check bool) "dep-of-dep lib on path" true
+        (mem_canon (Filename.concat d "c/lib") paths))
+
+let test_dep_lib_paths_cycle_terminates () =
+  with_temp_dir (fun d ->
+      make_package d [
+        ("a/forge.toml", "[package]\nname = \"a\"\n\n[deps]\nb = { path = \"../b\" }\n");
+        ("a/lib/a.march", "mod A do end");
+        ("b/forge.toml", "[package]\nname = \"b\"\n\n[deps]\na = { path = \"../a\" }\n");
+        ("b/lib/b.march", "mod B do end");
+      ];
+      (* Mutual deps must terminate and not re-add the archive's own lib. *)
+      let paths = Archive_store.dep_lib_paths_for_archive (Filename.concat d "a") in
+      Alcotest.(check bool) "dep lib on path" true
+        (mem_canon (Filename.concat d "b/lib") paths);
+      Alcotest.(check bool) "archive's own lib not re-added" false
+        (mem_canon (Filename.concat d "a/lib") paths))
+
+(* ------------------------------------------------------------------ *)
 (*  Suite                                                               *)
 (* ------------------------------------------------------------------ *)
 
@@ -191,5 +256,11 @@ let () =
       Alcotest.test_case "store is idempotent"             `Quick test_store_idempotent;
       Alcotest.test_case "verify intact archive"           `Quick test_verify_intact;
       Alcotest.test_case "verify detects tampering"        `Quick test_verify_detects_tampering;
+    ];
+    "archive-lib-paths", [
+      Alcotest.test_case "config/ + .forge/generated included" `Quick test_lib_paths_include_config_and_generated;
+      Alcotest.test_case "missing dirs omitted"                `Quick test_lib_paths_omit_missing_dirs;
+      Alcotest.test_case "dep lib paths are transitive"        `Quick test_dep_lib_paths_transitive;
+      Alcotest.test_case "dep cycles terminate"                `Quick test_dep_lib_paths_cycle_terminates;
     ];
   ]
