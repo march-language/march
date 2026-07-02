@@ -1,11 +1,307 @@
 [
   {
-    "hash": "410a1c25c1f73bc2a8f288b3fc2240dffe518194",
-    "short_hash": "410a1c2",
+    "hash": "926b14f4d83bfcf11c0d66c8e9a44be185ed1487",
+    "short_hash": "926b14f",
     "author": "Matthew Gilliam",
-    "date": "2026-06-25T18:34:57-04:00",
-    "message": "Merge branch 'worktree-agent-aefc82233ac36cb44' (needs capability inference hints)",
+    "date": "2026-07-02T14:47:26-04:00",
+    "message": "fix(llvm,repl): close in_tail hole in mutual-TCO group formation; render desugar diagnostics in REPL\n\nhas_non_tail_group_call's dec-chain-wrapper arm matched Perceus's\npost-call-DecRC wrapper at any position without checking in_tail, so a\nmutual SCC member with a non-tail Perceus-wrapped group call could pass\ngroup formation and get a mutual-TCO back-edge that strands its\ncontinuation in a dead block. Guard now mirrors the bare-EApp arm.\n\nrun_simple's ReplExpr/ReplLetQ branches call desugar_expr outside any\nlocal try/with, so a desugar-time ParseError (e.g. B6 pipe-into-match)\nescaped to the loop's outermost catch-all and rendered as a bare\n\"internal error: ...instead of the span-rendered diagnostic the batch\ndriver shows. Added a last_src ref and a ParseError case that renders\nvia the same render_parse_error path bin/main.ml uses.\n\nAlso fixes a stale comment in test/imports/record_native/rn_entry.march\nthat still described the B5 EUpdate fallback as routing through\nmarch_record_put instead of the landed march_record_update_dyn.",
+    "files_changed": 7
+  },
+  {
+    "hash": "b439d0f00db690da315a5e7716ca6a69ccdaf5ef",
+    "short_hash": "b439d0f",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:40:56-04:00",
+    "message": "fix(llvm,runtime): record_put uniform value handoff; erased-EUpdate via chained puts\n\nCompiled record_put(r, k, v) SIGSEGV'd for any even Int v >= 4096: the\nEApp call site passed scalars in natural (untagged) repr and\nrec_field_norm_in's REC_PLAUSIBLE_HEAP sniff misclassified them as heap\npointers, so march_incrc dereferenced the integer's value.  Reported as\na TCO'd record_from_list+record_put loop crashing above ~10k iterations\n— the threshold was the value i*2 crossing 4096, not iteration count.\n\nThe call site now tags scalar i64 values (coerce i64->ptr, always odd),\nmatching every other uniform-slot store, and rec_field_norm_in's 'i'\ncase delegates to rec_field_norm_uniform: odd untags losslessly to a\nnatural 'i' slot; even plausible-heap bits still downgrade to 'g' (+1)\nfor the type-erased lying-static-type flows the sniff was built for\n(ee23036d, depot heterogeneous schema opts).\n\nAlso fixes { r with f: v } on a type-erased base (EUpdate with no\nstatic fields): it allocated a ZERO-field cell and stored every update\nat fallback index 0 — out of bounds, giving address-dependent garbage\nsums and intermittent SIGSEGVs.  Erased updates now lower to chained\nmarch_record_put calls (fresh +1 result with the right shape stamp,\nintermediates released; base ownership left to Perceus as before).\nStatic-shape EUpdate unchanged.  The B5 branch's\nmarch_record_update_dyn supersedes the chained lowering on merge; the\nuniform record_put handoff is the part to keep.\n\nRegression test (compiled, Slow, adversarial-regressions): single put\nof 4096 + 20k-iteration record_put loop + the same loop via { with },\nchecked against the closed-form sum; verified red (exit 139) pre-fix.\n\nSuite green: compiler 373, eval 224, codegen 324, stdlib 792,\nstdlib_march 53.  RC benches unchanged: tree_transform 104857600,\nlist_ops 333333666666, binary_trees depth-15 check 65535.",
+    "files_changed": 5
+  },
+  {
+    "hash": "3af54edece9d3d77e36d72c317532348d164a4d8",
+    "short_hash": "3af54ed",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:37:20-04:00",
+    "message": "fix(jit): emit_repl_expr/emit_repl_decl dropped ctx.extra_fns (B11 sibling); resurrect clang-gated JIT tests\n\nA top-level function referenced as a first-class value (not called) from a\nplain REPL expression or `let` RHS goes through emit_atom's clo_wrap path,\nwhich appends the @<fn>$clo_wrap trampoline definition to ctx.extra_fns.\nemit_repl_expr and emit_repl_decl never appended ctx.extra_fns to their\noutput, so the wrapper symbol was referenced but never defined and clang\nrejected the fragment (\"use of undefined value '@double$clo_wrap'\"). Append\nit before Buffer.contents, matching emit_repl_fn / emit_fns_fragment /\nemit_repl_fn_with_closure_slot (the B11 family). New clang-gated regression\ntest \"top-level fn as first-class value\" in the repl_jit_cross_line group,\nRED-verified before the fix.\n\nTwo infra fixes surfaced by writing that test:\n\n- setup_jit_runtime's runtime .so source list was missing march_dispatch.c\n  and march_monitor_registry.c (required since dist-OTP commit 85b9b471), so\n  the link silently failed and every clang-gated JIT test skipped vacuously.\n\n- With the JIT tests live again, the single shared $TMPDIR/march_jit dir\n  raced across concurrently-running test executables: one process's cleanup\n  rmdir'd it while another's clang was writing repl_<n>.so, and cleanup's\n  readdir could raise on the vanished dir, masking the real test exception.\n  Repl_jit.create now uses a per-pid dir (march_jit.<pid>) with a\n  stale-dead-pid sweep; cleanup never raises.\n\nFive-runner suite green run concurrently (Slow included): compiler 381,\neval 224, codegen 325, stdlib 791, stdlib_march 53.",
+    "files_changed": 6
+  },
+  {
+    "hash": "d23ed17be781cc203ffefaccb40ce65bfd494e15",
+    "short_hash": "d23ed17",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:19:46-04:00",
+    "message": "Merge branch 'claude/inspiring-mclaren-b44238'",
     "files_changed": 0
+  },
+  {
+    "hash": "4aa229347e77e74bf1ff2d831a1791e271f4551f",
+    "short_hash": "4aa2293",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:19:02-04:00",
+    "message": "docs(specs): commit pipeline deep-review analysis and wave-1 plan (load-bearing refs from todos/progress)",
+    "files_changed": 2
+  },
+  {
+    "hash": "e43dbd7c4282e2c4765048c7396fbb96cf9e735c",
+    "short_hash": "e43dbd7",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:19:01-04:00",
+    "message": "fix(forge): align archive task runner with forge build — deps-first MARCH_LIB_PATH, pinned toolchain\n\nfind_task built MARCH_LIB_PATH with the archive's own lib dirs first and\ndeps last — the opposite of cmd_build's lib_path_env. Swap both branches\nto deps-first for consistency (hardening; the typechecker ordering bug\nthis could expose was fixed in 0799c745).\n\nrun_task invoked bare `march` from PATH, skipping the pinned toolchain.\nPrepend Toolchain.path_prefix () like cmd_build does.",
+    "files_changed": 1
+  },
+  {
+    "hash": "5fabb89d6db36e912f9007b84e32ebb465abc1e4",
+    "short_hash": "5fabb89",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T14:03:45-04:00",
+    "message": "docs(specs): record Wave 1 P0 fixes in todos/progress; correct benchmark + snapshot doc rot\n\nConsolidates the 14 findings fixed in Wave 1 of the pipeline deep review\n(specs/analysis/2026-07-01-pipeline-deep-review.md, commits 11925401..b32d8569)\ninto specs/todos.md (Done) and specs/progress.md (Current State), skipping the\nthree entries (B5, B11, B12) already recorded by their own commits. Adds a\ntracked P0 item for the interpreter/compiled ERecordUpdate divergence found\nduring the B5 fix. Corrects CLAUDE.md's benchmark quick reference to call out\nthe compiled invocation explicitly (interpreted fib-shaped benchmarks can take\nhours). Authoritative full-suite counts: 383 compiler / 226 eval / 334 codegen\n/ 788 stdlib (all Slow tests genuinely executing) / 53 stdlib_march, all exit 0.",
+    "files_changed": 3
+  },
+  {
+    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
+    "short_hash": "a9b5663",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T13:38:52-04:00",
+    "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
+    "files_changed": 3
+  },
+  {
+    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
+    "short_hash": "b32d856",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T13:38:52-04:00",
+    "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
+    "files_changed": 3
+  },
+  {
+    "hash": "53c70a0e3da638370899efacaafcc7e4a95c46ac",
+    "short_hash": "53c70a0",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T13:17:19-04:00",
+    "message": "fix(llvm): thread type defs through ctx; REPL fragments no longer see stale representations (B12)",
+    "files_changed": 4
+  },
+  {
+    "hash": "bc5b0e22f96e241d887afe939ecc3f3e9da50d79",
+    "short_hash": "bc5b0e2",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T12:48:41-04:00",
+    "message": "fix(llvm): reduction check in mutual-TCO loops prevents scheduler starvation (B8)",
+    "files_changed": 2
+  },
+  {
+    "hash": "05d9e46b6549582dda049c62ec836633cffb9ab0",
+    "short_hash": "05d9e46",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T12:39:43-04:00",
+    "message": "fix(llvm): emit Perceus dec-chain before mutual-TCO back-edge (B7)",
+    "files_changed": 2
+  },
+  {
+    "hash": "4c1eea4f7acfadb1889cdc25cddf77b9f3e0cab9",
+    "short_hash": "4c1eea4",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:31:25-04:00",
+    "message": "fix(scripts): pin dune root to PWD in run-tests.sh so it works from nested worktrees\n\nClaude worktrees live at .claude/worktrees/<name> inside the main repo, so\ndune's upward root search escaped to the outer repo and failed with \"Don't\nknow how to build test/run_compiler.exe\". Pass --root \"$PWD\" after each\ndune subcommand (this dune rejects the flag before the subcommand).",
+    "files_changed": 1
+  },
+  {
+    "hash": "b2b5047cd7afb33b45070c3f6d5af53fe8c9f0cd",
+    "short_hash": "b2b5047",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:25:15-04:00",
+    "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
+    "files_changed": 2
+  },
+  {
+    "hash": "ed66a874e4f457fe7f3efdb128e74fc1665dd396",
+    "short_hash": "ed66a87",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:25:15-04:00",
+    "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
+    "files_changed": 2
+  },
+  {
+    "hash": "13d6863e057387a1fdf1bfb2fa71d6ecff079bad",
+    "short_hash": "13d6863",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:20:07-04:00",
+    "message": "Merge branch 'main' into claude/happy-turing-e1efac\n\n# Conflicts:\n#\tspecs/progress.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "ed6992ea94d5ac2d84e3086d7fa97433fb4181b6",
+    "short_hash": "ed6992e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:14:12-04:00",
+    "message": "Merge branch 'main' into claude/relaxed-leavitt-6c3243",
+    "files_changed": 0
+  },
+  {
+    "hash": "68e7df32a27e5b5aa19b97e2ef3cf754819699e3",
+    "short_hash": "68e7df3",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T11:14:08-04:00",
+    "message": "fix(lsp): surface desugar-time errors as diagnostics instead of dropping the request\n\nanalyse called desugar_module without ~errors, so desugar-level user\nerrors (pipe-into-match B6, bad deriving/satisfy) raised ParseError\nthrough the unguarded LSP notification handlers — the editor showed no\nsquiggle at all. Pass a fresh Errors context into desugar_module and\nmerge its diagnostics into the typecheck context so they surface through\nthe same diag_to_lsp path (user-file filter, span ordering).\n\nNew LSP test: a pipe-into-match buffer yields a positioned Error\ndiagnostic at the offending match instead of an exception.",
+    "files_changed": 3
+  },
+  {
+    "hash": "a29d669b1b43be94b8c995eaa599eff0875d9175",
+    "short_hash": "a29d669",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:40:53-04:00",
+    "message": "fix(forge): archive task MARCH_LIB_PATH parity — config/, .forge/generated, transitive deps\n\nlib_paths_for_root now appends config/ and .forge/generated (mirroring\ncmd_build.lib_path_env), fixing \"Unknown module Config\" for archive tasks\nwhose modules import a config module. dep_lib_paths_for_archive is now\ntransitive: a dep's modules were typechecked against that project's own\ndep closure, so the task runner recurses into each path/git dep's\nforge.toml (cycle-guarded via realpath-canonicalised visited set).\n\n4 new tests in forge/test/test_cas_package.ml (archive-lib-paths).",
+    "files_changed": 4
+  },
+  {
+    "hash": "e3aebbdce50461a04998308c3db36000ef028b7c",
+    "short_hash": "e3aebbd",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:40:30-04:00",
+    "message": "fix(desugar): remove ~H CSRF conn auto-injection (B16, bastion removal)",
+    "files_changed": 2
+  },
+  {
+    "hash": "56f2ca21e0c3ccd08a37f39ea3f8b231d49ff8b5",
+    "short_hash": "56f2ca2",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:32:16-04:00",
+    "message": "fix(parser): reject interleaved same-name fn clause groups (B14)",
+    "files_changed": 2
+  },
+  {
+    "hash": "07fdb5b7014ff9942c25f88d6591767195d84996",
+    "short_hash": "07fdb5b",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:25:58-04:00",
+    "message": "fix(desugar): error on pipe-into-match instead of silently discarding scrutinee (B6)",
+    "files_changed": 2
+  },
+  {
+    "hash": "22f7df1b592eda7e00f311611b5c254242e7e0c9",
+    "short_hash": "22f7df1",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:08:43-04:00",
+    "message": "fix(parser): newline-led float (and audited) literal match arms parse (token filter)",
+    "files_changed": 2
+  },
+  {
+    "hash": "b2ee1de11a0a89d23e1047e84a028612e3f07432",
+    "short_hash": "b2ee1de",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T10:06:04-04:00",
+    "message": "fix(lexer): track raw newlines inside string literals; line numbers no longer desync (B15)",
+    "files_changed": 2
+  },
+  {
+    "hash": "1fbd7889b7a2c0961c866878419b232a2d5f0a95",
+    "short_hash": "1fbd788",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T09:39:20-04:00",
+    "message": "fix(llvm): EUpdate on type-erased records — dyn path / loud failure instead of OOB writes (B5)\n\nEUpdate on a record whose static shape is unknown (get_record_fields\nreturns []: a record_from_list/record_put result flowing through a\ntype-erased generic) allocated a header-only cell (emit_heap_alloc ctx 0\n0) and then wrote every update at field_index_for's (0, TVar \"_\")\nfallback offset — an out-of-bounds write past the allocation, with all\nupdates colliding on \"field 0.\"\n\nMirrors the EField dyn fallback (march_record_field_dyn) already present\nfor the same erased-shape case: when all_fields = [] and updates <> [],\nthread each update through the existing march_record_put runtime\nbuiltin (shape-registry-aware, by-name copy-and-overwrite) instead of a\nhardcoded-offset store. No new runtime C function needed — march_record_put\nalready implements exactly this semantics.\n\nSurface trigger confirmed reachable: record_from_list(...) followed by\n{ built with f: v }. Extended test/imports/record_native/rn_entry.march\n(existing compile-and-run adversarial fixture) with 7 new checks (18 -> 25\ntotal). RED-without/GREEN-with-fix verified by reverting the llvm_emit.ml\nhunk: 6 of 7 new checks failed with wrong field values (silent corruption,\nno crash); reapplying fixes all 25. Compiled output cross-checked against\ninterpreter output — identical.\n\nFull suite: run_compiler 372/372, run_eval 224/224, run_codegen 326/326,\nrun_stdlib 788/788, test_stdlib_march 53/53 — all exit 0.",
+    "files_changed": 4
+  },
+  {
+    "hash": "b98115da337f0b42ad65fc00367ed7f05d812340",
+    "short_hash": "b98115d",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T23:01:23-04:00",
+    "message": "fix(llvm): RC ops must not be skipped for locals shadowing builtins/top-fns (B10)",
+    "files_changed": 2
+  },
+  {
+    "hash": "cd0770d99a33efd0fd0d541afca0271223e52f3d",
+    "short_hash": "cd0770d",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T22:39:44-04:00",
+    "message": "fix(llvm): repair off-by-one march_ prefix guard; runtime externs as values (B9)",
+    "files_changed": 1
+  },
+  {
+    "hash": "3ab862e224ee80b532af84ac0a6f7103ec8fa7a5",
+    "short_hash": "3ab862e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T22:29:54-04:00",
+    "message": "Merge branch 'claude/gracious-meitner-39d4a4'\n\n# Conflicts:\n#\tspecs/progress.md\n#\tspecs/todos.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "e8a43b7b9a02ae3e2373d03f65eaaf2aaaf830af",
+    "short_hash": "e8a43b7",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T22:21:11-04:00",
+    "message": "fix(lower,llvm): compile float-literal match arms; fail loudly on unhandled pattern rows (B4)",
+    "files_changed": 4
+  },
+  {
+    "hash": "7f1d1a32106fcb568910f06cf92fec9fbdfcf4d2",
+    "short_hash": "7f1d1a3",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:47:40-04:00",
+    "message": "fix(runtime): keep ASAN's sigaltstack — MARCH_SANITIZE binaries no longer abort at exit\n\nMARCH_SANITIZE=1 binaries on macOS arm64 printed correct output then\ndied with SIGTRAP (exit 133): AddressSanitizer CHECK-failed in\nUnmapOrDie ('failed to deallocate 0x10000 bytes ... error code: 22').\n\nRoot cause (lldb): _pthread_exit -> AsanThread::Destroy ->\nUnsetAlternateSignalStack munmap()s whatever altstack is current,\nassuming it is the mmap'd one ASAN installs per thread. The scheduler's\nsetup_alt_stack() had replaced it with a malloc'd 64 KiB buffer\n(non-page-aligned -> munmap EINVAL -> abort).\n\nFix: under __has_feature(address_sanitizer) / __SANITIZE_ADDRESS__,\nsetup_alt_stack() is a no-op — ASAN's own altstack is SA_ONSTACK-capable\nand serves the lazy stack-growth SIGSEGV handler (verified: 2000-frame\nnon-tail recursion grows the 4 KiB initial stack and exits 0 sanitized).\nNon-sanitized builds unchanged (preprocessed out).\n\nRegression test (Slow, compiled): sanitized hello-world must print and\nexit 0 — red (133) without the fix, green with it.",
+    "files_changed": 4
+  },
+  {
+    "hash": "3b77b9f3eb716e780af0b1aac2464f1d3c27253a",
+    "short_hash": "3b77b9f",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:47:27-04:00",
+    "message": "build(ed25519): declare tweetnacl.h as extra_deps of the foreign stubs\n\nruntime/ has no dune file, so nothing copied tweetnacl.h into _build;\nthe stubs' -I %{project_root}/runtime pointed at _build/default/runtime,\nwhich only contained tweetnacl.c (from the explicit copy rule). Fresh\ncheckouts (worktrees, CI cold builds) failed with 'tweetnacl.h file not\nfound'; the main repo built only via a stale _build.",
+    "files_changed": 1
+  },
+  {
+    "hash": "119254016e19436641a47b35d6e3cda47236385a",
+    "short_hash": "1192540",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:38:58-04:00",
+    "message": "fix(lower): panic on guard exhaustion instead of returning 0 (B3)",
+    "files_changed": 2
+  },
+  {
+    "hash": "a7591c51368ed9e8578707b9bc4f4cf7a0971465",
+    "short_hash": "a7591c5",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:36:59-04:00",
+    "message": "Merge main into claude/wonderful-keller-c592ea (second sync: compress builtins)",
+    "files_changed": 0
+  },
+  {
+    "hash": "16ee1edc09926ba092c59202d6a1a113e4647a01",
+    "short_hash": "16ee1ed",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:26:47-04:00",
+    "message": "fix(cas): key compile cache on MARCH_SANITIZE, MARCH_HTTP_EVLOOP, --fast-math, --debug\n\nMARCH_SANITIZE=1 silently reused a cached non-sanitized binary because the\nenv var changes the clang link line but was absent from cas_flags. Add a\ncodegen_cas_tags helper covering every remaining toggle that alters the\nemitted binary (MARCH_SANITIZE, MARCH_HTTP_EVLOOP, --fast-math,\n--debug/--debug-tui) and append it at both compilation_hash sites.\n\nMARCH_DEBUG_RUNTIME needs no tag: it only affects the interpreter/JIT\nruntime .so, which is keyed by its own flags_sig content key.\n\nVerified: plain compile caches; MARCH_SANITIZE=1 recompiles and links\nlibclang_rt.asan_osx_dynamic.dylib; MARCH_HTTP_EVLOOP=1 recompiles;\nplain recompile still hits the original cached artifact.",
+    "files_changed": 1
+  },
+  {
+    "hash": "a5dad1944f14b525bed1623097d165288ab52b37",
+    "short_hash": "a5dad19",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-01T21:18:26-04:00",
+    "message": "fix(perceus): P0 pipeline-review items — oracle crash-skip, dual-position RC double-consumption, FBIP same_arity conflation\n\n1. test/test_properties.ml oracle_check: a signal-killed compiled binary\n   (exit >= 128) when the interpreter succeeded is now a differential\n   FAILURE, not a skip; clean nonzero error exits (and timeout's 124)\n   still skip. RC miscompiles that abort were invisible to the oracle.\n\n2. lib/tir/perceus.ml EApp + ECallPtr-extern: a var passed at BOTH an\n   owned and a borrowed position of the same call, dead afterwards, was\n   consumed twice (owned transfer + borrowed post-call dec) against the\n   caller's single reference — both(s, s, 1) with both(a:own, b:borrow, n)\n   aborted exit 134 compiled, interpreter fine. Normal calls now add one\n   balancing EIncRC and keep the post-dec (also protects the borrowed\n   alias for the call's whole duration); self calls drop the post-dec\n   (TCO makes the trailing dec dead code — an inc would leak per\n   iteration).\n\n3. lib/tir/perceus.ml same_arity: stop conflating a TCon's type-parameter\n   count with a constructor's field count. The dead-binding FBIP path fed\n   raw declared types, so a dead 1-field Small(n) : Holder(a,b,c,d,e)\n   cell was reused for the 5-field Big ctor — heap overflow clobbering\n   the neighbouring chunk (compiled match took the wrong arm).\n   add_scrutinee_free_for's arity encoding now carries an unforgeable\n   $fbip$ marker; same_arity accepts only marked encodings. Audited\n   Borrow.has_matching_alloc: name-prefix ownership gate only, no arity\n   use — documented, no change needed.\n\nTests: 2 compiled Slow regression guards (parity + exit 0) in\ntest_stdlib_suite.ml; fbip_p8 unit tests updated to the marker encoding\n+ same_arity_raw_type_refused added. 372 compiler / 224 eval / 323\ncodegen / 790 stdlib / 53 stdlib_march / 36 properties pass; RC\nbenchmarks (tree_transform / list_ops / binary_trees) outputs and\ntimings unchanged.",
+    "files_changed": 8
+  },
+  {
+    "hash": "8713f42b1e8f785094d0bcd56782d304b64e9059",
+    "short_hash": "8713f42",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-29T14:06:06-04:00",
+    "message": "feat(forge): print wall time, error count, and warning count after build/check\n\nforge build and forge check now print a summary line at the end of every\nrun: wall-clock time in seconds, plus error/warning counts when non-zero.\n\nExamples:\n  0.23s\n  3 warnings — 1.25s\n  2 errors, 1 warning — 0.47s\n\nImplemented by capturing each compiler invocation's stderr via a temp file\n(re-emitting it to forge's stderr with colour preserved when the terminal\nis a tty), then scanning the captured output for \"-- ERROR\" / \"-- WARNING\"\nblock headers and the simpler \"file:col: error:\" one-liner format.",
+    "files_changed": 3
+  },
+  {
+    "hash": "6a4fe4f3a2e20cab198087629447c19b2532ca9a",
+    "short_hash": "6a4fe4f",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-26T09:48:55-04:00",
+    "message": "merge: integrate pattern guard path threading with refinement-verified state migration\n\nCombines the guard-aware division-safety + multi-position return inference\nfrom claude/happy-ritchie-81ea80 with the @invariant syntax, --check-migration\nmode, cap pure/no_extern/deterministic, cap no_alloc, and let-value division\nchecks from origin/main (claude/unruffled-feistel-d310a9).\n\nMerge strategy:\n- division_safety.ml: keep both path_proves_nonzero (guard fast-path) and\n  collect_let_values (let-binding SMT check); check_var_divisor takes both\n  path and let_values; None case tries path first, then let_values lookup\n- return_infer.ml: keep multi-position return_positions + infer_clause with\n  guard-derived Z3 assumptions; infer_decls adapted to inferred_return option\n- test_compiler.ml: all 5 guard divsafety tests + all cap_pure/no_alloc tests\n  + 4 return_refine_guard tests; 370 compiler tests pass\n- specs: both todos entries kept; progress updated to 2026-06-26\n\n370 compiler / 66 refinecheck tests pass.",
+    "files_changed": 0
+  },
+  {
+    "hash": "05aca4b02abe5012f9f6d424a8493a3bd672d124",
+    "short_hash": "05aca4b",
+    "author": "Matthew Gilliam",
+    "date": "2026-06-26T09:05:35-04:00",
+    "message": "specs: pattern guards (when in match) refinement integration spec",
+    "files_changed": 1
   },
   {
     "hash": "4cf74f69992c7ba42d255dd89a1e86492db3a0a3",
@@ -2576,16 +2872,16 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -2656,14 +2952,6 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
     "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
@@ -2672,16 +2960,24 @@
     "files_changed": 7
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
