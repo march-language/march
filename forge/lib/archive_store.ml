@@ -364,8 +364,10 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat dep_dir rel_module in
             if Sys.file_exists full_path then
-              let lib_paths = lib_paths_for_root dep_dir
-                              @ dep_lib_paths_for_archive dep_dir in
+              (* Deps first, own lib last — same order as cmd_build's
+                 lib_path_env. *)
+              let lib_paths = dep_lib_paths_for_archive dep_dir
+                              @ lib_paths_for_root dep_dir in
               Some (full_path, lib_paths)
             else None
         end else None
@@ -389,8 +391,8 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat archive_root rel_module in
             if Sys.file_exists full_path then
-              let lib_paths = lib_paths_for_root archive_root
-                              @ dep_lib_paths_for_archive archive_root in
+              let lib_paths = dep_lib_paths_for_archive archive_root
+                              @ lib_paths_for_root archive_root in
               Some (full_path, lib_paths)
             else None))
 
@@ -432,6 +434,10 @@ let run_task task_file lib_paths args =
     | None -> ""
     | Some p -> Printf.sprintf "MARCH_STDLIB=%s " (Filename.quote p)
   in
-  let cmd = Printf.sprintf "%s%sFORGE_TASK_ARGS=%s march %s"
-      lib_path_env stdlib_env (Filename.quote args_env) (Filename.quote task_file) in
+  (* Same pinned-toolchain resolution as cmd_build: put the resolved toolchain
+     first on PATH so the bare `march` below uses the pinned version. *)
+  let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
+  let cmd = Printf.sprintf "%s%s%sFORGE_TASK_ARGS=%s march %s"
+      toolchain_pfx lib_path_env stdlib_env
+      (Filename.quote args_env) (Filename.quote task_file) in
   Sys.command cmd
