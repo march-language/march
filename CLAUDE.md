@@ -56,6 +56,13 @@ dune runtest --force       # re-run even if inputs are cached (avoids silent no-
 
 To unstick a stale daemon: `dune shutdown` (dune 3.x).
 
+**Shared dune cache.** Dune's build cache is enabled user-globally
+(`~/.config/dune/config`), so identical compilation actions are reused across
+all worktrees and sessions instead of recompiled — a fresh worktree's build is
+mostly cache hits. If you suspect the cache during compiler debugging, bypass
+it with `DUNE_CACHE=disabled dune build ...`. Bound its growth occasionally
+with `dune cache trim --size 20GB`.
+
 24 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
 parity tests (~5s), 15 compiled adversarial regression tests (~20s), 2 pbkdf2
 key-derivation tests (~3s), and 1 vault concurrency test. Run the full suite

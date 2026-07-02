@@ -56,6 +56,11 @@ delete `_build`, rebuild, and compare wall time — the warm rebuild should be
 dramatically faster. Run the quick suite (`scripts/run-tests.sh -q`) from the
 warm build to confirm cached artifacts behave identically.
 
+**Measured (2026-07-02, idle machine):** building the four test executables
+from an empty `_build` took 7.9s wall / ~33s CPU with the cache disabled, and
+0.66s wall / ~0.6s CPU warm from the shared cache — roughly 50× less CPU per
+worktree build. Quick suite from the warm build: all suites passed.
+
 ## Risks
 
 - **Cache-induced staleness** during compiler debugging: dune's cache is
