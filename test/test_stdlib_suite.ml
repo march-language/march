@@ -10310,6 +10310,77 @@ let test_compiled_record_field_poly_mono () =
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
+(* Regression: march_record_put received scalar values in NATURAL (untagged)
+   representation and sniffed them with REC_PLAUSIBLE_HEAP to catch lying
+   static types — so ANY even Int >= 4096 (page size) was misclassified as a
+   heap pointer and march_incrc dereferenced the integer's value (SIGSEGV on
+   the first such record_put; e.g. a TCO'd record_from_list+record_put loop
+   "crashed above ~10k iterations" only because that's when i*2 crossed 4096).
+   Fix: the record_put call site tags 'i'-kind values (uniform repr, odd) and
+   the runtime untags unambiguously via rec_field_norm_uniform.
+   Same family: `{ r with f: v }` on a TYPE-ERASED base (EUpdate with no
+   static fields) allocated a zero-field cell and stored every update at
+   fallback index 0 — out of bounds (address-dependent garbage/SIGSEGV).
+   Now lowered to chained march_record_put.  Guard: a single put of 4096, a
+   20k-iteration put loop, and the same loop via `{ with }` must exit 0 with
+   the arithmetically-correct sum. *)
+let test_compiled_record_put_large_even_int () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_recputint" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "rp.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod RecPutLargeInt do\n\
+      \  fn get_i(r, k) do\n\
+      \    match record_get(r, k) do\n\
+      \      Some(v) -> v\n\
+      \      None -> 0 - 1\n\
+      \    end\n\
+      \  end\n\
+      \  fn go(i, acc) do\n\
+      \    if i == 0 do\n\
+      \      acc\n\
+      \    else\n\
+      \      let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+      \      let u = record_put(record_put(built, \"a\", i), \"c\", i * 2)\n\
+      \      go(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
+      \    end\n\
+      \  end\n\
+      \  fn go2(i, acc) do\n\
+      \    if i == 0 do\n\
+      \      acc\n\
+      \    else\n\
+      \      let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+      \      let u = { built with a: i, c: i * 2 }\n\
+      \      go2(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() : Unit do\n\
+      \    let one = record_put(record_from_list([(\"a\", 1)]), \"a\", 4096)\n\
+      \    if get_i(one, \"a\") == 4096 do () else process_exit(1) end\n\
+      \    let n = 20000\n\
+      \    let expected = 3 * n * (n + 1) / 2 + 2 * n\n\
+      \    if go(n, 0) == expected do () else process_exit(2) end\n\
+      \    if go2(n, 0) == expected do () else process_exit(3) end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "rpbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote tmp) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else
+      Alcotest.(check int)
+        "compiled record_put of even Int >= 4096: no SIGSEGV, correct sum at 20k iterations"
+        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+  end
+
 (* End-to-end guard for Hot Code Reload (HCR) Phase 2 versioned dispatch.
    `--hot-reload <Prefix>` compiles modules under <Prefix> with a versioned
    dispatch table: boundary→boundary calls route through march_dispatch_enter/
@@ -11660,6 +11731,8 @@ let stdlib_suites =
           test_compiled_fbip_arity_no_overflow;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
+        Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
+          test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow

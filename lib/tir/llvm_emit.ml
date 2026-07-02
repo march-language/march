@@ -3020,12 +3020,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (kt, kv) = emit_atom ctx k in
     let kp = coerce ctx kt kv "ptr" in
     let (vt, vv) = emit_atom ctx v in
-    (* Pass the value in NATURAL representation as a ptr-sized word: raw i64
-       for scalars (NOT low-bit tagged), raw bits for floats, ptr as-is. *)
+    (* Pass the value in UNIFORM representation as a ptr-sized word: scalars
+       low-bit tagged (coerce i64→ptr), raw bits for floats, ptr as-is.
+       Natural repr is ambiguous — an even Int >= 4096 is bit-identical to a
+       heap pointer, so the runtime's plausible-heap sniff would incrc
+       (dereference) the integer's value.  Tagged scalars are always odd and
+       untag unambiguously in rec_field_norm_uniform. *)
     let vp = (match vt with
-      | "i64" ->
-        let t = fresh ctx "cv" in
-        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+      | "i64" -> coerce ctx "i64" vv "ptr"
       | "double" ->
         let b = fresh ctx "cv" in
         let t = fresh ctx "cv" in
@@ -4438,6 +4440,41 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.ALit _    -> Tir.TVar "_"
     in
     let all_fields = get_record_fields ctx base_ty in
+    if all_fields = [] && updates <> [] && ctx.shape_meta then begin
+      (* Type-erased base: the static shape is unknown, so the copy-all-
+         fields path below would allocate a ZERO-field cell and store every
+         update at fallback index 0 — out of bounds (heap clobber, address-
+         dependent garbage/SIGSEGV).  Lower to chained march_record_put
+         instead: it resolves fields by name against the runtime shape id,
+         handles any field kind via the uniform value handoff, and returns a
+         fresh +1 cell stamped with the right shape.  The base's ownership
+         is left to Perceus exactly as on the static path (no release here);
+         intermediate cells from all but the last put are released. *)
+      let (_, base_val) = emit_atom ctx base_atom in
+      let put cur (fname, atom) =
+        let (_, kv) =
+          emit_atom ctx (Tir.ALit (March_ast.Ast.LitString fname)) in
+        let (aty, av) = emit_atom ctx atom in
+        let vp = (match aty with
+          | "i64" -> coerce ctx "i64" av "ptr"
+          | "double" ->
+            let b = fresh ctx "cv" in
+            let t = fresh ctx "cv" in
+            emit ctx (Printf.sprintf "%s = bitcast double %s to i64" b av);
+            emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t b);
+            t
+          | _ -> av) in
+        let kind = shape_kind_char (atom_tir_ty atom) in
+        let res = fresh ctx "cr" in
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_record_put(ptr %s, ptr %s, ptr %s, i64 %d)"
+          res cur kv vp (Char.code kind));
+        if cur <> base_val then
+          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" cur);
+        res
+      in
+      ("ptr", List.fold_left put base_val updates)
+    end else begin
     let n = List.length all_fields in
     let (_, base_val) = emit_atom ctx base_atom in
     (* Allocate new record of same size *)
@@ -4469,6 +4506,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       end
     end;
     ("ptr", ptr)
+    end
 
   (* ── Case expression ───────────────────────────────────────────────── *)
   | Tir.ECase (scrut_atom, branches, default_opt) ->

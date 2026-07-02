@@ -1727,11 +1727,12 @@ void march_repl_set(int64_t slot, int64_t val) {
  *     conditionally (ashr iff odd); 'f' raw double bits; 'p'/'g' bits as-is.
  *     Compiled tuple slots are uniform too (ETuple stores scalars through
  *     coerce i64→ptr = tag), so pair snd MUST be tagged, not natural.
- *   - IN (record_put value): NATURAL repr with an explicit kind argument
- *     supplied by the call site (the EApp special case passes raw i64 bits).
- *     If a kind-'i' value's bits look like a heap pointer, the static type
- *     lied (type-erased heterogeneous flow) and the field kind is downgraded
- *     to 'g' so the bits round-trip unmodified.
+ *   - IN (record_put value): UNIFORM repr with an explicit kind argument
+ *     supplied by the call site (the EApp special case tags scalar i64s;
+ *     natural repr would make an even Int >= 4096 indistinguishable from a
+ *     heap pointer).  An even plausible-heap value under a scalar kind means
+ *     the static type lied (type-erased heterogeneous flow) and the field
+ *     kind is downgraded to 'g' so the bits round-trip unmodified.
  *   - IN (record_from_list pair values): UNIFORM repr (the pairs come from
  *     compiled tuple slots / record_entries) — 'i' values are conditionally
  *     untagged to natural before storing.
@@ -1858,12 +1859,12 @@ static int64_t rec_field_copy(void *rec, int32_t i, char kind) {
 /* Normalize an incoming (bits, kind) pair to the natural slot value and the
  * honest field kind, then take any needed +1 reference.
  *
- *   'i'  natural i64 from the record_put EApp special case.  If the bits look
- *        like a heap pointer the static type lied (type-erased heterogeneous
- *        flow) — downgrade the field to 'g' so the bits round-trip verbatim.
- *   'g'  UNIFORM bits from generic call paths / record_from_list pair snd:
- *        odd = tagged int (untag to natural, kind 'i'); even = heap pointer
- *        or erased raw bits (store verbatim, kind 'g', guarded incrc).
+ *   'i'/'g'  UNIFORM bits (record_put call sites tag scalars, generic paths
+ *        and record_from_list pair snd are uniform already): odd = tagged int
+ *        (untag to natural, kind 'i'); even = heap pointer or erased raw bits
+ *        flowing through a lying static type (store verbatim, kind 'g',
+ *        guarded incrc).  Natural repr would be ambiguous here: an even int
+ *        >= 4096 is bit-identical to a heap pointer.
  *   'f'  raw double bits.   'p'  heap pointer (+1 ref).
  */
 static int64_t rec_field_norm_uniform(int64_t bits, char *kind) {
@@ -1880,11 +1881,6 @@ static int64_t rec_field_norm_uniform(int64_t bits, char *kind) {
 static int64_t rec_field_norm_in(int64_t bits, char *kind) {
     switch (*kind) {
     case 'i':
-        if (REC_PLAUSIBLE_HEAP(bits)) {
-            *kind = 'g';
-            march_incrc((void *)(intptr_t)bits);    /* guarded */
-        }
-        return bits;
     case 'g':
         return rec_field_norm_uniform(bits, kind);
     case 'p':
@@ -2043,8 +2039,9 @@ static char *rec_desc_with_kind(march_record_shape *s, int32_t fi, char kind) {
 }
 
 /* record_put(rec, key, value, kind) -> new record with the field set (or
- * added, interning an extended shape at runtime).  [value] arrives in natural
- * representation; [kind] is the call site's static kind char. */
+ * added, interning an extended shape at runtime).  [value] arrives in UNIFORM
+ * representation (scalars low-bit tagged); [kind] is the call site's static
+ * kind char. */
 void *march_record_put(void *rec, void *key, void *value, int64_t kind) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_put");
     march_string *ks = (march_string *)key;
