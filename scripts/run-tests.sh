@@ -23,6 +23,12 @@ set -euo pipefail
 DUNE=${DUNE:-dune}
 SUITE_TIMEOUT=${MARCH_TEST_TIMEOUT:-300}
 
+# Pin the dune root to the invocation directory.  Claude worktrees live at
+# .claude/worktrees/<name> inside the main repo, so dune's upward root search
+# escapes to the outer repo and can't see the worktree's targets.  --root must
+# come AFTER the subcommand (this dune rejects `dune --root . build`).
+DUNE_ROOT=(--root "$PWD")
+
 # timeout(1) is GNU coreutils; macOS users can `brew install coreutils` for gtimeout.
 if command -v timeout &>/dev/null; then
   TIMEOUT_CMD="timeout $SUITE_TIMEOUT"
@@ -48,7 +54,7 @@ done
 # Optionally clear stale daemon before starting (useful after a crashed session)
 if [[ -n "${MARCH_DUNE_SHUTDOWN:-}" ]]; then
   echo "==> dune shutdown (clearing stale daemon)"
-  $DUNE shutdown 2>/dev/null || true
+  $DUNE shutdown "${DUNE_ROOT[@]}" 2>/dev/null || true
 fi
 
 # Build phase: dune handles concurrent build requests internally
@@ -57,7 +63,7 @@ BUILD_TARGETS=()
 for r in "${RUNNERS[@]}"; do
   BUILD_TARGETS+=("test/${r}.exe")
 done
-$DUNE build "${BUILD_TARGETS[@]}"
+$DUNE build "${DUNE_ROOT[@]}" "${BUILD_TARGETS[@]}"
 
 # Execution phase: run binaries directly — no dune RPC, no output buffering
 FAILED=0
