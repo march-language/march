@@ -691,6 +691,116 @@ let test_repl_jit_cross_line_hof () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression (B11): a REPL-defined top-level `fn` (declared via a bare
+    `fn ... do ... end` at the prompt) is stored as a first-class closure in
+    a persistent slot by [emit_repl_fn_with_closure_slot] (see
+    lib/repl/repl.ml's `DFn` arm, `run_decl ~is_fn_decl:true`), so that a
+    LATER fragment referencing the function by bare name loads the slot's
+    closure value rather than re-resolving a fresh top-level call (each REPL
+    fragment gets its own [ctx], so `ctx.top_fns`/`ctx.compiled_fns` from the
+    defining fragment aren't visible — the bridge in
+    [emit_prev_slot_bridges] is what makes cross-fragment references work at
+    all).  That bridged reference is dispatched through ECallPtr, which
+    always reads the callee's result as `ptr` — the same ABI every OTHER
+    closure wrapper in llvm_emit.ml (the canonical [clo_wrap_define]) honors
+    by tagging scalar results `(n<<1)|1`.  The REPL's inline wrapper instead
+    declares the RAW concrete return type (`i64` for `mk() : Int`), so the
+    LLVM-declared return type disagrees with the indirect call's `ptr`
+    signature; the conditional-untag on the caller side reinterprets the raw
+    bits as tagged and (n odd) `ashr`s them — halving odd Int results
+    (5 -> 2).  `mk()` returns the odd literal `5` directly (no inner
+    lambda, so the *only* wrapper in play is the REPL's own); referencing
+    `mk` bare on a later REPL line and calling it must yield "5", not "2". *)
+let test_repl_jit_stored_closure_returns_untagged_int () =
+  match setup_jit_runtime () with
+  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       (* fn mk() do 5 end *)
+       (match parse_repl "fn mk() do\n  5\nend" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+            | _ -> failwith "expected DFn for 'fn mk() do 5 end'"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (* mk() — cross-fragment reference; bridged through the closure slot
+          (not a fresh top-level call, since ctx is fresh per fragment). *)
+       (match parse_repl "mk()" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "stored closure mk() = 5 (not halved to 2)" "5" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression (B11 review follow-up): a REPL-defined `fn` whose body
+    references ITSELF as a first-class value must not produce a duplicate
+    `$clo_wrap` definition.  [emit_repl_fn_with_closure_slot] registers the
+    fn into [ctx.top_fns] BEFORE [emit_fn] runs, so when the body takes the
+    fn as a value (e.g. `let g = selfref`), emit_atom's top-fns wrap path
+    fires [clo_wrap_define] into [ctx.extra_fns] and records the name in
+    [ctx.emitted_wraps].  The emitter's own wrapper emission must honor the
+    same emitted_wraps check-then-add guard the other two clo_wrap_define
+    call sites use — an unconditional emission appends a SECOND
+    `define ptr @selfref$clo_wrap` to the same fragment, and clang rejects
+    the duplicate symbol (compile_fragment raises "clang failed").  The
+    assertion is simply that the fragment compiles and the call returns the
+    right (odd, tag-round-tripped) value. *)
+let test_repl_jit_selfref_fn_no_duplicate_wrapper () =
+  match setup_jit_runtime () with
+  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       (* fn selfref(n) do let g = selfref ... end — self-reference as value *)
+       (match parse_repl
+          "fn selfref(n) do\n  let g = selfref\n  if n > 0 do\n    g(0)\n  else\n    7\n  end\nend" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+            | _ -> failwith "expected DFn for 'fn selfref(n) do ... end'"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          (* Pre-guard-fix this raised: Failure "clang failed ... symbol
+             'selfref$clo_wrap' is already defined". *)
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (* selfref(1) — recurses once through the self-referenced closure
+          value, returning the odd literal 7 through the ptr-ABI wrapper. *)
+       (match parse_repl "selfref(1)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "selfref(1) = 7 (single wrapper, ptr ABI)" "7" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Test: List.length works correctly in JIT REPL with stdlib precompile.
 
     This is a regression test for the defun TVar bug: when the stdlib is
@@ -5634,6 +5744,8 @@ let codegen_suites =
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
+        Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
+        Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
         Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;
       ];

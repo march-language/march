@@ -7073,11 +7073,16 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
   emit_slot_loader_fns ctx prev_slots;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
-     Uses the same concrete parameter types and untagged return as the wrapper
-     emitted by emit_atom (lines 1095-1112).  This ensures ECallPtr call-sites
-     (which declare the concrete return type) get the raw value back, not a
-     tagged pointer.  Keeping both wrappers identical also prevents behavioural
-     disagreement when the two .so files define the same symbol name. *)
+     via the canonical [clo_wrap_define] (see its doc comment) so this
+     wrapper honors the SAME generic ptr ABI as every other closure-dispatch
+     wrapper in this file: scalars tagged `(n<<1)|1`, doubles bitcast into
+     the ptr slot, heap ptrs passed through.  ECallPtr call sites always
+     read the result as `ptr` (see is_apply_fn) regardless of the callee's
+     concrete return type — a wrapper that instead returned the raw
+     concrete type (as this one used to) would declare a mismatched LLVM
+     signature against that `call ptr` site, and the caller's conditional
+     untag would reinterpret raw bits as tagged, corrupting odd Int
+     results (B11). *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
   let nparams = List.length fn.Tir.fn_params in
@@ -7088,15 +7093,17 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
   let all_arg_decls = "%_clo" :: arg_names in
   let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
   let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-  let wrap_body =
-    if target_ret = "void" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
-        wrap_name decl_str fn_llvm_name call_args
-    else
-      Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n"
-        target_ret wrap_name decl_str target_ret fn_llvm_name call_args target_ret
-  in
-  Buffer.add_string ctx.buf wrap_body;
+  (* Same check-then-add emitted_wraps guard as the other two clo_wrap_define
+     call sites: the fn is registered in ctx.top_fns BEFORE emit_fn above, so
+     a body that references ITSELF as a first-class value (e.g.
+     `let g = selfref`) already emitted this exact wrapper via emit_atom's
+     top-fns wrap path — an unconditional second emission would define the
+     same symbol twice in one fragment and clang rejects the module. *)
+  if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
+    Hashtbl.add ctx.emitted_wraps wrap_name ();
+    Buffer.add_string ctx.extra_fns
+      (clo_wrap_define wrap_name decl_str target_ret fn_llvm_name call_args)
+  end;
   (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
@@ -7113,6 +7120,12 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
+  (* clo_wrap_define's output above lands in ctx.extra_fns (the same buffer
+     every other closure-wrap call site appends to) — include it here or the
+     wrapper text is silently dropped and @<fn>$clo_wrap becomes an undefined
+     symbol at link/dlopen time (B11 sibling bug: this emitter used to omit
+     extra_fns entirely). *)
+  Buffer.add_buffer out ctx.extra_fns;
   Buffer.contents out
 
 (** Emit a collection of functions as a standalone LLVM IR module.
