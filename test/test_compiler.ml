@@ -4780,6 +4780,45 @@ let test_return_infer_if_guard_infers_pos () =
       (has_pred infers "abs" "r > 0")
 
 
+(* B15: a raw newline inside a plain "..." string literal must advance the
+   lexer's line tracking (Lexing.new_line), matching the triple-string rule's
+   existing behavior. Before the fix, read_string/read_string_interp consumed
+   the newline character without calling Lexing.new_line, so every span after
+   the string was off by the number of embedded raw newlines. *)
+let test_string_literal_raw_newline_tracks_line () =
+  let src =
+    "mod StrNL do\n\
+    \  fn greet() do \"hello\nworld\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Source lines: 1 `mod StrNL do`, 2 `fn greet() ... "hello`, 3 `world" end`
+       (the raw newline inside the string literal splits the `greet` decl
+       across lines 2-3), 4 `fn second() do 42 end`. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
+let test_string_interp_raw_newline_tracks_line () =
+  let src =
+    "mod StrInterpNL do\n\
+    \  fn greet(name) do \"hi\n${name}\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Same reasoning as above, but the raw newline is inside the prefix of a
+       string-interpolation segment (read_string_interp), one line earlier
+       than the interpolation hole. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string interp" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
 let compiler_suites =
   [
       ( "resolver",
@@ -5254,6 +5293,10 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "lexer_line_tracking", [
+          Alcotest.test_case "B15: raw newline in string literal tracks line"      `Quick test_string_literal_raw_newline_tracks_line;
+          Alcotest.test_case "B15: raw newline in string interp tracks line"       `Quick test_string_interp_raw_newline_tracks_line;
         ] );
   ]
 
