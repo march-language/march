@@ -427,15 +427,24 @@ let http_fetch_hook
   : (string -> string -> string -> string -> (string, string) result) option ref
   = ref None
 
+(* Flushed on every call, not just at exit: a long-running program (e.g. an
+   HTTP server started via `forge run`, interpreted rather than compiled)
+   writes print/println output through here on every request. Without an
+   explicit flush, OCaml's stdout channel buffers silently until the process
+   exits — logs redirected to a file or pipe (`forge run > server.log 2>&1`)
+   never appear until the process is killed, even though the same program
+   looks fine interactively (a terminal's own line-buffering can mask the
+   channel-level buffering underneath). Mirrors capture_ewriteln below, which
+   already flushes on every call for the same reason. *)
 let capture_write (s : string) : unit =
   match !test_capture_buf with
   | Some buf -> Buffer.add_string buf s
-  | None -> print_string s
+  | None -> print_string s; flush stdout
 
 let capture_writeln (s : string) : unit =
   match !test_capture_buf with
   | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
-  | None -> print_endline s
+  | None -> print_endline s; flush stdout
 
 (* Logger output goes to stderr normally; redirect to capture buf during tests. *)
 let capture_ewriteln (s : string) : unit =
