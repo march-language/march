@@ -223,6 +223,7 @@ and read_string buf = parse
                     read_string buf lexbuf }
   | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string literal") }
+  | '\n'          { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_string buf lexbuf }
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
 
 (** Resume reading a string literal after the closing `}` of an interpolation. *)
@@ -274,4 +275,5 @@ and read_string_interp buf = parse
                     read_string_interp buf lexbuf }
   | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string interpolation") }
+  | '\n'          { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_string_interp buf lexbuf }
   | _ as c        { Buffer.add_char buf c; read_string_interp buf lexbuf }

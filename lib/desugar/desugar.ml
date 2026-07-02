@@ -410,6 +410,32 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
 
 (* ---- Pipe desugaring ---- *)
 
+(** Diagnostic sink for expression-level desugar errors.
+
+    [desugar_expr] is public API called without an error context by the
+    REPL and other tools, so [desugar_module ~errors] communicates its
+    context via this ref for the duration of the module pass.  When a
+    caller-supplied context is installed, errors are reported through the
+    standard [Errors] diagnostic machinery (positioned span, rendered by
+    the drivers that check [has_errors]).  When no context was supplied,
+    we raise the same positioned [ParseError] exception the parse path
+    uses — loud failure, never silently-wrong desugared code. *)
+let expr_err_ctx : Err.ctx option ref = ref None
+
+let desugar_expr_error ~(sp : span) ?hint msg : unit =
+  match !expr_err_ctx with
+  | Some ctx ->
+    Err.report ctx
+      { severity = Err.Error; span = sp; message = msg; labels = [];
+        notes = (match hint with Some h -> [h] | None -> []);
+        code = None; fix = None }
+  | None ->
+    let pos = { Lexing.pos_fname = sp.file;
+                pos_lnum = sp.start_line;
+                pos_bol  = 0;
+                pos_cnum = sp.start_col } in
+    raise (March_errors.Errors.ParseError (msg, hint, pos))
+
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
 let rec desugar_expr (e : expr) : expr =
@@ -434,14 +460,13 @@ let rec desugar_expr (e : expr) : expr =
          | EAtom (a, args, epsp) -> PatAtom (a, List.map expr_to_pat args, epsp)
          | ETuple (es, epsp) -> PatTuple (List.map expr_to_pat es, epsp)
          | _ ->
-           let file = sp.file in
-           let line = sp.start_line in
-           let col  = sp.start_col in
-           failwith (Printf.sprintf
-             "%s:%d:%d: error: pipe-to-match: expression cannot be used as a pattern here.\n\
-              Only constructors, variables, literals, and tuples are allowed as match arms \
-              in a `|>` pipe expression."
-             file line col)
+           desugar_expr_error ~sp
+             ~hint:"Only constructors, variables, literals, and tuples are \
+                    allowed as match arms in a `|>` pipe expression."
+             "pipe-to-match: expression cannot be used as a pattern here.";
+           (* Error recovery (context path): a wildcard keeps the branch
+              well-formed; compilation aborts on the reported error. *)
+           PatWild sp
        in
        let branches = List.map (fun (cond_e, body) ->
            { branch_pat = expr_to_pat cond_e
@@ -449,8 +474,19 @@ let rec desugar_expr (e : expr) : expr =
            ; branch_body = body }) arms in
        EMatch (l', branches, cond_sp)
      | EMatch (_, branches, match_sp) ->
-       (* x |> match scrutinee do ... end where scrutinee may be a hole;
-          but more importantly: x |> match do ... end with pattern branches *)
+       (* B6: `x |> (match scrut do ... end)` used to silently DISCARD
+          `scrut` and match on `x` instead — verified silent wrong code.
+          The supported scrutinee-less form (`x |> (match do ... end)`)
+          parses as ECond and is handled above; an explicit scrutinee
+          here is always a mistake, so report it. *)
+       desugar_expr_error ~sp:match_sp
+         ~hint:"The piped value becomes the scrutinee. Use \
+                `x |> (match do pat -> ... end)` (no scrutinee), or write \
+                `match x do ... end` directly."
+         "piping into a match discards its scrutinee; write `match x do ... end` instead";
+       (* Error recovery (context path): keep the historical shape so
+          downstream passes see a well-formed tree; compilation aborts on
+          the reported error. *)
        EMatch (l', branches, match_sp)
      | _ -> EApp (r', [l'], sp))
 
@@ -1831,7 +1867,17 @@ let qualify_module_refs (decls : decl list) : decl list =
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
     [DDeriving] nodes are expanded into [DImpl] blocks here. *)
-let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
+let desugar_module ?errors (m : module_) : module_ =
+  (* Only route expression-level errors into the context when the CALLER
+     supplied one (and therefore inspects it): reporting into a defaulted
+     throwaway context would silently swallow the diagnostic and return
+     wrong desugared code. Context-less callers get the loud positioned
+     ParseError from [desugar_expr_error] instead. *)
+  let caller_ctx = errors in
+  let errors = match errors with Some c -> c | None -> Err.create () in
+  let saved_ctx = !expr_err_ctx in
+  expr_err_ctx := caller_ctx;
+  Fun.protect ~finally:(fun () -> expr_err_ctx := saved_ctx) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in

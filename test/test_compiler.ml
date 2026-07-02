@@ -4804,6 +4804,164 @@ let test_return_infer_if_guard_infers_pos () =
       (has_pred infers "abs" "r > 0")
 
 
+(* B15: a raw newline inside a plain "..." string literal must advance the
+   lexer's line tracking (Lexing.new_line), matching the triple-string rule's
+   existing behavior. Before the fix, read_string/read_string_interp consumed
+   the newline character without calling Lexing.new_line, so every span after
+   the string was off by the number of embedded raw newlines. *)
+let test_string_literal_raw_newline_tracks_line () =
+  let src =
+    "mod StrNL do\n\
+    \  fn greet() do \"hello\nworld\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Source lines: 1 `mod StrNL do`, 2 `fn greet() ... "hello`, 3 `world" end`
+       (the raw newline inside the string literal splits the `greet` decl
+       across lines 2-3), 4 `fn second() do 42 end`. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
+let test_string_interp_raw_newline_tracks_line () =
+  let src =
+    "mod StrInterpNL do\n\
+    \  fn greet(name) do \"hi\n${name}\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Same reasoning as above, but the raw newline is inside the prefix of a
+       string-interpolation segment (read_string_interp), one line earlier
+       than the interpolation hole. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string interp" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
+(* FLOAT missing from token filter's pattern-start set (token_filter.ml
+   is_pattern_start). Without FLOAT in the set, the contextual newline
+   filter treats a newline-led float-literal match arm as a body
+   continuation rather than the start of a new arm, so the parser sees a
+   malformed arm and fails with "expecting `end`" at the float token. *)
+let test_float_literal_match_arm_parses () =
+  let src = {|mod FloatArms do
+  fn name(x) do
+    match x do
+      1.5 -> "a"
+      2.5 -> "b"
+      _ -> "c"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Negative float-literal patterns (`MINUS; FLOAT` in simple_pattern) must
+   also be recognized as a pattern start — MINUS was already in the set, but
+   cover it explicitly alongside FLOAT so a newline-led `-1.5 -> ...` arm
+   parses too. *)
+let test_negative_float_literal_match_arm_parses () =
+  let src = {|mod NegFloatArms do
+  fn sign(x) do
+    match x do
+      -1.5 -> "neg"
+      1.5 -> "pos"
+      _ -> "zero"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "negative float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Audit of simple_pattern (parser.mly ~1289-1308) against is_pattern_start:
+   simple_pattern's id = soft_lower_name case accepts several keyword tokens
+   as variable-pattern starters (STATE, INIT, LOOP, ON, PROTOCOL, APP, AS,
+   WITH, WHEN, USE, IN, FOR, TAG), none of which were in is_pattern_start.
+   A newline-led arm bound to one of these soft keywords as a var pattern
+   would suffer the same "treated as body continuation" bug as FLOAT. Cover
+   one representative case per missing token family: a soft-keyword var
+   pattern used as a catch-all binder. (CHAR does not exist as a token in
+   this grammar, so there is nothing to add for it.) *)
+(* B6: `x |> (match scrut do ... end)` used to desugar by silently throwing
+   away `scrut` and matching on `x` — verified silent wrong code. It must be
+   a compile-time diagnostic instead. Uses the diagnostics-capture pattern
+   (desugar_module ~errors) like the satisfy/derive desugar error tests. *)
+let test_pipe_into_match_reports_error () =
+  let src = {|mod PipeMatch do
+  fn go() do
+    1 |> (match 2 do 1 -> "one" | 2 -> "two" | _ -> "x" end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe into match: desugar error" true (has_errors errors);
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "message names the discarded scrutinee" true
+    (List.exists (fun m ->
+         try ignore (Str.search_forward (Str.regexp_string "discards its scrutinee") m 0); true
+         with Not_found -> false) msgs);
+  (* Diagnostic must be positioned at the offending match, not dummy. *)
+  let spans = List.map (fun (d : March_errors.Errors.diagnostic) -> d.span)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "diagnostic carries a real span" true
+    (List.exists (fun (s : March_ast.Ast.span) -> s.start_line = 3) spans)
+
+(* B6 sibling: the ECond pipe branch's expr→pattern conversion used a bare
+   `failwith` (uncaught Failure in entry points without a handler). It must
+   go through the same diagnostic mechanism. `foo(1)` is not convertible to
+   a pattern, so this arm triggers the conversion failure. *)
+let test_pipe_into_cond_bad_pattern_reports_error () =
+  let src = {|mod PipeCondBad do
+  fn go(x) do
+    x |> (match do
+      foo(1) -> "a"
+      other -> "b"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe cond bad pattern: desugar error (not Failure)" true
+    (has_errors errors)
+
+(* Positive control: the scrutinee-less `x |> (match do pat -> ... end)` form
+   is the supported pipe-match syntax and must keep desugaring cleanly.
+   (A variable arm becomes a PatVar catch-all through expr_to_pat.) *)
+let test_pipe_into_scrutineeless_match_still_works () =
+  let src = {|mod PipeCondOk do
+  fn go(x) do
+    x |> (match do
+      1 -> "one"
+      other -> "other"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "scrutinee-less pipe match: no desugar error" false
+    (has_errors errors)
+
+let test_soft_keyword_var_pattern_match_arm_parses () =
+  let src = {|mod SoftKwArms do
+  fn describe(x) do
+    match x do
+      0 -> "zero"
+      state -> state
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -5279,6 +5437,20 @@ let compiler_suites =
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "lexer_line_tracking", [
+          Alcotest.test_case "B15: raw newline in string literal tracks line"      `Quick test_string_literal_raw_newline_tracks_line;
+          Alcotest.test_case "B15: raw newline in string interp tracks line"       `Quick test_string_interp_raw_newline_tracks_line;
+        ] );
+      ( "token_filter_pattern_start", [
+          Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
+          Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
+          Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
+        ] );
+      ( "pipe_into_match", [
+          Alcotest.test_case "B6: pipe into match reports desugar error"           `Quick test_pipe_into_match_reports_error;
+          Alcotest.test_case "B6: pipe cond bad pattern reports desugar error"     `Quick test_pipe_into_cond_bad_pattern_reports_error;
+          Alcotest.test_case "B6: scrutinee-less pipe match still works"           `Quick test_pipe_into_scrutineeless_match_still_works;
         ] );
   ]
 
