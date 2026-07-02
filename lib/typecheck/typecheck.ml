@@ -5700,9 +5700,23 @@ let dependency_order_dfn_run (run : Ast.decl list) : Ast.decl list =
 let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
   let acc = ref StringSet.empty in
   let add (s : string) =
-    match String.index_opt s '.' with
-    | Some i when i > 0 -> acc := StringSet.add (String.sub s 0 i) !acc
-    | _ -> ()
+    (* Record EVERY dotted prefix, not just the first segment: a sibling
+       module can itself have a dotted name (`mod Depot.Schema`), so a
+       reference "Depot.Schema.define" depends on "Depot.Schema", not only
+       on "Depot" (often an empty namespace container).  The caller
+       intersects with the actual sibling-name set, so non-module prefixes
+       are dropped.  First-segment-only extraction left dotted siblings
+       unordered relative to their callers, and every caller then unified
+       against one shared pass-1 Mono placeholder — the first call site
+       pinned the parameter types for all the others. *)
+    let rec go i =
+      match String.index_from_opt s i '.' with
+      | Some j when j > 0 ->
+        acc := StringSet.add (String.sub s 0 j) !acc;
+        go (j + 1)
+      | _ -> ()
+    in
+    go 0
   in
   let rec ty (t : Ast.ty) =
     match t with
