@@ -28,6 +28,18 @@ let reset_counter () = _lower_counter := 0
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
 
+(** Emit a runtime panic for a non-exhaustive match that the typechecker
+    missed.  Returning [LitInt 0] here would silently reinterpret a value of
+    the match's real (possibly non-Int) type as a tagged int — e.g. treated
+    as a heap pointer for a [String] result — which crashes or corrupts
+    memory rather than failing loudly.  Shared by every match-compilation
+    fallback site (see [compile_matrix_impl] and the guarded-match fallthrough
+    in [lower_match]) so all of them fail the same way the interpreter does. *)
+let nonexhaustive_panic () =
+  let panic_var : Tir.var = {
+    Tir.v_name = "panic"; Tir.v_ty = Tir.TCon ("Never", []); Tir.v_lin = Tir.Unr } in
+  Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "non-exhaustive pattern match")])
+
 (* ── Type conversion: Ast.ty → Tir.ty ──────────────────────────── *)
 
 (** Default type used when no annotation is available. A placeholder
@@ -1025,13 +1037,6 @@ and compile_matrix_impl
     (rows     : (Ast.pattern list * Tir.expr) list)
     (fallback : Tir.expr option)
   : Tir.expr =
-  (* Emit a runtime panic for a non-exhaustive match that the typechecker missed.
-     Returning LitInt 0 here would silently produce wrong values; a panic is correct. *)
-  let nonexhaustive_panic () =
-    let panic_var : Tir.var = {
-      Tir.v_name = "panic"; Tir.v_ty = Tir.TCon ("Never", []); Tir.v_lin = Tir.Unr } in
-    Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "non-exhaustive pattern match")])
-  in
   match rows with
   | [] ->
     (match fallback with Some f -> f | None -> nonexhaustive_panic ())
@@ -1116,7 +1121,7 @@ and compile_matrix_impl
       (* If there are no ECase branches (all rows were trivial), the default
          already covers everything — just return it. *)
       if tir_branches = [] then
-        (match default with Some d -> d | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0)))
+        (match default with Some d -> d | None -> nonexhaustive_panic ())
       else
         Tir.ECase (scrut, tir_branches, default)
 
@@ -1170,7 +1175,7 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
     (* Guards present: compile each branch individually with fallthrough
        to the remaining branches when the guard fails. *)
     let rec go = function
-      | [] -> Tir.EAtom (Tir.ALit (Ast.LitInt 0))  (* match failure *)
+      | [] -> nonexhaustive_panic ()  (* every branch's guard failed *)
       | (br : Ast.branch) :: rest ->
         let rest_expr = go rest in
         (* Register pattern-bound names while lowering the body and guard

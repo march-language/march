@@ -5001,6 +5001,74 @@ let test_opt_without_perceus () =
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
+(* ── Guard-exhaustion fallthrough (B3) ─────────────────────────────────────
+   A guarded match where every guard fails must panic, not silently return
+   `LitInt 0` reinterpreted at the match's real (non-Int) type — see
+   lib/tir/lower.ml's `nonexhaustive_panic` comment.  This test compiles and
+   *runs* the binary (not just inspecting IR text) because the bug's symptom
+   is a runtime crash/garbage value, not a shape in the emitted IR. *)
+let test_guard_exhaustion_panics_compiled () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  (* Run from the project root so the compiler resolves its CWD-relative
+     runtime/ and stdlib/ directories (same trick as the other compiled
+     regression tests in test_stdlib_suite.ml). *)
+  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let src_text =
+      "mod GuardEx do\n\
+      \  fn classify(n) do\n\
+      \    match n do\n\
+      \      x when x > 0 -> \"pos\"\n\
+      \      x when x < 0 -> \"neg\"\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    println(classify(0))\n\
+      \  end\n\
+       end\n"
+    in
+    let tmp = Filename.temp_file "march_guardex" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "guardex.march" in
+    let oc = open_out src in
+    output_string oc src_text;
+    close_out oc;
+    (* Read the whole stdout+stderr of a command (trimmed). *)
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 64 in
+      (try
+         while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      String.trim (Buffer.contents buf)
+    in
+    (* --- interpreter: must already panic (parity check) --- *)
+    let interp_out = read_cmd (Printf.sprintf
+      "cd %s && %s %s 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check bool) "interpreter panics on guard exhaustion (non-exhaustive)" true
+      (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+    (* --- compiled: must panic (exit 1) with a non-exhaustive-match message,
+       not crash (segfault, exit 139) or exit 0 with garbage output --- *)
+    let bin = Filename.concat tmp "guardexbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check int) "compiles ok" 0 compile_rc;
+    let run_out = read_cmd (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled guard-exhaustion panics with a non-exhaustive-match message (not exit 0/segfault)"
+      true
+      ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
+       && ir_contains run_out "EXIT:1")
+  end
+
 let codegen_suites =
   [
       ( "nested_lit_pattern_codegen", [
@@ -5426,6 +5494,10 @@ let codegen_suites =
         ] );
       ( "js_backend_opt", [
           Alcotest.test_case "Opt safe without Perceus" `Quick test_opt_without_perceus;
+        ] );
+      ( "guard_exhaustion_codegen", [
+          Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
+            test_guard_exhaustion_panics_compiled;
         ] );
   ]
 
