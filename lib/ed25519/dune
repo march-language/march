@@ -8,6 +8,7 @@
  (foreign_stubs
   (language c)
   (names stubs tweetnacl_impl)
+  (extra_deps %{project_root}/runtime/tweetnacl.h)
   (flags (:standard -I %{project_root}/runtime))))
 
 (rule

@@ -779,12 +779,55 @@ void march_test_setup_all(void (*fn)(void)) {
     if (fn) fn();
 }
 
+/* ── Crash-trapping test mode (MARCH_TEST_TRAP_SIGNALS=1) ────────────────
+   Converts hardware faults (SIGSEGV/SIGBUS/SIGILL/SIGFPE) and abort()
+   (SIGABRT — e.g. the RC-underflow guard) that occur INSIDE a test into
+   ordinary recorded failures via the existing march_test_jmp_buf panic
+   path, so one suite run reports EVERY crashing test instead of dying at
+   the first.  This is an inventory tool for compiler bug hunts: after a
+   caught SIGSEGV the heap may be inconsistent, so subsequent results are
+   advisory.  Off by default — no behavior change unless the env var is
+   set.  Faults outside a test, or on a thread other than the test-runner
+   thread (longjmp across threads is UB), re-raise with the default
+   handler so real crashes still crash. */
+static pthread_t march_test_trap_thread;
+static void march_test_signal_handler(int sig) {
+    if (march_test_in_test
+        && pthread_equal(pthread_self(), march_test_trap_thread)) {
+        const char *nm =
+            sig == SIGSEGV ? "SIGSEGV" :
+            sig == SIGBUS  ? "SIGBUS"  :
+            sig == SIGILL  ? "SIGILL"  :
+            sig == SIGFPE  ? "SIGFPE"  :
+            sig == SIGABRT ? "SIGABRT" : "signal";
+        snprintf(march_test_fail_buf, sizeof(march_test_fail_buf),
+                 "CRASH: %s — trapped by MARCH_TEST_TRAP_SIGNALS; "
+                 "subsequent test results are advisory", nm);
+        longjmp(march_test_jmp_buf, 1);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void march_test_install_traps(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    const char *v = getenv("MARCH_TEST_TRAP_SIGNALS");
+    if (!v || !v[0] || strcmp(v, "0") == 0) return;
+    march_test_trap_thread = pthread_self();
+    int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+        signal(sigs[i], march_test_signal_handler);
+}
+
 /* Run a single test function, with optional per-test setup.
    name is a NUL-terminated C string (from the LLVM constant). */
 void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     /* Apply filter (case-sensitive substring match). */
     if (test_filter[0] != '\0' && strstr(name, test_filter) == NULL)
         return;
+    march_test_install_traps();
 
     test_total++;
     if (setup) setup();

@@ -178,7 +178,12 @@ let list_any_idx (f : int -> 'a -> bool) (xs : 'a list) : bool =
 (** Returns true iff [e] contains an [EAlloc(TCon(ctor_name, _), _)] where
     [ctor_name] starts with [base_type ^ "."]. This detects "reconstruct"
     patterns where a case branch allocates a same-type constructor, indicating
-    an FBIP reuse opportunity that requires ownership of the scrutinee. *)
+    an FBIP reuse opportunity that requires ownership of the scrutinee.
+    This deliberately does NOT compare constructor arities: it only gates an
+    OWNERSHIP decision (own the scrutinee so FBIP *may* reuse it), never a
+    memory-reuse size — [Perceus.same_arity] performs the size-safety check
+    on the $fbip$-encoded field count at the actual reuse site.  A false
+    positive here costs an extra inc/dec pair, not memory safety. *)
 let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
   let prefix = base_type ^ "." in
   let prefix_len = String.length prefix in

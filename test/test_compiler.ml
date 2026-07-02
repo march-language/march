@@ -331,6 +331,30 @@ let test_tc_fn_add () =
   end|} in
   Alcotest.(check bool) "add: no errors" false (has_errors ctx)
 
+let test_tc_dotted_sibling_module_order () =
+  (* Two callers of Ns.Helper.define with DIFFERENT record args, declared
+     BEFORE the dotted sibling module that defines it.
+     dependency_order_dmod_run must order Ns.Helper first so each caller
+     instantiates the generalized scheme.  Regression: module_refs_in_decls
+     recorded only the FIRST dotted segment of a reference ("Ns" from
+     "Ns.Helper.define"), so a dotted sibling (`mod Ns.Helper`) never
+     received a dependency edge and stayed after its callers — all callers
+     then unified against one shared pass-1 Mono placeholder and the first
+     caller's record shape was pinned as "the" parameter type. *)
+  let ctx = typecheck {|mod Test do
+    mod CallerA do
+      fn go() do Ns.Helper.define("a", { fields: { id: "x", name: "y" } }) end
+    end
+    mod CallerB do
+      fn go() do Ns.Helper.define("b", { fields: { id: "x", age: "z" } }) end
+    end
+    mod Ns.Helper do
+      fn define(table, spec) do (table, spec.fields) end
+    end
+  end|} in
+  Alcotest.(check bool) "dotted sibling ordered before callers: no errors"
+    false (has_errors ctx)
+
 let test_tc_if_bad_cond () =
   (* Condition must be Bool — using Int + 1 should produce an error.
      if/then/else needs no `end`; only fn do…end and match…end do. *)
@@ -5106,6 +5130,7 @@ let compiler_suites =
           Alcotest.test_case "Int literal"         `Quick test_tc_literal;
           Alcotest.test_case "identity fn"         `Quick test_tc_fn_identity;
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
+          Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
           Alcotest.test_case "match expression"    `Quick test_tc_match;

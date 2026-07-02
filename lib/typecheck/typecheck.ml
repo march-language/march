@@ -1640,6 +1640,25 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("stdlib_hmac_sha256",    Mono (TArrow (t_string, TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    (* Compress builtins — gzip, deflate, zstd, brotli C-level shims.
+       Called directly by stdlib/compress.march and any code that needs
+       compression without `import Compress` (not in stdlib_file_list). *)
+    ("stdlib_gzip_encode",    Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_gzip_decode",    Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_deflate_encode", Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_deflate_decode", Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_zstd_encode",    Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_zstd_decode",    Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_brotli_decode",  Mono (TArrow (TCon ("Bytes", []),
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
        NativeIntArr / NativeFloatArr are opaque types (0-arity constructors).
        These builtins are interpreter-path only; compiled mode support is
@@ -5700,9 +5719,23 @@ let dependency_order_dfn_run (run : Ast.decl list) : Ast.decl list =
 let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
   let acc = ref StringSet.empty in
   let add (s : string) =
-    match String.index_opt s '.' with
-    | Some i when i > 0 -> acc := StringSet.add (String.sub s 0 i) !acc
-    | _ -> ()
+    (* Record EVERY dotted prefix, not just the first segment: a sibling
+       module can itself have a dotted name (`mod Depot.Schema`), so a
+       reference "Depot.Schema.define" depends on "Depot.Schema", not only
+       on "Depot" (often an empty namespace container).  The caller
+       intersects with the actual sibling-name set, so non-module prefixes
+       are dropped.  First-segment-only extraction left dotted siblings
+       unordered relative to their callers, and every caller then unified
+       against one shared pass-1 Mono placeholder — the first call site
+       pinned the parameter types for all the others. *)
+    let rec go i =
+      match String.index_from_opt s i '.' with
+      | Some j when j > 0 ->
+        acc := StringSet.add (String.sub s 0 j) !acc;
+        go (j + 1)
+      | _ -> ()
+    in
+    go 0
   in
   let rec ty (t : Ast.ty) =
     match t with

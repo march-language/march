@@ -316,21 +316,27 @@ static void *make_none(void) { return (void *)0; }
  * Kind chars match shape_kind_char in llvm_emit.ml:
  *   'i' = Int/Bool/Unit/Atom (tagged (raw<<1)|1, always odd, nonzero)
  *   'p' = String/List/heap ptr (nonzero march_alloc address)
- *   'f' = Float (raw IEEE754 bits, 0.0 = 0 — cannot use niche; stay boxed)
- *   'g' = generic/TVar (bits may be 0 for Unit; conservative boxed)          */
+ *   'f' = Float (raw IEEE754 bits)
+ *   'g' = generic/TVar
+ *
+ * ALL kinds use the NICHE encoding (None = 0, Some(v) = v).  record_get's
+ * March type is Option(a) with an ERASED payload, and the compiled side
+ * decodes erased Options with the niche convention everywhere (emit_case's
+ * abstract-arg niche path, ensure_adt_eq_fn, the erased alloc paths).  The
+ * previous boxed cells for 'f'/'g' were misread by those niche decoders as
+ * Some(cell) — the cell then flowed on as a "record" and every downstream
+ * record_get/record_entries panicked with "no record shape metadata"
+ * (74 depot failures).  Niche-encoding costs the two known erased-niche edge
+ * cases (Float 0.0 and raw-0 Unit read as None) — the same trade the
+ * compiled convention already makes; consistency wins. */
 
 static void *rec_some_k(int64_t bits, char kind) {
-    if (kind == 'f' || kind == 'g') {
-        void *r = march_alloc(16 + 8);
-        ((march_hdr *)r)->tag = 1;
-        *(int64_t *)((char *)r + 16) = bits;
-        return r;
-    }
+    (void)kind;
     return (void *)(uintptr_t)bits;
 }
 
 static void *rec_none_k(char kind) {
-    if (kind == 'f' || kind == 'g') return march_alloc(16); /* tag 0 */
+    (void)kind;
     return (void *)0;
 }
 
@@ -1921,8 +1927,26 @@ static void *rec_pair(void *fst, int64_t snd_bits) {
 static march_record_shape *rec_shape_or_panic(void *rec, const char *who) {
     march_record_shape *s = rec_shape_of(rec);
     if (!s) {
-        char buf[128];
-        snprintf(buf, sizeof buf, "%s: value carries no record shape metadata", who);
+        char buf[192];
+        /* Identify WHAT the shapeless value actually is, so a suite-wide
+           failure report is self-diagnosing: null, a tagged immediate (low
+           bit set), or a heap cell whose ctor tag reveals the type it was
+           actually built as (-1 = string). */
+        if (!rec)
+            snprintf(buf, sizeof buf,
+                     "%s: value carries no record shape metadata (value is null)",
+                     who);
+        else if (((uintptr_t)rec & 1u) != 0)
+            snprintf(buf, sizeof buf,
+                     "%s: value carries no record shape metadata "
+                     "(value is a tagged immediate: %lld)",
+                     who, (long long)((intptr_t)rec >> 1));
+        else
+            snprintf(buf, sizeof buf,
+                     "%s: value carries no record shape metadata "
+                     "(heap cell tag=%d rc=%lld)",
+                     who, ((march_hdr *)rec)->tag,
+                     (long long)((march_hdr *)rec)->rc);
         rec_panic(buf);
     }
     return s;

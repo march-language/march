@@ -3266,16 +3266,17 @@ let test_beta_adt_no_fire_non_case () =
 
 (* ── P8: FBIP cross-tag constructor reuse ───────────────────────────────── *)
 
-(** P8 basic: same_arity returns true when type has the same field count.
-    TCon("Foo.A", [TUnit; TUnit]) encodes arity=2; nfields=2 → true. *)
+(** P8 basic: same_arity returns true when the $fbip$-marked encoding has the
+    same field count.  TCon("$fbip$Foo.A", [TUnit; TUnit]) encodes arity=2;
+    nfields=2 → true. *)
 let test_same_arity_match () =
-  let ty = March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit; March_tir.Tir.TUnit]) in
+  let ty = March_tir.Tir.TCon ("$fbip$Foo.A", [March_tir.Tir.TUnit; March_tir.Tir.TUnit]) in
   Alcotest.(check bool) "same arity matches" true
     (March_tir.Perceus.same_arity ty 2)
 
 (** P8: different arity returns false. *)
 let test_same_arity_mismatch () =
-  let ty = March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit]) in
+  let ty = March_tir.Tir.TCon ("$fbip$Foo.A", [March_tir.Tir.TUnit]) in
   Alcotest.(check bool) "different arity does not match" false
     (March_tir.Perceus.same_arity ty 2)
 
@@ -3284,20 +3285,30 @@ let test_same_arity_non_tcon () =
   Alcotest.(check bool) "non-TCon always false" false
     (March_tir.Perceus.same_arity March_tir.Tir.TInt 0)
 
+(** P0 regression: a RAW declared type (no $fbip$ marker) must be refused even
+    when its type-PARAMETER count happens to equal nfields.  A dead binding's
+    dec carries its declared type — e.g. Ok(7) : Result(Int, String) is a
+    1-field cell with 2 type params; treating the 2 params as "2 fields"
+    approved reusing the cell for a 2-field constructor (heap overflow). *)
+let test_same_arity_raw_type_refused () =
+  let ty = March_tir.Tir.TCon ("Result", [March_tir.Tir.TInt; March_tir.Tir.TString]) in
+  Alcotest.(check bool) "raw declared type is never an arity encoding" false
+    (March_tir.Perceus.same_arity ty 2)
+
 (** P8 integration: cross-tag FBIP fires.  We construct a TIR expression that
     mirrors what Perceus emits for a consumed scrutinee followed by a same-arity
     alloc of a different constructor.  Perceus wraps the decrc in ESeq (via
     add_scrutinee_free_for), so fbip_expr's ESeq path calls try_fbip_sink.
 
     Shape (Perceus ESeq form):
-      ESeq(EDecRC(v : TCon("Foo.A", [TUnit])),   -- arity=1 encoded
+      ESeq(EDecRC(v : TCon("$fbip$Foo.A", [TUnit])),   -- arity=1 encoded
            ELet(result, EAlloc(TCon("Foo.B",[]), [arg]),
                 EAtom result))
     → ELet(result, EReuse(AVar v, TCon("Foo.B",[]), [arg]),
            EAtom result) *)
 let test_fbip_cross_tag_reuse () =
-  (* v's type encodes arity=1 as one dummy TUnit arg *)
-  let v = mk_var "v" (March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit])) in
+  (* v's type encodes arity=1 as one dummy TUnit arg behind the marker *)
+  let v = mk_var "v" (March_tir.Tir.TCon ("$fbip$Foo.A", [March_tir.Tir.TUnit])) in
   let result = mk_var "result" (March_tir.Tir.TCon ("Foo", [])) in
   let arg = March_tir.Tir.ALit (March_ast.Ast.LitInt 42) in
   let e =
@@ -3316,7 +3327,7 @@ let test_fbip_cross_tag_reuse () =
 (** P8: different arity does NOT produce EReuse — falls back to ESeq EDecRC. *)
 let test_fbip_no_reuse_arity_mismatch () =
   (* v's type encodes arity=1; alloc has 2 fields → arity mismatch → no reuse *)
-  let v = mk_var "v" (March_tir.Tir.TCon ("Foo.A", [March_tir.Tir.TUnit])) in
+  let v = mk_var "v" (March_tir.Tir.TCon ("$fbip$Foo.A", [March_tir.Tir.TUnit])) in
   let result = mk_var "result" (March_tir.Tir.TCon ("Foo", [])) in
   let arg1 = March_tir.Tir.ALit (March_ast.Ast.LitInt 1) in
   let arg2 = March_tir.Tir.ALit (March_ast.Ast.LitInt 2) in
@@ -5973,6 +5984,7 @@ let codegen_suites =
         Alcotest.test_case "same_arity_match"        `Quick test_same_arity_match;
         Alcotest.test_case "same_arity_mismatch"     `Quick test_same_arity_mismatch;
         Alcotest.test_case "same_arity_non_tcon"     `Quick test_same_arity_non_tcon;
+        Alcotest.test_case "same_arity_raw_type_refused" `Quick test_same_arity_raw_type_refused;
         Alcotest.test_case "cross_tag_reuse"         `Quick test_fbip_cross_tag_reuse;
         Alcotest.test_case "no_reuse_arity_mismatch" `Quick test_fbip_no_reuse_arity_mismatch;
       ]);

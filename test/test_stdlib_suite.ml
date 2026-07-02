@@ -10058,6 +10058,140 @@ let test_compiled_sortby_heap_capturing_comparator () =
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
+(* Shared helper for the two P0 RC regression tests below: run [cmd], return
+   (exit_code, trimmed stdout).  A signal-killed process surfaces as 128+sig
+   through /bin/sh, so the exit-code assertion catches SIGABRT/SIGSEGV. *)
+let run_capture_rc cmd =
+  let out_f = Filename.temp_file "march_rcfix_out" ".txt" in
+  let rc = Sys.command (Printf.sprintf "%s > %s 2>/dev/null" cmd (Filename.quote out_f)) in
+  let out =
+    try
+      let ic = open_in out_f in
+      let s = In_channel.input_all ic in
+      close_in ic; s
+    with _ -> ""
+  in
+  (try Sys.remove out_f with _ -> ());
+  (rc, String.trim out)
+
+(* Regression (P0, perceus.ml EApp/ECallPtr-extern post_dec_vars): a variable
+   passed at BOTH an owned and a borrowed argument position of the same call,
+   dead afterwards, was consumed twice — find_inc_vars saw only the owned
+   occurrence (count-1 = 0 dups) while post_dec_vars added a post-call dec for
+   the borrowed occurrence.  The owned position already transfers the caller's
+   single reference, so the post-dec underflowed the RC and the compiled
+   binary aborted (exit 134, "RC underflow") while the interpreter was fine.
+   Guard: both(a:own, b:borrow, n) called as both(s, s, 1) with s dead after —
+   assert the compiled binary exits 0 AND matches the interpreter's output.
+   The string must exceed 15 bytes (shorter strings are stored inline, no RC). *)
+let test_compiled_dual_position_owned_borrowed () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_dualpos" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "dualpos.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod DualPosRegress do\n\
+      \  fn both(a : String, b : String, n : Int) : String do\n\
+      \    if String.byte_size(b) > n do\n\
+      \      a\n\
+      \    else\n\
+      \      \"short\"\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(37)\n\
+      \    let r = both(s, s, 1)\n\
+      \    println(r)\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let (interp_rc, interp_out) =
+      run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check int) "interpreter runs dual-position program cleanly" 0 interp_rc;
+    let bin = Filename.concat tmp "dualposbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
+    else begin
+      let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+      Alcotest.(check int)
+        "compiled both(s, s, 1) with s at owned+borrowed positions exits 0 (no RC underflow)"
+        0 run_rc;
+      Alcotest.(check string)
+        "compiled output matches interpreter output (dual-position args)"
+        interp_out compiled_out
+    end
+  end
+
+(* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
+   TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
+   dead binding's dec carries its raw declared type, so a dead 1-field
+   Small(n) : Holder(Int,Int,Int,Int,Int) cell (5 type params) was reused for
+   the 5-field Big constructor — writing 4 fields past the 24-byte cell,
+   clobbering the neighbouring heap chunk (here: q's tag, so the compiled
+   match printed "big" while the interpreter printed 293).  same_arity now
+   accepts only the $fbip$-marked arity encoding minted by the scrutinee-free
+   path, where the real field count is known.  Guard: interpreter/compiled
+   parity + exit 0 on the exact overflow shape. *)
+let test_compiled_fbip_arity_no_overflow () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()
+  else begin
+    let tmp = Filename.temp_file "march_fbiparity" "" in
+    Sys.remove tmp; Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "fbiparity.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod FbipArityRegress do\n\
+      \  type Holder(a, b, c, d, e) = Small(a) | Big(a, b, c, d, e)\n\
+      \  pfn churn(n : Int) : Int do\n\
+      \    if n > 100 do n else churn(n + 7) end\n\
+      \  end\n\
+      \  pfn mk_holder(n : Int) : Holder(Int, Int, Int, Int, Int) do\n\
+      \    if n > 0 do Small(n) else Big(n, n, n, n, n) end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let n = churn(3)\n\
+      \    let dead = mk_holder(n)\n\
+      \    let q = mk_holder(n + 91)\n\
+      \    let p = Big(n, n, n, n, n)\n\
+      \    match q do\n\
+      \      Small(v) ->\n\
+      \        match p do\n\
+      \          Big(x, _, _, _, _) -> println(to_string(v + x))\n\
+      \          Small(x) -> println(to_string(x))\n\
+      \        end\n\
+      \      Big(_, _, _, _, _) -> println(\"big\")\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let (interp_rc, interp_out) =
+      run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+    Alcotest.(check int) "interpreter runs FBIP-arity program cleanly" 0 interp_rc;
+    Alcotest.(check string) "interpreter computes 293" "293" interp_out;
+    let bin = Filename.concat tmp "fbiparitybin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then ()
+    else begin
+      let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+      Alcotest.(check int)
+        "compiled FBIP-arity program exits 0 (no heap overflow abort)"
+        0 run_rc;
+      Alcotest.(check string)
+        "compiled output matches interpreter output (no mismatched-arity cell reuse)"
+        interp_out compiled_out
+    end
+  end
+
 (* Regression: a TOML [section] with 4+ keys returned the WRONG value from
    Toml.get_str when COMPILED (e.g. get_str(pkg,"k1") = "k4", a sibling key's
    NAME) and could crash with OOM / RC underflow.  The interpreter was always
@@ -10272,6 +10406,55 @@ let test_compiled_hot_reload_dispatch () =
       Alcotest.(check bool)
         "IR contains march_dispatch_init call (@main dispatch setup)"
         true (contains ir "call void @march_dispatch_init")
+    end
+  end
+
+(* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
+   arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
+   scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
+   stack with a malloc'd (non-page-aligned) buffer; at thread exit ASAN's
+   AsanThread::Destroy → UnsetAlternateSignalStack munmap()s whatever altstack
+   is current, which fails with EINVAL on our buffer and CHECK-aborts.  Fix:
+   under ASAN the runtime keeps ASAN's own altstack (march_scheduler.c).
+   Guard: a sanitized hello-world must print its output AND exit 0. *)
+let test_compiled_sanitize_clean_exit () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_sanexit" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "sanexit.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod SanExit do\n\
+      \  fn main() do println(\"sanitize ok\") end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "sanexit_bin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "MARCH_SANITIZE=1 %s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    (* Skip when the sanitized compile can't complete here (no clang, or no
+       ASAN runtime for this toolchain) — matches the other Slow compiled
+       regression tests. *)
+    if compile_rc <> 0 then ()
+    else begin
+      let out_file = Filename.concat tmp "out.txt" in
+      let run_rc = Sys.command (Printf.sprintf
+        "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+      Alcotest.(check int)
+        "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
+        0 run_rc;
+      let output =
+        let ic = open_in out_file in
+        let n = in_channel_length ic in
+        let s = really_input_string ic n in
+        close_in ic; String.trim s
+      in
+      Alcotest.(check string)
+        "sanitized binary prints its output" "sanitize ok" output
     end
   end
 
@@ -11471,11 +11654,17 @@ let stdlib_suites =
           test_compiled_pmap_matches_map;
         Alcotest.test_case "sort_by with heap-capturing comparator (98 elems) no SIGBUS" `Slow
           test_compiled_sortby_heap_capturing_comparator;
+        Alcotest.test_case "dual-position owned+borrowed arg both(s,s,1): no RC underflow, parity (compiled)" `Slow
+          test_compiled_dual_position_owned_borrowed;
+        Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
+          test_compiled_fbip_arity_no_overflow;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
+        Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
+          test_compiled_sanitize_clean_exit;
       ]);
     ]

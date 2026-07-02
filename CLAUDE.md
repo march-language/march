@@ -56,9 +56,10 @@ dune runtest --force       # re-run even if inputs are cached (avoids silent no-
 
 To unstick a stale daemon: `dune shutdown` (dune 3.x).
 
-13 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
-parity tests (~5s), 5 compiled adversarial regression tests (~5s), and 2 pbkdf2
-key-derivation tests (~3s). Run the full suite before merging to main.
+24 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
+parity tests (~5s), 15 compiled adversarial regression tests (~20s), 2 pbkdf2
+key-derivation tests (~3s), and 1 vault concurrency test. Run the full suite
+before merging to main.
 
 After implementing or completing a feature, update `specs/todos.md` (move item to Done) and `specs/progress.md` (add to feature list) to keep them current.
 

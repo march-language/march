@@ -151,6 +151,45 @@ let ty_of_expr (e : Ast.expr) : Tir.ty =
     Built from [DUse] declarations. E.g. [map] → [List.map]. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
+(** Per-module import aliases (the aliases from the module CURRENTLY being lowered,
+    inheriting the enclosing module's).  Consulted BEFORE the program-global
+    [_use_aliases] so a module's own [import X] wins over an alias another module
+    registered globally for the same short name.  Without this, a name defined in
+    two modules (e.g. Connection.close and Db.close) resolves to whichever import
+    was processed first program-wide — hijacking modules that imported the other
+    (e.g. a `close(conn)` meant for Connection.close silently calling Db.close on a
+    ConnState → wrong-shape destructure → SIGSEGV).  Scoped per [lower_mod_decls]
+    (inherit-on-enter / restore-on-exit) so sibling modules do not leak into each
+    other. *)
+let _current_module_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
+
+(** Snapshot of each module's [_current_module_aliases] (keyed by its qualified
+    prefix, e.g. "TestLivePostgres."), saved at the end of [lower_mod_decls].
+    Test/setup bodies are lowered in a SEPARATE later pass ([collect_tests]) after
+    the per-module scope has been restored, so they re-load their enclosing
+    module's aliases from here — otherwise a test's `close(conn)` would fall back
+    to the global table and hijack Connection.close → Db.close. *)
+let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
+  = ref (Hashtbl.create 0)
+
+(* ── Alias-ambiguity audit (MARCH_ALIAS_AUDIT=1) ─────────────────────────
+   The name-hijack bug class (to_string → Bytes.to_string, close → Db.close,
+   march#8) is a bare name resolving through the PROGRAM-GLOBAL first-wins
+   alias table while several distinct qualified candidates exist.  The
+   per-module table fixes precedence for the importing module itself, but a
+   bare name that still falls through to the global table with ≥2 candidates
+   is resolving by registration order — a hijack waiting to happen.  Track
+   every qualified target ever offered for each short name; when the global
+   fallback fires for an ambiguous one, report it once.  Diagnostic only. *)
+let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
+let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
+let alias_audit_on = lazy (Sys.getenv_opt "MARCH_ALIAS_AUDIT" <> None)
+let note_alias_candidate (short : string) (target : string) : unit =
+  let cur = match Hashtbl.find_opt _alias_candidates short with
+    | Some l -> l | None -> [] in
+  if not (List.mem target cur) then
+    Hashtbl.replace _alias_candidates short (target :: cur)
+
 (* Resolve a variable name through use-import aliases.
    A name that is currently bound as a local (function parameter or
    let-binding tracked in [_fn_param_types]) is NOT resolved through
@@ -190,8 +229,27 @@ let resolve_use_alias (name : string) : string =
      and the interpreter — so never resolve a builtin name through the alias
      table. *)
   else if Defun.StringSet.mem name Defun.builtin_names then name
-  else match Hashtbl.find_opt !_use_aliases name with
+  (* The current module's OWN imports take precedence over the program-global
+     table, so [import Connection] in this module resolves [close] to
+     Connection.close even if another module globally registered Db.close. *)
+  else match Hashtbl.find_opt !_current_module_aliases name with
   | Some qualified -> qualified
+  | None ->
+  match Hashtbl.find_opt !_use_aliases name with
+  | Some qualified ->
+    (* GLOBAL-fallback resolution: the current module did not import this name
+       itself.  If several distinct qualified candidates exist program-wide,
+       this resolution is registration-order-dependent — the hijack class.
+       Report once per name under MARCH_ALIAS_AUDIT. *)
+    (if Lazy.force alias_audit_on && not (Hashtbl.mem _alias_reported name) then
+       match Hashtbl.find_opt _alias_candidates name with
+       | Some (_ :: _ :: _ as cands) ->
+         Hashtbl.replace _alias_reported name ();
+         Printf.eprintf
+           "[alias-audit] bare `%s` resolved via GLOBAL table to %s (ambiguous: %s)\n%!"
+           name qualified (String.concat ", " cands)
+       | _ -> ());
+    qualified
   | None -> name
 
 (* ── Qualified module lowering (refs) ──────────────────────────── *)
@@ -702,7 +760,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         | Tir.TCon (type_name, _) -> type_name ^ "." ^ short_tag
         | _ -> short_tag
       in
-      Tir.EAlloc (Tir.TCon (ctor_key, []), arg_atoms))
+      (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's
+         parameters into the EAlloc so codegen can decide the value's
+         representation — a niche-shaped type applied to a niche-UNSAFE payload
+         (e.g. Option(Option(_))) must box its nullary ctor rather than emit a
+         raw-0 niche, to stay consistent with the boxed non-nullary ctor and the
+         match's Boxed strategy.  Non-nullary ctors get the payload type from
+         their arguments, so this is only needed when there are none. *)
+      let ctor_params = match ty_of_span span, arg_atoms with
+        | Tir.TCon (_, params), [] -> params
+        | _ -> []
+      in
+      Tir.EAlloc (Tir.TCon (ctor_key, ctor_params), arg_atoms))
 
   (* --- Lambda → ELetRec with a single fn_def --- *)
   | Ast.ELam (params, body, lam_span) ->
@@ -1849,6 +1918,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _type_map_ref := type_map;
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
+  _current_module_aliases := Hashtbl.create 16;
+  _module_alias_snapshots := Hashtbl.create 16;
+  Hashtbl.reset _alias_candidates;
+  Hashtbl.reset _alias_reported;
   _lowered_modules := Hashtbl.create 8;
   (* Pre-register every top-level DMod name from the combined module.
      This prevents _ensure_module_lowered from re-parsing a stdlib file with a
@@ -2201,6 +2274,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               | Ast.DLet (_, b, _) ->
                 (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
               | _ -> None) decls in
+          (* Scope the per-module import-alias table: inherit the enclosing
+             module's aliases, add this module's own imports as they are
+             processed, and restore on exit so sibling modules don't see each
+             other's imports. *)
+          let saved_mod_aliases = !_current_module_aliases in
+          _current_module_aliases := Hashtbl.copy saved_mod_aliases;
+          Fun.protect
+            ~finally:(fun () -> _current_module_aliases := saved_mod_aliases)
+            (fun () ->
           with_current_module_fns direct_fn_names (fun () ->
           List.iter (fun d ->
               match d with
@@ -2264,10 +2346,17 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                                     (String.length fn_name - plen) in
                       (* Skip if a sibling fn in the current module has the
                          same short name — sibling fns shadow imports. *)
-                      if not (List.mem short direct_fn_names)
-                         && not (Hashtbl.mem !_use_aliases short)
-                      then
-                        Hashtbl.replace !_use_aliases short fn_name
+                      if not (List.mem short direct_fn_names) then begin
+                        note_alias_candidate short fn_name;
+                        if not (Hashtbl.mem !_use_aliases short) then
+                          Hashtbl.replace !_use_aliases short fn_name;
+                        (* Also record in the CURRENT module's own alias table so
+                           this import wins over a global alias another module
+                           registered for the same short name.  First local
+                           registration wins (mirrors the global first-wins). *)
+                        if not (Hashtbl.mem !_current_module_aliases short) then
+                          Hashtbl.replace !_current_module_aliases short fn_name
+                      end
                     end
                   ) all_fn_names
                 in
@@ -2309,7 +2398,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                                  ed_ret = ret } :: !externs
                   ) edef.ext_fns
               | _ -> ()
-            ) decls)
+            ) decls);
+          (* Save this module's aliases so the later test/setup lowering pass
+             (collect_tests) can re-load them for DTest bodies. *)
+          Hashtbl.replace !_module_alias_snapshots prefix
+            (Hashtbl.copy !_current_module_aliases))
         in
         lower_mod_decls (mod_name.txt ^ ".") inner_decls
       | Ast.DExtern (edef, _) ->
@@ -2352,14 +2445,17 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
+                 note_alias_candidate short fn_name;
                  Hashtbl.replace !_use_aliases short fn_name
                end
              ) all_fn_names
          | Ast.UseNames names ->
            List.iter (fun (n : Ast.name) ->
                let qualified = prefix ^ n.txt in
-               if List.mem qualified all_fn_names then
+               if List.mem qualified all_fn_names then begin
+                 note_alias_candidate n.txt qualified;
                  Hashtbl.replace !_use_aliases n.txt qualified
+               end
              ) names
          | Ast.UseExcept excluded ->
            let excl_set = List.map (fun (n : Ast.name) -> n.txt) excluded in
@@ -2369,8 +2465,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
-                 if not (List.mem short excl_set) then
+                 if not (List.mem short excl_set) then begin
+                   note_alias_candidate short fn_name;
                    Hashtbl.replace !_use_aliases short fn_name
+                 end
                end
              ) all_fn_names)
       | Ast.DAlias (ad, _) ->
@@ -2468,10 +2566,20 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           } in
           fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DMod (mname, _, inner_decls, _) ->
+          let new_mod_prefix = mod_prefix ^ mname.txt ^ "." in
+          (* Re-load this module's import aliases (saved during lower_mod_decls)
+             so the test bodies inside resolve unqualified names via the module's
+             own imports — e.g. `close` → Connection.close, not the global
+             Db.close. *)
+          let saved_aliases = !_current_module_aliases in
+          (match Hashtbl.find_opt !_module_alias_snapshots new_mod_prefix with
+           | Some snap -> _current_module_aliases := snap
+           | None -> ());
           collect_tests prefix
-            ~mod_prefix:(mod_prefix ^ mname.txt ^ ".")
+            ~mod_prefix:new_mod_prefix
             ~direct_fn_names:(direct_names_of inner_decls)
-            inner_decls
+            inner_decls;
+          _current_module_aliases := saved_aliases
         | _ -> ()
       ) decls
     in
@@ -2545,4 +2653,5 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _saved_iface_methods := Hashtbl.copy !_iface_methods;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
+  _current_module_aliases := Hashtbl.create 0;
   result
