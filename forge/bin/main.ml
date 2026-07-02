@@ -1053,8 +1053,31 @@ let completions_cmd =
 
 (* --------------------------------------------------------------------- root *)
 
+(* The current project's own [archive.task.*] entries, if any — separate
+   from the registry loop below, since a project is never registered as
+   its own installed archive (see find_task's matching fix). *)
+let self_man_blocks () =
+  match Project.find_forge_toml () with
+  | None -> []
+  | Some project_root ->
+    let self_name =
+      try (Project.load_from project_root).Project.name
+      with Sys_error _ | Failure _ | Toml.Parse_error _ -> ""
+    in
+    if self_name = "" then []
+    else
+      let tasks = Archive_store.list_archive_tasks project_root in
+      if tasks = [] then []
+      else
+        [`S (String.uppercase_ascii self_name ^ " TASKS")]
+        @ List.map (fun (cmd, _, doc) ->
+            let desc = if doc = "" then " " else doc in
+            `I ("$(b,forge " ^ cmd ^ ")", desc)
+          ) tasks
+
 let archive_man_blocks () =
   let entries = Archive_store.load_registry () in
+  self_man_blocks () @
   List.concat (List.map (fun (name, entry) ->
       let root = match entry.Archive_store.source with
         | Archive_store.Path p -> p
