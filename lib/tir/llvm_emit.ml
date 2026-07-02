@@ -5666,6 +5666,13 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
   emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
   emit_label ctx loop_lbl;
 
+  (* Phase 4: decrement the reduction budget at every loop iteration, exactly
+     as emit_fn's self-TCO path does at the top of tco_loop. A mutual-TCO
+     group is never leaf (each member tail-calls another group member), so a
+     pure mutually-recursive loop (e.g. is_even/is_odd) would otherwise never
+     yield back to the scheduler and would monopolize its worker forever. *)
+  emit_reduction_check ctx;
+
   (* Snapshot the stack pointer at the top of each iteration — see
      tco_stack_save's doc comment for why this is required. Every case body's
      back-edge restores to this point before re-entering the loop header. *)

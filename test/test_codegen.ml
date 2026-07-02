@@ -302,6 +302,48 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
     true (List.length live_decrefs > 0)
 
+(** B8 regression: a pure mutually-recursive loop (is_even/is_odd style) never
+    calls a builtin and never returns to the scheduler on its own — unlike
+    emit_fn's self-TCO path (which calls emit_reduction_check at the top of
+    every tco_loop iteration), emit_mutual_tco_group never emitted a reduction
+    check anywhere in its combined dispatch function. That starves the
+    scheduler worker running the loop forever. Assert the mutual_loop body
+    contains the same reduction-check IR (@march_tls_reductions decrement +
+    @march_yield_from_compiled call) that self-TCO loops get. *)
+let test_mutual_tco_has_reduction_check () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn is_even(n : Int) : Bool do
+      if n == 0 do true else is_odd(n - 1) end
+    end
+    @[no_warn_recursion]
+    fn is_odd(n : Int) : Bool do
+      if n == 0 do false else is_even(n - 1) end
+    end
+    fn main() : Unit do println(to_string(is_even(1000000))) end
+  end|} in
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
+    (ir_contains ir "mutual_loop");
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: reduction budget loaded" true
+    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: yield call present" true
+    (ir_contains ir "@march_yield_from_compiled");
+  (* The check must be inside the loop body, not merely present somewhere else
+     in the module — find the mutual_loop label and confirm the reduction
+     check appears between it and the switch dispatch that follows it. *)
+  let loop_pos =
+    try Str.search_forward (Str.regexp "\nmutual_loop[0-9]*:") ir 0
+    with Not_found -> Alcotest.fail "mutual_loop label not found in IR"
+  in
+  let switch_pos =
+    try Str.search_forward (Str.regexp "switch i64") ir loop_pos
+    with Not_found -> Alcotest.fail "switch dispatch not found after mutual_loop label"
+  in
+  let loop_header = String.sub ir loop_pos (switch_pos - loop_pos) in
+  Alcotest.(check bool)
+    "mutual TCO is_even/is_odd: reduction check sits inside the loop header, before the dispatch switch"
+    true (ir_contains loop_header "@march_yield_from_compiled")
+
 (* ── Phase 4: Reduction Counting in Compiled Code ─────────────────────── *)
 
 (** Non-leaf, non-TCO function: reduction check IR must appear. *)
@@ -5468,6 +5510,8 @@ let codegen_suites =
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
           Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
             `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "B8: reduction check present in mutual loop"
+            `Quick test_mutual_tco_has_reduction_check;
         ] );
       ( "phase4_reduction_codegen", [
           Alcotest.test_case "non-leaf has reduction check"      `Quick test_phase4_nonleaf_has_reduction_check;
