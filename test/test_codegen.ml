@@ -581,6 +581,66 @@ let test_repl_jit_cross_line_hof () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression: a top-level function referenced as a first-class VALUE (not
+    called) from a plain REPL expression or `let` RHS.  emit_atom wraps such a
+    reference in a @<fn>$clo_wrap trampoline whose definition is appended to
+    ctx.extra_fns — but emit_repl_expr / emit_repl_decl dropped extra_fns from
+    their output (unlike emit_repl_fn / emit_fns_fragment /
+    emit_repl_fn_with_closure_slot, fixed as B11), so the fragment stored the
+    address of an undefined symbol and clang rejected the IR. *)
+let test_repl_jit_topfn_first_class_value () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let desugared_decl src = match parse_repl src with
+         | March_ast.Ast.ReplDecl d -> March_desugar.Desugar.desugar_decl d
+         | _ -> failwith "expected ReplDecl" in
+       (* Module-level fns compiled into the same fragment; main's body passes
+          `double` as a bare value, forcing the clo_wrap trampoline. *)
+       let fn_decls = [
+         desugared_decl "fn double(x) do x * 2 end";
+         desugared_decl "fn call_with_21(f) do f(21) end";
+       ] in
+       let make_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
+           fn_clauses = [clause]; fn_bounds = [] } in
+         { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+           mod_decls = fn_decls @ [DFn (main_def, s)] }
+       in
+       (* Expression path (emit_repl_expr). *)
+       (match parse_repl "call_with_21(double)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          Alcotest.(check string) "expr: call_with_21(double) = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       (* Let-binding path (emit_repl_decl): same first-class use in a let RHS. *)
+       (match parse_repl "let y = call_with_21(double)" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (_, b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_mod bind_expr in
+          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Test: List.length works correctly in JIT REPL with stdlib precompile.
 
     This is a regression test for the defun TVar bug: when the stdlib is
@@ -5119,6 +5179,7 @@ let codegen_suites =
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
+        Alcotest.test_case "top-level fn as first-class value" `Quick test_repl_jit_topfn_first_class_value;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
       ];
       "repl_jit_regression", [

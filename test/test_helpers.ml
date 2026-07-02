@@ -546,6 +546,7 @@ let setup_jit_runtime () =
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c"; "march_ffi.c";
+      "march_dispatch.c"; "march_monitor_registry.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in
     let h_inputs =
