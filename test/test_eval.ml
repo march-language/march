@@ -3979,6 +3979,48 @@ end|} in
       | _ -> Alcotest.fail "bad Response shape")
    | _ -> Alcotest.fail "expected Ok(Response ...)")
 
+(* ── B16: ~H CSRF `conn` auto-injection removal ─────────────────────────────
+   Every ~H literal containing a mutating <form method="post|put|patch|delete">
+   used to get an injected `CSRF.tag_string(conn)` call, where `conn` is a
+   free variable assumed in scope (the Bastion convention). Any non-Bastion
+   module using such a form got a baffling unbound-`conn` error. Bastion is
+   leaving the stdlib; the injection is removed entirely. A standalone module
+   with a mutating form must compile and run. *)
+
+let test_h_sigil_form_post_typechecks_standalone () =
+  (* iolist.march is self-contained (no String-module deps), so loading it
+     alone keeps the harness free of unrelated missing-builtin noise;
+     html_auto_escape is a typecheck builtin. *)
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let m = parse_and_desugar {|mod Page do
+  fn page() : String do
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end
+end|} in
+  let m = { m with March_ast.Ast.mod_decls =
+                     [iolist_decl] @ m.March_ast.Ast.mod_decls } in
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool)
+    (Printf.sprintf "standalone ~H form post: no typecheck errors (got: %s)"
+       (String.concat " | " msgs))
+    false (March_errors.Errors.has_errors errors)
+
+let test_h_sigil_form_post_runs_standalone () =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let env = eval_with_stdlib [string_decl; iolist_decl]
+    {|mod Page do
+  fn page() : String do
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end
+end|} in
+  let result = call_fn env "page" [] in
+  (* No token injection: the template renders verbatim. *)
+  Alcotest.(check string) "form renders verbatim, no injected token"
+    {|<form method="post">x</form>|} (vstr result)
+
 let eval_suites =
   [
       ( "browser http",
@@ -4277,6 +4319,10 @@ let eval_suites =
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
+        ] );
+      ( "h_sigil_no_csrf_injection", [
+          Alcotest.test_case "B16: ~H form post typechecks standalone" `Quick test_h_sigil_form_post_typechecks_standalone;
+          Alcotest.test_case "B16: ~H form post runs standalone"       `Quick test_h_sigil_form_post_runs_standalone;
         ] );
   ]
 
