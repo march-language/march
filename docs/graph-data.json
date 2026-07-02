@@ -15388,6 +15388,226 @@
       "created_at": "2026-06-25T18:27:03.141350-04:00",
       "updated_at": "2026-06-25T18:27:03.141350-04:00",
       "metadata_json": "{\"branch\":\"worktree-agent-a0c4c21d83f0e3b73\",\"commit\":\"4cf74f69\",\"confidence\":95}"
+    },
+    {
+      "id": 1400,
+      "change_id": "a8b1f42f-06e0-4f49-b4f1-956d0a0b6e23",
+      "node_type": "goal",
+      "title": "Pattern guards (when in match) refinement integration",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-26T09:09:43.372256-04:00",
+      "updated_at": "2026-06-26T09:09:43.372256-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90,\"prompt\":\"ok, build it\"}"
+    },
+    {
+      "id": 1401,
+      "change_id": "af499edb-a8cf-40a3-8d89-b720a7463ab7",
+      "node_type": "action",
+      "title": "Implement pattern guards: division_safety path context, return_infer guard threading, tests",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-26T09:14:41.447840-04:00",
+      "updated_at": "2026-06-26T09:14:41.447840-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":85,\"files\":[\"lib/refinecheck/division_safety.ml\",\"lib/refinecheck/return_infer.ml\",\"test/test_refinecheck.ml\",\"test/test_compiler.ml\"]}"
+    },
+    {
+      "id": 1402,
+      "change_id": "31092916-3de5-4a5b-9c29-508d65b1ba48",
+      "node_type": "outcome",
+      "title": "Pattern guards implemented: division_safety path threading, return_infer multi-position inference, 16 new tests all passing",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-26T09:29:35.965093-04:00",
+      "updated_at": "2026-06-26T09:29:35.965093-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"05aca4b0\",\"confidence\":97}"
+    },
+    {
+      "id": 1403,
+      "change_id": "488d2fc7-5c18-4abb-aa20-a580a6f18750",
+      "node_type": "outcome",
+      "title": "Merge resolved and pushed to main — 370 compiler + 66 refinecheck tests pass",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-26T09:49:04.690953-04:00",
+      "updated_at": "2026-06-26T09:49:04.690953-04:00",
+      "metadata_json": "{\"branch\":\"claude/happy-ritchie-81ea80\",\"commit\":\"6a4fe4f3\",\"confidence\":95}"
+    },
+    {
+      "id": 1404,
+      "change_id": "9be2ffba-f81a-4e79-a129-4f62795403ac",
+      "node_type": "goal",
+      "title": "forge build and forge check: print wall time, error count, and warning count at end of run",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T13:57:47.884008-04:00",
+      "updated_at": "2026-06-29T13:57:47.884008-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"confidence\":90,\"prompt\":\"let's have forge build and check print out the total wall time it took to run, and also if there are errors, and warnings the number of each\"}"
+    },
+    {
+      "id": 1405,
+      "change_id": "ca42e1f0-a1ec-4bed-92b3-125c93439322",
+      "node_type": "action",
+      "title": "Add run_capturing_stderr, count_diagnostics, print summary to check_file/check_all/compile_entry/build/check",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T14:02:59.851084-04:00",
+      "updated_at": "2026-06-29T14:02:59.851084-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"confidence\":85,\"files\":[\"forge/lib/cmd_build.ml\",\"forge/lib/cmd_check.ml\"]}"
+    },
+    {
+      "id": 1406,
+      "change_id": "b132c4fe-5e80-496d-873a-a3796fdf2f6b",
+      "node_type": "outcome",
+      "title": "forge build and check now print wall time, error/warning counts after every run",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T14:06:11.486338-04:00",
+      "updated_at": "2026-06-29T14:06:11.486338-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"commit\":\"8713f42b\",\"confidence\":95}"
+    },
+    {
+      "id": 1407,
+      "change_id": "6cf05119-f9b6-4b7a-b22d-bcd6884eff00",
+      "node_type": "goal",
+      "title": "Fix DB-on-HTTP-worker-thread hang: handlers can't do socket I/O on the event-loop/worker threads (works on main thread). Restore thread-per-connection blocking-socket path so forgepm DB routes serve.",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T14:53:47.793325-04:00",
+      "updated_at": "2026-06-29T14:53:47.793325-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"confidence\":85,\"prompt\":\"clean an rebuild, the e2e testing. [user then chose: Fix march first — make HTTP worker threads pump the scheduler OR use blocking sockets in depot Connection.connect; verify home/browse/detail + publish e2e go green]\"}"
+    },
+    {
+      "id": 1408,
+      "change_id": "f5ea6dc5-0670-420b-8b0d-715f1399529b",
+      "node_type": "action",
+      "title": "Make evloop HTTP server opt-in (MARCH_HTTP_EVLOOP=1) so compiled binaries default to thread-per-connection + blocking sockets",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T14:54:30.877540-04:00",
+      "updated_at": "2026-06-29T14:54:30.877540-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"confidence\":80,\"files\":[\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1409,
+      "change_id": "9a295b24-1eda-4480-8fbc-bc0f9e7fd9db",
+      "node_type": "action",
+      "title": "Expose existing sha1_bytes builtin to the typechecker (+ defun list) — needed for TOTP HMAC-SHA1 in forgepm; impl already in eval/llvm_emit/runtime",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-06-29T19:17:17.118106-04:00",
+      "updated_at": "2026-06-29T19:17:17.118106-04:00",
+      "metadata_json": "{\"branch\":\"fix/h-sigil-compiled\",\"confidence\":85,\"files\":[\"lib/typecheck/typecheck.ml\",\"lib/tir/defun.ml\"]}"
+    },
+    {
+      "id": 1410,
+      "change_id": "ead05903-cc37-48a3-9504-bf41d63c5b6b",
+      "node_type": "goal",
+      "title": "Deep code review of lower/llvm_emit/perceus for deficiencies, RC issues, refactor + doc/test opportunities",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T18:49:54.772680-04:00",
+      "updated_at": "2026-07-01T18:49:54.772680-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90,\"prompt\":\"Examine @lib/tir/lower.ml @lib/tir/llvm_emit.ml and @lib/tir/perceus.ml they're frequent sources of bugs and issues. I want to examine them for deficiencies, RC issues, opportunities to refactor into multiple files, documentation/testing opportunities. Perform a deep code review. It may be appropriate to start at the lexer and parser then go all the way down. I want a list of recommendations in specs/analysis\"}"
+    },
+    {
+      "id": 1411,
+      "change_id": "3b7b71ba-ea48-4e53-a399-0f90ee7ea9c2",
+      "node_type": "observation",
+      "title": "Agent reviews: llvm_emit (1 crit: EUpdate OOB write on erased records; mutual-TCO RC leak + no reduction check; dead march_ prefix guard) and lower (2 crit: guard-exhaustion returns 0; PatRecord/LitFloat arms dropped)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T19:08:47.393228-04:00",
+      "updated_at": "2026-07-01T19:08:47.393228-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":85}"
+    },
+    {
+      "id": 1412,
+      "change_id": "f479461b-250e-459f-8bbe-16230b620140",
+      "node_type": "observation",
+      "title": "Front-end review verified by execution: pipe-into-(match) drops scrutinee; interleaved fn clauses shadow silently; raw newline in string desyncs all line numbers; docs wrong about if/else/then; ~H CSRF injection references free var conn",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T19:09:05.503780-04:00",
+      "updated_at": "2026-07-01T19:09:05.503780-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1413,
+      "change_id": "92217eb3-516f-4f6d-ae76-7364d503948a",
+      "node_type": "action",
+      "title": "Write specs/analysis/2026-07-01-pipeline-deep-review.md synthesizing 4 agent reviews (2 runtime-confirmed RC criticals, 6 criticals total, refactor/doc/test plans)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T19:19:48.377448-04:00",
+      "updated_at": "2026-07-01T19:19:48.377448-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90,\"files\":[\"specs/analysis/2026-07-01-pipeline-deep-review.md\"]}"
+    },
+    {
+      "id": 1414,
+      "change_id": "a55a61c4-60cf-44e1-a147-d6f5050ebc00",
+      "node_type": "outcome",
+      "title": "Deep review complete: specs/analysis/2026-07-01-pipeline-deep-review.md — 6 criticals (2 runtime-confirmed RC bugs), 10 highs, ~25 med/low, 5 root causes, refactor/test/doc plans; uncommitted in worktree",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T19:24:12.027568-04:00",
+      "updated_at": "2026-07-01T19:24:12.027568-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":95,\"files\":[\"specs/analysis/2026-07-01-pipeline-deep-review.md\"]}"
+    },
+    {
+      "id": 1415,
+      "change_id": "c65e7ca0-c724-478f-a448-bc0c488f1272",
+      "node_type": "goal",
+      "title": "Fix three P0 pipeline items: oracle skips compiled crashes; Perceus owned+borrowed double-consumption; same_arity FBIP conflation",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T20:37:29.965474-04:00",
+      "updated_at": "2026-07-01T20:37:29.965474-04:00",
+      "metadata_json": "{\"branch\":\"claude/wonderful-keller-c592ea\",\"confidence\":90,\"prompt\":\"Fix the three P0 items from specs/analysis/2026-07-01-pipeline-deep-review.md (§2, items 1-3), in this order:\\n\\n1. test/test_properties.ml:730 — the differential oracle skips compiled crashes (`if rc_run <> 0 then None`). Change it to treat a signal-killed compiled binary (exit >= 128 / WIFSIGNALED) as a FAILURE when the interpreter succeeded; keep skipping only clean nonzero error exits.\\n\\n2. lib/tir/perceus.ml:505-561 (EApp) and :617-677 (ECallPtr extern) — when one variable is passed at BOTH an owned and a borrowed argument position of the same call and is dead afterward, `find_inc_vars` (only inspects non_borrowed_args, :527) computes 0 dups while `post_dec_vars` (:535-561) adds a post-call dec for the borrowed occurrence → double-consumption of one reference → use-after-free. Repro: `both(a:own, b:borrow, n)` called as `both(s, s, 1)` with s dead-after; compiled binary aborts exit 134, interpreter fine. Fix: when a var occupies >=1 owned position in the node, suppress its borrowed-position post-dec (or add one IncRC per coexisting borrowed-dead occurrence). Fix both duplicated sites.\\n\\n3. lib/tir/perceus.ml:282-285 — `same_arity (TCon(_, ts)) nfields = (List.length ts = nfields)` conflates type-parameter count with constructor field count. The dead-binding FBIP path (:1450-1482) feeds the binding's declared type directly, so a dead `Ok(7) : Result(Int,String)` (1 field, 2 type params) cell gets reused for a 2-field constructor — 8-byte heap overflow. Fix: compare against the constructor's real field count (as add_scrutinee_free_for at :939-944 does), or refuse reuse when the constructor arity can't be verified. Also audit Borrow.has_matching_alloc (lib/tir/borrow.ml:182-199) for the same heuristic.\\n\\nAdd compiled regression tests for both RC bugs (assert interpreter/compiled output parity AND exit code 0). Run scripts/run-tests.sh (full suite) plus the RC-sensitive benchmarks (bench/tree_transform.march, bench/list_ops.march, bench/binary_trees.march) per specs/benchmarks.md. Use MARCH_DEBUG_PERCEUS=1 / MARCH_SANITIZE=1 to verify (see the compiler-rc skill). Update specs/todos.md and specs/progress.md in the same commit.\"}"
+    },
+    {
+      "id": 1416,
+      "change_id": "032635d8-c854-4c8f-8d32-0dbe1b6f5c5a",
+      "node_type": "action",
+      "title": "Fix oracle signal-kill skip, Perceus dual-position double-consumption (EApp+ECallPtr extern), same_arity FBIP encoding marker",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T20:50:34.243090-04:00",
+      "updated_at": "2026-07-01T20:50:34.243090-04:00",
+      "metadata_json": "{\"branch\":\"claude/wonderful-keller-c592ea\",\"confidence\":90,\"files\":[\"test/test_properties.ml\",\"lib/tir/perceus.ml\",\"lib/tir/borrow.ml\"]}"
+    },
+    {
+      "id": 1417,
+      "change_id": "2f1f670d-9d5a-4e0b-9f80-c646aebcd94a",
+      "node_type": "goal",
+      "title": "Include MARCH_SANITIZE in CAS cache key (bin/main.ml)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T21:13:10.355560-04:00",
+      "updated_at": "2026-07-01T21:13:10.355560-04:00",
+      "metadata_json": "{\"branch\":\"claude/wizardly-snyder-bbf58c\",\"confidence\":90,\"prompt\":\"In /Users/80197052/code/march, bin/main.ml computes a CAS compilation hash with a `cas_flags` string (two sites, around lines 1160 and 1813; see also the MARCH_SANITIZE usage at lines ~470 and ~2015). The MARCH_SANITIZE env var changes codegen (adds -fsanitize=address,undefined to clang) but is NOT part of the cache key, so `MARCH_SANITIZE=1 main.exe --compile ...` silently reuses a cached non-sanitized binary (observed: second compile printed \\\"(cached)\\\" and produced a binary without ASAN). Fix: include MARCH_SANITIZE (and audit MARCH_DEBUG_RUNTIME or any other env vars that alter emitted artifacts) in cas_flags at both sites. Per project memory (project_cas_cache_key_flags.md), verify with a value-revealing program: compile without sanitize, then with MARCH_SANITIZE=1, and confirm the second binary links ASAN (e.g. `otool -L bin | grep asan`). Run scripts/run-tests.sh -q after.\"}"
+    },
+    {
+      "id": 1418,
+      "change_id": "7f68bcf7-b72c-4939-9f08-b8026a0ec7df",
+      "node_type": "action",
+      "title": "Add codegen_cas_tags helper (MARCH_SANITIZE, MARCH_HTTP_EVLOOP, fast-math, dbg) to both cas_flags sites",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T21:15:28.890398-04:00",
+      "updated_at": "2026-07-01T21:15:28.890398-04:00",
+      "metadata_json": "{\"branch\":\"claude/wizardly-snyder-bbf58c\",\"confidence\":90,\"files\":[\"bin/main.ml\"]}"
+    },
+    {
+      "id": 1419,
+      "change_id": "81f884eb-742e-4a52-b4b6-57e18cd30110",
+      "node_type": "outcome",
+      "title": "All three P0 fixes verified: repros fixed (parity + exit 0), full suite green (372/224/323/790/53/36), benchmarks unchanged",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-01T21:18:37.045131-04:00",
+      "updated_at": "2026-07-01T21:18:37.045131-04:00",
+      "metadata_json": "{\"branch\":\"claude/wonderful-keller-c592ea\",\"commit\":\"a5dad194\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -25829,6 +26049,160 @@
       "weight": 1.0,
       "rationale": "committed",
       "created_at": "2026-06-25T18:27:03.152029-04:00"
+    },
+    {
+      "id": 959,
+      "from_node_id": 1400,
+      "to_node_id": 1401,
+      "from_change_id": "a8b1f42f-06e0-4f49-b4f1-956d0a0b6e23",
+      "to_change_id": "af499edb-a8cf-40a3-8d89-b720a7463ab7",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-26T09:14:41.491548-04:00"
+    },
+    {
+      "id": 960,
+      "from_node_id": 1401,
+      "to_node_id": 1402,
+      "from_change_id": "af499edb-a8cf-40a3-8d89-b720a7463ab7",
+      "to_change_id": "31092916-3de5-4a5b-9c29-508d65b1ba48",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-26T09:29:36.009153-04:00"
+    },
+    {
+      "id": 961,
+      "from_node_id": 1400,
+      "to_node_id": 1403,
+      "from_change_id": "a8b1f42f-06e0-4f49-b4f1-956d0a0b6e23",
+      "to_change_id": "488d2fc7-5c18-4abb-aa20-a580a6f18750",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-26T09:49:07.651589-04:00"
+    },
+    {
+      "id": 962,
+      "from_node_id": 1404,
+      "to_node_id": 1405,
+      "from_change_id": "9be2ffba-f81a-4e79-a129-4f62795403ac",
+      "to_change_id": "ca42e1f0-a1ec-4bed-92b3-125c93439322",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-06-29T14:02:59.892610-04:00"
+    },
+    {
+      "id": 963,
+      "from_node_id": 1405,
+      "to_node_id": 1406,
+      "from_change_id": "ca42e1f0-a1ec-4bed-92b3-125c93439322",
+      "to_change_id": "b132c4fe-5e80-496d-873a-a3796fdf2f6b",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-06-29T14:06:11.518293-04:00"
+    },
+    {
+      "id": 964,
+      "from_node_id": 1407,
+      "to_node_id": 1408,
+      "from_change_id": "6cf05119-f9b6-4b7a-b22d-bcd6884eff00",
+      "to_change_id": "f5ea6dc5-0670-420b-8b0d-715f1399529b",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "implementation",
+      "created_at": "2026-06-29T14:54:30.947277-04:00"
+    },
+    {
+      "id": 965,
+      "from_node_id": 1407,
+      "to_node_id": 1409,
+      "from_change_id": "6cf05119-f9b6-4b7a-b22d-bcd6884eff00",
+      "to_change_id": "9a295b24-1eda-4480-8fbc-bc0f9e7fd9db",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "sha1_bytes exposure",
+      "created_at": "2026-06-29T19:17:17.188953-04:00"
+    },
+    {
+      "id": 966,
+      "from_node_id": 1410,
+      "to_node_id": 1411,
+      "from_change_id": "ead05903-cc37-48a3-9504-bf41d63c5b6b",
+      "to_change_id": "3b7b71ba-ea48-4e53-a399-0f90ee7ea9c2",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Review findings",
+      "created_at": "2026-07-01T19:08:47.422152-04:00"
+    },
+    {
+      "id": 967,
+      "from_node_id": 1410,
+      "to_node_id": 1412,
+      "from_change_id": "ead05903-cc37-48a3-9504-bf41d63c5b6b",
+      "to_change_id": "f479461b-250e-459f-8bbe-16230b620140",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Review findings",
+      "created_at": "2026-07-01T19:09:05.515761-04:00"
+    },
+    {
+      "id": 968,
+      "from_node_id": 1410,
+      "to_node_id": 1413,
+      "from_change_id": "ead05903-cc37-48a3-9504-bf41d63c5b6b",
+      "to_change_id": "92217eb3-516f-4f6d-ae76-7364d503948a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Synthesis of review findings into recommendations doc",
+      "created_at": "2026-07-01T19:19:52.774037-04:00"
+    },
+    {
+      "id": 969,
+      "from_node_id": 1413,
+      "to_node_id": 1414,
+      "from_change_id": "92217eb3-516f-4f6d-ae76-7364d503948a",
+      "to_change_id": "a55a61c4-60cf-44e1-a147-d6f5050ebc00",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Analysis doc written",
+      "created_at": "2026-07-01T19:24:12.041874-04:00"
+    },
+    {
+      "id": 970,
+      "from_node_id": 1415,
+      "to_node_id": 1416,
+      "from_change_id": "c65e7ca0-c724-478f-a448-bc0c488f1272",
+      "to_change_id": "032635d8-c854-4c8f-8d32-0dbe1b6f5c5a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation of the three P0 fixes",
+      "created_at": "2026-07-01T20:50:34.267155-04:00"
+    },
+    {
+      "id": 971,
+      "from_node_id": 1417,
+      "to_node_id": 1418,
+      "from_change_id": "2f1f670d-9d5a-4e0b-9f80-c646aebcd94a",
+      "to_change_id": "7f68bcf7-b72c-4939-9f08-b8026a0ec7df",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation step",
+      "created_at": "2026-07-01T21:15:28.934354-04:00"
+    },
+    {
+      "id": 972,
+      "from_node_id": 1416,
+      "to_node_id": 1419,
+      "from_change_id": "032635d8-c854-4c8f-8d32-0dbe1b6f5c5a",
+      "to_change_id": "81f884eb-742e-4a52-b4b6-57e18cd30110",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete, verified by tests and benchmarks",
+      "created_at": "2026-07-01T21:18:37.082257-04:00"
     }
   ]
 }
