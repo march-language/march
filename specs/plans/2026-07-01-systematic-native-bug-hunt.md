@@ -158,3 +158,46 @@ tests eliminated by two audit-caught compiler fixes (`f0fe40cc`); the
 remaining board is 2 two-line depot fixes + 1 runtime metadata gap + 1
 singleton. The whack-a-mole is over: every remaining failure is named,
 clustered, and attributed.
+
+**Round 3** (after the depot bare-spec arms in `parse_field_spec` /
+`column_sql` / `parse_col_spec`): 85 failures — the 71-cluster *moved
+deeper* to 74× "no record shape metadata" + a newly-visible 10× cluster
+(`parse_one_assoc`, same bare-arm class) + 1 assert. Enriched the runtime
+shape panic to self-diagnose the value (null / tagged imm / heap tag+rc):
+all 74 were **tag=0 rc=1 heap cells**.
+
+**Root cause of the 74** (lldb on one test): the C-side Option builders
+`rec_some_k`/`rec_none_k` (march_extras.c) used BOXED cells for 'f'/'g'
+kinds, while `record_get`'s March type is `Option(erased)` — decoded NICHE
+by everything compiled. An absent 'g' field returned a boxed-None tag-0
+cell that niche callers read as `Some(cell)`; the cell then flowed on as a
+"record". **The C runtime helpers are a fourth repr-commitment site the TIR
+audit cannot see.** Fixed: niche encoding for all kinds.
+
+**Round 5** (niche C helpers + `parse_one_assoc` arm): **1333 tests,
+1 failure** — one SIGSEGV: `__march_eq_Option_Float @ 0x8`. The mirror-image
+boundary bug: concrete `Option(Float)` is BOXED (tag-load at +8), but the
+value arrived in the erased-niche encoding (null None from `record_get`).
+Fixed by a degenerate-value guard at the top of every generated boxed ADT
+eq fn: ptr-equal → eq; null vs heap-cell → compare the cell's tag against
+the NULLARY ctor; low-bit immediates → not-eq.
+
+**Round 6 (final): 1333 tests, 1 failure, 0 crashes.** The residual is the
+*documented-irreducible* niche edge case: `record_get(b, "ratio") ==
+Some(0.0)` — the erased-niche encoding cannot represent `Some(0.0)`
+distinctly from `None` (float bits 0 = null; repr.ml has always excluded
+Float from niche for exactly this reason). A clean wrong-answer at one
+precisely-known boundary, no longer a crash. Eliminating it requires the
+phase-4 uniform-Option-encoding (or kind-aware erased decoders) — the top
+candidate for the next deep session.
+
+**Phase 2b implemented** (`MARCH_ALIAS_AUDIT=1`, lower.ml): every alias
+registration records its candidate; a bare name resolving through the
+GLOBAL fallback with ≥2 distinct candidates is reported once (the
+registration-order-dependent hijack fingerprint). Depot run: **zero
+findings** — the per-module precedence fix (9849c3b5) fully retired the
+class; the audit now guards against its return.
+
+**Final arc: pre-tooling = suite dies at first SIGSEGV, unknown bug count.
+Post: 115 failures/3+ hidden crash clusters → 1 known-boundary failure,
+0 crashes, repr audit clean, alias audit clean, in 7 instrumented runs.**

@@ -2026,6 +2026,67 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
         let lbl_same   = flbl "same_tag" in
         Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
         Buffer.add_string buf "entry:\n";
+        (* Degenerate-value guard.  A value of this type may arrive in the
+           ERASED niche encoding (None = null, Some(x) = x raw / low-bit
+           tagged) when it crossed an erased boundary — record_get,
+           record_entries, a generic helper — even though the CONCRETE type is
+           boxed (e.g. Option(Float)).  The boxed strategy's unconditional
+           tag load at [v+8] then derefs null / a tagged immediate → SIGSEGV
+           (__march_eq_Option_Float @ 0x8, depot "Float type default in
+           blank").  Guard: pointer-equal → eq; null vs heap-cell → compare
+           the cell's tag against the NULLARY ctor (null IS the niche nullary);
+           any low-bit-tagged immediate (≠ per ptr-eq) → not_eq.  Residual
+           (documented): a niche Some carrying EVEN non-ptr float bits still
+           tag-loads garbage — fixed only by a uniform Option encoding. *)
+        let nullary_tag =
+          List.fold_left (fun acc (tag, _, flds) ->
+            match acc, flds with None, [] -> Some tag | _ -> acc) None ctors
+        in
+        let lbl_boxed  = flbl "eq_boxed" in
+        let lbl_chka   = flbl "eq_chka" in
+        let lbl_chkb   = flbl "eq_chkb" in
+        let lbl_chkodd = flbl "eq_chkodd" in
+        let peq = frsh "peq" in
+        e (Printf.sprintf "%s = icmp eq ptr %%a, %%b" peq);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" peq lbl_eq lbl_chka);
+        lbl lbl_chka;
+        let ai = frsh "ai" in let bi = frsh "bi" in
+        e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" ai);
+        e (Printf.sprintf "%s = ptrtoint ptr %%b to i64" bi);
+        let emit_null_arm ~null_lbl ~other_i ~other_ptr ~next_lbl =
+          let anull = frsh "isnull" in
+          e (Printf.sprintf "%s = icmp eq i64 %s, 0"
+               anull (if other_ptr = "%b" then ai else bi));
+          e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" anull null_lbl next_lbl);
+          lbl null_lbl;
+          (match nullary_tag with
+           | None -> e (Printf.sprintf "br label %%%s" lbl_not_eq)
+           | Some ntag ->
+             let odd = frsh "odd" in
+             e (Printf.sprintf "%s = trunc i64 %s to i1" odd other_i);
+             let tagl = flbl "eq_nulltag" in
+             e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" odd lbl_not_eq tagl);
+             lbl tagl;
+             let tp = frsh "ntp" in let tv = frsh "ntv" in
+             e (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tp other_ptr);
+             e (Printf.sprintf "%s = load i32, ptr %s, align 4" tv tp);
+             let c = frsh "ntc" in
+             e (Printf.sprintf "%s = icmp eq i32 %s, %d" c tv ntag);
+             e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" c lbl_eq lbl_not_eq))
+        in
+        let anull_lbl = flbl "eq_anull" in
+        emit_null_arm ~null_lbl:anull_lbl ~other_i:bi ~other_ptr:"%b" ~next_lbl:lbl_chkb;
+        lbl lbl_chkb;
+        let bnull_lbl = flbl "eq_bnull" in
+        emit_null_arm ~null_lbl:bnull_lbl ~other_i:ai ~other_ptr:"%a" ~next_lbl:lbl_chkodd;
+        lbl lbl_chkodd;
+        let aodd = frsh "aodd" in let bodd = frsh "bodd" in
+        e (Printf.sprintf "%s = trunc i64 %s to i1" aodd ai);
+        e (Printf.sprintf "%s = trunc i64 %s to i1" bodd bi);
+        let anyodd = frsh "anyodd" in
+        e (Printf.sprintf "%s = or i1 %s, %s" anyodd aodd bodd);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" anyodd lbl_not_eq lbl_boxed);
+        lbl lbl_boxed;
         let tgpa = frsh "tgpa" in let tgpb = frsh "tgpb" in
         let taga = frsh "taga" in let tagb = frsh "tagb" in
         e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 8" tgpa);
