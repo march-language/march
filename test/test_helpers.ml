@@ -542,10 +542,20 @@ let setup_jit_runtime () =
     (* On Linux, dlopen requires all symbols resolved at load time (unlike
        macOS which allows lazy/two-level resolution). Include all core C
        files that march_runtime.c depends on. Determined by attempting a
-       link and collecting the resulting "undefined symbol" errors. *)
+       link and collecting the resulting "undefined symbol" errors.
+       march_dispatch.c/march_reload.c/march_remote_registry.c/
+       march_monitor_registry.c were added later (Hot Code Reload phases 2-10)
+       and march_runtime.c's actor_green_thread / march_kill now reference
+       their symbols unconditionally — omitting them makes EVERY test in this
+       file silently skip (setup_jit_runtime returns None) rather than fail,
+       since a link error here is swallowed into the `None` branch. Deliberately
+       NOT adding march_http.c/march_tls.c/march_compress.c: those pull in
+       libssl/libz and aren't referenced by the symbols these tests need. *)
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c"; "march_ffi.c";
+      "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
+      "march_monitor_registry.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in
     let h_inputs =

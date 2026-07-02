@@ -48,6 +48,18 @@ type ctx = {
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
   pmap_threshold : int;  (* --pmap-threshold: List.pmap sequential-fallback cutoff *)
+  (* The full type_def table for the module/fragment currently being emitted.
+     Consulted by EAlloc, EReuse, emit_case, and ensure_adt_eq_fn (via
+     Repr.is_niche_shaped / niche_payload_ok / repr_of_ty / payload_needs_tag)
+     to decide niche/newtype/boxed representation. Populated at ctx
+     construction (make_ctx) from the `types` parameter every entry point
+     (emit_module, emit_repl_expr, emit_repl_decl, emit_repl_fn,
+     emit_repl_fn_with_closure_slot, emit_fns_fragment) already receives.
+     Previously this was a single module-level ref (`cur_type_defs`) set only
+     by emit_module — REPL/JIT fragment emitters never set it, so every
+     fragment's representation decisions ran against a stale or empty table,
+     causing niche-vs-boxed ABI mismatches across JIT fragments (B12). *)
+  type_defs : Tir.type_def list;
   (* For resolving concrete field types from polymorphic type definitions.
      poly_ctors: (type_name, ctor_name) -> generic field types (may contain TVar)
      type_params: type_name -> ordered list of type-variable parameter names *)
@@ -201,11 +213,9 @@ let target_int_ty = function
   | Native | Wasm64Wasi | Js -> "i64"
   | Wasm32Wasi | Wasm32Unknown -> "i32"
 
-(* Set at emit_module entry; consulted by EAlloc and emit_case for Repr lookups. *)
-let cur_type_defs : Tir.type_def list ref = ref []
-
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
-    ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build []) () = {
+    ?(hot_reload=None) ?(hr_names=Hot_reload.Name_table.build [])
+    ?(type_defs=[]) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
   ctr      = 0; blk = 0; str_ctr = 0;
@@ -218,6 +228,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   ret_ty   = Tir.TUnit;
   fast_math;
   pmap_threshold;
+  type_defs;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -1808,9 +1819,9 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
          use the normal tag-at-offset-8 strategy — there is no heap header.
          Detect niche shape early and emit a null-check equality instead. *)
       let niche_payload_opt =
-        if Repr.is_niche_shaped !cur_type_defs type_name then
+        if Repr.is_niche_shaped ctx.type_defs type_name then
           match ty_args with
-          | [p] when Repr.niche_payload_ok !cur_type_defs p -> Some p
+          | [p] when Repr.niche_payload_ok ctx.type_defs p -> Some p
           | [p] when (match p with Tir.TVar _ -> true | _ -> false) ->
             (* Abstract (erased) payload — e.g. Option(Any) from record_get.
                EAlloc and emit_case both niche-encode a niche-shaped type applied
@@ -1860,7 +1871,7 @@ let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
         (match payload_ty with
          | Tir.TString ->
            e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %%a, ptr %%b)" ok)
-         | _ when Repr.payload_needs_tag !cur_type_defs payload_ty ->
+         | _ when Repr.payload_needs_tag ctx.type_defs payload_ty ->
            (* Tagged scalar (Int/Bool) in ptr slot: compare raw tagged bits *)
            let pa = frsh "pa" in let pb = frsh "pb" in
            e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
@@ -3795,7 +3806,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty !cur_type_defs (Tir.TCon (alloc_type_name, [])) with
+    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
      | Repr.Newtype payload ->
        (* Newtype: no allocation. Emit the single payload atom directly. *)
        if List.length args <> 1 then
@@ -3804,7 +3815,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             (arity mismatch — malformed TIR)"
            ctor (List.length args));
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag !cur_type_defs payload then begin
+       if Repr.payload_needs_tag ctx.type_defs payload then begin
          (* Scalar payload: tag (v<<1)|1 so it's odd → IS_HEAP_PTR = false *)
          let i64v = coerce ctx v_ty v_val "i64" in
          let shifted = fresh ctx "nt_sh" in
@@ -3817,7 +3828,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        end else
          (* Pointer payload: pass through raw *)
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped !cur_type_defs alloc_type_name ->
+     | _ when Repr.is_niche_shaped ctx.type_defs alloc_type_name ->
        (* Niche (Option-shaped): None=0, Some(x)=x.
           repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
           params; we use the actual arg TIR type to determine tagging. *)
@@ -3830,10 +3841,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
            | _ -> Tir.TUnit
          in
-         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         if not (Repr.niche_payload_ok ctx.type_defs arg_tir_ty) then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
+           if Repr.payload_needs_tag ctx.type_defs arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let shifted = fresh ctx "niche_sh" in
              emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
@@ -3975,12 +3986,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty !cur_type_defs (Tir.TCon (reuse_type_name, [])) with
+    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (reuse_type_name, [])) with
      | Repr.Newtype payload ->
        let (_, rv) = emit_atom ctx reuse_atom in
        emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag !cur_type_defs payload then begin
+       if Repr.payload_needs_tag ctx.type_defs payload then begin
          let i64v = coerce ctx v_ty v_val "i64" in
          let shifted = fresh ctx "nt_sh" in
          emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
@@ -3991,7 +4002,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          ("ptr", as_ptr)
        end else
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped !cur_type_defs reuse_type_name ->
+     | _ when Repr.is_niche_shaped ctx.type_defs reuse_type_name ->
        (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
           march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
        let (_, old_v) = emit_atom ctx reuse_atom in
@@ -4005,10 +4016,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
            | _ -> Tir.TUnit
          in
-         if not (Repr.niche_payload_ok !cur_type_defs arg_tir_ty) then None
+         if not (Repr.niche_payload_ok ctx.type_defs arg_tir_ty) then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag !cur_type_defs arg_tir_ty then begin
+           if Repr.payload_needs_tag ctx.type_defs arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let shifted = fresh ctx "niche_sh" in
              emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
@@ -4074,7 +4085,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped !cur_type_defs reuse_atom_parent_type
+       && Repr.is_niche_shaped ctx.type_defs reuse_atom_parent_type
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -4179,7 +4190,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped !cur_type_defs reuse_atom_parent_type
+       && Repr.is_niche_shaped ctx.type_defs reuse_atom_parent_type
     then begin
       let arg_vals = arg_vals_of () in
       let hp = emit_heap_alloc ctx 0 (List.length args) in
@@ -4492,13 +4503,13 @@ and emit_case ctx scrut_atom branches default_opt =
     ctor_tags <> [] &&
     List.exists (function
       | Tir.TDVariant (tname, variants) ->
-        Repr.is_niche_shaped !cur_type_defs tname
+        Repr.is_niche_shaped ctx.type_defs tname
         && (let ctor_names = List.map fst variants in
             List.for_all (fun t -> List.mem t ctor_names) ctor_tags)
-      | _ -> false) !cur_type_defs
+      | _ -> false) ctx.type_defs
   in
   let effective_repr =
-    match Repr.repr_of_ty !cur_type_defs scrut_tir_ty_init with
+    match Repr.repr_of_ty ctx.type_defs scrut_tir_ty_init with
     | Repr.Boxed
       when (
         (* TVar path: scrutinee type unknown (unresolved module body), recover
@@ -4514,7 +4525,7 @@ and emit_case ctx scrut_atom branches default_opt =
            segfault on the null pointer.  The erased-i64 convention untags
            scalar payloads at their concrete use sites, so tagged=false is safe. *)
         (match scrut_tir_ty_init with
-         | Tir.TCon (name, []) -> Repr.is_niche_shaped !cur_type_defs name
+         | Tir.TCon (name, []) -> Repr.is_niche_shaped ctx.type_defs name
          | _ -> false)
         ||
         (* Abstract-arg niche path: niche-shaped type name applied to abstract
@@ -4527,7 +4538,7 @@ and emit_case ctx scrut_atom branches default_opt =
         (match scrut_tir_ty_init with
          | Tir.TCon (name, args) when args <> [] ->
            (List.exists (function Tir.TVar _ -> true | _ -> false) args)
-           && Repr.is_niche_shaped !cur_type_defs name
+           && Repr.is_niche_shaped ctx.type_defs name
          | _ -> false)
       ) ->
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
@@ -4559,7 +4570,7 @@ and emit_case ctx scrut_atom branches default_opt =
      | [br] ->
        (match br.Tir.br_vars with
         | [field_var] ->
-          let needs_tag = Repr.payload_needs_tag !cur_type_defs payload in
+          let needs_tag = Repr.payload_needs_tag ctx.type_defs payload in
           let (fty, fval) =
             if needs_tag then begin
               let raw = fresh ctx "nt_raw" in
@@ -5467,7 +5478,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
 
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = llvm_name v.Tir.v_name in
-      llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+      llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
   (* In --compile-so mode, give every non-exported function hidden ELF
@@ -5633,7 +5644,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     if all_params = [] then ""
     else ", " ^ String.concat ", "
       (List.map (fun (_, (v : Tir.var), base) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) base
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty) base
       ) all_params)
   in
   let mutco_vis = if ctx.compile_so then "hidden " else "" in
@@ -5755,7 +5766,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     let fn_llvm     = mangle_extern fn.Tir.fn_name in
     let params_str  = String.concat ", "
       (List.map (fun (v : Tir.var) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:!cur_type_defs v.Tir.v_ty) (llvm_name v.Tir.v_name)
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty) (llvm_name v.Tir.v_name)
       ) fn.Tir.fn_params)
     in
     let wrap_vis =
@@ -6269,7 +6280,6 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
     ?(emit_main=true)
     (m : Tir.tir_module) : string =
-  cur_type_defs := m.Tir.tm_types;
   (* Hot Code Reload: intern the names of every reloadable (boundary) function
      into NAME_IDs for the dispatch table.
      Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
@@ -6294,7 +6304,8 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
            then Some n else None)
       |> Hot_reload.Name_table.build
   in
-  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names () in
+  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names
+      ~type_defs:m.Tir.tm_types () in
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
@@ -6924,7 +6935,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ?(store_as_slot : int option = None)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
-  let ctx = make_ctx ~fast_math ~repl:true () in
+  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
@@ -6974,7 +6985,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   ignore name;
-  let ctx = make_ctx ~fast_math ~repl:true () in
+  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
@@ -7011,7 +7022,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
-  let ctx = make_ctx ~fast_math ~repl:true () in
+  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -7047,7 +7058,7 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   ignore bind_name;
-  let ctx = make_ctx ~fast_math ~repl:true () in
+  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -7113,7 +7124,7 @@ let emit_fns_fragment
     ?(extern_fns : Tir.fn_def list = [])
     ?(repl : bool = false)
     () : string =
-  let ctx = make_ctx ~repl () in
+  let ctx = make_ctx ~repl ~type_defs:types () in
   let pseudo_mod : Tir.tir_module =
     { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   build_ctor_info ctx pseudo_mod;

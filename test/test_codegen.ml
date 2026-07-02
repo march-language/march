@@ -751,6 +751,107 @@ let test_repl_jit_stdlib_list_length () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** B12 regression: a niche-eligible ADT ([Opt = None | Some(Int)], Option-shaped
+    — one nullary ctor + one single-field ctor) defined via [:load] (a DMod,
+    exactly like the real REPL wraps user modules) in fragment 1, then matched
+    on by an expression in fragment 2.
+
+    Fragment 1 goes through [register_module_decl], which emits the producer
+    function via [emit_fns_fragment]; fragment 2's [run_expr] passes
+    [ctx.loaded_tir_types @ tir.tm_types] to [emit_repl_expr]'s `~types`.
+
+    HISTORY / why this test is shaped the way it is (best-effort RED, per the
+    task brief): pre-fix, representation decisions were driven by a single
+    module-level ref `cur_type_defs`, set ONLY by [emit_module] — which the
+    pure REPL/JIT path never calls. So in an isolated JIT-only process,
+    `cur_type_defs` sat at `[]` for the *entire* session: every fragment's
+    EAlloc/emit_case/ensure_adt_eq_fn call consistently (if accidentally)
+    computed "Boxed" for `Opt`, so running fragment 1 then fragment 2 straight
+    did NOT reproduce an observable split (verified empirically by
+    instrumenting both call sites: `cur_type_defs_len=0` at every call, with
+    no poke at all — this alone was GREEN even pre-fix).
+
+    To force the actual staleness — "the REPL/fragment entry points ... never
+    set the global — so all niche/newtype representation decisions ... run
+    against a stale or empty table" — the original RED additionally called
+    [Llvm_emit.emit_module] directly on the `Opt` module before fragment 1
+    (mimicking a prior `--compile` sharing the same process image as the
+    REPL, which is how `emit_module` legitimately runs at all) and then reset
+    the ref to `[]` before fragment 2. That combination reliably reproduced a
+    SIGSEGV pre-fix (fragment 2's emit_case read the ctor tag at offset 8 of
+    what fragment 1 had actually emitted as a bare tagged scalar, per the
+    live-at-the-time global) — confirmed by running the suite repeatedly
+    (5/5 crashes, exit 139) before the mechanical fix landed below.
+
+    Now that [cur_type_defs] is deleted (ctx.type_defs is populated
+    per-fragment from each entry point's own `types` parameter, never a
+    shared global), that historical RED recipe no longer compiles — there is
+    no global left to poke. This test keeps the two-fragment cross-ADT
+    scenario as a permanent regression pin: fragment 1 defines a niche-shaped
+    ADT and a producer, fragment 2 matches on the value the producer returns,
+    and the payload must round-trip correctly. It is GREEN post-fix (as
+    verified above); its historical RED is documented here rather than
+    reproduced in-line because reproducing it requires reintroducing the
+    deleted global. *)
+let test_repl_jit_niche_adt_cross_fragment () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       (* Fragment 1: `:load`-style DMod defining a niche-eligible ADT and a
+          producer fn, exactly as lib/repl/repl.ml wraps user :load files. *)
+       let mod_src = {|mod OptMod do
+         type Opt = None | Some(Int)
+         fn mk(x : Int) : Opt do
+           Some(x)
+         end
+       end|} in
+       let mod_ast = parse_module mod_src in
+       let dmod = March_ast.Ast.DMod
+         (mod_ast.March_ast.Ast.mod_name, March_ast.Ast.Public,
+          mod_ast.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span) in
+       (* Mirror lib/repl/repl.ml's load_decls_list exactly: check_decl with a
+          fresh error ctx, keep tc_env pre-decl ("input_tc") to hand to
+          register_module_decl, then advance tc_env past the DMod. *)
+       let input_tc = { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } in
+       let new_tc = March_typecheck.Typecheck.check_decl input_tc dmod in
+       (* Fragment 1: emits `mk`'s body — EAlloc(Opt.Some, [x]) — via
+          register_module_decl -> emit_fns_fragment, whose ctx.type_defs is
+          populated from this fragment's own `types` (containing `Opt`). *)
+       March_jit.Repl_jit.register_module_decl jit ~tc_env:input_tc dmod;
+       tc_env := { new_tc with March_typecheck.Typecheck.errors = March_errors.Errors.create () };
+       (* Between fragments: exercise an entirely unrelated emit_module call
+          (as any prior --compile in the same process would) to prove there
+          is no shared mutable state left for it to leave behind. *)
+       let unrelated_src = {|mod Unrelated do
+         fn id(x : Int) : Int do x end
+       end|} in
+       let unrelated_ast = parse_module unrelated_src in
+       let (_, unrelated_type_map) = March_typecheck.Typecheck.check_module unrelated_ast in
+       let unrelated_tir = March_tir.Lower.lower_module ~type_map:unrelated_type_map unrelated_ast in
+       let unrelated_tir = March_tir.Mono.monomorphize unrelated_tir in
+       let unrelated_tir = March_tir.Defun.defunctionalize unrelated_tir in
+       let unrelated_tir = March_tir.Perceus.perceus unrelated_tir in
+       ignore (March_tir.Llvm_emit.emit_module unrelated_tir);
+       (* Fragment 2: match on the value the fragment-1 producer returns.
+          Post-fix, the intervening emit_module call (with a `types` table
+          that doesn't even mention `Opt`) has zero effect on this fragment's
+          representation decisions. *)
+       (match parse_repl "match OptMod.mk(7) do\nSome(v) -> v\nNone -> 0\nend" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "niche ADT cross-fragment: match Some(7) = 7" "7" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (* ------------------------------------------------------------------ *)
 (* REPL JIT regression tests                                           *)
 (* Exercises fixes: AVar extern fix, repl_N global uniquification,    *)
@@ -5534,6 +5635,7 @@ let codegen_suites =
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
+        Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;
       ];
       "repl_jit_regression", [
         Alcotest.test_case "list literal compiles" `Quick test_repl_list_literal;
