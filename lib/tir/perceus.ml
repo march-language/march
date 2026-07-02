@@ -269,19 +269,40 @@ let vars_of_atoms (atoms : Tir.atom list) : StringSet.t =
   List.fold_left (fun s a -> StringSet.union s (vars_of_atom a))
     StringSet.empty atoms
 
+(** Marker prefix for the FBIP arity encoding minted by
+    [add_scrutinee_free_for].  '$' cannot start a source-level type name, so
+    a [TCon] whose head carries this prefix is unambiguously an encoded
+    constructor arity, never a user type applied to type arguments. *)
+let fbip_arity_marker = "$fbip$"
+
+let is_fbip_encoded (name : string) : bool =
+  let ml = String.length fbip_arity_marker in
+  String.length name >= ml && String.sub name 0 ml = fbip_arity_marker
+
 (** Arity check for FBIP reuse — P8 extension.
     [dec_v.v_ty] carries the arity of the consumed (freed) constructor as
-    the length of its dummy TUnit type-arg list (see [add_scrutinee_free_for]).
+    the length of its dummy TUnit type-arg list (see [add_scrutinee_free_for]),
+    behind the [fbip_arity_marker] prefix.
     [nfields] is the number of arguments the new EAlloc will produce.
     Two constructors are reuse-compatible iff they have the SAME field count:
     the March GC allocates blocks as [tag + nfields × ptr], so any two
     constructors with the same arity have identical allocation sizes and can
     safely exchange their cells — the new tag is written into the reused block
     by the FBIP branch in llvm_emit.  Cross-ctor reuse (P8) is enabled here
-    by NOT requiring the constructor name to match, only the arity. *)
+    by NOT requiring the constructor name to match, only the arity.
+
+    Only marker-encoded types are accepted.  A dec of a variable carrying its
+    RAW declared type (the dead-binding cleanup path) must NOT be compared:
+    [TCon(name, ts)] there gives the type's PARAMETER count, not the field
+    count of whichever constructor the value happens to hold — e.g. a dead
+    [Ok(7) : Result(Int, String)] is a 1-field cell but has 2 type params, so
+    the old [List.length ts = nfields] check approved reusing it for a
+    2-field constructor: an 8-byte heap overflow.  The actual constructor of
+    a dead binding is statically unknown (any ctor of the type, each with its
+    own arity), so reuse is refused rather than guessed. *)
 let same_arity (t : Tir.ty) (nfields : int) : bool =
   match t with
-  | Tir.TCon (_, ts) -> List.length ts = nfields
+  | Tir.TCon (name, ts) -> is_fbip_encoded name && List.length ts = nfields
   | _ -> false
 
 (* ── Phase 1: Backwards Liveness Analysis ────────────────────────────────── *)
@@ -559,6 +580,35 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         | _ -> None
       ) indexed_args
     in
+    (* Dual-position args: a var passed at BOTH an owned and a borrowed
+       position of the same call, dead afterwards, gets 0 dups from
+       find_inc_vars (it only sees the owned occurrences: count-1 = 0) AND a
+       borrowed-position post-call EDecRC above — two consumptions of the one
+       reference the caller owns (the owned position already transfers it),
+       i.e. RC underflow / use-after-free.  For a normal call, keep the
+       post-dec and add ONE balancing EIncRC: this also keeps the value alive
+       across the whole call even if the callee consumes its owned parameter
+       before the last read of the borrowed alias.  For a SELF call, drop the
+       post-dec instead: TCO rewrites the trailing ESeq'd EDecRC into dead
+       code, so a balancing inc would leak one reference per iteration. *)
+    let is_self_call = String.equal f.Tir.v_name !_current_fn_name in
+    let owned_pos_names =
+      List.fold_left (fun s (i, a) ->
+        match a with
+        | Tir.AVar v when not (Borrow.is_borrowed !_borrow_map f.Tir.v_name i) ->
+          StringSet.add v.Tir.v_name s
+        | _ -> s)
+        StringSet.empty indexed_args
+    in
+    let dual_pos_vars, post_dec_vars =
+      List.partition
+        (fun (v : Tir.var) -> StringSet.mem v.Tir.v_name owned_pos_names)
+        post_dec_vars
+    in
+    let inc_vars, post_dec_vars =
+      if is_self_call then (inc_vars, post_dec_vars)
+      else (inc_vars @ dual_pos_vars, post_dec_vars @ dual_pos_vars)
+    in
     let e' = wrap_incrcs inc_vars e in
     (* Wrap with post-call Decs.
        When there are post-call decrefs and the call has a non-unit return
@@ -571,7 +621,6 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        ESeq(EApp(self,...), EDecRC(arg)) — after TCO emits the back-edge,
        the EDecRC is dead code and everything is correct.  Wrapping with
        ELet would hide the self-call from has_self_tail_call and kill TCO. *)
-    let is_self_call = String.equal f.Tir.v_name !_current_fn_name in
     let e'' =
       match post_dec_vars with
       | [] -> e'
@@ -647,6 +696,26 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           Some v
         | _ -> None
       ) indexed_args
+    in
+    (* Dual-position args — same accounting bug as the EApp case above: a var
+       at both an owned and a borrowed position, dead after the call, would be
+       consumed twice (owned transfer + post-call dec) against the caller's
+       single reference.  Externs are never self calls, so unconditionally add
+       one balancing EIncRC per such var and keep the post-dec: the extra ref
+       also protects the borrowed alias for the C call's whole duration. *)
+    let owned_pos_names =
+      List.fold_left (fun s (i, a) ->
+        match a with
+        | Tir.AVar v when not (Borrow.is_borrowed !_borrow_map fname i) ->
+          StringSet.add v.Tir.v_name s
+        | _ -> s)
+        StringSet.empty indexed_args
+    in
+    let inc_vars =
+      inc_vars
+      @ List.filter
+          (fun (v : Tir.var) -> StringSet.mem v.Tir.v_name owned_pos_names)
+          post_dec_vars
     in
     let e' = wrap_incrcs inc_vars e in
     let e'' =
@@ -926,21 +995,22 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
            of one of its fields via a nested match).
-           IMPORTANT: qualify the ctor_tag with the scrutinee's type name so it
-           matches the key format used by EAlloc (see lower.ml ECon case:
-           ctor_key = type_name ^ "." ^ tag).  Without this, the FBIP pass
-           compares e.g. "Leaf" vs "Tree.Leaf" and always returns false.
-           Encode [arity] as dummy TUnit args so [same_arity] can compare
-           field counts.  When the scrutinee's type is unknown (TVar — typical
-           for closure-internal helpers whose params are erased to TVar "_"),
-           we cannot form a qualified tag; falling back to the bare ctor_tag
-           would let [same_arity] false-positive — leave the type untouched
-           so [same_arity] returns false, suppressing FBIP conservatively. *)
+           Encode the freed constructor's [arity] (= its field count, known
+           exactly here from the branch's bound vars) as dummy TUnit args
+           behind the [fbip_arity_marker] prefix; [same_arity] accepts ONLY
+           this marked encoding, so a raw declared type (whose TCon args are
+           type PARAMETERS, not fields) can never be mistaken for an arity.
+           The qualified "Type.Ctor" tail is kept for TIR-dump readability.
+           When the scrutinee's type is unknown (TVar — typical for
+           closure-internal helpers whose params are erased to TVar "_"), we
+           leave the type untouched so [same_arity] returns false,
+           suppressing FBIP conservatively. *)
         let ctor_v = match v.Tir.v_ty with
           | Tir.TCon (type_name, _) ->
-            let qualified_tag = type_name ^ "." ^ ctor_tag in
+            let encoded_tag =
+              fbip_arity_marker ^ type_name ^ "." ^ ctor_tag in
             let dummy_args = List.init arity (fun _ -> Tir.TUnit) in
-            { v with Tir.v_ty = Tir.TCon (qualified_tag, dummy_args) }
+            { v with Tir.v_ty = Tir.TCon (encoded_tag, dummy_args) }
           | _ -> v
         in
         Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
