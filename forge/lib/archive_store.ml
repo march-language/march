@@ -275,13 +275,18 @@ let rec walk_dirs acc d =
 (** Lib paths to add to MARCH_LIB_PATH for tasks running from an archive root.
     Includes lib/ AND all of its descendant directories (so tasks can import
     modules that live in lib/ subfolders, e.g. march_doc's lib/march_doc/
-    submodules), plus forge/ at the root level (for CAS-extracted archives).
+    submodules), plus forge/ at the root level (for CAS-extracted archives),
+    plus config/ when present (a project's Config module conventionally lives
+    outside lib/, per cmd_build.ml's lib_path_env — this was previously
+    missing here, so any task needing Config failed with "Unknown module
+    Config" even once find_task located it correctly).
     The recursive lib/ expansion mirrors cmd_build's collect_lib_dirs. *)
 let lib_paths_for_root archive_root =
-  let lib_dir   = Filename.concat archive_root "lib" in
-  let forge_dir = Filename.concat archive_root "forge" in
+  let lib_dir    = Filename.concat archive_root "lib" in
+  let forge_dir  = Filename.concat archive_root "forge" in
+  let config_dir = Filename.concat archive_root "config" in
   let lib_dirs = List.rev (walk_dirs [] lib_dir) in
-  lib_dirs @ List.filter Sys.file_exists [forge_dir]
+  lib_dirs @ List.filter Sys.file_exists [forge_dir; config_dir]
 
 (** Collect lib paths from an archive's [deps] entries.
     Mirrors cmd_build's dep_to_lib_paths so archive tasks can import dep modules
@@ -325,6 +330,38 @@ let find_task command =
   | None -> None
   | Some dot ->
     let ns = String.sub command 0 dot in
+    (* 0. Check the current project's own forge.toml when the namespace is
+       the project's own package name (e.g. "forgepm.seed" run from inside
+       forgepm) — a project's own [archive.task.*] entries were previously
+       only found via deps/<ns>/forge.toml or the global registry, neither
+       of which a project satisfies for itself, so `forge <own-name>.<task>`
+       always failed with "unknown command" even for a correctly-declared
+       task. *)
+    let self_result =
+      match Project.find_forge_toml () with
+      | None -> None
+      | Some project_root ->
+        let self_name =
+          try (Project.load_from project_root).Project.name
+          with Sys_error _ | Failure _ | Toml.Parse_error _ -> ""
+        in
+        if self_name <> "" && self_name = ns then begin
+          let self_toml = Filename.concat project_root "forge.toml" in
+          let tasks = read_tasks_from_toml self_toml in
+          match List.find_opt (fun (cmd, _, _) -> cmd = command) tasks with
+          | None -> None
+          | Some (_, rel_module, _) ->
+            let full_path = Filename.concat project_root rel_module in
+            if Sys.file_exists full_path then
+              let lib_paths = lib_paths_for_root project_root
+                              @ dep_lib_paths_for_archive project_root in
+              Some (full_path, lib_paths)
+            else None
+        end else None
+    in
+    (match self_result with
+     | Some _ -> self_result
+     | None ->
     (* 1. Check project-local deps *)
     let local_result =
       match Project.find_forge_toml () with
@@ -367,7 +404,7 @@ let find_task command =
               let lib_paths = lib_paths_for_root archive_root
                               @ dep_lib_paths_for_archive archive_root in
               Some (full_path, lib_paths)
-            else None))
+            else None)))
 
 (** Return all (command, module_path, doc) triples for an archive directory. *)
 let list_archive_tasks archive_root =
