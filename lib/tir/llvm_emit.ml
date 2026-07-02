@@ -3181,12 +3181,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (kt, kv) = emit_atom ctx k in
     let kp = coerce ctx kt kv "ptr" in
     let (vt, vv) = emit_atom ctx v in
-    (* Pass the value in NATURAL representation as a ptr-sized word: raw i64
-       for scalars (NOT low-bit tagged), raw bits for floats, ptr as-is. *)
+    (* Pass the value in UNIFORM representation as a ptr-sized word: scalars
+       low-bit tagged (coerce i64→ptr), raw bits for floats, ptr as-is.
+       Natural repr is ambiguous — an even Int >= 4096 is bit-identical to a
+       heap pointer, so the runtime's plausible-heap sniff would incrc
+       (dereference) the integer's value.  Tagged scalars are always odd and
+       untag unambiguously in rec_field_norm_uniform. *)
     let vp = (match vt with
-      | "i64" ->
-        let t = fresh ctx "cv" in
-        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+      | "i64" -> coerce ctx "i64" vv "ptr"
       | "double" ->
         let b = fresh ctx "cv" in
         let t = fresh ctx "cv" in
@@ -4620,13 +4622,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let args = List.concat_map (fun (fname, atom) ->
         let ng = intern_string ctx fname in
         let (vt, vv) = emit_atom ctx atom in
-        (* Pass the value in NATURAL representation, matching record_put's
-           EApp call convention: raw i64 for scalars (not low-bit tagged),
-           raw bits for floats, ptr as-is. *)
+        (* Pass the value in UNIFORM representation, matching record_put's
+           EApp call convention: scalars low-bit tagged (coerce i64→ptr),
+           raw bits for floats, ptr as-is.  Natural repr is ambiguous — an
+           even Int >= 4096 is bit-identical to a heap pointer, so
+           rec_field_norm_in's plausible-heap sniff would incrc
+           (dereference) the integer's value. *)
         let vp = (match vt with
-          | "i64" ->
-            let t = fresh ctx "ruv" in
-            emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" t vv); t
+          | "i64" -> coerce ctx "i64" vv "ptr"
           | "double" ->
             let b = fresh ctx "ruv" in
             let t = fresh ctx "ruv" in
