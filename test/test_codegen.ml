@@ -4254,6 +4254,73 @@ let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
   Alcotest.(check bool) "task handle is decrc'd by caller" true
     (ir_contains ir "march_decrc_local")
 
+(** Regression (B10): a local variable whose name shadows a builtin (e.g.
+    `link`, the actor-linking builtin) must still get its RC ops emitted.
+    The five EIncRC/EDecRC/EFree/EAtomicIncRC/EAtomicDecRC arms in
+    llvm_emit.ml skip emission purely by NAME match against is_builtin_fn /
+    top_fns, without checking whether a local alloca (var_slot) shadows that
+    name — unlike emit_atom, which has the correct var_slot guard in both of
+    its analogous arms. Perceus DOES insert a dec_rc for the shadowed local
+    (confirmed via --dump-tir: `let out = dec_rc link; ...`), so if the
+    guard is missing, the alloca for `link` is created and stored but never
+    referenced by any RC runtime call — the local leaks (never freed) and,
+    more importantly, the same missing-guard bug pattern is what causes
+    heap corruption in the emit_atom builtin arm this mirrors. *)
+let test_compile_local_shadows_builtin_still_gets_rc_ops () =
+  let ir = emit_actor_ir {|mod ShadowRc do
+    fn main() do
+      let link = String.concat("heap", "-allocated")
+      let out = String.concat(link, "!")
+      println(out)
+    end
+  end|} in
+  (* The shadowed local must be stack-allocated under its own name... *)
+  Alcotest.(check bool) "local `link` gets its own alloca" true
+    (ir_contains ir "%link.addr = alloca");
+  (* ...and at least one RC runtime call must load from that exact alloca
+     (not just some unrelated %link.addr text elsewhere, and not the
+     unrelated @march_link actor-linking builtin declaration/call). *)
+  let loads_link_addr = Str.regexp "load ptr, ptr %link\\.addr" in
+  let ir_has_load_of_link_addr =
+    try ignore (Str.search_forward loads_link_addr ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "a load from %link.addr exists (feeds some use)" true
+    ir_has_load_of_link_addr;
+  (* Precisely: the value loaded from %link.addr must reach an RC op
+     (march_decrc_local/march_incrc_local/march_free/march_incrc/march_decrc)
+     as an argument — not merely be stored/loaded for the String.concat call.
+     Extract every SSA temp assigned from `load ptr, ptr %link.addr`, then
+     confirm at least one of those temps is passed to an RC runtime call. *)
+  let ssa_temps_loading_link_addr =
+    let re = Str.regexp "%\\([A-Za-z0-9_$]+\\) = load ptr, ptr %link\\.addr" in
+    let rec go i acc =
+      match Str.search_forward re ir i with
+      | j -> go (j + 1) (Str.matched_group 1 ir :: acc)
+      | exception Not_found -> acc
+    in
+    go 0 []
+  in
+  Alcotest.(check bool) "at least one SSA temp loads %link.addr" true
+    (ssa_temps_loading_link_addr <> []);
+  let rc_call_re =
+    Str.regexp "call void @march_\\(decrc_local\\|incrc_local\\|free\\|incrc\\|decrc\\)(ptr %\\([A-Za-z0-9_$]+\\))"
+  in
+  let rc_call_args =
+    let rec go i acc =
+      match Str.search_forward rc_call_re ir i with
+      | j -> go (j + 1) (Str.matched_group 2 ir :: acc)
+      | exception Not_found -> acc
+    in
+    go 0 []
+  in
+  let shadow_reaches_rc_op =
+    List.exists (fun t -> List.mem t rc_call_args) ssa_temps_loading_link_addr
+  in
+  Alcotest.(check bool)
+    "an RC op (incrc/decrc/free) is emitted against the shadowed local `link`'s value"
+    true shadow_reaches_rc_op
+
 (** Phase 5: task_yield() must emit call void @march_sched_yield(), not a no-op. *)
 let test_compile_task_yield_actually_yields () =
   let ir = emit_actor_ir {|mod TaskYieldTest do
@@ -5373,6 +5440,8 @@ let codegen_suites =
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
           Alcotest.test_case "task_spawn heap-alloc no RC underflow" `Quick
             (with_reset test_compile_task_spawn_heap_alloc_no_rc_underflow);
+          Alcotest.test_case "local shadowing builtin still gets RC ops (B10)" `Quick
+            (with_reset test_compile_local_shadows_builtin_still_gets_rc_ops);
           (* Phase 5: compiled IR correctness *)
           Alcotest.test_case "task_yield emits sched_yield"        `Quick
             (with_reset test_compile_task_yield_actually_yields);

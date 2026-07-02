@@ -282,6 +282,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-02, dotted-sibling module dependency ordering fix)
+
+- **`lib/typecheck/typecheck.ml` — `module_refs_in_decls` records all dotted prefixes.** Fixes order-dependent monomorphization of functions in dotted sibling modules (`forge forgepm.seed` reported "expected: {ApiKey fields} but got: {audit_logs fields}" for every `Depot.Schema.define` call after the first, while `forge build/check` passed). The whole-program combine emits auto-discovered modules in MARCH_LIB_PATH order; `forge <task>` (archive run_task) builds that path own-lib-first, so `mod Depot.Schema` landed AFTER its callers. `dependency_order_dmod_run` exists to topo-sort sibling DMods definition-before-use, but its edge collector `module_refs_in_decls` kept only the FIRST dotted segment of a reference ("Depot" — an empty namespace container — from `EVar "Depot.Schema.define"`), so a dotted sibling never received a dependency edge. Unordered, every caller unified against the single shared pass-1 `Mono (fresh_var 1)` placeholder for the unannotated fn and the first call site pinned the parameter record types for the rest. `add` now records every dotted prefix ("Depot" AND "Depot.Schema"); the existing `StringSet.inter name_set` drops non-module prefixes, so extra edges are free. Same `add` serves `TyCon`/`ECon`/`EVar`, so dotted type/ctor references gain edges too. Regression test in `test/test_compiler.ml` ("dotted sibling module order": two callers with different record args declared before the dotted sibling that defines the shared fn). **373 compiler / 224 eval / 323 codegen / 788 stdlib pass.**
+
 ## Current State (as of 2026-07-01, P0 pipeline-review fixes — differential oracle, dual-position RC, FBIP arity)
 
 Three P0 items from the 2026-07-01 pipeline deep review, in order:

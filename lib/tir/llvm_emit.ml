@@ -4294,10 +4294,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Function addresses live in the code segment, not the heap, so calling
      march_incrc_local/decrc_local/free on them would corrupt memory or crash.
      EIncRC/EDecRC use non-atomic local RC (fast path, single-owner values).
-     EAtomicIncRC/EAtomicDecRC use C11-atomic RC for actor-shared values. *)
+     EAtomicIncRC/EAtomicDecRC use C11-atomic RC for actor-shared values.
+     A LOCAL binding of the same name (var_slot entry) shadows the builtin
+     or top-level fn — mirrors emit_atom's two analogous guards (:1422-1424
+     top-fns arm, :1499-1500 builtin arm, whose comment cites heap
+     corruption).  Without this check a local heap value named e.g. `link`
+     (also the actor-linking builtin) silently gets ZERO RC ops: it is
+     never inc/dec'd or freed, leaking or (worse, if the same name is later
+     reused for a different shape) corrupting memory the same way the
+     emit_atom bug did. *)
   | Tir.EIncRC atom
-    when atom_is_builtin atom ||
-         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    when (atom_is_builtin atom ||
+          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
+         (match atom with Tir.AVar v -> not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) | _ -> true) ->
     ("i64", "0")
   | Tir.EIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
@@ -4306,8 +4315,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EDecRC atom
-    when atom_is_builtin atom ||
-         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    when (atom_is_builtin atom ||
+          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
+         (match atom with Tir.AVar v -> not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) | _ -> true) ->
     ("i64", "0")
   | Tir.EDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
@@ -4316,8 +4326,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EAtomicIncRC atom
-    when atom_is_builtin atom ||
-         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    when (atom_is_builtin atom ||
+          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
+         (match atom with Tir.AVar v -> not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) | _ -> true) ->
     ("i64", "0")
   | Tir.EAtomicIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
@@ -4326,8 +4337,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EAtomicDecRC atom
-    when atom_is_builtin atom ||
-         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    when (atom_is_builtin atom ||
+          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
+         (match atom with Tir.AVar v -> not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) | _ -> true) ->
     ("i64", "0")
   | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
@@ -4336,8 +4348,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "0")
 
   | Tir.EFree atom
-    when atom_is_builtin atom ||
-         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    when (atom_is_builtin atom ||
+          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false)) &&
+         (match atom with Tir.AVar v -> not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) | _ -> true) ->
     ("i64", "0")
   | Tir.EFree atom ->
     let (ty, v) = emit_atom ctx atom in
