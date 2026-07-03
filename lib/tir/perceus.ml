@@ -21,7 +21,81 @@
       that are still live after the call.
     - At call sites where the borrowed arg IS the caller's last use (ownership
       would normally transfer): the caller instead emits EDecRC after the call,
-      since the callee will not decrement the value. *)
+      since the callee will not decrement the value.
+
+    ── File split (Wave 3 Task 5) ───────────────────────────────────────────
+
+    This file is the pass ORCHESTRATOR: it keeps the [env] type, the Phase 2
+    (RC insertion) core [insert_rc_expr]/[insert_rc], and the public entry
+    point [perceus].  Four phases that were self-contained enough to not
+    need [env] (or only consume it as a caller, never as a parameter of
+    their own recursion) were split into focused modules, moved VERBATIM
+    (cut-paste; only cross-module qualification changed — no behavior
+    edits):
+
+    - [Perceus_liveness]: Phase 1 backwards liveness ([live_before]),
+      [name_free_in] (shared by Phase 2's core and Phases 3/4), and the
+      [vars_of_atom]/[vars_of_atoms] atom helpers.  Pure [Tir.expr] ->
+      [StringSet.t] analyses, never took an [env] before or after Task 4.
+    - [Perceus_elide]: Phase 3, [elide_cancel_pairs] (adjacent EIncRC/EDecRC
+      cancel-pair removal).  Depends on [Perceus_liveness.name_free_in].
+    - [Perceus_fbip]: Phase 4, [insert_fbip] (FBIP FreeIn-Place reuse
+      detection) plus [same_arity] and the [fbip_arity_marker] constant
+      it decodes.  Depends only on [Perceus_liveness.name_free_in] — the
+      marker moved here TOO (not just its consumer) because [Perceus]
+      already depends on [Perceus_fbip] (the orchestrator calls
+      [insert_fbip]), so the marker constant must not create a dependency
+      back the other way; see [fbip_arity_marker]'s re-export below and
+      [Perceus_fbip]'s header comment for the full rationale.
+    - [Perceus_scrut]: Phase 0.5, [preprocess_fn] (whole-scrutinee-escape
+      rewrite, runs BEFORE RC insertion).  Depends on [Perceus_liveness]
+      and on [Rc_types.needs_rc] DIRECTLY — not [Perceus.needs_rc] (see
+      below).
+
+    [Perceus] (this file) calls INTO all four via the [perceus] orchestrator
+    ([Perceus_scrut.preprocess_fn], [Perceus_elide.elide_cancel_pairs],
+    [Perceus_fbip.insert_fbip], plus [Perceus_liveness] used pervasively by
+    the Phase 2 core) — so none of the four may have a compile-time
+    dependency back on [Perceus], or dune rejects the build as a cycle.
+    This bit in practice: [Perceus.needs_rc] is ITSELF just a re-export of
+    [Rc_types.needs_rc] (below), and [Perceus_scrut]'s Phase-0.5 rewrite
+    needs the same predicate — routing that call through [Perceus.needs_rc]
+    would make [Perceus_scrut] depend on [Perceus], which (combined with
+    [Perceus] calling [Perceus_scrut.preprocess_fn]) is exactly a cycle.
+    The fix is for [Perceus_scrut] to call [Rc_types.needs_rc] directly,
+    skipping the re-export — the two spellings are the identical function,
+    so this is not a behavior change, only a dependency-direction choice.
+    [is_apply_fn] and [needs_rc] stay re-exported here (not moved) because
+    Phase 2's core logic still uses the unqualified names throughout.
+
+    A handful of symbols are re-exported at their historical
+    [Perceus.<name>] path — [same_arity], [elide_expr], [fbip_expr] — purely
+    for external-caller compatibility (test/test_codegen.ml,
+    test/test_eval.ml reach into these directly; see the alias definitions
+    near the bottom of this file for the full list and rationale).  New code
+    should prefer the [Perceus_fbip]/[Perceus_elide] qualified names
+    directly.
+
+    ── Pass-ordering contract ───────────────────────────────────────────────
+
+    Within [perceus] (the entry point at the bottom of this file):
+      Phase 0.5 [Perceus_scrut.preprocess_fn] (scrut-escape rewrite)
+        -> Phase 2 [insert_rc] (borrow-aware RC insertion; internally runs
+           Phase 1 [Perceus_liveness.live_before] per subtree)
+        -> Phase 3 [Perceus_elide.elide_cancel_pairs] (adjacent-pair elision)
+        -> Phase 4 [Perceus_fbip.insert_fbip] (FBIP reuse detection).
+
+    In the whole compiler pipeline (verified against bin/main.ml's
+    Phase-3/4 sequencing, ~line 1606–1638): [Known_call.run] and
+    [Join_points.run_pre] and [Simplify.run ~pre_perceus:true] all run
+    BEFORE [Perceus.perceus] (Known_call's ECallPtr->EApp closure-apply
+    rewrite must land first so its $clo-consuming ABI is visible to
+    Perceus's borrow-aware EApp case — see [is_apply_fn]'s doc below); and
+    [Escape.escape_analysis] runs immediately AFTER [Perceus.perceus] (RC
+    ops must exist in the TIR before escape analysis can reason about heap
+    vs. stack placement). This ordering is unchanged by the Task 5 file
+    split — [perceus] is still the single entry point bin/main.ml and
+    lib/jit/repl_jit.ml call. *)
 
 module StringSet = Set.Make (String)
 module StringMap = Map.Make (String)
@@ -275,186 +349,47 @@ let needs_rc = Rc_types.needs_rc
 let is_apply_fn = Tir_names.is_apply_fn
 
 (** Returns the set of variable names referenced by an atom.
+    Moved to [Perceus_liveness.vars_of_atom] (Wave 3 Task 5) — re-exported
+    here for the many call sites in this file's Phase 2 core. *)
+let vars_of_atom = Perceus_liveness.vars_of_atom
 
-    [ADefRef] resolves to a code-segment address (the function's symbol)
-    and so contributes no local-variable liveness AND needs no RC: function
-    pointers are never heap-allocated and [march_incrc] / [march_decrc]
-    would corrupt or crash if called on them.  This is consistent with the
-    [Hashtbl.mem ctx.top_fns] guard in [llvm_emit.ml]'s RC-op cases, which
-    also short-circuits RC ops on top-level function references. *)
-let vars_of_atom : Tir.atom -> StringSet.t = function
-  | Tir.AVar v    -> StringSet.singleton v.Tir.v_name
-  | Tir.ADefRef _ -> StringSet.empty
-  | Tir.ALit _    -> StringSet.empty
+(** Union of all variable sets from a list of atoms.
+    Moved to [Perceus_liveness.vars_of_atoms] (Wave 3 Task 5). *)
+let vars_of_atoms = Perceus_liveness.vars_of_atoms
 
-(** Union of all variable sets from a list of atoms. *)
-let vars_of_atoms (atoms : Tir.atom list) : StringSet.t =
-  List.fold_left (fun s a -> StringSet.union s (vars_of_atom a))
-    StringSet.empty atoms
+(** Marker prefix for the FBIP arity encoding minted below by
+    [add_scrutinee_free_for] (this file's [insert_rc_expr], ECase case) and
+    decoded by [Perceus_fbip.same_arity].  Moved to [Perceus_fbip] (Wave 3
+    Task 5) — NOT kept here as originally planned: see that module's header
+    comment for why the marker + its decoder [is_fbip_encoded] both live
+    there while the PRODUCER (below, in this file's [insert_rc_expr]) reaches
+    across to [Perceus_fbip.fbip_arity_marker] rather than the reverse
+    (which would cycle, since [Perceus] already calls INTO [Perceus_fbip]
+    for [insert_fbip]). Re-exported here so this file's existing producer
+    code and doc comments can keep referring to the unqualified name. *)
+let fbip_arity_marker = Perceus_fbip.fbip_arity_marker
 
-(** Marker prefix for the FBIP arity encoding minted by
-    [add_scrutinee_free_for].  '$' cannot start a source-level type name, so
-    a [TCon] whose head carries this prefix is unambiguously an encoded
-    constructor arity, never a user type applied to type arguments. *)
-let fbip_arity_marker = "$fbip$"
-
-let is_fbip_encoded (name : string) : bool =
-  let ml = String.length fbip_arity_marker in
-  String.length name >= ml && String.sub name 0 ml = fbip_arity_marker
-
-(** Arity check for FBIP reuse — P8 extension.
-    [dec_v.v_ty] carries the arity of the consumed (freed) constructor as
-    the length of its dummy TUnit type-arg list (see [add_scrutinee_free_for]),
-    behind the [fbip_arity_marker] prefix.
-    [nfields] is the number of arguments the new EAlloc will produce.
-    Two constructors are reuse-compatible iff they have the SAME field count:
-    the March GC allocates blocks as [tag + nfields × ptr], so any two
-    constructors with the same arity have identical allocation sizes and can
-    safely exchange their cells — the new tag is written into the reused block
-    by the FBIP branch in llvm_emit.  Cross-ctor reuse (P8) is enabled here
-    by NOT requiring the constructor name to match, only the arity.
-
-    Only marker-encoded types are accepted.  A dec of a variable carrying its
-    RAW declared type (the dead-binding cleanup path) must NOT be compared:
-    [TCon(name, ts)] there gives the type's PARAMETER count, not the field
-    count of whichever constructor the value happens to hold — e.g. a dead
-    [Ok(7) : Result(Int, String)] is a 1-field cell but has 2 type params, so
-    the old [List.length ts = nfields] check approved reusing it for a
-    2-field constructor: an 8-byte heap overflow.  The actual constructor of
-    a dead binding is statically unknown (any ctor of the type, each with its
-    own arity), so reuse is refused rather than guessed. *)
-let same_arity (t : Tir.ty) (nfields : int) : bool =
-  match t with
-  | Tir.TCon (name, ts) -> is_fbip_encoded name && List.length ts = nfields
-  | _ -> false
+(** Arity check for FBIP reuse — P8 extension.  Moved to
+    [Perceus_fbip.same_arity] (Wave 3 Task 5); re-exported at this
+    historical path because test/test_codegen.ml calls
+    [March_tir.Perceus.same_arity] directly. *)
+let same_arity = Perceus_fbip.same_arity
 
 (* ── Phase 1: Backwards Liveness Analysis ────────────────────────────────── *)
 
-type live_set = StringSet.t
+(** Moved to [Perceus_liveness] (Wave 3 Task 5): [live_set], [live_before],
+    [name_free_in] were already [env]-free before the Task 4 env-threading
+    and needed no changes beyond module qualification to relocate.
+    Re-exported here (types/values used throughout this file's Phase 2
+    core, which retains the "Phase N" section comments below for
+    continuity with the original single-file layout). *)
+type live_set = Perceus_liveness.live_set
 
-(** Compute the set of variables live *before* [e], given those live *after*. *)
-let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
-  match e with
-  | Tir.EAtom (Tir.AVar v) ->
-    StringSet.add v.Tir.v_name live_after
-  | Tir.EAtom (Tir.ADefRef _) ->
-    live_after  (* global ref — no local liveness *)
-  | Tir.EAtom (Tir.ALit _) ->
-    live_after
-  | Tir.EApp (_, args) ->
-    (* After defun, the callee in EApp is always a top-level function symbol
-       (a code-segment address), never a heap-allocated local variable.
-       Only the call arguments contribute to local variable liveness.
-       Including the callee name caused spurious liveness propagation for
-       operators like &&, || whose llvm_name produces an invalid symbol. *)
-    live_after
-    |> StringSet.union (vars_of_atoms args)
-  | Tir.ECallPtr (a, args) ->
-    live_after
-    |> StringSet.union (vars_of_atom a)
-    |> StringSet.union (vars_of_atoms args)
-  | Tir.ELet (v, e1, e2) ->
-    let l2 = live_before e2 live_after in
-    let l1_after = StringSet.remove v.Tir.v_name l2 in
-    live_before e1 l1_after
-  | Tir.ELetRec (fns, body) ->
-    let lb = live_before body live_after in
-    let fn_names =
-      List.fold_left (fun s fn -> StringSet.add fn.Tir.fn_name s)
-        StringSet.empty fns
-    in
-    (* Remove the recursive names, then add free vars from each fn body *)
-    let base = StringSet.diff lb fn_names in
-    List.fold_left (fun acc fn ->
-      let params =
-        List.fold_left (fun s p -> StringSet.add p.Tir.v_name s)
-          StringSet.empty fn.Tir.fn_params
-      in
-      let body_live = live_before fn.Tir.fn_body StringSet.empty in
-      StringSet.union acc (StringSet.diff body_live params)
-    ) base fns
-  | Tir.ECase (a, branches, default) ->
-    let arm_lives = List.map (fun br ->
-      let bound =
-        List.fold_left (fun s v -> StringSet.add v.Tir.v_name s)
-          StringSet.empty br.Tir.br_vars
-      in
-      live_before br.Tir.br_body (StringSet.diff live_after bound)
-    ) branches in
-    let default_lives = match default with
-      | Some d -> [live_before d live_after]
-      | None -> []
-    in
-    let all_lives = arm_lives @ default_lives in
-    let union = List.fold_left StringSet.union StringSet.empty all_lives in
-    StringSet.union (vars_of_atom a) union
-  | Tir.ESeq (e1, e2) ->
-    let l2 = live_before e2 live_after in
-    live_before e1 l2
-  | Tir.ETuple atoms ->
-    StringSet.union live_after (vars_of_atoms atoms)
-  | Tir.ERecord fields ->
-    let atoms = List.map snd fields in
-    StringSet.union live_after (vars_of_atoms atoms)
-  | Tir.EField (a, _) ->
-    StringSet.union live_after (vars_of_atom a)
-  | Tir.EUpdate (a, fields) ->
-    let atoms = List.map snd fields in
-    live_after
-    |> StringSet.union (vars_of_atom a)
-    |> StringSet.union (vars_of_atoms atoms)
-  | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
-    StringSet.union live_after (vars_of_atoms atoms)
-  | Tir.EFree a ->
-    StringSet.union live_after (vars_of_atom a)
-  | Tir.EIncRC a | Tir.EAtomicIncRC a ->
-    StringSet.union live_after (vars_of_atom a)
-  | Tir.EDecRC a | Tir.EAtomicDecRC a ->
-    StringSet.union live_after (vars_of_atom a)
-  | Tir.EReuse (a, _, atoms) ->
-    live_after
-    |> StringSet.union (vars_of_atom a)
-    |> StringSet.union (vars_of_atoms atoms)
+let live_before = Perceus_liveness.live_before
 
 (* ── name_free_in (shared by Phase 2 and Phase 4) ─────────────────────────── *)
 
-(** Returns true if [name] occurs free anywhere in [e]. *)
-let rec name_free_in (name : string) (e : Tir.expr) : bool =
-  let atom_uses a = match a with
-    | Tir.AVar v    -> String.equal v.Tir.v_name name
-    | Tir.ADefRef _ -> false  (* global ref, not a local name *)
-    | Tir.ALit _    -> false
-  in
-  let atoms_use = List.exists atom_uses in
-  match e with
-  | Tir.EAtom a                              -> atom_uses a
-  | Tir.EApp (f, args)                       -> String.equal f.Tir.v_name name || atoms_use args
-  | Tir.ECallPtr (a, args)                   -> atom_uses a || atoms_use args
-  | Tir.ELet (v, e1, e2)                     ->
-    name_free_in name e1
-    || (not (String.equal v.Tir.v_name name) && name_free_in name e2)
-  | Tir.ELetRec (fns, body)                  ->
-    let bound = List.exists (fun fd -> String.equal fd.Tir.fn_name name) fns in
-    (not bound && name_free_in name body)
-    || List.exists (fun fd ->
-         let param_bound = List.exists (fun p -> String.equal p.Tir.v_name name) fd.Tir.fn_params in
-         not param_bound && name_free_in name fd.Tir.fn_body) fns
-  | Tir.ECase (a, branches, default)         ->
-    atom_uses a
-    || List.exists (fun br ->
-         let bv_bound = List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars in
-         not bv_bound && name_free_in name br.Tir.br_body) branches
-    || Option.fold ~none:false ~some:(name_free_in name) default
-  | Tir.ESeq (e1, e2)                        -> name_free_in name e1 || name_free_in name e2
-  | Tir.ETuple atoms | Tir.EAlloc (_, atoms)
-  | Tir.EStackAlloc (_, atoms)               -> atoms_use atoms
-  | Tir.ERecord fields                       -> List.exists (fun (_, a) -> atom_uses a) fields
-  | Tir.EField (a, _)                        -> atom_uses a
-  | Tir.EUpdate (a, fields)                  ->
-    atom_uses a || List.exists (fun (_, a) -> atom_uses a) fields
-  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
-  | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom_uses a
-  | Tir.EReuse (a, _, atoms)                 -> atom_uses a || atoms_use atoms
+let name_free_in = Perceus_liveness.name_free_in
 
 (* ── Phase 2: RC Insertion ────────────────────────────────────────────────── *)
 
@@ -1490,311 +1425,33 @@ let insert_rc ~(module_env : env) ?(borrowed = StringSet.empty)
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
 
-(** Remove adjacent EIncRC/EDecRC cancel pairs.
+(** Moved to [Perceus_elide] (Wave 3 Task 5).  Re-exported at the historical
+    [Perceus.elide_expr] path because test/test_eval.ml calls it directly. *)
+let elide_expr = Perceus_elide.elide_expr
 
-    Also elide pairs that span an ELet binding whose RHS does not reference
-    the cancelled variable (audit L5).  Perceus's [fix_tail_value]
-    restructuring frequently wraps tail-position cleanup in an ELet, which
-    otherwise prevents the simple adjacent-cancel detection from firing
-    even though the Inc/Dec are semantically a no-op pair.
-
-    Atomicity strictness (audit P4): a cancel pair is only elided when BOTH
-    halves have the same atomicity.  Mixed (atomic↔non-atomic) pairs are
-    left in place.  Rationale: [incrc_for] and [decrc_for] pick atomicity
-    from [env.actor_sent] per function, so same-variable ops should always
-    match in correct code.  If a future pass ever produces a mismatch
-    (e.g. inliner copying code across actor-send boundaries), eliding would
-    silently drop the atomic op and introduce a data race.  Being strict
-    lets that class of bug surface via still-present RC operations rather
-    than turning into a memory-ordering heisenbug.  The dedicated test
-    [tir/perceus/p4_mixed_atomicity_preserved] pins the invariant. *)
-let rec elide_expr (e : Tir.expr) : Tir.expr =
-  let inc_dec_match v1 v2 = String.equal v1.Tir.v_name v2.Tir.v_name in
-  match e with
-  (* Cancel pair, matching atomicity *)
-  | Tir.ESeq (Tir.EIncRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EDecRC (Tir.AVar v2), rest))
-    when inc_dec_match v1 v2 -> elide_expr rest
-  | Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v2), rest))
-    when inc_dec_match v1 v2 -> elide_expr rest
-  | Tir.ESeq (Tir.EDecRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EIncRC (Tir.AVar v2), rest))
-    when inc_dec_match v1 v2 -> elide_expr rest
-  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v2), rest))
-    when inc_dec_match v1 v2 -> elide_expr rest
-  (* L5: cancel pair that spans an ELet whose RHS does not reference the
-     RC'd variable.  Same atomicity-strictness rule as above. *)
-  | Tir.ESeq (Tir.EIncRC (Tir.AVar v1),
-              Tir.ELet (x, rhs,
-                Tir.ESeq (Tir.EDecRC (Tir.AVar v2), rest)))
-    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
-    elide_expr (Tir.ELet (x, rhs, rest))
-  | Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v1),
-              Tir.ELet (x, rhs,
-                Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v2), rest)))
-    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
-    elide_expr (Tir.ELet (x, rhs, rest))
-  | Tir.ESeq (Tir.EDecRC (Tir.AVar v1),
-              Tir.ELet (x, rhs,
-                Tir.ESeq (Tir.EIncRC (Tir.AVar v2), rest)))
-    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
-    elide_expr (Tir.ELet (x, rhs, rest))
-  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v1),
-              Tir.ELet (x, rhs,
-                Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v2), rest)))
-    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
-    elide_expr (Tir.ELet (x, rhs, rest))
-  (* Recurse into all sub-expressions *)
-  | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (elide_expr e1, elide_expr e2)
-  | Tir.ELet (v, e1, e2) ->
-    Tir.ELet (v, elide_expr e1, elide_expr e2)
-  | Tir.ELetRec (fns, body) ->
-    let fns' = List.map (fun fn ->
-      { fn with Tir.fn_body = elide_expr fn.Tir.fn_body }
-    ) fns in
-    Tir.ELetRec (fns', elide_expr body)
-  | Tir.ECase (a, branches, default) ->
-    let branches' = List.map (fun br ->
-      { br with Tir.br_body = elide_expr br.Tir.br_body }
-    ) branches in
-    let default' = Option.map elide_expr default in
-    Tir.ECase (a, branches', default')
-  (* Leaf forms — no sub-expressions to recurse into *)
-  | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
-  | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
-  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
-  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
-    e
-
-(** Elide cancel pairs in a function definition. *)
-let elide_cancel_pairs (fn : Tir.fn_def) : Tir.fn_def =
-  { fn with Tir.fn_body = elide_expr fn.Tir.fn_body }
+(** Elide cancel pairs in a function definition.  Moved to
+    [Perceus_elide.elide_cancel_pairs] (Wave 3 Task 5); called from the
+    [perceus] orchestrator below. *)
+let elide_cancel_pairs = Perceus_elide.elide_cancel_pairs
 
 (* ── Phase 4: FBIP Reuse Detection ──────────────────────────────────────── *)
 
-(** True iff [dec_v]'s name appears as an AVar in any of [args].
-    Prevents the self-referential FBIP bug: if the reuse atom IS one of the
-    constructor args (e.g. Some(result)->Ok(result) with niche-encoding, where
-    result = the scrutinee = dec_v), reusing dec_v's memory to build the new
-    object would store dec_v's address into its own field, creating a cycle. *)
-let args_alias_reuse (dec_v : Tir.var) (args : Tir.atom list) : bool =
-  List.exists (function
-    | Tir.AVar v -> String.equal v.Tir.v_name dec_v.Tir.v_name
-    | _ -> false) args
+(** Moved to [Perceus_fbip] (Wave 3 Task 5).  Re-exported at the historical
+    [Perceus.fbip_expr] path because test/test_codegen.ml calls it directly. *)
+let fbip_expr = Perceus_fbip.fbip_expr
 
-(** Try to sink [EDecRC(dec_v)] into [body] through a chain of ELet
-    bindings, stopping when we find an EAlloc of matching shape.  Safe
-    only when [dec_v] does not appear in any RHS along the chain. *)
-let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
-  match body with
-  (* EAlloc in tail position — reuse directly if arities match and dec_v is
-     not one of the constructor args (which would create a self-referential
-     object when dec_v's memory is reused to store dec_v itself). *)
-  | Tir.EAlloc (ty, args)
-    when List.length args > 0
-      && same_arity dec_v.Tir.v_ty (List.length args)
-      && not (args_alias_reuse dec_v args) ->
-    Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
-  (* EAlloc bound to a result variable *)
-  | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
-    when List.length args > 0
-      && same_arity dec_v.Tir.v_ty (List.length args)
-      && not (args_alias_reuse dec_v args) ->
-    Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
-  (* dec_v not used in rhs — safe to sink past this binding *)
-  | Tir.ELet (v, rhs, inner)
-    when not (name_free_in dec_v.Tir.v_name rhs) ->
-    Option.map (fun inner' -> Tir.ELet (v, rhs, inner'))
-               (try_fbip_sink dec_v inner)
-  | _ -> None
-
-(** Detect DecRC + Alloc of compatible arity and replace with Reuse. *)
-let rec fbip_expr (e : Tir.expr) : Tir.expr =
-  match e with
-  (* Pattern: let _ = decrc(v) in let result = alloc(ty, args) in rest
-     where same_arity(v.v_ty, len(args)) and dec_v is not itself one of the
-     constructor args (which would create a self-referential object). *)
-  | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
-              Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when List.length args > 0
-      && same_arity dec_v.Tir.v_ty (List.length args)
-      && not (args_alias_reuse dec_v args) ->
-    let rest' = fbip_expr rest in
-    Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
-  (* ESeq(EDecRC v, body): try to sink the decrc to be adjacent to an
-     EAlloc of matching shape anywhere down the let-chain. *)
-  | Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v), body) ->
-    (match try_fbip_sink dec_v body with
-     | Some body' -> fbip_expr body'
-     | None       -> Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v), fbip_expr body))
-  (* Recurse into sub-expressions *)
-  | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (fbip_expr e1, fbip_expr e2)
-  | Tir.ELet (v, e1, e2) ->
-    Tir.ELet (v, fbip_expr e1, fbip_expr e2)
-  | Tir.ELetRec (fns, body) ->
-    let fns' = List.map (fun fn ->
-      { fn with Tir.fn_body = fbip_expr fn.Tir.fn_body }
-    ) fns in
-    Tir.ELetRec (fns', fbip_expr body)
-  | Tir.ECase (a, branches, default) ->
-    let branches' = List.map (fun br ->
-      { br with Tir.br_body = fbip_expr br.Tir.br_body }
-    ) branches in
-    let default' = Option.map fbip_expr default in
-    Tir.ECase (a, branches', default')
-  | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
-  | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
-  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
-  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
-    e
-
-(** Apply FBIP reuse to a function definition. *)
-let insert_fbip (fn : Tir.fn_def) : Tir.fn_def =
-  { fn with Tir.fn_body = fbip_expr fn.Tir.fn_body }
+(** Apply FBIP reuse to a function definition.  Moved to
+    [Perceus_fbip.insert_fbip] (Wave 3 Task 5); called from the [perceus]
+    orchestrator below. *)
+let insert_fbip = Perceus_fbip.insert_fbip
 
 (* ── Phase 0.5: whole-scrutinee-escape rewrite ───────────────────────────────
-   Problem: when a pattern-match arm returns the scrutinee verbatim in one
-   path while consuming its fields in sibling paths, e.g.
-
-     match ls do
-       Nil -> Nil
-       Cons(l, rest) ->
-         if String.is_empty(trim(l)) do drop_blank(rest)
-         else ls
-         end
-     end
-
-   Perceus sees the scrutinee `ls` as free in the Cons arm body (used in the
-   `else ls` branch) and therefore SKIPS emitting `dec_rc ls` at the arm
-   start.  But on the `drop_blank(rest)` sub-path, `rest` and `l` are still
-   treated as independent owning vars — including a post-call `dec_rc l`
-   after the `trim(l)` borrow — yet no ownership was ever transferred from
-   the scrutinee to them.  The `dec_rc l` then underflows the string's RC
-   and corrupts the heap (see commit 6065f30 for the fields-escape sibling
-   issue).
-
-   Fix: BEFORE Perceus, rewrite every tail-position occurrence of the
-   scrutinee inside a matched arm into a reconstruction of the matched
-   constructor.  E.g. `Cons(l, rest) -> ... ls` becomes
-   `Cons(l, rest) -> ... Cons(l, rest)`.  After rewriting:
-   - The arm body no longer mentions the scrutinee → the existing
-     `add_scrutinee_free_for` emits the usual `dec_rc ls` at arm start.
-   - `llvm_emit`'s `strip_scrut_decrc` converts that into the
-     `march_decrc_freed` + conditional field-IncRC pattern, which correctly
-     transfers ownership of the extracted fields into the arm.
-   - The trailing EAlloc re-packs those owned fields into a fresh cell,
-     which FBIP can collapse to an EReuse of the scrutinee's storage.
-
-   Only SYNTACTIC tail positions are rewritten: an EAtom(AVar scrut) that
-   is the arm's result, or the result of a tail sub-expression (ECase arm,
-   ELet body, ESeq tail, ELetRec body).  Non-tail occurrences (scrut used
-   inside a call argument that is not itself a tail call) stay untouched;
-   if those patterns turn out to matter in practice they can be handled
-   separately. *)
-
-(** Scan the straight-line ELet prefix of [e] for the user-level rebinds
-    of each [br_var] (e.g. `let l = $f1` after pattern decomposition).  If
-    a rebind is found its typed var replaces the anonymous br_var; this
-    lets the reconstructed EAlloc store atoms that already carry their
-    concrete types, so downstream Perceus/FBIP RC analysis sees the right
-    shape.  Falls back to the raw br_var when no rebind is present. *)
-let scrut_escape_field_atoms (br_vars : Tir.var list) (body : Tir.expr)
-    : Tir.atom list =
-  let rec gather acc e =
-    match e with
-    | Tir.ELet (v, Tir.EAtom (Tir.AVar src), rest) ->
-      gather ((src.Tir.v_name, v) :: acc) rest
-    | Tir.ELet (_, _, rest) -> gather acc rest
-    | _ -> List.rev acc
-  in
-  let rebinds = gather [] body in
-  List.map (fun bv ->
-    match List.assoc_opt bv.Tir.v_name rebinds with
-    | Some v -> Tir.AVar v
-    | None -> Tir.AVar bv
-  ) br_vars
-
-(** Replace every tail-position occurrence of [EAtom (AVar scrut_name)] in
-    [e] with an EAlloc reconstructing the matched constructor.  Stops
-    recursing through binders that shadow [scrut_name]. *)
-let rec rewrite_scrut_tail (scrut_name : string) (alloc_ty : Tir.ty)
-    (field_atoms : Tir.atom list) (e : Tir.expr) : Tir.expr =
-  match e with
-  | Tir.EAtom (Tir.AVar v) when String.equal v.Tir.v_name scrut_name ->
-    Tir.EAlloc (alloc_ty, field_atoms)
-  | Tir.ELet (v, e1, e2) ->
-    if String.equal v.Tir.v_name scrut_name then e
-    else Tir.ELet (v, e1, rewrite_scrut_tail scrut_name alloc_ty field_atoms e2)
-  | Tir.ELetRec (fns, body) ->
-    let shadows =
-      List.exists (fun fn -> String.equal fn.Tir.fn_name scrut_name) fns
-    in
-    if shadows then e
-    else Tir.ELetRec (fns, rewrite_scrut_tail scrut_name alloc_ty field_atoms body)
-  | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (e1, rewrite_scrut_tail scrut_name alloc_ty field_atoms e2)
-  | Tir.ECase (a, branches, default) ->
-    let branches' = List.map (fun br ->
-      let shadows =
-        List.exists (fun bv -> String.equal bv.Tir.v_name scrut_name) br.Tir.br_vars
-      in
-      if shadows then br
-      else { br with Tir.br_body =
-        rewrite_scrut_tail scrut_name alloc_ty field_atoms br.Tir.br_body }
-    ) branches in
-    let default' =
-      Option.map (rewrite_scrut_tail scrut_name alloc_ty field_atoms) default
-    in
-    Tir.ECase (a, branches', default')
-  | _ -> e
-
-(** Walk the function body, applying the scrut-escape rewrite inside every
-    ECase arm whose scrutinee is a heap-valued AVar and whose branch binds
-    at least one field. *)
-let rec preprocess_scrut_escape (e : Tir.expr) : Tir.expr =
-  match e with
-  | Tir.ECase (a, branches, default) ->
-    let branches' = List.map (fun br ->
-      let body' = preprocess_scrut_escape br.Tir.br_body in
-      let body'' =
-        match a with
-        | Tir.AVar sv
-          when needs_rc sv.Tir.v_ty
-               && br.Tir.br_vars <> []
-               && not (List.exists
-                         (fun bv -> String.equal bv.Tir.v_name sv.Tir.v_name)
-                         br.Tir.br_vars)
-               && name_free_in sv.Tir.v_name body' ->
-          let qualified_tag = match sv.Tir.v_ty with
-            | Tir.TCon (type_name, _) -> type_name ^ "." ^ br.Tir.br_tag
-            | _ -> br.Tir.br_tag
-          in
-          let alloc_ty = Tir.TCon (qualified_tag, []) in
-          let field_atoms = scrut_escape_field_atoms br.Tir.br_vars body' in
-          rewrite_scrut_tail sv.Tir.v_name alloc_ty field_atoms body'
-        | _ -> body'
-      in
-      { br with Tir.br_body = body'' }
-    ) branches in
-    let default' = Option.map preprocess_scrut_escape default in
-    Tir.ECase (a, branches', default')
-  | Tir.ELet (v, e1, e2) ->
-    Tir.ELet (v, preprocess_scrut_escape e1, preprocess_scrut_escape e2)
-  | Tir.ELetRec (fns, body) ->
-    let fns' = List.map (fun fn ->
-      { fn with Tir.fn_body = preprocess_scrut_escape fn.Tir.fn_body }
-    ) fns in
-    Tir.ELetRec (fns', preprocess_scrut_escape body)
-  | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (preprocess_scrut_escape e1, preprocess_scrut_escape e2)
-  | _ -> e
-
-let preprocess_fn (fn : Tir.fn_def) : Tir.fn_def =
-  { fn with Tir.fn_body = preprocess_scrut_escape fn.Tir.fn_body }
+   Moved to [Perceus_scrut] (Wave 3 Task 5) — see that module for the full
+   rationale (rewriting tail-position scrutinee escapes into constructor
+   reconstructions so Phase 2 + FBIP can free-and-reuse the original cell).
+   [preprocess_fn] is called from the [perceus] orchestrator below, as
+   Phase 0.5 (before Phase 2's RC insertion). *)
+let preprocess_fn = Perceus_scrut.preprocess_fn
 
 (* ── Debug stats ──────────────────────────────────────────────────────────── *)
 
