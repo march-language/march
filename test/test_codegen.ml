@@ -561,11 +561,14 @@ let test_complete_replace_with_suffix () =
 (* JIT cross-line REPL variable capture tests                         *)
 (* These tests exercise the fix for the bug where variables defined   *)
 (* on previous REPL lines could not be referenced in HOF arguments.  *)
-(* Tests are skipped gracefully when clang/runtime is unavailable.   *)
+(* Tests skip (counted) only when clang is absent; runtime-source or  *)
+(* link problems fail loudly per W2.0 — see setup_jit_runtime.        *)
 (* ------------------------------------------------------------------ *)
 
 (** Try to compile the march runtime to a shared library.
-    Returns [Some path] on success, [None] if clang or runtime.c is missing.
+    Returns [Some path] on success, [None] only when clang is absent (a
+    counted skip); a missing runtime source or a failed link is an
+    Alcotest failure, not a [None] (W2.0).
 
     The cache lives in ~/.cache/march, which is SHARED across worktrees and
     concurrent sessions — so the artifact name is keyed by a digest of every
@@ -585,7 +588,11 @@ let test_complete_replace_with_suffix () =
     test fails loudly if that ever happens; it only legitimately skips (via
     the same clang-absence check) when clang itself is not installed here. *)
 let test_setup_jit_runtime_gate_is_live () =
-  if not (clang_available ()) then ()  (* legitimate, counted skip: no clang on PATH *)
+  if not (clang_available ()) then
+    (* Legitimate skip: no clang on PATH.  Counted directly here — this
+       canary short-circuits before setup_jit_runtime, so it would otherwise
+       be invisible in the shared skip ledger. *)
+    record_jit_skip "canary test_setup_jit_runtime_gate_is_live: no clang on PATH"
   else
     match setup_jit_runtime () with
     | Some _ -> ()
@@ -598,7 +605,7 @@ let test_setup_jit_runtime_gate_is_live () =
 
 let test_repl_jit_cross_line_let () =
   match setup_jit_runtime () with
-  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
   | Some runtime_so ->
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
@@ -784,7 +791,7 @@ let test_repl_jit_cross_line_hof () =
     `mk` bare on a later REPL line and calling it must yield "5", not "2". *)
 let test_repl_jit_stored_closure_returns_untagged_int () =
   match setup_jit_runtime () with
-  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
   | Some runtime_so ->
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
@@ -834,7 +841,7 @@ let test_repl_jit_stored_closure_returns_untagged_int () =
     right (odd, tag-round-tripped) value. *)
 let test_repl_jit_selfref_fn_no_duplicate_wrapper () =
   match setup_jit_runtime () with
-  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
   | Some runtime_so ->
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
@@ -5761,12 +5768,11 @@ let test_erased_update_missing_field_panics_compiled () =
     \  end\n\
      end\n"
   in
-  (* Compile from the SOURCE root (the parent of _build): the new
-     march_record_update_dyn symbol must come from the live runtime/*.c
-     sources, not _build/default's runtime copies (refreshed only when a
-     dune rule that lists them as deps runs).  write_march_source's
-     project_root is .../_build, so its parent is the source tree. *)
-  let src_root = Filename.dirname project_root in
+  (* Compile from the source root: the new march_record_update_dyn symbol
+     must come from the live runtime/*.c sources, not _build/default's
+     runtime copies (refreshed only when a dune rule that lists them as
+     deps runs). *)
+  let src_root = project_root in
   let bin = Filename.concat tmp "erasedupdmissbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
           ~main_exe ~bin ~src () with
@@ -5810,7 +5816,7 @@ let test_erased_update_multi_field_values_compiled () =
   Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
   (* --- compiled must agree (compile from the source root — see the
      missing-field test above for why) --- *)
-  let src_root = Filename.dirname project_root in
+  let src_root = project_root in
   let bin = Filename.concat tmp "erasedupdmultibin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
           ~main_exe ~bin ~src () with
@@ -5926,6 +5932,95 @@ let test_compiled_println_nested_list_parity () =
           end\n"
     ~expected:"[[1, 2], [3]]"
     ()
+
+(* ── Guard liveness (Wave 2 final review): positive control for
+   [fail_if_unresolved_iface_method] ─────────────────────────────────────
+   The four parity tests above prove the FIXED pipeline resolves nested
+   interface-method calls; on a healthy compiler the guard's failwith never
+   fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
+   `$`-before-last-dot detection predicate ever drifts, the guard would rot
+   silently.  These tests hand-build the exact regression signature as a raw
+   Tir.tir_module — a bare `describe` call alongside a registered mangled
+   impl `Pretty$Int.describe` — precisely BECAUSE the real frontend can no
+   longer produce that state (that unreachability is what Wave 2 Task 1
+   fixed), and assert emission fails loudly, naming the symbol and the
+   candidate impl.  Full emit_module (rather than a synthetic-ctx unit test
+   of the helper alone) was chosen so the is_known_fn gating at BOTH
+   consumer call sites — the general EApp path and the ECallPtr
+   no-var-slot catch-all — stays covered too. *)
+
+let iface_guard_var name ty =
+  { March_tir.Tir.v_name = name; v_ty = ty; v_lin = March_tir.Tir.Unr }
+
+(** Minimal TIR module: one registered fn named [impl_name] plus a [main]
+    whose body is [main_body]. *)
+let iface_guard_module ~impl_name ~main_body =
+  let open March_tir.Tir in
+  let impl_fn = {
+    fn_name   = impl_name;
+    fn_params = [ iface_guard_var "x" TInt ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString "int"));
+  } in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   = main_body;
+  } in
+  { tm_name = "IfaceGuard"; tm_fns = [ impl_fn; main_fn ]; tm_types = [];
+    tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+(** A call to the bare (unqualified, unresolved) name `describe` — [mk]
+    picks the call form (EApp or ECallPtr) so both guard consumers share
+    one construction. *)
+let bare_describe_call mk =
+  let open March_tir.Tir in
+  mk (iface_guard_var "describe" (TFn ([ TInt ], TString)))
+    [ ALit (March_ast.Ast.LitInt 1) ]
+
+let assert_iface_guard_fires ~path_label m =
+  match March_tir.Llvm_emit.emit_module m with
+  | (_ : string) ->
+    Alcotest.fail
+      (path_label ^ ": emit_module was expected to raise Failure — the \
+                     unresolved-iface-method guard did not fire on a bare \
+                     `describe` call with a registered Pretty$Int.describe \
+                     impl")
+  | exception Failure msg ->
+    Alcotest.(check bool)
+      (path_label ^ ": failure names the unresolved symbol (got: " ^ msg ^ ")")
+      true (ir_contains msg "unresolved interface-method call to `describe`");
+    Alcotest.(check bool)
+      (path_label ^ ": failure names the candidate impl (got: " ^ msg ^ ")")
+      true (ir_contains msg "Pretty$Int.describe")
+
+(** Consumer 1: the general EApp direct-call path. *)
+let test_iface_guard_fires_eapp () =
+  assert_iface_guard_fires ~path_label:"EApp"
+    (iface_guard_module ~impl_name:"Pretty$Int.describe"
+       ~main_body:(bare_describe_call
+                     (fun f args -> March_tir.Tir.EApp (f, args))))
+
+(** Consumer 2: the ECallPtr no-var-slot catch-all path. *)
+let test_iface_guard_fires_ecallptr () =
+  assert_iface_guard_fires ~path_label:"ECallPtr"
+    (iface_guard_module ~impl_name:"Pretty$Int.describe"
+       ~main_body:(bare_describe_call
+                     (fun f args ->
+                        March_tir.Tir.(ECallPtr (AVar f, args)))))
+
+(** Negative control: an impl-mangled fn is registered but its dot-suffix
+    (`render`) does not match the bare callee (`describe`), so the guard
+    must NOT fire and the call must fall through to the pre-existing
+    forward-declare behavior.  Pins the predicate against false positives. *)
+let test_iface_guard_negative_control () =
+  let m = iface_guard_module ~impl_name:"Pretty$Int.render"
+      ~main_body:(bare_describe_call
+                    (fun f args -> March_tir.Tir.EApp (f, args))) in
+  let ir = March_tir.Llvm_emit.emit_module m in
+  Alcotest.(check bool) "non-matching bare call falls through to a declare"
+    true (ir_contains ir "declare ptr @describe")
 
 let codegen_suites =
   [
@@ -6394,6 +6489,12 @@ let codegen_suites =
             test_compiled_println_option_list_parity;
           Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
             test_compiled_println_nested_list_parity;
+          Alcotest.test_case "unresolved-iface-method guard fires: EApp path (Wave2 review)" `Quick
+            test_iface_guard_fires_eapp;
+          Alcotest.test_case "unresolved-iface-method guard fires: ECallPtr path (Wave2 review)" `Quick
+            test_iface_guard_fires_ecallptr;
+          Alcotest.test_case "unresolved-iface-method guard: negative control (Wave2 review)" `Quick
+            test_iface_guard_negative_control;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

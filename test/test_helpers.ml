@@ -521,12 +521,13 @@ let mk_inp buf cur = { March_repl.Input.empty with
 
 (* ── Loud-skip accounting (W2 Task 2 / W2.0) ─────────────────────────────
    Policy: a skip is legitimate ONLY when the environment genuinely lacks a
-   tool (here: no `clang` on PATH). Any in-repo failure — clang present but
-   the link fails, or the runtime sources this project ships with are
+   tool — no `clang` on PATH, or no LLVM verifier (`opt`/`llvm-as`) for the
+   IR validity gate (test_ir_verify.ml). Any in-repo failure — clang present
+   but the link fails, or the runtime sources this project ships with are
    missing — is a test FAILURE, not a skip. Legitimate skips are still
    counted (not just silently swallowed) and the total is printed once at
-   process exit, so a whole run of skipped JIT tests is visible in the
-   summary rather than indistinguishable from "all passed". *)
+   process exit, so a whole run of skipped tool-gated tests is visible in
+   the summary rather than indistinguishable from "all passed". *)
 let jit_skip_count = ref 0
 let jit_skip_reasons = ref []
 let jit_skip_teardown_registered = ref false
@@ -538,8 +539,11 @@ let record_jit_skip reason =
     jit_skip_teardown_registered := true;
     at_exit (fun () ->
       if !jit_skip_count > 0 then begin
+        (* The ledger carries every tool-absence skip class (clang-gated JIT
+           tests AND the IR gate's LLVM-verifier-absence skips), so the
+           header stays generic — each reason line names its missing tool. *)
         Printf.printf
-          "\n[setup_jit_runtime] %d clang-gated test(s) SKIPPED (clang not found on PATH):\n"
+          "\n[tool-skip ledger] %d test(s) SKIPPED (required external tool not found):\n"
           !jit_skip_count;
         List.iter (fun r -> Printf.printf "  - %s\n" r) (List.rev !jit_skip_reasons);
         flush stdout
