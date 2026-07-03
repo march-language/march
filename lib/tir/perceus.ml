@@ -1139,7 +1139,30 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          - arm-bound vars: the arm's pattern bind these, so they are locally
            new values, not the outer var.
          - _closure_fvs: owned by the closure struct; the apply function
-           must not decrement them. *)
+           must not decrement them.
+         - the scrutinee's own variable (scrutinee_name below): its lifecycle
+           is entirely owned by [add_scrutinee_free_for], which independently
+           decides — PER ARM — whether that arm's body still uses the
+           scrutinee (in which case ownership transfers into the body and no
+           free is emitted) or not (in which case exactly one free is
+           emitted).  Without this exclusion, a sibling arm whose body
+           re-matches the SAME scrutinee atom on a sub-path (the
+           "scrutinee-borrowed conservatism" re-add, ~line 1076 above) makes
+           the scrutinee appear "live" in that arm's [live_before_br], which
+           lands it in [union_live_br] — so every OTHER arm where the
+           scrutinee is dead sees it as "dead here, live elsewhere" and gets
+           a cross-branch EDecRC on top of the per-arm scrutinee free
+           [add_scrutinee_free_for] already inserts there.  That is a literal
+           double dec_rc on the identical reference: RC-underflow abort at
+           runtime (see specs/todos.md P0, fixed here). The scrutinee is not
+           a "cross-branch liveness" variable in the ordinary sense — every
+           arm consumes (or doesn't) the SAME single reference the match
+           itself is scrutinizing, so its fate can never legitimately depend
+           on what a sibling arm's body did with it. *)
+    let scrutinee_name = match a with
+      | Tir.AVar v -> Some v.Tir.v_name
+      | _ -> None
+    in
     let union_live_br = List.fold_left (fun acc (_, _, lb, _) ->
       StringSet.union acc lb
     ) StringSet.empty branches_processed in
@@ -1152,6 +1175,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         |> (fun s -> StringSet.diff s live_after)
         |> (fun s -> StringSet.diff s !_closure_fvs)
         |> (fun s -> StringSet.diff s !_borrowed_field_vars)
+        |> (fun s -> match scrutinee_name with
+            | Some n -> StringSet.remove n s
+            | None -> s)
       in
       StringSet.fold (fun name body_acc ->
         match StringMap.find_opt name !_var_ctx with
