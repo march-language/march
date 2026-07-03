@@ -138,14 +138,16 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
 
   (* if x then true else false → x *)
   | Tir.ECase (a,
-      [{ Tir.br_tag = "True"; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true)) }],
-      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)))) ->
+      [{ Tir.br_tag; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true)) }],
+      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))))
+    when br_tag = Tir_names.synthetic_true_tag ->
     changed := true; Tir.EAtom a
 
   (* if x then false else true → not x *)
   | Tir.ECase (a,
-      [{ Tir.br_tag = "True"; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)) }],
-      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true)))) ->
+      [{ Tir.br_tag; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)) }],
+      Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))))
+    when br_tag = Tir_names.synthetic_true_tag ->
     changed := true;
     Tir.EApp (mk_var "not" (Tir.TFn ([Tir.TBool], Tir.TBool)), [a])
 

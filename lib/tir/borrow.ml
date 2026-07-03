@@ -207,7 +207,7 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     name is minted as ["$Clo_…"] by defun.ml).  Used to distinguish a closure
     allocation from an ordinary data allocation. *)
 let is_closure_ty : Tir.ty -> bool = function
-  | Tir.TCon (n, _) -> String.length n >= 5 && String.sub n 0 5 = "$Clo_"
+  | Tir.TCon (n, _) -> Tir_names.is_clo_struct n
   | _ -> false
 
 (** True iff the closure variable [clo] ESCAPES the current function in [e] —
@@ -222,7 +222,7 @@ let is_closure_ty : Tir.ty -> bool = function
     (Perceus IncRC's them for the closure's owned ref, perceus.ml:425), not
     ownership transfers of the caller's reference. *)
 let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
-  let is_try f = String.equal f "__try_call" || String.equal f "__try_call_val" in
+  let is_try = Tir_names.is_try_call in
   match e with
   | Tir.EAtom a -> atom_is clo a                              (* returned *)
   | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) | Tir.ETuple args ->

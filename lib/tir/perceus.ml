@@ -125,7 +125,7 @@ let _var_ctx : Tir.var StringMap.t ref = ref StringMap.empty
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
 let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
   match fn.Tir.fn_params with
-  | p :: _ when String.equal p.Tir.v_name "$clo" ->
+  | p :: _ when String.equal p.Tir.v_name Tir_names.clo_param_name ->
     let clo_name = p.Tir.v_name in
     let rec scan e acc =
       match e with
@@ -237,19 +237,15 @@ let needs_rc : Tir.ty -> bool = function
   | Tir.TTuple _ | Tir.TRecord _ -> false
 
 (** True for a defunctionalized closure apply wrapper ("<fn>$apply$<uid>").
-    Mirrors [Llvm_emit.is_apply_fn].  An apply function's first parameter is the
-    closure struct ([$clo]); the closure-apply ABI used by both [ECallPtr]
-    dispatch and the [EApp] form that [Known_call] rewrites it into CONSUMES
-    that closure argument (ownership transfers to the callee).  This must
-    override any borrow-map classification of the [$clo] slot — see the EApp
-    [post_dec_vars] computation. *)
-let is_apply_fn (name : string) : bool =
-  let marker = "$apply$" in
-  let nl = String.length name and ml = String.length marker in
-  let rec scan i =
-    i + ml <= nl && (String.sub name i ml = marker || scan (i + 1))
-  in
-  nl >= ml && scan 0
+    An apply function's first parameter is the closure struct ([$clo]); the
+    closure-apply ABI used by both [ECallPtr] dispatch and the [EApp] form
+    that [Known_call] rewrites it into CONSUMES that closure argument
+    (ownership transfers to the callee).  This must override any borrow-map
+    classification of the [$clo] slot — see the EApp [post_dec_vars]
+    computation.  Defined in [Tir_names] (Wave 3 Task 1 — was a byte-identical
+    duplicate of [Llvm_emit.is_apply_fn] before this move; see
+    [Tir_names.is_apply_fn] for the diff verdict). *)
+let is_apply_fn = Tir_names.is_apply_fn
 
 (** Returns the set of variable names referenced by an atom.
 

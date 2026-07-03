@@ -455,7 +455,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
            match pat with
            | Ast.PatVar n ->
              let fv : Tir.var = { v_name = n.txt; v_ty = elem_ty_at i; v_lin = Tir.Lin } in
-             Tir.ELet (fv, Tir.EField (tv_atom, Printf.sprintf "$fv%d" i), inner)
+             Tir.ELet (fv, Tir.EField (tv_atom, Tir_names.fv_field i), inner)
            | _ -> inner  (* wildcard / other → skip *)
          ) (List.mapi (fun i p -> (i, p)) pats) body
        in
@@ -515,7 +515,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       let then' = lower_expr then_e in
       let else' = lower_expr else_e in
       Tir.ECase (cond_atom,
-        [{ br_tag = "True"; br_vars = []; br_body = then' }],
+        [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = then' }],
         Some else'))
 
   (* --- match do cond_arm* end → nested ECase on bools --- *)
@@ -530,7 +530,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
           let body' = lower_expr body_e in
           let rest' = lower_cond rest in
           Tir.ECase (cond_atom,
-            [{ br_tag = "True"; br_vars = []; br_body = body' }],
+            [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = body' }],
             Some rest'))
     in
     lower_cond arms
@@ -889,7 +889,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ESpawn (Ast.ECon ({ txt = actor_name; _ }, [], _), _)
   | Ast.ESpawn (Ast.EVar { txt = actor_name; _ }, _) ->
     let spawn_fn : Tir.var = {
-      v_name = actor_name ^ "_spawn";
+      v_name = actor_name ^ Tir_names.actor_spawn_suffix;
       v_ty = Tir.TPtr Tir.TUnit;
       v_lin = Tir.Unr
     } in
@@ -968,7 +968,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       } in
       let panic_v = Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "assertion failed")]) in
       Tir.ECase (cond_atom,
-        [{ br_tag = "True"; br_vars = []; br_body = unit_v }],
+        [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = unit_v }],
         Some panic_v))
 
   | Ast.ESigil _ ->
@@ -1042,9 +1042,9 @@ and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
        propagated to codegen. *)
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->
-    Some (Printf.sprintf "$Tuple%d" (List.length subs), subs)
+    Some (Tir_names.tuple_tag (List.length subs), subs)
   | Ast.PatLit (Ast.LitInt n, _)    -> Some (string_of_int n, [])
-  | Ast.PatLit (Ast.LitBool b, _)   -> Some (string_of_bool b, [])
+  | Ast.PatLit (Ast.LitBool b, _)   -> Some (Tir_names.bool_lit_tag b, [])
   | Ast.PatLit (Ast.LitString s, _) -> Some ("\"" ^ s ^ "\"", [])
   | Ast.PatLit (Ast.LitAtom a, _)   -> Some (":" ^ a, [])
   | Ast.PatLit (Ast.LitFloat f, _)  ->
@@ -1344,7 +1344,7 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
                                  v_ty = Tir.TBool; v_lin = Tir.Unr } in
             Tir.ELet (gv, guard_expr,
               Tir.ECase (Tir.AVar gv,
-                [{ br_tag = "true"; br_vars = []; br_body = body }],
+                [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
                 Some rest_expr))
         in
         List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
@@ -1583,10 +1583,10 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
   in
   (* In hot_reload mode, state lives in a separate heap record.
      state_type_name is the TIR name for that record. *)
-  let state_type_name = name ^ "_State" in
+  let state_type_name = name ^ Tir_names.actor_state_suffix in
 
   (* ── 1. Message variant type ─────────────────────────────── *)
-  let msg_type_name = name ^ "_Msg" in
+  let msg_type_name = name ^ Tir_names.actor_msg_suffix in
   let msg_ctors : (string * Tir.ty list) list =
     List.map (fun (h : Ast.actor_handler) ->
         let param_tys = List.map (fun (p : Ast.param) ->
@@ -1598,7 +1598,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
   let msg_variant = Tir.TDVariant (msg_type_name, msg_ctors) in
 
   (* ── 2. Actor struct type ────────────────────────────────── *)
-  let actor_type_name = name ^ "_Actor" in
+  let actor_type_name = name ^ Tir_names.actor_struct_suffix in
   (* Layout order: $d_dispatch (field 0), $e_alive (field 1), state fields (fields 2+)
      Names are prefixed so alphabetical sort ($d < $e < $f < letters) in llvm_emit.ml's
      get_record_fields matches the alloc/reuse arg order and the C runtime's
@@ -1606,11 +1606,11 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
      In hot_reload mode: field 2 is $f_state (ptr to state record) → a[4]=state ptr. *)
   let actor_struct_fields : (string * Tir.ty) list =
     if hot_reload then
-      [("$d_dispatch", Tir.TPtr Tir.TUnit);
-       ("$e_alive", Tir.TBool);
-       ("$f_state", Tir.TCon (state_type_name, []))]
+      [(Tir_names.actor_dispatch_field, Tir.TPtr Tir.TUnit);
+       (Tir_names.actor_alive_field, Tir.TBool);
+       (Tir_names.actor_state_field, Tir.TCon (state_type_name, []))]
     else
-      [("$d_dispatch", Tir.TPtr Tir.TUnit); ("$e_alive", Tir.TBool)]
+      [(Tir_names.actor_dispatch_field, Tir.TPtr Tir.TUnit); (Tir_names.actor_alive_field, Tir.TBool)]
       @ state_fields_sorted
   in
   let actor_record = Tir.TDRecord (actor_type_name, actor_struct_fields) in
@@ -1660,7 +1660,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
     (* Step 1: lower the handler body (uses `state` variable) *)
     let body_tir = lower_expr h.ah_body in
 
-    let state_ty = Tir.TCon (name ^ "_State", []) in
+    let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
     (* Step 2: let $result = body_tir *)
     let result_var = actor_var "$result" state_ty in
 
@@ -1730,7 +1730,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
        In hot_reload mode, first load the state ptr from actor, then load fields from it. *)
     let inner_with_state_loads =
       if hot_reload then
-        Tir.ELet (state_ptr_var, Tir.EField (actor_atom, "$f_state"),
+        Tir.ELet (state_ptr_var, Tir.EField (actor_atom, Tir_names.actor_state_field),
           List.fold_right (fun (fname, sfv) acc ->
               Tir.ELet (sfv, Tir.EField (Tir.AVar state_ptr_var, fname), acc)
             ) state_field_vars inner_with_state)
@@ -1742,12 +1742,12 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
 
     (* Wrap: let $e_alive_v = EField(actor, "$e_alive") *)
     let inner_with_alive =
-      Tir.ELet (alive_var, Tir.EField (actor_atom, "$e_alive"), inner_with_state_loads)
+      Tir.ELet (alive_var, Tir.EField (actor_atom, Tir_names.actor_alive_field), inner_with_state_loads)
     in
 
     (* Wrap: let $d_dispatch_v = EField(actor, "$d_dispatch") *)
     let full_body =
-      Tir.ELet (dispatch_var, Tir.EField (actor_atom, "$d_dispatch"), inner_with_alive)
+      Tir.ELet (dispatch_var, Tir.EField (actor_atom, Tir_names.actor_dispatch_field), inner_with_alive)
     in
 
     { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body }
@@ -1791,7 +1791,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
       ) actor.actor_handlers
   in
   let dispatch_fn : Tir.fn_def = {
-    fn_name   = name ^ "_dispatch";
+    fn_name   = name ^ Tir_names.actor_dispatch_suffix;
     fn_params = [actor_param; msg_var];
     fn_ret_ty = Tir.TUnit;
     fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
@@ -1806,11 +1806,11 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
        EAtom($actor)
   *)
   let dispatch_fn_ptr_var : Tir.var = {
-    v_name = name ^ "_dispatch";
+    v_name = name ^ Tir_names.actor_dispatch_suffix;
     v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit], Tir.TUnit);
     v_lin  = Tir.Unr;
   } in
-  let state_ty = Tir.TCon (name ^ "_State", []) in
+  let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
   let init_var = actor_var "$init_state" state_ty in
   let init_field_vars : (string * Tir.var) list =
     List.map (fun (fname, fty) ->
@@ -1885,7 +1885,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
       Tir.ELet (init_var, lower_expr actor.actor_init, wrap_sup spawn_with_fields)
   in
   let spawn_fn : Tir.fn_def = {
-    fn_name   = name ^ "_spawn";
+    fn_name   = name ^ Tir_names.actor_spawn_suffix;
     fn_params = [];
     fn_ret_ty = Tir.TPtr Tir.TUnit;
     fn_body   = spawn_body_with_sup;
@@ -1894,7 +1894,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
   (* Also register a state record type so EField accesses on the init state
      record resolve the correct field indices (needed when there are multiple
      state fields). *)
-  let state_record = Tir.TDRecord (name ^ "_State", state_fields_sorted) in
+  let state_record = Tir.TDRecord (name ^ Tir_names.actor_state_suffix, state_fields_sorted) in
 
   let type_defs = [state_record; msg_variant; actor_record] in
   let fn_defs   = handler_fns @ [dispatch_fn; spawn_fn] in
@@ -2172,12 +2172,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         match d with
         | Ast.DFn (def, _) ->
           let name = def.fn_name.txt in
-          (match String.rindex_opt name '$' with
-           | Some dollar_pos when dollar_pos > 0 ->
-             let base = String.sub name 0 dollar_pos in
-             let suffix = String.sub name (dollar_pos + 1) (String.length name - dollar_pos - 1) in
-             (match int_of_string_opt suffix with
-              | Some _ ->
+          (match Tir_names.parse_default_arg name with
+           | Some (base, _arity) ->
                 let n_params = match def.fn_clauses with
                   | [] -> 0
                   | c :: _ -> List.length c.fc_params
@@ -2186,8 +2182,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let mangled = prefix ^ name in
                 let existing = try Hashtbl.find default_dispatch key with Not_found -> [] in
                 Hashtbl.replace default_dispatch key ((n_params, mangled) :: existing)
-              | None -> ())
-           | _ -> ())
+           | None -> ())
         | Ast.DMod (mname, _, inner_decls, _) ->
           build_default_dispatch (prefix ^ mname.Ast.txt ^ ".") inner_decls
         | _ -> ()
@@ -2513,7 +2508,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     in
     (* Lower a test-body expression to a zero-arg TIR function. *)
     let lower_test_body ~mod_prefix ~direct_fn_names display_name body =
-      let fn_name = Printf.sprintf "__march_test_%d__" !test_counter in
+      let fn_name = Tir_names.test_fn_name !test_counter in
       incr test_counter;
       (* Register the enclosing module's own function names as current-module
          locals while lowering the test body, so [resolve_use_alias] does NOT
@@ -2550,7 +2545,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
           let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
           let fn : Tir.fn_def = {
-            fn_name   = "__march_setup__";
+            fn_name   = Tir_names.setup_fn_name;
             fn_params = [];
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
@@ -2559,7 +2554,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | Ast.DSetupAll (body, _) ->
           let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
           let fn : Tir.fn_def = {
-            fn_name   = "__march_setup_all__";
+            fn_name   = Tir_names.setup_all_fn_name;
             fn_params = [];
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';

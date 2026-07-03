@@ -97,7 +97,7 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
   ) m.Tir.tm_tests;
   (* Test-mode setup/setup_all are called from the generated @main — seed them. *)
   List.iter (fun (fd : Tir.fn_def) ->
-    if fd.Tir.fn_name = "__march_setup__" || fd.Tir.fn_name = "__march_setup_all__"
+    if fd.Tir.fn_name = Tir_names.setup_fn_name || fd.Tir.fn_name = Tir_names.setup_all_fn_name
     then begin Queue.push fd.Tir.fn_name queue; has_seeds := true end
   ) m.Tir.tm_fns;
   (* Hot-reload migration entry points: seeded like exports so the __migrate_<Actor>

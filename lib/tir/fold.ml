@@ -59,11 +59,13 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
 
   (* if true -> then branch; if false -> else branch *)
   | Tir.ECase (Tir.ALit (March_ast.Ast.LitBool true),
-               [{ Tir.br_tag = "True"; br_body; _ }], _) ->
+               [{ Tir.br_tag; br_body; _ }], _)
+    when br_tag = Tir_names.synthetic_true_tag ->
     changed := true; fold_expr ~changed br_body
 
   | Tir.ECase (Tir.ALit (March_ast.Ast.LitBool false),
-               [{ Tir.br_tag = "True"; _ }], Some else_e) ->
+               [{ Tir.br_tag; _ }], Some else_e)
+    when br_tag = Tir_names.synthetic_true_tag ->
     changed := true; fold_expr ~changed else_e
 
   (* ECase with LitBool false scrutinee and no default — unreachable in practice

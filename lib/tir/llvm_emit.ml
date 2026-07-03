@@ -453,14 +453,11 @@ let fn_ret_tir (ty : Tir.ty) : Tir.ty =
     Stored in the same list and called through one variable typed `(_) -> Bool`,
     the dispatch picks `call i64` for both and reinterprets the polymorphic
     wrapper's tagged `3`/`1` as a raw scalar — inverting Bool field predicates.
-    Void wrappers keep the `void` ABI (no value to carry). *)
-let is_apply_fn (name : string) : bool =
-  let marker = "$apply$" in
-  let nl = String.length name and ml = String.length marker in
-  let rec scan i =
-    i + ml <= nl && (String.sub name i ml = marker || scan (i + 1))
-  in
-  nl >= ml && scan 0
+    Void wrappers keep the `void` ABI (no value to carry).  Defined in
+    [Tir_names] (Wave 3 Task 1 — was a byte-identical duplicate of
+    [Perceus.is_apply_fn] before this move; see [Tir_names.is_apply_fn] for
+    the diff verdict). *)
+let is_apply_fn = Tir_names.is_apply_fn
 
 (** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
     result in the generic ptr ABI shared by all closure dispatch (see
@@ -642,10 +639,9 @@ let atom_is_builtin (atom : Tir.atom) =
 (** True if [name] refers to a provably-terminating call site that does not
     need a reduction check: either a March builtin operator or a C-runtime
     function injected by lower_module (identified by the "march_" prefix, e.g.
-    march_compare_int, march_hash_int). *)
+    march_compare_int, march_hash_int — see [Tir_names.has_runtime_prefix]). *)
 let is_leaf_callee (name : string) : bool =
-  is_builtin_fn name ||
-  (String.length name >= 6 && String.sub name 0 6 = "march_")
+  is_builtin_fn name || Tir_names.has_runtime_prefix name
 
 (** Returns [true] if [e] contains any non-leaf function call (EApp with a
     non-leaf callee, or any ECallPtr indirect call).  Used to decide whether
@@ -1503,8 +1499,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        A local binding of the same name (in var_slot) shadows the top-level
        function — fall through to the local-load path in that case. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
-  | Tir.AVar v when (let n = v.Tir.v_name in
-                     String.length n >= 6 && String.sub n 0 6 = "march_")
+  | Tir.AVar v when Tir_names.has_runtime_prefix v.Tir.v_name
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
     (* C-runtime extern used as a first-class value (e.g. march_compare_int passed
        to a HOF).  These are declared in emit_preamble — never in var_slot or
@@ -2432,12 +2427,13 @@ let rec is_trivial_dec_chain (e : Tir.expr) : bool =
 let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
   let candidates =
     Hashtbl.fold (fun name _ acc ->
-        match String.rindex_opt name '.' with
-        | Some i when (match String.index_opt name '$' with
-                       | Some j -> j < i | None -> false) ->
-          let suffix = String.sub name (i + 1) (String.length name - i - 1) in
-          if suffix = bare_name then name :: acc else acc
-        | _ -> acc)
+        if Tir_names.is_iface_mangled name then
+          match String.rindex_opt name '.' with
+          | Some i ->
+            let suffix = String.sub name (i + 1) (String.length name - i - 1) in
+            if suffix = bare_name then name :: acc else acc
+          | None -> acc
+        else acc)
       ctx.top_fns []
   in
   if candidates <> [] then
@@ -2465,8 +2461,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      closure is still live after the field access — we handle both forms. *)
   | Tir.ELet (v, rhs, body)
     when (let rec has_fv_field e = match e with
-            | Tir.EField (_, n) ->
-              String.length n > 3 && String.sub n 0 3 = "$fv"
+            | Tir.EField (_, n) -> Tir_names.is_fv_field n
             | Tir.ESeq (_, rest) -> has_fv_field rest
             | _ -> false
           in has_fv_field rhs) ->
@@ -3576,9 +3571,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        the storage value has type TVar "_").
        NOTE: skip if fname starts with "march_" — those are always pre-declared
        in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin =
-      String.length fname >= 6 && String.sub fname 0 6 = "march_"
-    in
+    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
     let is_known_fn =
       is_runtime_builtin
       || Hashtbl.mem ctx.top_fns resolved_name
@@ -3819,9 +3812,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        appears as a call but has no define/declare in the generated IR.
        NOTE: skip if fname starts with "march_" — those are always pre-declared
        in the hardcoded preamble string (emit_preamble). *)
-    let is_runtime_builtin =
-      String.length fname >= 6 && String.sub fname 0 6 = "march_"
-    in
+    let is_runtime_builtin = Tir_names.has_runtime_prefix fname in
     let is_known_fn =
       is_runtime_builtin
       || Hashtbl.mem ctx.top_fns resolved_name
@@ -4169,15 +4160,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
           wrapper; injecting here survives all IR transformations.
           Actor types are named <Base>_Actor; dispatch functions are <Base>_dispatch. *)
-       let actor_sfx = "_Actor" in
+       let actor_sfx = Tir_names.actor_struct_suffix in
        let atn_len = String.length alloc_type_name in
        let sfx_len = String.length actor_sfx in
        if ctx.hr_config <> None
-          && atn_len > sfx_len
-          && String.sub alloc_type_name (atn_len - sfx_len) sfx_len = actor_sfx
+          && Tir_names.is_actor_struct_name alloc_type_name
        then begin
          let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
-         let dispatch_fn = actor_base ^ "_dispatch" in
+         let dispatch_fn = actor_base ^ Tir_names.actor_dispatch_suffix in
          match Hot_reload.Name_table.id_of ctx.hr_names dispatch_fn with
          | Some id0 ->
            let slot_id = id0 + 1 in  (* 1-based; 0 = "not set" sentinel *)
@@ -4621,8 +4611,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     in
     (* Closure free-variable fields: "$fvN" — parse index from name directly
        since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
-    if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then begin
-      let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
+    if Tir_names.is_fv_field field_name then begin
+      let i = Tir_names.fv_field_index field_name in
       let (_, obj_val) = emit_atom ctx obj_atom in
       let fv = emit_load_field ctx obj_val i (llvm_ty (Tir.TPtr Tir.TUnit)) in
       (llvm_ty (Tir.TPtr Tir.TUnit), fv)
@@ -5797,7 +5787,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
       flen > sl && String.sub fname (flen - sl) sl = sfx
     in
     if ctx.compile_so
-       && not (ends_with "_dispatch")
+       && not (Tir_names.is_actor_dispatch_fn fname)
        && not (ends_with "_migrate_state")
     then "hidden "
     else ""
@@ -6076,7 +6066,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
         flen > sl && String.sub fname (flen - sl) sl = sfx
       in
       if ctx.compile_so
-         && not (ends_with "_dispatch")
+         && not (Tir_names.is_actor_dispatch_fn fname)
          && not (ends_with "_migrate_state")
       then "hidden " else ""
     in
@@ -6589,11 +6579,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
      declarations (only nested submodule functions retain their prefix).
      We include any *_dispatch function unconditionally so that actor hot-reload
      works when the --hot-reload boundary is the file-level module. *)
-  let is_actor_dispatch_fn (n : string) =
-    let sfx = "_dispatch" in
-    let ln = String.length n and ls = String.length sfx in
-    ln > ls && String.sub n (ln - ls) ls = sfx
-  in
+  let is_actor_dispatch_fn = Tir_names.is_actor_dispatch_fn in
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
@@ -6740,12 +6726,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
          unaffected. *)
       (match String.rindex_opt fn.Tir.fn_name '.' with
        | Some i ->
-         let is_iface_mangled =
-           match String.index_opt fn.Tir.fn_name '$' with
-           | Some j -> j < i
-           | None -> false
-         in
-         if not is_iface_mangled then begin
+         if not (Tir_names.is_iface_mangled fn.Tir.fn_name) then begin
            let unq = String.sub fn.Tir.fn_name (i+1)
                        (String.length fn.Tir.fn_name - i - 1) in
            if not (Hashtbl.mem ctx.unqualified_fns unq) then begin
@@ -7064,9 +7045,9 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
           call march_test_run(fn_ptr, name_ptr, setup_or_null).
           setup_all and per-test setup are optional and may not exist. *)
        let has_setup_all = List.exists (fun (fn : Tir.fn_def) ->
-           fn.Tir.fn_name = "__march_setup_all__") m.Tir.tm_fns in
+           fn.Tir.fn_name = Tir_names.setup_all_fn_name) m.Tir.tm_fns in
        let has_setup = List.exists (fun (fn : Tir.fn_def) ->
-           fn.Tir.fn_name = "__march_setup__") m.Tir.tm_fns in
+           fn.Tir.fn_name = Tir_names.setup_fn_name) m.Tir.tm_fns in
        (* Emit test name string constants directly to out (preamble was already
           flushed to out above, so ctx.preamble writes would be lost). *)
        List.iteri (fun i (_fn_name, display_name) ->
@@ -7097,9 +7078,9 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
        if has_setup_all then
          Buffer.add_string buf2
            (Printf.sprintf "  call void @march_test_setup_all(ptr @%s)\n"
-              (llvm_name (mangle_extern "__march_setup_all__")));
+              (llvm_name (mangle_extern Tir_names.setup_all_fn_name)));
        let setup_arg = if has_setup then
-         Printf.sprintf "ptr @%s" (llvm_name (mangle_extern "__march_setup__"))
+         Printf.sprintf "ptr @%s" (llvm_name (mangle_extern Tir_names.setup_fn_name))
        else "ptr null" in
        List.iteri (fun i (fn_name, _display_name) ->
          let mangled = llvm_name (mangle_extern fn_name) in

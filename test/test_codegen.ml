@@ -1,6 +1,129 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
+
+let test_tir_names_tuple_tag () =
+  Alcotest.(check string) "tuple_tag 2" "$Tuple2" (March_tir.Tir_names.tuple_tag 2);
+  Alcotest.(check bool) "is_tuple_tag $Tuple2" true
+    (March_tir.Tir_names.is_tuple_tag (March_tir.Tir_names.tuple_tag 2));
+  Alcotest.(check bool) "is_tuple_tag $Tuple0" true
+    (March_tir.Tir_names.is_tuple_tag (March_tir.Tir_names.tuple_tag 0));
+  Alcotest.(check bool) "not is_tuple_tag Some" false
+    (March_tir.Tir_names.is_tuple_tag "Some");
+  Alcotest.(check bool) "not is_tuple_tag $fv1" false
+    (March_tir.Tir_names.is_tuple_tag "$fv1")
+
+let test_tir_names_fv_field_round_trip () =
+  Alcotest.(check string) "fv_field 1" "$fv1" (March_tir.Tir_names.fv_field 1);
+  Alcotest.(check bool) "is_fv_field $fv1" true
+    (March_tir.Tir_names.is_fv_field (March_tir.Tir_names.fv_field 1));
+  Alcotest.(check int) "fv_field_index round-trip" 42
+    (March_tir.Tir_names.fv_field_index (March_tir.Tir_names.fv_field 42));
+  Alcotest.(check bool) "not is_fv_field $Clo_foo$1" false
+    (March_tir.Tir_names.is_fv_field "$Clo_foo$1");
+  Alcotest.(check bool) "not is_fv_field plain field" false
+    (March_tir.Tir_names.is_fv_field "name")
+
+let test_tir_names_clo_struct () =
+  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:3 in
+  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3" n;
+  Alcotest.(check bool) "is_clo_struct" true (March_tir.Tir_names.is_clo_struct n);
+  Alcotest.(check bool) "not is_clo_struct Option" false
+    (March_tir.Tir_names.is_clo_struct "Option")
+
+let test_tir_names_apply_fn () =
+  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:3 in
+  Alcotest.(check string) "apply_fn_name" "foo$apply$3" n;
+  Alcotest.(check bool) "is_apply_fn" true (March_tir.Tir_names.is_apply_fn n);
+  Alcotest.(check bool) "not is_apply_fn plain" false
+    (March_tir.Tir_names.is_apply_fn "foo");
+  (* is_apply_fn scans for the marker anywhere, not just as a suffix. *)
+  Alcotest.(check bool) "is_apply_fn marker mid-string" true
+    (March_tir.Tir_names.is_apply_fn "foo$apply$3$extra")
+
+let test_tir_names_iface_mangled () =
+  Alcotest.(check bool) "Show$Int.show is mangled" true
+    (March_tir.Tir_names.is_iface_mangled "Show$Int.show");
+  Alcotest.(check bool) "Show$List.show$List_Int is mangled" true
+    (March_tir.Tir_names.is_iface_mangled "Show$List.show$List_Int");
+  (* The critical negative case from the plan brief: a $ AFTER the last '.'
+     is an ordinary specialized generic fn, not an interface impl. *)
+  Alcotest.(check bool) "List.map$Int is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "List.map$Int");
+  Alcotest.(check bool) "ordinary qualified name is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "Crypto.base64_encode");
+  Alcotest.(check bool) "no dot at all is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "no_dots_here$weird");
+  (* A user fn named with dots but no interface mangling. *)
+  Alcotest.(check bool) "App.Core.b is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "App.Core.b")
+
+let test_tir_names_iface_mangle_builder () =
+  Alcotest.(check string) "iface_mangle" "Show$List.show"
+    (March_tir.Tir_names.iface_mangle ~iface:"Show" ~ty:"List" ~meth:"show")
+
+let test_tir_names_default_arg_round_trip () =
+  Alcotest.(check string) "default_arg_mangle" "greet$2"
+    (March_tir.Tir_names.default_arg_mangle "greet" 2);
+  Alcotest.(check bool) "parse round-trip" true
+    (March_tir.Tir_names.parse_default_arg
+       (March_tir.Tir_names.default_arg_mangle "greet" 2) = Some ("greet", 2));
+  Alcotest.(check bool) "parse_default_arg no dollar" true
+    (March_tir.Tir_names.parse_default_arg "greet" = None);
+  Alcotest.(check bool) "parse_default_arg empty base rejected" true
+    (March_tir.Tir_names.parse_default_arg "$2" = None);
+  Alcotest.(check bool) "parse_default_arg non-numeric suffix rejected" true
+    (March_tir.Tir_names.parse_default_arg "greet$abc" = None)
+
+let test_tir_names_actor_suffixes () =
+  Alcotest.(check bool) "is_actor_struct_name Counter_Actor" true
+    (March_tir.Tir_names.is_actor_struct_name ("Counter" ^ March_tir.Tir_names.actor_struct_suffix));
+  Alcotest.(check bool) "not is_actor_struct_name Counter" false
+    (March_tir.Tir_names.is_actor_struct_name "Counter");
+  Alcotest.(check bool) "is_actor_dispatch_fn Counter_dispatch" true
+    (March_tir.Tir_names.is_actor_dispatch_fn ("Counter" ^ March_tir.Tir_names.actor_dispatch_suffix));
+  Alcotest.(check bool) "not is_actor_dispatch_fn Counter" false
+    (March_tir.Tir_names.is_actor_dispatch_fn "Counter");
+  (* Field-sort invariant: $d_ < $e_ < $f_ < any letter (C-runtime word-index
+     coupling — see the module doc comment). *)
+  Alcotest.(check bool) "dispatch field sorts before alive field" true
+    (March_tir.Tir_names.actor_dispatch_field < March_tir.Tir_names.actor_alive_field);
+  Alcotest.(check bool) "alive field sorts before state field" true
+    (March_tir.Tir_names.actor_alive_field < March_tir.Tir_names.actor_state_field);
+  Alcotest.(check bool) "state field sorts before a plain letter field" true
+    (March_tir.Tir_names.actor_state_field < "a")
+
+let test_tir_names_runtime_prefix () =
+  Alcotest.(check bool) "has_runtime_prefix march_compare_int" true
+    (March_tir.Tir_names.has_runtime_prefix "march_compare_int");
+  (* "march_" requires the trailing underscore; "marching" has none at
+     that position, so it must NOT match. *)
+  Alcotest.(check bool) "not has_runtime_prefix marching" false
+    (March_tir.Tir_names.has_runtime_prefix "marching");
+  Alcotest.(check bool) "not has_runtime_prefix short string" false
+    (March_tir.Tir_names.has_runtime_prefix "march")
+
+let test_tir_names_try_call () =
+  Alcotest.(check bool) "is_try_call __try_call" true
+    (March_tir.Tir_names.is_try_call "__try_call");
+  Alcotest.(check bool) "is_try_call __try_call_val" true
+    (March_tir.Tir_names.is_try_call "__try_call_val");
+  Alcotest.(check bool) "not is_try_call other" false
+    (March_tir.Tir_names.is_try_call "try_call")
+
+let test_tir_names_test_and_setup_fn_names () =
+  Alcotest.(check string) "test_fn_name 0" "__march_test_0__" (March_tir.Tir_names.test_fn_name 0);
+  Alcotest.(check string) "test_fn_name 7" "__march_test_7__" (March_tir.Tir_names.test_fn_name 7);
+  Alcotest.(check string) "setup_fn_name" "__march_setup__" March_tir.Tir_names.setup_fn_name;
+  Alcotest.(check string) "setup_all_fn_name" "__march_setup_all__" March_tir.Tir_names.setup_all_fn_name
+
+let test_tir_names_bool_tags () =
+  Alcotest.(check string) "synthetic_true_tag" "True" March_tir.Tir_names.synthetic_true_tag;
+  Alcotest.(check string) "synthetic_false_tag" "False" March_tir.Tir_names.synthetic_false_tag;
+  Alcotest.(check string) "bool_lit_tag true" "true" (March_tir.Tir_names.bool_lit_tag true);
+  Alcotest.(check string) "bool_lit_tag false" "false" (March_tir.Tir_names.bool_lit_tag false)
+
 let test_nested_bool_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
     fn classify(r : Result(Bool, String)) : String do
@@ -6065,6 +6188,20 @@ let test_scrutinee_borrowed_cross_branch_no_double_dec () =
 
 let codegen_suites =
   [
+      ( "tir_names", [
+          Alcotest.test_case "tuple_tag round-trip"       `Quick test_tir_names_tuple_tag;
+          Alcotest.test_case "fv_field round-trip"        `Quick test_tir_names_fv_field_round_trip;
+          Alcotest.test_case "clo_struct_name/is_clo_struct" `Quick test_tir_names_clo_struct;
+          Alcotest.test_case "apply_fn_name/is_apply_fn"  `Quick test_tir_names_apply_fn;
+          Alcotest.test_case "is_iface_mangled"            `Quick test_tir_names_iface_mangled;
+          Alcotest.test_case "iface_mangle builder"        `Quick test_tir_names_iface_mangle_builder;
+          Alcotest.test_case "default_arg_mangle round-trip" `Quick test_tir_names_default_arg_round_trip;
+          Alcotest.test_case "actor suffixes + field sort" `Quick test_tir_names_actor_suffixes;
+          Alcotest.test_case "runtime_prefix"              `Quick test_tir_names_runtime_prefix;
+          Alcotest.test_case "is_try_call"                 `Quick test_tir_names_try_call;
+          Alcotest.test_case "test/setup fn names"         `Quick test_tir_names_test_and_setup_fn_names;
+          Alcotest.test_case "bool tags"                   `Quick test_tir_names_bool_tags;
+        ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;

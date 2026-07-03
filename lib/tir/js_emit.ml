@@ -550,7 +550,7 @@ and emit_val_impl ctx expr =
     emit_atom ctx a; emit ctx ".";
     (* Closure free-variable fields are named "$fvN" in TIR but stored as "_N"
        in the JS closure struct (EAlloc uses positional _0/_1/_2 ... layout) *)
-    if String.length field > 3 && String.sub field 0 3 = "$fv" then
+    if Tir_names.is_fv_field field then
       emit ctx ("_" ^ String.sub field 3 (String.length field - 3))
     else
       emit ctx field
@@ -728,8 +728,7 @@ and emit_case_impl ctx result_var expr =
     let is_tuple_case =
       match s_ty with Tir.TTuple _ -> true | _ -> false
       || (match branches with
-          | br :: _ -> let t = br.Tir.br_tag in
-                       String.length t >= 6 && String.sub t 0 6 = "$Tuple"
+          | br :: _ -> Tir_names.is_tuple_tag br.Tir.br_tag
           | [] -> false) in
     if is_tuple_case then begin
       (* Tuple: exactly one branch, directly destructure _0, _1, ... *)
