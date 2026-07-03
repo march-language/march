@@ -575,6 +575,27 @@ let test_complete_replace_with_suffix () =
     invalidated when the runtime changed, and a concurrent worktree with
     diverged runtime sources would overwrite it with an ABI-mismatched
     binary, hanging whichever test process dlopen'd the wrong build. *)
+
+(** Canary (W2 Task 2 / W2.0): the "gate is live" assertion. If clang is on
+    PATH, `setup_jit_runtime` must NEVER return `None` — every clang-gated
+    test in this file (and test_stdlib_suite.ml) silently no-ops when it
+    does, so a regression that reintroduces a swallowed link failure (or
+    breaks the runtime-source search path) would otherwise make an entire
+    class of tests vacuously pass again without any test catching it. This
+    test fails loudly if that ever happens; it only legitimately skips (via
+    the same clang-absence check) when clang itself is not installed here. *)
+let test_setup_jit_runtime_gate_is_live () =
+  if not (clang_available ()) then ()  (* legitimate, counted skip: no clang on PATH *)
+  else
+    match setup_jit_runtime () with
+    | Some _ -> ()
+    | None ->
+      Alcotest.fail
+        "setup_jit_runtime returned None while `clang --version` succeeds — \
+         the JIT gate is broken (a link failure or missing runtime source is \
+         being silently swallowed again; see setup_jit_runtime's Alcotest.failf \
+         paths, which should have raised instead of returning None here)"
+
 let test_repl_jit_cross_line_let () =
   match setup_jit_runtime () with
   | None -> ()  (* skip: clang or runtime not available in this environment *)
@@ -5517,66 +5538,61 @@ let test_opt_without_perceus () =
    *runs* the binary (not just inspecting IR text) because the bug's symptom
    is a runtime crash/garbage value, not a shape in the emitted IR. *)
 let test_guard_exhaustion_panics_compiled () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  let main_exe = find_main_exe () in
   (* Run from the project root so the compiler resolves its CWD-relative
      runtime/ and stdlib/ directories (same trick as the other compiled
      regression tests in test_stdlib_suite.ml). *)
-  let project_root = Filename.dirname (Filename.dirname exe_dir) in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let src_text =
-      "mod GuardEx do\n\
-      \  fn classify(n) do\n\
-      \    match n do\n\
-      \      x when x > 0 -> \"pos\"\n\
-      \      x when x < 0 -> \"neg\"\n\
-      \    end\n\
-      \  end\n\
-      \  fn main() do\n\
-      \    println(classify(0))\n\
-      \  end\n\
-       end\n"
-    in
-    let tmp = Filename.temp_file "march_guardex" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "guardex.march" in
-    let oc = open_out src in
-    output_string oc src_text;
-    close_out oc;
-    (* Read the whole stdout+stderr of a command (trimmed). *)
-    let read_cmd cmd =
-      let ic = Unix.open_process_in cmd in
-      let buf = Buffer.create 64 in
-      (try
-         while true do Buffer.add_channel buf ic 1 done
-       with End_of_file -> ());
-      ignore (Unix.close_process_in ic);
-      String.trim (Buffer.contents buf)
-    in
-    (* --- interpreter: must already panic (parity check) --- *)
-    let interp_out = read_cmd (Printf.sprintf
-      "cd %s && %s %s 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check bool) "interpreter panics on guard exhaustion (non-exhaustive)" true
-      (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
-    (* --- compiled: must panic (exit 1) with a non-exhaustive-match message,
-       not crash (segfault, exit 139) or exit 0 with garbage output --- *)
-    let bin = Filename.concat tmp "guardexbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    Alcotest.(check int) "compiles ok" 0 compile_rc;
+  let project_root = march_project_root () in
+  let src_text =
+    "mod GuardEx do\n\
+    \  fn classify(n) do\n\
+    \    match n do\n\
+    \      x when x > 0 -> \"pos\"\n\
+    \      x when x < 0 -> \"neg\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    println(classify(0))\n\
+    \  end\n\
+     end\n"
+  in
+  let tmp = Filename.temp_file "march_guardex" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "guardex.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (* Read the whole stdout+stderr of a command (trimmed). *)
+  let read_cmd cmd =
+    let ic = Unix.open_process_in cmd in
+    let buf = Buffer.create 64 in
+    (try
+       while true do Buffer.add_channel buf ic 1 done
+     with End_of_file -> ());
+    ignore (Unix.close_process_in ic);
+    String.trim (Buffer.contents buf)
+  in
+  (* --- interpreter: must already panic (parity check) --- *)
+  let interp_out = read_cmd (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "interpreter panics on guard exhaustion (non-exhaustive)" true
+    (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+  (* --- compiled: must panic (exit 1) with a non-exhaustive-match message,
+     not crash (segfault, exit 139) or exit 0 with garbage output --- *)
+  let bin = Filename.concat tmp "guardexbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
     Alcotest.(check bool)
       "compiled guard-exhaustion panics with a non-exhaustive-match message (not exit 0/segfault)"
       true
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
-  end
 
 (* ── Float-literal match arms (B4) ──────────────────────────────────────
    `pat_tag_and_subs` returned `None` for `Ast.LitFloat` patterns, and the
@@ -5600,11 +5616,12 @@ let read_cmd_output cmd =
   String.trim (Buffer.contents buf)
 
 (** Write [src_text] to a fresh temp dir and return (project_root, main_exe,
-    src_path, tmp_dir). Shared setup for the compile-and-run tests below. *)
+    src_path, tmp_dir). Shared setup for the compile-and-run tests below.
+    [find_main_exe] fails loudly if the compiler binary is missing (it is
+    never legitimately absent — see test_helpers.ml). *)
 let write_march_source ~name src_text =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
   let tmp = Filename.temp_file name "" in
   Sys.remove tmp;
   Unix.mkdir tmp 0o755;
@@ -5627,28 +5644,24 @@ let test_float_lit_match_arm_compiled () =
     \  end\n\
      end\n"
   in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    (* --- interpreter: matches the float literal correctly (baseline) --- *)
-    let interp_out = read_cmd_output (Printf.sprintf
-      "cd %s && %s %s 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check string) "interpreter matches float literal arm"
-      "two-and-a-half" interp_out;
-    (* --- compiled: must match too — this is the B4 regression --- *)
-    let bin = Filename.concat tmp "floatpatbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    Alcotest.(check int) "compiles ok" 0 compile_rc;
+  (* --- interpreter: matches the float literal correctly (baseline) --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter matches float literal arm"
+    "two-and-a-half" interp_out;
+  (* --- compiled: must match too — this is the B4 regression --- *)
+  let bin = Filename.concat tmp "floatpatbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd_output (Filename.quote bin) in
     Alcotest.(check string)
       "compiled float literal match arm produces the SAME value as the \
        interpreter (not silently falling through to a later/wildcard arm)"
       "two-and-a-half" run_out
-  end
 
 (** Float arm with NO wildcard: a non-exhaustive float match must panic (the
     Task 1 / B3 `nonexhaustive_panic` fallback), not silently fall through to
@@ -5670,22 +5683,19 @@ let test_float_lit_no_wildcard_panics_compiled () =
     \  end\n\
      end\n"
   in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    (* --- interpreter: must already panic (parity check) --- *)
-    let interp_out = read_cmd_output (Printf.sprintf
-      "cd %s && %s %s 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check bool) "interpreter panics on float non-exhaustive match" true
-      (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
-    (* --- compiled: must panic (exit 1), not exit 0 with a wrong value --- *)
-    let bin = Filename.concat tmp "floatpatnowildbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    Alcotest.(check int) "compiles ok" 0 compile_rc;
+  (* --- interpreter: must already panic (parity check) --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "interpreter panics on float non-exhaustive match" true
+    (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+  (* --- compiled: must panic (exit 1), not exit 0 with a wrong value --- *)
+  let bin = Filename.concat tmp "floatpatnowildbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
     Alcotest.(check bool)
       "compiled float non-exhaustive match panics with a non-exhaustive-match \
@@ -5693,7 +5703,6 @@ let test_float_lit_no_wildcard_panics_compiled () =
       true
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
-  end
 
 (* ── EUpdate on type-erased records (B5) ─────────────────────────────────
    `{ base with f: v }` where the base's static shape is unknown
@@ -5752,20 +5761,17 @@ let test_erased_update_missing_field_panics_compiled () =
     \  end\n\
      end\n"
   in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    (* Compile from the SOURCE root (the parent of _build): the new
-       march_record_update_dyn symbol must come from the live runtime/*.c
-       sources, not _build/default's runtime copies (refreshed only when a
-       dune rule that lists them as deps runs).  write_march_source's
-       project_root is .../_build, so its parent is the source tree. *)
-    let src_root = Filename.dirname project_root in
-    let bin = Filename.concat tmp "erasedupdmissbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote src_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    Alcotest.(check int) "compiles ok" 0 compile_rc;
+  (* Compile from the SOURCE root (the parent of _build): the new
+     march_record_update_dyn symbol must come from the live runtime/*.c
+     sources, not _build/default's runtime copies (refreshed only when a
+     dune rule that lists them as deps runs).  write_march_source's
+     project_root is .../_build, so its parent is the source tree. *)
+  let src_root = Filename.dirname project_root in
+  let bin = Filename.concat tmp "erasedupdmissbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
     Alcotest.(check bool)
       "compiled erased update with a missing field name panics with a \
@@ -5774,7 +5780,6 @@ let test_erased_update_missing_field_panics_compiled () =
       (ir_contains run_out "no field"
        && ir_contains run_out "EXIT:1"
        && not (ir_contains run_out "FABRICATED"))
-  end
 
 (** Compiled multi-field (3-field) erased update: every updated field must
     carry its own value (pre-fix, all updates collided on slot 0 of a
@@ -5797,29 +5802,25 @@ let test_erased_update_multi_field_values_compiled () =
     \  end\n\
      end\n"
   in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    (* --- interpreter baseline --- *)
-    let interp_out = read_cmd_output (Printf.sprintf
-      "cd %s && %s %s 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
-    (* --- compiled must agree (compile from the source root — see the
-       missing-field test above for why) --- *)
-    let src_root = Filename.dirname project_root in
-    let bin = Filename.concat tmp "erasedupdmultibin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote src_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    Alcotest.(check int) "compiles ok" 0 compile_rc;
+  (* --- interpreter baseline --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
+  (* --- compiled must agree (compile from the source root — see the
+     missing-field test above for why) --- *)
+  let src_root = Filename.dirname project_root in
+  let bin = Filename.concat tmp "erasedupdmultibin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd_output (Filename.quote bin) in
     Alcotest.(check string)
       "compiled 3-field erased update: each field carries its own value \
        (no slot-0 collision, no corruption)"
       "11 22 33" run_out
-  end
 
 (* ── Interface-impl monomorphization: compiled println/show on generic
    containers (Wave 2, Task 1) ──────────────────────────────────────────
@@ -5847,19 +5848,16 @@ let test_erased_update_multi_field_values_compiled () =
     can still assert on it directly if useful. *)
 let assert_compiled_interp_parity ~name ~src ~expected () =
   let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let interp_out = read_cmd_output (Printf.sprintf
-      "cd %s && %s %s 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote src_path)) in
-    Alcotest.(check string) (name ^ ": interpreter output") expected interp_out;
-    let bin = Filename.concat tmp (name ^ "bin") in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote project_root)
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src_path)) in
-    Alcotest.(check int) (name ^ ": compiles ok") 0 compile_rc;
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output") expected interp_out;
+  let bin = Filename.concat tmp (name ^ "bin") in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
     let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
       (Filename.quote bin)) in
     Alcotest.(check bool)
@@ -5868,7 +5866,6 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       true
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
-  end
 
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
@@ -5973,6 +5970,7 @@ let codegen_suites =
         Alcotest.test_case "is_complete open block" `Quick test_multiline_is_complete_open_block;
       ];
       "repl_jit_cross_line", [
+        Alcotest.test_case "W2.0 canary: setup_jit_runtime gate is live" `Quick test_setup_jit_runtime_gate_is_live;
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;

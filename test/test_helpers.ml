@@ -519,6 +519,48 @@ let mk_inp buf cur = { March_repl.Input.empty with
   March_repl.Input.buffer = buf;
   March_repl.Input.cursor = cur }
 
+(* ── Loud-skip accounting (W2 Task 2 / W2.0) ─────────────────────────────
+   Policy: a skip is legitimate ONLY when the environment genuinely lacks a
+   tool (here: no `clang` on PATH). Any in-repo failure — clang present but
+   the link fails, or the runtime sources this project ships with are
+   missing — is a test FAILURE, not a skip. Legitimate skips are still
+   counted (not just silently swallowed) and the total is printed once at
+   process exit, so a whole run of skipped JIT tests is visible in the
+   summary rather than indistinguishable from "all passed". *)
+let jit_skip_count = ref 0
+let jit_skip_reasons = ref []
+let jit_skip_teardown_registered = ref false
+
+let record_jit_skip reason =
+  incr jit_skip_count;
+  jit_skip_reasons := reason :: !jit_skip_reasons;
+  if not !jit_skip_teardown_registered then begin
+    jit_skip_teardown_registered := true;
+    at_exit (fun () ->
+      if !jit_skip_count > 0 then begin
+        Printf.printf
+          "\n[setup_jit_runtime] %d clang-gated test(s) SKIPPED (clang not found on PATH):\n"
+          !jit_skip_count;
+        List.iter (fun r -> Printf.printf "  - %s\n" r) (List.rev !jit_skip_reasons);
+        flush stdout
+      end)
+  end
+
+(** True iff a `clang` binary is reachable on PATH. Distinguishes "tool
+    genuinely absent" (legitimate skip) from "clang is present but the link
+    failed" (must fail loudly — see setup_jit_runtime). *)
+let clang_available () =
+  Sys.command "command -v clang >/dev/null 2>&1" = 0
+
+(** Read the whole contents of a file (best-effort; "" if unreadable). *)
+let read_file_contents path =
+  try
+    let ic = open_in path in
+    let n = in_channel_length ic in
+    let s = really_input_string ic n in
+    close_in ic; s
+  with Sys_error _ -> ""
+
 let setup_jit_runtime () =
   let home = Sys.getenv "HOME" in
   let dot_cache = Filename.concat home ".cache" in
@@ -532,7 +574,15 @@ let setup_jit_runtime () =
     Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
   ] in
   match List.find_opt Sys.file_exists candidates with
-  | None -> None
+  | None ->
+    (* The runtime/ sources are checked into this repo and always present
+       relative to the project root — this is not "tool absence", it means
+       the test binary was invoked from somewhere that can't find them.
+       Fail loudly rather than silently no-op every JIT test. *)
+    Alcotest.failf
+      "setup_jit_runtime: could not find runtime/march_runtime.c (searched: %s) — \
+       run tests from the project root or a normal _build layout"
+      (String.concat ", " candidates)
   | Some runtime_c ->
     let runtime_dir = Filename.dirname runtime_c in
     let opt_path f =
@@ -546,11 +596,14 @@ let setup_jit_runtime () =
        march_dispatch.c/march_reload.c/march_remote_registry.c/
        march_monitor_registry.c were added later (Hot Code Reload phases 2-10)
        and march_runtime.c's actor_green_thread / march_kill now reference
-       their symbols unconditionally — omitting them makes EVERY test in this
-       file silently skip (setup_jit_runtime returns None) rather than fail,
-       since a link error here is swallowed into the `None` branch. Deliberately
-       NOT adding march_http.c/march_tls.c/march_compress.c: those pull in
-       libssl/libz and aren't referenced by the symbols these tests need. *)
+       their symbols unconditionally — omitting them used to make EVERY test
+       in this file silently skip (setup_jit_runtime returned None) rather
+       than fail, since the link error was swallowed into the `None` branch.
+       That vacuous-green class is now impossible: any link failure while
+       clang IS present is an Alcotest.fail with the captured stderr (see
+       below). Deliberately NOT adding march_http.c/march_tls.c/
+       march_compress.c: those pull in libssl/libz and aren't referenced by
+       the symbols these tests need. *)
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c"; "march_ffi.c";
@@ -576,7 +629,11 @@ let setup_jit_runtime () =
     let so_path =
       Filename.concat cache_dir ("libmarch_rt_test_" ^ key ^ ".so") in
     if Sys.file_exists so_path then Some so_path
-    else begin
+    else if not (clang_available ()) then begin
+      record_jit_skip
+        (Printf.sprintf "no clang on PATH (building %s)" (Filename.basename so_path));
+      None
+    end else begin
       let extra_srcs =
         String.concat "" (List.map (fun p -> " " ^ p) extra_src_list) in
       (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
@@ -592,18 +649,125 @@ let setup_jit_runtime () =
          filesystem, so a concurrent test process can never dlopen a
          half-written .so. *)
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
+      let stderr_file = Printf.sprintf "%s.%d.stderr" so_path (Unix.getpid ()) in
       let rc = Sys.command (Printf.sprintf
-        "clang -shared -O2 -fPIC %s%s%s -o %s 2>/dev/null"
-        runtime_c extra_srcs pthread_flag tmp) in
+        "clang -shared -O2 -fPIC %s%s%s -o %s 2>%s"
+        runtime_c extra_srcs pthread_flag tmp (Filename.quote stderr_file)) in
       if rc <> 0 then begin
+        let stderr_output = read_file_contents stderr_file in
         (try Sys.remove tmp with Sys_error _ -> ());
-        None
+        (try Sys.remove stderr_file with Sys_error _ -> ());
+        (* clang IS on PATH (checked above) — this is a genuine in-repo link
+           failure (e.g. a missing runtime source, an undefined symbol from
+           a recently-added .c file not yet listed above). Never silently
+           skip: fail loudly with the linker's own stderr. *)
+        Alcotest.failf
+          "setup_jit_runtime: clang link failed (rc=%d) building %s from %s:\n%s"
+          rc so_path runtime_c stderr_output
       end else begin
+        (try Sys.remove stderr_file with Sys_error _ -> ());
         (try Sys.rename tmp so_path
          with Sys_error _ -> (try Sys.remove tmp with Sys_error _ -> ()));
-        if Sys.file_exists so_path then Some so_path else None
+        if Sys.file_exists so_path then Some so_path
+        else
+          Alcotest.failf
+            "setup_jit_runtime: clang reported success (rc=0) but %s does not exist \
+             after rename from %s" so_path tmp
       end
     end
+
+(* ── Compiled-regression test infra: main.exe + --compile skip policy ────
+   Same policy as setup_jit_runtime above: `march --compile` shells out to
+   clang for the final link, so a `compile_rc <> 0` conflates two very
+   different situations — (a) clang genuinely absent from PATH (legitimate,
+   countable skip) and (b) clang present but the March compiler produced a
+   bad program / crashed / hit a real bug (a test FAILURE, never a silent
+   `()`). This consolidates the ~20 near-identical
+   `exe_dir`/`main_exe`/`if not (Sys.file_exists main_exe) then ()` and
+   `if compile_rc <> 0 then ()` copies that used to live independently in
+   test_codegen.ml and test_stdlib_suite.ml. *)
+
+(** Locate the compiler binary built alongside this test executable
+    (`<build>/bin/main.exe`, relative to `<build>/test/<this test>.exe`).
+    `main.exe` is produced by the SAME `dune build` that produces the test
+    binaries — it is never legitimately absent, so a missing exe here means
+    the test was invoked from a broken/partial build, not "tool absence".
+    Fails loudly rather than silently skipping every compiled-regression
+    test in the file. *)
+let find_main_exe () =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if Sys.file_exists main_exe then main_exe
+  else
+    Alcotest.failf
+      "find_main_exe: %s does not exist — compiled-regression tests require \
+       `dune build ... test/run_codegen.exe test/run_stdlib.exe` (which also \
+       builds bin/main.exe) to have completed" main_exe
+
+(** The project root, derived the same way the compiled-regression tests
+    need it to `cd` there so the compiler resolves its CWD-relative
+    runtime/ and stdlib/ directories. *)
+let march_project_root () =
+  Filename.dirname (Filename.dirname (Filename.dirname Sys.executable_name))
+
+(** Run a shell command, returning (exit_code, combined_stdout_stderr).
+    Used to capture the March compiler's own diagnostic output so a real
+    compile failure can be reported with the actual error, not swallowed. *)
+let run_capture cmd =
+  let tmp = Filename.temp_file "march_test_capture" ".txt" in
+  let rc = Sys.command (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp)) in
+  let output = read_file_contents tmp in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (rc, output)
+
+(** Like [compile_march] but never calls [Alcotest.fail]/[Alcotest.skip]
+    itself — returns the raw outcome so a caller can inspect a real
+    compiler failure's captured output before deciding how to report it
+    (e.g. to recognize one specific, already-tracked product bug and
+    convert it to a documented [Alcotest.skip] rather than a plain fail —
+    see test_compiled_recursive_closure_capture). Most callers should use
+    [compile_march] or [compile_march_or_skip] instead, which apply the
+    default loud-failure policy automatically. *)
+let compile_march_raw ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  let cmd = Printf.sprintf "%s%s --compile%s -o %s %s"
+    cmd_prefix (Filename.quote main_exe)
+    (if extra_args = "" then "" else " " ^ extra_args)
+    (Filename.quote bin) (Filename.quote src) in
+  let (rc, output) = run_capture cmd in
+  if rc = 0 then `Ok bin
+  else if not (clang_available ()) then begin
+    record_jit_skip (Printf.sprintf "no clang on PATH (compiling %s)" src);
+    `Skipped
+  end else
+    `Failed (rc, output)
+
+(** Compile [src] with `main_exe --compile [extra_args] -o bin src`
+    (optionally prefixed with extra env/cd via [cmd_prefix]; [extra_args]
+    lets callers pass e.g. "--test"). Returns `Ok bin_path` on success.
+    On failure: if clang is genuinely absent from PATH, records a counted
+    skip and returns `Error `Skipped` (legitimate — see setup_jit_runtime's
+    doc comment for the policy this mirrors); otherwise clang IS present
+    and the March compiler itself failed, which is never a silent skip —
+    fails the test immediately with the compiler's captured stderr. *)
+let compile_march ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  match compile_march_raw ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
+  | `Ok bin -> `Ok bin
+  | `Skipped -> `Skipped
+  | `Failed (rc, output) ->
+    Alcotest.failf
+      "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+       PATH, so this is a real compiler failure, not an environment gap):\n%s"
+      rc src output
+
+(** Like [compile_march], but calls [Alcotest.fail] directly instead of
+    returning a variant — for the common case where the caller has no
+    further use for a "skipped" outcome distinct from "compiled". Returns
+    `None` only on a legitimate clang-absent skip; always `Some bin` or a
+    failed test otherwise (never a silent no-op). *)
+let compile_march_or_skip ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  match compile_march ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
+  | `Ok bin -> Some bin
+  | `Skipped -> None
 
 (** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
 let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
