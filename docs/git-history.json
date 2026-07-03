@@ -1,5 +1,61 @@
 [
   {
+    "hash": "e23a41c4a79230deab7fa2c891071dcd612fd4c2",
+    "short_hash": "e23a41c",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T18:09:43-04:00",
+    "message": "docs(perceus): ownership invariants — call boundaries, FBIP, scrutinee approximation post-campaign (W4.2)",
+    "files_changed": 3
+  },
+  {
+    "hash": "c6e00bd2eec034dd088f3cf95d4c7a0fcb98bd98",
+    "short_hash": "c6e00bd",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T17:40:43-04:00",
+    "message": "docs(repr): value-representation contract — tagging law, slots, ABI, RC shallow-free (W4.1)",
+    "files_changed": 1
+  },
+  {
+    "hash": "94b7c36dae6c660208969bf34695732c77b76c30",
+    "short_hash": "94b7c36",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T17:40:43-04:00",
+    "message": "docs(repr): value-representation contract — tagging law, slots, ABI, RC shallow-free (W4.1)",
+    "files_changed": 1
+  },
+  {
+    "hash": "94df6bb48e0849ccef18b25e89986a6e4b86a2de",
+    "short_hash": "94df6bb",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T16:26:28-04:00",
+    "message": "docs(specs): W3C2 closing filings — $clo_wrap contract, Task-3 backfill, declare_text acceptance, count corrections",
+    "files_changed": 2
+  },
+  {
+    "hash": "8a9a50bda1fe2b8b5f74919eca7a2d3662b0fec5",
+    "short_hash": "8a9a50b",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T16:12:30-04:00",
+    "message": "docs(specs): record Wave 3 chunk 2 (llvm_emit + lower restructure complete)\n\nTask 10 bookkeeping for specs/plans/2026-07-03-wave3-chunk2-emit-lower.md:\n\n- CLAUDE.md's lib/tir/ project-layout line updated to the full module map\n  (perceus + 4 chunk-1 modules; llvm_emit orchestrator + 8 siblings; lower\n  orchestrator + 6 siblings; tir_names/rc_types).\n- Backfilled specs/todos.md + specs/progress.md entries for Tasks 5/6\n  (commits ec294fb8/ce2fb5aa), which shipped without same-commit entries.\n- specs/progress.md: chunk-2 wrap-up entry with the final module map, the\n  proof standard (six runners + zero snapshot churn + byte-identical IR x4\n  + benchmarks within +-10% on every task), and the three review-caught fix\n  cycles (Task 5's dedup false-completion claim, Task 8's collect_tests\n  unprotected-dance twin, Task 9's forward-ref de-cycle sign-off).\n- specs/todos.md: SS7.2/SS7.4 marked DONE; deep-review SS7 now fully\n  complete across Chunks 1-2; only Wave 4 (docs) remains.\n- Comment-only fold-ins from reviews (zero code changes): llvm_ctx.ml's\n  header corrected to describe the actual in-file re-export shim (it\n  contradicted itself, claiming none was needed while llvm_emit.ml\n  re-exports ~25 names bare); llvm_builtins.ml's stale in_is_builtin\n  row-count comment corrected (273 of 318 rows, not \"230-ish\"); known_call.ml\n  gained a one-sentence CAS one-way note (is_clo_name only reads names\n  already hashed into impl_hash, never feeds back into hashing).\n- ~/.claude/commands/compiler-rc.md (outside this repo) extended with the\n  llvm_emit/lower module maps alongside its existing perceus map.\n\nSix runners green (isolated HOME): 384 compiler / 230 eval / 374 codegen /\n791 stdlib / 53 stdlib_march / 29 snapshots (1861 tests), zero .expected\ndiffs. scripts/check-docs.sh passes clean.",
+    "files_changed": 6
+  },
+  {
+    "hash": "190c0797e2d693b210c416d2ca5e8ae81dfe4227",
+    "short_hash": "190c079",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T15:55:07-04:00",
+    "message": "refactor(lower): split types/match/decls/actor/tests modules; lower becomes orchestrator (W3C2.9)",
+    "files_changed": 10
+  },
+  {
+    "hash": "fe046757f40b6a9e6a5592cca6f49a53df20eb4b",
+    "short_hash": "fe04675",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T15:04:22-04:00",
+    "message": "refactor(lower): thread explicit env; module-level mutable state contained and documented (W3C2.8)",
+    "files_changed": 6
+  },
+  {
     "hash": "e3f40fbc9ba29a8abdc474975a08dac30762b609",
     "short_hash": "e3f40fb",
     "author": "Matthew Gilliam",
@@ -24,14 +80,6 @@
     "files_changed": 6
   },
   {
-    "hash": "c37e81df84f90aa5cc435b5a6193943be5834554",
-    "short_hash": "c37e81d",
-    "author": "Matthew Gilliam",
-    "date": "2026-07-03T14:32:42-04:00",
-    "message": "refactor(llvm): toplevel/REPL modules; llvm_emit becomes orchestrator (W3C2.7)\n\nSplits llvm_emit.ml into lib/tir/llvm_toplevel.ml (emit_fn, build_ctor_info,\nfn_declare_str, emit_module, target_config and its consumers, the\nemit_preamble wrapper) and lib/tir/llvm_repl.ml (the five REPL/fragment\nemitters, repl_slot_info, and their bridge helpers). llvm_emit.ml drops from\n4015 to 2957 lines and becomes a thin orchestrator: the emit_expr/emit_atom\ncore stays (excluded from every split in this chunk), everything else is a\nbare re-export or a callback-pre-application shim over the two new modules.\n\nBoth new modules take ~emit_expr as a labeled callback (same de-cycling\npattern Llvm_case/Llvm_tco established in Tasks 5/6), since emit_expr stays\nin llvm_emit.ml but llvm_emit.ml calls back into both modules' public entry\npoints. llvm_repl.ml forward-references Llvm_toplevel.emit_fn/\nbuild_ctor_info/fn_declare_str/emit_preamble directly (one-directional\ndependency, not a callback). target_config promotes to llvm_toplevel.ml\n(its real cross-module consumer) and is re-exported bare from llvm_emit.ml,\nso external callers (bin/main.ml, lib/jit/repl_jit.ml, test/) see zero\nsignature change.\n\nStandard gates: six runners exit 0 (384/230/374/791/53/29 tests), zero\nsnapshot churn, byte-identical LLVM IR on all four benchmarks vs base\nce2fb5aa, compiled benchmark outputs/timings unchanged within noise.",
-    "files_changed": 6
-  },
-  {
     "hash": "ce2fb5aa28d43af89c020c370a60678d37415abd",
     "short_hash": "ce2fb5a",
     "author": "Matthew Gilliam",
@@ -40,16 +88,16 @@
     "files_changed": 5
   },
   {
-    "hash": "570883fa80070993a625267729d0b869bf45f0a6",
-    "short_hash": "570883f",
+    "hash": "ec294fb8bf6e1ed72e4b41d083a9cb82f9dabf58",
+    "short_hash": "ec294fb",
     "author": "Matthew Gilliam",
     "date": "2026-07-03T13:24:15-04:00",
     "message": "refactor(llvm): split eq/data/case emit modules out of llvm_emit (W3C2.5)\n\nMove mangle_ty_for_eq/ensure_adt_eq_fn (+ apply_ty_subst/field_load_llty)\nto llvm_eq.ml; the EAlloc/EReuse/ETuple/ERecord/EField/EUpdate helper\nfamily (GEP/alloc primitives, ctor lookup, record-shape metadata) to\nllvm_data.ml; emit_case to llvm_case.ml. All verbatim moves, verified by\nstripping the added module-qualification back out and diffing against\nthe pre-move text.\n\nemit_case was mutually recursive with emit_expr (which stays in\nllvm_emit.ml per the plan); de-cycled by passing emit_expr/emit_atom as\nlabeled callback parameters at the single ECase call site. The shared\nrepr-consistency-audit table and alloca_name (both needed by the three\nnew modules, previously left in llvm_emit.ml) move to llvm_ctx.ml to\navoid a cycle back through the file they were extracted from. Dedup the\ntwo byte-identical is_trivial_dec_chain_returning copies into one.\n\nSix runners green (791 tests via scripts/run-tests.sh), zero snapshot\nchurn, byte-identical LLVM IR vs 1bfbe83e on all four benchmarks\n(fib/binary_trees/tree_transform/list_ops), compiled outputs and timings\nmatch.",
     "files_changed": 6
   },
   {
-    "hash": "ec294fb8bf6e1ed72e4b41d083a9cb82f9dabf58",
-    "short_hash": "ec294fb",
+    "hash": "570883fa80070993a625267729d0b869bf45f0a6",
+    "short_hash": "570883f",
     "author": "Matthew Gilliam",
     "date": "2026-07-03T13:24:15-04:00",
     "message": "refactor(llvm): split eq/data/case emit modules out of llvm_emit (W3C2.5)\n\nMove mangle_ty_for_eq/ensure_adt_eq_fn (+ apply_ty_subst/field_load_llty)\nto llvm_eq.ml; the EAlloc/EReuse/ETuple/ERecord/EField/EUpdate helper\nfamily (GEP/alloc primitives, ctor lookup, record-shape metadata) to\nllvm_data.ml; emit_case to llvm_case.ml. All verbatim moves, verified by\nstripping the added module-qualification back out and diffing against\nthe pre-move text.\n\nemit_case was mutually recursive with emit_expr (which stays in\nllvm_emit.ml per the plan); de-cycled by passing emit_expr/emit_atom as\nlabeled callback parameters at the single ECase call site. The shared\nrepr-consistency-audit table and alloca_name (both needed by the three\nnew modules, previously left in llvm_emit.ml) move to llvm_ctx.ml to\navoid a cycle back through the file they were extracted from. Dedup the\ntwo byte-identical is_trivial_dec_chain_returning copies into one.\n\nSix runners green (791 tests via scripts/run-tests.sh), zero snapshot\nchurn, byte-identical LLVM IR vs 1bfbe83e on all four benchmarks\n(fib/binary_trees/tree_transform/list_ops), compiled outputs and timings\nmatch.",
@@ -232,16 +280,16 @@
     "files_changed": 6
   },
   {
-    "hash": "59a9fb9f8efc157e56ff9b58bd32731d8279b389",
-    "short_hash": "59a9fb9",
+    "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
+    "short_hash": "d685bc6",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T21:57:04-04:00",
     "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
     "files_changed": 6
   },
   {
-    "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
-    "short_hash": "d685bc6",
+    "hash": "59a9fb9f8efc157e56ff9b58bd32731d8279b389",
+    "short_hash": "59a9fb9",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T21:57:04-04:00",
     "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
@@ -368,16 +416,16 @@
     "files_changed": 3
   },
   {
-    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
-    "short_hash": "b32d856",
+    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
+    "short_hash": "a9b5663",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
     "files_changed": 3
   },
   {
-    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
-    "short_hash": "a9b5663",
+    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
+    "short_hash": "b32d856",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
@@ -3184,16 +3232,16 @@
     "files_changed": 7
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -3264,14 +3312,6 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:00:16-04:00",
-    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
-    "files_changed": 7
-  },
-  {
     "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
     "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
@@ -3280,16 +3320,24 @@
     "files_changed": 7
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:00:16-04:00",
+    "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
+    "files_changed": 7
+  },
+  {
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",

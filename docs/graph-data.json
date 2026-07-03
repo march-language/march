@@ -18083,6 +18083,193 @@
       "created_at": "2026-07-03T15:22:28.248978-04:00",
       "updated_at": "2026-07-03T15:22:28.248978-04:00",
       "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"8549ccd1\",\"confidence\":92}"
+    },
+    {
+      "id": 1645,
+      "change_id": "b22e201b-cee9-41d8-88f6-f728ee384e4a",
+      "node_type": "outcome",
+      "title": "Final amended commit fe046757 (docs export folded in)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T15:23:22.251720-04:00",
+      "updated_at": "2026-07-03T15:23:22.251720-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"fe046757\",\"confidence\":95}"
+    },
+    {
+      "id": 1646,
+      "change_id": "90a83599-8d30-4244-9e79-626e6f6713da",
+      "node_type": "action",
+      "title": "Task 9: split lower.ml into types/state/match/decls/actor/tests modules",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T15:55:21.019317-04:00",
+      "updated_at": "2026-07-03T15:55:21.019317-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"190c0797\",\"confidence\":90}"
+    },
+    {
+      "id": 1647,
+      "change_id": "0144f15c-faa9-4edf-afda-30a6714e21fa",
+      "node_type": "outcome",
+      "title": "Task 9 landed: lower.ml (2868->1399 lines) split into lower_types/lower_state/lower_match/lower_decls/lower_actor/lower_tests; new lower_state.ml justified (env shared by 4 consumer modules); match-compilation cycle with lower_expr broken via forward-ref (5 edges, same idiom as _ensure_module_lowered); 3 module-decl walkers left unparameterized (lazy-stdlib coverage gap is a filed bug, not provably preservable as a param); 2 DExtern blocks verified byte-identical and deduped; six runners green (384/230/374/791/53/29 = 1861 tests) + test_properties 36/36; zero snapshot churn (29/29); byte-identical IR x4 (fib/binary_trees/tree_transform/list_ops) vs base fe046757, re-verified deterministic; benchmarks within noise (compiled binaries bit-identical)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T15:55:31.911724-04:00",
+      "updated_at": "2026-07-03T15:55:31.911724-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"190c0797\",\"confidence\":90}"
+    },
+    {
+      "id": 1648,
+      "change_id": "6952245e-a1f5-4b0d-ba33-96a904c0ccd6",
+      "node_type": "action",
+      "title": "Task 10: bookkeeping — CLAUDE.md module map, compiler-rc.md extension, Tasks 5/6 backfill, comment fold-ins, chunk-2 wrap-up",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T16:12:11.446896-04:00",
+      "updated_at": "2026-07-03T16:12:11.446896-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1649,
+      "change_id": "baf838a0-2cce-4ab0-a7f3-70195c8a126f",
+      "node_type": "outcome",
+      "title": "Task 10 landed: bookkeeping complete, Wave 3 Chunk 2 done, six runners green (1861 tests), doc-lint clean",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T16:12:34.679404-04:00",
+      "updated_at": "2026-07-03T16:12:34.679404-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"8a9a50bd\",\"confidence\":95}"
+    },
+    {
+      "id": 1650,
+      "change_id": "982667fc-8f16-4938-9dd9-a36915697028",
+      "node_type": "outcome",
+      "title": "Wave 3 chunk 2 merged: llvm_emit 7504->2957 orchestrator + 8 modules, lower 2688->1399 + 6 modules; transitive IR-identity proven across 12 commits; 3 fix cycles caught by review (false claim, collect_tests twin, forward-ref sign-off); deep-review §7 refactors complete",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T16:26:43.984328-04:00",
+      "updated_at": "2026-07-03T16:26:43.984328-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"94df6bb4\",\"confidence\":95}"
+    },
+    {
+      "id": 1651,
+      "change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "node_type": "goal",
+      "title": "Wave 4: invariant documentation — value-repr, perceus contracts, TIR/actor/synthetic-name registries, syntax-doc corrections",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:28:05.292391-04:00",
+      "updated_at": "2026-07-03T17:28:05.292391-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90,\"prompt\":\"get started\"}"
+    },
+    {
+      "id": 1652,
+      "change_id": "c4749c4d-c7f5-4b8c-a4c2-c39d4dc889a3",
+      "node_type": "option",
+      "title": "6-task SDD with claim-verification gates (every semantic assertion executed against the live compiler before written)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:28:05.325961-04:00",
+      "updated_at": "2026-07-03T17:28:05.325961-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1653,
+      "change_id": "b20a87a5-b954-4978-8a63-e58816ae39cc",
+      "node_type": "option",
+      "title": "Single monolithic docs PR",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:28:05.357863-04:00",
+      "updated_at": "2026-07-03T17:28:05.357863-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":35}"
+    },
+    {
+      "id": 1654,
+      "change_id": "20622680-dede-4d33-b329-82a541eba818",
+      "node_type": "decision",
+      "title": "SDD with claim-verification; if/then item is survey-first with remove-if-unused default (stated design says no then), user can override",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:28:05.388867-04:00",
+      "updated_at": "2026-07-03T17:28:05.388867-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":85}"
+    },
+    {
+      "id": 1655,
+      "change_id": "2ee45ee1-db85-4061-81dc-c5bc56e74b18",
+      "node_type": "action",
+      "title": "Write specs/plans/2026-07-04-wave4-docs.md",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:28:17.579957-04:00",
+      "updated_at": "2026-07-03T17:28:17.579957-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90,\"files\":[\"specs/plans/2026-07-04-wave4-docs.md\"]}"
+    },
+    {
+      "id": 1656,
+      "change_id": "7bb132d9-1ef7-46b1-bc92-c7883161a39d",
+      "node_type": "action",
+      "title": "Write docs/value-representation.md (W4.1)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:38:12.907909-04:00",
+      "updated_at": "2026-07-03T17:38:12.907909-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90,\"files\":[\"docs/value-representation.md\"]}"
+    },
+    {
+      "id": 1657,
+      "change_id": "7062afba-e9cf-4ac0-bacf-e778571eb343",
+      "node_type": "outcome",
+      "title": "docs/value-representation.md committed, doc-lint passed, 14 claims verified",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T17:40:48.705316-04:00",
+      "updated_at": "2026-07-03T17:40:48.705316-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"c6e00bd2\",\"confidence\":95}"
+    },
+    {
+      "id": 1658,
+      "change_id": "c07e300b-9b2c-44a5-8f9e-a30430956ed1",
+      "node_type": "action",
+      "title": "Write specs/perceus-invariants.md (W4.2)",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T18:09:34.060916-04:00",
+      "updated_at": "2026-07-03T18:09:34.060916-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1659,
+      "change_id": "5cdde146-ee55-4aef-8ccd-093094468fa7",
+      "node_type": "outcome",
+      "title": "specs/perceus-invariants.md committed, doc-lint passed, 4 numbered probe claims + standing test-suite citations verified; sort_by comment discrepancy found and filed to todos.md",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T18:09:47.983438-04:00",
+      "updated_at": "2026-07-03T18:09:47.983438-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"e23a41c4\",\"confidence\":90}"
+    },
+    {
+      "id": 1660,
+      "change_id": "ab4cc510-6cc9-4406-814e-db2f8aa3f4b8",
+      "node_type": "action",
+      "title": "Task 3: TIR invariants + synthetic-name registry + actor mirror comment",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T18:28:13.422528-04:00",
+      "updated_at": "2026-07-03T18:28:13.422528-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":85}"
+    },
+    {
+      "id": 1661,
+      "change_id": "e389a8da-8b63-456c-85f6-16b898bb5eef",
+      "node_type": "outcome",
+      "title": "specs/features/tir-invariants.md committed, doc-lint passed, actor-layout mirror comment added (comment-only, verified via byte-identical .o); ANF/TVar-_/ELetRec-lambda/br_tag/no-spans/synthetic-name-registry sections verified",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T18:44:50.046670-04:00",
+      "updated_at": "2026-07-03T18:44:50.046670-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
     }
   ],
   "edges": [
@@ -31109,6 +31296,182 @@
       "weight": 1.0,
       "rationale": "review found the second (unprotected) current_module_aliases dance; observability traced (reset-at-entry before any read; no reader outside lower_module), remedy 2 applied: keep conversion + file",
       "created_at": "2026-07-03T15:22:36.174148-04:00"
+    },
+    {
+      "id": 1201,
+      "from_node_id": 1644,
+      "to_node_id": 1645,
+      "from_change_id": "66737055-1d04-444a-8531-facd8ba69753",
+      "to_change_id": "b22e201b-cee9-41d8-88f6-f728ee384e4a",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "second amend folded deciduous docs export into the same commit",
+      "created_at": "2026-07-03T15:23:22.266088-04:00"
+    },
+    {
+      "id": 1202,
+      "from_node_id": 1619,
+      "to_node_id": 1646,
+      "from_change_id": "8ec7d831-e16d-4f6f-8dfc-cf21cd3e0cd1",
+      "to_change_id": "90a83599-8d30-4244-9e79-626e6f6713da",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Wave 3 chunk 2 Task 9: lower.ml file split (final refactor task of the chunk)",
+      "created_at": "2026-07-03T15:55:24.489559-04:00"
+    },
+    {
+      "id": 1203,
+      "from_node_id": 1646,
+      "to_node_id": 1647,
+      "from_change_id": "90a83599-8d30-4244-9e79-626e6f6713da",
+      "to_change_id": "0144f15c-faa9-4edf-afda-30a6714e21fa",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 9 implementation outcome",
+      "created_at": "2026-07-03T15:55:34.761386-04:00"
+    },
+    {
+      "id": 1204,
+      "from_node_id": 1619,
+      "to_node_id": 1648,
+      "from_change_id": "8ec7d831-e16d-4f6f-8dfc-cf21cd3e0cd1",
+      "to_change_id": "6952245e-a1f5-4b0d-ba33-96a904c0ccd6",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 10 bookkeeping under Wave 3 Chunk 2 goal",
+      "created_at": "2026-07-03T16:12:15.137017-04:00"
+    },
+    {
+      "id": 1205,
+      "from_node_id": 1648,
+      "to_node_id": 1649,
+      "from_change_id": "6952245e-a1f5-4b0d-ba33-96a904c0ccd6",
+      "to_change_id": "baf838a0-2cce-4ab0-a7f3-70195c8a126f",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 10 action produced this outcome",
+      "created_at": "2026-07-03T16:12:37.087283-04:00"
+    },
+    {
+      "id": 1206,
+      "from_node_id": 1619,
+      "to_node_id": 1650,
+      "from_change_id": "8ec7d831-e16d-4f6f-8dfc-cf21cd3e0cd1",
+      "to_change_id": "982667fc-8f16-4938-9dd9-a36915697028",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chunk 2 shipped",
+      "created_at": "2026-07-03T16:26:43.997073-04:00"
+    },
+    {
+      "id": 1207,
+      "from_node_id": 1651,
+      "to_node_id": 1652,
+      "from_change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "to_change_id": "c4749c4d-c7f5-4b8c-a4c2-c39d4dc889a3",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Approach",
+      "created_at": "2026-07-03T17:28:17.505773-04:00"
+    },
+    {
+      "id": 1208,
+      "from_node_id": 1651,
+      "to_node_id": 1653,
+      "from_change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "to_change_id": "b20a87a5-b954-4978-8a63-e58816ae39cc",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Approach",
+      "created_at": "2026-07-03T17:28:17.522974-04:00"
+    },
+    {
+      "id": 1209,
+      "from_node_id": 1652,
+      "to_node_id": 1654,
+      "from_change_id": "c4749c4d-c7f5-4b8c-a4c2-c39d4dc889a3",
+      "to_change_id": "20622680-dede-4d33-b329-82a541eba818",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Chosen",
+      "created_at": "2026-07-03T17:28:17.538427-04:00"
+    },
+    {
+      "id": 1210,
+      "from_node_id": 1654,
+      "to_node_id": 1655,
+      "from_change_id": "20622680-dede-4d33-b329-82a541eba818",
+      "to_change_id": "2ee45ee1-db85-4061-81dc-c5bc56e74b18",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Plan authoring",
+      "created_at": "2026-07-03T17:28:17.591739-04:00"
+    },
+    {
+      "id": 1211,
+      "from_node_id": 1651,
+      "to_node_id": 1656,
+      "from_change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "to_change_id": "7bb132d9-1ef7-46b1-bc92-c7883161a39d",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 1 of wave-4 plan: value-representation contract doc",
+      "created_at": "2026-07-03T17:38:15.599721-04:00"
+    },
+    {
+      "id": 1212,
+      "from_node_id": 1656,
+      "to_node_id": 1657,
+      "from_change_id": "7bb132d9-1ef7-46b1-bc92-c7883161a39d",
+      "to_change_id": "7062afba-e9cf-4ac0-bacf-e778571eb343",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "action produced this outcome",
+      "created_at": "2026-07-03T17:40:51.105962-04:00"
+    },
+    {
+      "id": 1213,
+      "from_node_id": 1651,
+      "to_node_id": 1658,
+      "from_change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "to_change_id": "c07e300b-9b2c-44a5-8f9e-a30430956ed1",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 2 of the Wave 4 SDD: perceus ownership invariants doc",
+      "created_at": "2026-07-03T18:09:37.014908-04:00"
+    },
+    {
+      "id": 1214,
+      "from_node_id": 1658,
+      "to_node_id": 1659,
+      "from_change_id": "c07e300b-9b2c-44a5-8f9e-a30430956ed1",
+      "to_change_id": "5cdde146-ee55-4aef-8ccd-093094468fa7",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 2 action produced this outcome",
+      "created_at": "2026-07-03T18:09:50.562640-04:00"
+    },
+    {
+      "id": 1215,
+      "from_node_id": 1651,
+      "to_node_id": 1660,
+      "from_change_id": "2f406378-9400-49a8-b1ae-6bfdc79d4031",
+      "to_change_id": "ab4cc510-6cc9-4406-814e-db2f8aa3f4b8",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 3 action for TIR invariants + synthetic-name registry + actor mirror comment",
+      "created_at": "2026-07-03T18:44:42.381454-04:00"
+    },
+    {
+      "id": 1216,
+      "from_node_id": 1660,
+      "to_node_id": 1661,
+      "from_change_id": "ab4cc510-6cc9-4406-814e-db2f8aa3f4b8",
+      "to_change_id": "e389a8da-8b63-456c-85f6-16b898bb5eef",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Task 3 action produced this outcome",
+      "created_at": "2026-07-03T18:44:53.239710-04:00"
     }
   ]
 }

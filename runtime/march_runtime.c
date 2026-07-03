@@ -1082,6 +1082,15 @@ void *__try_call_val(void *thunk) {
  *   [3] alive      ($alive field   — 1 = alive, 0 = dead)
  *   [4+] state fields (alphabetical order)
  *
+ * This word order is not incidental: it is guaranteed by lower_actor's
+ * $d_dispatch/$e_alive/$f_state field-name sort-prefix contract — the
+ * TIR-side struct fields are named so that an alphabetical sort ($d < $e
+ * < $f < any user field name) reproduces exactly this word order. See
+ * lib/tir/tir_names.ml (actor_dispatch_field/actor_alive_field/
+ * actor_state_field) for the producer contract these hardcoded a[2]/a[3]/
+ * a[4] reads on the C side mirror; changing that sort prefix without
+ * updating these indices (or vice versa) desyncs the two sides silently.
+ *
  * RC / FBIP contract
  * ──────────────────
  * march_send does NOT call march_incrc on the message.  Perceus at the call
