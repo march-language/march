@@ -10423,6 +10423,160 @@ let test_compiled_hot_reload_dispatch () =
         "IR contains march_dispatch_init call (@main dispatch setup)"
         true (contains ir "call void @march_dispatch_init")
 
+(* Phase 5C-A.3: `.hcr_manifest` gains a per-fn `caps=` field (the function's
+   normalized inferred IO-capability closure, from
+   March_typecheck.Typecheck.fn_capability_closures) and a top-level
+   `ROOT cap_root=<blake3 hex>` line (BLAKE3 of the sorted, Cap_lattice-
+   normalized union of every FN line's caps — same hash algorithm as the
+   existing `cas_hash` line, per the plan's "avoid two digest algorithms in
+   one manifest" note).
+   Fixture: Core.logger has a declared `needs IO.Console` (covering its
+   println body-call); Pure.add has no needs declaration and calls no
+   capability-implying builtin, so its closure is empty ("caps=").
+   Note: FN lines are keyed by the *unqualified* module-local name (e.g.
+   "Core.logger", not "App.Core.logger") — check_module_needs qualifies with
+   only the immediately-enclosing DMod's own name, not the full nesting path
+   (confirmed empirically: the outer "App" module name never appears as a
+   prefix in the emitted manifest).
+   Also: hr_impl_hashes covers every SCC in the compiled program, including
+   the whole stdlib closure the fixture pulls in (println, etc.) — not just
+   the two user fns — so cap_root is NOT simply blake3("IO.Console"); it is
+   recomputed independently below via the same algorithm (sorted-unique
+   union, Cap_lattice.normalize, blake3 of the newline join) applied to
+   every parsed caps= field, which is a real cross-check against the
+   writer's internal aggregation since it starts from the parsed file, not
+   from bin/main.ml's in-memory hashtable.
+   Two independent assertions:
+     1. parse the manifest and check the caps= fields for the two fixture
+        fns, and cross-check cap_root against an independent recomputation
+        from every parsed caps= field;
+     2. compile twice (fresh tmp dirs) and assert cap_root is byte-identical
+        across the two builds — catches Hashtbl-iteration-order
+        nondeterminism in the aggregation step. *)
+let hcr_manifest_caps_fixture_src =
+  "mod App do\n\
+  \  mod Core do\n\
+  \    needs IO.Console\n\
+  \    fn logger(x : String) : Unit do println(x) end\n\
+  \  end\n\
+  \  mod Pure do\n\
+  \    fn add(a : Int, b : Int) : Int do a + b end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    Core.logger(\"hi\")\n\
+  \    println(Pure.add(2, 3))\n\
+  \  end\n\
+   end\n"
+
+(* Parse `.hcr_manifest` into (fn_lines : (name, caps_csv) list, cap_root_opt). *)
+let parse_hcr_manifest (path : string) : (string * string) list * string option =
+  let ic = open_in path in
+  let fn_lines = ref [] in
+  let cap_root = ref None in
+  (try
+     while true do
+       let line = input_line ic in
+       if String.length line >= 6 && String.sub line 0 6 = "ROOT c" then begin
+         (* "ROOT cap_root=<hex>" *)
+         match String.index_opt line '=' with
+         | Some i -> cap_root := Some (String.sub line (i + 1) (String.length line - i - 1))
+         | None -> ()
+       end else if String.length line > 0 && line.[0] <> '#' then begin
+         (* "<fn_name> <impl_hash> <sig_hash> [callers:...] caps=<csv>" *)
+         match String.index_opt line ' ' with
+         | None -> ()
+         | Some _ ->
+           let fields = String.split_on_char ' ' line in
+           let name = List.hd fields in
+           let caps_field = List.find_opt (fun f ->
+             String.length f >= 5 && String.sub f 0 5 = "caps=") fields in
+           (match caps_field with
+            | Some f -> fn_lines := (name, String.sub f 5 (String.length f - 5)) :: !fn_lines
+            | None -> ())
+       end
+     done
+   with End_of_file -> ());
+  close_in ic;
+  (!fn_lines, !cap_root)
+
+let test_hcr_manifest_emits_caps_and_cap_root () =
+  let main_exe = find_main_exe () in
+  let build_once tag =
+    let tmp = Filename.temp_file (Printf.sprintf "march_hcrcaps_%s" tag) "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "caps.march" in
+    let oc = open_out src in
+    output_string oc hcr_manifest_caps_fixture_src;
+    close_out oc;
+    let bin = Filename.concat tmp "capsbin" in
+    (* Both `march --compile`'s early source-hash CAS (bin/main.ml's
+       "early_cas", which exit-0s BEFORE typecheck/manifest-write on a
+       cache hit) and the later per-artifact CAS key off `$cwd/.march/cas`
+       plus a `$HOME/.march/cas` global fallback. Two builds of identical
+       source from the shared project-root cwd would hit that cache on the
+       second build and skip the manifest write entirely (a real, separate,
+       pre-existing gap: manifest emission isn't wired into the cache-hit
+       path) — which would make this determinism check pass vacuously
+       (comparing a real manifest to itself via the copied-forward cached
+       binary, or erroring outright with no manifest at all). Force each
+       build to see an empty CAS by giving it its own HOME (isolates the
+       global fallback) and cd-ing into the fresh tmp dir (isolates the
+       project-root-relative local store) — this guarantees two genuinely
+       independent compiler invocations, which is what "stable across two
+       builds" is meant to test. *)
+    let cmd_prefix = Printf.sprintf "HOME=%s cd %s && "
+        (Filename.quote tmp) (Filename.quote tmp) in
+    match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+            ~extra_args:"--hot-reload App --compile-so" () with
+    | None -> None  (* legitimate, counted skip: no clang on PATH *)
+    | Some bin -> Some (bin ^ ".hcr_manifest")
+  in
+  match build_once "a" with
+  | None -> ()
+  | Some mf1 ->
+    Alcotest.(check bool) "manifest sidecar written" true (Sys.file_exists mf1);
+    let (fn_lines1, cap_root1) = parse_hcr_manifest mf1 in
+    let find_caps name =
+      match List.assoc_opt name fn_lines1 with
+      | Some c -> c
+      | None -> Alcotest.failf "no FN line with caps= found for %s in manifest %s" name mf1
+    in
+    Alcotest.(check string) "Core.logger caps = IO.Console"
+      "IO.Console" (find_caps "Core.logger");
+    Alcotest.(check string) "Pure.add caps = (empty)"
+      "" (find_caps "Pure.add");
+    (* Independent recomputation of cap_root from the parsed manifest: split
+       every non-empty caps= CSV field, union+sort+dedupe, Cap_lattice.normalize,
+       then BLAKE3 the newline join — the exact algorithm bin/main.ml's writer
+       applies to its in-memory hashtable, but starting fresh from the file
+       parse rather than reusing any of the writer's intermediate state. *)
+    let all_caps_from_manifest =
+      List.concat_map (fun (_, csv) ->
+        if csv = "" then [] else String.split_on_char ',' csv
+      ) fn_lines1
+      |> List.sort_uniq String.compare
+    in
+    let recomputed_artifact_caps = March_caps.Cap_lattice.normalize all_caps_from_manifest in
+    let expected_cap_root =
+      March_cas.Blake3.hash_string (String.concat "\n" recomputed_artifact_caps) in
+    Alcotest.(check bool) "IO.Console present among recomputed artifact caps"
+      true (List.mem "IO.Console" recomputed_artifact_caps);
+    (match cap_root1 with
+     | None -> Alcotest.fail "no ROOT cap_root= line found in manifest"
+     | Some got -> Alcotest.(check string)
+         "cap_root matches independent recomputation from parsed caps= fields"
+         expected_cap_root got);
+    (* Determinism: a second, independent build of the same source must yield
+       byte-identical cap_root (guards against Hashtbl-iteration-order bugs in
+       the artifact_caps aggregation). *)
+    (match build_once "b" with
+     | None -> ()  (* clang vanished between builds — treat consistently as skip *)
+     | Some mf2 ->
+       let (_, cap_root2) = parse_hcr_manifest mf2 in
+       Alcotest.(check (option string)) "cap_root stable across two independent builds"
+         cap_root1 cap_root2)
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -11647,6 +11801,8 @@ let stdlib_suites =
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
+        Alcotest.test_case "HCR manifest: caps= fields + ROOT cap_root= (Phase5C-A.3), stable across builds" `Slow
+          test_hcr_manifest_emits_caps_and_cap_root;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
       ]);
