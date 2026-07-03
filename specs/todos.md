@@ -68,6 +68,15 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P1 — High Impact / Near-Term
 
+### Runtime / stdlib
+
+- [ ] **Signal-handler API (`Signal.watch`) — spec'd 2026-07-02, not implemented.** User-facing
+  SIGTERM/SIGINT/HUP/USR1/USR2 watchers with deferred green-thread dispatch (never in signal
+  context), composing with the existing internal handlers (`g_http_shutdown` in march_http.c,
+  `shutdown_requested` in eval.ml) via suppress-default + second-delivery escape hatch. Blocks
+  graceful drain in Bastion apps (forgepm's operations spec parks it on exactly this). Full
+  design incl. per-layer implementation plan and test plan: `specs/2026-07-02-signal-handler-api.md`.
+
 ### Web Framework: Islands Library
 
 - ✅ **Islands library (`islands/`)** — `forge new islands --lib`. Core: `Islands.wrap`, `Islands.wrap_eager`, `Islands.client_only`, `Islands.bootstrap_script`, `Islands.preload_hint`, `Islands.Registry`. `HydrateOn` type (`Eager | Lazy | OnIdle | OnInteraction`). `interface Island(s)` typeclass. `islands/runtime/march_islands.js` — actor-per-island JS runtime with configurable hydration strategies (eager, lazy, idle, interaction), event delegation (`data-on-click`, `data-on-input`, `data-on-change`, `data-on-submit`), cross-island messaging API. 34 tests in `islands/test/islands_test.march`. Specs: `specs/bastion/architecture.md`, `specs/bastion/wasm-islands.md`, `specs/bastion/templates.md`. WASM loading stub plugs in when Tier 4 browser target lands.
