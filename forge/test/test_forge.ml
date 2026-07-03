@@ -1047,6 +1047,20 @@ let test_gate_pure_narrowing_allowed () =
   Alcotest.(check (list string)) "no widening" [] widening;
   Alcotest.(check (list string)) "narrowing reported" ["IO.NetConnect"] narrowing
 
+(* I2 fix: compute_cap_narrowing must use subsumption, not exact match.
+   Prior use of List.mem misreported narrowing whenever the new build still
+   holds a broader (root) cap that covers the prior, more specific cap — new
+   build holding IO (root) still covers a prior IO.FileRead, so no actual
+   narrowing occurred even though IO.FileRead itself is no longer literally
+   present in new_caps. *)
+let test_gate_narrowing_root_cap_covers_prior_specific_not_misreported () =
+  let prior = ["IO.FileRead"] in
+  let new_caps = ["IO"] in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior ~new_caps in
+  Alcotest.(check (list string))
+    "IO root in new_caps subsumes prior IO.FileRead: not narrowing"
+    [] narrowing
+
 let test_gate_subsumed_add_allowed () =
   (* prior already holds the IO root cap, so any IO.* child is already covered *)
   let prior = ["IO"] in
@@ -1261,6 +1275,7 @@ let () =
       Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
       Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
       Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
+      Alcotest.test_case "gate: narrowing uses subsumption, root cap covers prior specific" `Quick test_gate_narrowing_root_cap_covers_prior_specific_not_misreported;
       Alcotest.test_case "gate: subsumed add allowed"           `Quick test_gate_subsumed_add_allowed;
       Alcotest.test_case "gate: sibling widen blocked"          `Quick test_gate_sibling_widen_blocked;
       Alcotest.test_case "gate: parent widen blocked"           `Quick test_gate_parent_widen_blocked;

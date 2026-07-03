@@ -121,9 +121,19 @@ let compute_cap_widening ~(prior : string list) ~(new_caps : string list) : stri
   List.filter (fun c -> not (List.exists (fun p -> March_caps.Cap_lattice.cap_subsumes p c) prior)) new_caps
 
 (** [compute_cap_narrowing ~prior ~new_caps] — prior caps no longer present in
-    the new build.  Log-only: narrowing is always allowed. *)
+    the new build.  Log-only: narrowing is always allowed.
+
+    I2 fix: use [Cap_lattice.cap_subsumes] (the same way [compute_cap_widening]
+    above already does) rather than exact-match [List.mem].  Both lists are
+    normalized (subsumed-duplicate caps already dropped), so an exact-match
+    filter misreports narrowing whenever the new build still holds a broader
+    cap that covers the prior one — e.g. new build holds [IO] (root), prior
+    held [IO.FileRead]: exact match would report [IO.FileRead] as "narrowed
+    away" even though [IO] still covers it, so no narrowing actually
+    occurred.  A prior cap only counts as genuinely narrowed if nothing in
+    [new_caps] subsumes it. *)
 let compute_cap_narrowing ~(prior : string list) ~(new_caps : string list) : string list =
-  List.filter (fun p -> not (List.mem p new_caps)) prior
+  List.filter (fun p -> not (List.exists (fun n -> March_caps.Cap_lattice.cap_subsumes n p) new_caps)) prior
 
 (** Union (via [March_caps.Cap_lattice.normalize]) of every function's [fn_caps] in a
     manifest's function list. *)
@@ -133,11 +143,19 @@ let manifest_caps (functions : fn_manifest list) : string list =
 (** For each widened cap, find a function in [functions] whose [fn_caps]
     contains (or subsumes-would-need) that cap — used to attribute the
     widening to a specific manifest line in the diagnostic.  Picks the first
-    function (in manifest order) that literally lists the cap. *)
+    function (in manifest name order) that literally lists the cap.
+
+    M5 fix: [functions] arrives here in [manifest.functions]'s order, which
+    the manifest-file writer emits via [Hashtbl.iter] (unspecified order) —
+    so which function got blamed in the diagnostic could vary build-to-build
+    for the exact same source.  Sort by [fn_name] first so the search (and
+    thus the diagnostic) is deterministic and reproducible. *)
 let attribute_widening (functions : fn_manifest list) (widening : string list) : (string * string) list =
+  let sorted_functions =
+    List.sort (fun a b -> String.compare a.fn_name b.fn_name) functions in
   List.map (fun cap ->
     let introducer =
-      match List.find_opt (fun fm -> List.mem cap fm.fn_caps) functions with
+      match List.find_opt (fun fm -> List.mem cap fm.fn_caps) sorted_functions with
       | Some fm -> fm.fn_name
       | None -> "?"
     in
@@ -169,8 +187,14 @@ let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string
   Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
   Printf.eprintf "  running version caps:  %s\n"
     (if prior_caps = [] then "(none)" else String.concat ", " prior_caps);
+  (* M3 fix: the padding width used to be a hardcoded 12, which misaligned
+     for caps longer than 12 chars (e.g. "IO.NetConnect.TLS",
+     "IO.Foreign.Blocking"). Compute it dynamically from the longest cap name
+     actually being printed so alignment holds regardless of cap length. *)
+  let pad_width =
+    List.fold_left (fun acc (cap, _) -> max acc (String.length cap)) 12 attributed in
   List.iter (fun (cap, fn_name) ->
-    Printf.eprintf "  new version adds:      %-12s (from %s)\n" cap fn_name
+    Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
   ) attributed;
   Printf.eprintf "  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n";
   List.iter (fun (cap, _) ->
