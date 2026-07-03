@@ -9,9 +9,12 @@
     references (this file, like llvm_emit.ml, uses no [open]).  Consumers
     (bin/main.ml, lib/jit/repl_jit.ml, test/ files) never referenced these items
     directly — only [Llvm_emit.emit_module] / [emit_repl_*] / [target_config]
-    / [mangle_extern] / [repl_slot_info] — so no re-export shim is needed for
-    the moved names; [llvm_emit.ml] opens/qualifies through [Llvm_ctx.xxx] at
-    its remaining call sites.
+    / [mangle_extern] / [repl_slot_info] — so no PUBLIC-API re-export shim is
+    needed for external callers; but [llvm_emit.ml] itself DOES re-export every
+    moved name bare (`let fresh = Llvm_ctx.fresh`, etc., ~25 bindings) so its
+    own ~600 pre-existing unqualified in-file call sites keep compiling
+    unchanged — the same in-file-shim pattern the [Perceus]/[Llvm_builtins]
+    splits use, not a qualify-at-call-site rewrite.
 
     HAZARD H1 (this task): the two audited helpers below,
     [emit_tag_scalar] / [emit_untag_scalar] / [emit_untag_known_scalar],

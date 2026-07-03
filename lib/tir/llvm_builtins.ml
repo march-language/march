@@ -1259,15 +1259,16 @@ let emit_preamble ~(is_wasm : bool) ~(triple : string) ?(repl = false) (buf : Bu
 
 (* ── Consumers, reimplemented from the table ────────────────────────── *)
 
-(** Hashtable of every name with [in_is_builtin = true], built once at
-    module load. Replaces the historical [List.mem name [...230-ish
-    literals...]] linear scan that ran on hot paths (emit_atom,
-    is_leaf_callee/expr_has_call's reduction-check analysis, EIncRC/EDecRC/
-    EFree shadow guards) — O(n) per call becomes O(1). Answer-identical:
-    membership is exactly the historical list's membership (see [builtins]
-    row order + [in_is_builtin] field, extracted verbatim from the deleted
-    list). This is the one intentional non-cosmetic change this task makes;
-    it changes complexity, not behavior. *)
+(** Hashtable of every name with [in_is_builtin = true] (273 of the 318
+    table rows), built once at module load. Replaces the historical
+    [List.mem name [...272 literals...]] linear scan that ran on hot paths
+    (emit_atom, is_leaf_callee/expr_has_call's reduction-check analysis,
+    EIncRC/EDecRC/EFree shadow guards) — O(n) per call becomes O(1).
+    Answer-identical: membership is exactly the historical list's
+    membership (see [builtins] row order + [in_is_builtin] field, extracted
+    verbatim from the deleted list). This is the one intentional
+    non-cosmetic change this task makes; it changes complexity, not
+    behavior. *)
 let is_builtin_fn_tbl : (string, unit) Hashtbl.t =
   let tbl = Hashtbl.create 512 in
   List.iter (fun b -> if b.in_is_builtin then Hashtbl.replace tbl b.march_name ()) builtins;

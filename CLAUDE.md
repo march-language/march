@@ -136,7 +136,10 @@ lib/parser/parser.mly       menhir parser
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
 lib/typecheck/typecheck.ml  bidirectional HM type inference
 lib/eval/eval.ml            tree-walking interpreter (1180+ tests)
-lib/tir/                    typed IR: lower, mono, defun, perceus, borrow, fusion, llvm_emit
+lib/tir/                    typed IR: lower (+lower_state/types/match/decls/actor/tests), mono, defun,
+                             perceus (+perceus_liveness/elide/fbip/scrut), borrow, fusion,
+                             llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl),
+                             tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine

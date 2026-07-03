@@ -43,7 +43,13 @@
     anywhere in lib/); fn_name/lam_uid can never make the underscore
     disappear, so every producible name is "$Clo_" + more. The 4-vs-5-char
     widening is therefore unobservable, and switching to the shared
-    predicate is a safe, behavior-preserving narrowing. *)
+    predicate is a safe, behavior-preserving narrowing. One-way CAS note:
+    [lib/cas/serialize.ml]'s [write_type_def] already hashes every
+    [TDClosure]'s full name string (including the "$Clo_" prefix) into the
+    content-addressed [impl_hash]; [is_clo_name] only READS that
+    already-baked-in name to classify it, it never feeds back into hashing,
+    so narrowing this predicate cannot retroactively change any existing
+    CAS hash. *)
 let is_clo_name = Tir_names.is_clo_struct
 
 (** Environment: maps local variable name → apply function name. *)
