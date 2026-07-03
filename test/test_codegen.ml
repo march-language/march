@@ -118,6 +118,37 @@ let test_tir_names_test_and_setup_fn_names () =
   Alcotest.(check string) "setup_fn_name" "__march_setup__" March_tir.Tir_names.setup_fn_name;
   Alcotest.(check string) "setup_all_fn_name" "__march_setup_all__" March_tir.Tir_names.setup_all_fn_name
 
+let test_tir_names_specialize_mangle () =
+  (* Equality against the OLD inline expression shape mono.ml used before
+     this conversion (Wave 3 Chunk 2 Task 1): `base ^ "$" ^ mangled_ty`. *)
+  let old_shape base mangled_ty = base ^ "$" ^ mangled_ty in
+  Alcotest.(check string) "specialize_mangle matches old inline shape (single ty)"
+    (old_shape "map" "Int")
+    (March_tir.Tir_names.specialize_mangle "map" "Int");
+  Alcotest.(check string) "specialize_mangle basic" "map$Int"
+    (March_tir.Tir_names.specialize_mangle "map" "Int");
+  (* Multi-arg specialization: caller joins mangled tys with "$" itself
+     before calling (mirrors mono.ml's `mangle_name`'s
+     `String.concat "$" (List.map mangle_ty tys)`), so this helper sees
+     the already-joined suffix. *)
+  Alcotest.(check string) "specialize_mangle multi-ty suffix (pre-joined)"
+    (old_shape "map" "Int$Bool")
+    (March_tir.Tir_names.specialize_mangle "map" "Int$Bool");
+  (* The W2 interface-impl double-mangle case: applying specialize_mangle to
+     an already-iface_mangle'd base must NOT trip is_iface_mangled — the new
+     '$' lands after the base's own '.', same as the pre-existing
+     "List.map$Int" negative case. *)
+  let iface_base = March_tir.Tir_names.iface_mangle ~iface:"Show" ~ty:"List" ~meth:"show" in
+  let doubly_mangled = March_tir.Tir_names.specialize_mangle iface_base "List_Int" in
+  Alcotest.(check string) "W2 double-mangle shape" "Show$List.show$List_Int" doubly_mangled;
+  Alcotest.(check bool) "double-mangled impl name still is_iface_mangled" true
+    (March_tir.Tir_names.is_iface_mangled doubly_mangled);
+  (* Ordinary generic fn (no dots at all) specialized: must NOT be
+     is_iface_mangled — matches the existing "List.map$Int" contract. *)
+  Alcotest.(check bool) "plain specialized generic fn is NOT iface_mangled" false
+    (March_tir.Tir_names.is_iface_mangled
+       (March_tir.Tir_names.specialize_mangle "map" "Int"))
+
 let test_tir_names_bool_tags () =
   Alcotest.(check string) "synthetic_true_tag" "True" March_tir.Tir_names.synthetic_true_tag;
   Alcotest.(check string) "synthetic_false_tag" "False" March_tir.Tir_names.synthetic_false_tag;
@@ -185,6 +216,182 @@ let test_rc_types_divergence_set_exact () =
     Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
       (expected_divergent ty) actual
   ) rc_types_truth_table
+
+(* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
+   fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
+   gen_map_filter_fold — see fusion.ml) tag every generated fn_def
+   `Tir.FnFused` (added Wave 3 Chunk 1 Task 3, commit c28ff465), but until
+   now nothing ever read that field back — no consumer, no assert, no test.
+   This is exactly the "flag says X but does anything check X matches
+   reality" gap the transitional fn_kind asserts (perceus.ml, llvm_emit.ml)
+   exist to catch for the OTHER fn_kind values; FnFused had no such
+   cross-check at all.
+
+   Reachability: fusion IS already exercised by test-corpus programs — see
+   test_eval.ml's test_fusion_map_fold / test_fusion_filter_fold /
+   test_fusion_map_filter_fold (via Test_helpers.fusion_module +
+   has_fused_fn, which only sniff the "$fused_" name prefix). These tests
+   below reuse that same reachable pipeline and additionally assert the
+   fn_kind tag, closing the flag-vs-reality gap: every "$fused_" named
+   fn_def must be FnFused, and — the direction the name-only check can't
+   see — every FnFused fn_def must be named "$fused_<mf|ff|mff>_N" per
+   fusion.ml's own gensym convention. *)
+
+(** True if [name] matches fusion.ml's gensym convention: "$fused_" followed
+    by one of the three generator tags ("mf"/"ff"/"mff") then "_" and a
+    counter. Mirrors fusion.ml's [gensym] (`Printf.sprintf "$fused_%s_%d"`) —
+    kept local to this test (not a Tir_names contract: fusion.ml's synthesized
+    names have no consumer that name-sniffs them, per the Wave 3 Task 3
+    report, so there is nothing in Tir_names to centralize here). *)
+let is_fusion_gensym_name (name : string) : bool =
+  let has_prefix p s =
+    String.length s >= String.length p && String.sub s 0 (String.length p) = p
+  in
+  let strip_prefix p s = String.sub s (String.length p) (String.length s - String.length p) in
+  if not (has_prefix "$fused_" name) then false
+  else
+    let rest = strip_prefix "$fused_" name in
+    List.exists (fun tag ->
+      has_prefix (tag ^ "_") rest &&
+      (let ctr = strip_prefix (tag ^ "_") rest in
+       ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr)
+    ) ["mf"; "ff"; "mff"]
+
+(** Cross-check, over a fused module: every fn whose name matches the
+    "$fused_" gensym convention is tagged FnFused, AND every FnFused-tagged
+    fn matches the naming convention — the bidirectional check the plan
+    calls out as never having been covered. *)
+let assert_fnfused_consistent (m : March_tir.Tir.tir_module) : unit =
+  List.iter (fun (fd : March_tir.Tir.fn_def) ->
+    if is_fusion_gensym_name fd.March_tir.Tir.fn_name then
+      Alcotest.(check bool)
+        ("\"" ^ fd.March_tir.Tir.fn_name ^ "\" named like a fusion helper => FnFused")
+        true (fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused);
+    if fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused then
+      Alcotest.(check bool)
+        ("FnFused fn \"" ^ fd.March_tir.Tir.fn_name ^ "\" named like fusion.ml's gensym")
+        true (is_fusion_gensym_name fd.March_tir.Tir.fn_name)
+  ) m.March_tir.Tir.tm_fns
+
+(** At least one FnFused fn_def actually exists post-fusion (not just that
+    IF one exists it's consistent — the existence half of the gate). *)
+let assert_some_fnfused_present (m : March_tir.Tir.tir_module) : unit =
+  let any_fused = List.exists (fun (fd : March_tir.Tir.fn_def) ->
+      fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused)
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "at least one FnFused fn_def present post-fusion" true any_fused
+
+let test_fnfused_map_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = imap(xs, fn x -> x * 2)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+let test_fnfused_filter_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) ->
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = ifilter(xs, fn x -> x > 1)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for filter+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+let test_fnfused_map_filter_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) ->
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, ICons(4, ICons(5, INil)))))
+      let ys = imap(xs, fn x -> x * 2)
+      let zs = ifilter(ys, fn x -> x > 4)
+      ifold(zs, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+filter+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+(** Negative control: a non-fusible (non-list) program must have NO
+    FnFused-tagged fn_def at all — the existence check must not be
+    vacuously true for every module. *)
+let test_fnfused_absent_when_not_fused () =
+  let m = fusion_module {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Int do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "no fused fn for non-list program" false (has_fused_fn m);
+  let any_fused = List.exists (fun (fd : March_tir.Tir.fn_def) ->
+      fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused)
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "no FnFused fn_def for non-list program" false any_fused
 
 let test_nested_bool_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
@@ -2961,6 +3168,39 @@ let test_known_call_stack_alloc () =
   let m = mk_module [mk_fn "main" body] in
   let _ = March_tir.Known_call.run ~changed m in
   Alcotest.(check bool) "changed (stack-allocated closure)" true !changed
+
+(** known_call.ml's [is_clo_name] was converted from an inline 4-char
+    "$Clo" prefix check to [Tir_names.is_clo_struct] (Wave 3 Chunk 2 Task 1)
+    — pins the behavior-narrowing proof: every name ANY producer in the
+    compiler can actually mint (i.e. every name [Tir_names.clo_struct_name]
+    can produce) agrees between the old 4-char check and the new 5-char
+    predicate; the two predicates diverge ONLY on the unreachable
+    "$Clo"+non-underscore shape, which this test also documents. *)
+let test_known_call_is_clo_name_matches_tir_names () =
+  let old_is_clo_name_4char s =
+    String.length s >= 4 && String.sub s 0 4 = "$Clo"
+  in
+  let representative_names =
+    (* Every shape [Tir_names.clo_struct_name] can actually produce. *)
+    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:0;
+      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:42;
+      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:7;
+      (* Non-closure names, must be false under both. *)
+      "Option"; "List"; "$fv1"; "$Tuple2"; "main" ]
+  in
+  List.iter (fun name ->
+    Alcotest.(check bool)
+      ("is_clo_name/is_clo_struct agree on producible name \"" ^ name ^ "\"")
+      (old_is_clo_name_4char name)
+      (March_tir.Known_call.is_clo_name name)
+  ) representative_names;
+  (* The only theoretical divergence: "$Clo"+non-underscore. Documented as
+     unreachable (no producer mints it — see is_clo_name's doc comment) but
+     pinned here so the narrowing is explicit, not silently assumed. *)
+  Alcotest.(check bool) "old 4-char check WOULD match unreachable shape" true
+    (old_is_clo_name_4char "$Clox");
+  Alcotest.(check bool) "new predicate correctly rejects unreachable shape" false
+    (March_tir.Known_call.is_clo_name "$Clox")
 
 (* ── Struct update fusion ────────────────────────────────────────── *)
 
@@ -6276,7 +6516,14 @@ let codegen_suites =
           Alcotest.test_case "runtime_prefix"              `Quick test_tir_names_runtime_prefix;
           Alcotest.test_case "is_try_call"                 `Quick test_tir_names_try_call;
           Alcotest.test_case "test/setup fn names"         `Quick test_tir_names_test_and_setup_fn_names;
+          Alcotest.test_case "specialize_mangle"           `Quick test_tir_names_specialize_mangle;
           Alcotest.test_case "bool tags"                   `Quick test_tir_names_bool_tags;
+        ] );
+      ( "fnfused_coverage", [
+          Alcotest.test_case "map+fold fused fn is FnFused"        `Quick test_fnfused_map_fold_tagged;
+          Alcotest.test_case "filter+fold fused fn is FnFused"     `Quick test_fnfused_filter_fold_tagged;
+          Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
+          Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
         ] );
       ( "rc_types", [
           Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
@@ -6462,6 +6709,8 @@ let codegen_suites =
         Alcotest.test_case "unknown_unchanged" `Quick test_known_call_unknown_unchanged;
         Alcotest.test_case "two_closures"    `Quick test_known_call_two_closures;
         Alcotest.test_case "stack_alloc"     `Quick test_known_call_stack_alloc;
+        Alcotest.test_case "is_clo_name matches Tir_names.is_clo_struct (W3C2.1)" `Quick
+          test_known_call_is_clo_name_matches_tir_names;
       ]);
       ("struct_fusion", [
         Alcotest.test_case "two_updates"       `Quick test_struct_fusion_two_updates;

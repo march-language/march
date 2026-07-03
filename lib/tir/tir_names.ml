@@ -214,6 +214,43 @@ let is_iface_mangled (name : string) : bool =
 let iface_mangle ~(iface : string) ~(ty : string) ~(meth : string) : string =
   Printf.sprintf "%s$%s.%s" iface ty meth
 
+(* ── Specialization-suffix mangling: "base$mangled_ty[$mangled_ty...]" ──
+   Producer: lib/tir/mono.ml's [mangle_name] appends a "$"-separated
+   mangled-type suffix to a base name at monomorphization time, e.g. an
+   ordinary generic fn "map" called at [Int] becomes "map$Int"; a
+   multi-arg specialization joins each mangled type with its own "$"
+   (e.g. "map$Int$Bool"). The SAME helper is also used to build the
+   second-order suffix on an already-interface-mangled impl name (W2's
+   example: "Show$List.show" + [List(Int)] -> "Show$List.show$List_Int",
+   see mono.ml's [enqueue_specialized_impl]) — mono.ml computes the
+   type-specific [mangled_ty] string itself (via its own [mangle_ty],
+   which stays in mono.ml: it is a monomorphization-specific algorithm,
+   not a name CONTRACT another pass needs to recognise) and this helper
+   only owns the shared "glue a '$' between base and suffix" contract.
+   mono.ml's comment used to read "no shared Tir_names-style helper exists
+   yet — that's Wave 3"; this is that helper. *)
+
+(** [specialize_mangle base mangled_ty] appends a "$"-separated
+    specialization suffix to [base], e.g. [specialize_mangle "map" "Int" =
+    "map$Int"]. [mangled_ty] is caller-computed (mono.ml's [mangle_ty]/
+    [String.concat "$"] over multiple type args) — this helper only owns
+    the separator convention, not the type-to-string algorithm.
+
+    Why this can NEVER trip [is_iface_mangled]: that predicate looks for a
+    ['$'] BEFORE the name's LAST ['.']. [base] here is either a bare
+    generic-fn name with no '.' at all (e.g. "map"), or an
+    ALREADY-[iface_mangle]-produced name like "Show$List.show" whose own
+    ['.'] is the mangle's method-separator — appending "$List_Int" AFTER
+    that '.' only ever adds a ['$'] AFTER the last '.', which
+    [is_iface_mangled] explicitly treats as the "ordinary specialized
+    generic fn" case (its own doc comment's "List.map$Int" example is
+    exactly this shape). In neither case does [specialize_mangle] ever
+    introduce a '.' or move a '$' to before an existing '.', so a name this
+    helper produces is is-iface-mangled if and only if [base] already was —
+    specialization is transparent to that predicate by construction. *)
+let specialize_mangle (base : string) (mangled_ty : string) : string =
+  base ^ "$" ^ mangled_ty
+
 (* ── Default-argument mangling: "base$N" ────────────────────────────────
    Producer: lib/desugar/desugar.ml's [expand_defaults_decl] mints, for a
    fn with default params, a full-arity mangled decl ["%s$%d" name

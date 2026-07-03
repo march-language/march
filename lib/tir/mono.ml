@@ -122,11 +122,13 @@ let rec mangle_ty : Tir.ty -> string = function
   | Tir.TVar name     -> "V_" ^ name
 
 (** [mangle_name base tys] appends a "$"-separated mangled suffix to [base].
-    Returns [base] unchanged if [tys] is empty (already monomorphic). *)
+    Returns [base] unchanged if [tys] is empty (already monomorphic).
+    The "$"-glue itself is [Tir_names.specialize_mangle] (Wave 3 Chunk 2
+    Task 1) — [mangle_ty] (mono-specific type-to-string) stays here. *)
 let mangle_name (base : string) (tys : Tir.ty list) : string =
   match tys with
   | [] -> base
-  | _  -> base ^ "$" ^ String.concat "$" (List.map mangle_ty tys)
+  | _  -> Tir_names.specialize_mangle base (String.concat "$" (List.map mangle_ty tys))
 
 (* ── Type matching (poly → concrete → subst) ────────────────────── *)
 
@@ -316,11 +318,12 @@ let rec rewrite_calls
      the impl was already monomorphic, e.g. Show$Int.show — or a further
      doubly-mangled name, e.g. "Show$List.show$List_Int", when it was).
 
-     Name convention (local to mono.ml only; matches the pre-existing
-     mangle_name scheme used for ordinary generic fns; no shared
-     Tir_names-style helper exists yet — that's Wave 3): the impl name gets
-     an extra "$"-separated suffix built from its OWN concrete parameter
-     types after substitution, e.g. "Show$List.show" + [List(Int)] ->
+     Name convention: the SAME [mangle_name] scheme used for ordinary
+     generic fns (glued via [Tir_names.specialize_mangle], Wave 3 Chunk 2
+     Task 1 — see that helper's doc for why this never trips
+     [Tir_names.is_iface_mangled]): the impl name gets an extra
+     "$"-separated suffix built from its OWN concrete parameter types
+     after substitution, e.g. "Show$List.show" + [List(Int)] ->
      "Show$List.show$List_Int".  Recursion (List(List(Int)) etc.) terminates
      via the existing worklist [done_set] dedup: once a given specialized
      name has been enqueued/emitted, subsequent calls just reuse it. *)
