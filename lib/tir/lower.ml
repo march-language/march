@@ -17,6 +17,16 @@ module Typecheck = March_typecheck.Typecheck
 
 (* ── Fresh name generation ──────────────────────────────────────── *)
 
+(** Monotonic fresh-name counter ($lamN/$tN/$pN/$jpN/…).
+
+    NOT converted to an env field (Wave 3 Task 8): a pure accumulator —
+    mutated without restore across the entire module traversal, reset to 0
+    exactly once per [lower_module] call via [reset_counter ()] (that
+    per-call restart is load-bearing: the TIR snapshot corpus and the REPL
+    JIT's per-fragment numbering both depend on it — see
+    test/test_snapshots.ml's determinism note). The direct lower.ml
+    analogue of perceus's [_rc_fresh_ctr], which chunk-1 Task 4 kept as a
+    ref under the same "accumulator/table-build semantics" law clause. *)
 let _lower_counter = ref 0
 
 let fresh_name (prefix : string) : string =
@@ -120,21 +130,88 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
       don't interfere.
     - [ELam] temporarily installs the lambda's own parameter types so the
       lambda body can't accidentally inherit an enclosing function parameter
-      of the same name but different type. *)
+      of the same name but different type.
+
+    NOT converted to an [env] field (Wave 3 Task 8): all 6 save/restore sites
+    (this file's [EBlock]/[ELetFn]-as-block-statement, [ELam], [ELetFn],
+    [lower_branch_body_with_pat], the guarded-match arm in [lower_match], and
+    [lower_fn_def]'s full-scope save/clear/restore) bracket a call to
+    [lower_expr] — which can [failwith] (EPipe/EResultRef/ESigil bail-outs,
+    the non-exhaustive-pattern-kind panic in the match compiler, the
+    fn-arity-mismatch check in [lower_fn_def]) — WITHOUT [Fun.protect]. A
+    thrown exception during any of these six windows leaves the table
+    populated with the inner scope's entries (or, for [lower_fn_def],
+    cleared entirely) instead of restored. This is a genuine restore-gap:
+    an [env]-record version using [{ env with fn_param_types = saved }]
+    would NOT reproduce this on the throw path (the caller's [env] binding
+    is untouched by a callee's exception, so the "leak" would silently
+    disappear) — a real behavior change on the error path, forbidden by the
+    plan's transformation law. Preserved bit-for-bit as a global, dirty-on-
+    throw semantics included. Filed: specs/todos.md (Wave 3 Task 8 entry,
+    citing analysis doc lower.ml High #2's neighborhood). *)
 let _fn_param_types : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
 
-(* ── Type map reference (set by lower_module, used by lower_expr) ── *)
+(* ── Env — module-scoped state threaded through the lowering functions
+   (Wave 3 Task 8) ──────────────────────────────────────────────────────
 
-(** Optional typechecker type_map threaded through lowering.
-    Looked up by expression span to produce concrete types instead
-    of [unknown_ty] placeholders. Set at [lower_module] entry. *)
-let _type_map_ref : (Ast.span, Typecheck.ty) Hashtbl.t option ref = ref None
+   Only fields whose old ref was BOTH (a) genuinely save-and-restored
+   (never left dirty on a lexical exit) AND (b) safe to reset per
+   [lower_module] call (not part of the documented cross-call-staleness
+   trio below) are carried here. Everything else stays a module-level
+   ref/Hashtbl, each with a comment at its declaration explaining why
+   (accumulator, restore-gap, or intentional cross-call staleness) —
+   see the "NOT converted" comments throughout this file for the full
+   per-ref rationale demanded by the plan's transformation law. *)
+type env = {
+  type_map : (Ast.span, Typecheck.ty) Hashtbl.t option;
+      (** The typechecker's span → type table. Set once at [lower_module]
+          entry, read-only for the entire lowering run (never mutated
+          mid-traversal — only ever replaced wholesale at the next
+          [lower_module] call), reset to [None] at exit. A pure
+          module-scoped constant, the same shape as perceus's
+          [borrow_map]/[type_defs] fields. Was [_type_map_ref]. *)
+  current_module_aliases : (string, string) Hashtbl.t;
+      (** Per-module import aliases (the aliases from the module CURRENTLY
+          being lowered, inheriting the enclosing module's). Consulted
+          BEFORE the program-global [_use_aliases] so a module's own
+          [import X] wins over an alias another module registered globally
+          for the same short name. Was [_current_module_aliases], which had
+          TWO save/restore dances:
+          - [lower_mod_decls] (inherit-on-enter / restore-on-exit): the old
+            code protected this one with [Fun.protect], so the env version
+            (a callee's exception cannot touch the caller's own [env]
+            binding) is exactly as safe — no throw-path change.
+          - [collect_tests]' [DMod] case (snapshot re-load for test
+            bodies): the old code did a BARE save/mutate/recurse/restore
+            with NO [Fun.protect] around throw-capable recursion — on the
+            throw path the ref stayed dirty (pointing at the snapshot).
+            The env version erases that dirty-on-throw state. This is a
+            behavior change, but a provably UNOBSERVABLE one: every read
+            site of the old ref ([resolve_use_alias], the [DUse]
+            registration, the snapshot save, both dance saves) executes
+            only within [lower_module]'s dynamic extent; a throw escaping
+            [collect_tests] propagates out of [lower_module] (whose exit
+            cleanup was not exception-protected, so the dirt survived the
+            frame), and the NEXT [lower_module] call reset the ref to a
+            fresh table in its entry preamble BEFORE any read could occur
+            — while in batch mode the process exits on the diagnostic.
+            Filed in specs/todos.md (Wave 3 Task 8 amendment) with the
+            full trace. *)
+}
 
-(** Look up the TIR type for an expression from the type_map.
+(** The env used at the top of [lower_module], before [type_map] is known
+    and before any module scope has been entered — mirrors the old refs'
+    initial values ([None], a fresh empty [Hashtbl]). *)
+let empty_env : env = {
+  type_map = None;
+  current_module_aliases = Hashtbl.create 0;
+}
+
+(** Look up the TIR type for an expression from the env's type_map.
     Falls back to [unknown_ty] when no type_map is set or the span
     is not present (e.g. spans introduced by desugaring). *)
-let ty_of_span (sp : Ast.span) : Tir.ty =
-  match !_type_map_ref with
+let ty_of_span (env : env) (sp : Ast.span) : Tir.ty =
+  match env.type_map with
   | None -> unknown_ty
   | Some tbl ->
     (match Hashtbl.find_opt tbl sp with
@@ -142,33 +219,39 @@ let ty_of_span (sp : Ast.span) : Tir.ty =
        convert_ty t
      | None   -> unknown_ty)
 
-let ty_of_expr (e : Ast.expr) : Tir.ty =
-  ty_of_span (Typecheck.span_of_expr e)
+let ty_of_expr (env : env) (e : Ast.expr) : Tir.ty =
+  ty_of_span env (Typecheck.span_of_expr e)
 
 (* ── Use import resolution ───────────────────────────────────────── *)
 
 (** Maps unqualified names to their qualified module-prefixed names.
-    Built from [DUse] declarations. E.g. [map] → [List.map]. *)
+    Built from [DUse] declarations. E.g. [map] → [List.map].
+
+    NOT converted to an env field: this is an accumulator, not a
+    save-and-restore scope. It is reset to a fresh (empty) table once at
+    [lower_module] entry, then progressively WRITTEN TO throughout Pass 2
+    as each [DUse]/[DMod] declaration is processed, with later declarations'
+    lowering reading entries earlier declarations in the SAME pass wrote —
+    so, unlike [type_map] above, its value is not fixed for the whole run.
+    Cleared (to size 0, not reset) at [lower_module] exit. Stays a ref,
+    documented per the plan's "accumulator/table-build semantics" rule. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
-(** Per-module import aliases (the aliases from the module CURRENTLY being lowered,
-    inheriting the enclosing module's).  Consulted BEFORE the program-global
-    [_use_aliases] so a module's own [import X] wins over an alias another module
-    registered globally for the same short name.  Without this, a name defined in
-    two modules (e.g. Connection.close and Db.close) resolves to whichever import
-    was processed first program-wide — hijacking modules that imported the other
-    (e.g. a `close(conn)` meant for Connection.close silently calling Db.close on a
-    ConnState → wrong-shape destructure → SIGSEGV).  Scoped per [lower_mod_decls]
-    (inherit-on-enter / restore-on-exit) so sibling modules do not leak into each
-    other. *)
-let _current_module_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
-
-(** Snapshot of each module's [_current_module_aliases] (keyed by its qualified
+(** Snapshot of each module's [current_module_aliases] env field (keyed by its qualified
     prefix, e.g. "TestLivePostgres."), saved at the end of [lower_mod_decls].
     Test/setup bodies are lowered in a SEPARATE later pass ([collect_tests]) after
     the per-module scope has been restored, so they re-load their enclosing
     module's aliases from here — otherwise a test's `close(conn)` would fall back
-    to the global table and hijack Connection.close → Db.close. *)
+    to the global table and hijack Connection.close → Db.close.
+
+    NOT converted to an env field: an accumulator written throughout Pass 2
+    (one entry per module lowered) and read later by the wholly separate
+    [collect_tests] pass, which runs AFTER [env.current_module_aliases] has
+    already been unwound back to its outermost (entry-module) value by
+    [lower_mod_decls]'s save/restore — i.e. this snapshot table is exactly
+    the mechanism that lets test bodies see a per-module [env] value the
+    live [env] no longer holds by the time they run. Reset fresh at
+    [lower_module] entry. *)
 let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
   = ref (Hashtbl.create 0)
 
@@ -180,7 +263,11 @@ let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
    bare name that still falls through to the global table with ≥2 candidates
    is resolving by registration order — a hijack waiting to happen.  Track
    every qualified target ever offered for each short name; when the global
-   fallback fires for an ambiguous one, report it once.  Diagnostic only. *)
+   fallback fires for an ambiguous one, report it once.  Diagnostic only.
+
+   NOT converted to env fields: pure diagnostic accumulators (never
+   consulted for a lowering DECISION, only for an optional stderr report),
+   reset via [Hashtbl.reset] at [lower_module] entry. *)
 let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
 let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
 let alias_audit_on = lazy (Sys.getenv_opt "MARCH_ALIAS_AUDIT" <> None)
@@ -202,7 +289,24 @@ let note_alias_candidate (short : string) (target : string) : unit =
     module's import added to the (program-global) [_use_aliases] table.
     Without this, e.g. CounterIsland.ssr's bare `render(state)` was rewritten
     to `Controller.render` (added by some other module's `import Controller`),
-    silently calling the wrong function. *)
+    silently calling the wrong function.
+
+    NOT converted to an env field, despite [with_current_module_fns] below
+    being a textbook exception-safe save/restore dance ([Fun.protect]): this
+    ref is a member of the documented NOT-reset trio (analysis doc lower.ml
+    High #2, alongside [_default_dispatch] and [_fn_param_types]). Its value
+    is deliberately NOT reset at [lower_module] entry — [lower_module]'s Pass
+    2 preamble sets it directly (line ~2251-equivalent below) to the ENTRY
+    module's own fn names, and that assignment happens AFTER Pass 1
+    ([collect_iface_impls ~lower_bodies:true], which lowers impl method
+    bodies) has already run and read whatever this table held at the END OF
+    THE PREVIOUS [lower_module] CALL (or its initial empty value, on the
+    first call in the process). The REPL JIT (lib/jit/repl_jit.ml) calls
+    [lower_module] once per fragment, so this staleness is live,
+    load-bearing, current behavior — turning it into an env field reset
+    fresh at the top of every [lower_module] call (the natural env-record
+    idiom) would silently FIX (i.e. change) this. Preserved as a ref
+    exactly. Filed: specs/todos.md. *)
 let _current_module_fns : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 0)
 
 (** Run [f] with [_current_module_fns] set to [names], restoring the previous
@@ -214,7 +318,7 @@ let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
   _current_module_fns := tbl;
   Fun.protect ~finally:(fun () -> _current_module_fns := saved) f
 
-let resolve_use_alias (name : string) : string =
+let resolve_use_alias (env : env) (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
   else if Hashtbl.mem !_current_module_fns name then name
   (* A bulk `import Mod` registers every public fn of Mod as an unqualified
@@ -232,7 +336,7 @@ let resolve_use_alias (name : string) : string =
   (* The current module's OWN imports take precedence over the program-global
      table, so [import Connection] in this module resolves [close] to
      Connection.close even if another module globally registered Db.close. *)
-  else match Hashtbl.find_opt !_current_module_aliases name with
+  else match Hashtbl.find_opt env.current_module_aliases name with
   | Some qualified -> qualified
   | None ->
   match Hashtbl.find_opt !_use_aliases name with
@@ -255,15 +359,42 @@ let resolve_use_alias (name : string) : string =
 (* ── Qualified module lowering (refs) ──────────────────────────── *)
 
 (** Module-level refs for function and type accumulators, set by [lower_module].
-    Needed so [ensure_module_lowered] can append stdlib module definitions. *)
+    Needed so [ensure_module_lowered] can append stdlib module definitions.
+
+    NOT converted to env fields: [_fns_ref]/[_types_ref] are accumulators
+    (each [lower_module] call points them at that call's own [fns]/[types]
+    list-refs; [_ensure_module_lowered]'s closure and [lower_stdlib_mod_decls]
+    append to them as a side effect throughout the whole run — there is no
+    "restore" step, only reset-then-grow). They are ALSO poked directly by
+    test/test_eval.ml's [test_tir_lower_qualified_auto_load] to exercise
+    [_ensure_module_lowered] in isolation from a full [lower_module] call —
+    a real (if unusual) external dependency on these being globally
+    reachable refs, not env-record fields a caller would have to construct
+    a full [env] to obtain. *)
 let _fns_ref : Tir.fn_def list ref ref = ref (ref [])
 let _types_ref : Tir.type_def list ref ref = ref (ref [])
 
-(** Tracks which modules have already been lowered to avoid duplicates. *)
+(** Tracks which modules have already been lowered to avoid duplicates.
+    NOT converted to an env field: same accumulator/test-coupling rationale
+    as [_fns_ref] above ([test_tir_lower_qualified_auto_load] resets and
+    reads this directly). Reset fresh at [lower_module] entry (part of the
+    "reset-at-entry set", together with [_type_map_ref] (now [env.type_map]),
+    [_iface_methods], [_use_aliases]). *)
 let _lowered_modules : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 8)
 
-(** Forward ref — filled after [lower_fn_def] / [lower_type_def] are defined. *)
-let _ensure_module_lowered : (string -> unit) ref = ref (fun _ -> ())
+(** Forward ref — filled after [lower_fn_def] / [lower_type_def] are defined.
+    NOT convertible to an env field: this is a process-lifetime function
+    pointer (the standard OCaml forward-reference idiom for breaking the
+    ordering constraint that [lower_to_atom_k]/[lower_expr] — defined before
+    [lower_stdlib_mod_decls] — need to call it). It is set exactly ONCE via
+    [let () = _ensure_module_lowered := ...] at module-load time, never
+    per-[lower_module]-call; the closure it holds reads [_fns_ref]/
+    [_types_ref]/[_lowered_modules] (all refs) at call time, so it always
+    sees whichever module's accumulators are currently installed. Also
+    poked directly by [test_tir_lower_qualified_auto_load]. Takes an [env]
+    (threaded through to [lower_stdlib_mod_decls]/[lower_fn_def] for the
+    lazily-loaded module's own body) as its first argument. *)
+let _ensure_module_lowered : (env -> string -> unit) ref = ref (fun _ _ -> ())
 
 (* ── Interface method resolution ────────────────────────────────── *)
 
@@ -271,14 +402,30 @@ let _ensure_module_lowered : (string -> unit) ref = ref (fun _ -> ())
     Used during lowering to rewrite calls like [show(42)] → [Show$Int.show(42)].
     Keys include BOTH base names (e.g. "checkpoint_get") AND fully-qualified
     names (e.g. "Conduit.Storage.checkpoint_get") so that polymorphic call sites
-    that use qualified names can be resolved post-monomorphization. *)
+    that use qualified names can be resolved post-monomorphization.
+
+    NOT converted to an env field: reset to a fresh table at [lower_module]
+    entry (like [type_map]), but — unlike [type_map] — it is then WRITTEN TO
+    throughout Pass 1 ([collect_iface_impls]) and Pass 2, with
+    [resolve_iface_method] reading it INTERLEAVED with those writes (an impl
+    registered while lowering module A's body must be visible when lowering
+    module B's body later in the same pass). An accumulator, not a
+    fixed-for-the-run constant — stays a ref, mirroring [_use_aliases]. *)
 let _iface_methods : (string, (string * string) list) Hashtbl.t ref
   = ref (Hashtbl.create 0)
 
 (** Saved copy of [_iface_methods] after the most recent [lower_module] call.
     Retained so that [Mono.monomorphize] can resolve interface calls in
     functions that were polymorphic during lowering but become concrete after
-    type-variable substitution. *)
+    type-variable substitution.
+
+    NOT converted to an env field: deliberately a CROSS-CALL cache — written
+    only at [lower_module] EXIT (never reset at entry) and read by
+    [get_iface_methods] strictly AFTER [lower_module] has already returned
+    its [Tir.tir_module] result (by [Mono.monomorphize], via the public
+    [get_iface_methods ()] API). An [env] field cannot outlive the [env]
+    value the function that produced it was holding — this ref's entire
+    reason to exist is to outlive the call. *)
 let _saved_iface_methods : (string, (string * string) list) Hashtbl.t ref
   = ref (Hashtbl.create 0)
 
@@ -289,7 +436,19 @@ let get_iface_methods () : (string, (string * string) list) Hashtbl.t =
 
 (** Maps base function names to [(arity, mangled_name)] for default-arg functions.
     Built from [DFn] declarations whose names end with [$N] (N = arity number).
-    Used to rewrite calls like [greet(x)] → [greet$1(x)] in the TIR pipeline. *)
+    Used to rewrite calls like [greet(x)] → [greet$1(x)] in the TIR pipeline.
+
+    NOT converted to an env field: part of the documented NOT-reset trio
+    (analysis doc lower.ml High #2, alongside [_current_module_fns] and
+    [_fn_param_types]). It IS unconditionally reassigned inside every
+    [lower_module] call (via [build_default_dispatch]) — but only AFTER Pass
+    1's [collect_iface_impls ~lower_bodies:true] has already lowered impl
+    method bodies against whatever this table held at the end of the
+    PREVIOUS [lower_module] call. Converting to an env field constructed
+    fresh at the top of [lower_module] would erase that inter-call
+    staleness window Pass 1 currently runs inside — a genuine (if narrow)
+    behavior change the plan's law forbids introducing silently. Preserved
+    as a ref. Filed: specs/todos.md. *)
 let _default_dispatch : (string, (int * string) list) Hashtbl.t ref
   = ref (Hashtbl.create 0)
 
@@ -299,7 +458,7 @@ let _default_dispatch : (string, (int * string) list) Hashtbl.t ref
     Tries the name as-is first, then progressively strips module prefixes to
     handle calls like "Conduit.Storage.enqueue" when the impl was registered
     under "Storage.enqueue" (user wrote `impl Storage(T)` after `import Conduit`). *)
-let resolve_iface_method (method_name : string) (arg_span : Ast.span) : string option =
+let resolve_iface_method (env : env) (method_name : string) (arg_span : Ast.span) : string option =
   let rec find_impls name =
     match Hashtbl.find_opt !_iface_methods name with
     | Some impls -> Some impls
@@ -312,7 +471,7 @@ let resolve_iface_method (method_name : string) (arg_span : Ast.span) : string o
   match find_impls method_name with
   | None -> None
   | Some impls ->
-    match !_type_map_ref with
+    match env.type_map with
     | None -> None
     | Some tbl ->
       match Hashtbl.find_opt tbl arg_span with
@@ -340,15 +499,15 @@ let resolve_iface_method (method_name : string) (arg_span : Ast.span) : string o
     This is the core ANF trick: non-atomic expressions get a fresh
     variable name, their lowered form becomes the RHS of an [ELet],
     and the continuation [k] receives the bound variable as an atom. *)
-let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
+let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   match e with
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
   | Ast.EVar { txt = name; span; _ } ->
-    let name = resolve_use_alias name in
+    let name = resolve_use_alias env name in
     (match String.index_opt name '.' with
-     | Some i -> !_ensure_module_lowered (String.sub name 0 i)
+     | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
-    let ty = ty_of_span span in
+    let ty = ty_of_span env span in
     (* Use the parameter's declared type (from _fn_param_types) when available,
        rather than ty_of_span.  The type_map is shared across the whole program
        and ty_of_span may return a stale or spurious type for a parameter
@@ -364,45 +523,45 @@ let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
     in
     k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
   | _ ->
-    let rhs = lower_expr e in
-    let v = fresh_var (ty_of_expr e) in
+    let rhs = lower_expr env e in
+    let v = fresh_var (ty_of_expr env e) in
     Tir.ELet (v, rhs, k (Tir.AVar v))
 
 (** Lower a list of expressions to atoms using CPS. *)
-and lower_atoms_k (es : Ast.expr list) (k : Tir.atom list -> Tir.expr) : Tir.expr =
+and lower_atoms_k (env : env) (es : Ast.expr list) (k : Tir.atom list -> Tir.expr) : Tir.expr =
   match es with
   | [] -> k []
   | e :: rest ->
-    lower_to_atom_k e (fun a ->
-      lower_atoms_k rest (fun rest_atoms ->
+    lower_to_atom_k env e (fun a ->
+      lower_atoms_k env rest (fun rest_atoms ->
         k (a :: rest_atoms)))
 
 (** Translate an AST expression to a TIR expression in ANF. *)
-and lower_expr (e : Ast.expr) : Tir.expr =
+and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   match e with
   (* --- Atoms --- *)
   | Ast.ELit (lit, _) -> Tir.EAtom (Tir.ALit lit)
 
   | Ast.EVar { txt = name; span; _ } ->
-    let name = resolve_use_alias name in
+    let name = resolve_use_alias env name in
     (match String.index_opt name '.' with
-     | Some i -> !_ensure_module_lowered (String.sub name 0 i)
+     | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
     let ty = match Hashtbl.find_opt _fn_param_types name with
       | Some param_ty -> param_ty
-      | None -> ty_of_span span
+      | None -> ty_of_span env span
     in
     Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
   | Ast.ELet (b, _) ->
-    lower_expr b.bind_expr
+    lower_expr env b.bind_expr
 
   (* --- Blocks → right-nested ELet --- *)
   | Ast.EBlock ([], _) -> Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
-  | Ast.EBlock ([e], _) -> lower_expr e
+  | Ast.EBlock ([e], _) -> lower_expr env e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
-    let rhs = lower_expr b.bind_expr in
+    let rhs = lower_expr env b.bind_expr in
     (* Register the let-bound pattern names in _fn_param_types for the
        duration of lowering the rest of the block.  Without this, a bare
        reference to the bound name (e.g. [html] after [let html = ...]) is
@@ -418,15 +577,15 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         | None -> None) pat_names
     in
     List.iter (fun (name, sp) ->
-      Hashtbl.replace _fn_param_types name (ty_of_span sp)) pat_names;
-    let body = lower_expr (Ast.EBlock (rest, sp)) in
+      Hashtbl.replace _fn_param_types name (ty_of_span env sp)) pat_names;
+    let body = lower_expr env (Ast.EBlock (rest, sp)) in
     List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
     List.iter (fun (name, ty) -> Hashtbl.replace _fn_param_types name ty) saved_shadowed;
     (match b.bind_pat with
      | Ast.PatVar n ->
        let v : Tir.var = {
          v_name = n.txt;
-         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
+         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr env b.bind_expr);
          v_lin = lower_linearity b.bind_lin;
        } in
        Tir.ELet (v, rhs, body)
@@ -439,7 +598,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
           propagates element types from the scrutinee's tuple type — mirror it. *)
        let rhs_tuple_ty = match b.bind_ty with
          | Some t -> lower_ty t
-         | None -> ty_of_expr b.bind_expr in
+         | None -> ty_of_expr env b.bind_expr in
        let elem_tys = match rhs_tuple_ty with
          | Tir.TTuple ts -> ts
          | _ -> [] in
@@ -464,7 +623,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
        let bind_name = fresh_name "p" in
        let v : Tir.var = {
          v_name = bind_name;
-         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
+         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr env b.bind_expr);
          v_lin = lower_linearity b.bind_lin;
        } in
        Tir.ELet (v, rhs, body))
@@ -473,7 +632,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     let fn_name = name.Ast.txt in
     let params' = List.map (fun (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span p.param_name.span);
+          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span env p.param_name.span);
           v_lin = lower_linearity p.param_lin }
       ) params in
     (* Install fn_name → self_ty so that both recursive self-calls inside the
@@ -486,8 +645,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     let self_ty_pre = Tir.TFn (param_tys', ret_ty_pre) in
     let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
     Hashtbl.replace _fn_param_types fn_name self_ty_pre;
-    let fn_body' = lower_expr fn_body in
-    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr fn_body in
+    let fn_body' = lower_expr env fn_body in
+    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr env fn_body in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = fn_body';
       (* Block-statement `fn name(...) do ... end` → same ELetRec([fn], AVar fn)
@@ -503,21 +662,21 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     (* Update with final ret_ty before lowering the continuation *)
     Hashtbl.replace _fn_param_types fn_name fn_var.v_ty;
     let fn_expr = Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var)) in
-    let block_body = lower_expr (Ast.EBlock (rest, sp)) in
+    let block_body = lower_expr env (Ast.EBlock (rest, sp)) in
     (match saved_fn with
      | Some t -> Hashtbl.replace _fn_param_types fn_name t
      | None -> Hashtbl.remove _fn_param_types fn_name);
     Tir.ELet (fn_var, fn_expr, block_body)
   | Ast.EBlock (e :: rest, sp) ->
-    let e' = lower_expr e in
-    let body = lower_expr (Ast.EBlock (rest, sp)) in
+    let e' = lower_expr env e in
+    let body = lower_expr env (Ast.EBlock (rest, sp)) in
     Tir.ESeq (e', body)
 
   (* --- If → ECase on bool (CPS for condition) --- *)
   | Ast.EIf (cond, then_e, else_e, _) ->
-    lower_to_atom_k cond (fun cond_atom ->
-      let then' = lower_expr then_e in
-      let else' = lower_expr else_e in
+    lower_to_atom_k env cond (fun cond_atom ->
+      let then' = lower_expr env then_e in
+      let else' = lower_expr env else_e in
       Tir.ECase (cond_atom,
         [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = then' }],
         Some else'))
@@ -530,8 +689,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     let rec lower_cond = function
       | [] -> no_match
       | (cond_e, body_e) :: rest ->
-        lower_to_atom_k cond_e (fun cond_atom ->
-          let body' = lower_expr body_e in
+        lower_to_atom_k env cond_e (fun cond_atom ->
+          let body' = lower_expr env body_e in
           let rest' = lower_cond rest in
           Tir.ECase (cond_atom,
             [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = body' }],
@@ -541,65 +700,65 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   (* --- Tuples (CPS for elements) --- *)
   | Ast.ETuple (es, _) ->
-    lower_atoms_k es (fun atoms -> Tir.ETuple atoms)
+    lower_atoms_k env es (fun atoms -> Tir.ETuple atoms)
 
   (* --- Records (CPS for field values) --- *)
   | Ast.ERecord (fields, _) ->
     let names = List.map (fun (n, _) -> n.Ast.txt) fields in
     let exprs = List.map snd fields in
-    lower_atoms_k exprs (fun atoms ->
+    lower_atoms_k env exprs (fun atoms ->
       Tir.ERecord (List.combine names atoms))
 
   | Ast.ERecordUpdate (base, updates, _) ->
-    lower_to_atom_k base (fun base_atom ->
+    lower_to_atom_k env base (fun base_atom ->
       let names = List.map (fun (n, _) -> n.Ast.txt) updates in
       let exprs = List.map snd updates in
-      lower_atoms_k exprs (fun atoms ->
+      lower_atoms_k env exprs (fun atoms ->
         Tir.EUpdate (base_atom, List.combine names atoms)))
 
   | Ast.EField (e, { txt = name; _ }, _) ->
-    lower_to_atom_k e (fun a -> Tir.EField (a, name))
+    lower_to_atom_k env e (fun a -> Tir.EField (a, name))
 
   (* --- Session-typed channel builtins (binary) --- *)
   | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_arg], _) ->
-    lower_to_atom_k proto_arg (fun proto' ->
+    lower_to_atom_k env proto_arg (fun proto' ->
       let fn_var : Tir.var = {
         v_name = "chan_new"; v_ty = Tir.TFn ([Tir.TString], Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
         v_lin = Tir.Unr } in
       Tir.EApp (fn_var, [proto']))
 
   | Ast.EApp (Ast.EVar { txt = "Chan.send"; _ }, [ch_arg; val_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
-      lower_to_atom_k val_arg (fun val' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
+      lower_to_atom_k env val_arg (fun val' ->
         let fn_var : Tir.var = {
           v_name = "chan_send"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
           v_lin = Tir.Unr } in
         Tir.EApp (fn_var, [ch'; val'])))
 
   | Ast.EApp (Ast.EVar { txt = "Chan.recv"; _ }, [ch_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
       let fn_var : Tir.var = {
         v_name = "chan_recv"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
         v_lin = Tir.Unr } in
       Tir.EApp (fn_var, [ch']))
 
   | Ast.EApp (Ast.EVar { txt = "Chan.close"; _ }, [ch_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
       let fn_var : Tir.var = {
         v_name = "chan_close"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TUnit);
         v_lin = Tir.Unr } in
       Tir.EApp (fn_var, [ch']))
 
   | Ast.EApp (Ast.EVar { txt = "Chan.choose"; _ }, [ch_arg; label_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
-      lower_to_atom_k label_arg (fun label' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
+      lower_to_atom_k env label_arg (fun label' ->
         let fn_var : Tir.var = {
           v_name = "chan_choose"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
           v_lin = Tir.Unr } in
         Tir.EApp (fn_var, [ch'; label'])))
 
   | Ast.EApp (Ast.EVar { txt = "Chan.offer"; _ }, [ch_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
       let fn_var : Tir.var = {
         v_name = "chan_offer"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
         v_lin = Tir.Unr } in
@@ -608,11 +767,11 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   (* --- Multi-party session type builtins --- *)
   | Ast.EApp (Ast.EVar { txt = "MPST.new"; _ }, [proto_arg], sp) ->
     (* Derive the role count from the result type (TTuple of N TChan endpoints). *)
-    let n_roles = match ty_of_span sp with
+    let n_roles = match ty_of_span env sp with
       | Tir.TTuple ts -> List.length ts
       | _ -> 3  (* fallback — shouldn't happen for well-typed code *)
     in
-    lower_to_atom_k proto_arg (fun proto' ->
+    lower_to_atom_k env proto_arg (fun proto' ->
       let n_atom = Tir.ALit (March_ast.Ast.LitInt n_roles) in
       let fn_var : Tir.var = {
         v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TPtr Tir.TUnit);
@@ -626,8 +785,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       | Ast.EAtom (s, [], _) | Ast.ELit (Ast.LitAtom s, _) -> s
       | _ -> "unknown"
     in
-    lower_to_atom_k ch_arg (fun ch' ->
-      lower_to_atom_k val_arg (fun val' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
+      lower_to_atom_k env val_arg (fun val' ->
         let role_str = Tir.ALit (March_ast.Ast.LitString role_name) in
         let fn_var : Tir.var = {
           v_name = "mpst_send"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TString; Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
@@ -640,7 +799,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       | Ast.EAtom (s, [], _) | Ast.ELit (Ast.LitAtom s, _) -> s
       | _ -> "unknown"
     in
-    lower_to_atom_k ch_arg (fun ch' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
       let role_str = Tir.ALit (March_ast.Ast.LitString role_name) in
       let fn_var : Tir.var = {
         v_name = "mpst_recv"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TString], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
@@ -648,7 +807,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       Tir.EApp (fn_var, [ch'; role_str]))
 
   | Ast.EApp (Ast.EVar { txt = "MPST.close"; _ }, [ch_arg], _) ->
-    lower_to_atom_k ch_arg (fun ch' ->
+    lower_to_atom_k env ch_arg (fun ch' ->
       let fn_var : Tir.var = {
         v_name = "mpst_close"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TUnit);
         v_lin = Tir.Unr } in
@@ -680,14 +839,14 @@ and lower_expr (e : Ast.expr) : Tir.expr =
            (match args with
             | first_arg :: _
               when not (Hashtbl.mem !_current_module_fns name) ->
-              (match resolve_iface_method name (Typecheck.span_of_expr first_arg) with
+              (match resolve_iface_method env name (Typecheck.span_of_expr first_arg) with
                | Some mangled_name -> Ast.EVar { txt = mangled_name; span = fn_span }
                | None -> f_expr)
             | _ -> f_expr))
       | _ -> f_expr
     in
-    lower_to_atom_k resolved_f (fun f_atom ->
-      lower_atoms_k args (fun arg_atoms ->
+    lower_to_atom_k env resolved_f (fun f_atom ->
+      lower_atoms_k env args (fun arg_atoms ->
         let f_var = match f_atom with
           | Tir.AVar v -> v
           | Tir.ADefRef did ->
@@ -752,7 +911,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
      result type from the typechecker; when it is TCon(type_name, _) we use
      "type_name.ctor_name" as the key, otherwise fall back to the bare name. *)
   | Ast.ECon ({ txt = tag; _ }, args, span) ->
-    lower_atoms_k args (fun arg_atoms ->
+    lower_atoms_k env args (fun arg_atoms ->
       (* The reference itself may be module- or type-qualified
          ("AeLib.AeWrap", "Expr.Col"); keep only the final segment so the key
          stays in the "TypeName.CtorName" format ctor_entry resolves against.
@@ -763,7 +922,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
         | None -> tag
       in
-      let ctor_key = match ty_of_span span with
+      let ctor_key = match ty_of_span env span with
         | Tir.TCon (type_name, _) -> type_name ^ "." ^ short_tag
         | _ -> short_tag
       in
@@ -774,7 +933,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
          raw-0 niche, to stay consistent with the boxed non-nullary ctor and the
          match's Boxed strategy.  Non-nullary ctors get the payload type from
          their arguments, so this is only needed when there are none. *)
-      let ctor_params = match ty_of_span span, arg_atoms with
+      let ctor_params = match ty_of_span env span, arg_atoms with
         | Tir.TCon (_, params), [] -> params
         | _ -> []
       in
@@ -784,7 +943,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ELam (params, body, lam_span) ->
     let fn_name = fresh_name "lam" in
     (* Extract param types from the lambda's inferred type when no annotation. *)
-    let lam_ty = ty_of_span lam_span in
+    let lam_ty = ty_of_span env lam_span in
     let inferred_param_tys = match lam_ty with
       | Tir.TFn (ps, _) -> ps
       | _ -> List.map (fun _ -> unknown_ty) params
@@ -817,7 +976,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       | _ ->
         Hashtbl.replace _fn_param_types v.v_name v.v_ty
     ) params';
-    let body' = lower_expr body in
+    let body' = lower_expr env body in
     List.iter (fun (name, saved) ->
       match saved with
       | Some ty -> Hashtbl.replace _fn_param_types name ty
@@ -831,7 +990,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
        would get fn_ret_ty = TVar "_" → void LLVM return → result silently
        dropped → NULL returned to the caller. *)
     let ret_ty =
-      let from_body = ty_of_expr body in
+      let from_body = ty_of_expr env body in
       match from_body with
       | Tir.TVar "_" ->
         (match lam_ty with
@@ -852,16 +1011,16 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   (* --- Match → ECase (CPS for scrutinee) --- *)
   | Ast.EMatch (scrut, branches, _) ->
-    lower_to_atom_k scrut (fun scrut_atom ->
-      lower_match scrut_atom branches)
+    lower_to_atom_k env scrut (fun scrut_atom ->
+      lower_match env scrut_atom branches)
 
   (* --- Annotations: lower the inner expr --- *)
-  | Ast.EAnnot (e, _, _) -> lower_expr e
+  | Ast.EAnnot (e, _, _) -> lower_expr env e
 
   (* --- Atoms (the :tag syntax) --- *)
   | Ast.EAtom (a, [], _) -> Tir.EAtom (Tir.ALit (Ast.LitAtom a))
   | Ast.EAtom (a, args, _) ->
-    lower_atoms_k args (fun arg_atoms ->
+    lower_atoms_k env args (fun arg_atoms ->
       Tir.EAlloc (Tir.TCon (a, []), arg_atoms))
 
   (* --- Holes --- *)
@@ -879,12 +1038,12 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
   | Ast.EDbg (Some inner, _) ->
     (* dbg(expr): compile to just the expression (strip the debug wrapper) *)
-    lower_expr inner
+    lower_expr env inner
 
   (* --- Send/Spawn (CPS for args) --- *)
   | Ast.ESend (cap, msg, _) ->
-    lower_to_atom_k cap (fun cap' ->
-      lower_to_atom_k msg (fun msg' ->
+    lower_to_atom_k env cap (fun cap' ->
+      lower_to_atom_k env msg (fun msg' ->
         let send_var : Tir.var = {
           v_name = "send";
           v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit],
@@ -925,18 +1084,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     let params' = List.map (fun (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
           v_ty = (match p.param_ty with Some t -> lower_ty t
-                  | None -> ty_of_span p.param_name.span);
+                  | None -> ty_of_span env p.param_name.span);
           v_lin = lower_linearity p.param_lin }
       ) params in
     let ret_ty_pre = match ret_ty_ann with Some t -> lower_ty t | None -> unknown_ty in
     let param_tys' = List.map (fun v -> v.Tir.v_ty) params' in
     let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
     Hashtbl.replace _fn_param_types fn_name (Tir.TFn (param_tys', ret_ty_pre));
-    let body' = lower_expr body in
+    let body' = lower_expr env body in
     (match saved_fn with
      | Some t -> Hashtbl.replace _fn_param_types fn_name t
      | None -> Hashtbl.remove _fn_param_types fn_name);
-    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr body in
+    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr env body in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body';
       fn_kind = Tir.FnLambda;  (* `ELetFn` — named local recursive fn *)
@@ -962,13 +1121,13 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       branch_guard = None;
       branch_body  = Ast.ECon ({ txt = "Err"; span = dsp }, [Ast.EVar err_var], dsp);
     } in
-    lower_expr (Ast.EMatch (result_expr, [ok_branch; err_branch], dsp))
+    lower_expr env (Ast.EMatch (result_expr, [ok_branch; err_branch], dsp))
 
   (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
   | Ast.EAssert (inner, _) ->
     (* Lower assert to: if inner then () else panic("assertion failed")
        Uses same CPS-based bool dispatch as EIf. *)
-    lower_to_atom_k inner (fun cond_atom ->
+    lower_to_atom_k env inner (fun cond_atom ->
       let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
       let panic_var : Tir.var = {
         v_name = "panic";
@@ -993,20 +1152,20 @@ and is_trivial_pat : Ast.pattern -> bool = function
 
 (** Wrap [body] with bindings from a trivial pattern on [scrut].
     Handles PatVar (bind), PatWild (no-op), PatAs (bind outer name + recurse). *)
-and bind_trivial_pat (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
+and bind_trivial_pat (env : env) (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
   match pat with
   | Ast.PatWild _ -> body
   | Ast.PatVar n ->
     (* Use the typechecker's type for this variable (via its source span) so that
        field accesses on pattern-matched records resolve to the correct offsets.
        Without this, record field lookups fall back to index 0 for all fields. *)
-    let resolved_ty = ty_of_span n.span in
+    let resolved_ty = ty_of_span env n.span in
     let v : Tir.var = { v_name = n.txt; v_ty = resolved_ty; v_lin = Tir.Unr } in
     Tir.ELet (v, Tir.EAtom scrut, body)
   | Ast.PatAs (inner, n, _) ->
-    let v : Tir.var = { v_name = n.txt; v_ty = ty_of_span n.span; v_lin = Tir.Unr } in
+    let v : Tir.var = { v_name = n.txt; v_ty = ty_of_span env n.span; v_lin = Tir.Unr } in
     let named_body = Tir.ELet (v, Tir.EAtom scrut, body) in
-    bind_trivial_pat scrut inner named_body
+    bind_trivial_pat env scrut inner named_body
   | _ -> body
 
 (** Format an [Ast.span] as "file:line:col" for a fail-loudly diagnostic. *)
@@ -1118,14 +1277,15 @@ and is_atomic_fallback : Tir.expr -> bool = function
     the exponential TIR blowup for nested [Cons] / string-literal
     patterns in multi-arm matches. *)
 and compile_matrix
+    (env      : env)
     (scruts   : Tir.atom list)
     (rows     : (Ast.pattern list * Tir.expr) list)
     (fallback : Tir.expr option)
   : Tir.expr =
   match fallback with
-  | None -> compile_matrix_impl scruts rows None
+  | None -> compile_matrix_impl env scruts rows None
   | Some fb when is_atomic_fallback fb ->
-    compile_matrix_impl scruts rows fallback
+    compile_matrix_impl env scruts rows fallback
   | Some fb ->
     let jp_fn_name = fresh_name "jp" in
     let jp_fn_ty   = Tir.TFn ([], unknown_ty) in
@@ -1155,10 +1315,11 @@ and compile_matrix
        this to [ECallPtr] because [clo_var] has a [TFn] type and is not
        a top-level name. *)
     let jp_call = Tir.EApp (clo_var, []) in
-    let body    = compile_matrix_impl scruts rows (Some jp_call) in
+    let body    = compile_matrix_impl env scruts rows (Some jp_call) in
     Tir.ELet (clo_var, lambda_expr, body)
 
 and compile_matrix_impl
+    (env      : env)
     (scruts   : Tir.atom list)
     (rows     : (Ast.pattern list * Tir.expr) list)
     (fallback : Tir.expr option)
@@ -1193,8 +1354,8 @@ and compile_matrix_impl
           (* Bind the trivial first-column pattern on [scrut], then continue
              matching remaining columns (rest_scruts) with remaining patterns
              (rest_pats).  Any further rows (more) become the inner fallback. *)
-          let inner_fb = compile_matrix (scrut :: rest_scruts) more fallback in
-          let body_with_bindings = bind_trivial_pat scrut fp body in
+          let inner_fb = compile_matrix env (scrut :: rest_scruts) more fallback in
+          let body_with_bindings = bind_trivial_pat env scrut fp body in
           (* If there are more columns, we still need to compile them.
              For the trivial row itself, the remaining columns are rest_pats
              matched against rest_scruts. *)
@@ -1202,7 +1363,7 @@ and compile_matrix_impl
             if rest_pats = [] || rest_scruts = [] then body_with_bindings
             else
               let inner_rows = [(rest_pats, body_with_bindings)] in
-              compile_matrix rest_scruts inner_rows (Some inner_fb)
+              compile_matrix env rest_scruts inner_rows (Some inner_fb)
           in
           (* The full default also handles any subsequent trivial rows via inner_fb *)
           let _ = inner_fb in   (* inner_fb used above only as compile_matrix fallback *)
@@ -1252,7 +1413,7 @@ and compile_matrix_impl
             let sub_atoms = List.map (fun v -> Tir.AVar v) sub_vars in
             let combined_scruts = sub_atoms @ rest_scruts in
             let branch_body =
-              compile_matrix combined_scruts !rows_ref default
+              compile_matrix env combined_scruts !rows_ref default
             in
             Some { Tir.br_tag = tag; br_vars = sub_vars; br_body = branch_body }
           ) !tag_groups
@@ -1302,15 +1463,15 @@ and collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
 (** Lower a branch body with the pattern's bound names registered in
     [_fn_param_types] for the duration of the lowering.  Restores any
     shadowed entries afterwards. *)
-and lower_branch_body_with_pat (pat : Ast.pattern) (body : Ast.expr) : Tir.expr =
+and lower_branch_body_with_pat (env : env) (pat : Ast.pattern) (body : Ast.expr) : Tir.expr =
   let names = collect_pat_names pat in
   let saved_shadowed = List.filter_map (fun (name, _) ->
       match Hashtbl.find_opt _fn_param_types name with
       | Some ty -> Some (name, ty)
       | None -> None) names in
   List.iter (fun (name, sp) ->
-    Hashtbl.replace _fn_param_types name (ty_of_span sp)) names;
-  let result = lower_expr body in
+    Hashtbl.replace _fn_param_types name (ty_of_span env sp)) names;
+  let result = lower_expr env body in
   List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) names;
   List.iter (fun (name, ty) ->
     Hashtbl.replace _fn_param_types name ty) saved_shadowed;
@@ -1320,15 +1481,15 @@ and lower_branch_body_with_pat (pat : Ast.pattern) (body : Ast.expr) : Tir.expr 
     Branches with [when] guards are handled by embedding a boolean check
     in the branch body: if the guard is false, control falls through to the
     remaining branches. *)
-and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
+and lower_match (env : env) (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
   let has_guards = List.exists (fun (br : Ast.branch) ->
       br.branch_guard <> None) branches in
   if not has_guards then begin
     (* Fast path: no guards — use efficient matrix compilation. *)
     let rows = List.map (fun (br : Ast.branch) ->
         ([br.branch_pat],
-         lower_branch_body_with_pat br.branch_pat br.branch_body)) branches in
-    compile_matrix [scrut] rows None
+         lower_branch_body_with_pat env br.branch_pat br.branch_body)) branches in
+    compile_matrix env [scrut] rows None
   end else begin
     (* Guards present: compile each branch individually with fallthrough
        to the remaining branches when the guard fails. *)
@@ -1344,12 +1505,12 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
             | Some ty -> Some (name, ty)
             | None -> None) pat_names in
         List.iter (fun (name, sp) ->
-          Hashtbl.replace _fn_param_types name (ty_of_span sp)) pat_names;
-        let body = lower_expr br.branch_body in
+          Hashtbl.replace _fn_param_types name (ty_of_span env sp)) pat_names;
+        let body = lower_expr env br.branch_body in
         let guarded_body = match br.branch_guard with
           | None -> body
           | Some guard ->
-            let guard_expr = lower_expr guard in
+            let guard_expr = lower_expr env guard in
             let gv : Tir.var = { v_name = fresh_name "guard";
                                  v_ty = Tir.TBool; v_lin = Tir.Unr } in
             Tir.ELet (gv, guard_expr,
@@ -1360,7 +1521,7 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
         List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
         List.iter (fun (name, ty) ->
           Hashtbl.replace _fn_param_types name ty) saved_shadowed;
-        compile_matrix [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
+        compile_matrix env [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
     in
     go branches
   end
@@ -1431,7 +1592,7 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)
-let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
+let lower_fn_def (env : env) (def : Ast.fn_def) : Tir.fn_def =
   let clause = match def.fn_clauses with
     | [c] -> c
     | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
@@ -1457,19 +1618,19 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
   let params = List.map (fun fp ->
       match fp with
       | Ast.FPNamed p ->
-        let ty = ty_from_tc_or_ann (ty_of_span p.param_name.span) p.param_ty in
+        let ty = ty_from_tc_or_ann (ty_of_span env p.param_name.span) p.param_ty in
         { Tir.v_name = p.param_name.txt;
           v_ty = ty;
           v_lin = lower_linearity p.param_lin }
       | Ast.FPPat (Ast.PatVar n) ->
-        { Tir.v_name = n.txt; v_ty = ty_of_span n.span; v_lin = Tir.Unr }
+        { Tir.v_name = n.txt; v_ty = ty_of_span env n.span; v_lin = Tir.Unr }
       | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
     ) clause.fc_params in
   let ret_ty =
     (* Same rationale as params: prefer the typechecker's inferred return type,
        falling back to the source annotation only when the typechecker has no
        record for the body span. *)
-    let tc_ret = ty_of_expr clause.fc_body in
+    let tc_ret = ty_of_expr env clause.fc_body in
     ty_from_tc_or_ann tc_ret def.fn_ret_ty
   in
   (* Populate the parameter type scope so that body variable references can
@@ -1478,7 +1639,7 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
   let saved_scope = Hashtbl.copy _fn_param_types in
   Hashtbl.clear _fn_param_types;
   List.iter (fun v -> Hashtbl.replace _fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body = lower_expr clause.fc_body in
+  let body = lower_expr env clause.fc_body in
   Hashtbl.clear _fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace _fn_param_types k v) saved_scope;
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
@@ -1503,7 +1664,7 @@ let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_de
 
 (** Lower all declarations from a stdlib module's body, adding functions
     and types to the current module-level accumulator refs. *)
-let rec lower_stdlib_mod_decls prefix decls =
+let rec lower_stdlib_mod_decls (env : env) prefix decls =
   let direct_fn_names = List.filter_map (function
       | Ast.DFn (def, _) -> Some def.fn_name.txt
       | Ast.DLet (_, b, _) ->
@@ -1512,7 +1673,7 @@ let rec lower_stdlib_mod_decls prefix decls =
   List.iter (fun d ->
       match d with
       | Ast.DFn (def, _) ->
-        let fn = lower_fn_def def in
+        let fn = lower_fn_def env def in
         let fn = rename_tir_vars prefix direct_fn_names fn in
         !_fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!_fns_ref)
       | Ast.DType (_, tname, params, td, _)
@@ -1522,18 +1683,18 @@ let rec lower_stdlib_mod_decls prefix decls =
          | Some td' -> !_types_ref := td' :: !(!_types_ref)
          | None -> ())
       | Ast.DMod (sub_name, _, sub_decls, _) ->
-        lower_stdlib_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+        lower_stdlib_mod_decls env (prefix ^ sub_name.txt ^ ".") sub_decls
       | Ast.DLet (_, b, _) ->
         (* Module-level let bindings are compiled as zero-arg functions so they
            can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
         (match b.bind_pat with
          | Ast.PatVar n ->
-           let rhs = lower_expr b.bind_expr in
+           let rhs = lower_expr env b.bind_expr in
            let fn : Tir.fn_def = {
              fn_name   = prefix ^ n.txt;
              fn_params = [];
              fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
-                          | None -> ty_of_expr b.bind_expr);
+                          | None -> ty_of_expr env b.bind_expr);
              fn_body   = rhs;
              fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
            } in
@@ -1542,7 +1703,7 @@ let rec lower_stdlib_mod_decls prefix decls =
       | _ -> ()
     ) decls
 
-let () = _ensure_module_lowered := (fun mod_name ->
+let () = _ensure_module_lowered := (fun env mod_name ->
   if not (Hashtbl.mem !_lowered_modules mod_name) then begin
     Hashtbl.replace !_lowered_modules mod_name ();
     match March_modules.Module_registry.find_stdlib_file mod_name with
@@ -1561,7 +1722,7 @@ let () = _ensure_module_lowered := (fun mod_name ->
          let ast = March_parser.Parser.module_
                      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
          let ast = March_desugar.Desugar.desugar_module ast in
-         lower_stdlib_mod_decls (mod_name ^ ".") ast.mod_decls
+         lower_stdlib_mod_decls env (mod_name ^ ".") ast.mod_decls
        with _ -> ())
   end)
 
@@ -1586,7 +1747,7 @@ let () = _ensure_module_lowered := (fun mod_name ->
       Name_dispatch(actor:ptr, msg:ptr) → Unit
       Name_spawn() → ptr
 *)
-let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
+let lower_actor (env : env) ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
   (* State fields sorted alphabetically (matches TRecord ordering) *)
   let state_fields_sorted : (string * Tir.ty) list =
     List.sort (fun (a, _) (b, _) -> String.compare a b)
@@ -1670,7 +1831,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
        Build the continuation bottom-up: first build inner body, wrap in lets. *)
 
     (* Step 1: lower the handler body (uses `state` variable) *)
-    let body_tir = lower_expr h.ah_body in
+    let body_tir = lower_expr env h.ah_body in
 
     let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
     (* Step 2: let $result = body_tir *)
@@ -1884,7 +2045,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
   (* Wrap the spawn body: after allocating the actor, register supervision if needed. *)
   let spawn_body_with_sup =
     match actor.actor_supervise with
-    | None -> Tir.ELet (init_var, lower_expr actor.actor_init, spawn_with_fields)
+    | None -> Tir.ELet (init_var, lower_expr env actor.actor_init, spawn_with_fields)
     | Some sc ->
       (* Replace the final EAtom($spawned) with:
            let $reg_sup_result = register_supervisor($spawned, strat, max, window) in
@@ -1901,7 +2062,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
         | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap_sup body)
         | other -> other
       in
-      Tir.ELet (init_var, lower_expr actor.actor_init, wrap_sup spawn_with_fields)
+      Tir.ELet (init_var, lower_expr env actor.actor_init, wrap_sup spawn_with_fields)
   in
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_spawn_suffix;
@@ -1935,10 +2096,14 @@ let builtin_type_defs : Tir.type_def list = [
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
-  _type_map_ref := type_map;
+  (* env is constructed fresh here (module-scoped fields only — the
+     reset-at-entry set, per the plan's landmine classification): [type_map]
+     is set once from the caller's argument and never mutated again this
+     call; [current_module_aliases] starts as a fresh empty table exactly
+     like the old [_current_module_aliases := Hashtbl.create 16] did. *)
+  let env = { type_map; current_module_aliases = Hashtbl.create 16 } in
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
-  _current_module_aliases := Hashtbl.create 16;
   _module_alias_snapshots := Hashtbl.create 16;
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
@@ -1970,7 +2135,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      These mirror the builtin_impls registered in the typechecker.
      Synthetic TIR functions delegate to the corresponding built-in ops.
      Only injected when a type_map is available (full pipeline mode). *)
-  if !_type_map_ref <> None then begin
+  if env.type_map <> None then begin
   let mk_var name ty = { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr } in
   let call2 op_name x_ty y_ty ret_ty =
     (* fn(x, y) -> op(x, y) *)
@@ -2144,7 +2309,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the dispatch entry — the function is already precompiled. *)
                 ignore mdef;
                 if lower_bodies then begin
-                  let fn = lower_fn_def mdef in
+                  let fn = lower_fn_def env mdef in
                   (* If this impl is inside a module, qualify any references to
                      module-local functions (e.g. bigint_eq_impl → BigInt.bigint_eq_impl)
                      so that mono can find them in fn_table (which uses the
@@ -2230,7 +2395,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       match d with
       | Ast.DFn (def, _) ->
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
-          let fn = lower_fn_def def in   (* evaluate before reading !fns *)
+          let fn = lower_fn_def env def in   (* evaluate before reading !fns *)
           fns := fn :: !fns
         end
       | _ -> ()
@@ -2257,7 +2422,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            The mangled versions (foo$N) are the real implementations used by TIR.
            Dispatchers are only needed by the interpreter for VMultiarity dispatch. *)
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
-          let fn = lower_fn_def def in   (* evaluate before reading !fns *)
+          let fn = lower_fn_def env def in   (* evaluate before reading !fns *)
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
@@ -2266,19 +2431,19 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
          | Some td' -> types := td' :: !types
          | None -> ())
       | Ast.DLet (_, b, _) ->
-        let rhs = lower_expr b.bind_expr in
+        let rhs = lower_expr env b.bind_expr in
         (match b.bind_pat with
          | Ast.PatVar n ->
            let v : Tir.var = {
              v_name = n.txt;
              v_ty = (match b.bind_ty with Some t -> lower_ty t
-                     | None -> ty_of_expr b.bind_expr);
+                     | None -> ty_of_expr env b.bind_expr);
              v_lin = lower_linearity b.bind_lin;
            } in
            top_lets := (v, rhs) :: !top_lets
          | _ -> ())
       | Ast.DActor (_, name, actor_def, _) ->
-        let (new_types, new_fns) = lower_actor ~hot_reload name.txt actor_def in
+        let (new_types, new_fns) = lower_actor env ~hot_reload name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
@@ -2291,26 +2456,27 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            iface dispatch (e.g. hash → march_hash_string/int/…), leaving a bare
            @hash extern that the linker cannot resolve. *)
         Hashtbl.replace !_lowered_modules mod_name.txt ();
-        let rec lower_mod_decls prefix decls =
+        let rec lower_mod_decls (env : env) prefix decls =
           let direct_fn_names = List.filter_map (function
               | Ast.DFn (def, _) -> Some def.fn_name.txt
               | Ast.DLet (_, b, _) ->
                 (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
               | _ -> None) decls in
           (* Scope the per-module import-alias table: inherit the enclosing
-             module's aliases, add this module's own imports as they are
-             processed, and restore on exit so sibling modules don't see each
-             other's imports. *)
-          let saved_mod_aliases = !_current_module_aliases in
-          _current_module_aliases := Hashtbl.copy saved_mod_aliases;
-          Fun.protect
-            ~finally:(fun () -> _current_module_aliases := saved_mod_aliases)
-            (fun () ->
+             module's aliases (via a fresh copy in [mod_env]) so this
+             module's own imports (registered into [mod_env.current_module_aliases]
+             below) do not leak into the CALLER's [env] value once this
+             function returns — [env] itself is never mutated, so "restore"
+             is automatic (the caller's own binding is untouched), the exact
+             behavior the old code's [Fun.protect]-guarded [:=]/restore dance
+             produced. *)
+          let mod_env = { env with
+            current_module_aliases = Hashtbl.copy env.current_module_aliases } in
           with_current_module_fns direct_fn_names (fun () ->
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
-                let fn = lower_fn_def def in
+                let fn = lower_fn_def mod_env def in
                 let fn = rename_tir_vars prefix direct_fn_names fn in
                 fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
               | Ast.DType (_, tname, params, td, _)
@@ -2320,19 +2486,19 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                  | Some td' -> types := td' :: !types
                  | None -> ())
               | Ast.DMod (sub_name, _, sub_decls, _) ->
-                lower_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+                lower_mod_decls mod_env (prefix ^ sub_name.txt ^ ".") sub_decls
               | Ast.DLet (_, b, _) ->
                 (* Module-level let bindings are compiled as zero-arg functions
                    so they can be referenced by qualified name after
                    rename_tir_vars renames the short name to prefix^name. *)
-                let rhs = lower_expr b.bind_expr in
+                let rhs = lower_expr mod_env b.bind_expr in
                 (match b.bind_pat with
                  | Ast.PatVar n ->
                    let fn : Tir.fn_def = {
                      fn_name   = prefix ^ n.txt;
                      fn_params = [];
                      fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
-                                  | None -> ty_of_expr b.bind_expr);
+                                  | None -> ty_of_expr mod_env b.bind_expr);
                      fn_body   = rhs;
                      fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
@@ -2378,8 +2544,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                            this import wins over a global alias another module
                            registered for the same short name.  First local
                            registration wins (mirrors the global first-wins). *)
-                        if not (Hashtbl.mem !_current_module_aliases short) then
-                          Hashtbl.replace !_current_module_aliases short fn_name
+                        if not (Hashtbl.mem mod_env.current_module_aliases short) then
+                          Hashtbl.replace mod_env.current_module_aliases short fn_name
                       end
                     end
                   ) all_fn_names
@@ -2397,7 +2563,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    Handler bodies reference the module's private helpers by short
                    name; rename_tir_vars rewrites them to their qualified names so
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
-                let (new_types, new_fns) = lower_actor ~hot_reload name.txt actor_def in
+                let (new_types, new_fns) = lower_actor mod_env ~hot_reload name.txt actor_def in
                 let renamed_fns = List.map (rename_tir_vars prefix direct_fn_names) new_fns in
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns
@@ -2426,9 +2592,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           (* Save this module's aliases so the later test/setup lowering pass
              (collect_tests) can re-load them for DTest bodies. *)
           Hashtbl.replace !_module_alias_snapshots prefix
-            (Hashtbl.copy !_current_module_aliases))
+            (Hashtbl.copy mod_env.current_module_aliases)
         in
-        lower_mod_decls (mod_name.txt ^ ".") inner_decls
+        lower_mod_decls env (mod_name.txt ^ ".") inner_decls
       | Ast.DExtern (edef, _) ->
         List.iter (fun (ef : Ast.extern_fn) ->
             let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
@@ -2536,7 +2702,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | _ -> None) decls
     in
     (* Lower a test-body expression to a zero-arg TIR function. *)
-    let lower_test_body ~mod_prefix ~direct_fn_names display_name body =
+    let lower_test_body test_env ~mod_prefix ~direct_fn_names display_name body =
       let fn_name = Tir_names.test_fn_name !test_counter in
       incr test_counter;
       (* Register the enclosing module's own function names as current-module
@@ -2546,7 +2712,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
          2-arg stdlib [Bytes.list_len]).  Without this the local def is shadowed
          by the import BEFORE [qualify_locals] can prefix it, producing a call to
          the wrong-arity stdlib function (arg dropped → uninitialized param). *)
-      let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
+      let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
       let fn : Tir.fn_def = {
         fn_name;
         fn_params = [];
@@ -2564,20 +2730,24 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     in
     (* Recursive collector: descends into DDescribe and DMod blocks.
        [prefix] builds the human-readable display name; [mod_prefix] /
-       [direct_fn_names] track the enclosing module for symbol renaming. *)
-    let rec collect_tests prefix ~mod_prefix ~direct_fn_names decls =
+       [direct_fn_names] track the enclosing module for symbol renaming.
+       [test_env] carries the CURRENT module's [current_module_aliases] —
+       re-loaded per [DMod] descent from [_module_alias_snapshots] below,
+       since this whole pass runs after [env]'s own module-alias scoping
+       (in [lower_mod_decls] above) has already unwound. *)
+    let rec collect_tests test_env prefix ~mod_prefix ~direct_fn_names decls =
       List.iter (fun d ->
         match d with
         | Ast.DTest (tdef, _) ->
           let display = if prefix = "" then tdef.Ast.test_name
                         else prefix ^ " " ^ tdef.Ast.test_name in
-          lower_test_body ~mod_prefix ~direct_fn_names display tdef.Ast.test_body
+          lower_test_body test_env ~mod_prefix ~direct_fn_names display tdef.Ast.test_body
         | Ast.DDescribe (label, inner, _) ->
           let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
-          collect_tests new_prefix ~mod_prefix ~direct_fn_names inner
+          collect_tests test_env new_prefix ~mod_prefix ~direct_fn_names inner
         | Ast.DSetup (body, _) ->
           (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
-          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
+          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
           let fn : Tir.fn_def = {
             fn_name   = Tir_names.setup_fn_name;
             fn_params = [];
@@ -2587,7 +2757,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           } in
           fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DSetupAll (body, _) ->
-          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr body) in
+          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
           let fn : Tir.fn_def = {
             fn_name   = Tir_names.setup_all_fn_name;
             fn_params = [];
@@ -2601,20 +2771,28 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           (* Re-load this module's import aliases (saved during lower_mod_decls)
              so the test bodies inside resolve unqualified names via the module's
              own imports — e.g. `close` → Connection.close, not the global
-             Db.close. *)
-          let saved_aliases = !_current_module_aliases in
-          (match Hashtbl.find_opt !_module_alias_snapshots new_mod_prefix with
-           | Some snap -> _current_module_aliases := snap
-           | None -> ());
-          collect_tests prefix
+             Db.close. A fresh [env] value (not a mutation of [test_env]), so
+             sibling [DMod]s at this level are unaffected — matching the old
+             code's save/restore around [_current_module_aliases] on the
+             normal path. NOTE the old dance here was NOT [Fun.protect]-
+             guarded (unlike lower_mod_decls'): a throw escaping this
+             recursion used to leave the ref dirty, which the env version
+             does not reproduce — an UNOBSERVABLE difference (see the
+             [env.current_module_aliases] field doc for the full trace:
+             no reader outside [lower_module]'s dynamic extent, and the
+             next call's entry preamble reset the ref before any read). *)
+          let inner_env = match Hashtbl.find_opt !_module_alias_snapshots new_mod_prefix with
+            | Some snap -> { test_env with current_module_aliases = snap }
+            | None -> test_env
+          in
+          collect_tests inner_env prefix
             ~mod_prefix:new_mod_prefix
             ~direct_fn_names:(direct_names_of inner_decls)
-            inner_decls;
-          _current_module_aliases := saved_aliases
+            inner_decls
         | _ -> ()
       ) decls
     in
-    collect_tests "" ~mod_prefix:"" ~direct_fn_names:(direct_names_of m.mod_decls) m.mod_decls
+    collect_tests env "" ~mod_prefix:"" ~direct_fn_names:(direct_names_of m.mod_decls) m.mod_decls
   end;
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
@@ -2679,10 +2857,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     tm_exports = [];
     tm_tests = List.rev !test_pairs;
     tm_io_fns = [] } in
-  _type_map_ref := None;
+  (* [env]'s [type_map] and [current_module_aliases] fields are local
+     bindings, not refs — they are simply dropped when [lower_module]
+     returns, with no explicit reset needed (was [_type_map_ref := None];
+     [_current_module_aliases := Hashtbl.create 0]). *)
   (* Save a snapshot before clearing so the mono pass can use it. *)
   _saved_iface_methods := Hashtbl.copy !_iface_methods;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
-  _current_module_aliases := Hashtbl.create 0;
   result

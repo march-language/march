@@ -662,7 +662,7 @@ let test_tir_lower_qualified_auto_load () =
   March_tir.Lower._fns_ref := ref [];
   March_tir.Lower._types_ref := ref [];
   (* Try to load a nonexistent module — should not crash *)
-  !(March_tir.Lower._ensure_module_lowered) "NoSuchModule99";
+  !(March_tir.Lower._ensure_module_lowered) March_tir.Lower.empty_env "NoSuchModule99";
   Alcotest.(check bool) "nonexistent module tracked"
     true (Hashtbl.mem !(March_tir.Lower._lowered_modules) "NoSuchModule99");
   (* Fns should still be empty — no module found *)
