@@ -5522,7 +5522,9 @@ let test_guard_exhaustion_panics_compiled () =
   (* Run from the project root so the compiler resolves its CWD-relative
      runtime/ and stdlib/ directories (same trick as the other compiled
      regression tests in test_stdlib_suite.ml). *)
-  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  (* exe_dir is <root>/_build/default/test, so three dirnames reach <root>. *)
+  let project_root =
+    Filename.dirname (Filename.dirname (Filename.dirname exe_dir)) in
   if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
   else begin
     let src_text =
@@ -5604,7 +5606,9 @@ let read_cmd_output cmd =
 let write_march_source ~name src_text =
   let exe_dir  = Filename.dirname Sys.executable_name in
   let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  (* exe_dir is <root>/_build/default/test, so three dirnames reach <root>. *)
+  let project_root =
+    Filename.dirname (Filename.dirname (Filename.dirname exe_dir)) in
   let tmp = Filename.temp_file name "" in
   Sys.remove tmp;
   Unix.mkdir tmp 0o755;
@@ -5754,12 +5758,11 @@ let test_erased_update_missing_field_panics_compiled () =
   in
   if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
   else begin
-    (* Compile from the SOURCE root (the parent of _build): the new
-       march_record_update_dyn symbol must come from the live runtime/*.c
-       sources, not _build/default's runtime copies (refreshed only when a
-       dune rule that lists them as deps runs).  write_march_source's
-       project_root is .../_build, so its parent is the source tree. *)
-    let src_root = Filename.dirname project_root in
+    (* Compile from the source root: the new march_record_update_dyn symbol
+       must come from the live runtime/*.c sources, not _build/default's
+       runtime copies (refreshed only when a dune rule that lists them as
+       deps runs). *)
+    let src_root = project_root in
     let bin = Filename.concat tmp "erasedupdmissbin" in
     let compile_rc = Sys.command (Printf.sprintf
       "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
@@ -5807,7 +5810,7 @@ let test_erased_update_multi_field_values_compiled () =
     Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
     (* --- compiled must agree (compile from the source root — see the
        missing-field test above for why) --- *)
-    let src_root = Filename.dirname project_root in
+    let src_root = project_root in
     let bin = Filename.concat tmp "erasedupdmultibin" in
     let compile_rc = Sys.command (Printf.sprintf
       "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
