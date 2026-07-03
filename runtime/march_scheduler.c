@@ -73,6 +73,12 @@ static _Atomic int      g_all_done       = 0;
 static _Atomic int64_t  g_live_procs     = 0;
 static _Atomic int      g_sched_shutdown = 0;
 
+/* Live procs that are NOT daemons (main, task procs).  When this reaches 0
+ * after shutdown is requested, only actor recv loops remain — the idle
+ * branch of sched_loop then wakes parked daemons so they exit their loops
+ * (recv returns MARCH_RECV_NO_MSG) and the scheduler can drain to 0. */
+static _Atomic int64_t  g_live_nondaemon = 0;
+
 /* Lock-free stack of procs spawned from outside any scheduler thread.
  * Workers drain this into their local deques each idle cycle.
  * Using march_proc::next as the intrusive link. */
@@ -94,18 +100,29 @@ static size_t g_page_size = 0;
 static march_proc *g_proc_registry[MARCH_MAX_PROCS];
 static int64_t     g_proc_count = 0;
 
+/* Guards registry slots against the walk-vs-free race: sched_loop removes a
+ * DEAD proc from the registry (under this mutex) strictly BEFORE freeing it,
+ * so a walker holding the mutex either sees the slot populated with a
+ * not-yet-freed proc or sees NULL — never a dangling pointer.  Walkers:
+ * march_sched_wait_idle and wake_idle_daemons. */
+static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
+
 static void registry_add(march_proc *p) {
+    pthread_mutex_lock(&g_registry_mu);
     if (p->pid < MARCH_MAX_PROCS) {
         g_proc_registry[p->pid] = p;
     }
     g_proc_count++;
+    pthread_mutex_unlock(&g_registry_mu);
 }
 
 static void registry_remove(march_proc *p) {
+    pthread_mutex_lock(&g_registry_mu);
     if (p->pid < MARCH_MAX_PROCS) {
         g_proc_registry[p->pid] = NULL;
     }
     g_proc_count--;
+    pthread_mutex_unlock(&g_registry_mu);
 }
 
 /* ── Stack allocation helpers (Phase 4: lazy virtual-memory growth) ───── */
@@ -361,6 +378,7 @@ void march_sched_init(void) {
     atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
     atomic_store_explicit(&g_all_done,       0, memory_order_relaxed);
     atomic_store_explicit(&g_live_procs,     0, memory_order_relaxed);
+    atomic_store_explicit(&g_live_nondaemon, 0, memory_order_relaxed);
     atomic_store_explicit(&g_sched_shutdown, 0, memory_order_relaxed);
     atomic_store_explicit(&g_ext_spawn_head, (march_proc *)NULL, memory_order_relaxed);
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
@@ -390,7 +408,7 @@ void march_sched_init(void) {
     install_stack_growth_handler();
 }
 
-march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
+static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daemon) {
     march_proc *p = (march_proc *)calloc(1, sizeof(march_proc));
     if (!p) {
         fputs("march_sched: out of memory (process alloc)\n", stderr);
@@ -398,6 +416,7 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     }
 
     p->pid        = atomic_fetch_add_explicit(&g_next_pid, 1, memory_order_relaxed);
+    p->is_daemon  = is_daemon;
     p->status     = PROC_READY;
     p->priority   = PRIO_NORMAL;
     p->reductions = MARCH_REDUCTION_BUDGET;
@@ -438,6 +457,8 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
 
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
+    if (!is_daemon)
+        atomic_fetch_add_explicit(&g_live_nondaemon, 1, memory_order_relaxed);
 
     /* Push to the local deque if called from a scheduler thread.
      * From non-scheduler threads (e.g. main thread), push to a lock-free
@@ -458,7 +479,41 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     return p;
 }
 
+march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
+    return sched_spawn_common(fn, arg, 0);
+}
+
+march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
+    return sched_spawn_common(fn, arg, 1);
+}
+
 /* ── Per-thread scheduler loop with work-stealing ────────────────────── */
+
+/* Wake every parked daemon proc that has an empty mailbox.  Called from the
+ * idle branch of sched_loop once shutdown has been requested and no
+ * non-daemon procs remain: the woken daemons' march_sched_recv returns
+ * MARCH_RECV_NO_MSG, their loops (actor_green_thread) break, and they die —
+ * letting g_live_procs drain to 0 so the scheduler can exit.  Daemons with
+ * pending messages are left alone; the normal send/wake path handles them
+ * and a later idle iteration picks them up once drained.
+ * Returns the number of procs woken. */
+static int wake_idle_daemons(void) {
+    int woken = 0;
+    pthread_mutex_lock(&g_registry_mu);
+    int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
+    if (hi > MARCH_MAX_PROCS) hi = MARCH_MAX_PROCS;
+    for (int64_t i = 0; i < hi; i++) {
+        march_proc *q = g_proc_registry[i];
+        if (!q || !q->is_daemon) continue;
+        if (atomic_load_explicit(&q->status, memory_order_acquire) == PROC_WAITING
+                && q->mbox_count == 0) {
+            march_sched_wake(q);
+            woken++;
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+    return woken;
+}
 
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
@@ -534,6 +589,14 @@ static void sched_loop(march_scheduler *sched) {
                 atomic_store_explicit(&g_all_done, 1, memory_order_release);
                 break;
             }
+            /* Shutdown endgame: only daemon procs (actor recv loops) remain
+             * and nothing is runnable here.  Wake idle daemons so their
+             * loops exit; without this, any program that ends main() while
+             * an actor is still alive would hang forever right here. */
+            if (atomic_load_explicit(&g_sched_shutdown, memory_order_acquire)
+                    && atomic_load_explicit(&g_live_nondaemon, memory_order_acquire) <= 0
+                    && wake_idle_daemons() > 0)
+                continue;  /* woken procs are in our deque — run them now */
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
@@ -566,6 +629,8 @@ static void sched_loop(march_scheduler *sched) {
         } else if (st == PROC_DEAD) {
             registry_remove(p);
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
+            if (!p->is_daemon)
+                atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
             munmap(p->stack_mmap_base, p->stack_alloc);
             free(p);
         }
@@ -623,6 +688,33 @@ void march_sched_yield(void) {
     atomic_store_explicit(&p->status, PROC_READY, memory_order_release);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
     /* Execution resumes here after the scheduler re-schedules us. */
+}
+
+void march_sched_wait_idle(void) {
+    if (!tl_sched || !tl_sched->current) return;
+    march_proc *self = tl_sched->current;
+    for (;;) {
+        /* Give every other runnable proc a turn before checking. */
+        march_sched_yield();
+        int busy = 0;
+        pthread_mutex_lock(&g_registry_mu);
+        int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
+        if (hi > MARCH_MAX_PROCS) hi = MARCH_MAX_PROCS;
+        for (int64_t i = 0; i < hi && !busy; i++) {
+            march_proc *q = g_proc_registry[i];
+            if (!q || q == self) continue;
+            march_proc_status st =
+                atomic_load_explicit(&q->status, memory_order_acquire);
+            if (st == PROC_READY || st == PROC_RUNNING || st == PROC_PARKED) {
+                busy = 1;
+            } else if (st == PROC_WAITING && q->mbox_count > 0) {
+                /* Message enqueued but wake not yet delivered — transient. */
+                busy = 1;
+            }
+        }
+        pthread_mutex_unlock(&g_registry_mu);
+        if (!busy) return;
+    }
 }
 
 void march_sched_tick(void) {

@@ -93,6 +93,11 @@ typedef struct march_proc {
     void                      *arg;          /* Argument passed to fn */
     struct march_proc         *next;         /* Intrusive link (unused with deque, kept for compat) */
     struct march_scheduler    *owner_sched;  /* Scheduler that last ran this process */
+    int                        is_daemon;    /* Daemon procs (actor recv loops) do not keep the
+                                              * scheduler alive: at shutdown, once no non-daemon
+                                              * procs remain and nothing is runnable, parked
+                                              * daemons are woken without a message so their
+                                              * loops exit and the process can terminate. */
 } march_proc;
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
@@ -124,8 +129,20 @@ void         march_sched_request_shutdown(void);
  * Safe to call from within a running process (nested spawn). */
 march_proc  *march_sched_spawn(void (*fn)(void *), void *arg);
 
+/* Spawn a daemon green thread (see march_proc.is_daemon): daemons do not
+ * keep the scheduler alive at shutdown.  Used for actor recv loops, which
+ * park forever unless killed and must not prevent program exit once main
+ * and all task procs have completed. */
+march_proc  *march_sched_spawn_daemon(void (*fn)(void *), void *arg);
+
 /* Cooperatively yield the CPU back to the scheduler. */
 void         march_sched_yield(void);
+
+/* Cooperatively yield until no OTHER process is runnable or mid-work
+ * (READY, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is
+ * the in-scheduler implementation of run_until_idle(): callable only from
+ * inside a green thread; a no-op otherwise. */
+void         march_sched_wait_idle(void);
 
 /* Decrement the reduction counter; yield automatically if budget runs out.
  * Call once per "reduction" (function application, match arm, etc.) in

@@ -2220,7 +2220,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                  the non-null cell as Some (caught by MARCH_REPR_AUDIT:
                  case=Niche(Any) vs alloc-none-boxed=Boxed(Any)). *)
               || (match p with Tir.TVar _ -> true | _ -> false)
-            | _   -> true  (* no payload info — keep the historical null encoding *)
+            | _ ->
+              (* Non-generic type (no params on the ctor key): the variant DEF
+                 carries the concrete payload type — key the encode on the same
+                 classification the decode (emit_case) uses, so None and Some
+                 stay consistently encoded (both niche, or both boxed). *)
+              (match Repr.niche_repr_of_concrete ctx.type_defs alloc_type_name with
+               | Some _ -> true
+               | None   -> false)
           in
           if payload_niche_safe then begin
             audit "Niche" "alloc-none";
@@ -2423,7 +2430,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          end
        in
        (match args with
-        | [] ->
+        | [] when (match Repr.niche_repr_of_concrete ctx.type_defs reuse_type_name with
+                   | Some _ -> true
+                   (* Payload not niche-safe (e.g. Float): the Some side is
+                      encoded BOXED (emit_niche_payload returns None), so None
+                      must be boxed too — fall through to the boxed path below,
+                      mirroring EAlloc's alloc-none-boxed. *)
+                   | None -> false) ->
           (* Distinct prefix from the niche-None BLOCK label (fresh_block ctx
              "niche_none").  fresh/fresh_block use independent counters, so a
              shared prefix can mint an SSA value and a block label with the same

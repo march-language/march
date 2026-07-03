@@ -57,17 +57,6 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         ((match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
          && branches_match_niche_shape ())
         ||
-        (* Concrete niche path: TCon with no type params -- repr_of_ty returns
-           Boxed because it cannot determine niche-safety without concrete params,
-           but EAlloc uses is_niche_shaped (which works without params) and emits
-           the nullary ctor as inttoptr i64 0 (null).  We must match that choice
-           here so the match uses icmp eq null rather than a tag load, which would
-           segfault on the null pointer.  The erased-i64 convention untags
-           scalar payloads at their concrete use sites, so tagged=false is safe. *)
-        (match scrut_tir_ty_init with
-         | Tir.TCon (name, []) -> Repr.is_niche_shaped ctx.Llvm_ctx.type_defs name
-         | _ -> false)
-        ||
         (* Abstract-arg niche path: niche-shaped type name applied to abstract
            (TVar) type arguments -- e.g. TCon("Option", [TVar "_1234"]) produced
            when the scrutinee's typemap entry has an unresolved type variable.
@@ -82,6 +71,29 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          | _ -> false)
       ) ->
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
+    | Repr.Boxed
+      when (match scrut_tir_ty_init with
+            | Tir.TCon (_, []) -> true
+            | _ -> false) ->
+      (* Concrete niche path: non-generic Option-shaped TCon (e.g. an actor
+         message type [Inc(Int) | Probe]) — repr_of_ty returns Boxed because
+         the TCon carries no type params, but the variant DEF carries the
+         concrete payload type.  Classify from the def so the decode matches
+         the EAlloc/EReuse encode exactly:
+           - scalar payload  → Niche{tagged=true}: encode stored (v<<1)|1, so
+             the match binding must untag.  (Decoding with tagged=false handed
+             the raw tagged word to the branch body — an actor handler summed
+             tagged payloads: 21 + 11 instead of 10 + 5.)
+           - heap payload    → Niche{tagged=false}: value is the payload ptr.
+           - niche-UNSAFE payload (e.g. Float) → Boxed, matching the boxed
+             encode fallback.
+         Non-niche-shaped TCons return None and stay Boxed. *)
+      (match scrut_tir_ty_init with
+       | Tir.TCon (name, []) ->
+         (match Repr.niche_repr_of_concrete ctx.Llvm_ctx.type_defs name with
+          | Some r -> r
+          | None -> Repr.Boxed)
+       | _ -> Repr.Boxed)
     | r -> r
   in
   (* Repr audit hook — record the DECODING this match commits to, so mixed

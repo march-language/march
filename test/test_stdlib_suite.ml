@@ -10153,6 +10153,121 @@ let test_compiled_fbip_arity_no_overflow () =
       "compiled output matches interpreter output (no mismatched-arity cell reuse)"
       interp_out compiled_out
 
+(* Regression (P0, runtime/march_runtime.c actor_green_thread): the hot-reload
+   migrate-message check loaded the int64 at msg+8 guarded only by
+   msg != NULL.  An actor whose message ADT is Option-shaped (one nullary +
+   one unary ctor, e.g. Inc(Int) | Probe()) receives niche/newtype-represented
+   messages: Inc(10) is the tagged scalar 0x15, which passes the NULL check
+   and SIGSEGVs on the load at msg+8 (UBSan: misaligned load at 0x1d).  The
+   interpreter never touches this path, so only a compiled test catches it.
+   Also guards run_until_idle() draining pending messages before kill():
+   count=15 must print BETWEEN the two main-thread lines (before the fix,
+   run_until_idle was a no-op when called from the main green thread). *)
+let test_compiled_actor_niche_msg_run_until_idle_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_niche" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_niche.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorNicheMsg do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    println(\"alive_before=\" ++ bool_to_string(is_alive(pid)))\n\
+    \    send(pid, Inc(10))\n\
+    \    send(pid, Inc(5))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    kill(pid)\n\
+    \    println(\"alive_after_kill=\" ++ bool_to_string(is_alive(pid)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  (* Watchdog: a scheduler-shutdown regression hangs instead of crashing;
+     bound both runs so the suite fails (SIGALRM, rc 142) rather than wedging. *)
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter runs niche-msg actor program cleanly" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape"
+    "alive_before=true\ncount=15\nalive_after_kill=false" interp_out;
+  let bin = Filename.concat tmp "actornichebin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled niche-msg actor + run_until_idle + kill exits 0 (no SIGSEGV/hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (messages drained before kill)"
+      interp_out compiled_out
+
+(* Regression (P0, runtime/march_scheduler.c sched_loop exit condition): the
+   scheduler only exited when g_live_procs hit 0, but an alive actor's green
+   thread parks forever in recv — so ANY compiled program that ends main()
+   without killing every spawned actor hung indefinitely after printing its
+   output (examples/actors.march).  Actor loops are now daemon procs: once
+   main (and all task procs) are done and nothing is runnable, parked daemons
+   are woken without a message so their loops exit and the process terminates. *)
+let test_compiled_actor_program_exits_without_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_nokill" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_nokill.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorExitNoKill do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    send(pid, Inc(7))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    println(\"done\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter exits without kill()" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape" "count=7\ndone" interp_out;
+  let bin = Filename.concat tmp "actornokillbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled actor program with live actor at main-exit terminates (exit 0, no hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (no-kill exit)"
+      interp_out compiled_out
+
 (* Regression: a TOML [section] with 4+ keys returned the WRONG value from
    Toml.get_str when COMPILED (e.g. get_str(pkg,"k1") = "k4", a sibling key's
    NAME) and could crash with OOM / RC underflow.  The interpreter was always
@@ -11639,6 +11754,10 @@ let stdlib_suites =
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
           test_compiled_fbip_arity_no_overflow;
+        Alcotest.test_case "actor niche msg + run_until_idle + kill: no SIGSEGV, parity (compiled)" `Slow
+          test_compiled_actor_niche_msg_run_until_idle_kill;
+        Alcotest.test_case "actor alive at main-exit: process terminates, parity (compiled)" `Slow
+          test_compiled_actor_program_exits_without_kill;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
