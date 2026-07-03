@@ -17,48 +17,71 @@
     [@main] wrapper is appended that calls @march_main and returns 0.
 
     Arithmetic / comparison builtins are recognized by name and lowered
-    to native LLVM instructions. *)
+    to native LLVM instructions.
 
-(** Compilation target. *)
-type target_config =
-  | Native          (** Host-native binary (arm64-apple-macosx, x86_64-linux, etc.) *)
-  | Wasm64Wasi      (** wasm64-wasi — 8-byte pointers, WASI preview *)
-  | Wasm32Wasi      (** wasm32-wasi — 4-byte pointers, WASI preview *)
-  | Wasm32Unknown   (** wasm32-unknown-unknown — browser, no WASI *)
-  | Js              (** ES module output — no LLVM, no clang *)
+    Wave 3 Task 7 (chunk 2) reduced this file to an orchestrator: the
+    [emit_expr]/[emit_atom] core recursive emitters stay here (the one
+    piece every split explicitly leaves in place — see each split's module
+    doc); everything else has moved out over Tasks 3-7. This file's public
+    API is: [target_config] (+ [Native]/[Wasm64Wasi]/[Wasm32Wasi]/
+    [Wasm32Unknown]/[Js]), [target_triple], [is_wasm_target], [is_wasm32],
+    [target_ptr_size]/[target_ptr_ty]/[target_int_ty], [emit_preamble],
+    [emit_module], and the REPL/fragment entry points ([emit_repl_expr],
+    [emit_repl_decl], [emit_repl_fn], [emit_repl_fn_with_closure_slot],
+    [emit_fns_fragment], [repl_slot_info], [fn_declare_str],
+    [build_ctor_info], [mangle_extern]). Below are pointers to where the
+    rest of the value-representation machinery now lives (prose, not
+    code — Wave 4 owns the real architecture doc):
 
-let is_wasm_target = function
-  | Native | Js -> false
-  | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
+    - Object layout / tagging law (odd-tag scalar convention, conditional
+      ptr<->i64 untag, [emit_tag_scalar]/[emit_untag_scalar]/
+      [emit_untag_known_scalar]), the [ctx] record, fresh-name/emit
+      primitives, core type mapping ([llvm_ty]/[llvm_param_ty]/
+      [llvm_ret_ty]), [coerce], string interning, the repr-consistency
+      audit: [Llvm_ctx] (Wave 3 Task 3).
+    - Builtin-function table (the single source for [is_builtin_fn] /
+      [builtin_ret_ty] / [mangle_extern] / the preamble declare blob):
+      [Llvm_builtins] (Wave 3 Task 4).
+    - ADT structural equality ([ensure_adt_eq_fn] family): [Llvm_eq]
+      (Wave 3 Task 5).
+    - Data-constructor emission (EAlloc/EStackAlloc/EReuse/ETuple/ERecord/
+      EField/EUpdate helpers, ctor lookup, record shape metadata): [Llvm_data]
+      (Wave 3 Task 5).
+    - [emit_case] + niche/newtype match-compilation strategies: [Llvm_case]
+      (Wave 3 Task 5).
+    - EApp/ECallPtr helpers, the `raises`-wrapper and closure-apply-wrapper
+      ABI ([clo_wrap_define] — the canonical generic-ptr apply-fn ABI every
+      closure dispatch site shares), interface-method-resolution failure:
+      [Llvm_calls] (Wave 3 Task 6).
+    - Self- and mutual-tail-call analysis/emission (Tarjan SCC, the combined
+      mutual-TCO dispatch function): [Llvm_tco] (Wave 3 Task 6).
+    - [emit_fn] (including the self-TCO loop transform), [build_ctor_info],
+      [emit_module] (module-level assembly: HCR name-table setup, extern/
+      main/test/WASM entry emission), [target_config] and its consumers,
+      [emit_preamble]: [Llvm_toplevel] (Wave 3 Task 7).
+    - The five REPL/JIT-fragment emitters, [repl_slot_info], the slot/global
+      bridge builders: [Llvm_repl] (Wave 3 Task 7). *)
 
-let is_wasm32 = function
-  | Wasm32Wasi | Wasm32Unknown -> true
-  | _ -> false
+(** Compilation target. Wave 3 Task 7 (chunk 2): definition moved to
+    [Llvm_toplevel] (its one real cross-module consumer, via [emit_module] /
+    [emit_preamble]) — re-exported bare here so external callers
+    (bin/main.ml, lib/jit/repl_jit.ml, test/) keep referencing
+    [Llvm_emit.target_config] / [Llvm_emit.Native] / etc. unchanged. See
+    [Llvm_toplevel]'s module doc for the promotion rationale (same
+    criterion Task 6 used for [llvm_ret_ty]/[emit_reduction_check]). *)
+type target_config = Llvm_toplevel.target_config =
+  | Native
+  | Wasm64Wasi
+  | Wasm32Wasi
+  | Wasm32Unknown
+  | Js
 
-external get_native_triple : unit -> string = "march_tir_native_triple"
-let native_triple = lazy (get_native_triple ())
-
-let target_triple = function
-  | Native          -> Lazy.force native_triple
-  | Wasm64Wasi      -> "wasm64-wasi"
-  | Wasm32Wasi      -> "wasm32-wasi"
-  | Wasm32Unknown   -> "wasm32-unknown-unknown"
-  | Js              -> "js"
-
-(** Pointer size in bytes for the target. *)
-let target_ptr_size = function
-  | Native | Wasm64Wasi | Js -> 8
-  | Wasm32Wasi | Wasm32Unknown -> 4
-
-(** LLVM pointer type name for the target. *)
-let target_ptr_ty = function
-  | Native | Wasm64Wasi | Js -> "ptr"
-  | Wasm32Wasi | Wasm32Unknown -> "ptr"
-
-(** LLVM integer type matching pointer width. *)
-let target_int_ty = function
-  | Native | Wasm64Wasi | Js -> "i64"
-  | Wasm32Wasi | Wasm32Unknown -> "i32"
+let is_wasm_target = Llvm_toplevel.is_wasm_target
+let is_wasm32 = Llvm_toplevel.is_wasm32
+let target_triple = Llvm_toplevel.target_triple
+let target_ptr_size = Llvm_toplevel.target_ptr_size
+let target_ptr_ty = Llvm_toplevel.target_ptr_ty
+let target_int_ty = Llvm_toplevel.target_int_ty
 
 (* Type defs live on ctx (ctx.type_defs) — threaded per emission context so
    REPL/JIT fragments never see stale representations (B12). *)
@@ -223,30 +246,10 @@ let atom_is_builtin (atom : Tir.atom) =
   | Tir.AVar v -> is_builtin_fn v.Tir.v_name
   | _ -> false
 
-(** True if [name] refers to a provably-terminating call site that does not
-    need a reduction check: either a March builtin operator or a C-runtime
-    function injected by lower_module (identified by the "march_" prefix, e.g.
-    march_compare_int, march_hash_int — see [Tir_names.has_runtime_prefix]). *)
-let is_leaf_callee (name : string) : bool =
-  is_builtin_fn name || Tir_names.has_runtime_prefix name
-
-(** Returns [true] if [e] contains any non-leaf function call (EApp with a
-    non-leaf callee, or any ECallPtr indirect call).  Used to decide whether
-    to insert a reduction check: functions whose bodies contain no such calls
-    are provably-terminating leaf functions and can skip the check. *)
-let rec expr_has_call (e : Tir.expr) : bool =
-  match e with
-  | Tir.EApp (f, _)      -> not (is_leaf_callee f.Tir.v_name)
-  | Tir.ECallPtr _       -> true   (* indirect call — always non-trivial *)
-  | Tir.ELet (_, e1, e2) -> expr_has_call e1 || expr_has_call e2
-  | Tir.ELetRec (fns, e2) ->
-      List.exists (fun fn -> expr_has_call fn.Tir.fn_body) fns
-      || expr_has_call e2
-  | Tir.ECase (_, arms, def) ->
-      List.exists (fun (br : Tir.branch) -> expr_has_call br.Tir.br_body) arms
-      || (match def with Some d -> expr_has_call d | None -> false)
-  | Tir.ESeq (e1, e2)    -> expr_has_call e1 || expr_has_call e2
-  | _                    -> false
+(* is_leaf_callee / expr_has_call moved to [Llvm_toplevel] (Wave 3 Task 7,
+   chunk 2): their only consumer, emit_fn's Phase 4 leaf-function detection,
+   moved there too — no re-export needed since nothing in this file
+   (emit_expr's core) calls them. *)
 
 (* emit_reduction_check moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2):
    [emit_mutual_tco_group] (now in [Llvm_tco]) needed it alongside [emit_fn]
@@ -2878,1138 +2881,77 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
    find_mutual_tco_groups / mutual_tco_combined_name / has_self_tail_call —
    and is_trivial_dec_chain_returning / is_trivial_dec_chain themselves —
    moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).  None of these are called
-   from this file: emit_fn below only calls has_self_tail_call (see
-   Llvm_tco.has_self_tail_call at its one call site), and emit_module (Task
-   7's territory, further down) calls find_mutual_tco_groups /
-   mutual_tco_combined_name / emit_mutual_tco_group to decide per-group
-   dispatch — all referenced qualified, no re-export needed for these (only
-   is_trivial_dec_chain_returning/is_trivial_dec_chain are re-exported bare,
-   above, for emit_expr's own Perceus-wrapped-TCO guards). *)
+   from this file: [Llvm_toplevel.emit_fn] calls has_self_tail_call (see
+   Llvm_tco.has_self_tail_call at its one call site), and
+   [Llvm_toplevel.emit_module] (Wave 3 Task 7, chunk 2) calls
+   find_mutual_tco_groups / mutual_tco_combined_name / emit_mutual_tco_group
+   to decide per-group dispatch — all referenced qualified, no re-export
+   needed for these (only is_trivial_dec_chain_returning/is_trivial_dec_chain
+   are re-exported bare, above, for emit_expr's own Perceus-wrapped-TCO
+   guards). *)
 
-(* ── Function emitter ────────────────────────────────────────────────── *)
+(* ── Function/module emitters, REPL fragment emitters ─────────────────────
+   [emit_fn] / [fn_declare_str] / [build_ctor_info] / [emit_module] moved to
+   [Llvm_toplevel] (Wave 3 Task 7, chunk 2); the five REPL/fragment emitters
+   ([emit_repl_expr] / [emit_repl_decl] / [emit_repl_fn] /
+   [emit_repl_fn_with_closure_slot] / [emit_fns_fragment]) plus
+   [repl_slot_info] moved to [Llvm_repl].  Both new modules need
+   [emit_expr] (this file's core, immediately above) to descend into
+   function/fragment bodies; since this file in turn calls
+   [Llvm_toplevel.emit_module] / [Llvm_repl.emit_repl_*] below (the
+   orchestrator's public API), a direct reference the other way would
+   cycle — both modules take [~emit_expr] as a labeled callback parameter
+   instead (the same de-cycling pattern [Llvm_case]/[Llvm_tco] already
+   established in Tasks 5/6). All public names are re-exported bare below,
+   pre-applying the [~emit_expr] callback, so existing external call sites
+   (bin/main.ml, lib/jit/repl_jit.ml, test/) see the exact same signatures
+   as before this split. *)
 
-let emit_fn ctx (fn : Tir.fn_def) =
-  Hashtbl.clear ctx.local_names;
-  Hashtbl.clear ctx.var_slot;
-  Hashtbl.clear ctx.var_llvm_ty;
-  ctx.ret_ty <- fn.Tir.fn_ret_ty;
-  ctx.cur_emit_fn <- fn.Tir.fn_name;
-  ctx.hr_cur_module <- module_of_name fn.Tir.fn_name;
-  let fn_llvm_name = mangle_extern fn.Tir.fn_name in
-  (* Closure apply wrappers use the generic ptr ABI (see [is_apply_fn]) so a
-     single calling convention works regardless of whether the lambda's return
-     type was inferred concretely or left polymorphic.  The body result is
-     coerced to ptr below (tagging scalars), matching what every call site
-     reads.  void wrappers keep void — there is no value to carry. *)
-  let ret_ty =
-    let base = llvm_ret_ty fn.Tir.fn_ret_ty in
-    if is_apply_fn fn.Tir.fn_name && base <> "void" then "ptr" else base
-  in
+let emit_fn ctx fn = Llvm_toplevel.emit_fn ~emit_expr ctx fn
+let fn_declare_str = Llvm_toplevel.fn_declare_str
+let build_ctor_info = Llvm_toplevel.build_ctor_info
+let emit_main_wrapper = Llvm_toplevel.emit_main_wrapper
+let emit_preamble = Llvm_toplevel.emit_preamble
 
-  (* Detect self-tail-recursion: only do TCO when the function calls itself
-     in tail position and is not a closure apply fn (those have a clo arg).
-     TCO is enabled whenever ANY self-call is in tail position; the back-edge
-     transform in emit_expr is gated on [ctx.tco_in_tail] so that NON-tail
-     self-calls (which also occur in mixed functions, e.g. the recursive call
-     inside `Cons(x, f(t))`) emit an ordinary call instead of a loop back-edge.
-     Without that gate the non-tail call would be turned into a back-edge and
-     the surrounding construction silently dropped — a miscompile. *)
-  let is_tco =
-    Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
-    && not (is_builtin_fn fn.Tir.fn_name)
-  in
+let emit_module ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
+    ?remote_impl_hashes ?remote_sig_hashes ?emit_main (m : Tir.tir_module) : string =
+  Llvm_toplevel.emit_module ~emit_expr
+    ?fast_math ?pmap_threshold ?target ?hot_reload ?impl_hashes
+    ?remote_impl_hashes ?remote_sig_hashes ?emit_main m
 
-  let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
-      let vn = llvm_name v.Tir.v_name in
-      llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
-    ) fn.Tir.fn_params) in
+type repl_globals = Llvm_repl.repl_globals
+let emit_repl_globals_decl = Llvm_repl.emit_repl_globals_decl
 
-  (* In --compile-so mode, give every non-exported function hidden ELF
-     visibility so intra-.so PLT calls resolve to the .so's own definitions
-     without going through the process global symbol table (where v1 symbols
-     from the server binary would otherwise win).
-     Exported symbols that must stay default-visible:
-       *_dispatch      — the reload server finds these with dlsym(ACTIVATE)
-       *_migrate_state — the __migrate_* alias points to this function; a
-                         hidden aliasee with a default-visibility alias is not
-                         valid LLVM IR, so keep the migrate_state fn visible *)
-  let vis_prefix =
-    let fname = fn.Tir.fn_name in
-    let flen  = String.length fname in
-    let ends_with sfx =
-      let sl = String.length sfx in
-      flen > sl && String.sub fname (flen - sl) sl = sfx
-    in
-    if ctx.compile_so
-       && not (Tir_names.is_actor_dispatch_fn fname)
-       && not (ends_with "_migrate_state")
-    then "hidden "
-    else ""
-  in
-  Buffer.add_string ctx.buf
-    (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str);
+type repl_slot_info = Llvm_repl.repl_slot_info = {
+  rs_bare : string;
+  rs_slot : int;
+  rs_ty : Tir.ty;
+}
 
-  (* Alloca + store for each parameter; collect slot info for TCO. *)
-  let param_slots = List.map (fun (v : Tir.var) ->
-    let ty = llvm_ty v.Tir.v_ty in
-    let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
-    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
-    emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (llvm_name v.Tir.v_name) slot);
-    Hashtbl.replace ctx.var_llvm_ty slot ty;
-    (v.Tir.v_name, slot, ty)
-  ) fn.Tir.fn_params in
+let emit_prev_slot_bridges = Llvm_repl.emit_prev_slot_bridges
+let emit_store_to_slot = Llvm_repl.emit_store_to_slot
+let emit_slot_loader_fns = Llvm_repl.emit_slot_loader_fns
+let emit_prev_global_bridges = Llvm_repl.emit_prev_global_bridges
 
-  (* Phase 4: leaf-function detection.  A function is a leaf if its body
-     contains no non-builtin calls and no indirect calls (ECallPtr).  Leaf
-     functions are provably-terminating (they finish in O(1) time per call)
-     and therefore do not need a reduction check. *)
-  let is_leaf = not (expr_has_call fn.Tir.fn_body) in
+let emit_repl_expr ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns
+    ?store_as_slot ~types (body : Tir.expr) : string =
+  Llvm_repl.emit_repl_expr ~emit_expr
+    ?fast_math ~n ~ret_ty ~prev_slots ~fns ?extern_fns ?store_as_slot ~types body
 
-  if is_tco then begin
-    (* Emit: entry → loop.  The loop block header is the back-edge target. *)
-    let loop_lbl = fresh_block ctx "tco_loop" in
-    emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
-    emit_label ctx loop_lbl;
-    (* Phase 4: decrement the reduction budget at every loop iteration.
-       TCO functions are never leaf (they call themselves), so the check is
-       always needed here. *)
-    emit_reduction_check ctx;
-    (* Snapshot the stack pointer at the top of each iteration so that any
-       `alloca` textually inside the loop body (case-branch bindings, struct
-       construction, etc.) — which LLVM must treat as a fresh dynamic
-       allocation on every dynamic execution of the alloca instruction, since
-       it cannot prove the loop runs once — gets freed before the next
-       iteration via llvm.stackrestore at each back-edge. Without this, stack
-       space accumulates unboundedly across iterations and large loops
-       (e.g. folding a 10k-element list) crash with a stack overflow despite
-       the loop itself being O(1) stack via the back-edge. *)
-    let stack_save = fresh ctx "sp.save" in
-    emit ctx (Printf.sprintf "%s = call ptr @llvm.stacksave()" stack_save);
-    (* Install TCO context so EApp to self emits a back-edge instead of a call. *)
-    ctx.tco_fn_name    <- Some fn.Tir.fn_name;
-    ctx.tco_loop_label <- loop_lbl;
-    ctx.tco_param_info <- param_slots;
-    ctx.tco_in_tail    <- true;
-    ctx.tco_stack_save <- stack_save;
-    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
-    (* Clear TCO state before emitting any other function. *)
-    ctx.tco_fn_name <- None;
-    ctx.tco_stack_save <- "";
-    if ret_ty = "void" then
-      emit_term ctx "ret void"
-    else begin
-      let final_val = coerce ctx body_ty body_val ret_ty in
-      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
-    end
-  end else begin
-    (* Phase 4: insert the reduction check at function entry for non-leaf
-       non-TCO functions.  This fires once per call, counting every function
-       invocation against the budget. *)
-    if not is_leaf then emit_reduction_check ctx;
-    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
-    if ret_ty = "void" then
-      emit_term ctx "ret void"
-    else begin
-      let final_val = coerce ctx body_ty body_val ret_ty in
-      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
-    end
-  end;
+let emit_repl_decl ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns
+    ?extern_fns ~types (body : Tir.expr) : string =
+  Llvm_repl.emit_repl_decl ~emit_expr
+    ?fast_math ~n ~name ~val_ty ~dest_slot ~prev_slots ~fns ?extern_fns ~types body
 
-  Buffer.add_string ctx.buf "}\n"
+let emit_repl_fn ?fast_math ~n ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
+  Llvm_repl.emit_repl_fn ~emit_expr ?fast_math ~n ~prev_slots ?extern_fns ~types fn
 
-(** Return the LLVM `declare` string for a function, for use as a forward
-    declaration in subsequent JIT fragments that reference it without redefining it. *)
-let fn_declare_str (fn : Tir.fn_def) : string =
-  let fn_llvm_name = mangle_extern fn.Tir.fn_name in
-  let ret_ty = llvm_ret_ty fn.Tir.fn_ret_ty in
-  let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
-      llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
-  Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
+let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
+    ~prev_slots ?extern_fns ~types (fn : Tir.fn_def) : string =
+  Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
+    ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?extern_fns ~types fn
 
-(* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
-   Its single call site (emit_module, further down) now passes emit_expr as
-   a labeled callback and qualifies the reference: see
-   Llvm_tco.emit_mutual_tco_group. *)
+let emit_fns_fragment ~types ~fns ?extern_fns ?repl () : string =
+  Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ?repl ()
 
-(* ── Module emitter ──────────────────────────────────────────────────── *)
-
-let build_ctor_info ctx (m : Tir.tir_module) =
-  List.iter (fun td ->
-    match td with
-    | Tir.TDVariant (_name, ctors) ->
-      (* Collect free type-variable names in declaration order for poly resolution *)
-      let seen = Hashtbl.create 4 in
-      let params = ref [] in
-      let rec collect_tvars = function
-        | Tir.TVar n ->
-          if not (Hashtbl.mem seen n) then begin
-            Hashtbl.add seen n ();
-            params := n :: !params
-          end
-        | Tir.TCon (_, args) -> List.iter collect_tvars args
-        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
-        | Tir.TTuple ts     -> List.iter collect_tvars ts
-        | Tir.TPtr t        -> collect_tvars t
-        | _                 -> ()
-      in
-      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
-      let param_names = List.rev !params in
-      Hashtbl.replace ctx.type_params _name param_names;
-      List.iteri (fun tag_idx (ctor_name, field_tys) ->
-        (* Use a type-qualified key "TypeName.CtorName" so that two different
-           ADTs with the same constructor name (e.g. List.Cons and Tree.Cons)
-           never collide in ctor_info.  lower.ml embeds the same qualified key
-           in EAlloc (TCon ("TypeName.CtorName", [])), and emit_case qualifies
-           br_tag with scrut_tir_ty before the lookup.
-           Use first-wins semantics to avoid collisions when two types from
-           different modules share the same short name (e.g. Depot.Query.Query
-           and Ast.Query both lower to TDVariant("Query", ...)). *)
-        let key = _name ^ "." ^ ctor_name in
-        if not (Hashtbl.mem ctx.ctor_info key) then
-          Hashtbl.replace ctx.ctor_info key { ce_tag = tag_idx; ce_fields = field_tys };
-        if not (Hashtbl.mem ctx.poly_ctors (_name, ctor_name)) then
-          Hashtbl.replace ctx.poly_ctors (_name, ctor_name) field_tys
-      ) ctors
-    | Tir.TDRecord (_name, fields) ->
-      Hashtbl.replace ctx.ctor_info _name
-        { ce_tag = 0; ce_fields = List.map snd fields };
-      Hashtbl.replace ctx.field_map _name fields
-    | Tir.TDClosure (_name, field_tys) ->
-      Hashtbl.replace ctx.ctor_info _name
-        { ce_tag = 0; ce_fields = field_tys }
-  ) m.Tir.tm_types
-
-(** Emit the LLVM preamble (`declare`d externs for the C runtime / every
-    builtin). Wave 3 Task 4 (chunk 2): the ~400-line hand-written declare
-    blob moved to [Llvm_builtins.emit_preamble] (generated from the same
-    table that drives [is_builtin_fn]/[builtin_ret_ty]/[mangle_extern]
-    above) — see its module doc for the byte-identical-reproduction
-    guarantee (HAZARD H2) and test/test_codegen.ml's preamble byte-diff
-    test for the enforcement. This wrapper preserves the public signature
-    (default [~target:Native], optional [~repl]) and translates
-    [target_config] to the plain [is_wasm]/[triple] values Llvm_builtins
-    needs — Llvm_builtins does not depend on [target_config] to avoid a
-    module cycle. *)
-let emit_preamble ?(target=Native) ?(repl=false) (buf : Buffer.t) =
-  Llvm_builtins.emit_preamble ~is_wasm:(is_wasm_target target) ~triple:(target_triple target) ~repl buf
-
-let emit_main_wrapper (buf : Buffer.t) =
-  Buffer.add_string buf
-    "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv)\n\
-     declare void @march_spawn_main(ptr %fn)\n\
-     define i32 @main(i32 %argc, ptr %argv) {\nentry:\n\
-       call void @march_process_argv_init(i32 %argc, ptr %argv)\n\
-       call void @march_spawn_main(ptr @march_main)\n\
-       call void @march_run_scheduler()\n\
-       ret i32 0\n}\n"
-
-let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
-    ?(hot_reload=None) ?(impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
-    ?(remote_impl_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
-    ?(remote_sig_hashes=(Hashtbl.create 0 : (string, string) Hashtbl.t))
-    ?(emit_main=true)
-    (m : Tir.tir_module) : string =
-  (* type defs are threaded via ctx.type_defs (set below); reset the
-     repr-consistency audit per module emission. *)
-  Hashtbl.reset _repr_audit;
-  (* Hot Code Reload: intern the names of every reloadable (boundary) function
-     into NAME_IDs for the dispatch table.
-     Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
-     TIR because lower.ml strips the top-level file-module name from all
-     declarations (only nested submodule functions retain their prefix).
-     We include any *_dispatch function unconditionally so that actor hot-reload
-     works when the --hot-reload boundary is the file-level module. *)
-  let is_actor_dispatch_fn = Tir_names.is_actor_dispatch_fn in
-  let hr_names =
-    match hot_reload with
-    | None -> Hot_reload.Name_table.build []
-    | Some cfg ->
-      m.Tir.tm_fns
-      |> List.filter_map (fun fn ->
-           let n = fn.Tir.fn_name in
-           if Hot_reload.is_reloadable cfg (module_of_name n)
-              || is_actor_dispatch_fn n
-           then Some n else None)
-      |> Hot_reload.Name_table.build
-  in
-  let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names
-      ~type_defs:m.Tir.tm_types () in
-  (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
-     .so's own definitions over same-named symbols in the server binary.  This
-     is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)
-  let ctx = { ctx with compile_so = not emit_main } in
-  (* Phase 9: in .so patch mode WITH hot-reload enabled, emit the file-static
-     epoch cell into the preamble.  Static (private) linkage keeps it out of
-     the global symbol table so multiple deployed .so files don't collide.
-     @__march_init (exported) lets the reload server stamp the epoch after
-     dlopen via dlsym(handle,"__march_init").
-     Guard on hr_config <> None: a --compile-so build without --hot-reload
-     must not export a spurious epoch entry point. *)
-  if ctx.compile_so && hot_reload <> None then
-    Buffer.add_string ctx.preamble
-      "@__march_hcr_epoch = private global i32 0\n";
-  (* Distributed OTP L4: populate CAS hash maps for remote_ref_hashes constant folding. *)
-  Hashtbl.iter (Hashtbl.replace ctx.remote_impl_hashes) remote_impl_hashes;
-  Hashtbl.iter (Hashtbl.replace ctx.remote_sig_hashes)  remote_sig_hashes;
-  (* Hot Code Reload: IR run in @main (before user main spawns) that sizes the
-     dispatch table and publishes each boundary function as its NATIVE baseline
-     version. Each boundary fn's per-definition impl_hash (a Merkle root over its
-     call graph + type usage, from the CAS) is emitted as a private NUL-terminated
-     string global and passed to march_dispatch_publish so the runtime can match a
-     hot-swap candidate against the running baseline. When no hash is known (e.g.
-     a non-CAS build path) the baseline is published with a null impl_hash and the
-     reload server stamps the real hash on activation; see runtime/march_dispatch.c. *)
-  let hr_setup =
-    match hot_reload with
-    | None -> ""
-    | Some _cfg ->
-      let n = Hot_reload.Name_table.count hr_names in
-      if n = 0 then "" else begin
-        let b = Buffer.create 256 in
-        (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
-           sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)
-        Printf.bprintf b "  call void @march_dispatch_init(i32 %d)\n" (n + 1);
-        List.iter (fun (fn : Tir.fn_def) ->
-          match Hot_reload.Name_table.id_of hr_names fn.Tir.fn_name with
-          | None -> ()
-          | Some id0 ->
-              let id = id0 + 1 in  (* shift to 1-based *)
-              (* Emit the impl_hash (if known) as a private string global and
-                 pass its ptr; otherwise fall back to a null baseline hash. *)
-              let hash_arg =
-                match Hashtbl.find_opt impl_hashes fn.Tir.fn_name with
-                | Some h when String.length h > 0 ->
-                  let g = Printf.sprintf "@.hr_hash%d" id in
-                  Buffer.add_string ctx.preamble
-                    (Printf.sprintf
-                       "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
-                       g (String.length h + 1) (llvm_escape_string h));
-                  Printf.sprintf "ptr %s" g
-                | _ -> "ptr null"
-              in
-              let sig_arg =
-                match Hashtbl.find_opt ctx.remote_sig_hashes fn.Tir.fn_name with
-                | Some h when String.length h > 0 ->
-                  let sg = Printf.sprintf "@.hr_sighash%d" id in
-                  Buffer.add_string ctx.preamble
-                    (Printf.sprintf
-                       "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
-                       sg (String.length h + 1) (llvm_escape_string h));
-                  Printf.sprintf "ptr %s" sg
-                | _ -> "ptr null"
-              in
-              Printf.bprintf b
-                "  call i32 @march_dispatch_publish(i32 %d, ptr @%s, %s, %s, i8 0)\n"
-                id (mangle_extern fn.Tir.fn_name) hash_arg sig_arg;
-              (* Register name→ID mapping for the reload server. *)
-              let name_g = Printf.sprintf "@.hr_name%d" id in
-              Buffer.add_string ctx.preamble
-                (Printf.sprintf
-                   "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
-                   name_g (String.length fn.Tir.fn_name + 1)
-                   (llvm_escape_string fn.Tir.fn_name));
-              Printf.bprintf b
-                "  call void @march_dispatch_register_name(i32 %d, ptr %s)\n"
-                id name_g
-        ) m.Tir.tm_fns;
-        (* Start the reload server if MARCH_HOT_RELOAD_SOCKET is set. *)
-        Buffer.add_string ctx.preamble
-          "@.hr_sock_env = private unnamed_addr constant [24 x i8] c\"MARCH_HOT_RELOAD_SOCKET\\00\"\n";
-        Buffer.add_string b
-          "  %hr_sock_ptr = call ptr @getenv(ptr @.hr_sock_env)\n\
-          \  call void @march_reload_server_start(ptr %hr_sock_ptr)\n";
-        Buffer.contents b
-      end
-  in
-  (* Record shape metadata requires the native runtime (march_extras.c);
-     the WASM runtime does not provide march_record_set_shape. *)
-  ctx.shape_meta <- not (is_wasm_target target);
-  build_ctor_info ctx m;
-  (* Register user-defined extern functions *)
-  List.iter (fun (ed : Tir.extern_decl) ->
-      Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
-      if ed.ed_blocking then Hashtbl.replace ctx.blocking_externs ed.ed_march_name ();
-      if ed.ed_raises then Hashtbl.replace ctx.raises_externs ed.ed_march_name ();
-      Hashtbl.replace ctx.top_fns ed.ed_march_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret;
-      Hashtbl.replace ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params)
-    ) m.Tir.tm_externs;
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then
-        Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
-      (* Populate unqualified_fns: maps the unqualified suffix (e.g.
-         "base64_encode") to the fully qualified name ("Crypto.base64_encode").
-         Used to fix up cross-module ECallPtr calls where lower.ml left the
-         function name unqualified.  First registration wins to avoid
-         collisions between modules sharing an unqualified name.
-         NOTE: we do NOT add the unqualified name to top_fns — that would
-         shadow local variables with the same name (e.g. a boolean variable
-         named "abs" would incorrectly resolve to @Math.abs).
-
-         EXCLUDE interface-impl-mangled names ("Iface$Type.method", e.g.
-         "Show$List.show" or a further-specialized "Show$List.show$List_Int")
-         from this map (Wave 2 Task 1 — defense in depth for the
-         println-of-list miscompile).  mono.ml now propagates the
-         substitution when it enqueues a resolved impl, so a nested
-         `show(x)` call inside `impl Show(List(a)) when Show(a)` should
-         ALWAYS be resolved to the concrete impl (e.g. Show$Int.show) by
-         mono before reaching llvm_emit.  If mono ever regresses and leaves
-         a bare interface-method call unresolved again, this map must NOT
-         silently rebind it to an arbitrary same-named impl (that was the
-         actual bug — a bare `show` got hijacked to `Show$List.show`,
-         the LIST impl applied to a raw element).  Detected by checking for
-         a '$' before the LAST '.' — ordinary qualified names ("Crypto.
-         base64_encode", "App.Core.b") never contain '$', so they are
-         unaffected. *)
-      (match String.rindex_opt fn.Tir.fn_name '.' with
-       | Some i ->
-         if not (Tir_names.is_iface_mangled fn.Tir.fn_name) then begin
-           let unq = String.sub fn.Tir.fn_name (i+1)
-                       (String.length fn.Tir.fn_name - i - 1) in
-           if not (Hashtbl.mem ctx.unqualified_fns unq) then begin
-             Hashtbl.replace ctx.unqualified_fns unq fn.Tir.fn_name
-           end
-         end
-       | None -> ()))
-    m.Tir.tm_fns;
-  (* Identify mutual-TCO groups.  Functions in these groups are emitted as
-     combined dispatch functions + thin wrappers — they must NOT also be
-     emitted individually via emit_fn. *)
-  let mutual_groups = Llvm_tco.find_mutual_tco_groups m.Tir.tm_fns in
-  let mutual_fn_names =
-    List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
-      mutual_groups
-  in
-  (* Emit the combined function + wrappers for each mutual-TCO group.
-     emit_expr is passed as a labeled callback (de-cycling move, Wave 3
-     Task 6, chunk 2 — same pattern as Llvm_case.emit_case in Task 5). *)
-  List.iter (Llvm_tco.emit_mutual_tco_group ~emit_expr ctx) mutual_groups;
-
-  (* Skip emitting prelude wrapper functions whose runtime name is already
-     declared in the preamble.  Only filter short unqualified names that map
-     to march_* builtins — not user-defined qualified names like "CapDemo.main".
-     Also skip functions that are members of a mutual-TCO group — those were
-     already emitted (as wrappers) by emit_mutual_tco_group above. *)
-  let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
-                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
-  let migrate_suffix = "_migrate_state" in
-  let migrate_suffix_len = String.length migrate_suffix in
-  List.iter (fun fn ->
-      if List.mem fn.Tir.fn_name preamble_declared then ()
-      else if List.mem fn.Tir.fn_name mutual_fn_names then ()
-      else begin
-        let fname = fn.Tir.fn_name in
-        let flen = String.length fname in
-        emit_fn ctx fn;
-        (* Phase 5: for migrate_state functions, export a __migrate_<Actor>
-           alias so march_reload.c can dlsym it without knowing the full
-           mangled March name.
-           Convention: fn counter_migrate_state inside mod MyApp →
-             TIR name "MyApp.counter_migrate_state"
-             → strip "_migrate_state" → "MyApp.counter"
-             → last dot-component → "counter"
-             → capitalize first letter → "Counter"
-             → alias "@__migrate_Counter"
-           The march_reload.c runtime forms the same name by stripping
-           "_dispatch" from the ACTIVATE name "Counter_dispatch". *)
-        if flen > migrate_suffix_len
-           && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
-        then begin
-          (* Take the part before _migrate_state, then extract the last
-             dot-separated component (strips module prefix), then capitalize
-             the first letter to recover the actor name. *)
-          let before_suffix = String.sub fname 0 (flen - migrate_suffix_len) in
-          let last_component =
-            match String.rindex_opt before_suffix '.' with
-            | None   -> before_suffix
-            | Some i -> String.sub before_suffix (i + 1)
-                          (String.length before_suffix - i - 1)
-          in
-          if last_component <> "" then begin
-            let actor_name =
-              (String.uppercase_ascii (String.sub last_component 0 1))
-              ^ (String.sub last_component 1 (String.length last_component - 1))
-            in
-            let alias_name   = "__migrate_" ^ actor_name in
-            let llvm_fn_name = mangle_extern fname in
-            (* LLVM alias: same signature as migrate_state (ptr → ptr) *)
-            Buffer.add_string ctx.buf (Printf.sprintf
-              "@%s = alias ptr (ptr), ptr @%s\n" alias_name llvm_fn_name)
-          end
-        end
-      end
-    ) m.Tir.tm_fns;
-
-  let out = Buffer.create 8192 in
-  emit_preamble ~target out;
-  (* Emit user-defined extern function declarations *)
-  List.iter (fun (ed : Tir.extern_decl) ->
-      (* A `raises` binding takes a hidden march_env* first param and returns the
-         bare Ok payload (T of Result(T,E)); the call site wraps it into Ok/Err. *)
-      let ret_llty =
-        if ed.ed_raises then llvm_ret_ty (ok_payload_ty ed.ed_ret)
-        else llvm_ret_ty ed.ed_ret in
-      let param_lltys = List.map (fun _t -> "ptr") ed.ed_params in
-      let param_lltys = if ed.ed_raises then "ptr" :: param_lltys else param_lltys in
-      let params_str = String.concat ", " (List.mapi (fun i ty ->
-          Printf.sprintf "%s %%%d" ty i) param_lltys) in
-      Buffer.add_string out
-        (Printf.sprintf "declare %s @%s(%s)\n" ret_llty ed.ed_c_name params_str)
-    ) m.Tir.tm_externs;
-  (* Blocking-dispatch helpers, if any extern is `blocking`. *)
-  if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_blocking) m.Tir.tm_externs then
-    Buffer.add_string out
-      "declare i64 @march_run_blocking_i(ptr, ptr, i32)\n\
-       declare double @march_run_blocking_d(ptr, ptr, i32)\n";
-  (* Error-protocol Ok/Err constructors, if any extern is `raises` (the call-site
-     wrapper calls them; march_raise itself is called only from the C binding). *)
-  if List.exists (fun (ed : Tir.extern_decl) -> ed.ed_raises) m.Tir.tm_externs then
-    Buffer.add_string out
-      "declare ptr @march_ok(i64)\n\
-       declare ptr @march_err(i64)\n\
-       declare i64 @march_make_float(double)\n";
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-
-  (* Distributed OTP L4 — Compiler-emitted enroll/stub.
-     Scan for functions whose name ends in "__rpc_stub".  For each one, emit
-     string constants for the base function's impl_hash / sig_hash (if known
-     from the CAS pipeline) and collect a march_remote_register call that goes
-     inside @main, between march_remote_init() and march_spawn_main(). *)
-  let stub_suffix = "__rpc_stub" in
-  let stub_suffix_len = String.length stub_suffix in
-  let stub_setup =
-    let b = Buffer.create 256 in
-    List.iteri (fun i (fn : Tir.fn_def) ->
-      let name = fn.Tir.fn_name in
-      let nlen = String.length name in
-      if nlen > stub_suffix_len &&
-         String.sub name (nlen - stub_suffix_len) stub_suffix_len = stub_suffix
-      then begin
-        let base = String.sub name 0 (nlen - stub_suffix_len) in
-        match Hashtbl.find_opt ctx.remote_impl_hashes base,
-              Hashtbl.find_opt ctx.remote_sig_hashes base with
-        | Some impl_h, Some sig_h when String.length impl_h > 0 ->
-          let mangled_stub = llvm_name (mangle_extern name) in
-          let impl_esc = llvm_escape_string impl_h in
-          let sig_esc  = llvm_escape_string sig_h in
-          Printf.bprintf out
-            "@.rpc_impl_%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
-            i (String.length impl_h + 1) impl_esc;
-          Printf.bprintf out
-            "@.rpc_sig_%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
-            i (String.length sig_h + 1) sig_esc;
-          Printf.bprintf b
-            "  call i32 @march_remote_register(ptr @.rpc_impl_%d, ptr @.rpc_sig_%d, ptr @%s)\n"
-            i i mangled_stub
-        | _ -> ()
-      end
-    ) m.Tir.tm_fns;
-    Buffer.contents b
-  in
-
-  (* Find a main function: either top-level "main" or "ModName.main".
-     Use fold_left (last match wins) so that when multiple modules define
-     fn main(), the entry file's module takes precedence.  The entry file's
-     declarations are injected last into mod_decls, so its functions appear
-     last in tm_fns — fold_left keeps the last match. *)
-  let main_fn_name = List.fold_left (fun acc (fn : Tir.fn_def) ->
-      if fn.Tir.fn_name = "main" then Some "main"
-      else if String.length fn.Tir.fn_name > 5 &&
-              String.sub fn.Tir.fn_name
-                (String.length fn.Tir.fn_name - 5) 5 = ".main"
-      then Some fn.Tir.fn_name
-      else acc
-    ) None m.Tir.tm_fns in
-
-  (* Entry point: for native targets emit @main calling march_main + scheduler;
-     for WASM browser target (Wasm32Unknown), emit exported island entry points
-     that the JS runtime can call. *)
-  (match target with
-   | Wasm32Unknown ->
-     (* For WASM islands, export the render/update functions.
-        The island name is derived from the module name.
-        The user's module must define render(state) and update(state, msg). *)
-     (* Find a function by base name, handling mono suffixes like render$String.
-        Only matches the user's own module (tm_name.suffix) or bare names —
-        NOT functions from other modules like Vault.update. *)
-     let find_fn suffix =
-       List.find_opt (fun (fn : Tir.fn_def) ->
-         let n = fn.Tir.fn_name in
-         (* Strip monomorphization suffix (e.g. render$String → render) *)
-         let base = match String.index_opt n '$' with
-           | Some i -> String.sub n 0 i
-           | None -> n
-         in
-         base = suffix ||
-         base = m.Tir.tm_name ^ "." ^ suffix
-       ) m.Tir.tm_fns
-     in
-     let emit_island_export export_name march_fn_name params ret_ty =
-       let mangled = llvm_name (mangle_extern march_fn_name) in
-       let param_decls = String.concat ", " (List.mapi (fun i ty ->
-           Printf.sprintf "%s %%%d" ty i) params) in
-       let param_refs = String.concat ", " (List.mapi (fun i ty ->
-           Printf.sprintf "%s %%%d" ty i) params) in
-       Buffer.add_string out
-         (Printf.sprintf "\ndefine dllexport %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n"
-            ret_ty export_name param_decls ret_ty mangled param_refs ret_ty)
-     in
-     (match find_fn "render" with
-      | Some fn ->
-        emit_island_export "march_island_render" fn.Tir.fn_name ["ptr"] "ptr"
-      | None -> ());
-     (match find_fn "update" with
-      | Some fn ->
-        emit_island_export "march_island_update" fn.Tir.fn_name ["ptr"; "ptr"] "ptr"
-      | None -> ());
-     (* march_island_init: if there's an init() function, export it;
-        otherwise generate a stub that returns null (use SSR state). *)
-     (match find_fn "init" with
-      | Some fn ->
-        let mangled = llvm_name (mangle_extern fn.Tir.fn_name) in
-        Buffer.add_string out
-          (Printf.sprintf "\ndefine dllexport ptr @march_island_init() {\nentry:\n  %%r = call ptr @%s()\n  ret ptr %%r\n}\n" mangled)
-      | None ->
-        Buffer.add_string out
-          "\ndefine dllexport ptr @march_island_init() {\nentry:\n  ret ptr null\n}\n");
-     (* Re-export march_alloc and march_free for JS glue *)
-     Buffer.add_string out
-       "\ndefine dllexport void @march_dealloc(ptr %p) {\nentry:\n  call void @march_free(ptr %p)\n  ret void\n}\n";
-     Buffer.add_string out
-       "\ndefine dllexport ptr @march_alloc_export(i64 %sz) {\nentry:\n  %r = call ptr @march_alloc(i64 %sz)\n  ret ptr %r\n}\n";
-     Buffer.add_string out
-       "\ndefine dllexport ptr @march_string_lit_export(ptr %s, i64 %len) {\nentry:\n  %r = call ptr @march_string_lit(ptr %s, i64 %len)\n  ret ptr %r\n}\n";
-     (* march_island_render_html: calls render + iolist_flatten, returns a flat String *)
-     (match find_fn "render" with
-      | Some fn ->
-        let mangled = llvm_name (mangle_extern fn.Tir.fn_name) in
-        Buffer.add_string out
-          (Printf.sprintf "\ndeclare ptr @march_iolist_flatten(ptr)\ndeclare i32 @march_string_length_i32(ptr)\ndeclare ptr @march_string_data_ptr(ptr)\n\ndefine dllexport ptr @march_island_render_html(ptr %%state) {\nentry:\n  %%iolist = call ptr @%s(ptr %%state)\n  %%str = call ptr @march_iolist_flatten(ptr %%iolist)\n  ret ptr %%str\n}\n\ndefine dllexport i32 @march_island_string_length(ptr %%str) {\nentry:\n  %%r = call i32 @march_string_length_i32(ptr %%str)\n  ret i32 %%r\n}\n\ndefine dllexport ptr @march_island_string_data(ptr %%str) {\nentry:\n  %%r = call ptr @march_string_data_ptr(ptr %%str)\n  ret ptr %%r\n}\n" mangled)
-      | None -> ());
-     (* march_island_msg_from_name: construct a Msg variant from its name string.
-        Emits a chain of string comparisons for all zero-field (enum) Msg constructors.
-        Variants with fields are not supported here — use JSON wire format instead. *)
-     let msg_type_opt = List.find_opt (fun td ->
-       match td with
-       | Tir.TDVariant (name, _) ->
-         (* Strip module prefix, e.g. "Counter.Msg" -> "Msg" *)
-         let base = match String.rindex_opt name '.' with
-           | Some i -> String.sub name (i+1) (String.length name - i - 1)
-           | None -> name
-         in
-         (* Strip mono suffix like Msg$0 *)
-         let base2 = match String.index_opt base '$' with
-           | Some i -> String.sub base 0 i
-           | None -> base
-         in
-         base2 = "Msg"
-       | _ -> false
-     ) m.Tir.tm_types in
-     (match msg_type_opt with
-      | Some (Tir.TDVariant (_, ctors)) ->
-        (* Filter to enum constructors (no fields) *)
-        let enum_ctors = List.filter (fun (_, fields) -> fields = []) ctors in
-        if enum_ctors <> [] then begin
-          let buf2 = Buffer.create 512 in
-          (* Emit string constants for each constructor name *)
-          List.iter (fun (name, _) ->
-            (* Strip module prefix from ctor name *)
-            let base_name = match String.rindex_opt name '.' with
-              | Some i -> String.sub name (i+1) (String.length name - i - 1)
-              | None -> name
-            in
-            Buffer.add_string buf2
-              (Printf.sprintf "@.msg_name_%s = private constant [%d x i8] c\"%s\\00\"\n"
-                 base_name (String.length base_name + 1) base_name)
-          ) enum_ctors;
-          Buffer.add_string buf2
-            "\ndeclare i64 @march_string_eq(ptr, ptr)\n";
-          Buffer.add_string buf2
-            "\ndeclare i64 @march_poly_eq(ptr, ptr)\n";
-          Buffer.add_string buf2
-            "\ndefine dllexport ptr @march_island_msg_from_name(ptr %data, i32 %len) {\nentry:\n";
-          (* Allocate a temporary string for the input *)
-          Buffer.add_string buf2
-            "  %ilen = sext i32 %len to i64\n  %tmp = call ptr @march_string_lit(ptr %data, i64 %ilen)\n";
-          List.iteri (fun i (name, _) ->
-            let base_name = match String.rindex_opt name '.' with
-              | Some j -> String.sub name (j+1) (String.length name - j - 1)
-              | None -> name
-            in
-            let nlen = String.length base_name in
-            Buffer.add_string buf2
-              (Printf.sprintf "  %%slit%d = call ptr @march_string_lit(ptr @.msg_name_%s, i64 %d)\n"
-                 i base_name nlen);
-            Buffer.add_string buf2
-              (Printf.sprintf "  %%eq%d = call i64 @march_string_eq(ptr %%slit%d, ptr %%tmp)\n" i i);
-            Buffer.add_string buf2
-              (Printf.sprintf "  %%b%d = icmp ne i64 %%eq%d, 0\n" i i);
-            Buffer.add_string buf2
-              (Printf.sprintf "  br i1 %%b%d, label %%match%d, label %%next%d\n" i i i);
-            Buffer.add_string buf2
-              (Printf.sprintf "match%d:\n  %%cell%d = call ptr @march_alloc(i64 16)\n" i i);
-            Buffer.add_string buf2
-              (Printf.sprintf "  %%tp%d = getelementptr i8, ptr %%cell%d, i64 8\n" i i);
-            Buffer.add_string buf2
-              (Printf.sprintf "  store i32 %d, ptr %%tp%d\n  ret ptr %%cell%d\nnext%d:\n" i i i i)
-          ) enum_ctors;
-          (* Default: return null (unknown message) *)
-          Buffer.add_string buf2 "  ret ptr null\n}\n";
-          Buffer.add_string out (Buffer.contents buf2)
-        end
-      | _ -> ());
-     (* If there's a main function, still call it for module-level init *)
-     (match main_fn_name with
-      | Some name ->
-        let mangled = llvm_name (mangle_extern name) in
-        Buffer.add_string out
-          (Printf.sprintf "\ndefine dllexport void @_start() {\nentry:\n  call void @%s()\n  ret void\n}\n" mangled)
-      | None -> ())
-   | _ ->
-     (* Native / WASI: test-runner @main (when tm_tests populated) or standard @main.
-        Suppressed when emit_main=false (--compile-so: patch shared library). *)
-     if not emit_main && hot_reload <> None then begin
-       (* Phase 9: exported init function so the reload server can stamp the epoch.
-          Only emitted when --hot-reload is active; a plain --compile-so build
-          without --hot-reload must not export a spurious epoch entry point. *)
-       Buffer.add_string out
-         "\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
-          \  store i32 %epoch, ptr @__march_hcr_epoch\n\
-          \  ret void\n}\n"
-     end else
-     if m.Tir.tm_tests <> [] then begin
-       (* --test mode: emit a @main that calls the test harness.
-          For each test fn we emit a string constant for its display name and
-          call march_test_run(fn_ptr, name_ptr, setup_or_null).
-          setup_all and per-test setup are optional and may not exist. *)
-       let has_setup_all = List.exists (fun (fn : Tir.fn_def) ->
-           fn.Tir.fn_name = Tir_names.setup_all_fn_name) m.Tir.tm_fns in
-       let has_setup = List.exists (fun (fn : Tir.fn_def) ->
-           fn.Tir.fn_name = Tir_names.setup_fn_name) m.Tir.tm_fns in
-       (* Emit test name string constants directly to out (preamble was already
-          flushed to out above, so ctx.preamble writes would be lost). *)
-       List.iteri (fun i (_fn_name, display_name) ->
-         (* Use the same escaper as intern_string (llvm_escape_string): percent-
-            encodes every byte outside printable ASCII and encodes " as \22 and
-            \ as \5C.  LLVM parses these three-byte forms back to one byte, so
-            String.length display_name + 1 remains the correct array size.
-            The previous ad-hoc escaper only handled '\n' → \0A, leaving literal
-            " and \ in place; LLVM's C-string parser then interpreted them as
-            escape sequences, collapsing two-byte sequences to one byte so the
-            actual payload was shorter than nbytes, and clang rejected the IR
-            with "constant expression type mismatch". *)
-         let escaped = llvm_escape_string display_name in
-         let nbytes = String.length display_name + 1 in
-         Printf.bprintf out
-           "@.test_name_%d = private constant [%d x i8] c\"%s\\00\"\n"
-           i nbytes escaped
-       ) m.Tir.tm_tests;
-       let buf2 = Buffer.create 1024 in
-       Buffer.add_string buf2
-         "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv_ptr)\n";
-       Buffer.add_string buf2
-         "define i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n";
-       Buffer.add_string buf2
-         "  call void @march_process_argv_init(i32 %argc, ptr %argv_ptr)\n";
-       Buffer.add_string buf2
-         "  call void @march_test_init(i32 %argc, ptr %argv_ptr)\n";
-       if has_setup_all then
-         Buffer.add_string buf2
-           (Printf.sprintf "  call void @march_test_setup_all(ptr @%s)\n"
-              (llvm_name (mangle_extern Tir_names.setup_all_fn_name)));
-       let setup_arg = if has_setup then
-         Printf.sprintf "ptr @%s" (llvm_name (mangle_extern Tir_names.setup_fn_name))
-       else "ptr null" in
-       List.iteri (fun i (fn_name, _display_name) ->
-         let mangled = llvm_name (mangle_extern fn_name) in
-         Printf.bprintf buf2
-           "  call void @march_test_run(ptr @%s, ptr @.test_name_%d, %s)\n"
-           mangled i setup_arg
-       ) m.Tir.tm_tests;
-       Buffer.add_string buf2 "  %rc = call i32 @march_test_report()\n";
-       Buffer.add_string buf2 "  ret i32 %rc\n}\n";
-       Buffer.add_buffer out buf2
-     end else begin
-       (match main_fn_name with
-        | Some name ->
-          let mangled = llvm_name (mangle_extern name) in
-          Buffer.add_string out
-            (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-             declare void @march_spawn_main(ptr %%fn)\n\
-             define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
-               call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-               call void @march_remote_init()\n\
-             %s%s\
-               call void @march_spawn_main(ptr @%s)\n\
-               call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" hr_setup stub_setup mangled)
-        | None ->
-          (* Library module with no user-defined main: emit a stub @main so
-             clang can link a valid binary (forge build type-checks libraries). *)
-          Buffer.add_string out
-            "\ndefine i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n  ret i32 0\n}\n")
-     end);
-
-  (* Append closure wrapper functions generated for top-level fn-as-value *)
-  Buffer.add_buffer out ctx.extra_fns;
-
-  repr_audit_report ();
-  Buffer.contents out
-
-(* ── REPL emission helpers ──────────────────────────────────────────────── *)
-
-(** Tracks REPL globals across fragments. Each entry:
-    (llvm_name, llvm_type_string).  Example: ("repl_x", "ptr") *)
-type repl_globals = (string * string) list ref
-
-let emit_repl_globals_decl (buf : Buffer.t) (globals : (string * string) list) =
-  List.iter (fun (name, ty) ->
-    Printf.bprintf buf "@%s = external global %s\n" name ty
-  ) globals
-
-(** A REPL variable slot: the persistent index into [march_repl_slots].
-    [rs_bare] is the bare variable name (e.g. "x", "fib").
-    [rs_slot] is the slot index passed to @march_repl_get / @march_repl_set.
-    [rs_ty]   is the TIR type, used to pick the right bit-conversion. *)
-type repl_slot_info = { rs_bare : string; rs_slot : int; rs_ty : Tir.ty }
-
-(** Emit bridge alloca+call pairs for each prev_slot into the current function
-    entry block, and register the alloca in [ctx.var_slot].
-    Uses @march_repl_get(i64 slot) so no LLVM external globals are needed —
-    values live in a single persistent C array that survives .so reloads. *)
-let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
-  List.iter (fun si ->
-    let llty = llvm_ty si.rs_ty in
-    let raw  = fresh ctx "slot" in
-    Printf.bprintf ctx.buf "  %%%s.addr = alloca %s\n" si.rs_bare llty;
-    Printf.bprintf ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" raw si.rs_slot;
-    let converted = match si.rs_ty with
-      | Tir.TInt | Tir.TBool | Tir.TUnit -> raw
-      | Tir.TFloat ->
-        let ft = fresh ctx "fv" in
-        Printf.bprintf ctx.buf "  %s = bitcast i64 %s to double\n" ft raw;
-        ft
-      | _ ->
-        let pt = fresh ctx "pv" in
-        Printf.bprintf ctx.buf "  %s = inttoptr i64 %s to ptr\n" pt raw;
-        pt
-    in
-    Printf.bprintf ctx.buf "  store %s %s, ptr %%%s.addr\n" llty converted si.rs_bare;
-    Hashtbl.replace ctx.var_slot si.rs_bare si.rs_bare
-  ) prev_slots
-
-(** Emit a store of [result] (LLVM value of type [llty]) into slot [slot_idx]
-    via @march_repl_set.  Converts non-i64 values to i64 bits first. *)
-let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) =
-  let bits = match tir_ty with
-    | Tir.TInt | Tir.TBool | Tir.TUnit -> result
-    | Tir.TFloat ->
-      let bt = fresh ctx "fb" in
-      Printf.bprintf ctx.buf "  %s = bitcast double %s to i64\n" bt result;
-      bt
-    | _ ->
-      let pt = fresh ctx "pb" in
-      Printf.bprintf ctx.buf "  %s = ptrtoint ptr %s to i64\n" pt result;
-      pt
-  in
-  Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %s)\n" slot_idx bits
-
-(** Emit thin module-level loader functions for each prior REPL slot so that
-    named function bodies compiled via [emit_repl_fn] /
-    [emit_repl_fn_with_closure_slot] can reference prior let-bindings as
-    zero-arg calls "@<name>()".  Each loader calls @march_repl_get and returns
-    the value in the correct LLVM type.  [ctx.top_fn_ret_ty] is updated so the
-    AVar handler at the call site uses the matching return type.
-    Writing to [ctx.buf] (not [ctx.extra_fns]) so the definitions appear even
-    in [emit_repl_fn] which does not include extra_fns in its output. *)
-let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
-  List.iter (fun (si : repl_slot_info) ->
-    match si.rs_ty with
-    | Tir.TUnit -> ()  (* unit slots carry no meaningful value; skip *)
-    | ty ->
-      let fname  = llvm_name si.rs_bare in
-      let ret_ty = llvm_ret_ty ty in
-      Hashtbl.replace ctx.top_fn_ret_ty si.rs_bare ty;
-      let (conv_instr, retval) = match ty with
-        | Tir.TInt | Tir.TBool -> ("", "%raw")
-        | Tir.TFloat -> ("  %fv = bitcast i64 %raw to double\n", "%fv")
-        | _ -> ("  %pv = inttoptr i64 %raw to ptr\n", "%pv")
-      in
-      Printf.bprintf ctx.buf
-        "\ndefine %s @%s() {\nentry:\n  %%raw = call i64 @march_repl_get(i64 %d)\n%s  ret %s %s\n}\n"
-        ret_ty fname si.rs_slot conv_instr ret_ty retval
-  ) prev_slots
-
-(** Emit bridge alloca+load+store pairs for each prev_global into the current
-    function entry block, and register the slot in [ctx.var_slot].
-    This lets the body refer to REPL globals via the normal alloca load path.
-    LLVM's mem2reg/SROA eliminates the extra instructions. *)
-let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
-  List.iter (fun (gname, llty) ->
-    (* gname is "repl_N_<bare>" by construction in repl_jit (N = fragment number).
-       Strip the "repl_N_" prefix to recover the bare variable name. *)
-    let bare =
-      let len = String.length gname in
-      if len > 5 && String.sub gname 0 5 = "repl_" then begin
-        let i = ref 5 in
-        while !i < len && gname.[!i] >= '0' && gname.[!i] <= '9' do incr i done;
-        if !i < len && gname.[!i] = '_' then
-          String.sub gname (!i + 1) (len - !i - 1)
-        else
-          String.sub gname 5 (len - 5)  (* fallback: old "repl_<bare>" format *)
-      end else gname
-    in
-    let tmp = fresh ctx "br" in
-    Printf.bprintf ctx.buf "  %%%s.addr = alloca %s\n" bare llty;
-    Printf.bprintf ctx.buf "  %s = load %s, ptr @%s\n" tmp llty gname;
-    Printf.bprintf ctx.buf "  store %s %s, ptr %%%s.addr\n" llty tmp bare;
-    Hashtbl.replace ctx.var_slot bare bare
-  ) prev_globals
-
-(** Emit a REPL expression as a standalone .ll fragment.
-    Returns textual LLVM IR with a function [@repl_<n>] that computes
-    and returns the expression result.
-    [prev_slots] are the persistent variable slots from earlier REPL inputs.
-    [fns] are any helper functions the expression depends on.
-    [store_as_slot] if Some k, also stores the result to slot k via
-    @march_repl_set so later fragments can read it as "v". *)
-let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
-    ~(prev_slots : repl_slot_info list)
-    ~(fns : Tir.fn_def list)
-    ?(extern_fns : Tir.fn_def list = [])
-    ?(store_as_slot : int option = None)
-    ~(types : Tir.type_def list)
-    (body : Tir.expr) : string =
-  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
-  build_ctor_info ctx pseudo_mod;
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
-  (* Register pre-compiled extern functions so EApp generates direct calls *)
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
-  List.iter (emit_fn ctx) fns;
-  let ret_llty = llvm_ty ret_ty in
-  let fname = Printf.sprintf "repl_%d" n in
-  Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
-  emit_prev_slot_bridges ctx prev_slots;
-  let (actual_ty, result) = emit_expr ctx body in
-  let result' = coerce ctx actual_ty result ret_llty in
-  (* Store result to the persistent "v" slot so later fragments can read it. *)
-  (match store_as_slot with
-   | None -> ()
-   | Some k -> emit_store_to_slot ctx k result' ret_ty);
-  Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result';
-  let out = Buffer.create 4096 in
-  emit_preamble ~repl:true out;
-  (* Declare pre-compiled functions so LLVM IR is valid even without definitions *)
-  List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-  Buffer.add_buffer out ctx.extra_fns;
-  Buffer.contents out
-
-(* Emit a REPL let-binding as a .ll fragment.
-   Creates a global [@repl_<name>] and an init function [@repl_<n>_init]
-   that computes the value and stores it in the global. *)
-(** Emit a REPL let-binding as a .ll fragment.
-    Creates an init function [@repl_<n>_init] that computes the value and
-    stores it in slot [dest_slot] via @march_repl_set.  No LLVM global is
-    needed — the slot table in march_extras.c persists across .so reloads. *)
-let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
-    ~(val_ty : Tir.ty)
-    ~(dest_slot : int)
-    ~(prev_slots : repl_slot_info list)
-    ~(fns : Tir.fn_def list)
-    ?(extern_fns : Tir.fn_def list = [])
-    ~(types : Tir.type_def list)
-    (body : Tir.expr) : string =
-  ignore name;
-  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
-  build_ctor_info ctx pseudo_mod;
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
-  List.iter (emit_fn ctx) fns;
-  let llty = llvm_ty val_ty in
-  let init_name = Printf.sprintf "repl_%d_init" n in
-  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
-  emit_prev_slot_bridges ctx prev_slots;
-  let (actual_ty, result) = emit_expr ctx body in
-  let result' = coerce ctx actual_ty result llty in
-  emit_store_to_slot ctx dest_slot result' val_ty;
-  Printf.bprintf ctx.buf "  ret void\n}\n";
-  let out = Buffer.create 4096 in
-  emit_preamble ~repl:true out;
-  List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-  Buffer.add_buffer out ctx.extra_fns;
-  Buffer.contents out
-
-(** Emit a REPL function declaration as a .ll fragment.
-    The function is emitted at top level (callable by later fragments).
-    A no-op [@repl_<n>_init] is emitted so the REPL runner can call it uniformly. *)
-let emit_repl_fn ?(fast_math=false) ~(n : int)
-    ~(prev_slots : repl_slot_info list)
-    ?(extern_fns : Tir.fn_def list = [])
-    ~(types : Tir.type_def list)
-    (fn : Tir.fn_def) : string =
-  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
-  build_ctor_info ctx pseudo_mod;
-  Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-  Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-  Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-  if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
-  List.iter (fun f ->
-      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
-      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
-  emit_slot_loader_fns ctx prev_slots;
-  emit_fn ctx fn;
-  let init_name = Printf.sprintf "repl_%d_init" n in
-  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
-  let out = Buffer.create 4096 in
-  emit_preamble ~repl:true out;
-  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-  Buffer.add_buffer out ctx.extra_fns;
-  Buffer.contents out
-
-(** Emit a REPL function declaration as a .ll fragment, and also store a
-    first-class closure value in slot [dest_slot] via @march_repl_set.
-    The init function [@repl_<n>_init] allocates the closure and writes it
-    to the slot so later fragments can load it via @march_repl_get. *)
-let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
-    ~(bind_name : string)
-    ~(dest_slot : int)
-    ~(prev_slots : repl_slot_info list)
-    ?(extern_fns : Tir.fn_def list = [])
-    ~(types : Tir.type_def list)
-    (fn : Tir.fn_def) : string =
-  ignore bind_name;
-  let ctx = make_ctx ~fast_math ~repl:true ~type_defs:types () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
-  build_ctor_info ctx pseudo_mod;
-  Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-  Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-  Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-  if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
-  List.iter (fun f ->
-      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
-      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
-  emit_slot_loader_fns ctx prev_slots;
-  emit_fn ctx fn;
-  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
-     via the canonical [clo_wrap_define] (see its doc comment) so this
-     wrapper honors the SAME generic ptr ABI as every other closure-dispatch
-     wrapper in this file: scalars tagged `(n<<1)|1`, doubles bitcast into
-     the ptr slot, heap ptrs passed through.  ECallPtr call sites always
-     read the result as `ptr` (see is_apply_fn) regardless of the callee's
-     concrete return type — a wrapper that instead returned the raw
-     concrete type (as this one used to) would declare a mismatched LLVM
-     signature against that `call ptr` site, and the caller's conditional
-     untag would reinterpret raw bits as tagged, corrupting odd Int
-     results (B11). *)
-  let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
-  let wrap_name = fn_llvm_name ^ "$clo_wrap" in
-  let nparams = List.length fn.Tir.fn_params in
-  let target_ret = llvm_ret_ty fn.Tir.fn_ret_ty in
-  let param_tys = List.map (fun v -> llvm_ty v.Tir.v_ty) fn.Tir.fn_params in
-  let all_params = "ptr" :: param_tys in
-  let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-  let all_arg_decls = "%_clo" :: arg_names in
-  let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
-  let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-  (* Same check-then-add emitted_wraps guard as the other two clo_wrap_define
-     call sites: the fn is registered in ctx.top_fns BEFORE emit_fn above, so
-     a body that references ITSELF as a first-class value (e.g.
-     `let g = selfref`) already emitted this exact wrapper via emit_atom's
-     top-fns wrap path — an unconditional second emission would define the
-     same symbol twice in one fragment and clang rejects the module. *)
-  if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
-    Hashtbl.add ctx.emitted_wraps wrap_name ();
-    Buffer.add_string ctx.extra_fns
-      (clo_wrap_define wrap_name decl_str target_ret fn_llvm_name call_args)
-  end;
-  (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
-  let init_name = Printf.sprintf "repl_%d_init" n in
-  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
-  Printf.bprintf ctx.buf "  %%hp = call ptr @march_alloc(i64 24)\n";
-  Printf.bprintf ctx.buf "  %%tgp = getelementptr i8, ptr %%hp, i64 8\n";
-  Printf.bprintf ctx.buf "  store i32 0, ptr %%tgp, align 4\n";
-  Printf.bprintf ctx.buf "  %%fp = getelementptr i8, ptr %%hp, i64 16\n";
-  Printf.bprintf ctx.buf "  store ptr @%s, ptr %%fp, align 8\n" wrap_name;
-  Printf.bprintf ctx.buf "  %%cp = ptrtoint ptr %%hp to i64\n";
-  Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %%cp)\n" dest_slot;
-  Printf.bprintf ctx.buf "  ret void\n}\n";
-  let out = Buffer.create 4096 in
-  emit_preamble ~repl:true out;
-  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-  (* clo_wrap_define's output above lands in ctx.extra_fns (the same buffer
-     every other closure-wrap call site appends to) — include it here or the
-     wrapper text is silently dropped and @<fn>$clo_wrap becomes an undefined
-     symbol at link/dlopen time (B11 sibling bug: this emitter used to omit
-     extra_fns entirely). *)
-  Buffer.add_buffer out ctx.extra_fns;
-  Buffer.contents out
-
-(** Emit a collection of functions as a standalone LLVM IR module.
-    Used for precompiling the stdlib to a cacheable .so fragment.
-    No expression wrapper is emitted — just the function definitions. *)
-let emit_fns_fragment
-    ~(types : Tir.type_def list)
-    ~(fns : Tir.fn_def list)
-    ?(extern_fns : Tir.fn_def list = [])
-    ?(repl : bool = false)
-    () : string =
-  let ctx = make_ctx ~repl ~type_defs:types () in
-  let pseudo_mod : Tir.tir_module =
-    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
-  build_ctor_info ctx pseudo_mod;
-  (* Register externals first so intra-fragment references resolve correctly. *)
-  List.iter (fun f ->
-      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
-      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
-  List.iter (fun fn ->
-      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
-      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
-      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
-  List.iter (emit_fn ctx) fns;
-  let out = Buffer.create 8192 in
-  emit_preamble ~repl out;
-  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
-  Buffer.add_buffer out ctx.preamble;
-  Buffer.add_buffer out ctx.buf;
-  Buffer.add_buffer out ctx.extra_fns;
-  Buffer.contents out
-
-let llvm_ty_of_tir = llvm_ty
+let llvm_ty_of_tir = Llvm_repl.llvm_ty_of_tir
