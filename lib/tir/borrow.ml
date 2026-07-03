@@ -146,21 +146,10 @@ let is_borrowed (m : borrow_map) (fn_name : string) (idx : int) : bool =
   | Some modes -> idx < Array.length modes && modes.(idx)
   | None -> is_extern_borrowed fn_name idx
 
-(** Same predicate as [Perceus.needs_rc].  Duplicated here to avoid a cyclic
-    module dependency: [Perceus] imports [Borrow], so [Borrow] must not import
-    [Perceus]. *)
-let needs_rc : Tir.ty -> bool = function
-  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
-  | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
-  | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively treat as heap-carrying *)
-  | Tir.TRecord _ | Tir.TTuple _ -> true
-    (* Records and tuples are heap-allocated (via march_alloc) and hold heap-carrying
-       fields (Strings, ADT values, etc.).  Making them borrow-eligible lets the
-       fixpoint infer "cfg:borrowed" for functions that only read fields via EField,
-       preventing Perceus from emitting dec_rc on the extracted field values when
-       the owning caller still holds the record across multiple calls. *)
-  | Tir.TVar _ | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TFn _ -> false
+(* Borrow-inference eligibility is [Rc_types.borrow_eligible] — NOT the same
+   predicate as [Rc_types.needs_rc] (Perceus's RC-op emission question):
+   they deliberately diverge on TFn / bare TVar / TTuple / TRecord. See
+   Rc_types's module doc for the contract and fix history. *)
 
 (** True iff atom [a] is a reference to the variable named [name]. *)
 let atom_is (name : string) : Tir.atom -> bool = function
@@ -380,12 +369,12 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        Note we intentionally do NOT gate on the [br_var]'s own [v_ty]:
        [Lower] creates [br_vars] with a placeholder [TVar "_"] type even
        when the concrete constructor field is heap-carrying (e.g.
-       [List(String)] inside [Box(...)]) and [needs_rc] returns false for
-       [TVar _].
+       [List(String)] inside [Box(...)]) and [Rc_types.borrow_eligible]
+       returns false for [TVar _].
        For the same reason we also do NOT gate on the scrutinee's own type:
        closure-generated helpers (e.g. the [go] accumulator loop inside
        [List.map]) have their parameters typed as [TVar "_"] by Lower even
-       after monomorphisation, so [needs_rc scrutinee.v_ty] would also be
+       after monomorphisation, so [borrow_eligible scrutinee.v_ty] would also be
        false for them — causing field-escape to be missed entirely. Since
        ECase is only generated for variant/tuple types that are always
        heap-allocated in March, any [AVar] scrutinee is conservatively safe
@@ -479,9 +468,9 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
     Termination: parameters only transition borrowed → owned, never back.
     The iteration is bounded by the total number of RC-needing parameters.
 
-    Params whose types do not [needs_rc] are left as [false] (owned / not
-    relevant); the RC pass will not attempt to increment/decrement them
-    regardless. *)
+    Params whose types are not [Rc_types.borrow_eligible] are left as
+    [false] (owned / not relevant); the RC pass will not attempt to
+    increment/decrement them regardless. *)
 let _borrow_debug : bool Lazy.t =
   lazy (Sys.getenv_opt "MARCH_DEBUG_BORROW" <> None)
 
@@ -506,12 +495,12 @@ let print_borrow_map (m : Tir.tir_module) (bm : borrow_map) =
   Printf.eprintf "%!"
 
 let infer_module (m : Tir.tir_module) : borrow_map =
-  (* Initialise: params that need RC start as borrowed; others are false. *)
+  (* Initialise: borrow-eligible params start as borrowed; others are false. *)
   let init =
     List.fold_left (fun acc fn ->
       let n = List.length fn.Tir.fn_params in
       let modes = Array.init n (fun i ->
-        needs_rc (List.nth fn.Tir.fn_params i).Tir.v_ty
+        Rc_types.borrow_eligible (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc
     ) StringMap.empty m.Tir.tm_fns
@@ -555,7 +544,7 @@ let infer_module (m : Tir.tir_module) : borrow_map =
       let modes = Array.of_list (List.mapi (fun i pty ->
         let consumed = match List.nth_opt ed.Tir.ed_consumed i with
           | Some c -> c | None -> false in
-        needs_rc pty && not consumed
+        Rc_types.borrow_eligible pty && not consumed
       ) ed.Tir.ed_params) in
       StringMap.add ed.Tir.ed_march_name modes acc
     ) result m.Tir.tm_externs

@@ -199,42 +199,13 @@ let decrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
 
 (* ── Helpers ─────────────────────────────────────────────────────────────── *)
 
-(** Returns true if this type needs reference counting (heap-allocated). *)
-let needs_rc : Tir.ty -> bool = function
-  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
-  | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
-  | Tir.TVar "_" -> true  (* lower.ml placeholder for ECase br_vars / closure params:
-                              conservatively treat as heap-carrying.  The LLVM emit
-                              guards all RC calls with [if ty = "ptr" then …], so
-                              emitting EIncRC/EDecRC for a scalar TVar "_" is safe —
-                              the guard prevents the actual C call from firing. *)
-  | Tir.TVar _ -> true
-    (* Unresolved user type-var after mono: leaks into monomorphic TIR when a
-       value's concrete type is not propagated across a module boundary (e.g.
-       a `let gate = Gate.cast(...)` whose result is an opaque type defined in
-       another module stays `'_NNNN` instead of resolving to `Gate`).
-       llvm_ty (TVar _) = "ptr", so the value IS a heap pointer at runtime;
-       the old `false` made it invisible to Perceus, so no EIncRC was emitted
-       before a consuming call.  When the same binding was consumed twice (two
-       `Gate.get_change(gate, ...)` calls) the first consume freed the box and
-       the second double-freed it (bastion `Gate.cast` RC-underflow UAF).
-       Conservatively heap-carrying, exactly like the TFn case below; safe
-       because llvm_emit guards RC ops with [if ty = "ptr"] and the runtime
-       guards with IS_HEAP_PTR. *)
-  | Tir.TFn _ -> true
-    (* After defun, any AVar with a TFn type is a heap-allocated closure
-       struct (never a raw code pointer — those are ADefRef and never appear
-       in AVar liveness).  llvm_ty (TFn _) = "ptr" and llvm_emit already
-       guards RC ops with [if ty = "ptr" then …], so emitting EIncRC/EDecRC
-       for TFn variables is both necessary (to track the closure's lifetime)
-       and safe (no-op for non-ptr types due to the LLVM emit guard).
-       Setting this to false was the root cause of the Map.fold crash: the
-       closure parameter f in Map.node_fold was invisible to Perceus, so
-         (a) no EIncRC before storing f in the go closure,
-         (b) no EDecRC in the HEmpty branch where f is unused,
-         (c) no EIncRC in apply functions before lending f to recursive calls. *)
-  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TTuple _ | Tir.TRecord _ -> false
+(** Returns true if this type needs reference counting (heap-allocated).
+    Canonical definition: [Rc_types.needs_rc] (Wave 3 Task 2). It
+    deliberately diverges from [Rc_types.borrow_eligible] on
+    TFn / bare TVar (true here) and TTuple / TRecord (false here) — see
+    Rc_types's module doc for the full contract and fix history before
+    changing any arm. *)
+let needs_rc = Rc_types.needs_rc
 
 (** True for a defunctionalized closure apply wrapper ("<fn>$apply$<uid>").
     An apply function's first parameter is the closure struct ([$clo]); the

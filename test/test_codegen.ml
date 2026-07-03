@@ -124,6 +124,68 @@ let test_tir_names_bool_tags () =
   Alcotest.(check string) "bool_lit_tag true" "true" (March_tir.Tir_names.bool_lit_tag true);
   Alcotest.(check string) "bool_lit_tag false" "false" (March_tir.Tir_names.bool_lit_tag false)
 
+(* ── Rc_types: needs_rc / borrow_eligible divergence contract (Wave 3 Task 2) ──
+   Table-driven pin of the FULL truth table for both predicates over
+   representative types, plus an exactness check that the divergence set is
+   precisely {TFn _, bare TVar _, TTuple _, TRecord _} and nothing else.
+   If either predicate changes, this test fails and points at Rc_types's
+   module doc (each divergent constructor's fix history: a705cc95/d2cf09e/
+   fd520110 for TFn/TVar, 0b52510d/390dff00 for TTuple/TRecord). *)
+
+(* (label, ty, expected needs_rc, expected borrow_eligible) *)
+let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
+  let open March_tir.Tir in
+  [
+    "TInt",                TInt,                        false, false;
+    "TFloat",              TFloat,                      false, false;
+    "TBool",               TBool,                       false, false;
+    "TString",             TString,                     true,  true;
+    "TUnit",               TUnit,                       false, false;
+    "TTuple []",           TTuple [],                   false, true;   (* diverges *)
+    "TTuple [Int]",        TTuple [TInt],               false, true;   (* diverges *)
+    "TTuple [String]",     TTuple [TString],            false, true;   (* diverges *)
+    "TRecord []",          TRecord [],                  false, true;   (* diverges *)
+    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       false, true;   (* diverges *)
+    "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
+    "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
+    "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
+    "TCon (Atom,[Int])",   TCon ("Atom", [TInt]),       true,  true;   (* only nullary Atom is scalar *)
+    "TFn ([],Int)",        TFn ([], TInt),              true,  false;  (* diverges *)
+    "TFn ([Int],Int)",     TFn ([TInt], TInt),          true,  false;  (* diverges *)
+    "TPtr Int",            TPtr TInt,                   true,  true;
+    "TVar \"_\"",          TVar "_",                    true,  true;   (* placeholder: both conservative *)
+    "TVar \"a\"",          TVar "a",                    true,  false;  (* diverges *)
+    "TVar \"'_1234\"",     TVar "'_1234",               true,  false;  (* diverges *)
+  ]
+
+let test_rc_types_truth_table () =
+  List.iter (fun (label, ty, exp_rc, exp_be) ->
+    Alcotest.(check bool) (label ^ ": needs_rc") exp_rc
+      (March_tir.Rc_types.needs_rc ty);
+    Alcotest.(check bool) (label ^ ": borrow_eligible") exp_be
+      (March_tir.Rc_types.borrow_eligible ty)
+  ) rc_types_truth_table
+
+let test_rc_types_divergence_set_exact () =
+  (* Exactly the {TFn, bare TVar, TTuple, TRecord} rows diverge — computed
+     from the live predicates, compared against the constructor-classified
+     expectation, so a new divergence (or a silently unified arm) fails
+     loudly here even if the truth-table rows above were edited in sync. *)
+  let expected_divergent (ty : March_tir.Tir.ty) : bool =
+    match ty with
+    | March_tir.Tir.TFn _ | March_tir.Tir.TTuple _ | March_tir.Tir.TRecord _ -> true
+    | March_tir.Tir.TVar "_" -> false
+    | March_tir.Tir.TVar _ -> true
+    | _ -> false
+  in
+  List.iter (fun (label, ty, _, _) ->
+    let actual =
+      March_tir.Rc_types.needs_rc ty <> March_tir.Rc_types.borrow_eligible ty
+    in
+    Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
+      (expected_divergent ty) actual
+  ) rc_types_truth_table
+
 let test_nested_bool_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
     fn classify(r : Result(Bool, String)) : String do
@@ -6201,6 +6263,10 @@ let codegen_suites =
           Alcotest.test_case "is_try_call"                 `Quick test_tir_names_try_call;
           Alcotest.test_case "test/setup fn names"         `Quick test_tir_names_test_and_setup_fn_names;
           Alcotest.test_case "bool tags"                   `Quick test_tir_names_bool_tags;
+        ] );
+      ( "rc_types", [
+          Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
+          Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple, TRecord}" `Quick test_rc_types_divergence_set_exact;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
