@@ -1,19 +1,59 @@
 [
   {
+    "hash": "338ee15e552d87b3d02b3337e2587ae0d7e6241f",
+    "short_hash": "338ee15",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:45:56-04:00",
+    "message": "fix(test): march_project_root walks to the real repo root instead of _build\n\nFilename.dirname x3 of the test exe landed on <root>/_build — one dirname\nshort — so the compiled-regression tests' cd never enabled the compiler's\nCWD-relative stdlib/runtime fallbacks (a targeted build broke them all with\nstdlib-missing errors), --compile runs dropped .march/cas trees inside\n_build/, and the test_snapshots/test_ir_verify fallbacks were dead. Now\nwalks the exe's ancestors to the parent of its _build directory, verified\nby dune-project, failing loudly otherwise.",
+    "files_changed": 4
+  },
+  {
+    "hash": "8a79ebe3f9500cf6c75475ed379865d02052e19d",
+    "short_hash": "8a79ebe",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:45:01-04:00",
+    "message": "Merge origin/main: carry the project_root fix into the Wave-2 consolidated helper\n\norigin/main's e5843ab8 fixed the inline project_root computations in\ntest_codegen.ml (three dirnames of exe_dir, not two — two lands on\n_build). Wave 2 had consolidated those sites into test_helpers.ml's\nmarch_project_root, which carried the same off-by-one. Resolution keeps\nthe consolidated helper structure and applies the fix inside\nmarch_project_root itself; the two erased-update tests drop their\nnow-stale compensating 'dirname project_root', and test_ir_verify.ml's\nfallback comment (which documented the brokenness) is updated.",
+    "files_changed": 0
+  },
+  {
+    "hash": "9de119f461997fcb35b5d6a3f4773ffa6a493d36",
+    "short_hash": "9de119f",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:38:48-04:00",
+    "message": "test(codegen): liveness tests for the unresolved-iface-method guard; skip-ledger wording fixes (Wave 2 final review)\n\nPositive control for fail_if_unresolved_iface_method (llvm_emit.ml): the\nWave 2 Task 1 defense-in-depth failwith path was never exercised, so a\ndrift in ctx.top_fns naming or the $-before-last-dot predicate would rot\nit silently. Three new tests in iface_impl_mono_codegen hand-build the\nregression signature as a raw Tir.tir_module (bare `describe` call +\nregistered Pretty$Int.describe impl) — hand-built because the fixed\nfrontend can no longer produce that state — and drive full emit_module\nthrough BOTH guard consumers (EApp general path, ECallPtr no-var-slot\ncatch-all), asserting the Failure names the symbol and candidate impl;\na negative control (non-matching suffix) pins against false positives.\n\nSkip-ledger truthfulness: the W2.0 canary's clang-absent skip is now\nactually counted (comment claimed counted, record_jit_skip never ran);\nthe at_exit banner generalized to a tool-neutral header (ledger also\ncarries LLVM-verifier-absence skips); stale pre-W2.0 'clang or runtime'\nskip comments in test_codegen.ml / test_stdlib_suite.ml reworded to the\nreal contract (only clang absence skips, counted; anything else loud).\n\nSix runners: 384 compiler / 230 eval / 349 codegen (+3) / 791 stdlib\n(790 + 1 documented mono-limit skip) / 53 stdlib_march / 29 snapshot —\nall exit 0. check-docs.sh green.",
+    "files_changed": 5
+  },
+  {
+    "hash": "4b3b636aa9de6eae7ae3fbb9f177fbd5248ca95c",
+    "short_hash": "4b3b636",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:27:19-04:00",
+    "message": "Merge branch 'claude/wonderful-archimedes-597acf'\n\n# Conflicts:\n#\tspecs/progress.md\n#\tspecs/todos.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "4b3b636aa9de6eae7ae3fbb9f177fbd5248ca95c",
+    "short_hash": "4b3b636",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:27:19-04:00",
+    "message": "Merge branch 'claude/wonderful-archimedes-597acf'\n\n# Conflicts:\n#\tspecs/progress.md\n#\tspecs/todos.md",
+    "files_changed": 0
+  },
+  {
+    "hash": "d0ef088571ffa1324f7c0953f9bb5219915c2367",
+    "short_hash": "d0ef088",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:19:42-04:00",
+    "message": "fix(refine): reap the shared z3 solver on every exit path\n\nEvery process that ran a refinement pass leaked one immortal 'z3 -in':\nthe shared solver singleton behind Refine.discharge was never closed,\nand Solver.create's pipes lacked ~cloexec:true, so the z3 child\ninherited the write end of its own stdin pipe — parent death never\ndelivered EOF and the orphan blocked in read(0) forever (1,174 such\norphans found reparented to PID 1 on 2026-07-02).\n\n- Solver.create: cloexec on all pipe ends (parent death now EOFs the\n  child even on abnormal exit); ignore SIGPIPE if at default so a dead\n  solver surfaces as a catchable error, not parent death.\n- Solver.close: SIGKILL before waitpid — reaping never blocks on a\n  wedged solver.\n- Refine.shutdown: close + clear the singleton; registered at_exit on\n  first spawn and called at the end of both refinement-pass scopes in\n  bin/main.ml.\n- Refine.discharge: supervised restart — a dead/wedged solver is\n  reaped, respawned once, then marked unavailable for the run.\n- test/test_refine.ml lifecycle suite (pgrep-based, loud-skip without\n  z3): spawn-count check and an orphan probe (MARCH_Z3_ORPHAN_PROBE\n  re-exec), RED-verified against the pre-fix pipes.",
+    "files_changed": 7
+  },
+  {
     "hash": "84b422e04588d0ff3872f0470cef0dfac6c4c537",
     "short_hash": "84b422e",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T23:16:00-04:00",
     "message": "Merge main into claude/hopeful-kapitsa-9f49f3: wave-2 testing infra x main record_put/CSRF work\n\nUnion-merged append-only specs; converted main's new\ntest_compiled_record_put_large_even_int to the W2.0 loud-skip helpers\n(find_main_exe + compile_march_or_skip) per the whole-branch review.\nVerified: six runners exit 0 (incl. IR gate over main's record_put\nemitter changes; zero TIR snapshot churn).",
     "files_changed": 0
-  },
-  {
-    "hash": "62d907e3f631d8cc8c4811e281ad139d0cfed7d4",
-    "short_hash": "62d907e",
-    "author": "Matthew Gilliam",
-    "date": "2026-07-02T22:59:54-04:00",
-    "message": "docs(specs): record Wave 2 (testing infrastructure + audit findings); snapshot doc corrections",
-    "files_changed": 3
   },
   {
     "hash": "62d907e3f631d8cc8c4811e281ad139d0cfed7d4",
@@ -32,14 +72,6 @@
     "files_changed": 48
   },
   {
-    "hash": "59a9fb9f8efc157e56ff9b58bd32731d8279b389",
-    "short_hash": "59a9fb9",
-    "author": "Matthew Gilliam",
-    "date": "2026-07-02T21:57:04-04:00",
-    "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
-    "files_changed": 6
-  },
-  {
     "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
     "short_hash": "d685bc6",
     "author": "Matthew Gilliam",
@@ -50,6 +82,14 @@
   {
     "hash": "43faba9fd31a41071039690cfacf5777de4d3df3",
     "short_hash": "43faba9",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T21:57:04-04:00",
+    "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
+    "files_changed": 6
+  },
+  {
+    "hash": "59a9fb9f8efc157e56ff9b58bd32731d8279b389",
+    "short_hash": "59a9fb9",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T21:57:04-04:00",
     "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
@@ -224,16 +264,16 @@
     "files_changed": 1
   },
   {
-    "hash": "b2b5047cd7afb33b45070c3f6d5af53fe8c9f0cd",
-    "short_hash": "b2b5047",
+    "hash": "ed66a874e4f457fe7f3efdb128e74fc1665dd396",
+    "short_hash": "ed66a87",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T11:25:15-04:00",
     "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
     "files_changed": 2
   },
   {
-    "hash": "ed66a874e4f457fe7f3efdb128e74fc1665dd396",
-    "short_hash": "ed66a87",
+    "hash": "b2b5047cd7afb33b45070c3f6d5af53fe8c9f0cd",
+    "short_hash": "b2b5047",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T11:25:15-04:00",
     "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
@@ -2968,16 +3008,16 @@
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2992,16 +3032,16 @@
     "files_changed": 7
   },
   {
-    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
-    "short_hash": "376a668",
+    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
+    "short_hash": "6612a48",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
     "files_changed": 3
   },
   {
-    "hash": "6612a48aedee223a85d1b047e202316a6d1e019f",
-    "short_hash": "6612a48",
+    "hash": "376a668a88cb9f396603a482660f75857ae567ce",
+    "short_hash": "376a668",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:38:16-04:00",
     "message": "fix(eval): clean SIGINT shutdown for interpreter HTTP server\n\nThe http_server_listen builtin was blocking forever on Unix.accept with\nno way to interrupt it on SIGINT.  OCaml retries EINTR-interrupted\nblocking calls automatically, so the existing Sys.Signal_handle handler\n(which sets shutdown_requested) had no effect on the accept loop.\n\nReplace the while-true/blocking-accept with a select-based loop that\npolls with a 1-second timeout, checks shutdown_requested between\niterations, and prints \"march: Shutting down...\" before exiting.  This\nmirrors the C runtime's g_http_shutdown + select(1s) pattern used in\nmarch_http_server_listen().",
@@ -3024,16 +3064,16 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -3112,16 +3152,16 @@
     "files_changed": 15
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
