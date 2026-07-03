@@ -18,8 +18,8 @@
     re-literal the string or re-derive the predicate. This is a pure
     behavior-preserving move (Wave 3 Task 1): every function here was
     verified byte-identical against the code it replaces before conversion
-    — see specs/plans/2026-07-03-wave3-chunk1-refactors.md Task 1 and
-    .superpowers/sdd/w3-task-1-report.md for the inventory and diff verdicts.
+    — see specs/plans/2026-07-03-wave3-chunk1-refactors.md Task 1 for the
+    inventory requirements and gate evidence standard the conversion met.
 
     Naming convention across the whole scheme: every synthesized name here
     uses ['$'], which is unlexable in March surface syntax (the lexer has no
