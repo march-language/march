@@ -161,15 +161,16 @@ let coerce = Llvm_ctx.coerce
 let llvm_escape_string = Llvm_ctx.llvm_escape_string
 let intern_string = Llvm_ctx.intern_string
 
-let llvm_ret_ty : Tir.ty -> string = function
-  | Tir.TUnit -> "void"
-  | t -> llvm_ty t
+(* llvm_ret_ty moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2): [Llvm_calls] and
+   [Llvm_tco] both need it too; re-exported bare since ~20 call sites in this
+   file still use it unqualified. *)
+let llvm_ret_ty = Llvm_ctx.llvm_ret_ty
 
-(* For a `raises` extern declared `: Result(T, E)`, the C binding returns the
-   bare Ok payload of type T (not a march_value Result).  This is T. *)
-let ok_payload_ty : Tir.ty -> Tir.ty = function
-  | Tir.TCon ("Result", [t_ok; _]) -> t_ok
-  | t -> t
+(* ok_payload_ty moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): its only
+   caller besides emit_module's one use below is [emit_raises_wrapper].
+   Re-exported bare for that one remaining call site (in emit_module,
+   Task 7's territory). *)
+let ok_payload_ty = Llvm_calls.ok_payload_ty
 
 (** Return type of a function variable's type. *)
 let fn_ret_tir (ty : Tir.ty) : Tir.ty =
@@ -200,37 +201,11 @@ let fn_ret_tir (ty : Tir.ty) : Tir.ty =
     the diff verdict). *)
 let is_apply_fn = Tir_names.is_apply_fn
 
-(** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
-    result in the generic ptr ABI shared by all closure dispatch (see
-    [is_apply_fn]).  A closure struct's fn-pointer is type-erased, so a thin
-    closure wrapping a named function MUST present the same ptr ABI as a lambda
-    apply wrapper — otherwise the ECallPtr dispatch (which reads ptr) would
-    misread a concrete `i64`/`double` return (e.g. a Bool-returning predicate
-    passed to List.filter, read back tagged and inverted).  Scalars are tagged
-    `(n<<1)|1` and floats bitcast into the ptr slot; the consumer untags via the
-    usual ptr->scalar coerce.  void wrappers carry no value (ret ptr null). *)
-let clo_wrap_define wrap_name decl_str target_ret fn_name call_args =
-  if target_ret = "void" then
-    Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
-      wrap_name decl_str fn_name call_args
-  else if target_ret = "ptr" then
-    Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
-      wrap_name decl_str fn_name call_args
-  else if target_ret = "double" then
-    Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  \
-       %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  \
-       ret ptr %%rp\n}\n\n"
-      wrap_name decl_str fn_name call_args
-  else
-    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
-    Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  \
-       %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
-       %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
-      wrap_name decl_str target_ret fn_name call_args
+(* clo_wrap_define moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): a pure
+   string-building helper (no ctx dependency) called from emit_atom's two
+   first-class-function-reference arms below and from emit_repl_fn_with_
+   closure_slot further down — both stay in this file, so re-export bare. *)
+let clo_wrap_define = Llvm_calls.clo_wrap_define
 
 (* ── Known builtins ──────────────────────────────────────────────────── *)
 
@@ -273,33 +248,10 @@ let rec expr_has_call (e : Tir.expr) : bool =
   | Tir.ESeq (e1, e2)    -> expr_has_call e1 || expr_has_call e2
   | _                    -> false
 
-(** Emit an inline reduction-count check at the current position in [ctx.buf].
-    Decrements [@march_tls_reductions]; when it reaches zero calls
-    [@march_yield_from_compiled()] (which resets the budget and yields).
-    Leaves the IR positioned at the start of a fresh basic block so the
-    caller can continue emitting the function body. *)
-let emit_reduction_check ctx =
-  (* In REPL mode, skip the reduction check: ORC JIT cannot resolve
-     march_tls_reductions (a TLS var) on macOS via emutls, and the REPL is
-     always single-threaded so the scheduler yield is a no-op anyway. *)
-  if not ctx.repl then begin
-  let yield_blk = fresh_block ctx "sched_yield" in
-  let cont_blk  = fresh_block ctx "sched_cont"  in
-  let red       = fresh ctx "red" in
-  let red_dec   = fresh ctx "red_dec" in
-  let need_yield = fresh ctx "need_yield" in
-  emit ctx (Printf.sprintf "%s = load i64, ptr @march_tls_reductions" red);
-  emit ctx (Printf.sprintf "%s = sub i64 %s, 1" red_dec red);
-  emit ctx (Printf.sprintf "store i64 %s, ptr @march_tls_reductions" red_dec);
-  emit ctx (Printf.sprintf "%s = icmp sle i64 %s, 0" need_yield red_dec);
-  emit_term ctx
-    (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-       need_yield yield_blk cont_blk);
-  emit_label ctx yield_blk;
-  emit ctx "call void @march_yield_from_compiled()";
-  emit_term ctx (Printf.sprintf "br label %%%s" cont_blk);
-  emit_label ctx cont_blk
-  end
+(* emit_reduction_check moved to [Llvm_ctx] (Wave 3 Task 6, chunk 2):
+   [emit_mutual_tco_group] (now in [Llvm_tco]) needed it alongside [emit_fn]
+   here — re-export bare since emit_fn calls it unqualified below. *)
+let emit_reduction_check = Llvm_ctx.emit_reduction_check
 
 (** TIR return type for known builtin/extern functions, overriding type info.
 
@@ -628,164 +580,27 @@ let mangle_ty_for_eq = Llvm_eq.mangle_ty_for_eq
 let field_load_llty = Llvm_eq.field_load_llty
 let ensure_adt_eq_fn = Llvm_eq.ensure_adt_eq_fn
 
-(** Emit the call-site wrapper for a `raises` extern (env-routed error protocol).
-    The C binding [fname] takes a hidden march_env* first param and returns the
-    bare Ok payload (T of Result(T,E) = [ret_tir]); to fail it calls
-    march_raise(env, e).  We pass a stack { i64 raised; i64 err }, call, then
-    materialize Ok(payload) / Err(env.err).  Result is boxed → returns ("ptr",_).
-    [arg_pairs] are the (llty, value) pairs for the binding's own (non-env) args. *)
-let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
-  let env = fresh ctx "env" in
-  emit ctx (Printf.sprintf "%s = alloca { i64, i64 }" env);
-  let rslot = fresh ctx "envraised" in
-  emit ctx (Printf.sprintf
-    "%s = getelementptr { i64, i64 }, ptr %s, i64 0, i32 0" rslot env);
-  emit ctx (Printf.sprintf "store i64 0, ptr %s" rslot);
-  let t_ok = ok_payload_ty ret_tir in
-  let payload_llty = llvm_ret_ty t_ok in
-  let call_args =
-    String.concat ", "
-      (Printf.sprintf "ptr %s" env
-       :: List.map (fun (ty, v) -> Printf.sprintf "%s %s" ty v) arg_pairs) in
-  let payload =
-    if payload_llty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" fname call_args); "0"
-    end else begin
-      let p = fresh ctx "okpay" in
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" p payload_llty fname call_args); p
-    end in
-  let raisedv = fresh ctx "raised" in
-  emit ctx (Printf.sprintf "%s = load i64, ptr %s" raisedv rslot);
-  let cond = fresh ctx "rcond" in
-  emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" cond raisedv);
-  let err_lbl = fresh_block ctx "raise_err" in
-  let ok_lbl  = fresh_block ctx "raise_ok" in
-  let mrg_lbl = fresh_block ctx "raise_merge" in
-  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cond err_lbl ok_lbl);
-  (* Err: materialize Err(env.err) *)
-  emit_label ctx err_lbl;
-  let errslot = fresh ctx "enverr" in
-  emit ctx (Printf.sprintf
-    "%s = getelementptr { i64, i64 }, ptr %s, i64 0, i32 1" errslot env);
-  let errv = fresh ctx "errv" in
-  emit ctx (Printf.sprintf "%s = load i64, ptr %s" errv errslot);
-  let eres = fresh ctx "eres" in
-  emit ctx (Printf.sprintf "%s = call ptr @march_err(i64 %s)" eres errv);
-  emit_term ctx (Printf.sprintf "br label %%%s" mrg_lbl);
-  (* Ok: convert the bare payload to a march_value, then Ok(payload) *)
-  emit_label ctx ok_lbl;
-  let okval = (match t_ok with
-    | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
-      (* tag a raw scalar into a march_value: (v << 1) | 1 *)
-      let sh = fresh ctx "oksh" in
-      emit ctx (Printf.sprintf "%s = shl i64 %s, 1" sh payload);
-      let tg = fresh ctx "oktag" in
-      emit ctx (Printf.sprintf "%s = or i64 %s, 1" tg sh); tg
-    | Tir.TFloat ->
-      (* the bare payload is a double; the Result Ok slot holds the raw IEEE
-         bits (Result is a plain boxed ADT — no extra boxing for Float). *)
-      let bits = fresh ctx "okfbits" in
-      emit ctx (Printf.sprintf "%s = call i64 @march_make_float(double %s)" bits payload); bits
-    | _ ->
-      (* heap/String/record/variant: the payload word is already a value *)
-      let pi = fresh ctx "okp2i" in
-      emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" pi payload); pi) in
-  let ores = fresh ctx "ores" in
-  emit ctx (Printf.sprintf "%s = call ptr @march_ok(i64 %s)" ores okval);
-  emit_term ctx (Printf.sprintf "br label %%%s" mrg_lbl);
-  emit_label ctx mrg_lbl;
-  let result = fresh ctx "raise_r" in
-  emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
-              result eres err_lbl ores ok_lbl);
-  ("ptr", result)
+(* emit_raises_wrapper moved to [Llvm_calls] (Wave 3 Task 6, chunk 2): the
+   EApp/ECallPtr `raises`-extern call sites below (both stay in this file's
+   [emit_expr]) call it unqualified — re-export bare. *)
+let emit_raises_wrapper = Llvm_calls.emit_raises_wrapper
 
-(** True iff [body] is a "trivial cleanup chain" that performs only
-    [EDecRC] / [EAtomicDecRC] / [EFree] operations and finally returns
-    the binding named [tmp_name].
+(* is_trivial_dec_chain_returning / is_trivial_dec_chain moved to [Llvm_tco]
+   (Wave 3 Task 6, chunk 2), alongside the mutual-TCO analysis section that
+   names them in the brief as moving "as ONE" with the tail-call predicates.
+   [emit_expr]'s own Perceus-wrapped-TCO match-arm guards below (self-TCO and
+   mutual-TCO ELet/ESeq interception, B7/B8) still call them unqualified —
+   this is a one-directional forward reference ([llvm_emit.ml] depending on
+   [Llvm_tco]): the predicates are pure structural recursion over [Tir.expr]
+   with no dependency back on [emit_expr], so no cycle. Re-exported bare. *)
+let is_trivial_dec_chain_returning = Llvm_tco.is_trivial_dec_chain_returning
+let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
 
-    Used to recognise the
-        [ELet (tmp, EApp (f, args), ESeq (dec_v1, ESeq (dec_v2, EAtom tmp)))]
-    shape that Perceus emits in the EApp case when wrapping a borrowed-arg
-    last-use post-call DecRC around a NON-self call (see [perceus.ml] EApp
-    handling).  Without this recognition the wrapped call is invisible to
-    the tail-call analyses in the mutual-TCO section below — silently
-    dropping mutual TCO and producing real stack overflows on long inputs.
-
-    Single definition (Wave 3 Task 5, chunk 2): this predicate was
-    previously duplicated — this copy (needed by emit_expr's Perceus-wrapped
-    TCO cases) plus a byte-identical one at the top of the mutual-TCO
-    analysis section, an OCaml forward-reference workaround carrying a
-    "must stay identical" comment.  Both sets of callers live after this
-    point in the file, so the duplicate was deleted and this is now the
-    only copy. *)
-let rec is_trivial_dec_chain_returning (tmp_name : string) (body : Tir.expr) : bool =
-  match body with
-  | Tir.EAtom (Tir.AVar v) -> String.equal v.Tir.v_name tmp_name
-  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _), rest) ->
-    is_trivial_dec_chain_returning tmp_name rest
-  | _ -> false
-
-(* Sibling of is_trivial_dec_chain_returning for the no-temp ESeq shape:
-   Perceus emits ESeq(EApp(self,args), dec_chain) — WITHOUT an ELet binding
-   the call's result — when the tail call's result needs no further
-   post-call field-level bookkeeping beyond decrementing/incrementing
-   already-materialised local values (e.g. a wildcarded `Cons(_, t)` pattern
-   decrements the local `t` after passing it on, since March's calling
-   convention borrows arguments and the caller is responsible for releasing
-   its own reference once the call returns). emit_expr's generic ESeq case
-   relies on the "e2 is Dec/IncRC → propagate e1's value" rule (see ESeq
-   below) to make e1's result the seq's value, but it also unconditionally
-   clears tco_in_tail before emitting e1 — so a self-call here compiles as
-   an ordinary (non-tail) call even though it is semantically a tail call.
-   This predicate recognises that dec_chain consists solely of trivial
-   RC bookkeeping, so the dedicated ESeq-TCO case below can intercept it
-   and emit a back-edge instead. *)
-let rec is_trivial_dec_chain (e : Tir.expr) : bool =
-  match e with
-  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-  | Tir.EIncRC _ | Tir.EAtomicIncRC _ -> true
-  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-              | Tir.EIncRC _ | Tir.EAtomicIncRC _), rest) ->
-    is_trivial_dec_chain rest
-  | _ -> false
-
-(* Wave 2 Task 1 defense-in-depth: a bare (unqualified, unresolved) callee
-   name that exactly matches the dot-suffix of one or more registered
-   interface-impl-mangled names ("Iface$Type.method") is the exact
-   recurrence signature of the println-of-list miscompile — mono.ml failed
-   to resolve a nested interface-method call (e.g. the `show(x)` inside
-   `impl Show(List(a)) when Show(a)`), and it survived to codegen as a bare
-   call.  unqualified_fns deliberately excludes these mangled names (see
-   the population site in emit_module), so such a call would otherwise
-   silently fall through to an unresolved `declare` that either fails at
-   link time with a cryptic "undefined symbol" or — worse — coincidentally
-   resolves against some unrelated same-named top-level fn.  Fail LOUDLY
-   instead, naming the unresolved symbol and the candidate impls, so this
-   can never again silently mis-bind to the wrong impl.
-
-   Called from BOTH unqualified_fns consumers — the general EApp call path
-   and the ECallPtr no-var-slot catch-all — with the same message, so any
-   future refinement of this check lands in both. *)
-let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
-  let candidates =
-    Hashtbl.fold (fun name _ acc ->
-        if Tir_names.is_iface_mangled name then
-          match String.rindex_opt name '.' with
-          | Some i ->
-            let suffix = String.sub name (i + 1) (String.length name - i - 1) in
-            if suffix = bare_name then name :: acc else acc
-          | None -> acc
-        else acc)
-      ctx.top_fns []
-  in
-  if candidates <> [] then
-    failwith (Printf.sprintf
-      "llvm_emit: unresolved interface-method call to `%s` reached codegen \
-       unspecialized (mono.ml should have rewritten this to a concrete impl). \
-       Candidate impls found (dispatch is ambiguous / was never resolved): %s. \
-       This is a monomorphization bug, not a linker issue — refusing to \
-       silently bind to an arbitrary one of these impls."
-      bare_name (String.concat ", " candidates))
+(* fail_if_unresolved_iface_method moved to [Llvm_calls] (Wave 3 Task 6,
+   chunk 2): called from BOTH unqualified_fns consumers in [emit_expr] below
+   (the general EApp call path and the ECallPtr no-var-slot catch-all) —
+   re-export bare. *)
+let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
 
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
@@ -3059,205 +2874,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
 (* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
 
-(* The is_trivial_dec_chain_returning predicate used throughout this section
-   is defined ONCE, earlier in this file (just after emit_raises_wrapper) —
-   a byte-identical duplicate that used to sit here as an OCaml
-   forward-reference workaround was deleted in the Wave 3 Task 5 (chunk 2)
-   split; see the single definition's doc comment. *)
-
-(** Collect all function names that are called in TAIL position in [expr].
-    Only traverses tail-position sub-expressions. *)
-let rec tail_calls_in (expr : Tir.expr) : string list =
-  match expr with
-  | Tir.EApp (f, _) -> [f.Tir.v_name]
-  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
-    when is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    (* Borrow-induced post-DecRC wrapper: the EApp is semantically the tail. *)
-    [f.Tir.v_name]
-  | Tir.ELet (_, _, body) -> tail_calls_in body
-  | Tir.ESeq (_, e2) -> tail_calls_in e2
-  | Tir.ECase (_, branches, default_opt) ->
-    List.concat_map (fun br -> tail_calls_in br.Tir.br_body) branches
-    @ (match default_opt with Some d -> tail_calls_in d | None -> [])
-  | Tir.ELetRec (_, body) -> tail_calls_in body
-  | _ -> []
-
-(** True if [expr] contains a call to any member of [group] that is NOT in
-    tail position.  [in_tail] tracks whether we are currently on a tail path.
-    - ELet rhs is non-tail; body inherits [in_tail].
-    - ESeq e1 is non-tail; e2 inherits [in_tail].
-    - ECase arm bodies inherit [in_tail].
-    - ELetRec inner fn bodies: calls there are relative to those fns, not the
-      outer function, so we treat them as non-tail for outer-group purposes. *)
-let rec has_non_tail_group_call (group : string list) ~(in_tail : bool)
-    (expr : Tir.expr) : bool =
-  match expr with
-  | Tir.EApp (f, _) -> List.mem f.Tir.v_name group && not in_tail
-  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
-    when is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    (* Borrow-induced post-DecRC wrapper: the EApp is semantically the tail
-       call IFF this whole ELet is itself in tail position.  Body contains
-       only DecRC/Free ops + the trailing EAtom — no further calls that
-       could be non-tail on their own, so once we know the wrapped call is
-       disqualifying we don't need to recurse into body.  Mirror the bare
-       EApp arm above: a wrapped call to a group member is a non-tail group
-       call whenever [in_tail] is false here (e.g. this ELet is the rhs of
-       an outer ELet/ESeq).  Before this guard, the wrapped call was always
-       treated as the tail call regardless of [in_tail], so a non-tail
-       Perceus-wrapped group call could slip a mutual SCC through group
-       formation, and the mutual-TCO emission then stranded the
-       continuation in a dead block. *)
-    (List.mem f.Tir.v_name group && not in_tail)
-    || has_non_tail_group_call group ~in_tail body
-  | Tir.ELet (_, rhs, body) ->
-    has_non_tail_group_call group ~in_tail:false rhs
-    || has_non_tail_group_call group ~in_tail body
-  | Tir.ESeq (e1, e2) ->
-    has_non_tail_group_call group ~in_tail:false e1
-    || has_non_tail_group_call group ~in_tail e2
-  | Tir.ECase (_, branches, default_opt) ->
-    List.exists (fun br -> has_non_tail_group_call group ~in_tail br.Tir.br_body)
-      branches
-    || (match default_opt with
-        | Some d -> has_non_tail_group_call group ~in_tail d
-        | None -> false)
-  | Tir.ELetRec (fns, body) ->
-    (* Calls inside inner local functions are in those functions' own tail
-       positions, not the outer function's.  Conservatively block mutual TCO
-       if any inner fn non-tail-calls a group member (inner bodies are not the
-       outer tail position regardless). *)
-    List.exists (fun fn ->
-      has_non_tail_group_call group ~in_tail:true fn.Tir.fn_body) fns
-    || has_non_tail_group_call group ~in_tail body
-  | _ -> false
-
-(** Tarjan's SCC algorithm over the tail-call graph of [fns].
-    Returns a list of SCCs, each SCC being a list of fn_names. *)
-let tarjan_sccs (fns : Tir.fn_def list) : string list list =
-  let fn_names = List.map (fun fn -> fn.Tir.fn_name) fns in
-  (* tail-call adjacency: name -> [names tail-called within the module] *)
-  let tail_adj = List.map (fun fn ->
-    let tcs = tail_calls_in fn.Tir.fn_body in
-    let within = List.sort_uniq String.compare
-      (List.filter (fun n -> List.mem n fn_names) tcs) in
-    (fn.Tir.fn_name, within)
-  ) fns in
-  let index_ctr = ref 0 in
-  let stack     = ref [] in
-  let on_stack  = Hashtbl.create 16 in
-  let indices   = Hashtbl.create 16 in
-  let lowlinks  = Hashtbl.create 16 in
-  let sccs      = ref [] in
-  let rec strongconnect v =
-    let idx = !index_ctr in
-    Hashtbl.replace indices  v idx;
-    Hashtbl.replace lowlinks v idx;
-    incr index_ctr;
-    stack := v :: !stack;
-    Hashtbl.replace on_stack v true;
-    let neighbors = try List.assoc v tail_adj with Not_found -> [] in
-    List.iter (fun w ->
-      if not (Hashtbl.mem indices w) then begin
-        strongconnect w;
-        let vll = Hashtbl.find lowlinks v in
-        let wll = Hashtbl.find lowlinks w in
-        Hashtbl.replace lowlinks v (min vll wll)
-      end else if Hashtbl.mem on_stack w then begin
-        let vll = Hashtbl.find lowlinks v in
-        let widx = Hashtbl.find indices w in
-        Hashtbl.replace lowlinks v (min vll widx)
-      end
-    ) neighbors;
-    if Hashtbl.find lowlinks v = Hashtbl.find indices v then begin
-      let scc = ref [] in
-      let go  = ref true in
-      while !go do
-        let w = List.hd !stack in
-        stack := List.tl !stack;
-        Hashtbl.remove on_stack w;
-        scc := w :: !scc;
-        if String.equal w v then go := false
-      done;
-      sccs := !scc :: !sccs
-    end
-  in
-  List.iter (fun name ->
-    if not (Hashtbl.mem indices name) then strongconnect name
-  ) fn_names;
-  !sccs
-
-(** Given the full list of top-level functions, return groups of ≥ 2 functions
-    that qualify for mutual TCO.  A group qualifies when:
-    1. Its functions form a non-trivial SCC in the tail-call graph (size ≥ 2).
-    2. No function in the group makes a non-tail call to any other group member.
-    3. All functions in the group have the same LLVM return type (required for
-       the shared loop to produce one result type). *)
-let find_mutual_tco_groups (fns : Tir.fn_def list) : Tir.fn_def list list =
-  let fn_map = List.map (fun fn -> (fn.Tir.fn_name, fn)) fns in
-  let sccs = tarjan_sccs fns in
-  List.filter_map (fun scc ->
-    if List.length scc < 2 then None
-    else begin
-      let group_fns = List.filter_map (fun name ->
-        try Some (List.assoc name fn_map) with Not_found -> None) scc in
-      let group_names = List.map (fun fn -> fn.Tir.fn_name) group_fns in
-      (* All cross-group calls must be tail calls *)
-      let all_tail =
-        List.for_all (fun fn ->
-          not (has_non_tail_group_call group_names ~in_tail:true fn.Tir.fn_body)
-        ) group_fns
-      in
-      (* All functions must have the same LLVM return type *)
-      let ret_tys = List.map (fun fn -> llvm_ret_ty fn.Tir.fn_ret_ty) group_fns in
-      let all_same_ret = match ret_tys with
-        | [] | [_] -> true
-        | h :: t   -> List.for_all (String.equal h) t
-      in
-      if all_tail && all_same_ret then Some group_fns
-      else None
-    end
-  ) sccs
-
-(* ── Mutual TCO: combined function name ─────────────────────────────── *)
-
-(** Stable mangled name for the combined function of a mutual-TCO group. *)
-let mutual_tco_combined_name (group : Tir.fn_def list) : string =
-  "__mutco_" ^
-  String.concat "_" (List.map (fun fn -> llvm_name fn.Tir.fn_name) group) ^
-  "__"
-
-(* ── TCO helper ──────────────────────────────────────────────────────── *)
-
-(** Return true if [expr] contains a tail-position call to [fn_name].
-    Only traverses sub-expressions that are in tail position:
-    - ELet body (not rhs)
-    - ESeq: second operand, or first operand when the first is a self-call
-      followed only by RC cleanup (borrow inference may emit
-      ESeq(EApp(self,...), EDecRC(arg)) — the EDecRC lands in dead code
-      after TCO emits the back-edge, so it is safe to treat e1 as a tail call)
-    - ECase branch bodies and default
-    - ELetRec body
-    A bare EApp whose callee name matches is a tail call. *)
-let rec has_self_tail_call (fn_name : string) (expr : Tir.expr) : bool =
-  match expr with
-  | Tir.EApp (f, _) -> String.equal f.Tir.v_name fn_name
-  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
-    when String.equal f.Tir.v_name fn_name
-         && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    (* Borrow-induced post-DecRC wrapper around a self call.  Recognise it
-       so TCO sees the call.  (Self calls usually keep ESeq form via the
-       is_self_call branch in perceus.ml, but the ELet form arises when the
-       call is via an indirect alias.) *)
-    true
-  | Tir.ELet (_, _, body) -> has_self_tail_call fn_name body
-  | Tir.ESeq (e1, e2) ->
-    has_self_tail_call fn_name e2 ||
-    has_self_tail_call fn_name e1
-  | Tir.ECase (_, branches, default_opt) ->
-    List.exists (fun br -> has_self_tail_call fn_name br.Tir.br_body) branches ||
-    (match default_opt with Some d -> has_self_tail_call fn_name d | None -> false)
-  | Tir.ELetRec (_, body) -> has_self_tail_call fn_name body
-  | _ -> false
+(* tail_calls_in / has_non_tail_group_call / tarjan_sccs /
+   find_mutual_tco_groups / mutual_tco_combined_name / has_self_tail_call —
+   and is_trivial_dec_chain_returning / is_trivial_dec_chain themselves —
+   moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).  None of these are called
+   from this file: emit_fn below only calls has_self_tail_call (see
+   Llvm_tco.has_self_tail_call at its one call site), and emit_module (Task
+   7's territory, further down) calls find_mutual_tco_groups /
+   mutual_tco_combined_name / emit_mutual_tco_group to decide per-group
+   dispatch — all referenced qualified, no re-export needed for these (only
+   is_trivial_dec_chain_returning/is_trivial_dec_chain are re-exported bare,
+   above, for emit_expr's own Perceus-wrapped-TCO guards). *)
 
 (* ── Function emitter ────────────────────────────────────────────────── *)
 
@@ -3288,7 +2915,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
      Without that gate the non-tail call would be turned into a back-edge and
      the surrounding construction silently dropped — a miscompile. *)
   let is_tco =
-    has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
+    Llvm_tco.has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
     && not (is_builtin_fn fn.Tir.fn_name)
   in
 
@@ -3399,234 +3026,10 @@ let fn_declare_str (fn : Tir.fn_def) : string =
       llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 
-(* ── Mutual TCO: combined function emitter ───────────────────────────── *)
-
-(** Emit the combined dispatch function and per-function wrapper stubs for
-    [group].  After this call the caller must NOT emit any of the original
-    [group] functions via [emit_fn] — the wrappers have been emitted here.
-
-    Combined function layout:
-      define RET @__mutco_f_g__(i64 %__tag__.arg,
-                                Tf1 %f__p1.arg, ...,
-                                Tg1 %g__p1.arg, ...) {
-      entry:
-        alloca tag_slot, param_slots ...
-        br %mutual_loop
-      mutual_loop:
-        %tag = load tag_slot
-        switch tag [ 0 -> case_f, 1 -> case_g, ... ]
-      case_f:   ; f's body, mutual calls become: store tag+args → br loop
-      case_g:   ; g's body, mutual calls become: store tag+args → br loop
-      dead:
-        unreachable
-      }
-
-    Wrapper for f:
-      define RET @f(Tf1 %p1, ...) {
-        %r = call RET @__mutco__(0, p1, ..., undef, ...)
-        ret RET %r
-      }
-*)
-let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
-  (* Reset naming state for this combined function — same as emit_fn does at
-     the top of each function, but here we do it once for the whole group so
-     that local_names accumulates across all case bodies and never resets mid-
-     function, which would produce duplicate %name.addr alloca definitions. *)
-  Hashtbl.clear ctx.local_names;
-  Hashtbl.clear ctx.var_slot;
-  Hashtbl.clear ctx.var_llvm_ty;
-  let group_names = List.map (fun fn -> fn.Tir.fn_name) group in
-  let combined    = mutual_tco_combined_name group in
-  let ret_ty      = llvm_ret_ty (List.hd group).Tir.fn_ret_ty in
-
-  (* Assign integer dispatch tags in list order. *)
-  let fn_tags = List.mapi (fun i fn -> (fn.Tir.fn_name, i)) group in
-
-  (* Build a flat list of (fn_name, var, combined_slot_base) for ALL params.
-     Each param slot is prefixed with the owning function's mangled name to
-     avoid collisions between functions with identically-named parameters. *)
-  let all_params : (string * Tir.var * string) list =
-    List.concat_map (fun fn ->
-      List.map (fun (v : Tir.var) ->
-        let base = llvm_name fn.Tir.fn_name ^ "__" ^ llvm_name v.Tir.v_name in
-        (fn.Tir.fn_name, v, base)
-      ) fn.Tir.fn_params
-    ) group
-  in
-
-  (* ── Emit the combined function definition ───────────────────────── *)
-  let tag_param_str = "i64 %__tag__.arg" in
-  let rest_params_str =
-    if all_params = [] then ""
-    else ", " ^ String.concat ", "
-      (List.map (fun (_, (v : Tir.var), base) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty) base
-      ) all_params)
-  in
-  let mutco_vis = if ctx.compile_so then "hidden " else "" in
-  Buffer.add_string ctx.buf
-    (Printf.sprintf "\ndefine %s%s @%s(%s%s) {\nentry:\n"
-       mutco_vis ret_ty (llvm_name combined) tag_param_str rest_params_str);
-
-  (* Alloca the dispatch tag slot. *)
-  let tag_slot = "mutco_tag" in
-  emit ctx (Printf.sprintf "%%%s.addr = alloca i64" tag_slot);
-  emit ctx (Printf.sprintf "store i64 %%__tag__.arg, ptr %%%s.addr" tag_slot);
-
-  (* Alloca each parameter slot and store the incoming arg. *)
-  let fn_param_slots : (string * (string * string * string) list) list =
-    List.map (fun fn ->
-      let slots = List.map (fun (v : Tir.var) ->
-        let base = llvm_name fn.Tir.fn_name ^ "__" ^ llvm_name v.Tir.v_name in
-        let ty   = llvm_ty v.Tir.v_ty in
-        emit ctx (Printf.sprintf "%%%s.addr = alloca %s" base ty);
-        emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty base base);
-        Hashtbl.replace ctx.var_llvm_ty base ty;
-        (v.Tir.v_name, base, ty)
-      ) fn.Tir.fn_params in
-      (fn.Tir.fn_name, slots)
-    ) group
-  in
-
-  (* Jump to loop header. *)
-  let loop_lbl = fresh_block ctx "mutual_loop" in
-  emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
-  emit_label ctx loop_lbl;
-
-  (* Phase 4: decrement the reduction budget at every loop iteration, exactly
-     as emit_fn's self-TCO path does at the top of tco_loop. A mutual-TCO
-     group is never leaf (each member tail-calls another group member), so a
-     pure mutually-recursive loop (e.g. is_even/is_odd) would otherwise never
-     yield back to the scheduler and would monopolize its worker forever. *)
-  emit_reduction_check ctx;
-
-  (* Snapshot the stack pointer at the top of each iteration — see
-     tco_stack_save's doc comment for why this is required. Every case body's
-     back-edge restores to this point before re-entering the loop header. *)
-  let mutual_stack_save = fresh ctx "mutco_sp.save" in
-  emit ctx (Printf.sprintf "%s = call ptr @llvm.stacksave()" mutual_stack_save);
-
-  (* Load the dispatch tag and emit a switch. *)
-  let tag_v    = fresh ctx "mutco_tag_v" in
-  let dead_lbl = fresh_block ctx "mutco_dead" in
-  emit ctx (Printf.sprintf "%s = load i64, ptr %%%s.addr" tag_v tag_slot);
-
-  let case_labels = List.map (fun fn ->
-    let lbl = fresh_block ctx ("mutco_case_" ^ llvm_name fn.Tir.fn_name) in
-    (fn, lbl)
-  ) group in
-
-  let switch_entries = String.concat " "
-    (List.map2 (fun (fn, lbl) (_, tag_int) ->
-      Printf.sprintf "i64 %d, label %%%s" tag_int lbl
-      |> (fun s -> ignore fn; s)
-    ) case_labels fn_tags)
-  in
-  emit ctx (Printf.sprintf "switch i64 %s, label %%%s [ %s ]"
-    tag_v dead_lbl switch_entries);
-
-  (* Install mutual TCO context.  The EApp handler uses this to redirect
-     tail calls to group members back to the loop header. *)
-  ctx.mutual_tco_group      <- group_names;
-  ctx.mutual_tco_tag_slot   <- tag_slot;
-  ctx.mutual_tco_loop_label <- loop_lbl;
-  ctx.mutual_tco_fn_params  <- fn_param_slots;
-  ctx.mutual_tco_fn_tags    <- fn_tags;
-  ctx.mutual_tco_stack_save <- mutual_stack_save;
-
-  (* Emit each case body. *)
-  List.iter (fun (fn, case_lbl) ->
-    emit_label ctx case_lbl;
-    (* Reset per-case variable environment but NOT local_names: all case bodies
-       live inside the same LLVM function, so alloca name uniquification must
-       persist across case bodies to prevent duplicate %name.addr definitions. *)
-    Hashtbl.clear ctx.var_slot;
-    Hashtbl.clear ctx.var_llvm_ty;
-    let fn_slots = List.assoc fn.Tir.fn_name fn_param_slots in
-    List.iter (fun (vname, slot, ty) ->
-      Hashtbl.replace ctx.var_slot    vname slot;
-      Hashtbl.replace ctx.var_llvm_ty slot   ty
-    ) fn_slots;
-    (* Re-populate var_llvm_ty for all group slots (needed if a case body
-       loads another group member's slot via a phi / load path). *)
-    List.iter (fun (_, slots) ->
-      List.iter (fun (_, slot, ty) ->
-        Hashtbl.replace ctx.var_llvm_ty slot ty
-      ) slots
-    ) fn_param_slots;
-    ctx.ret_ty <- fn.Tir.fn_ret_ty;
-    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
-    if ret_ty = "void" then
-      emit_term ctx "ret void"
-    else begin
-      let final_val = coerce ctx body_ty body_val ret_ty in
-      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
-    end
-  ) case_labels;
-
-  (* Dead / unreachable default arm. *)
-  emit_label ctx dead_lbl;
-  emit ctx "unreachable";
-
-  Buffer.add_string ctx.buf "}\n";
-
-  (* Clear mutual TCO context. *)
-  ctx.mutual_tco_group <- [];
-  ctx.mutual_tco_stack_save <- "";
-
-  (* ── Emit wrapper functions ──────────────────────────────────────── *)
-  (* Each original function name becomes a thin wrapper that sets the
-     dispatch tag and calls the combined function. *)
-  List.iter (fun fn ->
-    let tag_int     = List.assoc fn.Tir.fn_name fn_tags in
-    let fn_llvm     = mangle_extern fn.Tir.fn_name in
-    let params_str  = String.concat ", "
-      (List.map (fun (v : Tir.var) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_param_ty ~type_defs:ctx.type_defs v.Tir.v_ty) (llvm_name v.Tir.v_name)
-      ) fn.Tir.fn_params)
-    in
-    let wrap_vis =
-      let fname = fn.Tir.fn_name in
-      let flen  = String.length fname in
-      let ends_with sfx =
-        let sl = String.length sfx in
-        flen > sl && String.sub fname (flen - sl) sl = sfx
-      in
-      if ctx.compile_so
-         && not (Tir_names.is_actor_dispatch_fn fname)
-         && not (ends_with "_migrate_state")
-      then "hidden " else ""
-    in
-    Buffer.add_string ctx.buf
-      (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" wrap_vis ret_ty fn_llvm params_str);
-
-    (* Build the call arguments: tag first, then ALL params of ALL group fns.
-       For this function's own params, pass the incoming arg.
-       For other functions' params, pass undef (they will not be read). *)
-    let call_args =
-      Printf.sprintf "i64 %d" tag_int ^
-      (if all_params = [] then ""
-       else ", " ^ String.concat ", "
-         (List.map (fun (owner_fn, (v : Tir.var), base) ->
-           let ty = llvm_ty v.Tir.v_ty in
-           if String.equal owner_fn fn.Tir.fn_name then
-             Printf.sprintf "%s %%%s.arg" ty (llvm_name v.Tir.v_name)
-           else
-             Printf.sprintf "%s undef" ty
-           |> (fun s -> ignore base; s)
-         ) all_params))
-    in
-    let result_v = fresh ctx "mutco_wr" in
-    if ret_ty = "void" then begin
-      emit ctx (Printf.sprintf "call void @%s(%s)" (llvm_name combined) call_args);
-      emit_term ctx "ret void"
-    end else begin
-      emit ctx (Printf.sprintf "%s = call %s @%s(%s)"
-        result_v ret_ty (llvm_name combined) call_args);
-      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty result_v)
-    end;
-    Buffer.add_string ctx.buf "}\n"
-  ) group
+(* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
+   Its single call site (emit_module, further down) now passes emit_expr as
+   a labeled callback and qualifies the reference: see
+   Llvm_tco.emit_mutual_tco_group. *)
 
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
@@ -3875,13 +3278,15 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   (* Identify mutual-TCO groups.  Functions in these groups are emitted as
      combined dispatch functions + thin wrappers — they must NOT also be
      emitted individually via emit_fn. *)
-  let mutual_groups = find_mutual_tco_groups m.Tir.tm_fns in
+  let mutual_groups = Llvm_tco.find_mutual_tco_groups m.Tir.tm_fns in
   let mutual_fn_names =
     List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
       mutual_groups
   in
-  (* Emit the combined function + wrappers for each mutual-TCO group. *)
-  List.iter (emit_mutual_tco_group ctx) mutual_groups;
+  (* Emit the combined function + wrappers for each mutual-TCO group.
+     emit_expr is passed as a labeled callback (de-cycling move, Wave 3
+     Task 6, chunk 2 — same pattern as Llvm_case.emit_case in Task 5). *)
+  List.iter (Llvm_tco.emit_mutual_tco_group ~emit_expr ctx) mutual_groups;
 
   (* Skip emitting prelude wrapper functions whose runtime name is already
      declared in the preamble.  Only filter short unqualified names that map

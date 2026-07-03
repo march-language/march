@@ -327,6 +327,18 @@ let llvm_ty : Tir.ty -> string = function
   | Tir.TPtr _  -> "ptr"
   | Tir.TVar _  -> "ptr"   (* pre-mono fallback *)
 
+(* llvm_ret_ty moved here (Wave 3 Task 6, chunk 2): a pure ctx-independent
+   wrapper around [llvm_ty] (Unit -> "void", else llvm_ty) with no home
+   outside this file's already-depended-on base once [Llvm_calls] and
+   [Llvm_tco] (both split out of [llvm_emit.ml] in that task) needed it too —
+   same criterion as the Wave 3 Task 5 [alloca_name]/[repr_audit_record]
+   moves ("pure primitive, real non-[llvm_emit.ml] consumer exists").
+   Re-exported bare in [llvm_emit.ml], which still calls it unqualified at
+   ~20 sites in [emit_expr]/[emit_fn]. *)
+let llvm_ret_ty : Tir.ty -> string = function
+  | Tir.TUnit -> "void"
+  | t -> llvm_ty t
+
 (** LLVM type string for a function *parameter*, augmented with alias-analysis
     attributes for pointer types.
     - [nonnull]: March allocators call exit(1) on OOM, so heap pointers are
@@ -584,4 +596,42 @@ let repr_audit_report () =
       end
     ) _repr_audit;
     Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" !flagged
+  end
+
+(* ── Reduction-check helper ───────────────────────────────────────────── *)
+
+(* emit_reduction_check moved here (Wave 3 Task 6, chunk 2): a pure
+   ctx-primitive (no dependency on emit_expr/emit_case/anything else split
+   out of llvm_emit.ml) needed by BOTH [emit_fn] (stays in llvm_emit.ml) and
+   [emit_mutual_tco_group] (moves to Llvm_tco) — same criterion as the
+   [alloca_name]/[repr_audit_record]/[llvm_ret_ty] moves above: a real
+   non-llvm_emit.ml consumer now exists. Re-exported bare in llvm_emit.ml,
+   which still calls it unqualified from emit_fn. *)
+
+(** Emit an inline reduction-count check at the current position in [ctx.buf].
+    Decrements [@march_tls_reductions]; when it reaches zero calls
+    [@march_yield_from_compiled()] (which resets the budget and yields).
+    Leaves the IR positioned at the start of a fresh basic block so the
+    caller can continue emitting the function body. *)
+let emit_reduction_check ctx =
+  (* In REPL mode, skip the reduction check: ORC JIT cannot resolve
+     march_tls_reductions (a TLS var) on macOS via emutls, and the REPL is
+     always single-threaded so the scheduler yield is a no-op anyway. *)
+  if not ctx.repl then begin
+  let yield_blk = fresh_block ctx "sched_yield" in
+  let cont_blk  = fresh_block ctx "sched_cont"  in
+  let red       = fresh ctx "red" in
+  let red_dec   = fresh ctx "red_dec" in
+  let need_yield = fresh ctx "need_yield" in
+  emit ctx (Printf.sprintf "%s = load i64, ptr @march_tls_reductions" red);
+  emit ctx (Printf.sprintf "%s = sub i64 %s, 1" red_dec red);
+  emit ctx (Printf.sprintf "store i64 %s, ptr @march_tls_reductions" red_dec);
+  emit ctx (Printf.sprintf "%s = icmp sle i64 %s, 0" need_yield red_dec);
+  emit_term ctx
+    (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+       need_yield yield_blk cont_blk);
+  emit_label ctx yield_blk;
+  emit ctx "call void @march_yield_from_compiled()";
+  emit_term ctx (Printf.sprintf "br label %%%s" cont_blk);
+  emit_label ctx cont_blk
   end
