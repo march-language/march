@@ -29,9 +29,15 @@ revision fixes them in place:
    behavior — and aggregate by intersection, not union. Running them through the authority
    widening check gives the wrong answer in both directions. Guarantee-cap variance moves to
    Out of Scope with the polarity rule written down.
-5. **`cap_root` uses SHA-512, not blake3.** The C runtime has no blake3; SHA-512 already
-   exists inside `runtime/tweetnacl.c` (used by ed25519) and only needs exposing in the
-   header. Client side uses digestif SHA512 (already a forge dep).
+5. **`cap_root` uses BLAKE3, matching `cas_hash`.** Correction to an earlier draft of this
+   revision (which specified SHA-512/digestif): `bin/main.ml` already depends on `march_cas`,
+   which vendors its own BLAKE3 (`lib/cas/blake3.ml`, C stubs) — the same hash already used
+   for `cas_hash`/`impl_hash`/`sig_hash` throughout this manifest. Using a second hash
+   algorithm in the same manifest file would be needless inconsistency; `Blake3.hash_string`
+   needs no new dependency for Parts A/B. Part C's server-side recompute (out of scope here)
+   can link the existing `lib/cas/blake3_stubs.c` into the runtime build rather than vendor
+   SHA-512 from `tweetnacl.c` — a build-wiring choice for whoever picks up Part C, noted but
+   not decided here.
 
 ### Landed since this plan was written (context delta)
 
@@ -85,7 +91,7 @@ Parts A and C are mostly engineering on machinery Phase 5 already shipped (CAS, 
 | Where caps come from | The traversal `check_module_needs` already performs (`typecheck.ml:5160`) — declared `needs`, `builtin_cap_table` + `calls_in_expr` body scan, `extern` ⇒ `IO.Foreign`, import propagation. Today the per-fn sets are computed transiently and discarded; Part A **restructures the checks to accumulate a per-fn map and exports it via the `.mli`**. Reuses the machinery; no new analysis, but it is a refactor, not a one-line accessor. |
 | Cap lattice ownership | Factor `io_cap_hierarchy` + `cap_subsumes` (`typecheck.ml:933`, `:1071`) into a shared `lib/caps/cap_lattice.ml` that typecheck, refinecheck, and forge all depend on — two identical copies exist today (`typecheck.ml:933` and `refinecheck/cap_infer.ml:26`); this removes the duplication and adds the C-table emitter |
 | Manifest carrier | Extend the existing `.hcr_manifest` sidecar (already per-fn `impl_hash`/`sig_hash`/`callers:`) with a `caps=` field per fn + a top-level `cap_root`; content covered by `cas_hash` |
-| `cap_root` hash | **SHA-512, hex** (not blake3): the reload server already links SHA-512 inside `runtime/tweetnacl.c` (ed25519's hash) — expose it in `tweetnacl.h` and reuse it; client side uses digestif SHA512 (already a forge dependency). The C runtime has no blake3 and vendoring one for this is not worth it. |
+| `cap_root` hash | **BLAKE3, hex** — same algorithm as `cas_hash`/`impl_hash`/`sig_hash`. OCaml side: `March_cas.Blake3.hash_string` (`lib/cas/blake3.ml`), already a transitive dependency of `bin/main.ml` via `march_cas` — no new dependency. Part C's server-side recompute (out of scope here) can link the existing `lib/cas/blake3_stubs.c` C source into the runtime build. |
 | Protocol | New verb **`ACTIVATE4`** = ACTIVATE3 + `cap_root:<hex>` in wire and signed message. A new verb, not an appended field: (a) adding anything to the signed message makes old servers reconstruct a different message and fail with a misleading `bad_signature`; (b) the server parses `callers:` to end-of-line, so a trailing field would be swallowed into the CSV. Old servers answer `ACTIVATE4` with a clean unknown-command error. |
 | Monotonicity rule | Deploy may *narrow* freely; *widening* (a new cap not subsumed by any prior-held cap) aborts before activation unless an explicit `--grant-cap <C>` authorizes each widened cap |
 | Grant authority | A widening grant rides the deployer's ed25519 signature: `cap_root` is added to the signed activation payload, so the authority claim is tamper-evident and audit-logged |
@@ -119,7 +125,7 @@ In `--hot-reload --compile-so` mode, `bin/main.ml` (which already writes the `.h
 
 ```
 artifact_caps = sorted( ⋃ over boundary fns f of caps(f) )      -- normalized, no subsumed dups
-cap_root      = sha512_hex( "\n".join(artifact_caps) )          -- deterministic content digest
+cap_root      = blake3_hex( "\n".join(artifact_caps) )          -- deterministic content digest, same algorithm as cas_hash
 ```
 
 Union is the correct aggregation for *authority* (the artifact can do anything any of its functions can do). This is exactly why guarantee caps don't belong in the same set — they hold by intersection.
@@ -262,7 +268,7 @@ Two wire-format constraints force this shape (both verified against `march_reloa
 
 Server flow on `ACTIVATE4`, after sig-verify + CAS-load (existing) and before `dlopen`:
 
-1. Read the just-received artifact's `.hcr_manifest` from the CAS; recompute `cap_root'` over its `caps` (SHA-512 via the exposed tweetnacl hash). **This is new C code** — today the server never reads the manifest (it is parsed only client-side in `cmd_deploy_hot.ml`); the server needs the manifest path derivation, a line parser for `FN`/`ROOT`, and the digest call.
+1. Read the just-received artifact's `.hcr_manifest` from the CAS; recompute `cap_root'` over its `caps` (BLAKE3, via `lib/cas/blake3_stubs.c` linked into the runtime build). **This is new C code** — today the server never reads the manifest (it is parsed only client-side in `cmd_deploy_hot.ml`); the server needs the manifest path derivation, a line parser for `FN`/`ROOT`, and the digest call.
 2. **Tamper check:** `cap_root' == cap_root` (the signed value). Mismatch ⇒ `ERR cap_tamper`, audit `err_cap_tamper` (naming follows the existing `err_abi`/`err_cas_miss`/`err_sig` convention in `write_audit_log`).
 3. **Policy check:** every cap in the artifact set is subsumed by some policy entry. Violation ⇒ `ERR cap_policy <cap>`, audit `err_cap_policy`.
 4. Proceed to `dlopen` + `march_dispatch_publish` as today (extend the shared `do_activate()` helper, `march_reload.c:377`).
@@ -296,11 +302,11 @@ This is the cleanest first application of "capability-bounded migration sandbox.
 | `lib/tir/tir_names.ml` | `is_migrate_fn` suffix predicate (the `_migrate_state` name contract) — joins the existing cross-pass name contracts; typecheck + `bin/main.ml` use it; converting the four existing sniff sites (`dce`/`llvm_emit`/`mono`/`bin/main`) is coordinated with Wave 3 chunk 2 |
 | `lib/typecheck/typecheck.ml` + `.mli` | Depend on `Cap_lattice`; **restructure `check_module_needs` Checks 1b/1c to accumulate a per-fn cap map** (today computed transiently and discarded) and export an accessor; `_migrate_state` suffix recognition + IO-free check |
 | `lib/refinecheck/cap_infer.ml` | Replace local `io_cap_hierarchy` with `Cap_lattice.hierarchy` to remove the existing duplication |
-| `bin/main.ml` | Aggregate `artifact_caps` + `cap_root` (SHA-512); emit `caps=`/`ROOT` into `.hcr_manifest` in `--hot-reload --compile-so` (writer at `:2158`) |
+| `bin/main.ml` | Aggregate `artifact_caps` + `cap_root` (BLAKE3 via `March_cas.Blake3.hash_string`, no new dependency); emit `caps=`/`ROOT` into `.hcr_manifest` in `--hot-reload --compile-so` (writer at `:2158`) |
 | `forge/lib/dune` | Add the shared caps lib (forge already depends on `march_ast`/`march_parser`/etc., so this is routine) |
 | `forge/lib/cmd_deploy_hot.ml` | Parse `caps=` (field 4) + `ROOT`; fetch prior cap manifest from the epoch-master node; monotonicity diff; `--grant-cap` handling; emit `ACTIVATE4` with `cap_root` in the signed message; explicit old-server diagnostic + `--no-cap-gate`; widening diagnostic; cap-change lines in `status` |
 | `forge/bin/main.ml` | `--grant-cap` via Cmdliner `Arg.opt_all` (first repeatable flag in forge); `--no-cap-gate` |
-| `runtime/tweetnacl.h` | Expose the SHA-512 already implemented inside `tweetnacl.c` (one declaration) for the `cap_root` recompute |
+| `lib/cas/dune` / `runtime/dune` (Part C, out of scope here) | Link `lib/cas/blake3_stubs.c` into the runtime build so the server can recompute `cap_root` with the same BLAKE3 the compiler used |
 | `runtime/march_reload.c` | New `ACTIVATE4` branch (extend `do_activate()` at `:377`); **new** server-side `.hcr_manifest` CAS read + parse (none exists today); `cap_root` recompute + tamper check; load `MARCH_DEPLOY_POLICY`; policy check; `err_cap_tamper`/`err_cap_policy` audit results |
 | `runtime/march_cap_lattice.{h,c}` (new, generated) | C subsumption table emitted from `Cap_lattice`; needs a dune emit rule + CI regenerate-and-diff freshness check (no generated-C precedent exists in the repo); covered by the existing `runtime/*` CAS cache key |
 | `runtime/march_dispatch.{h,c}` | Optional: per-slot `cap_root` field on `MarchDispatchSlot` (alongside the existing `signer_hex`/`callers_str`) for `VERSIONS_DETAIL` reporting |
@@ -364,7 +370,7 @@ A narrowing deploy (v3 drops `IO.FileWrite`) sails through with no grant and no 
 ## Testing
 
 - `forge/test/test_forge.ml`: `Cap_lattice.subsumes`/`normalize` (hierarchy edges, root, siblings); monotonicity diff (narrow / subsumed-add / sibling-widen / parent-widen / root-add) × (grant present / absent); repeatable `--grant-cap` parsing.
-- `test/test_cas.ml`: `.hcr_manifest` `caps=` + `ROOT` emit/parse round-trip; old parser tolerates `caps=` field (wildcard match); `cap_root` determinism vs cap order; OCaml (digestif) and C (tweetnacl) SHA-512 agree on `cap_root` for the same cap list.
+- `test/test_cas.ml`: `.hcr_manifest` `caps=` + `ROOT` emit/parse round-trip; old parser tolerates `caps=` field (wildcard match); `cap_root` determinism vs cap order (same BLAKE3 primitive already used for `cas_hash`, so no cross-implementation agreement test is needed for Parts A/B — that only becomes relevant if Part C's C-side recompute uses a different binding of the same `blake3_stubs.c`).
 - Typecheck tests: per-fn cap map accessor returns inferred body usage (builtin, extern, import-propagated); `{actor_lower}_migrate_state` recognition; migration fn doing `file_write`/`println`/`extern` ⇒ IO-free error; pure migration fn ⇒ clean.
 - `runtime/march_reload.c` admission tests: `ACTIVATE4` within policy ⇒ activate; exceeding policy ⇒ `err_cap_policy`; tampered `cap_root` ⇒ `err_cap_tamper`; no policy ⇒ permissive; `ACTIVATE3` legacy artifact ⇒ permissive + warning; `ACTIVATE4` against a pre-5C server build ⇒ clean unknown-command error (compat-matrix row).
 - Generated-table freshness: CI check that regenerating `march_cap_lattice.{h,c}` from `Cap_lattice` produces no diff.
@@ -414,9 +420,10 @@ that wiring is Part C's `ACTIVATE4`.
   span for code that has no capability manifest concerns — run
   `scripts/run-tests.sh` (full, not `-q`) after each task and diff any
   unexpected typecheck-test output.
-- **`cap_root` hash is SHA-512, hex-encoded**, not blake3 — OCaml side via
-  `digestif` (already a `forge` dependency; add to `lib/caps` or wherever the
-  digest is computed), matching the plan's Decisions table.
+- **`cap_root` hash is BLAKE3, hex-encoded** — via `March_cas.Blake3.hash_string`
+  (`lib/cas/blake3.ml`), the same primitive already used for `cas_hash` in this
+  manifest. `bin/main.ml` already depends on `march_cas`; no new dune dependency
+  needed for this task.
 - **Determinism:** `cap_root` must be identical across builds regardless of
   traversal/hashtable iteration order — always sort the cap list before joining
   and hashing.
@@ -499,9 +506,12 @@ mode). **Depends on:** Task 2 (the accessor).
       is still present, e.g. `caps=`).
 - [ ] **Step 2:** Aggregate `artifact_caps = sorted(⋃ boundary-fn caps)`
       (normalized — reuse `Cap_lattice.normalize` on the union, not just
-      per-fn), compute `cap_root = sha512_hex(String.concat "\n" artifact_caps)`
-      using `digestif` (add as a `bin/dune` library dependency if not already
-      present — check first, `forge` already depends on it).
+      per-fn), compute `cap_root = March_cas.Blake3.hash_string (String.concat
+      "\n" artifact_caps)` — `bin/main.ml` already depends on `march_cas`
+      (it's how `ch`/`cas_hash` is computed a few lines above, via
+      `March_cas.Cas.compilation_hash`), so no new dune dependency is needed.
+      Same hash algorithm as `cas_hash`, avoiding two digest algorithms in one
+      manifest file.
 - [ ] **Step 3:** Emit a new manifest line `ROOT cap_root=<hex>` (placement:
       alongside the existing `CAS <cas_hash>` line, per the manifest format in
       the "Manifest format extension" section of this plan).
