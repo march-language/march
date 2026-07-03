@@ -1,0 +1,28 @@
+-- types (0) --
+-- fns (2) --
+## first_or_recheck
+fn first_or_recheck(xs : List(Int), flag : Bool) : Int =
+  case xs of
+  Cons($f7, $f8) -> let $jp_clo10 : () -> '_ = letrec [$jp9] in
+$jp9 in
+let t : List(Int) = $f8 in
+let h : Int = $f7 in
+case flag of
+  True() -> h
+  _ -> case xs of
+  Cons($f1, $f2) -> let $jp_clo4 : () -> '_ = letrec [$jp3] in
+$jp3 in
+let h2 : Int = $f1 in
+h2
+  Nil() -> 0
+  _ -> panic("non-exhaustive pattern match")
+  Nil() -> negate(1)
+  _ -> panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t15 : Int = let $t14 : List(Int) = let $t13 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(1, $t13) in
+first_or_recheck($t14, true) in
+println($t15)
+

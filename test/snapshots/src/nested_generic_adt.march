@@ -1,0 +1,18 @@
+-- Nested generic ADT construction/match (Option(List(Int))): pins how
+-- nested TCon type args monomorphize and how the niche-vs-boxed Option
+-- representation lowers for a heap-carrying payload.
+mod NestedGenericAdt do
+  fn head_opt(xs : List(Int)) : Option(Int) do
+    match xs do
+      Cons(h, _) -> Some(h)
+      Nil -> None
+    end
+  end
+
+  fn main() do
+    match head_opt(Cons(3, Nil)) do
+      Some(v) -> println(v)
+      None -> println(0)
+    end
+  end
+end

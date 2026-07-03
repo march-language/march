@@ -1,0 +1,27 @@
+-- The scrutinee-borrowed conservatism PIN (perceus.ml ~1039-1057): the
+-- scrutinee `xs` is free on only ONE path through the branch body (the
+-- nested if's else side), not every path.  The current path-INSENSITIVE
+-- approximation still treats the scrutinee as borrowed on this branch,
+-- keeping br_vars alive on both sub-paths (a bounded, intentional leak on
+-- the true side rather than a path-sensitive free that risks a UAF, per
+-- the sort_by regression this documents).
+mod ScrutineeBorrowedConservatism do
+  fn first_or_recheck(xs : List(Int), flag : Bool) : Int do
+    match xs do
+      Cons(h, t) ->
+        if flag do
+          h
+        else
+          match xs do
+            Cons(h2, _) -> h2
+            Nil -> 0
+          end
+        end
+      Nil -> -1
+    end
+  end
+
+  fn main() do
+    println(first_or_recheck(Cons(1, Nil), true))
+  end
+end

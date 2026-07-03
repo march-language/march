@@ -1,0 +1,15 @@
+-- Self-tail-recursive loop (accumulator pattern): pins the self-TCO
+-- rewrite to a loop (contrast with mutual_tco.march's cross-fn TCO).
+mod SelfTcoLoop do
+  fn sum_to(n : Int, acc : Int) : Int do
+    if n == 0 do
+      acc
+    else
+      sum_to(n - 1, acc + n)
+    end
+  end
+
+  fn main() do
+    println(sum_to(5, 0))
+  end
+end

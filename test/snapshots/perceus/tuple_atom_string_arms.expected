@@ -1,0 +1,99 @@
+-- types (6) --
+closure $Clo_$jp7$0(Ptr(Unit), '_, '_)
+closure $Clo_$jp3$1(Ptr(Unit))
+closure $Clo_$jp9$2(Ptr(Unit), () -> '_)
+closure $Clo_$jp3$3(Ptr(Unit))
+closure $Clo_$jp11$4(Ptr(Unit))
+closure $Clo_$jp13$5(Ptr(Unit))
+-- fns (10) --
+## $jp11$apply$4
+fn $jp11$apply$4($clo : Ptr(Unit)) : '_ =
+  negate(1)
+
+## $jp13$apply$5
+fn $jp13$apply$5($clo : Ptr(Unit)) : '_ =
+  negate(1)
+
+## $jp3$apply$1
+fn $jp3$apply$1($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp3$apply$3
+fn $jp3$apply$3($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp7$apply$0
+fn $jp7$apply$0($clo : Ptr(Unit)) : '_ =
+  let $f1 : '_ = inc_rc $clo;
+$clo.$fv1 in
+let $f2 : '_ = inc_rc $clo;
+$clo.$fv2 in
+let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$1($jp3$apply$1) in
+dec_rc $jp_clo4;
+let y : Int = inc_rc $f2;
+$f2 in
+let x : Int = inc_rc $f1;
+$f1 in
+"point"
+
+## $jp9$apply$2
+fn $jp9$apply$2($clo : Ptr(Unit)) : '_ =
+  let $jp_clo8 : () -> '_ = inc_rc $clo;
+$clo.$fv1 in
+inc_rc $jp_clo8;
+call_ptr $jp_clo8()
+
+## describe
+fn describe(pair : (Int, Int)) : String =
+  case pair of
+  $Tuple2($f1, $f2) -> case $f1 of
+  0() -> let $jp_clo8 : () -> '_ = inc_rc $f1;
+inc_rc $f2;
+alloc $Clo_$jp7$0($jp7$apply$0, $f1, $f2) in
+case $f2 of
+  0() -> let $jp_clo10 : () -> '_ = alloc $Clo_$jp9$2($jp9$apply$2, $jp_clo8) in
+dec_rc $jp_clo10;
+"origin"
+  _ -> call_ptr $jp_clo8()
+  _ -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$3($jp3$apply$3) in
+dec_rc $jp_clo4;
+let y : Int = inc_rc $f2;
+$f2 in
+let x : Int = inc_rc $f1;
+$f1 in
+"point"
+  _ -> panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
+describe($t15) in
+let $rc_2 : () = println($t16) in
+dec_rc $t16;
+$rc_2;
+let $t18 : String = let $t17 : Atom = :ok in
+tag_name($t17) in
+let $rc_1 : () = println($t18) in
+dec_rc $t18;
+$rc_1;
+let $t19 : Int = word("yes") in
+println($t19)
+
+## tag_name
+fn tag_name(t : Atom) : String =
+  case t of
+  :ok() -> "okay"
+  :err() -> "error"
+  _ -> "unknown"
+
+## word
+fn word(s : String) : Int =
+  case s of
+  "yes"() -> let $jp_clo12 : () -> '_ = alloc $Clo_$jp11$4($jp11$apply$4) in
+dec_rc $jp_clo12;
+1
+  "no"() -> let $jp_clo14 : () -> '_ = alloc $Clo_$jp13$5($jp13$apply$5) in
+dec_rc $jp_clo14;
+0
+  _ -> negate(1)
+

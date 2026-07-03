@@ -1,0 +1,18 @@
+-- FBIP dead-binding reuse: `xs` is uniquely owned and dead after the Cons
+-- match, and the arm allocates a same-arity Cons — Perceus should reuse the
+-- freed cell (EReuse) instead of Free+Alloc.
+mod FbipDeadBindingReuse do
+  fn bump_head(xs : List(Int)) : List(Int) do
+    match xs do
+      Cons(h, t) -> Cons(h + 1, t)
+      Nil -> Nil
+    end
+  end
+
+  fn main() do
+    match bump_head(Cons(1, Nil)) do
+      Cons(h, _) -> println(h)
+      Nil -> println(0)
+    end
+  end
+end

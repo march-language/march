@@ -65,6 +65,21 @@ After implementing or completing a feature, update `specs/todos.md` (move item t
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`) — interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
+### TIR golden-snapshot tests
+
+`test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small
+hand-picked corpus (`test/snapshots/src/*.march`) at two pipeline stages —
+post-lower (`test/snapshots/lower/*.expected`) and post-Perceus/RC-insertion
+(`test/snapshots/perceus/*.expected`) — so a lowering/monomorphization/
+defunctionalization/Perceus refactor that changes the emitted IR shape shows up
+as a readable diff instead of only surfacing later as a runtime regression.
+Regenerate deliberately after an intentional TIR-shape change with
+`UPDATE_SNAPSHOTS=1 ./_build/default/test/run_snapshots.exe -e`, then review
+`git diff test/snapshots/` before committing — the diff IS the code review
+artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
+for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
+determinism).
+
 ## Multi-file compilation (MARCH_LIB_PATH)
 
 March accepts exactly ONE input file per invocation. Multi-file projects (apps + library deps) use the `MARCH_LIB_PATH` environment variable to auto-discover all `.march` files in dependency directories.

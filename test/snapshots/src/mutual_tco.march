@@ -1,0 +1,24 @@
+-- Mutual tail-call pair (is_even/is_odd): pins the mutual-TCO lowering
+-- shape distinct from self-TCO (see B7: self-TCO handles the Perceus
+-- dec-chain, mutual-TCO historically didn't).
+mod MutualTco do
+  fn is_even(n : Int) : Bool do
+    if n == 0 do
+      true
+    else
+      is_odd(n - 1)
+    end
+  end
+
+  fn is_odd(n : Int) : Bool do
+    if n == 0 do
+      false
+    else
+      is_even(n - 1)
+    end
+  end
+
+  fn main() do
+    println(is_even(10))
+  end
+end

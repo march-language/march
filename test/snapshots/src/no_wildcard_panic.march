@@ -1,0 +1,16 @@
+-- A match with NO wildcard/catch-all arm: the typechecker considers this
+-- exhaustive over Option's two constructors, but pins the panic-default
+-- shape Lower inserts for any non-exhaustive-looking ECase compilation
+-- (see lower.ml's non-exhaustive-match panic emission).
+mod NoWildcardPanic do
+  fn unwrap_or_die(o : Option(Int)) : Int do
+    match o do
+      Some(x) -> x
+      None -> 0
+    end
+  end
+
+  fn main() do
+    println(unwrap_or_die(Some(7)))
+  end
+end

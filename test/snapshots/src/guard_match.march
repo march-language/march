@@ -1,0 +1,16 @@
+-- Guarded match with a wildcard fallback: pins the post-Task-1-wave panic
+-- shape for match arms that DO have a final catch-all (no panic default
+-- inserted) but DO carry guard conditions per arm.
+mod GuardMatch do
+  fn classify(x : Int) : String do
+    match x do
+      n when n > 0 -> "pos"
+      n when n < 0 -> "neg"
+      _ -> "zero"
+    end
+  end
+
+  fn main() do
+    println(classify(5))
+  end
+end

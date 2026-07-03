@@ -1,0 +1,19 @@
+-- types (0) --
+-- fns (2) --
+## both
+fn both(owned : String, borrowed : String, n : Int) : String =
+  let $t1 : Bool = >(n, 0) in
+case $t1 of
+  True() -> owned
+  _ -> dec_rc owned;
+borrowed
+
+## main
+fn main() : () =
+  let s : String = "shared" in
+let $t2 : String = inc_rc s;
+both(s, s, 1) in
+let $rc_1 : () = println($t2) in
+dec_rc $t2;
+$rc_1
+

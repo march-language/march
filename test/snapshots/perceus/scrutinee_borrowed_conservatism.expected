@@ -1,0 +1,49 @@
+-- types (2) --
+closure $Clo_$jp9$0(Ptr(Unit))
+closure $Clo_$jp3$1(Ptr(Unit))
+-- fns (4) --
+## $jp3$apply$1
+fn $jp3$apply$1($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp9$apply$0
+fn $jp9$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## first_or_recheck
+fn first_or_recheck(xs : List(Int), flag : Bool) : Int =
+  case xs of
+  Cons($f7, $f8) -> let $jp_clo10 : () -> '_ = alloc $Clo_$jp9$0($jp9$apply$0) in
+dec_rc $jp_clo10;
+let t : List(Int) = inc_rc $f8;
+$f8 in
+dec_rc t;
+let h : Int = inc_rc $f7;
+$f7 in
+case flag of
+  True() -> h
+  _ -> case xs of
+  Cons($f1, $f2) -> dec_rc xs;
+dec_rc $f2;
+let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$1($jp3$apply$1) in
+dec_rc $jp_clo4;
+let h2 : Int = $f1 in
+h2
+  Nil() -> dec_rc xs;
+0
+  _ -> dec_rc xs;
+panic("non-exhaustive pattern match")
+  Nil() -> dec_rc xs;
+dec_rc xs;
+negate(1)
+  _ -> dec_rc xs;
+dec_rc xs;
+panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t15 : Int = let $t14 : List(Int) = let $t13 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(1, $t13) in
+first_or_recheck($t14, true) in
+println($t15)
+

@@ -1,0 +1,18 @@
+-- types (0) --
+-- fns (2) --
+## main
+fn main() : () =
+  let $t1 : String = pick(true, "value") in
+let $rc_1 : () = println($t1) in
+dec_rc $t1;
+$rc_1
+
+## pick
+fn pick(flag : Bool, s : String) : String =
+  case flag of
+  true() -> s
+  false() -> dec_rc s;
+"discarded"
+  _ -> dec_rc s;
+panic("non-exhaustive pattern match")
+

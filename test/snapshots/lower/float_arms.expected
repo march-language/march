@@ -1,0 +1,14 @@
+-- types (0) --
+-- fns (2) --
+## describe
+fn describe(x : Float) : String =
+  case x of
+  #0x0p+0() -> "zero"
+  #0x1.8p+0() -> "one-half-more"
+  _ -> "other"
+
+## main
+fn main() : () =
+  let $t1 : String = describe(1.5) in
+println($t1)
+

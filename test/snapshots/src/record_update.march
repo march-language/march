@@ -1,0 +1,14 @@
+-- Record functional update: pins EUpdate's field-list shape ({ x with f: v }).
+mod RecordUpdate do
+  type Point = { x : Int, y : Int }
+
+  fn move_right(p : Point) : Point do
+    { p with x: p.x + 1 }
+  end
+
+  fn main() do
+    let p = { x: 1, y: 2 }
+    let moved = move_right(p)
+    println(moved.x)
+  end
+end

@@ -1,0 +1,17 @@
+-- types (0) --
+-- fns (2) --
+## main
+fn main() : () =
+  let $t3 : Int = let $t2 : Option(Int) = alloc Option.Some(7) in
+unwrap_or_die($t2) in
+println($t3)
+
+## unwrap_or_die
+fn unwrap_or_die(o : Option(Int)) : Int =
+  case o of
+  Some($f1) -> let x : Int = $f1 in
+x
+  None() -> 0
+  _ -> dec_rc o;
+panic("non-exhaustive pattern match")
+

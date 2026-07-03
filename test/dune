@@ -32,6 +32,12 @@
  (modules test_stdlib_suite)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
+(library
+ (name march_test_snapshots)
+ (wrapped false)
+ (modules test_snapshots)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_tir alcotest str unix))
+
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
 ; -e: show test-case error details inline (no digging through log files).
 ; Run binaries directly for agent-safe, RPC-free execution: see scripts/run-tests.sh.
@@ -57,6 +63,23 @@
  (name run_stdlib)
  (modules run_stdlib)
  (libraries march_test_stdlib_suite alcotest)
+ (action (run %{test} -e)))
+
+; ── TIR golden-snapshot tests (Wave 2 Task 4 / W2.2) ──────────────────────
+; A separate runner (not folded into run_compiler/run_codegen): snapshot
+; tests have distinct semantics from ordinary alcotest assertions — an
+; UPDATE_SNAPSHOTS=1 regeneration run is expected to WRITE files and still
+; exit 0, which would be a confusing mode to enable ambient inside one of
+; the five existing suites (accidentally regenerating unrelated compiler or
+; codegen `.expected` fixtures was never a risk anyone had to consider
+; before). Keeping `-e` semantics clean per-runner (per the task brief) and
+; giving this corpus its own `test/snapshots/{src,lower,perceus}/` tree a
+; single obvious home. See test/test_snapshots.ml's top-of-file comment for
+; the regen workflow.
+(test
+ (name run_snapshots)
+ (modules run_snapshots)
+ (libraries march_test_snapshots alcotest)
  (action (run %{test} -e)))
 
 ; ── C scheduler tests ────────────────────────────────────────────────────

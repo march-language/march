@@ -1,0 +1,33 @@
+-- Mixed tuple/atom/string match arms in one function: pins how each
+-- literal-arm class (tuple destructure, atom equality, string equality)
+-- lowers side by side in the same ECase chain.
+mod TupleAtomStringArms do
+  fn describe(pair : (Int, Int)) : String do
+    match pair do
+      (0, 0) -> "origin"
+      (x, y) -> "point"
+    end
+  end
+
+  fn tag_name(t : Atom) : String do
+    match t do
+      :ok -> "okay"
+      :err -> "error"
+      _ -> "unknown"
+    end
+  end
+
+  fn word(s : String) : Int do
+    match s do
+      "yes" -> 1
+      "no" -> 0
+      _ -> -1
+    end
+  end
+
+  fn main() do
+    println(describe((0, 0)))
+    println(tag_name(:ok))
+    println(word("yes"))
+  end
+end
