@@ -496,6 +496,15 @@ type env = {
   deterministic_mod : bool;
   (** True when the module currently being checked has `cap deterministic`.
       Set by [check_decl] on [DOpts ["deterministic"]]; read by [check_deterministic_module]. *)
+  cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function inferred IO-capability closure: fully-qualified function
+      name ("Mod.fn") → normalized list of cap paths that function requires,
+      as computed by [check_module_needs] (declared [needs] in scope, Cap-typed
+      signatures, body-scanned builtin calls, extern-implied caps, and
+      transitively-imported module needs). Mutated in place (shared across all
+      [env] copies derived from the same root, like [type_map]) so it survives
+      threading through [check_decl]'s per-declaration env folds. Read via
+      [fn_capability_closures]; a later hot-deploy manifest task consumes this. *)
 }
 
 let make_env errors type_map = {
@@ -515,6 +524,7 @@ let make_env errors type_map = {
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
+  cap_closures = Hashtbl.create 64;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -5193,6 +5203,55 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
     ) []
   in
+  (* Per-function inferred IO-capability closure (Phase5C-A.2): same data the
+     checks above already compute, additionally attributed to the owning
+     function and recorded into [env.cap_closures] for a later hot-deploy
+     capability-manifest task. Purely additive bookkeeping — does not affect
+     any Check 1/1b/1c/2/3/4/5/6 validation logic or diagnostics below. *)
+  let module_wide_caps : string list =
+    (* Caps that apply to every function in this module regardless of which
+       function's own signature/body/extern-block produced them: declared
+       [needs] (in-scope for the whole module body) and caps propagated in
+       from imported modules (Check 4). *)
+    let propagated = List.concat_map (function
+      | Ast.DUse (ud, _) ->
+        let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+        (match List.assoc_opt imported env.module_caps with
+         | None -> [] | Some req_caps -> req_caps)
+      | _ -> []
+    ) decls in
+    declared_needs @ propagated
+  in
+  let record_fn_caps (fn_qname : string) (own_caps : string list) =
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+    let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+    Hashtbl.replace env.cap_closures fn_qname merged
+  in
+  List.iter (function
+    | Ast.DFn (def, _) ->
+      let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
+      let param_tys = List.filter_map (fun p ->
+        match p with
+        | Ast.FPNamed { param_ty = Some t; _ } -> Some t
+        | _ -> None
+      ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
+      let ret_tys = Option.to_list def.fn_ret_ty in
+      let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
+      let body_caps = List.concat_map (fun clause ->
+          List.filter_map (fun (call_name, _) -> List.assoc_opt call_name builtin_cap_table)
+            (calls_in_expr [] clause.Ast.fc_body)
+        ) def.fn_clauses
+      in
+      record_fn_caps qname (sig_caps @ body_caps)
+    | Ast.DExtern (edef, _) ->
+      let base = ["IO.Foreign"] in
+      List.iter (fun (ef : Ast.extern_fn) ->
+          let qname = mod_name.txt ^ "." ^ ef.ef_name.txt in
+          let own = if ef.ef_blocking then base @ ["IO.Foreign.Blocking"] else base in
+          record_fn_caps qname own
+        ) edef.ext_fns
+    | _ -> ()
+  ) decls;
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
@@ -5434,6 +5493,20 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         ) all_param_tys
     | _ -> ()
   ) decls
+
+(** [fn_capability_closures env] returns the per-function inferred IO-capability
+    closure recorded by [check_module_needs] for every function checked so far
+    in [env]'s lineage: [(fully_qualified_fn_name, normalized_cap_paths)] pairs,
+    one per function ("Mod.fn" for [DFn]/actor-owning modules, "Mod.extern_fn"
+    for FFI functions declared in an [extern] block). The list combines each
+    function's own inferred requirements (Cap-typed signature, body-scanned
+    builtin calls, extern-implied [IO.Foreign]/[IO.Foreign.Blocking]) with the
+    caps that apply to every function in its module (declared [needs] and
+    caps propagated in from imported modules per Check 4), normalized via
+    [March_caps.Cap_lattice.normalize]. Order is unspecified (backed by a hashtable).
+    Consumed by the (future) hot-deploy capability manifest. *)
+let fn_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.cap_closures []
 
 (* =================================================================
    §16a  Session type projection and duality

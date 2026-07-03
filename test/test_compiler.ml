@@ -4137,6 +4137,69 @@ let test_cap_body_foreign_blocking () =
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
 
+(* ── fn_capability_closures: per-function IO-capability closure (Phase5C-A.2) ─
+   check_module_needs records, per fully-qualified function name, the
+   normalized set of IO capabilities it requires. These tests exercise the
+   accessor directly via typecheck_full's returned env. *)
+
+(* A function with only declared `needs` on the module — the accessor returns
+   that declared set (normalized) attributed to the function. *)
+let test_fn_cap_closure_declared_needs () =
+  let (_errors, env) = typecheck_full {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do name end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Greeter.greet" closures in
+  Alcotest.(check bool) "declared needs recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
+
+(* A function calling an IO builtin with no declared `needs` — the accessor
+   returns the inferred set from builtin_cap_table for that function. *)
+let test_fn_cap_closure_inferred_builtin () =
+  let (_errors, env) = typecheck_full {|mod Reader do
+    fn load(path) do file_read(path) end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Reader.load" closures in
+  Alcotest.(check bool) "inferred builtin cap recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.FileRead" cs | None -> false)
+
+(* An extern function — the accessor returns a set including IO.Foreign. *)
+let test_fn_cap_closure_extern () =
+  let (_errors, env) = typecheck_full {|mod Bindings do
+    needs IO.Foreign
+    needs IO.FileSystem
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Bindings.read" closures in
+  Alcotest.(check bool) "extern fn recorded with IO.Foreign" true
+    (match caps with Some cs -> List.mem "IO.Foreign" cs | None -> false)
+
+(* A function that imports a module needing IO (Check 4 propagation) — the
+   accessor returns the union, normalized, including the propagated cap. *)
+let test_fn_cap_closure_propagated_import () =
+  let (_errors, env) = typecheck_full {|mod Outer do
+    mod Lib do
+      needs IO.Mut
+      fn setup() do
+        let _ = vault_new("t")
+        ()
+      end
+    end
+    mod Consumer do
+      needs IO.Mut
+      fn run() do () end
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Consumer.run" closures in
+  Alcotest.(check bool) "propagated import cap recorded for consumer fn" true
+    (match caps with Some cs -> List.mem "IO.Mut" cs | None -> false)
+
 (* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
 
 (* A module that declares `needs IO.Mut` only to satisfy transitive enforcement
@@ -5445,6 +5508,10 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+          Alcotest.test_case "fn_capability_closures: declared needs"       `Quick test_fn_cap_closure_declared_needs;
+          Alcotest.test_case "fn_capability_closures: inferred builtin"     `Quick test_fn_cap_closure_inferred_builtin;
+          Alcotest.test_case "fn_capability_closures: extern IO.Foreign"    `Quick test_fn_cap_closure_extern;
+          Alcotest.test_case "fn_capability_closures: propagated import"    `Quick test_fn_cap_closure_propagated_import;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
