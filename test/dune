@@ -289,6 +289,11 @@
  (libraries march_refine alcotest unix))
 
 (test
+ (name test_caps)
+ (modules test_caps)
+ (libraries march_caps alcotest))
+
+(test
  (name test_refinecheck)
  (modules test_refinecheck)
  (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck alcotest))

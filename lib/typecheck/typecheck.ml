@@ -924,32 +924,10 @@ let _t_pid    = t_pid
 
 (* =================================================================
    Capability hierarchy for needs / Cap checking.
-   Each entry: (cap_path, parent_path option).
-   Paths are dot-joined strings, e.g. "IO.FileRead".
-   FFI caps like "LibC" are valid but not in this table — they are
-   their own roots and have no subtyping relationship.
+   Moved to March_caps.Cap_lattice (Phase5C-A.1) — shared with
+   March_refinecheck.Cap_infer, which previously carried a verbatim
+   duplicate of this table.
    ================================================================= *)
-
-let io_cap_hierarchy : (string * string option) list = [
-  ("IO",            None);
-  ("IO.Console",    Some "IO");
-  ("IO.FileSystem", Some "IO");
-  ("IO.FileRead",   Some "IO.FileSystem");
-  ("IO.FileWrite",  Some "IO.FileSystem");
-  ("IO.Network",    Some "IO");
-  ("IO.NetConnect", Some "IO.Network");
-  ("IO.NetListen",  Some "IO.Network");
-  ("IO.Process",    Some "IO");
-  ("IO.Clock",      Some "IO");
-  ("IO.Random",     Some "IO");
-  ("IO.Database",   Some "IO.NetConnect");
-  ("IO.Spawn",      Some "IO");
-  ("IO.Mut",        Some "IO");
-  ("IO.Telemetry",  Some "IO");
-  ("IO.NetConnect.TLS", Some "IO.NetConnect");
-  ("IO.Foreign",         Some "IO");
-  ("IO.Foreign.Blocking", Some "IO.Foreign");
-]
 
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
@@ -1054,22 +1032,10 @@ let builtin_cap_table : (string * string) list = [
   ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
-(** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
-    E.g., "IO.FileRead" → ["IO.FileRead"; "IO.FileSystem"; "IO"].
-    FFI caps not in the table return just themselves. *)
-let cap_ancestors cap =
-  let rec go c acc =
-    let acc' = c :: acc in
-    match List.assoc_opt c io_cap_hierarchy with
-    | Some (Some parent) -> go parent acc'
-    | _ -> acc'
-  in
-  List.rev (go cap [])
-
 (** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
-    E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
-let cap_subsumes parent child =
-  List.mem parent (cap_ancestors child)
+    E.g., cap_subsumes "IO" "IO.FileRead" = true.
+    See [March_caps.Cap_lattice.cap_subsumes]. *)
+let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
 
 (** [cap_path_of_names names] joins AST name list to dot-string. *)
 let cap_path_of_names names =
