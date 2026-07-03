@@ -10524,8 +10524,19 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
        global fallback) and cd-ing into the fresh tmp dir (isolates the
        project-root-relative local store) — this guarantees two genuinely
        independent compiler invocations, which is what "stable across two
-       builds" is meant to test. *)
-    let cmd_prefix = Printf.sprintf "HOME=%s cd %s && "
+       builds" is meant to test.
+
+       NOTE: a bare `VAR=val` prefix before `&&` only scopes to the
+       IMMEDIATELY FOLLOWING command under POSIX shell semantics — here that's
+       `cd`, not the compiler invocation appended after `&&` by
+       [compile_march_or_skip]'s `cmd_prefix` splice, so `HOME` was NOT
+       actually exported to the compiler subprocess. Use `env HOME=... ` after
+       `&&` instead, which exports for the rest of the command line. The
+       `cd`-into-a-fresh-tmp-dir half of the isolation (which forces a fresh
+       LOCAL `.march/cas`) was always effective and is what actually makes
+       this test exercise two independent builds; the HOME half is fixed here
+       to close the global-fallback-cache loophole for real. *)
+    let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
         (Filename.quote tmp) (Filename.quote tmp) in
     match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
             ~extra_args:"--hot-reload App --compile-so" () with
