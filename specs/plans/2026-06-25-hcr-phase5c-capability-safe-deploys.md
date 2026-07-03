@@ -53,7 +53,7 @@ The following related work landed after 2026-06-25 and affects this plan:
 | 0566c52c | **`needs` capability inference hints** | Complements Part A; inference can auto-populate `needs` declarations from body analysis. |
 | 8e3e4850 | **Phase 8: callers per slot + coordinated upgrade gate** | `.hcr_manifest` now has `callers:` field per `FN` line (see format below). `caps=` comes after `callers:` in the manifest (the manifest parser tolerates extra fields); on the *wire*, `cap_root:` comes **before** `callers:` (the server's callers parse consumes to end-of-line). |
 | f86f9b66 | **Phase 9: epoch-tagged dispatch via `__march_init`** | Epoch is baked at server; ACTIVATE3 carries `epoch:N` as a mandatory signed field. Part C extends this. |
-| a7588911 | **Phase 10: cluster-aware rolling deploy** | `forge deploy hot` orchestrates multi-node; the monotonicity gate (Part B) runs once on the deployer side before any per-node activation. The prior-caps baseline is fetched from the **epoch-master node** (the same first-server Phase 10 already uses for the shared epoch). Node admission (Part C) runs independently on each node. |
+| a7588911 | **Phase 10: cluster-aware rolling deploy** | `forge deploy hot` orchestrates multi-node; the monotonicity gate (Part B) runs once on the deployer side before any per-node activation. **Correction (2026-07-03):** the prior-caps baseline is a **local file**, not a remote fetch — mirrors the existing `prev_schemas_path` pattern (`<project>/.march/<name>_hot.so.schemas.json.prev`, computed once in `deploy_env`/`deploy` and passed unchanged to every server via `deploy_one`). There is no epoch-master CAS fetch for schemas or manifests anywhere in the current code; an earlier draft of this revision incorrectly assumed one by analogy with the shared-epoch fetch. Node admission (Part C) runs independently on each node. |
 
 **Key structural change:** `io_cap_hierarchy` is now **duplicated** — it exists in both `lib/typecheck/typecheck.ml:933` and `lib/refinecheck/cap_infer.ml:26` (identical modulo whitespace, with a "Same hierarchy as..." comment). The `lib/caps/cap_lattice.ml` factoring (Part A) is therefore more urgent, not less: it needs to absorb the refinecheck copy too and serve as the single source for all three consumers (typecheck, forge deploy, C runtime table).
 
@@ -95,7 +95,7 @@ Parts A and C are mostly engineering on machinery Phase 5 already shipped (CAS, 
 | Protocol | New verb **`ACTIVATE4`** = ACTIVATE3 + `cap_root:<hex>` in wire and signed message. A new verb, not an appended field: (a) adding anything to the signed message makes old servers reconstruct a different message and fail with a misleading `bad_signature`; (b) the server parses `callers:` to end-of-line, so a trailing field would be swallowed into the CSV. Old servers answer `ACTIVATE4` with a clean unknown-command error. |
 | Monotonicity rule | Deploy may *narrow* freely; *widening* (a new cap not subsumed by any prior-held cap) aborts before activation unless an explicit `--grant-cap <C>` authorizes each widened cap |
 | Grant authority | A widening grant rides the deployer's ed25519 signature: `cap_root` is added to the signed activation payload, so the authority claim is tamper-evident and audit-logged |
-| Multi-node baseline | On a Phase 10 multi-node deploy, the prior-caps baseline is fetched once from the **epoch-master node** (the first server, same node the shared epoch comes from); the gate runs once on the deployer before any per-node activation |
+| Multi-node baseline | The prior-caps baseline is a **local file** (`<project>/.march/<name>_hot.so.hcr_manifest.prev`, mirroring the existing `prev_schemas_path` pattern) — not a network fetch. Computed once per `deploy`/`deploy_env` call and passed unchanged to every server via `deploy_one`, so the gate runs exactly once per deploy regardless of fleet size. Updated to the new manifest after a successful deploy (mirroring `save_schemas_baseline`). |
 | Node policy | Optional `MARCH_DEPLOY_POLICY` file (newline-delimited cap paths) caps the node's maximum admissible authority; absent ⇒ permissive (preserves current behavior) |
 | Tamper-evidence | Server recomputes `cap_root` from the CAS-received `.hcr_manifest` and checks it equals the signed `cap_root` before the policy check. (Integrity, not truthfulness — see Threat model.) |
 | `migrate_state` bound | Compile-time: a recognized migration function (the `{actor_lower}_migrate_state` suffix convention, today implemented as `find_migrate_fn` in `bin/main.ml:1005`) must have an empty IO cap closure — it runs in the migration window ahead of user messages. IO use ⇒ compile error. Part C adds the same suffix recognition to **typecheck**, where the cap closure lives; `bin/main.ml` keeps its copy for the `--check-migration` SMT mode. (`no_alloc`/`no_panic` bound deferred to the `policy_dce` follow-on.) |
@@ -132,24 +132,30 @@ Union is the correct aggregation for *authority* (the artifact can do anything a
 
 ### Manifest format extension
 
-`.hcr_manifest` gains a per-fn `caps=` field and a top-level `ROOT` line. The current manifest format (writer at `bin/main.ml:2158`, after Phase 8 added `callers:`) is:
+`.hcr_manifest` gains a per-fn `caps=` field and a top-level `ROOT` line. **Corrected to match the actual writer** (there is no literal `FN`/`CAS` prefix token on each line — that was illustrative prose in an earlier draft; the real format is bare space-delimited fields, one function per line, plus comment/`ROOT` lines). The format, as implemented by Task 3 (`bin/main.ml`, writer around `:2158`, after Phase 8 added `callers:`), is:
 
 ```
-FN   <name> <impl_hash> <sig_hash> callers:<sorted-csv>
+# march-hcr-manifest v1
+# cas_hash <64-char blake3 hex>
+ROOT cap_root=<64-char blake3 hex>
+<name> <impl_hash> <sig_hash> [callers:<sorted-csv>] caps=<sorted-csv>
 ```
 
-The extended format adds `caps=` after `callers:` and a new top-level `ROOT` line:
+Example:
 
 ```
-CAS  <cas_hash>
-ROOT cap_root=<hex>
-FN   MyApp.Server.handle   <impl_hash> <sig_hash> callers:MyApp.Router.route caps=IO.Console,IO.NetConnect
-FN   MyApp.Server.server_migrate_state  <impl_hash> <sig_hash> callers: caps=
+# march-hcr-manifest v1
+# cas_hash 9f2a...
+ROOT cap_root=7c1e...
+MyApp.Server.handle   <impl_hash> <sig_hash> callers:MyApp.Router.route caps=IO.Console,IO.NetConnect
+MyApp.Server.server_migrate_state  <impl_hash> <sig_hash> caps=
 ```
 
 (Note the migration function's real name follows the implemented `{actor_lower}_migrate_state` suffix convention, not a bare `migrate_state`.)
 
-`forge/lib/cmd_deploy_hot.ml` already parses `callers:` from field index 3 (`fn_callers`, `cmd_deploy_hot.ml:51`) and its match pattern ends in a wildcard, so **old parsers tolerate the new field**; new parsing logic for `caps=` at field index 4 is additive.
+`forge/lib/cmd_deploy_hot.ml` already parses `callers:` from field index 3 (`fn_callers`, `cmd_deploy_hot.ml:51`) and its match pattern ends in a wildcard, so **old parsers tolerate the new field** (the trailing `caps=` token is silently absorbed into the discarded `_` tail). New parsing must not assume `caps=` sits at a fixed field index, though: `callers:` is only present when the function has callers, so `caps=` is field index 3 for a caller-less function and field index 4 otherwise — scan the tail for a token with a `caps=` prefix rather than indexing positionally.
+
+**A parsing landmine the new code must handle:** the current `parse_manifest`'s line dispatch only special-cases lines starting with `#` (comments) and falls through everything else to the FN-line splitter. The new `ROOT cap_root=<hex>` line does **not** start with `#`, so `String.split_on_char ' ' "ROOT cap_root=<hex>"` yields exactly `["ROOT"; "cap_root=<hex>"]` — a 2-element list that matches the existing `[name; impl_h]` fallback pattern, silently fabricating a phantom function named `"ROOT"` with `impl_hash = "cap_root=<hex>"`. The line-dispatch must recognize and consume `ROOT cap_root=` lines *before* falling through to FN-line parsing.
 
 Caps go in `.hcr_manifest` (per-function) rather than `.schemas.json` (per-actor-state). The manifest is already keyed in the CAS next to the artifact, so `forge deploy hot` and the server both reach it by the path derivation Phase 5 established.
 
@@ -159,7 +165,7 @@ Caps go in `.hcr_manifest` (per-function) rather than `.schemas.json` (per-actor
 
 In `forge/lib/cmd_deploy_hot.ml`, after the existing `ABI_QUERY` prior-state fetch and `sig_hash` ABI gate (the prior-manifest read already uses the `.hcr_manifest` path derivation established in Phase 5):
 
-1. **Fetch prior caps.** Read the prior deployed artifact's `.hcr_manifest` from the CAS (same path derivation already used to fetch the prior `.schemas.json`). On a multi-node deploy, the prior baseline comes from the **epoch-master node** — the same first-server Phase 10 already queries for the shared epoch — so the gate runs exactly once per deploy even mid-rolling-upgrade. Compute `prior_caps = ⋃ prior fn caps`.
+1. **Fetch prior caps.** Read the prior deployed artifact's `.hcr_manifest` from a **local baseline file** (`<project>/.march/<name>_hot.so.hcr_manifest.prev`), mirroring the existing `prev_schemas_path`/`save_schemas_baseline` pattern exactly — computed once per `deploy`/`deploy_env` call, so the gate runs exactly once per deploy even on a multi-node fleet, regardless of server count. Compute `prior_caps = ⋃ prior fn caps`. Absent baseline file (first deploy) ⇒ no prior caps, no gate (permissive), matching the schemas-baseline precedent.
 2. **Compute new caps** from the build's own manifest.
 3. **Diff.** A new cap `C` is *covered* iff `∃ P ∈ prior_caps. cap_subsumes P C` (shared `Cap_lattice.subsumes`). *Widening* = the set of new caps not covered by any prior cap. *Narrowing* = prior caps no longer present (always fine, logged).
 4. **Gate.** If `widening` is nonempty and not every widened cap has a matching `--grant-cap`, abort **before** any activation with an actionable diagnostic.
@@ -304,7 +310,7 @@ This is the cleanest first application of "capability-bounded migration sandbox.
 | `lib/refinecheck/cap_infer.ml` | Replace local `io_cap_hierarchy` with `Cap_lattice.hierarchy` to remove the existing duplication |
 | `bin/main.ml` | Aggregate `artifact_caps` + `cap_root` (BLAKE3 via `March_cas.Blake3.hash_string`, no new dependency); emit `caps=`/`ROOT` into `.hcr_manifest` in `--hot-reload --compile-so` (writer at `:2158`) |
 | `forge/lib/dune` | Add the shared caps lib (forge already depends on `march_ast`/`march_parser`/etc., so this is routine) |
-| `forge/lib/cmd_deploy_hot.ml` | Parse `caps=` (field 4) + `ROOT`; fetch prior cap manifest from the epoch-master node; monotonicity diff; `--grant-cap` handling; emit `ACTIVATE4` with `cap_root` in the signed message; explicit old-server diagnostic + `--no-cap-gate`; widening diagnostic; cap-change lines in `status` |
+| `forge/lib/cmd_deploy_hot.ml` | Parse `caps=`/`ROOT cap_root=` lines; maintain a local `.hcr_manifest.prev` baseline (mirroring `prev_schemas_path`/`save_schemas_baseline`); monotonicity diff; `--grant-cap` handling; emit `ACTIVATE4` with `cap_root` in the signed message; explicit old-server diagnostic + `--no-cap-gate`; widening diagnostic; cap-change lines in `status` |
 | `forge/bin/main.ml` | `--grant-cap` via Cmdliner `Arg.opt_all` (first repeatable flag in forge); `--no-cap-gate` |
 | `lib/cas/dune` / `runtime/dune` (Part C, out of scope here) | Link `lib/cas/blake3_stubs.c` into the runtime build so the server can recompute `cap_root` with the same BLAKE3 the compiler used |
 | `runtime/march_reload.c` | New `ACTIVATE4` branch (extend `do_activate()` at `:377`); **new** server-side `.hcr_manifest` CAS read + parse (none exists today); `cap_root` recompute + tamper check; load `MARCH_DEPLOY_POLICY`; policy check; `err_cap_tamper`/`err_cap_policy` audit results |
@@ -357,7 +363,7 @@ end
 
 `forge deploy hot` flow:
 1. Build v2; manifest records `MyApp.Server.handle caps=IO.Console,IO.FileWrite,IO.NetConnect`; `cap_root` over the set.
-2. `ABI_QUERY` + fetch prior manifest (epoch-master node): `prior_caps = {IO.Console, IO.NetConnect}`.
+2. `ABI_QUERY` + read the local `.hcr_manifest.prev` baseline: `prior_caps = {IO.Console, IO.NetConnect}`.
 3. Monotonicity diff: `IO.FileWrite` is **not** subsumed by any prior cap → widening → **abort** with the Part B diagnostic.
 4. Operator decides this is intended: `forge deploy hot --grant-cap IO.FileWrite`. The grant is signed into `cap_root`, the deploy proceeds via `ACTIVATE4`.
 5. Server: verifies sig (covers `cap_root`); recomputes `cap_root'` from the CAS manifest, matches; checks `{IO.Console, IO.FileWrite, IO.NetConnect}` ⊆ node policy. If the node policy omits `IO.FileWrite` → `ERR cap_policy IO.FileWrite`, deploy rejected at the boundary even though it was correctly signed and granted. Otherwise `dlopen` + publish.
@@ -529,18 +535,42 @@ mode). **Depends on:** Task 2 (the accessor).
 **Files:** Modify `forge/lib/cmd_deploy_hot.ml`, `forge/lib/dune`.
 **Depends on:** Task 1 (`Cap_lattice.subsumes`), Task 3 (manifest format).
 
-- [ ] **Step 1:** Add `Cap_lattice` (via `lib/caps`) to `forge/lib/dune`'s
-      `libraries` stanza.
+- [ ] **Step 1:** Add `Cap_lattice` (via `lib/caps`; confirm the library's
+      actual public name, e.g. `march_caps`, by checking `lib/caps/dune` —
+      Task 1 created it) to `forge/lib/dune`'s `libraries` stanza.
 - [ ] **Step 2:** Extend the existing `.hcr_manifest` parser (`cmd_deploy_hot.ml`,
-      the `name :: impl_h :: sig_h :: callers_field :: _` match at `:51`) to
-      also extract a `caps=` field when present at index 4 (absent/legacy ⇒
-      empty list, not an error), and parse the new `ROOT cap_root=<hex>` line.
+      the `parse_manifest` function, `name :: impl_h :: sig_h :: callers_field
+      :: _` match around `:51`) to also extract a `caps=` field. **Do not
+      assume `caps=` sits at a fixed field index** — it's field 3 for a
+      caller-less function (no `callers:` token present) or field 4 otherwise;
+      scan the trailing token list for one with a `caps=` prefix instead of
+      indexing positionally. **Also fix a real parsing landmine**: the line
+      dispatch currently only special-cases lines starting with `#`; a new
+      `ROOT cap_root=<hex>` line does not start with `#` and would otherwise
+      fall through to the FN-line splitter, where `String.split_on_char ' '
+      "ROOT cap_root=<hex>"` produces `["ROOT"; "cap_root=<hex>"]` — matching
+      the existing `[name; impl_h]` fallback and silently fabricating a
+      phantom function named `"ROOT"`. Add an explicit check for a `ROOT
+      cap_root=` prefix *before* falling through to FN-line parsing, storing
+      the extracted hex in the `manifest` type (add a `cap_root : string`
+      field, empty string when absent — legacy manifest).
 - [ ] **Step 3:** In the deploy flow, after the existing `ABI_QUERY`/sig_hash
-      gate: fetch the prior deployed artifact's `.hcr_manifest` from the CAS
-      using the same path derivation already used for the prior `.schemas.json`.
-      On a multi-node deploy (Phase 10's `deploy_env`), fetch from the
-      epoch-master node specifically (the same first-server the shared epoch
-      already comes from) — the gate runs once per deploy, not once per node.
+      gate: fetch the prior deployed artifact's `.hcr_manifest` from a
+      **local baseline file**, mirroring the existing `prev_schemas_path` /
+      `save_schemas_baseline` pattern exactly (grep `cmd_deploy_hot.ml` for
+      both — `prev_schemas_path` is computed once per `deploy`/`deploy_env`
+      call at a path like `<project_root>/.march/<name>_hot.so.schemas.json.prev`
+      and threaded unchanged into every `deploy_one` call in a multi-server
+      fleet; `save_schemas_baseline` rewrites it after a successful deploy).
+      Add a parallel `<name>_hot.so.hcr_manifest.prev` baseline file and a
+      `save_manifest_baseline` following the same shape. There is **no**
+      remote/CAS fetch involved — an earlier draft of this plan incorrectly
+      assumed a network fetch from an "epoch-master node" by false analogy
+      with the shared-epoch fetch; the actual prior-schemas mechanism has
+      always been this local file, and caps should follow the identical
+      pattern for consistency with the existing code. Absent baseline file
+      (first deploy) ⇒ no prior caps, no gate (permissive), matching the
+      schemas-baseline precedent (`old_schemas_path <> ""` checks in `run`).
 - [ ] **Step 4:** Compute `prior_caps = ⋃ prior FN caps` and `new_caps = ⋃ new
       FN caps` (both via `Cap_lattice.normalize`). Compute `widening = { c ∈
       new_caps | ¬∃ p ∈ prior_caps. Cap_lattice.subsumes p c }` and `narrowing =
@@ -553,7 +583,8 @@ mode). **Depends on:** Task 2 (the accessor).
       prior manifest (first deploy — treat as legacy/permissive per Failure
       Modes, no gate), pure narrowing (allowed, logged), a subsumed add
       (allowed), a sibling widen (blocked), a parent widen (blocked), an `IO`
-      root add (blocked).
+      root add (blocked), and a `ROOT cap_root=` line parsing correctly
+      without fabricating a phantom `"ROOT"` function entry.
 - [ ] **Step 7:** Standard gates + forge test runner. **Commit**
       `feat(forge): monotonicity gate — block capability widening on hot deploy (Phase5C-B.1)`.
 
