@@ -375,6 +375,10 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - [ ] **Language reference manual** — Comprehensive user-facing docs covering all syntax forms, built-in types, stdlib modules, and the compiler CLI.
 - [ ] **Tutorial / getting-started guide** — Walk through writing a first March program, compiling it, and using the REPL.
 
+### Housekeeping
+
+- [ ] **Stale "protects sort_by" rationale in `lib/tir/perceus.ml`'s scrutinee-borrowed comment (around lines 984, 995)** — still cites the retired "root cause of the sort_by RC underflow" / "cause the sort_by underflow to recur" story as the justification for the path-insensitive conservatism. sort_by was formally exonerated (`.superpowers/sdd/sortby-diagnosis.md`; real bug was `mono.ml`'s empty-substitution interface-impl resolution, fixed in `ffe6fba8`) and has nothing to do with `ECase` scrutinee ownership. `specs/perceus-invariants.md` §6 documents the current (non-sort_by) justification: leak-not-crash for genuine single-sub-path uses, plus the `20d1d144` cross-branch dec exclusion. Reword the comment to match — found during Wave 4 Task 2 (docs-only scope; comment edits are `lib/` and were out of that task's scope). **Third site (found by Task 2's review):** `test/snapshots/src/scrutinee_borrowed_conservatism.march`'s header comment carries the same retired rationale verbatim ("...per the sort_by regression this documents") — reword it in the same pass; it is lexer-stripped so the `.expected` snapshot will not churn.
+
 ---
 
 ## Done (recently completed)

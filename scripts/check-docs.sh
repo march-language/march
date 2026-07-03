@@ -44,6 +44,7 @@ lint_docs() {
     echo README.md
     echo CLAUDE.md
     echo syntax_reference.md
+    echo specs/perceus-invariants.md
     find docs -name '*.md' 2>/dev/null || true
     find specs/features -name '*.md' 2>/dev/null || true
     echo .claude/skills/march-lang/SKILL.md
