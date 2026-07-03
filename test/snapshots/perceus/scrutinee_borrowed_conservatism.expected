@@ -34,10 +34,8 @@ h2
   _ -> dec_rc xs;
 panic("non-exhaustive pattern match")
   Nil() -> dec_rc xs;
-dec_rc xs;
 negate(1)
   _ -> dec_rc xs;
-dec_rc xs;
 panic("non-exhaustive pattern match")
 
 ## main

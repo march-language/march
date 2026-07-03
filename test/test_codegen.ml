@@ -5927,6 +5927,48 @@ let test_compiled_println_nested_list_parity () =
     ~expected:"[[1, 2], [3]]"
     ()
 
+(* ── Scrutinee-borrowed conservatism: cross-branch double dec_rc (P0) ────
+   found during Wave 2 Task 4's TIR snapshot audit
+   (test/snapshots/perceus/scrutinee_borrowed_conservatism.expected).  When a
+   match arm re-matches the SAME scrutinee variable on a sub-path of its own
+   body (here, the `Cons` arm's `else` branch re-matches `xs`), Perceus's
+   "scrutinee-borrowed conservatism" (perceus.ml's ECase handling, ~line
+   1058-1080) re-adds the scrutinee to that arm's `live_before_br` to protect
+   its branch-bound vars from a premature free.  `add_cross_decrcs` (~line
+   1146) used to union `live_before_br` across ALL sibling arms and emit a
+   cross-branch `dec_rc` for "dead here, live elsewhere" variables — so a
+   SIBLING arm (here, `Nil`) that never uses the scrutinee got a cross-branch
+   `dec_rc xs` IN ADDITION TO the ordinary per-arm scrutinee free every arm
+   already receives from `add_scrutinee_free_for` (~line 984).  Two
+   `dec_rc`s on the same reference: RC underflow, exit 134, compiled only —
+   the interpreter (which does not use this RC scheme) is unaffected.  Fixed
+   by excluding the scrutinee's own variable name from `add_cross_decrcs`'s
+   liveness set: its lifecycle is exclusively owned by
+   `add_scrutinee_free_for`, which independently and correctly decides, per
+   arm, whether to free it. *)
+let test_scrutinee_borrowed_cross_branch_no_double_dec () =
+  assert_compiled_interp_parity
+    ~name:"march_scrutdbl"
+    ~src:"mod MinimalScrutDbl do\n\
+         \  fn f(xs : List(Int), flag : Bool) : Int do\n\
+         \    match xs do\n\
+         \      Cons(h, t) ->\n\
+         \        if flag do\n\
+         \          h\n\
+         \        else\n\
+         \          match xs do\n\
+         \            Cons(h2, _) -> h2\n\
+         \            Nil -> 0\n\
+         \          end\n\
+         \        end\n\
+         \      Nil -> -1\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do println(f(Nil, true)) end\n\
+          end\n"
+    ~expected:"-1"
+    ()
+
 let codegen_suites =
   [
       ( "nested_lit_pattern_codegen", [
@@ -6394,6 +6436,10 @@ let codegen_suites =
             test_compiled_println_option_list_parity;
           Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
             test_compiled_println_nested_list_parity;
+        ] );
+      ( "scrutinee_borrowed_cross_branch_dec_codegen", [
+          Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
+            test_scrutinee_borrowed_cross_branch_no_double_dec;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
