@@ -38,13 +38,10 @@ open Test_helpers
        direct-binary recipe `./_build/default/test/<t>.exe` (this project's
        CLAUDE.md requires running that from the project root too).
     2. [march_project_root]-relative, as a fallback for any other CWD dune
-       might use — [march_project_root] itself is exe-path-relative
-       (`Filename.dirname` x3), which resolves correctly under `dune
-       runtest`'s working directory but NOT when the test binary is
-       invoked directly with a relative path like
-       `./_build/default/test/run_codegen.exe` (three dirnames from that
-       path land on `_build`, not the repo root) — the CWD-relative lookup
-       above is therefore the primary path, this is just a safety net. *)
+       might use — [march_project_root] is exe-path-derived (three
+       dirnames above the executable's directory, i.e. the repo root for
+       an exe under `_build/default/test/`), so this safety net works
+       regardless of the caller's CWD. *)
 let native_dir () =
   let cwd_relative = "test/native" in
   if Sys.file_exists cwd_relative && Sys.is_directory cwd_relative then cwd_relative

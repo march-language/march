@@ -5768,12 +5768,11 @@ let test_erased_update_missing_field_panics_compiled () =
     \  end\n\
      end\n"
   in
-  (* Compile from the SOURCE root (the parent of _build): the new
-     march_record_update_dyn symbol must come from the live runtime/*.c
-     sources, not _build/default's runtime copies (refreshed only when a
-     dune rule that lists them as deps runs).  write_march_source's
-     project_root is .../_build, so its parent is the source tree. *)
-  let src_root = Filename.dirname project_root in
+  (* Compile from the source root: the new march_record_update_dyn symbol
+     must come from the live runtime/*.c sources, not _build/default's
+     runtime copies (refreshed only when a dune rule that lists them as
+     deps runs). *)
+  let src_root = project_root in
   let bin = Filename.concat tmp "erasedupdmissbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
           ~main_exe ~bin ~src () with
@@ -5817,7 +5816,7 @@ let test_erased_update_multi_field_values_compiled () =
   Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
   (* --- compiled must agree (compile from the source root — see the
      missing-field test above for why) --- *)
-  let src_root = Filename.dirname project_root in
+  let src_root = project_root in
   let bin = Filename.concat tmp "erasedupdmultibin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
           ~main_exe ~bin ~src () with

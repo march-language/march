@@ -708,11 +708,15 @@ let find_main_exe () =
        `dune build ... test/run_codegen.exe test/run_stdlib.exe` (which also \
        builds bin/main.exe) to have completed" main_exe
 
-(** The project root, derived the same way the compiled-regression tests
-    need it to `cd` there so the compiler resolves its CWD-relative
-    runtime/ and stdlib/ directories. *)
+(** The project root — the compiled-regression tests `cd` there so the
+    compiler resolves its CWD-relative runtime/ and stdlib/ directories
+    from the live source tree (not `_build/default`'s copies, which only a
+    dune rule listing them as deps refreshes).  The test executable lives
+    at `<root>/_build/default/test/<runner>.exe`, so the root is three
+    dirnames above the executable's directory. *)
 let march_project_root () =
-  Filename.dirname (Filename.dirname (Filename.dirname Sys.executable_name))
+  let exe_dir = Filename.dirname Sys.executable_name in
+  Filename.dirname (Filename.dirname (Filename.dirname exe_dir))
 
 (** Run a shell command, returning (exit_code, combined_stdout_stderr).
     Used to capture the March compiler's own diagnostic output so a real
