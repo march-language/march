@@ -3,15 +3,24 @@
 ; tweetnacl.c is vendored from runtime/ via a copy rule so dune can track the
 ; dependency.  stubs.c provides the OCaml FFI wrappers; tweetnacl_impl.c is the
 ; ed25519 implementation compiled as a separate object in the same library.
+;
+; tweetnacl.h is copied in the same way (not just referenced via -I): dune's
+; build sandbox only materializes files that are declared rule outputs/deps,
+; so a bare -I %{project_root}/runtime pointing outside the sandbox leaves
+; tweetnacl_impl.c/stubs.c unable to find the header even though it exists on
+; disk — the copy rule below makes it a real, tracked dependency.
 (library
  (name march_ed25519)
  (foreign_stubs
   (language c)
-  (names stubs tweetnacl_impl)
-  (extra_deps %{project_root}/runtime/tweetnacl.h)
-  (flags (:standard -I %{project_root}/runtime))))
+  (names stubs tweetnacl_impl)))
 
 (rule
  (target tweetnacl_impl.c)
  (deps %{project_root}/runtime/tweetnacl.c)
+ (action (copy %{deps} %{target})))
+
+(rule
+ (target tweetnacl.h)
+ (deps %{project_root}/runtime/tweetnacl.h)
  (action (copy %{deps} %{target})))

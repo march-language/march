@@ -255,13 +255,146 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
   in
   go [] parts
 
+(* ── CSRF token injection in ~H ──────────────────────────────────────────── *)
+
 (* B16 note: ~H used to auto-inject a `CSRF.tag_string(conn)` call after
    every mutating `<form method="post|put|patch|delete">` opening tag,
-   assuming a free `conn` variable in scope (the Bastion convention). That
-   broke every non-Bastion ~H user with a baffling unbound-`conn` error;
-   with Bastion leaving the stdlib the injection was removed entirely.
-   Templates wanting a CSRF token interpolate it explicitly, e.g.
-   `${CSRF.tag_string(conn)}`. *)
+   UNCONDITIONALLY assuming a free `conn` variable in scope (the Bastion
+   convention). That broke every non-Bastion ~H user with a baffling
+   unbound-`conn` error, so the injection was removed entirely — which in
+   turn silently dropped CSRF protection from every Bastion app (every POST
+   started 403ing). The resolution keeps both behaviours: injection now
+   fires ONLY when a `conn` binding is lexically in scope at the ~H sigil
+   (function/lambda parameter, `let`/`let?` binding earlier in the block, or
+   a match-branch pattern). Templates without `conn` render verbatim and
+   never see an unbound-`conn` error; templates following the Bastion
+   convention keep automatic CSRF protection. An explicit
+   `${CSRF.tag_string(conn)}` interpolation still works either way. *)
+
+(** Is a `conn` binding lexically in scope at the expression currently being
+    desugared?  Maintained imperatively (like [expr_err_ctx]) because
+    [desugar_expr] doesn't thread an environment.  Scope owners save/restore
+    via [with_conn_scope]. *)
+let csrf_conn_in_scope : bool ref = ref false
+
+(** Run [f] with [csrf_conn_in_scope] additionally enabled when [flag] holds,
+    restoring the previous value afterwards (exception-safe). *)
+let with_conn_scope (flag : bool) (f : unit -> 'a) : 'a =
+  let saved = !csrf_conn_in_scope in
+  csrf_conn_in_scope := saved || flag;
+  Fun.protect ~finally:(fun () -> csrf_conn_in_scope := saved) f
+
+(** Does pattern [p] bind a variable named [conn]? *)
+let rec pat_binds_conn (p : pattern) : bool =
+  match p with
+  | PatWild _ | PatLit _ -> false
+  | PatVar n -> n.txt = "conn"
+  | PatCon (_, ps) -> List.exists pat_binds_conn ps
+  | PatAtom (_, ps, _) -> List.exists pat_binds_conn ps
+  | PatTuple (ps, _) -> List.exists pat_binds_conn ps
+  | PatRecord (fields, _) -> List.exists (fun (_, fp) -> pat_binds_conn fp) fields
+  | PatAs (inner, n, _) -> n.txt = "conn" || pat_binds_conn inner
+
+(** Does a function parameter bind [conn]? *)
+let fn_param_binds_conn : fn_param -> bool = function
+  | FPNamed p | FPDefault (p, _) -> p.param_name.txt = "conn"
+  | FPPat pat -> pat_binds_conn pat
+
+let params_bind_conn (ps : fn_param list) : bool =
+  List.exists fn_param_binds_conn ps
+
+let lam_params_bind_conn (ps : param list) : bool =
+  List.exists (fun (p : param) -> p.param_name.txt = "conn") ps
+
+(** Check whether [s] contains a [<form] opening tag whose [method] attribute
+    specifies a mutating HTTP method (post, put, patch, delete).
+
+    Returns [Some close_pos] where [close_pos] is the byte index just after
+    the [>] closing the form opening tag, or [None].
+
+    Detection is case-insensitive on both tag name and method value.
+    Only the first mutating form tag within [s] is detected; call recursively
+    on the remainder to handle multiple forms in one literal. *)
+let csrf_form_close_pos (s : string) : int option =
+  let lower = String.lowercase_ascii s in
+  let len   = String.length lower in
+  let is_boundary c =
+    c = ' ' || c = '\t' || c = '\n' || c = '\r' || c = '>' in
+  let find_sub needle hay from =
+    let nlen = String.length needle in
+    let hlen = String.length hay in
+    let rec loop i =
+      if i + nlen > hlen then -1
+      else if String.sub hay i nlen = needle then i
+      else loop (i + 1)
+    in
+    loop from
+  in
+  let mutating = ["post"; "put"; "patch"; "delete"] in
+  let rec scan i =
+    let fi = find_sub "<form" lower i in
+    if fi = -1 then None
+    else begin
+      let after_tag = fi + 5 in
+      (* Require whitespace or '>' immediately after "<form" so we don't
+         match "<format", "<formdata", etc. *)
+      if after_tag < len && not (is_boundary lower.[after_tag]) then
+        scan (fi + 1)
+      else begin
+        (* Find the closing '>' of this form tag *)
+        let rec find_close j =
+          if j >= len then -1
+          else if lower.[j] = '>' then j + 1
+          else find_close (j + 1)
+        in
+        let close = find_close after_tag in
+        if close = -1 then None
+        else begin
+          let tag_src = String.sub lower fi (close - fi) in
+          let has_method = List.exists (fun m ->
+            find_sub ("method=\"" ^ m ^ "\"") tag_src 0 >= 0 ||
+            find_sub ("method='" ^ m ^ "'") tag_src 0 >= 0 ||
+            find_sub ("method=" ^ m) tag_src 0 >= 0
+          ) mutating in
+          if has_method then Some close
+          else scan (fi + 1)
+        end
+      end
+    end
+  in
+  scan 0
+
+(** Inject CSRF hidden-input string expressions into a ~H parts list.
+
+    For each [ELit (LitString s, _)] that contains a [<form method="post/...">]
+    opening tag, split the literal at the closing [>] and insert an
+    [EApp(CSRF.tag_string, [EVar "conn"])] call between the two halves.
+
+    The injected call returns [String] (not IOList), so it is valid as an
+    element in the [List(String)] passed to [IOList.from_strings].
+
+    Only called when [csrf_conn_in_scope] holds — the caller guarantees a
+    [conn] variable is lexically in scope (the standard Bastion convention
+    for request-handler functions that use ~H templates). *)
+let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
+  let v s = EVar { txt = s; span = sp } in
+  let csrf_call = EApp (v "CSRF.tag_string", [v "conn"], sp) in
+  let rec go = function
+    | [] -> []
+    | ELit (LitString s, lsp) :: rest ->
+      (match csrf_form_close_pos s with
+       | None -> ELit (LitString s, lsp) :: go rest
+       | Some close_pos ->
+         let before = String.sub s 0 close_pos in
+         let after  = String.sub s close_pos (String.length s - close_pos) in
+         (* Recurse on the remainder to handle multiple forms in one literal *)
+         ELit (LitString before, lsp)
+         :: csrf_call
+         :: go (ELit (LitString after, lsp) :: rest))
+    | part :: rest ->
+      part :: go rest
+  in
+  go parts
 
 (** Build an IOList directly from the parts of an ~H sigil interpolation.
 
@@ -271,6 +404,11 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
     Island tags ([<island name='Mod' props=${expr} />]) are recognised and
     replaced with [IslandView.island_ssr(...)] calls that perform SSR.
 
+    Form tags with mutating methods ([<form method="post/put/patch/delete">])
+    have a [CSRF.tag_string(conn)] call injected immediately after the opening
+    tag — but only when a [conn] binding is lexically in scope (see the B16
+    note above [csrf_conn_in_scope]).
+
     The result is:
       IOList.from_strings(["static1", Html.escape(to_string(e1)), "static2", ...])
     which produces a multi-segment IOList without building an intermediate
@@ -279,7 +417,12 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   let parts = decompose_concat content in
   (* First pass: replace <island> tags with IslandView calls *)
   let parts = process_island_tags parts sp in
-  (* Second pass: escape dynamic interpolations.
+  (* Second pass: inject CSRF tokens after mutating <form> opening tags —
+     but ONLY when a `conn` binding is lexically in scope (B16: standalone
+     templates must never see an injected unbound `conn`). *)
+  let parts =
+    if !csrf_conn_in_scope then inject_csrf_tokens parts sp else parts in
+  (* Third pass: escape dynamic interpolations.
      Use html_auto_escape(x) instead of Html.escape(to_string(x)) so that:
      - Html.Safe values are inserted verbatim (no double-escaping)
      - IOList values (partials) are flattened as-is (already HTML)
@@ -423,18 +566,37 @@ let rec desugar_expr (e : expr) : expr =
     ECon (name, List.map desugar_expr args, sp)
 
   | ELam (ps, body, sp) ->
-    ELam (ps, desugar_expr body, sp)
+    let body' =
+      with_conn_scope (lam_params_bind_conn ps) (fun () -> desugar_expr body) in
+    ELam (ps, body', sp)
 
   | EBlock (es, sp) ->
-    EBlock (List.map desugar_expr es, sp)
+    (* `let conn = ...` brings `conn` into scope for the REST of the block —
+       walk statements in order, enabling the CSRF conn gate once a binding
+       of `conn` has been seen. Restore on exit (block-scoped). *)
+    with_conn_scope false (fun () ->
+      (* Explicit recursion: statement order matters for the scope scan
+         (List.map's application order is unspecified). *)
+      let rec go acc = function
+        | [] -> List.rev acc
+        | stmt :: rest ->
+          let stmt' = desugar_expr stmt in
+          (match stmt' with
+           | ELet (b, _) when pat_binds_conn b.bind_pat ->
+             csrf_conn_in_scope := true
+           | _ -> ());
+          go (stmt' :: acc) rest
+      in
+      EBlock (go [] es, sp))
 
   | ELet (b, sp) ->
     ELet ({ b with bind_expr = desugar_expr b.bind_expr }, sp)
 
   | EMatch (scrut, branches, sp) ->
     let branches' = List.map (fun br ->
-        { br with branch_guard = Option.map desugar_expr br.branch_guard
-                ; branch_body  = desugar_expr br.branch_body }) branches in
+        with_conn_scope (pat_binds_conn br.branch_pat) (fun () ->
+          { br with branch_guard = Option.map desugar_expr br.branch_guard
+                  ; branch_body  = desugar_expr br.branch_body })) branches in
     EMatch (desugar_expr scrut, branches', sp)
 
   | ETuple (es, sp) ->
@@ -489,10 +651,17 @@ let rec desugar_expr (e : expr) : expr =
     ESpawn (desugar_expr actor, sp)
 
   | ELetFn (name, params, ret_ty, body, sp) ->
-    ELetFn (name, params, ret_ty, desugar_expr body, sp)
+    let body' =
+      with_conn_scope (lam_params_bind_conn params)
+        (fun () -> desugar_expr body) in
+    ELetFn (name, params, ret_ty, body', sp)
 
   | ELetQ (p, result, cont, sp) ->
-    ELetQ (p, desugar_expr result, desugar_expr cont, sp)
+    (* `let? conn = ...` binds `conn` for the continuation only. *)
+    let result' = desugar_expr result in
+    let cont' =
+      with_conn_scope (pat_binds_conn p) (fun () -> desugar_expr cont) in
+    ELetQ (p, result', cont', sp)
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
@@ -533,8 +702,10 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
   | [only] when clause_is_trivial only ->
     (* Fast path: single clause, all named params, no guard — nothing to do
        except recursively desugar the body. *)
-    let only' = { only with fc_body = desugar_expr only.fc_body
-                           ; fc_guard = Option.map desugar_expr only.fc_guard }
+    let only' =
+      with_conn_scope (params_bind_conn only.fc_params) (fun () ->
+        { only with fc_body = desugar_expr only.fc_body
+                  ; fc_guard = Option.map desugar_expr only.fc_guard })
     in
     { def with fn_clauses = [only'] }
 
@@ -564,9 +735,11 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
        argument to be supplied — nested default-arg dispatch was never wired
        up). *)
     let strip = function FPDefault (p, _) -> FPNamed p | other -> other in
-    let only' = { only with fc_params = List.map strip only.fc_params
-                           ; fc_body = desugar_expr only.fc_body
-                           ; fc_guard = Option.map desugar_expr only.fc_guard }
+    let only' =
+      with_conn_scope (params_bind_conn only.fc_params) (fun () ->
+        { only with fc_params = List.map strip only.fc_params
+                  ; fc_body = desugar_expr only.fc_body
+                  ; fc_guard = Option.map desugar_expr only.fc_guard })
     in
     { def with fn_clauses = [only'] }
 
@@ -590,10 +763,11 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
         | [p] -> p
         | ps  -> PatTuple (ps, clause.fc_span)
       in
-      { branch_pat   = pat
-      ; branch_guard = Option.map desugar_expr clause.fc_guard
-      ; branch_body  = desugar_expr clause.fc_body
-      }
+      with_conn_scope (params_bind_conn clause.fc_params) (fun () ->
+        { branch_pat   = pat
+        ; branch_guard = Option.map desugar_expr clause.fc_guard
+        ; branch_body  = desugar_expr clause.fc_body
+        })
     in
 
     let branches = List.map clause_to_branch clauses in

@@ -4023,13 +4023,16 @@ end|} in
       | _ -> Alcotest.fail "bad Response shape")
    | _ -> Alcotest.fail "expected Ok(Response ...)")
 
-(* ── B16: ~H CSRF `conn` auto-injection removal ─────────────────────────────
+(* ── B16 + conn-gated CSRF: ~H auto-injection ───────────────────────────────
    Every ~H literal containing a mutating <form method="post|put|patch|delete">
-   used to get an injected `CSRF.tag_string(conn)` call, where `conn` is a
-   free variable assumed in scope (the Bastion convention). Any non-Bastion
-   module using such a form got a baffling unbound-`conn` error. Bastion is
-   leaving the stdlib; the injection is removed entirely. A standalone module
-   with a mutating form must compile and run. *)
+   gets an injected `CSRF.tag_string(conn)` call — but ONLY when a `conn`
+   binding is lexically in scope (function/lambda param, block `let`, or match
+   pattern). Two regressions guarded here:
+   - B16: a standalone module WITHOUT `conn` must never see the injected call
+     (it used to get a baffling unbound-`conn` error) — renders verbatim.
+   - Bastion convention: a page fn WITH a `conn` param MUST get the injection
+     (its unconditional removal silently dropped CSRF protection from every
+     Bastion app — every POST started 403ing). *)
 
 let test_h_sigil_form_post_typechecks_standalone () =
   (* iolist.march is self-contained (no String-module deps), so loading it
@@ -4064,6 +4067,55 @@ end|} in
   (* No token injection: the template renders verbatim. *)
   Alcotest.(check string) "form renders verbatim, no injected token"
     {|<form method="post">x</form>|} (vstr result)
+
+(* A module with a `CSRF.tag_string` stub (the injected call's target) and a
+   Bastion-style page fn taking `conn`. The injected token must appear right
+   after the <form ...> opening tag. *)
+let csrf_stub_token = {|<input type="hidden" name="_csrf_token" value="tok123">|}
+
+let eval_csrf_page body_decl =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  eval_with_stdlib [string_decl; iolist_decl]
+    (Printf.sprintf {|mod Page do
+  mod CSRF do
+    fn tag_string(conn) : String do
+      "<input type=\"hidden\" name=\"_csrf_token\" value=\"tok123\">"
+    end
+  end
+%s
+end|} body_decl)
+
+let test_h_sigil_form_post_injects_with_conn_param () =
+  let env = eval_csrf_page {|
+  fn page(conn) : String do
+    IOList.to_string(~H"<form action=\"/login\" method=\"post\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "conn param in scope: token injected after form tag"
+    ({|<form action="/login" method="post">|} ^ csrf_stub_token ^ {|x</form>|})
+    (vstr result)
+
+let test_h_sigil_form_post_injects_with_conn_let () =
+  let env = eval_csrf_page {|
+  fn page(c) : String do
+    let conn = c
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "block `let conn` in scope: token injected"
+    ({|<form method="post">|} ^ csrf_stub_token ^ {|x</form>|})
+    (vstr result)
+
+let test_h_sigil_get_form_not_injected_with_conn () =
+  (* Non-mutating method: no injection even with conn in scope. *)
+  let env = eval_csrf_page {|
+  fn page(conn) : String do
+    IOList.to_string(~H"<form method=\"get\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "GET form: no injection"
+    {|<form method="get">x</form>|} (vstr result)
 
 let eval_suites =
   [
@@ -4366,9 +4418,12 @@ let eval_suites =
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
         ] );
-      ( "h_sigil_no_csrf_injection", [
+      ( "h_sigil_csrf_conn_gated", [
           Alcotest.test_case "B16: ~H form post typechecks standalone" `Quick test_h_sigil_form_post_typechecks_standalone;
           Alcotest.test_case "B16: ~H form post runs standalone"       `Quick test_h_sigil_form_post_runs_standalone;
+          Alcotest.test_case "conn param: CSRF token injected"         `Quick test_h_sigil_form_post_injects_with_conn_param;
+          Alcotest.test_case "block let conn: CSRF token injected"     `Quick test_h_sigil_form_post_injects_with_conn_let;
+          Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
         ] );
   ]
 

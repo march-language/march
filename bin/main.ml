@@ -555,6 +555,19 @@ let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
+(* CAS cache-key fragments for the remaining toggles that alter the emitted
+   binary: MARCH_SANITIZE adds -fsanitize to the clang link, MARCH_HTTP_EVLOOP
+   adds -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
+   --debug/--debug-tui add -g. Any toggle missing here lets a cached artifact
+   silently shadow the requested codegen. (MARCH_DEBUG_RUNTIME is deliberately
+   absent: it only affects the interpreter/JIT runtime .so, which is keyed by
+   its own flags_sig content key.) *)
+let codegen_cas_tags () =
+  (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
+     then ["evloop"] else [])
+  @ (if !fast_math then ["fast-math"] else [])
+  @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
@@ -1160,7 +1173,7 @@ let compile filename =
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag ()
+          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -1813,7 +1826,7 @@ let compile filename =
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag ()
+          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in

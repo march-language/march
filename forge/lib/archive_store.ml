@@ -350,6 +350,40 @@ let find_task command =
   | None -> None
   | Some dot ->
     let ns = String.sub command 0 dot in
+    (* 0. Check the current project's own forge.toml when the namespace is
+       the project's own package name (e.g. "forgepm.seed" run from inside
+       forgepm) — a project's own [archive.task.*] entries were previously
+       only found via deps/<ns>/forge.toml or the global registry, neither
+       of which a project satisfies for itself, so `forge <own-name>.<task>`
+       always failed with "unknown command" even for a correctly-declared
+       task. *)
+    let self_result =
+      match Project.find_forge_toml () with
+      | None -> None
+      | Some project_root ->
+        let self_name =
+          try (Project.load_from project_root).Project.name
+          with Sys_error _ | Failure _ | Toml.Parse_error _ -> ""
+        in
+        if self_name <> "" && self_name = ns then begin
+          let self_toml = Filename.concat project_root "forge.toml" in
+          let tasks = read_tasks_from_toml self_toml in
+          match List.find_opt (fun (cmd, _, _) -> cmd = command) tasks with
+          | None -> None
+          | Some (_, rel_module, _) ->
+            let full_path = Filename.concat project_root rel_module in
+            if Sys.file_exists full_path then
+              (* Deps first, own lib last — same order as cmd_build's
+                 lib_path_env (and cases 1/2 below). *)
+              let lib_paths = dep_lib_paths_for_archive project_root
+                              @ lib_paths_for_root project_root in
+              Some (full_path, lib_paths)
+            else None
+        end else None
+    in
+    (match self_result with
+     | Some _ -> self_result
+     | None ->
     (* 1. Check project-local deps *)
     let local_result =
       match Project.find_forge_toml () with
@@ -394,7 +428,7 @@ let find_task command =
               let lib_paths = dep_lib_paths_for_archive archive_root
                               @ lib_paths_for_root archive_root in
               Some (full_path, lib_paths)
-            else None))
+            else None)))
 
 (** Return all (command, module_path, doc) triples for an archive directory. *)
 let list_archive_tasks archive_root =
