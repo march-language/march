@@ -263,6 +263,28 @@ let llvm_name (name : string) : string =
     else '_'
   ) name
 
+(** Return a unique alloca slot name for TIR variable [base] and update
+    var_slot so subsequent loads of [base] use this slot.
+    First use returns [base] unchanged; shadowing gives [base_1], [base_2], ...
+
+    Wave 3 Task 5 (chunk 2) split: moved verbatim from [llvm_emit.ml].  Left
+    in place by Task 3 (not named in that brief; only pure ctx-hashtable
+    helper without a standalone external consumer yet) — now moves because
+    [emit_case] (Task 5, now in [Llvm_case]) is one of its call sites, and
+    [Llvm_case] must not depend back on [llvm_emit.ml] (the module it was
+    extracted from) to reach it. *)
+let alloca_name ctx (base : string) : string =
+  let slot = match Hashtbl.find_opt ctx.local_names base with
+    | None ->
+      Hashtbl.replace ctx.local_names base 1;
+      base
+    | Some n ->
+      Hashtbl.replace ctx.local_names base (n + 1);
+      base ^ "_" ^ string_of_int n
+  in
+  Hashtbl.replace ctx.var_slot base slot;
+  slot
+
 (** FNV-1a 64-bit hash — used for stable atom → i64 mapping.
     Must match the C runtime implementation in march_runtime.c. *)
 let fnv1a_64 (s : string) : int64 =
@@ -497,3 +519,69 @@ let intern_string ctx s =
     (Printf.sprintf "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
        name (len + 1) (llvm_escape_string s));
   name
+
+(* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
+   Every site that COMMITS to a value representation (EAlloc, EReuse,
+   emit_case, ensure_adt_eq_fn) records its decision here, keyed by
+   "TypeName(payload)" — payload "?" when the site has no type params (the
+   dangerous case: it guessed).  At end of emit_module, any type whose
+   recorded encodings mix families (Boxed vs Niche vs Newtype) is reported:
+   * same payload key, different families  → definite inconsistency;
+   * a "?"-payload site disagreeing with a concrete one → the exact shape of
+     the Option(Option(_)) None-null-vs-boxed bug (86c62b98).
+   Records the ACTUAL decisions as they are made (not a re-derivation), so it
+   cannot diverge from codegen.  Diagnostic only — no behavior change.
+
+   Wave 3 Task 5 (chunk 2) split: moved verbatim from [llvm_emit.ml] to
+   [llvm_ctx.ml] — [ensure_adt_eq_fn] (now in [Llvm_eq]), the EAlloc/EReuse
+   arms (now calling into [Llvm_data]), and [emit_case] (now in [Llvm_case])
+   all record into this table, and none of those three modules may depend on
+   [llvm_emit.ml] (that would cycle back through the module they were
+   extracted from) — so the shared audit state moves to the common
+   already-depended-on base instead.  [emit_module] (which stays in
+   llvm_emit.ml) still resets the table per module and prints the report;
+   both are re-exported bare there, same pattern as the ctx primitives
+   above. *)
+let repr_audit_on = lazy (Sys.getenv_opt "MARCH_REPR_AUDIT" <> None)
+(* type_name -> (payload_key, family, site) list, deduped *)
+let _repr_audit : (string, (string * string * string) list ref) Hashtbl.t =
+  Hashtbl.create 64
+let repr_audit_record ~(ty : string) ~(payload : string) ~(family : string)
+    ~(site : string) : unit =
+  if Lazy.force repr_audit_on then begin
+    let l = match Hashtbl.find_opt _repr_audit ty with
+      | Some l -> l
+      | None -> let l = ref [] in Hashtbl.add _repr_audit ty l; l
+    in
+    let entry = (payload, family, site) in
+    if not (List.mem entry !l) then l := entry :: !l
+  end
+let repr_audit_report () =
+  if Lazy.force repr_audit_on then begin
+    let flagged = ref 0 in
+    Hashtbl.iter (fun ty entries ->
+      let es = !entries in
+      let families = List.sort_uniq compare (List.map (fun (_, f, _) -> f) es) in
+      if List.length families > 1 then begin
+        (* Mixed families for this type: definite if within one concrete
+           payload key; suspicious if via a "?" site. Legitimate when two
+           DIFFERENT concrete payloads pick different reprs (Option(Int) niche
+           vs Option(Float) boxed) — only flag same-key or ?-key conflicts. *)
+        let same_key_conflict =
+          List.exists (fun (p1, f1, _) ->
+            List.exists (fun (p2, f2, _) -> p1 = p2 && f1 <> f2) es) es in
+        let unknown_conflict =
+          List.exists (fun (p, _, _) -> p = "?") es in
+        if same_key_conflict || unknown_conflict then begin
+          incr flagged;
+          Printf.eprintf "[repr-audit] %s: MIXED %s%s\n" ty
+            (String.concat "/" families)
+            (if same_key_conflict then " (same-payload conflict)"
+             else " (unknown-payload site disagrees)");
+          List.iter (fun (p, f, s) ->
+            Printf.eprintf "    %-8s payload=%-24s %s\n" f p s) es
+        end
+      end
+    ) _repr_audit;
+    Printf.eprintf "[repr-audit] %d type(s) flagged\n%!" !flagged
+  end
