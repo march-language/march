@@ -704,11 +704,45 @@ let find_main_exe () =
        `dune build ... test/run_codegen.exe test/run_stdlib.exe` (which also \
        builds bin/main.exe) to have completed" main_exe
 
-(** The project root, derived the same way the compiled-regression tests
-    need it to `cd` there so the compiler resolves its CWD-relative
-    runtime/ and stdlib/ directories. *)
+(** The March project root: the parent of the `_build` directory this test
+    executable lives under, verified by the `dune-project` file sitting at
+    that root. The compiled-regression tests `cd` here before invoking the
+    compiler so its CWD-relative fallback candidates are live: `stdlib/`
+    and `runtime/` resolve from the source tree even when the
+    `_build/default/` copies are absent (a targeted `dune build
+    test/run_codegen.exe bin/main.exe` populates neither — only a full
+    `dune build` does), and the `.march/cas` tree a `--compile` run drops
+    under its CWD lands at the repo root instead of inside `_build/`.
+
+    Walking the exe's own ancestors (rather than applying a fixed number
+    of [Filename.dirname]s) is deliberate: a previous fixed-count version
+    landed on `_build` itself — one dirname short — which silently
+    disabled everything above (stdlib resolution then depended entirely on
+    the exe-relative `_build/default/stdlib` copy, and CAS trees piled up
+    inside `_build/`). The walk is correct at any depth, including dune's
+    `_build/.sandbox/<hash>/...` trees. Fails loudly if the exe is not
+    under a `_build` with a `dune-project` beside it (same
+    never-silently-wrong policy as [find_main_exe]). *)
 let march_project_root () =
-  Filename.dirname (Filename.dirname (Filename.dirname Sys.executable_name))
+  let exe =
+    if Filename.is_relative Sys.executable_name
+    then Filename.concat (Sys.getcwd ()) Sys.executable_name
+    else Sys.executable_name
+  in
+  let rec parent_of_build dir =
+    let parent = Filename.dirname dir in
+    if Filename.basename dir = "_build" then parent
+    else if parent = dir then
+      Alcotest.failf
+        "march_project_root: test exe %s is not under a _build directory" exe
+    else parent_of_build parent
+  in
+  let root = parent_of_build (Filename.dirname exe) in
+  if Sys.file_exists (Filename.concat root "dune-project") then root
+  else
+    Alcotest.failf
+      "march_project_root: derived %s (parent of the exe's _build ancestor) \
+       but it contains no dune-project" root
 
 (** Run a shell command, returning (exit_code, combined_stdout_stderr).
     Used to capture the March compiler's own diagnostic output so a real

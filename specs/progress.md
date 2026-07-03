@@ -282,6 +282,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-02, march_project_root off-by-one fix — compiled-regression tests really cd to the repo root now)
+
+- **`test/test_helpers.ml` `march_project_root` returned `<root>/_build`, not the root** (`Filename.dirname` ×3 of the test exe's path — one short). The compiled-regression tests' `cd` therefore never made the compiler's CWD-relative `stdlib`/`runtime` candidates live: everything silently rode on the exe-relative `_build/default/` copies, which only a FULL `dune build` populates — a targeted `dune build test/run_codegen.exe bin/main.exe` broke every compiled-regression test with stdlib-missing errors — and `--compile` runs littered `.march/cas` trees inside `_build/`. The `march_project_root` fallbacks in `test_snapshots.ml`/`test_ir_verify.ml` were equally dead.
+- Fix: walk the exe's ancestors to the parent of its `_build` directory, verify `dune-project` sits there, `Alcotest.failf` otherwise (never silently wrong; depth-independent, works under dune `.sandbox` trees too). Verified by CAS relocation: `.march/cas` now appears at the repo root and `_build/.march` no longer exists after a codegen run. Suites (direct-binary invocation, isolated HOME, judged by exit code): codegen 346, stdlib 791 (incl. Slow), snapshots — all green.
+
 ## Current State (as of 2026-07-02, Z3 solver process-leak fix — refinement solving no longer orphans z3)
 
 - **`lib/refine/solver.ml` + `lib/refine/refine.ml` + `bin/main.ml` — the refinement/measure-axiom Z3 integration now reaps its solver child on every exit path.** Previously every process that ran a refinement pass (each `march --check`/`--compile` invocation, each test binary) leaked one immortal `z3 -in`: the shared solver singleton behind `Refine.discharge` was never closed on any production path, and `Solver.create`'s pipes lacked `~cloexec:true`, so the z3 child inherited the write end of its own stdin pipe — parent death never delivered EOF and the orphan blocked in `read(0)` forever at 0% CPU (1,174 such orphans, reparented to PID 1, were found and killed on 2026-07-02).
