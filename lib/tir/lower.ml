@@ -489,7 +489,11 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     let fn_body' = lower_expr fn_body in
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr fn_body in
     let fn : Tir.fn_def = {
-      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = fn_body'
+      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = fn_body';
+      (* Block-statement `fn name(...) do ... end` → same ELetRec([fn], AVar fn)
+         lambda-creation shape as ELam; defun's lift_lambda consumes it and
+         mints a fresh FnApply fn_def, so FnLambda never reaches borrow/perceus. *)
+      fn_kind = Tir.FnLambda;
     } in
     let fn_var : Tir.var = {
       v_name = fn_name;
@@ -722,6 +726,9 @@ and lower_expr (e : Ast.expr) : Tir.expr =
               fn_params = [dummy_param];
               fn_ret_ty = Tir.TUnit;
               fn_body   = drop_body;
+              (* Synthesized `own(...)` drop-callback lambda — same
+                 ELetRec([fn], AVar fn) shape defun lifts to FnApply. *)
+              fn_kind   = Tir.FnLambda;
             } in
             let lam_ty  = Tir.TFn ([Tir.TUnit], Tir.TUnit) in
             let lam_var = { Tir.v_name = lam_name; v_ty = lam_ty; v_lin = Tir.Unr } in
@@ -833,7 +840,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       | _ -> from_body
     in
     let fn : Tir.fn_def = {
-      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
+      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body';
+      fn_kind = Tir.FnLambda;  (* `ELam` — anonymous lambda *)
     } in
     let fn_var : Tir.var = {
       v_name = fn_name;
@@ -930,7 +938,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
      | None -> Hashtbl.remove _fn_param_types fn_name);
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr body in
     let fn : Tir.fn_def = {
-      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
+      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body';
+      fn_kind = Tir.FnLambda;  (* `ELetFn` — named local recursive fn *)
     } in
     let fn_var : Tir.var = {
       v_name = fn_name;
@@ -1126,6 +1135,7 @@ and compile_matrix
       fn_params = [];
       fn_ret_ty = unknown_ty;
       fn_body   = fb;
+      fn_kind   = Tir.FnJoinPoint;
     } in
     (* The fn-name var, used in the [EAtom(AVar …)] body of the lambda-
        creation [ELetRec]. *)
@@ -1471,7 +1481,8 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
   let body = lower_expr clause.fc_body in
   Hashtbl.clear _fn_param_types;
   Hashtbl.iter (fun k v -> Hashtbl.replace _fn_param_types k v) saved_scope;
-  { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body }
+  { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
+    fn_kind = Tir.FnNormal }  (* parsed user/stdlib/impl-method fn *)
 
 (** Lower a type definition. *)
 let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_def) : Tir.type_def option =
@@ -1524,6 +1535,7 @@ let rec lower_stdlib_mod_decls prefix decls =
              fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
                           | None -> ty_of_expr b.bind_expr);
              fn_body   = rhs;
+             fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
            } in
            !_fns_ref := fn :: !(!_fns_ref)
          | _ -> ())
@@ -1750,7 +1762,13 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
       Tir.ELet (dispatch_var, Tir.EField (actor_atom, Tir_names.actor_dispatch_field), inner_with_alive)
     in
 
-    { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body }
+    { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body;
+      (* Actor message-handler glue: a regular top-level fn (called only via
+         the dispatch ECase below), not a lifted lambda/join-point/apply
+         wrapper — no RC/codegen consumer sniffs actor fn names for fn_kind
+         purposes, so FnNormal is the honest label (set per plan guidance:
+         "actor glue ... FnNormal with a comment"). *)
+      fn_kind = Tir.FnNormal }
   in
 
   let handler_fns = List.map lower_handler actor.actor_handlers in
@@ -1795,6 +1813,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
     fn_params = [actor_param; msg_var];
     fn_ret_ty = Tir.TUnit;
     fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
+    fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
   } in
 
   (* ── 5. Spawn function ───────────────────────────────────── *)
@@ -1889,6 +1908,7 @@ let lower_actor ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_d
     fn_params = [];
     fn_ret_ty = Tir.TPtr Tir.TUnit;
     fn_body   = spawn_body_with_sup;
+    fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
   } in
 
   (* Also register a state record type so EField accesses on the init state
@@ -1958,7 +1978,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     { Tir.fn_name   = op_name;
       fn_params     = [x; y];
       fn_ret_ty     = ret_ty;
-      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x; Tir.AVar y]) }
+      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x; Tir.AVar y]);
+      fn_kind       = Tir.FnNormal }
   in
   let call1 op_name x_ty ret_ty =
     (* fn(x) -> op(x) *)
@@ -1966,7 +1987,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     { Tir.fn_name   = op_name;
       fn_params     = [x];
       fn_ret_ty     = ret_ty;
-      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x]) }
+      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x]);
+      fn_kind       = Tir.FnNormal }
   in
   let reg_method meth_name ty_name mangled_name =
     let existing = match Hashtbl.find_opt !_iface_methods meth_name with
@@ -1981,6 +2003,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       fn_body   = Tir.EApp (mk_var body_fn_name
                                (Tir.TFn (List.map (fun v -> v.Tir.v_ty) body_params, ret_ty)),
                              List.map (fun v -> Tir.AVar v) body_params);
+      fn_kind   = Tir.FnNormal;
     } in
     fns := fn :: !fns
   in
@@ -1995,6 +2018,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TBool;
         fn_body = Tir.EApp (mk_var "==" (Tir.TFn ([tir_ty; tir_ty], Tir.TBool)), [Tir.AVar x; Tir.AVar y]);
+        fn_kind = Tir.FnNormal;
       } in
       fns := fn :: !fns;
       reg_method "eq" ty_name mangled
@@ -2011,6 +2035,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TInt;
         fn_body = Tir.EApp (mk_var c_fn (Tir.TFn ([tir_ty; tir_ty], Tir.TInt)), [Tir.AVar x; Tir.AVar y]);
+        fn_kind = Tir.FnNormal;
       } in
       fns := fn :: !fns;
       reg_method "compare" ty_name mangled
@@ -2033,6 +2058,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     fn_name = "Show$String.show"; fn_params = [str_x];
     fn_ret_ty = Tir.TString;
     fn_body = Tir.EAtom (Tir.AVar str_x);
+    fn_kind = Tir.FnNormal;
   } in
   fns := show_str_fn :: !fns;
   reg_method "show" "String" "Show$String.show";
@@ -2042,6 +2068,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     fn_name = "Show$Unit.show"; fn_params = [unit_x];
     fn_ret_ty = Tir.TString;
     fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitString "()"));
+    fn_kind = Tir.FnNormal;
   } in
   fns := show_unit_fn :: !fns;
   reg_method "show" "Unit" "Show$Unit.show";
@@ -2058,6 +2085,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x]; fn_ret_ty = Tir.TInt;
         fn_body = Tir.EApp (mk_var c_fn (Tir.TFn ([tir_ty], Tir.TInt)), [Tir.AVar x]);
+        fn_kind = Tir.FnNormal;
       } in
       fns := fn :: !fns;
       reg_method "hash" ty_name mangled
@@ -2306,6 +2334,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
                                   | None -> ty_of_expr b.bind_expr);
                      fn_body   = rhs;
+                     fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
                    fns := fn :: !fns
                  | _ -> ())
@@ -2523,6 +2552,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         fn_params = [];
         fn_ret_ty = Tir.TCon ("Unit", []);
         fn_body   = body';
+        (* `__march_test_N__` runner wrapper: an ordinary zero-arg top-level
+           fn from every RC/codegen consumer's perspective (dce.ml's root-set
+           detection and llvm_emit's --test driver key off Tir_names.test_fn_name
+           directly, not fn_kind), so FnNormal is honest here. *)
+        fn_kind   = Tir.FnNormal;
       } in
       let fn = qualify_locals mod_prefix direct_fn_names fn in
       fns := fn :: !fns;
@@ -2549,6 +2583,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_params = [];
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
+            fn_kind   = Tir.FnNormal;  (* `__march_setup__` — see test-runner comment above *)
           } in
           fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DSetupAll (body, _) ->
@@ -2558,6 +2593,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_params = [];
             fn_ret_ty = Tir.TCon ("Unit", []);
             fn_body   = body';
+            fn_kind   = Tir.FnNormal;  (* `__march_setup_all__` — see test-runner comment above *)
           } in
           fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
         | Ast.DMod (mname, _, inner_decls, _) ->

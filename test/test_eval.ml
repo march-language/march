@@ -2499,7 +2499,8 @@ let test_thm_defun_preserves_linearity () =
   let lambda_body = March_tir.Tir.EAtom (March_tir.Tir.AVar x_lin) in
   let lambda_fn = { March_tir.Tir.fn_name = "lam0"; fn_params = [];
                     fn_ret_ty = March_tir.Tir.TCon ("List", []);
-                    fn_body = lambda_body } in
+                    fn_body = lambda_body;
+                    fn_kind = March_tir.Tir.FnLambda } in
   let lam_var = mk_var_lin "lam_ref" (March_tir.Tir.TPtr March_tir.Tir.TUnit)
                   March_tir.Tir.Unr in
   let inner = March_tir.Tir.ELetRec ([lambda_fn],
@@ -2509,7 +2510,8 @@ let test_thm_defun_preserves_linearity () =
     inner) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
                   fn_ret_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
-                  fn_body = outer } in
+                  fn_body = outer;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [main_fn];
             tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let m' = March_tir.Defun.defunctionalize m in

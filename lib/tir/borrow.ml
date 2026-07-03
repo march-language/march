@@ -194,7 +194,18 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
 
 (** True iff [ty] is a defunctionalised closure environment struct (its ctor
     name is minted as ["$Clo_…"] by defun.ml).  Used to distinguish a closure
-    allocation from an ordinary data allocation. *)
+    allocation from an ordinary data allocation.
+
+    Wave 3 Task 3 scoping note: [fn_kind] lives on [Tir.fn_def], but this
+    predicate checks a [Tir.ty] (a [TCon] struct-type name from an EAlloc) —
+    there is no fn_def in play here at all, so there is no flag to assert
+    this against. defun.ml's [lift_lambda] mints the closure struct's TCon
+    name (["$Clo_" ^ fn_name ^ "$" ^ uid]) and the [FnApply]-tagged apply
+    fn_def's name (["fn_name$apply$uid"]) together from the same [lam_uid],
+    so the two ARE correlated in principle — but asserting that correlation
+    here would mean re-deriving and parsing the uid back out of the type
+    name, which is exactly the kind of fragile re-derivation this task
+    exists to eliminate, not add. Left unconverted; see the task report. *)
 let is_closure_ty : Tir.ty -> bool = function
   | Tir.TCon (n, _) -> Tir_names.is_clo_struct n
   | _ -> false
@@ -209,7 +220,17 @@ let is_closure_ty : Tir.ty -> bool = function
     A non-escaping closure does not transfer ownership of its captured free
     variables to any longer-lived value — so those captures are borrowing dups
     (Perceus IncRC's them for the closure's owned ref, perceus.ml:425), not
-    ownership transfers of the caller's reference. *)
+    ownership transfers of the caller's reference.
+
+    Wave 3 Task 3 scoping note on [is_try]: [__try_call]/[__try_call_val] are
+    typecheck/eval BUILTINS (typecheck.ml's builtin type table, eval.ml's
+    VBuiltin registrations) — they are never lowered to a TIR [fn_def], so no
+    [fn_kind] flag exists for them to be checked against (a lookup by this
+    name in any fn_def table would always miss). This check is call-target
+    dispatch on a hardcoded builtin name, the same shape as the
+    "task_spawn_steal"/"actor_reply" name checks elsewhere in this pipeline
+    — not a synthesis-role classification — so there is nothing to convert
+    or assert here; left as name-checking, unconverted. *)
 let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
   let is_try = Tir_names.is_try_call in
   match e with

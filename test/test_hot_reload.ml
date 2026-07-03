@@ -141,11 +141,13 @@ let contains (haystack : string) (needle : string) : bool =
 let two_boundary_module () : Tir.tir_module =
   let b : Tir.fn_def =
     { fn_name = "MyApp.B"; fn_params = []; fn_ret_ty = Tir.TInt;
-      fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 1)) } in
+      fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 1));
+      fn_kind = Tir.FnNormal } in
   let a : Tir.fn_def =
     { fn_name = "MyApp.A"; fn_params = []; fn_ret_ty = Tir.TInt;
       fn_body = Tir.EApp ({ Tir.v_name = "MyApp.B";
-                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []) } in
+                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []);
+      fn_kind = Tir.FnNormal } in
   { Tir.tm_name = "MyApp"; tm_fns = [a; b]; tm_types = []; tm_externs = [];
     tm_exports = []; tm_tests = []; tm_io_fns = [] }
 
@@ -172,7 +174,8 @@ let boundary_module_with_main () : Tir.tir_module =
   let main : Tir.fn_def =
     { fn_name = "main"; fn_params = []; fn_ret_ty = Tir.TInt;
       fn_body = Tir.EApp ({ Tir.v_name = "MyApp.A";
-                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []) } in
+                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []);
+      fn_kind = Tir.FnNormal } in
   { m with Tir.tm_fns = m.Tir.tm_fns @ [main] }
 
 let test_startup_registers_boundary_fns () =

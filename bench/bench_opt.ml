@@ -82,7 +82,8 @@ let make_double_fn suffix =
   { fn_name   = "double_" ^ suffix;
     fn_params = [x];
     fn_ret_ty = TInt;
-    fn_body   = op "+" [AVar x; AVar x] }
+    fn_body   = op "+" [AVar x; AVar x];
+    fn_kind   = FnNormal }
 
 (** A caller that calls double N times — inlining candidates. *)
 let make_caller_body suffix n =
@@ -110,19 +111,19 @@ let build_module n_groups =
     let s = string_of_int i in
     (* work functions *)
     fns := { fn_name = "work_int_"   ^ s; fn_params = [];
-              fn_ret_ty = TInt;   fn_body = make_work_body i } :: !fns;
+              fn_ret_ty = TInt;   fn_body = make_work_body i; fn_kind = FnNormal } :: !fns;
     fns := { fn_name = "work_float_" ^ s; fn_params = [];
-              fn_ret_ty = TFloat; fn_body = make_float_body i } :: !fns;
+              fn_ret_ty = TFloat; fn_body = make_float_body i; fn_kind = FnNormal } :: !fns;
     (* inlinable + caller *)
     fns := make_double_fn s :: !fns;
     fns := { fn_name = "caller_" ^ s; fn_params = [];
               fn_ret_ty = TInt;
-              fn_body   = make_caller_body s 4 } :: !fns;
+              fn_body   = make_caller_body s 4; fn_kind = FnNormal } :: !fns;
   done;
   (* add a main that calls all work functions *)
   fns := { fn_name = "main"; fn_params = [];
             fn_ret_ty = TUnit;
-            fn_body = EAtom (ilit 0) } :: !fns;
+            fn_body = EAtom (ilit 0); fn_kind = FnNormal } :: !fns;
   { tm_name = "bench"; tm_fns = List.rev !fns; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
 
 (* ── Timing ──────────────────────────────────────────────────────────── *)

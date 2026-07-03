@@ -222,7 +222,8 @@ let gen_map_fold
                            Tir.AVar acc'; Tir.AVar xg]))) };
     ], None)
   in
-  { Tir.fn_name; fn_params = [xs; xf; acc; xg]; fn_ret_ty = acc_ty; fn_body = body }
+  { Tir.fn_name; fn_params = [xs; xf; acc; xg]; fn_ret_ty = acc_ty; fn_body = body;
+    fn_kind = Tir.FnFused }
 
 (** Generate a filter+fold fused function.
     Equivalent to: fold_left(combine, acc, filter(pred, xs))
@@ -269,7 +270,8 @@ let gen_filter_fold
           ], None)) };
     ], None)
   in
-  { Tir.fn_name; fn_params = [xs; xp; acc; xg]; fn_ret_ty = acc_ty; fn_body = body }
+  { Tir.fn_name; fn_params = [xs; xp; acc; xg]; fn_ret_ty = acc_ty; fn_body = body;
+    fn_kind = Tir.FnFused }
 
 (** Generate a map+filter+fold fused function.
     Equivalent to: fold_left(combine, acc, filter(pred, map(transform, xs)))
@@ -323,7 +325,8 @@ let gen_map_filter_fold
   { Tir.fn_name;
     fn_params  = [xs; xf; xp; acc; xg];
     fn_ret_ty  = acc_ty;
-    fn_body    = body }
+    fn_body    = body;
+    fn_kind    = Tir.FnFused }
 
 (* ── Fusion attempt helpers ──────────────────────────────────────────── *)
 

@@ -3077,7 +3077,8 @@ let mk_tagged_fn policy_name body =
   { March_tir.Tir.fn_name = "process";
     fn_params = [mk_tagged_param policy_name];
     fn_ret_ty  = March_tir.Tir.TInt;
-    fn_body    = body }
+    fn_body    = body;
+    fn_kind    = March_tir.Tir.FnNormal }
 
 let tir_int_lit n =
   March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt n))
@@ -3119,7 +3120,8 @@ let test_policy_nopanic_transitive () =
     [March_tir.Tir.TString] March_tir.Tir.TUnit
     [March_tir.Tir.ALit (March_ast.Ast.LitString "oops")] in
   let helper = { March_tir.Tir.fn_name = "my_helper"; fn_params = [];
-                 fn_ret_ty = March_tir.Tir.TUnit; fn_body = helper_body } in
+                 fn_ret_ty = March_tir.Tir.TUnit; fn_body = helper_body;
+                 fn_kind = March_tir.Tir.FnNormal } in
   (* Tagged fn calls the helper *)
   let body = tir_call "my_helper" [] March_tir.Tir.TUnit [] in
   let fd = mk_tagged_fn "NoPanic" body in
@@ -3145,7 +3147,8 @@ let test_policy_realtime_clean () =
 let test_policy_untagged_not_checked () =
   let body = March_tir.Tir.EAlloc (March_tir.Tir.TCon ("List", [March_tir.Tir.TInt]), []) in
   let fd = { March_tir.Tir.fn_name = "normal_fn"; fn_params = [];
-             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [fd] in
   let v = March_tir.Policy_dce.audit m in
   Alcotest.(check bool) "Untagged fn with alloc: no violation" true (v = [])

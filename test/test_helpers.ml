@@ -288,7 +288,8 @@ let perceus_dead_let v =
       March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 0)))
   in
   let fn = { March_tir.Tir.fn_name = "f"; fn_params = [];
-             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn];
             tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let m' = March_tir.Perceus.perceus m in
@@ -1074,7 +1075,8 @@ let _blit b = March_tir.Tir.ALit (March_ast.Ast.LitBool b)
 
 let mk_fn name body =
   { March_tir.Tir.fn_name = name; fn_params = [];
-    fn_ret_ty = March_tir.Tir.TInt; fn_body = body }
+    fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+    fn_kind = March_tir.Tir.FnNormal }
 let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
 let avar name ty = March_tir.Tir.AVar (mk_var name ty)
 let flit f = March_tir.Tir.ALit (March_ast.Ast.LitFloat f)

@@ -47,6 +47,17 @@ let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
     representations). *)
 let _type_defs : Tir.type_def list ref = ref []
 
+(** name → [Tir.fn_kind] for every fn_def in the current module, set at the
+    start of [perceus] (Wave 3 Task 3). [is_apply_fn] (below) is a CALL-SITE
+    check — it only has the callee's [Tir.var] name, not its defining
+    [fn_def] — so this table is the bridge from "the name I'm looking at" to
+    "the honest role its definition was tagged with". Used ONLY for the
+    transitional assert that [Tir_names.is_apply_fn]'s name-sniffing answer
+    still agrees with the flag; the callee's actual RC-relevant DECISION
+    still goes through [is_apply_fn] (unchanged) this chunk — see the plan's
+    "assertions come out in Chunk 2" note. *)
+let _fn_kinds : Tir.fn_kind StringMap.t ref = ref StringMap.empty
+
 (** True when a value of type [ty] shares its heap object with the payload of
     its single relevant constructor — i.e. newtype- (S(x)≡x) or niche-
     (Some(x)≡x, None≡0) represented.  For such types a pattern match does NOT
@@ -520,6 +531,19 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           the caller still owns exactly one reference and must emit exactly
           one DecRC.  Without dedup we would underflow the RC. *)
     let callee_is_apply = is_apply_fn f.Tir.v_name in
+    (* TRANSITION SAFETY (Wave 3 Task 3, removed in Chunk 2): [is_apply_fn]
+       still makes the actual RC decision above (unchanged this chunk) — this
+       assert only proves the name-sniffing answer agrees with the honest
+       [fn_kind] flag set at the fn's synthesis site. A callee name absent
+       from [_fn_kinds] (builtin operators like "+", externs, or any callee
+       not defined as a fn_def in THIS module — e.g. cross-module refs seen
+       pre-mono) has no flag to check against, so it is skipped rather than
+       treated as a mismatch. If this ever fires, it means some synthesis
+       site mints an "$apply$"-shaped name without tagging FnApply (or vice
+       versa) — fix the synthesis site, do not weaken this assert. *)
+    (match StringMap.find_opt f.Tir.v_name !_fn_kinds with
+     | Some kind -> assert ((kind = Tir.FnApply) = callee_is_apply)
+     | None -> ());
     let post_dec_vars =
       let seen = ref StringSet.empty in
       List.filter_map (fun (i, a) ->
@@ -1809,6 +1833,10 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   let borrow_map = Borrow.infer_module m in
   _borrow_map := borrow_map;
   _type_defs := m.Tir.tm_types;
+  _fn_kinds :=
+    List.fold_left (fun acc (fd : Tir.fn_def) ->
+      StringMap.add fd.Tir.fn_name fd.Tir.fn_kind acc
+    ) StringMap.empty m.Tir.tm_fns;
   _extern_names :=
     List.fold_left (fun s (ed : Tir.extern_decl) ->
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs;
@@ -1842,4 +1870,5 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
     print_perceus_stats ~label:m.Tir.tm_name ~before ~after ()
   end;
   _borrow_map := Borrow.empty;
+  _fn_kinds := StringMap.empty;
   { m with Tir.tm_fns = fns' }

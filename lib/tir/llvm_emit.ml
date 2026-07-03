@@ -35,6 +35,17 @@ type ctx = {
   (* Maps fn_name → fn_ret_ty for functions registered in top_fns.
      Used in EApp to resolve concrete return types when call-site TVar is "_". *)
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
+  (* Maps fn_name → Tir.fn_kind, populated ONCE in [emit_module] from the
+     top-level module's [tm_fns] (Wave 3 Task 3). Used ONLY for the
+     transitional [is_apply_fn] name-sniff-vs-flag assert in the EApp case
+     below — NOT populated by the ~10 scattered REPL/JIT incremental
+     registration sites (each wraps a pseudo_mod of one or a few fns for
+     hot-swap compilation), so a callee resolved during incremental/REPL
+     compilation simply has no entry here and the assert is skipped for it
+     (same "no fn_def to check against" rule as perceus.ml's table) rather
+     than adding fn_kind population to every incremental call site in this
+     fix-dense file. *)
+  top_fn_kind : (string, Tir.fn_kind) Hashtbl.t;
   (* Maps fn_name → number of parameters for top-level functions.
      Used when emitting a top-level function as a first-class value (closure
      trampoline) but the AVar's v_ty is TVar _ rather than TFn. *)
@@ -283,6 +294,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;
   top_fn_ret_ty = Hashtbl.create 64;
+  top_fn_kind = Hashtbl.create 64;
   top_fn_nparams = Hashtbl.create 64;
   zero_arg_fns  = Hashtbl.create 16;
   field_map = Hashtbl.create 16;
@@ -3564,6 +3576,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        direct path must read the result as ptr too. *)
     let ret_ty =
       if is_apply_fn resolved_name then "ptr" else llvm_ret_ty ret_tir in
+    (* TRANSITION SAFETY (Wave 3 Task 3, removed in Chunk 2): see
+       [ctx.top_fn_kind]'s doc comment — [resolved_name] may not be in the
+       table (REPL/JIT incremental compile, extern, or builtin), in which
+       case there is nothing to check against. *)
+    (match Hashtbl.find_opt ctx.top_fn_kind resolved_name with
+     | Some kind -> assert ((kind = Tir.FnApply) = is_apply_fn resolved_name)
+     | None -> ());
     (* If the function is not known (not in top_fns, not a builtin, not an extern),
        emit a forward declaration into the preamble so LLVM does not reject the IR
        with "use of undefined value".  This covers interface dispatch calls that were
@@ -5749,6 +5768,13 @@ let emit_fn ctx (fn : Tir.fn_def) =
      reads.  void wrappers keep void — there is no value to carry. *)
   let ret_ty =
     let base = llvm_ret_ty fn.Tir.fn_ret_ty in
+    (* TRANSITION SAFETY (Wave 3 Task 3, removed in Chunk 2): [fn] is the
+       fn_def being emitted, so its own honest [fn_kind] is directly
+       available (no lookup table needed, unlike the call-site checks
+       below). The RC/ABI decision still follows [is_apply_fn] this chunk;
+       this only proves the name-sniffing answer agrees with the flag set
+       at defun.ml's [lift_lambda]. *)
+    assert ((fn.Tir.fn_kind = Tir.FnApply) = is_apply_fn fn.Tir.fn_name);
     if is_apply_fn fn.Tir.fn_name && base <> "void" then "ptr" else base
   in
 
@@ -6594,6 +6620,11 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
   in
   let ctx = make_ctx ~fast_math ~pmap_threshold ~hot_reload ~hr_names
       ~type_defs:m.Tir.tm_types () in
+  (* Wave 3 Task 3: record every top-level fn's honest role flag for the
+     transitional is_apply_fn assert (see [ctx.top_fn_kind]'s doc comment). *)
+  List.iter (fun (fn : Tir.fn_def) ->
+    Hashtbl.replace ctx.top_fn_kind fn.Tir.fn_name fn.Tir.fn_kind
+  ) m.Tir.tm_fns;
   (* Patch .so: hide all non-exported symbols so intra-.so PLT calls prefer the
      .so's own definitions over same-named symbols in the server binary.  This
      is the compile-time complement to RTLD_DEEPBIND (which is Linux-only). *)

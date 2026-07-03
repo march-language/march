@@ -2820,11 +2820,13 @@ let test_inline_pure_small () =
   let x_param = mk_var "x" March_tir.Tir.TInt in
   let double_body = app "+" [March_tir.Tir.AVar x_param; March_tir.Tir.AVar x_param] in
   let double_fn = { March_tir.Tir.fn_name = "double"; fn_params = [x_param];
-                    fn_ret_ty = March_tir.Tir.TInt; fn_body = double_body } in
+                    fn_ret_ty = March_tir.Tir.TInt; fn_body = double_body;
+                    fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "double"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [double_fn; main_fn] in
   let m' = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
@@ -2842,11 +2844,13 @@ let test_inline_impure_not_inlined () =
     app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")],
     March_tir.Tir.EAtom (March_tir.Tir.AVar x_param)) in
   let bad_fn = { March_tir.Tir.fn_name = "bad"; fn_params = [x_param];
-                 fn_ret_ty = March_tir.Tir.TInt; fn_body = bad_body } in
+                 fn_ret_ty = March_tir.Tir.TInt; fn_body = bad_body;
+                 fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "bad"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [bad_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (impure)" false !changed
@@ -2859,11 +2863,13 @@ let test_inline_recursive_not_inlined () =
                     (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
                     [March_tir.Tir.AVar n_param]) in
   let fact_fn = { March_tir.Tir.fn_name = "fact"; fn_params = [n_param];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = fact_body } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = fact_body;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "fact"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [fact_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (recursive)" false !changed
@@ -2873,11 +2879,11 @@ let test_inline_mutual_recursion_not_inlined () =
   let changed = ref false in
   let x_param = mk_var "x" March_tir.Tir.TInt in
   let g_call = March_tir.Tir.EApp (mk_var "g" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
-  let f_fn = { March_tir.Tir.fn_name = "f"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = g_call } in
+  let f_fn = { March_tir.Tir.fn_name = "f"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = g_call; fn_kind = March_tir.Tir.FnNormal } in
   let f_call = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
-  let g_fn = { March_tir.Tir.fn_name = "g"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = f_call } in
+  let g_fn = { March_tir.Tir.fn_name = "g"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = f_call; fn_kind = March_tir.Tir.FnNormal } in
   let call_f = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
-  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = []; fn_ret_ty = March_tir.Tir.TInt; fn_body = call_f } in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = []; fn_ret_ty = March_tir.Tir.TInt; fn_body = call_f; fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [f_fn; g_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
@@ -3108,10 +3114,12 @@ let test_dce_unreachable_topfn () =
   let changed = ref false in
   let unused_fn = { March_tir.Tir.fn_name = "unused"; fn_params = [];
                     fn_ret_ty = March_tir.Tir.TInt;
-                    fn_body = March_tir.Tir.EAtom (ilit 99) } in
+                    fn_body = March_tir.Tir.EAtom (ilit 99);
+                    fn_kind = March_tir.Tir.FnNormal } in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
                   fn_ret_ty = March_tir.Tir.TInt;
-                  fn_body = March_tir.Tir.EAtom (ilit 0) } in
+                  fn_body = March_tir.Tir.EAtom (ilit 0);
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [unused_fn; main_fn] in
   let m' = March_tir.Dce.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
@@ -3154,7 +3162,8 @@ let test_fast_math_emits_fast_attr () =
   let fn_var name = mk_var name (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)) in
   let body = March_tir.Tir.EApp (fn_var "+.", [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) in
   let fd = { March_tir.Tir.fn_name = "fadd_test"; fn_params = [x; y];
-             fn_ret_ty = March_tir.Tir.TFloat; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TFloat; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let ir_fast   = March_tir.Llvm_emit.emit_module ~fast_math:true  m in
   let ir_normal = March_tir.Llvm_emit.emit_module ~fast_math:false m in
@@ -3897,14 +3906,16 @@ let test_ctor_no_collision_different_tags () =
                fn_ret_ty = March_tir.Tir.TCon ("A", []);
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("A.Cons", []),
-                              [March_tir.Tir.AVar x]) } in
+                              [March_tir.Tir.AVar x]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   (* make_b: builds B.Cons — should store tag 0 (first ctor of B) *)
   let fn_b = { March_tir.Tir.fn_name = "make_b";
                fn_params = [x];
                fn_ret_ty = March_tir.Tir.TCon ("B", []);
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("B.Cons", []),
-                              [March_tir.Tir.AVar x]) } in
+                              [March_tir.Tir.AVar x]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_a; fn_b];
             tm_types = [td_a; td_b]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let ir = March_tir.Llvm_emit.emit_module m in
@@ -3932,7 +3943,8 @@ let test_ctor_arity_mismatch_raises () =
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("A.Cons", []),
                               (* 2 args but ctor only has 1 field *)
-                              [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) } in
+                              [March_tir.Tir.AVar x; March_tir.Tir.AVar y]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_t];
             tm_types = [td]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let raised =
@@ -6146,12 +6158,14 @@ let iface_guard_module ~impl_name ~main_body =
     fn_params = [ iface_guard_var "x" TInt ];
     fn_ret_ty = TString;
     fn_body   = EAtom (ALit (March_ast.Ast.LitString "int"));
+    fn_kind   = FnNormal;
   } in
   let main_fn = {
     fn_name   = "main";
     fn_params = [];
     fn_ret_ty = TString;
     fn_body   = main_body;
+    fn_kind   = FnNormal;
   } in
   { tm_name = "IfaceGuard"; tm_fns = [ impl_fn; main_fn ]; tm_types = [];
     tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }

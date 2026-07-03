@@ -378,6 +378,9 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
     fn_params = clo_param :: fn.Tir.fn_params;
     fn_ret_ty = fn.Tir.fn_ret_ty;
     fn_body   = wrapped_body;
+    (* This IS the synthesis site Tir_names.is_apply_fn / the former
+       perceus.ml + llvm_emit.ml name-sniffing copies were detecting. *)
+    fn_kind   = Tir.FnApply;
   } in
   (td, apply_fn)
 

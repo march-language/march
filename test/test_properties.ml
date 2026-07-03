@@ -535,6 +535,7 @@ let gen_tir_int_expr : Tir.expr Gen.t =
                   fn_params = [param];
                   fn_ret_ty = Tir.TInt;
                   fn_body   = Tir.EAtom (Tir.AVar param);
+                  fn_kind   = Tir.FnLambda;
                 } in
                 (* let $clo = letrec [id_fn] in EAtom(AVar id_fn) in EAtom($clo) *)
                 let clo_var = { Tir.v_name = "clo"; v_ty = Tir.TFn([Tir.TInt], Tir.TInt); v_lin = Tir.Unr } in
@@ -571,6 +572,7 @@ let gen_tir_closure_module : Tir.tir_module Gen.t =
          fn_params = [param_var];
          fn_ret_ty = Tir.TInt;
          fn_body   = adder_body;
+         fn_kind   = Tir.FnLambda;
        } in
        let main_body =
          Tir.ELet (base_var,
@@ -584,6 +586,7 @@ let gen_tir_closure_module : Tir.tir_module Gen.t =
          fn_params = [];
          fn_ret_ty = Tir.TInt;
          fn_body   = main_body;
+         fn_kind   = Tir.FnNormal;
        } in
        { Tir.tm_name    = "Main";
          Tir.tm_fns     = [main_fn];
@@ -603,6 +606,7 @@ let gen_tir_module : Tir.tir_module Gen.t =
          fn_params = [];
          fn_ret_ty = Tir.TInt;
          fn_body   = body;
+         fn_kind   = Tir.FnNormal;
        } in
        { Tir.tm_name    = "Main";
          Tir.tm_fns     = [fn];

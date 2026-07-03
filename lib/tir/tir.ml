@@ -65,12 +65,68 @@ and branch = {
   br_body : expr;
 }
 
+(* The synthesis role of a [fn_def] — WHY it exists, set honestly by its
+   producer (Wave 3 Task 3; see specs/plans/2026-07-03-wave3-chunk1-refactors.md).
+   Before this field, several consumers (borrow.ml, perceus.ml, llvm_emit.ml)
+   answered "is this fn synthetic / an apply wrapper / etc.?" by re-deriving
+   the answer from [fn_name] (magic substrings like "$apply$") — the same
+   name-sniffing drift class Tir_names (W3.1) centralized for OTHER kinds of
+   names. [fn_kind] gives those consumers a field to check directly instead.
+
+   NOTE: this list intentionally does NOT include a "try-call thunk" variant.
+   [__try_call]/[__try_call_val] (see [Tir_names.is_try_call]) are ordinary
+   builtin call targets; the lambda passed as their thunk argument is
+   synthesized by [lower.ml] exactly like any other lambda ([FnLambda]) — the
+   "try-call-ness" is a property of the *call site* (borrow.ml's
+   [closure_escapes]/[owned_in] check the CALLEE name, not the thunk's
+   fn_def), not of the thunk's own fn_def. Inventing a kind with no producer
+   would violate the "adapt to what synthesis sites actually distinguish"
+   rule, so there is no [FnTryThunk] here. *)
+and fn_kind =
+  | FnNormal     (* parsed user/stdlib fn, iface-method shim, module-level
+                     `let`-as-zero-arg-fn, actor handler/dispatch/spawn glue —
+                     anything not synthesized as one of the roles below *)
+  | FnLambda     (* body of an `ELam`/named-local-recursive-fn (`ELetFn`), as
+                     lowered by lower.ml into the ELetRec([fn], AVar fn) lambda-
+                     creation pattern.  Always consumed by Defun before Perceus
+                     runs — defun.ml's [lift_lambda] builds a brand-new
+                     [FnApply] fn_def from it, so no [FnLambda]-tagged fn_def
+                     survives to reach borrow.ml/perceus.ml/llvm_emit.ml. Set
+                     honestly anyway: the field must be meaningful at every
+                     construction site, and it documents defun's consuming
+                     role precisely. *)
+  | FnJoinPoint  (* the hoisted-fallback join point minted by lower.ml's
+                     [compile_matrix] (non-atomic match `fallback`, `jp_fn`) —
+                     structurally the same ELetRec([fn], AVar fn) shape as
+                     [FnLambda] (so it goes through the identical defun lift
+                     into [FnApply]), but the ROLE differs: it exists to dedupe
+                     a shared match fallback, not to represent user code. *)
+  | FnApply      (* the closure "apply wrapper" lifted by defun.ml's
+                     [lift_lambda] for EVERY defunctionalized lambda/local-fn/
+                     join-point ([Tir_names.apply_fn_name], "<fn>$apply$<uid>").
+                     This is the kind [Tir_names.is_apply_fn] / the former
+                     perceus.ml and llvm_emit.ml name-sniffing copies existed
+                     to detect — see those call sites' transitional asserts. *)
+  | FnFused      (* a whole-loop fusion helper synthesized by fusion.ml
+                     ([gen_map_fold]/[gen_filter_fold]/[gen_map_filter_fold],
+                     gensym "mf"/"ff"/"mff") — a new self-recursive top-level
+                     fn, not a lifted lambda.  No consumer currently sniffs
+                     these names (grep-verified against lib/tir at task time),
+                     so this kind exists purely for honest labeling; it is not
+                     (yet) load-bearing for any RC/codegen decision. *)
+
 (* A function definition. *)
 and fn_def = {
   fn_name   : string;
   fn_params : var list;
   fn_ret_ty : ty;
   fn_body   : expr;
+  fn_kind   : fn_kind;
+  (* Role flag (Wave 3 Task 3). Deliberately OMITTED from [show_fn_def] below
+     and from [Pp.string_of_fn_def] (lib/tir/pp.ml) this chunk — printing it
+     would churn every TIR snapshot for a purely additive field. See
+     specs/plans/2026-07-03-wave3-chunk1-refactors.md Task 3 "printer
+     caveat". *)
 }
 
 (* Top-level type definitions. *)
