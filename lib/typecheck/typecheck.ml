@@ -5138,6 +5138,37 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
     | _ -> []
   ) decls in
+  (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
+     same cap data the checks below already compute to the owning function and
+     records it into [env.cap_closures] for a later hot-deploy
+     capability-manifest task. Purely additive bookkeeping — does not affect
+     any Check 1/1b/1c/2/3/4/5/6 validation logic or diagnostics below.
+     [record_fn_caps] is called as a side effect from within [used_caps],
+     [body_cap_uses], and [extern_cap_uses] below (each of which already
+     iterates [decls] and already computes sig/body/extern caps per-DFn or
+     per-DExtern) rather than via a separate re-traversal, so no function body
+     or signature is walked twice. Merge order across the three call sites
+     doesn't matter: [record_fn_caps] always merges with whatever is already
+     in [env.cap_closures] for that qualified name. *)
+  let module_wide_caps : string list =
+    (* Caps that apply to every function in this module regardless of which
+       function's own signature/body/extern-block produced them: declared
+       [needs] (in-scope for the whole module body) and caps propagated in
+       from imported modules (Check 4). *)
+    let propagated = List.concat_map (function
+      | Ast.DUse (ud, _) ->
+        let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+        (match List.assoc_opt imported env.module_caps with
+         | None -> [] | Some req_caps -> req_caps)
+      | _ -> []
+    ) decls in
+    declared_needs @ propagated
+  in
+  let record_fn_caps (fn_qname : string) (own_caps : string list) =
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+    let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+    Hashtbl.replace env.cap_closures fn_qname merged
+  in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
@@ -5146,9 +5177,10 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         | _ -> None
       ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
       let ret_tys = Option.to_list def.fn_ret_ty in
-      List.concat_map (fun t ->
-        List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
-      ) (param_tys @ ret_tys)
+      let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
+      let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
+      record_fn_caps qname sig_caps;
+      List.map (fun cap -> (cap, sp)) sig_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
@@ -5171,13 +5203,16 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
   let body_cap_uses : (string * Ast.span) list =
     let all = List.concat_map (function
       | Ast.DFn (def, _) ->
-        List.concat_map (fun clause ->
+        let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
             match List.assoc_opt call_name builtin_cap_table with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
           ) (calls_in_expr [] clause.Ast.fc_body)
-        ) def.fn_clauses
+        ) def.fn_clauses in
+        let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
+        record_fn_caps qname (List.concat_map (List.map fst) per_clause);
+        List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
           match List.assoc_opt call_name builtin_cap_table with
@@ -5196,6 +5231,11 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       | Ast.DExtern (edef, sp) ->
         let base = [("IO.Foreign", sp)] in
         let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
+        List.iter (fun (ef : Ast.extern_fn) ->
+            let qname = mod_name.txt ^ "." ^ ef.ef_name.txt in
+            let own = if ef.Ast.ef_blocking then ["IO.Foreign"; "IO.Foreign.Blocking"] else ["IO.Foreign"] in
+            record_fn_caps qname own
+          ) edef.ext_fns;
         if has_blocking then base @ [("IO.Foreign.Blocking", sp)] else base
       | _ -> []
     ) decls
@@ -5203,55 +5243,6 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       if List.mem_assoc cap_name acc then acc else (cap_name, sp) :: acc
     ) []
   in
-  (* Per-function inferred IO-capability closure (Phase5C-A.2): same data the
-     checks above already compute, additionally attributed to the owning
-     function and recorded into [env.cap_closures] for a later hot-deploy
-     capability-manifest task. Purely additive bookkeeping — does not affect
-     any Check 1/1b/1c/2/3/4/5/6 validation logic or diagnostics below. *)
-  let module_wide_caps : string list =
-    (* Caps that apply to every function in this module regardless of which
-       function's own signature/body/extern-block produced them: declared
-       [needs] (in-scope for the whole module body) and caps propagated in
-       from imported modules (Check 4). *)
-    let propagated = List.concat_map (function
-      | Ast.DUse (ud, _) ->
-        let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
-        (match List.assoc_opt imported env.module_caps with
-         | None -> [] | Some req_caps -> req_caps)
-      | _ -> []
-    ) decls in
-    declared_needs @ propagated
-  in
-  let record_fn_caps (fn_qname : string) (own_caps : string list) =
-    let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
-    let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
-    Hashtbl.replace env.cap_closures fn_qname merged
-  in
-  List.iter (function
-    | Ast.DFn (def, _) ->
-      let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
-      let param_tys = List.filter_map (fun p ->
-        match p with
-        | Ast.FPNamed { param_ty = Some t; _ } -> Some t
-        | _ -> None
-      ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
-      let ret_tys = Option.to_list def.fn_ret_ty in
-      let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
-      let body_caps = List.concat_map (fun clause ->
-          List.filter_map (fun (call_name, _) -> List.assoc_opt call_name builtin_cap_table)
-            (calls_in_expr [] clause.Ast.fc_body)
-        ) def.fn_clauses
-      in
-      record_fn_caps qname (sig_caps @ body_caps)
-    | Ast.DExtern (edef, _) ->
-      let base = ["IO.Foreign"] in
-      List.iter (fun (ef : Ast.extern_fn) ->
-          let qname = mod_name.txt ^ "." ^ ef.ef_name.txt in
-          let own = if ef.ef_blocking then base @ ["IO.Foreign.Blocking"] else base in
-          record_fn_caps qname own
-        ) edef.ext_fns
-    | _ -> ()
-  ) decls;
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need.
      Exception: the declaring module of a proof cap implicitly satisfies its own needs —
