@@ -1096,6 +1096,41 @@ let test_gate_manifest_caps_union_normalized () =
   (* IO subsumes IO.Console and IO.FileRead, so both should be dropped *)
   Alcotest.(check (list string)) "normalized union collapses to IO" ["IO"] caps
 
+(* ─── --grant-cap: filter_granted_widening (Phase 5C Part B, Task 5) ──────── *)
+
+let test_grant_no_grants_leaves_widening_blocked () =
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:[] in
+  Alcotest.(check (list string)) "no grants -> widening unchanged" ["IO.Process"] granted
+
+let test_grant_exact_match_covers_widening () =
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Process"] in
+  Alcotest.(check (list string)) "exact-match grant clears widening" [] granted
+
+let test_grant_broader_subsuming_grant_covers_widening () =
+  let widening = ["IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.FileSystem"] in
+  Alcotest.(check (list string)) "broader grant subsumes narrower widened cap" [] granted
+
+let test_grant_partial_leaves_only_ungranted () =
+  let widening = ["IO.Process"; "IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Process"] in
+  Alcotest.(check (list string)) "only ungranted cap remains" ["IO.FileWrite"] granted
+
+let test_grant_unused_grant_is_inert () =
+  (* A grant for a cap that isn't actually being widened has no effect and
+     causes no error. *)
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Console"] in
+  Alcotest.(check (list string)) "unrelated grant is inert" ["IO.Process"] granted
+
+let test_grant_multiple_grants_cover_multiple_widenings () =
+  let widening = ["IO.Process"; "IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening
+      ~grant_caps:["IO.Process"; "IO.FileSystem"] in
+  Alcotest.(check (list string)) "both widenings granted" [] granted
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1232,5 +1267,11 @@ let () =
       Alcotest.test_case "gate: IO root add blocked"            `Quick test_gate_io_root_add_blocked;
       Alcotest.test_case "gate: attribution names introducer"  `Quick test_gate_attribution_names_introducing_function;
       Alcotest.test_case "gate: manifest_caps normalizes union" `Quick test_gate_manifest_caps_union_normalized;
+      Alcotest.test_case "grant: no grants leaves widening blocked" `Quick test_grant_no_grants_leaves_widening_blocked;
+      Alcotest.test_case "grant: exact-match grant covers widening" `Quick test_grant_exact_match_covers_widening;
+      Alcotest.test_case "grant: broader subsuming grant covers widening" `Quick test_grant_broader_subsuming_grant_covers_widening;
+      Alcotest.test_case "grant: partial grant leaves only ungranted" `Quick test_grant_partial_leaves_only_ungranted;
+      Alcotest.test_case "grant: unused grant is inert" `Quick test_grant_unused_grant_is_inert;
+      Alcotest.test_case "grant: multiple grants cover multiple widenings" `Quick test_grant_multiple_grants_cover_multiple_widenings;
     ];
   ]

@@ -106,12 +106,12 @@ let parse_manifest path : (manifest, string) result =
     else Ok { cas_hash = !cas_hash; cap_root = !cap_root; functions = List.rev !fns }
   with Sys_error m -> Error m
 
-(* ─── Capability monotonicity gate (Phase 5C Part B, Task 4) ─────────────────
+(* ─── Capability monotonicity gate (Phase 5C Part B, Task 4/5) ───────────────
 
    A hot deploy may narrow the running system's IO-capability authority
-   freely, but widening it is blocked unconditionally (a future --grant-cap
-   mechanism, not implemented yet, will let an operator explicitly authorize
-   a widening deploy).
+   freely, but widening it is blocked unless the operator explicitly
+   authorizes the widening with one or more repeatable `--grant-cap <C>`
+   flags (Task 5; see `filter_granted_widening` below).
 
    [compute_cap_widening ~prior ~new_caps] returns the subset of [new_caps]
    not already subsumed by some cap in [prior] — i.e. the caps a hot deploy
@@ -144,17 +144,27 @@ let attribute_widening (functions : fn_manifest list) (widening : string list) :
     (cap, introducer)
   ) widening
 
+(** [filter_granted_widening ~widening ~grant_caps] — Phase 5C Part B, Task 5.
+    Removes from [widening] every cap authorized by some entry in
+    [grant_caps], via subsumption (not exact string match): a grant of a
+    broader cap (e.g. [IO.FileSystem]) covers a narrower widened cap (e.g.
+    [IO.FileWrite]). Grants for caps that aren't actually being widened are
+    simply inert — they have no effect and produce no error. *)
+let filter_granted_widening ~(widening : string list) ~(grant_caps : string list) : string list =
+  List.filter (fun c -> not (List.exists (fun g -> March_caps.Cap_lattice.cap_subsumes g c) grant_caps)) widening
+
 (** Print the "hot deploy would add authority" diagnostic to stderr in the
     fixed shape depended on by tooling/tests:
 
       error: hot deploy would add authority not held by the running version
         running version caps:  IO.Console, IO.NetConnect
         new version adds:      IO.Process   (from MyApp.Server.handle)
-        A hot deploy may only narrow authority.
+        A hot deploy may only narrow authority. To authorize this widening, re-run with:
+            forge deploy hot --grant-cap IO.Process
+        The grant is signed and recorded in the audit log.
 
-    Task 5 (not this task) will extend this message to mention --grant-cap;
-    for now there is no grant mechanism, so we state plainly that widening
-    is not currently permitted. *)
+    Only caps still ungranted (after `filter_granted_widening` has removed
+    any covered by `--grant-cap`) are ever passed in via [attributed]. *)
 let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string * string) list) =
   Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
   Printf.eprintf "  running version caps:  %s\n"
@@ -162,9 +172,10 @@ let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string
   List.iter (fun (cap, fn_name) ->
     Printf.eprintf "  new version adds:      %-12s (from %s)\n" cap fn_name
   ) attributed;
-  Printf.eprintf "  A hot deploy may only narrow authority.\n";
-  Printf.eprintf
-    "  A future --grant-cap mechanism (not yet implemented) would authorize this widening.\n"
+  Printf.eprintf "  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n";
+  List.iter (fun (cap, _) ->
+    Printf.eprintf "      forge deploy hot --grant-cap %s\n" cap
+  ) attributed
 
 (** After a successful deploy, copy the just-deployed .hcr_manifest over the
     baseline file, so next time's "prior" is this time's "new" — mirrors
@@ -414,7 +425,7 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
-    ?(old_manifest_path="") ?(provided_epoch=0) () =
+    ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list)) () =
   let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
 
   (* 1. SSH tunnel *)
@@ -589,10 +600,24 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               Printf.printf "NOTE: this deploy narrows capability authority (allowed): %s\n%!"
                 (String.concat ", " narrowing);
             if widening <> [] then begin
-              let attributed = attribute_widening manifest.functions widening in
-              print_widening_diagnostic ~prior_caps ~attributed;
-              Unix.close fd;
-              raise (Failure "capability widening — deploy aborted")
+              (* Phase 5C Part B, Task 5: --grant-cap authorizes specific
+                 widenings (subsumption-matched, not exact string match). *)
+              let ungranted = filter_granted_widening ~widening ~grant_caps in
+              let granted_caps = List.filter (fun c -> not (List.mem c ungranted)) widening in
+              List.iter (fun cap ->
+                let covering_grant =
+                  match List.find_opt (fun g -> March_caps.Cap_lattice.cap_subsumes g cap) grant_caps with
+                  | Some g -> g
+                  | None -> cap
+                in
+                Printf.printf "  granted widening: %s (via --grant-cap %s)\n%!" cap covering_grant
+              ) granted_caps;
+              if ungranted <> [] then begin
+                let attributed = attribute_widening manifest.functions ungranted in
+                print_widening_diagnostic ~prior_caps ~attributed;
+                Unix.close fd;
+                raise (Failure "capability widening — deploy aborted")
+              end
             end);
 
           (* 6. CAS_PUT the .so if not already present *)
@@ -974,7 +999,7 @@ let build_so ~proj ~output : (string * string, string) result =
     When [so] is non-empty, it is used as the pre-built .so (the build step is
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
-let deploy ?(output="") ?(so="") () : (unit, string) result =
+let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) () : (unit, string) result =
   (* Load project *)
   match Project.load () with
   | Error m -> Error m
@@ -1055,6 +1080,7 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                   ~new_schemas_path
                   ~entry_path
                   ~old_manifest_path:prev_manifest_path
+                  ~grant_caps
                   ()
               in
               (* After successful deploy, save new schemas as the baseline for next time *)
@@ -1103,7 +1129,7 @@ let ping_server ~ssh_host ~remote_socket : bool =
     instead of calling GET_EPOCH on the server. *)
 let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
     ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
-    ?(provided_epoch=0) ()
+    ?(provided_epoch=0) ?(grant_caps=([] : string list)) ()
     : (int, string) result =
   let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
   let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
@@ -1115,6 +1141,7 @@ let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
     ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path ~entry_path
     ~old_manifest_path
     ~provided_epoch
+    ~grant_caps
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -1135,7 +1162,8 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [env]: name of the [[hot-reload.env]] group (empty → use flat [hot-reload] config).
     - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
-let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) () : (unit, string) result =
+let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
+    ?(grant_caps=([] : string list)) () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
@@ -1230,7 +1258,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                   (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                           ~old_schemas_path:prev_schemas_path
                           ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                          ~provided_epoch:shared_epoch ())
+                          ~provided_epoch:shared_epoch ~grant_caps ())
                 ) srvs
               in
 
@@ -1243,7 +1271,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                     let r = deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                         ~old_schemas_path:prev_schemas_path
                         ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                        ~provided_epoch:shared_epoch () in
+                        ~provided_epoch:shared_epoch ~grant_caps () in
                     results := (srv, r) :: !results;
                     (match r with
                     | Error _ -> stop := true
