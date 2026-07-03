@@ -950,6 +950,152 @@ let test_ffi_gen_c_no_extern () =
    | Error _ -> ()  (* expected: no extern blocks *)
    | Ok () -> Alcotest.fail "expected an error for a file with no extern blocks")
 
+(* ---------------------------------------------------- hcr capability gate *)
+
+let write_manifest_file (lines : string list) : string =
+  let path = Filename.temp_file "test_hcr_manifest" ".hcr_manifest" in
+  let oc = open_out path in
+  List.iter (fun l -> output_string oc (l ^ "\n")) lines;
+  close_out oc;
+  path
+
+let with_manifest_file lines f =
+  let path = write_manifest_file lines in
+  Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+    (fun () -> f path)
+
+let cas_hash_line = "# cas_hash " ^ String.make 64 'a'
+let root_line = "ROOT cap_root=" ^ String.make 64 'b'
+
+let test_parse_manifest_root_no_phantom_fn () =
+  with_manifest_file [cas_hash_line; root_line; "MyApp.f implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check string) "cap_root extracted" (String.make 64 'b') m.Cmd_deploy_hot.cap_root;
+        Alcotest.(check int) "no phantom ROOT function" 1 (List.length m.Cmd_deploy_hot.functions);
+        List.iter (fun fm ->
+          Alcotest.(check bool) "ROOT is not a function name" true
+            (fm.Cmd_deploy_hot.fn_name <> "ROOT")
+        ) m.Cmd_deploy_hot.functions)
+
+let test_parse_manifest_no_root_line_is_legacy () =
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps=IO.Console"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check string) "cap_root empty when absent" "" m.Cmd_deploy_hot.cap_root)
+
+let test_parse_manifest_caps_no_callers () =
+  (* caps= at the earlier field position (no callers: token present) *)
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps=IO.Console,IO.NetConnect"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] ->
+           Alcotest.(check (list string)) "caps parsed (no callers)"
+             ["IO.Console"; "IO.NetConnect"] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_parse_manifest_caps_with_callers () =
+  (* caps= at the later field position, after a callers: token *)
+  with_manifest_file
+    [cas_hash_line;
+     "MyApp.g implhash sighash callers:MyApp.a,MyApp.b caps=IO.FileRead"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] ->
+           Alcotest.(check (list string)) "callers parsed"
+             ["MyApp.a"; "MyApp.b"] fm.Cmd_deploy_hot.fn_callers;
+           Alcotest.(check (list string)) "caps parsed (with callers)"
+             ["IO.FileRead"] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_parse_manifest_caps_empty () =
+  with_manifest_file [cas_hash_line; "MyApp.h implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] -> Alcotest.(check (list string)) "no caps" [] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_gate_no_prior_is_permissive () =
+  (* No baseline file at all -> caller treats prior_caps as empty / gate skipped.
+     At the pure-function level, computing widening against an empty prior
+     baseline is the well-defined "not gated" case tested elsewhere (the
+     `run` function skips the gate entirely when old_manifest_path doesn't
+     exist — this test exercises the pure diff fn with no prior data, which
+     callers must not invoke when there's genuinely no baseline). *)
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:[] ~new_caps:["IO.Console"] in
+  Alcotest.(check (list string)) "everything looks like widening vs an empty baseline"
+    ["IO.Console"] widening
+
+let test_gate_pure_narrowing_allowed () =
+  let prior = ["IO.Console"; "IO.NetConnect"] in
+  let new_caps = ["IO.Console"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior ~new_caps in
+  Alcotest.(check (list string)) "no widening" [] widening;
+  Alcotest.(check (list string)) "narrowing reported" ["IO.NetConnect"] narrowing
+
+let test_gate_subsumed_add_allowed () =
+  (* prior already holds the IO root cap, so any IO.* child is already covered *)
+  let prior = ["IO"] in
+  let new_caps = ["IO"; "IO.FileRead"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "subsumed add is not widening" [] widening
+
+let test_gate_sibling_widen_blocked () =
+  let prior = ["IO.Console"] in
+  let new_caps = ["IO.Console"; "IO.Process"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "sibling cap is widening" ["IO.Process"] widening
+
+let test_gate_parent_widen_blocked () =
+  (* prior only has the child; new build asks for the parent -> widening,
+     since the child does not subsume the parent. *)
+  let prior = ["IO.FileRead"] in
+  let new_caps = ["IO.FileSystem"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "parent cap is widening" ["IO.FileSystem"] widening
+
+let test_gate_io_root_add_blocked () =
+  let prior = ["IO.Console"] in
+  let new_caps = ["IO.Console"; "IO"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "IO root add is widening" ["IO"] widening
+
+let test_gate_attribution_names_introducing_function () =
+  let functions = [
+    { Cmd_deploy_hot.fn_name = "MyApp.Server.handle"; fn_impl_hash = "h1"; fn_sig_hash = "s1";
+      fn_callers = []; fn_caps = ["IO.Process"] };
+    { Cmd_deploy_hot.fn_name = "MyApp.Other.fn"; fn_impl_hash = "h2"; fn_sig_hash = "s2";
+      fn_callers = []; fn_caps = ["IO.Console"] };
+  ] in
+  let attributed = Cmd_deploy_hot.attribute_widening functions ["IO.Process"] in
+  Alcotest.(check (list (pair string string))) "attributes widened cap to its function"
+    [("IO.Process", "MyApp.Server.handle")] attributed
+
+let test_gate_manifest_caps_union_normalized () =
+  let functions = [
+    { Cmd_deploy_hot.fn_name = "a"; fn_impl_hash = "h"; fn_sig_hash = "s";
+      fn_callers = []; fn_caps = ["IO"; "IO.Console"] };
+    { Cmd_deploy_hot.fn_name = "b"; fn_impl_hash = "h"; fn_sig_hash = "s";
+      fn_callers = []; fn_caps = ["IO.FileRead"] };
+  ] in
+  let caps = Cmd_deploy_hot.manifest_caps functions in
+  (* IO subsumes IO.Console and IO.FileRead, so both should be dropped *)
+  Alcotest.(check (list string)) "normalized union collapses to IO" ["IO"] caps
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1071,5 +1217,20 @@ let () =
       Alcotest.test_case "gen-c: raises (env-routed errors)"        `Quick test_ffi_gen_c_raises;
       Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
+    ];
+    "hcr-cap-gate", [
+      Alcotest.test_case "parse_manifest: ROOT line, no phantom fn" `Quick test_parse_manifest_root_no_phantom_fn;
+      Alcotest.test_case "parse_manifest: no ROOT -> cap_root empty" `Quick test_parse_manifest_no_root_line_is_legacy;
+      Alcotest.test_case "parse_manifest: caps= (no callers)"  `Quick test_parse_manifest_caps_no_callers;
+      Alcotest.test_case "parse_manifest: caps= (with callers)" `Quick test_parse_manifest_caps_with_callers;
+      Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
+      Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
+      Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
+      Alcotest.test_case "gate: subsumed add allowed"           `Quick test_gate_subsumed_add_allowed;
+      Alcotest.test_case "gate: sibling widen blocked"          `Quick test_gate_sibling_widen_blocked;
+      Alcotest.test_case "gate: parent widen blocked"           `Quick test_gate_parent_widen_blocked;
+      Alcotest.test_case "gate: IO root add blocked"            `Quick test_gate_io_root_add_blocked;
+      Alcotest.test_case "gate: attribution names introducer"  `Quick test_gate_attribution_names_introducing_function;
+      Alcotest.test_case "gate: manifest_caps normalizes union" `Quick test_gate_manifest_caps_union_normalized;
     ];
   ]
