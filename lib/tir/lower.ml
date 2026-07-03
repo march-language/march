@@ -10,485 +10,79 @@
     ANF conversion uses continuation-passing: [lower_to_atom_k e k] lowers [e]
     and calls [k atom] with the resulting atom. If [e] is not already atomic,
     a fresh [ELet] binding wraps the continuation. This ensures all call
-    arguments are atoms without dangling variable references. *)
+    arguments are atoms without dangling variable references.
+
+    Wave 3 Task 9 (chunk 2) split this file into an orchestrator (this file:
+    [lower_module] + the module-decl walkers that assemble a [Tir.tir_module],
+    plus [lower_expr]/[lower_to_atom_k]/[lower_atoms_k] — the giant
+    mutual-recursive core every other split module calls into) and five
+    focused modules:
+      - [Lower_state]: the [env] record + the module-level mutable
+        tables/refs shared across every split (alias resolution,
+        interface-method dispatch, [_fn_param_types], fresh-name counter,
+        [nonexhaustive_panic]).
+      - [Lower_types]: both AST-ty and typechecker-ty → TIR-ty converters
+        ([lower_ty], [convert_ty]) — kept side by side verbatim; see that
+        file's module doc for the filed arrow/Nat encoding disagreement.
+      - [Lower_match]: the decision-tree matrix compiler, guards, join
+        points, and pattern-tag encoding ([compile_matrix], [lower_match],
+        [pat_tag_and_subs], …). Mutually recursive with THIS file's
+        [lower_expr] (2 call directions, 5 total edges) — broken via a
+        forward-ref ([Lower_match.install_lower_expr], wired below) using
+        the same idiom this file already used for [_ensure_module_lowered].
+      - [Lower_decls]: [lower_fn_def], [lower_type_def], [rename_tir_vars],
+        the lazy stdlib-module loader, and the deduped extern-lowering
+        helper.
+      - [Lower_actor]: [lower_actor] and its glue.
+      - [Lower_tests]: DTest/DSetup/DSetupAll/DDescribe collection.
+    See each module's doc comment for the detailed moved-verbatim contents
+    and (for [Lower_match]) the cycle-breaking rationale. *)
 
 module Ast = March_ast.Ast
 module Typecheck = March_typecheck.Typecheck
 
-(* ── Fresh name generation ──────────────────────────────────────── *)
-
-(** Monotonic fresh-name counter ($lamN/$tN/$pN/$jpN/…).
-
-    NOT converted to an env field (Wave 3 Task 8): a pure accumulator —
-    mutated without restore across the entire module traversal, reset to 0
-    exactly once per [lower_module] call via [reset_counter ()] (that
-    per-call restart is load-bearing: the TIR snapshot corpus and the REPL
-    JIT's per-fragment numbering both depend on it — see
-    test/test_snapshots.ml's determinism note). The direct lower.ml
-    analogue of perceus's [_rc_fresh_ctr], which chunk-1 Task 4 kept as a
-    ref under the same "accumulator/table-build semantics" law clause. *)
-let _lower_counter = ref 0
-
-let fresh_name (prefix : string) : string =
-  incr _lower_counter;
-  Printf.sprintf "$%s%d" prefix !_lower_counter
-
-let reset_counter () = _lower_counter := 0
-
-let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
-  { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
-
-(** Emit a runtime panic for a non-exhaustive match that the typechecker
-    missed.  Returning [LitInt 0] here would silently reinterpret a value of
-    the match's real (possibly non-Int) type as a tagged int — e.g. treated
-    as a heap pointer for a [String] result — which crashes or corrupts
-    memory rather than failing loudly.  Shared by every match-compilation
-    fallback site (see [compile_matrix_impl] and the guarded-match fallthrough
-    in [lower_match]) so all of them fail the same way the interpreter does. *)
-let nonexhaustive_panic () =
-  let panic_var : Tir.var = {
-    Tir.v_name = "panic"; Tir.v_ty = Tir.TCon ("Never", []); Tir.v_lin = Tir.Unr } in
-  Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "non-exhaustive pattern match")])
-
-(* ── Type conversion: Ast.ty → Tir.ty ──────────────────────────── *)
-
-(** Default type used when no annotation is available. A placeholder
-    that will be resolved during monomorphization. *)
-let unknown_ty = Tir.TVar "_"
-
-(** Convert surface types to TIR types.
-    Pre-monomorphization, type variables become [TVar]. *)
-let rec lower_ty (t : Ast.ty) : Tir.ty =
-  match t with
-  | Ast.TyCon ({ txt = "Int"; _ }, [])    -> Tir.TInt
-  | Ast.TyCon ({ txt = "Float"; _ }, [])  -> Tir.TFloat
-  | Ast.TyCon ({ txt = "Bool"; _ }, [])   -> Tir.TBool
-  | Ast.TyCon ({ txt = "String"; _ }, []) -> Tir.TString
-  | Ast.TyCon ({ txt = "Unit"; _ }, [])   -> Tir.TUnit
-  | Ast.TyCon ({ txt = name; _ }, args)   ->
-    Tir.TCon (name, List.map lower_ty args)
-  | Ast.TyVar { txt = name; _ }          -> Tir.TVar name
-  | Ast.TyArrow (a, b)                   -> Tir.TFn ([lower_ty a], lower_ty b)
-  | Ast.TyTuple ts                        -> Tir.TTuple (List.map lower_ty ts)
-  | Ast.TyRecord fields                   ->
-    let fs = List.map (fun (n, t) -> (n.Ast.txt, lower_ty t)) fields in
-    Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)
-  | Ast.TyLinear (_, t)                   -> lower_ty t  (* linearity tracked on var *)
-  | Ast.TyNat n                           -> Tir.TCon ("Nat", [Tir.TCon (string_of_int n, [])])
-  | Ast.TyNatOp _                         -> Tir.TCon ("NatOp", [])  (* placeholder *)
-  | Ast.TyChan _                          -> Tir.TCon ("Chan", [])   (* lowered to opaque Chan ptr *)
-  | Ast.TyRefine (base, _, _)             -> lower_ty base  (* refinement erases to base in TIR *)
-
-(** Convert AST linearity to TIR linearity. *)
-let lower_linearity : Ast.linearity -> Tir.linearity = function
-  | Ast.Linear       -> Tir.Lin
-  | Ast.Affine       -> Tir.Aff
-  | Ast.Unrestricted -> Tir.Unr
-
-(* ── Type conversion: Typecheck.ty → Tir.ty ─────────────────── *)
-
-(** Convert an internal typechecker type to a TIR type.
-    [Typecheck.TArrow] is curried; we uncurry into [Tir.TFn]. *)
-let rec convert_ty (t : Typecheck.ty) : Tir.ty =
-  match Typecheck.repr t with
-  | Typecheck.TCon ("Int",    []) -> Tir.TInt
-  | Typecheck.TCon ("Float",  []) -> Tir.TFloat
-  | Typecheck.TCon ("Bool",   []) -> Tir.TBool
-  | Typecheck.TCon ("String", []) -> Tir.TString
-  | Typecheck.TCon ("Unit",   []) -> Tir.TUnit
-  | Typecheck.TCon (name, args)   -> Tir.TCon (name, List.map convert_ty args)
-  | Typecheck.TArrow _ as t ->
-    let rec collect acc = function
-      | Typecheck.TArrow (a, b) -> collect (convert_ty a :: acc) (Typecheck.repr b)
-      | ret -> (List.rev acc, convert_ty ret)
-    in
-    let (params, ret) = collect [] t in
-    Tir.TFn (params, ret)
-  | Typecheck.TTuple tys ->
-    Tir.TTuple (List.map convert_ty tys)
-  | Typecheck.TRecord fields ->
-    Tir.TRecord (List.map (fun (n, t) -> (n, convert_ty t)) fields)
-  | Typecheck.TVar r ->
-    (match !r with
-     | Typecheck.Unbound (id, _) -> Tir.TVar (Printf.sprintf "_%d" id)
-     | Typecheck.Link _ -> assert false)
-  | Typecheck.TLin (_, inner) -> convert_ty inner
-  | Typecheck.TNat n          -> Tir.TCon (Printf.sprintf "Nat_%d" n, [])
-  | Typecheck.TNatOp _        -> Tir.TVar "_natop"
-  | Typecheck.TChan _         -> Tir.TCon ("Chan", [])  (* lowered to opaque Chan ptr *)
-  | Typecheck.TError          -> Tir.TVar "_err"
-  | Typecheck.TRefine (base, _, _) -> convert_ty base  (* refinements erase in TIR *)
-
-(* ── Parameter type scope (set by lower_fn_def, used by lower_to_atom_k) ── *)
-
-(** Maps current function's (or lambda's) parameter names → their TIR types.
-    Used to give body variable references the correct type when [ty_of_span]
-    returns a wrong or stale type for a parameter at its use-site (e.g. due
-    to shared mutable type_map entries).  Managed by [lower_fn_def] and the
-    [ELam] case in [lower_expr]:
-    - [lower_fn_def] saves/restores across nested calls so function scopes
-      don't interfere.
-    - [ELam] temporarily installs the lambda's own parameter types so the
-      lambda body can't accidentally inherit an enclosing function parameter
-      of the same name but different type.
-
-    NOT converted to an [env] field (Wave 3 Task 8): all 6 save/restore sites
-    (this file's [EBlock]/[ELetFn]-as-block-statement, [ELam], [ELetFn],
-    [lower_branch_body_with_pat], the guarded-match arm in [lower_match], and
-    [lower_fn_def]'s full-scope save/clear/restore) bracket a call to
-    [lower_expr] — which can [failwith] (EPipe/EResultRef/ESigil bail-outs,
-    the non-exhaustive-pattern-kind panic in the match compiler, the
-    fn-arity-mismatch check in [lower_fn_def]) — WITHOUT [Fun.protect]. A
-    thrown exception during any of these six windows leaves the table
-    populated with the inner scope's entries (or, for [lower_fn_def],
-    cleared entirely) instead of restored. This is a genuine restore-gap:
-    an [env]-record version using [{ env with fn_param_types = saved }]
-    would NOT reproduce this on the throw path (the caller's [env] binding
-    is untouched by a callee's exception, so the "leak" would silently
-    disappear) — a real behavior change on the error path, forbidden by the
-    plan's transformation law. Preserved bit-for-bit as a global, dirty-on-
-    throw semantics included. Filed: specs/todos.md (Wave 3 Task 8 entry,
-    citing analysis doc lower.ml High #2's neighborhood). *)
-let _fn_param_types : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
-
-(* ── Env — module-scoped state threaded through the lowering functions
-   (Wave 3 Task 8) ──────────────────────────────────────────────────────
-
-   Only fields whose old ref was BOTH (a) genuinely save-and-restored
-   (never left dirty on a lexical exit) AND (b) safe to reset per
-   [lower_module] call (not part of the documented cross-call-staleness
-   trio below) are carried here. Everything else stays a module-level
-   ref/Hashtbl, each with a comment at its declaration explaining why
-   (accumulator, restore-gap, or intentional cross-call staleness) —
-   see the "NOT converted" comments throughout this file for the full
-   per-ref rationale demanded by the plan's transformation law. *)
-type env = {
+(* ── Re-exports: env, fresh-name generation, shared lowering state ──────
+   (Wave 3 Task 9 — now defined in [Lower_state]/[Lower_types], re-exported
+   here bare so every external caller (bin/main.ml, lib/jit/repl_jit.ml,
+   test/, lsp/) keeps referencing [Lower.env] / [Lower.lower_ty] / etc.
+   unchanged — same convention Task 7's [Llvm_emit] re-exports used.) *)
+type env = Lower_state.env = {
   type_map : (Ast.span, Typecheck.ty) Hashtbl.t option;
-      (** The typechecker's span → type table. Set once at [lower_module]
-          entry, read-only for the entire lowering run (never mutated
-          mid-traversal — only ever replaced wholesale at the next
-          [lower_module] call), reset to [None] at exit. A pure
-          module-scoped constant, the same shape as perceus's
-          [borrow_map]/[type_defs] fields. Was [_type_map_ref]. *)
   current_module_aliases : (string, string) Hashtbl.t;
-      (** Per-module import aliases (the aliases from the module CURRENTLY
-          being lowered, inheriting the enclosing module's). Consulted
-          BEFORE the program-global [_use_aliases] so a module's own
-          [import X] wins over an alias another module registered globally
-          for the same short name. Was [_current_module_aliases], which had
-          TWO save/restore dances:
-          - [lower_mod_decls] (inherit-on-enter / restore-on-exit): the old
-            code protected this one with [Fun.protect], so the env version
-            (a callee's exception cannot touch the caller's own [env]
-            binding) is exactly as safe — no throw-path change.
-          - [collect_tests]' [DMod] case (snapshot re-load for test
-            bodies): the old code did a BARE save/mutate/recurse/restore
-            with NO [Fun.protect] around throw-capable recursion — on the
-            throw path the ref stayed dirty (pointing at the snapshot).
-            The env version erases that dirty-on-throw state. This is a
-            behavior change, but a provably UNOBSERVABLE one: every read
-            site of the old ref ([resolve_use_alias], the [DUse]
-            registration, the snapshot save, both dance saves) executes
-            only within [lower_module]'s dynamic extent; a throw escaping
-            [collect_tests] propagates out of [lower_module] (whose exit
-            cleanup was not exception-protected, so the dirt survived the
-            frame), and the NEXT [lower_module] call reset the ref to a
-            fresh table in its entry preamble BEFORE any read could occur
-            — while in batch mode the process exits on the diagnostic.
-            Filed in specs/todos.md (Wave 3 Task 8 amendment) with the
-            full trace. *)
 }
 
-(** The env used at the top of [lower_module], before [type_map] is known
-    and before any module scope has been entered — mirrors the old refs'
-    initial values ([None], a fresh empty [Hashtbl]). *)
-let empty_env : env = {
-  type_map = None;
-  current_module_aliases = Hashtbl.create 0;
-}
-
-(** Look up the TIR type for an expression from the env's type_map.
-    Falls back to [unknown_ty] when no type_map is set or the span
-    is not present (e.g. spans introduced by desugaring). *)
-let ty_of_span (env : env) (sp : Ast.span) : Tir.ty =
-  match env.type_map with
-  | None -> unknown_ty
-  | Some tbl ->
-    (match Hashtbl.find_opt tbl sp with
-     | Some t ->
-       convert_ty t
-     | None   -> unknown_ty)
-
-let ty_of_expr (env : env) (e : Ast.expr) : Tir.ty =
-  ty_of_span env (Typecheck.span_of_expr e)
-
-(* ── Use import resolution ───────────────────────────────────────── *)
-
-(** Maps unqualified names to their qualified module-prefixed names.
-    Built from [DUse] declarations. E.g. [map] → [List.map].
-
-    NOT converted to an env field: this is an accumulator, not a
-    save-and-restore scope. It is reset to a fresh (empty) table once at
-    [lower_module] entry, then progressively WRITTEN TO throughout Pass 2
-    as each [DUse]/[DMod] declaration is processed, with later declarations'
-    lowering reading entries earlier declarations in the SAME pass wrote —
-    so, unlike [type_map] above, its value is not fixed for the whole run.
-    Cleared (to size 0, not reset) at [lower_module] exit. Stays a ref,
-    documented per the plan's "accumulator/table-build semantics" rule. *)
-let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
-
-(** Snapshot of each module's [current_module_aliases] env field (keyed by its qualified
-    prefix, e.g. "TestLivePostgres."), saved at the end of [lower_mod_decls].
-    Test/setup bodies are lowered in a SEPARATE later pass ([collect_tests]) after
-    the per-module scope has been restored, so they re-load their enclosing
-    module's aliases from here — otherwise a test's `close(conn)` would fall back
-    to the global table and hijack Connection.close → Db.close.
-
-    NOT converted to an env field: an accumulator written throughout Pass 2
-    (one entry per module lowered) and read later by the wholly separate
-    [collect_tests] pass, which runs AFTER [env.current_module_aliases] has
-    already been unwound back to its outermost (entry-module) value by
-    [lower_mod_decls]'s save/restore — i.e. this snapshot table is exactly
-    the mechanism that lets test bodies see a per-module [env] value the
-    live [env] no longer holds by the time they run. Reset fresh at
-    [lower_module] entry. *)
-let _module_alias_snapshots : (string, (string, string) Hashtbl.t) Hashtbl.t ref
-  = ref (Hashtbl.create 0)
-
-(* ── Alias-ambiguity audit (MARCH_ALIAS_AUDIT=1) ─────────────────────────
-   The name-hijack bug class (to_string → Bytes.to_string, close → Db.close,
-   march#8) is a bare name resolving through the PROGRAM-GLOBAL first-wins
-   alias table while several distinct qualified candidates exist.  The
-   per-module table fixes precedence for the importing module itself, but a
-   bare name that still falls through to the global table with ≥2 candidates
-   is resolving by registration order — a hijack waiting to happen.  Track
-   every qualified target ever offered for each short name; when the global
-   fallback fires for an ambiguous one, report it once.  Diagnostic only.
-
-   NOT converted to env fields: pure diagnostic accumulators (never
-   consulted for a lowering DECISION, only for an optional stderr report),
-   reset via [Hashtbl.reset] at [lower_module] entry. *)
-let _alias_candidates : (string, string list) Hashtbl.t = Hashtbl.create 64
-let _alias_reported   : (string, unit) Hashtbl.t = Hashtbl.create 16
-let alias_audit_on = lazy (Sys.getenv_opt "MARCH_ALIAS_AUDIT" <> None)
-let note_alias_candidate (short : string) (target : string) : unit =
-  let cur = match Hashtbl.find_opt _alias_candidates short with
-    | Some l -> l | None -> [] in
-  if not (List.mem target cur) then
-    Hashtbl.replace _alias_candidates short (target :: cur)
-
-(* Resolve a variable name through use-import aliases.
-   A name that is currently bound as a local (function parameter or
-   let-binding tracked in [_fn_param_types]) is NOT resolved through
-   aliases — local bindings shadow imports.  Without this guard, a
-   parameter named e.g. [status] would be rewritten to [HttpServer.status]
-   whenever [import HttpServer] is in scope, replacing every use of the
-   local parameter with a global function reference. *)
-(** Bare function names DEFINED by the module currently being lowered.  A
-    same-module top-level fn shadows any import alias — including one another
-    module's import added to the (program-global) [_use_aliases] table.
-    Without this, e.g. CounterIsland.ssr's bare `render(state)` was rewritten
-    to `Controller.render` (added by some other module's `import Controller`),
-    silently calling the wrong function.
-
-    NOT converted to an env field, despite [with_current_module_fns] below
-    being a textbook exception-safe save/restore dance ([Fun.protect]): this
-    ref is a member of the documented NOT-reset trio (analysis doc lower.ml
-    High #2, alongside [_default_dispatch] and [_fn_param_types]). Its value
-    is deliberately NOT reset at [lower_module] entry — [lower_module]'s Pass
-    2 preamble sets it directly (line ~2251-equivalent below) to the ENTRY
-    module's own fn names, and that assignment happens AFTER Pass 1
-    ([collect_iface_impls ~lower_bodies:true], which lowers impl method
-    bodies) has already run and read whatever this table held at the END OF
-    THE PREVIOUS [lower_module] CALL (or its initial empty value, on the
-    first call in the process). The REPL JIT (lib/jit/repl_jit.ml) calls
-    [lower_module] once per fragment, so this staleness is live,
-    load-bearing, current behavior — turning it into an env field reset
-    fresh at the top of every [lower_module] call (the natural env-record
-    idiom) would silently FIX (i.e. change) this. Preserved as a ref
-    exactly. Filed: specs/todos.md. *)
-let _current_module_fns : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 0)
-
-(** Run [f] with [_current_module_fns] set to [names], restoring the previous
-    table afterwards (so nested module lowering composes correctly). *)
-let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
-  let saved = !_current_module_fns in
-  let tbl = Hashtbl.create (List.length names) in
-  List.iter (fun n -> Hashtbl.replace tbl n ()) names;
-  _current_module_fns := tbl;
-  Fun.protect ~finally:(fun () -> _current_module_fns := saved) f
-
-let resolve_use_alias (env : env) (name : string) : string =
-  if Hashtbl.mem _fn_param_types name then name
-  else if Hashtbl.mem !_current_module_fns name then name
-  (* A bulk `import Mod` registers every public fn of Mod as an unqualified
-     alias (see [register_aliases] / the DUse cases).  When one of those short
-     names is a compiler builtin — e.g. [to_string], which has a generic
-     value→string impl AND type-specific functions like [Bytes.to_string] — the
-     alias would hijack the builtin PROGRAM-WIDE (the alias table is global): a
-     later polymorphic call such as [to_string(v)] in an unrelated module would
-     be rewritten to that one concrete impl and then crash on a value of the
-     wrong type (e.g. a String matched as a Bytes(List(Int))).  The builtin must
-     always win — matching the typechecker (which binds the polymorphic builtin)
-     and the interpreter — so never resolve a builtin name through the alias
-     table. *)
-  else if Defun.StringSet.mem name Defun.builtin_names then name
-  (* The current module's OWN imports take precedence over the program-global
-     table, so [import Connection] in this module resolves [close] to
-     Connection.close even if another module globally registered Db.close. *)
-  else match Hashtbl.find_opt env.current_module_aliases name with
-  | Some qualified -> qualified
-  | None ->
-  match Hashtbl.find_opt !_use_aliases name with
-  | Some qualified ->
-    (* GLOBAL-fallback resolution: the current module did not import this name
-       itself.  If several distinct qualified candidates exist program-wide,
-       this resolution is registration-order-dependent — the hijack class.
-       Report once per name under MARCH_ALIAS_AUDIT. *)
-    (if Lazy.force alias_audit_on && not (Hashtbl.mem _alias_reported name) then
-       match Hashtbl.find_opt _alias_candidates name with
-       | Some (_ :: _ :: _ as cands) ->
-         Hashtbl.replace _alias_reported name ();
-         Printf.eprintf
-           "[alias-audit] bare `%s` resolved via GLOBAL table to %s (ambiguous: %s)\n%!"
-           name qualified (String.concat ", " cands)
-       | _ -> ());
-    qualified
-  | None -> name
-
-(* ── Qualified module lowering (refs) ──────────────────────────── *)
-
-(** Module-level refs for function and type accumulators, set by [lower_module].
-    Needed so [ensure_module_lowered] can append stdlib module definitions.
-
-    NOT converted to env fields: [_fns_ref]/[_types_ref] are accumulators
-    (each [lower_module] call points them at that call's own [fns]/[types]
-    list-refs; [_ensure_module_lowered]'s closure and [lower_stdlib_mod_decls]
-    append to them as a side effect throughout the whole run — there is no
-    "restore" step, only reset-then-grow). They are ALSO poked directly by
-    test/test_eval.ml's [test_tir_lower_qualified_auto_load] to exercise
-    [_ensure_module_lowered] in isolation from a full [lower_module] call —
-    a real (if unusual) external dependency on these being globally
-    reachable refs, not env-record fields a caller would have to construct
-    a full [env] to obtain. *)
-let _fns_ref : Tir.fn_def list ref ref = ref (ref [])
-let _types_ref : Tir.type_def list ref ref = ref (ref [])
-
-(** Tracks which modules have already been lowered to avoid duplicates.
-    NOT converted to an env field: same accumulator/test-coupling rationale
-    as [_fns_ref] above ([test_tir_lower_qualified_auto_load] resets and
-    reads this directly). Reset fresh at [lower_module] entry (part of the
-    "reset-at-entry set", together with [_type_map_ref] (now [env.type_map]),
-    [_iface_methods], [_use_aliases]). *)
-let _lowered_modules : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 8)
-
-(** Forward ref — filled after [lower_fn_def] / [lower_type_def] are defined.
-    NOT convertible to an env field: this is a process-lifetime function
-    pointer (the standard OCaml forward-reference idiom for breaking the
-    ordering constraint that [lower_to_atom_k]/[lower_expr] — defined before
-    [lower_stdlib_mod_decls] — need to call it). It is set exactly ONCE via
-    [let () = _ensure_module_lowered := ...] at module-load time, never
-    per-[lower_module]-call; the closure it holds reads [_fns_ref]/
-    [_types_ref]/[_lowered_modules] (all refs) at call time, so it always
-    sees whichever module's accumulators are currently installed. Also
-    poked directly by [test_tir_lower_qualified_auto_load]. Takes an [env]
-    (threaded through to [lower_stdlib_mod_decls]/[lower_fn_def] for the
-    lazily-loaded module's own body) as its first argument. *)
-let _ensure_module_lowered : (env -> string -> unit) ref = ref (fun _ _ -> ())
-
-(* ── Interface method resolution ────────────────────────────────── *)
-
-(** Maps interface method names to a list of (concrete_type_name, mangled_fn_name).
-    Used during lowering to rewrite calls like [show(42)] → [Show$Int.show(42)].
-    Keys include BOTH base names (e.g. "checkpoint_get") AND fully-qualified
-    names (e.g. "Conduit.Storage.checkpoint_get") so that polymorphic call sites
-    that use qualified names can be resolved post-monomorphization.
-
-    NOT converted to an env field: reset to a fresh table at [lower_module]
-    entry (like [type_map]), but — unlike [type_map] — it is then WRITTEN TO
-    throughout Pass 1 ([collect_iface_impls]) and Pass 2, with
-    [resolve_iface_method] reading it INTERLEAVED with those writes (an impl
-    registered while lowering module A's body must be visible when lowering
-    module B's body later in the same pass). An accumulator, not a
-    fixed-for-the-run constant — stays a ref, mirroring [_use_aliases]. *)
-let _iface_methods : (string, (string * string) list) Hashtbl.t ref
-  = ref (Hashtbl.create 0)
-
-(** Saved copy of [_iface_methods] after the most recent [lower_module] call.
-    Retained so that [Mono.monomorphize] can resolve interface calls in
-    functions that were polymorphic during lowering but become concrete after
-    type-variable substitution.
-
-    NOT converted to an env field: deliberately a CROSS-CALL cache — written
-    only at [lower_module] EXIT (never reset at entry) and read by
-    [get_iface_methods] strictly AFTER [lower_module] has already returned
-    its [Tir.tir_module] result (by [Mono.monomorphize], via the public
-    [get_iface_methods ()] API). An [env] field cannot outlive the [env]
-    value the function that produced it was holding — this ref's entire
-    reason to exist is to outlive the call. *)
-let _saved_iface_methods : (string, (string * string) list) Hashtbl.t ref
-  = ref (Hashtbl.create 0)
-
-(** Return the interface-method dispatch table built during the last call to
-    [lower_module].  Used by the monomorphization pass. *)
-let get_iface_methods () : (string, (string * string) list) Hashtbl.t =
-  !_saved_iface_methods
-
-(** Maps base function names to [(arity, mangled_name)] for default-arg functions.
-    Built from [DFn] declarations whose names end with [$N] (N = arity number).
-    Used to rewrite calls like [greet(x)] → [greet$1(x)] in the TIR pipeline.
-
-    NOT converted to an env field: part of the documented NOT-reset trio
-    (analysis doc lower.ml High #2, alongside [_current_module_fns] and
-    [_fn_param_types]). It IS unconditionally reassigned inside every
-    [lower_module] call (via [build_default_dispatch]) — but only AFTER Pass
-    1's [collect_iface_impls ~lower_bodies:true] has already lowered impl
-    method bodies against whatever this table held at the end of the
-    PREVIOUS [lower_module] call. Converting to an env field constructed
-    fresh at the top of [lower_module] would erase that inter-call
-    staleness window Pass 1 currently runs inside — a genuine (if narrow)
-    behavior change the plan's law forbids introducing silently. Preserved
-    as a ref. Filed: specs/todos.md. *)
-let _default_dispatch : (string, (int * string) list) Hashtbl.t ref
-  = ref (Hashtbl.create 0)
-
-(** Resolve an interface method call if possible.
-    Given a method name and the inferred type of the first argument,
-    returns the mangled impl function name, or None.
-    Tries the name as-is first, then progressively strips module prefixes to
-    handle calls like "Conduit.Storage.enqueue" when the impl was registered
-    under "Storage.enqueue" (user wrote `impl Storage(T)` after `import Conduit`). *)
-let resolve_iface_method (env : env) (method_name : string) (arg_span : Ast.span) : string option =
-  let rec find_impls name =
-    match Hashtbl.find_opt !_iface_methods name with
-    | Some impls -> Some impls
-    | None ->
-      (match String.index_opt name '.' with
-       | None -> None
-       | Some i ->
-         find_impls (String.sub name (i + 1) (String.length name - i - 1)))
-  in
-  match find_impls method_name with
-  | None -> None
-  | Some impls ->
-    match env.type_map with
-    | None -> None
-    | Some tbl ->
-      match Hashtbl.find_opt tbl arg_span with
-      | None -> None
-      | Some tc_ty ->
-        let tc_ty = Typecheck.repr tc_ty in
-        (* Extract the concrete type name from the typechecker type *)
-        let type_name = match tc_ty with
-          | Typecheck.TCon (name, _) -> Some name
-          | Typecheck.TTuple _       -> Some "$Tuple"
-          | Typecheck.TRecord _      -> Some "$Record"
-          | _ -> None
-        in
-        match type_name with
-        | None -> None
-        | Some tname ->
-          List.assoc_opt tname impls
+let empty_env = Lower_state.empty_env
+let ty_of_span = Lower_state.ty_of_span
+let ty_of_expr = Lower_state.ty_of_expr
+let unknown_ty = Lower_types.unknown_ty
+let lower_ty = Lower_types.lower_ty
+let lower_linearity = Lower_types.lower_linearity
+let convert_ty = Lower_types.convert_ty
+let reset_counter = Lower_state.reset_counter
+let fresh_name = Lower_state.fresh_name
+let fresh_var = Lower_state.fresh_var
+let nonexhaustive_panic = Lower_state.nonexhaustive_panic
+let _fn_param_types = Lower_state._fn_param_types
+let _use_aliases = Lower_state._use_aliases
+let _module_alias_snapshots = Lower_state._module_alias_snapshots
+let _current_module_fns = Lower_state._current_module_fns
+let with_current_module_fns = Lower_state.with_current_module_fns
+let resolve_use_alias = Lower_state.resolve_use_alias
+let _fns_ref = Lower_state._fns_ref
+let _types_ref = Lower_state._types_ref
+let _lowered_modules = Lower_state._lowered_modules
+let _ensure_module_lowered = Lower_state._ensure_module_lowered
+let _iface_methods = Lower_state._iface_methods
+let _saved_iface_methods = Lower_state._saved_iface_methods
+let get_iface_methods = Lower_state.get_iface_methods
+let _default_dispatch = Lower_state._default_dispatch
+let resolve_iface_method = Lower_state.resolve_iface_method
+let _alias_candidates = Lower_state._alias_candidates
+let _alias_reported = Lower_state._alias_reported
+let note_alias_candidate = Lower_state.note_alias_candidate
+let lower_type_def = Lower_decls.lower_type_def
+let lower_fn_def = Lower_decls.lower_fn_def
+let rename_tir_vars = Lower_decls.rename_tir_vars
 
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
@@ -569,7 +163,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
        function reference (e.g. [html] → [Response.html]).  Save any shadowed
        entries (function parameters or outer let-bindings with the same name)
        and restore them afterwards. *)
-    let pat_names = collect_pat_names b.bind_pat in
+    let pat_names = Lower_match.collect_pat_names b.bind_pat in
     let saved_shadowed : (string * Tir.ty) list =
       List.filter_map (fun (name, _) ->
         match Hashtbl.find_opt _fn_param_types name with
@@ -1012,7 +606,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- Match → ECase (CPS for scrutinee) --- *)
   | Ast.EMatch (scrut, branches, _) ->
     lower_to_atom_k env scrut (fun scrut_atom ->
-      lower_match env scrut_atom branches)
+      Lower_match.lower_match env scrut_atom branches)
 
   (* --- Annotations: lower the inner expr --- *)
   | Ast.EAnnot (e, _, _) -> lower_expr env e
@@ -1142,944 +736,18 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   | Ast.ESigil _ ->
     failwith "lower_expr: ESigil should be desugared before lowering"
 
-(* ── Match lowering ─────────────────────────────────────────────── *)
-
-(** True if [pat] matches everything without discriminating (wildcard / var / as-var). *)
-and is_trivial_pat : Ast.pattern -> bool = function
-  | Ast.PatWild _ | Ast.PatVar _ -> true
-  | Ast.PatAs (p, _, _) -> is_trivial_pat p
-  | _ -> false
-
-(** Wrap [body] with bindings from a trivial pattern on [scrut].
-    Handles PatVar (bind), PatWild (no-op), PatAs (bind outer name + recurse). *)
-and bind_trivial_pat (env : env) (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
-  match pat with
-  | Ast.PatWild _ -> body
-  | Ast.PatVar n ->
-    (* Use the typechecker's type for this variable (via its source span) so that
-       field accesses on pattern-matched records resolve to the correct offsets.
-       Without this, record field lookups fall back to index 0 for all fields. *)
-    let resolved_ty = ty_of_span env n.span in
-    let v : Tir.var = { v_name = n.txt; v_ty = resolved_ty; v_lin = Tir.Unr } in
-    Tir.ELet (v, Tir.EAtom scrut, body)
-  | Ast.PatAs (inner, n, _) ->
-    let v : Tir.var = { v_name = n.txt; v_ty = ty_of_span env n.span; v_lin = Tir.Unr } in
-    let named_body = Tir.ELet (v, Tir.EAtom scrut, body) in
-    bind_trivial_pat env scrut inner named_body
-  | _ -> body
-
-(** Format an [Ast.span] as "file:line:col" for a fail-loudly diagnostic. *)
-and string_of_pat_span (sp : Ast.span) : string =
-  Printf.sprintf "%s:%d:%d" sp.Ast.file sp.Ast.start_line sp.Ast.start_col
-
-(** Extract the span of any pattern, for fail-loudly diagnostics. *)
-and span_of_pat : Ast.pattern -> Ast.span = function
-  | Ast.PatWild sp         -> sp
-  | Ast.PatVar  name       -> name.Ast.span
-  | Ast.PatCon  (name, _)  -> name.Ast.span
-  | Ast.PatAtom (_, _, sp) -> sp
-  | Ast.PatTuple (_, sp)   -> sp
-  | Ast.PatLit  (_, sp)    -> sp
-  | Ast.PatRecord (_, sp)  -> sp
-  | Ast.PatAs   (_, _, sp) -> sp
-
-(** Return the string tag and sub-pattern list for a pattern that discriminates.
-    PatCon → (tag, subs); PatTuple → ("$Tuple", subs); PatLit → (repr, []).
-    Returns None for trivial patterns.
-
-    [br_tag] namespace (see also llvm_emit.ml's [emit_case] decoder, which
-    must be kept in sync with every case below):
-      - ADT ctor / atom-ctor tags  → bare or dotted name, first char 'A'-'Z'
-        (e.g. "Some", "Inline.Text")
-      - Tuple                      → "$TupleN"           (leading '$')
-      - Int literal                → decimal digits, optional leading '-'
-      - Bool literal                → "true" / "false"   (lowercase)
-      - String literal              → "\"..\""            (leading '"')
-      - Atom literal / pattern     → ":name"             (leading ':')
-      - Float literal (NEW)        → "#<hex-float>"      (leading '#') —
-        see below. *)
-and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
-  match pat with
-  | Ast.PatCon ({ txt = tag; _ }, subs) ->
-    (* Keep the constructor pattern's FULL text (e.g. "Inline.Text", "T.B").
-       A type-qualified pattern carries its own disambiguating qualifier; codegen
-       (qualified_br_key in llvm_emit) resolves it to the right ctor_info key.
-       Stripping to the bare name here loses that qualifier, so a bare ctor name
-       that collides with another type's constructor (e.g. stdlib Xml.XmlNode.Text)
-       resolves ambiguously to the wrong tag when the scrutinee type was not
-       propagated to codegen. *)
-    Some (tag, subs)
-  | Ast.PatTuple (subs, _) ->
-    Some (Tir_names.tuple_tag (List.length subs), subs)
-  | Ast.PatLit (Ast.LitInt n, _)    -> Some (string_of_int n, [])
-  | Ast.PatLit (Ast.LitBool b, _)   -> Some (Tir_names.bool_lit_tag b, [])
-  | Ast.PatLit (Ast.LitString s, _) -> Some ("\"" ^ s ^ "\"", [])
-  | Ast.PatLit (Ast.LitAtom a, _)   -> Some (":" ^ a, [])
-  | Ast.PatLit (Ast.LitFloat f, _)  ->
-    (* Encode as "#" ^ OCaml hex-float ("%h"), e.g. "#0x1.8p+0" for 1.5.
-       Unlike "%g"/[Float.to_string] (which round to ~12 significant decimal
-       digits and can map two distinct doubles to the same string, or fail to
-       parse back to the exact original bit pattern), "%h" is an exact,
-       lossless base-2 encoding of the IEEE-754 bits — round-trips via
-       [float_of_string] for every finite/subnormal/zero value, and the
-       leading '#' does not collide with any other tag form (ctor names start
-       uppercase, tuples '$', ints digits/'-', bools true/false, strings '"',
-       atoms ':'). The decoder (llvm_emit.ml's [emit_case], float-chain
-       branch) must parse this exact form back with [Int64.bits_of_float] /
-       the equivalent LLVM hex-double literal. *)
-    Some (Printf.sprintf "#%h" f, [])
-  (* The parser emits PatAtom for bare atom patterns (:get) and atom
-     constructor patterns (:Tag(x)).  PatLit(LitAtom) is never generated
-     by the parser; it would only appear if constructed directly in tests. *)
-  | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
-  | Ast.PatAtom (a, subs, _) -> Some (a, subs)
-  | Ast.PatRecord (_, sp) ->
-    failwith (Printf.sprintf
-      "lower: record patterns are not yet compilable (%s) — PatRecord has no \
-       {...} pattern production in the grammar today, so this indicates a \
-       pattern constructed directly rather than parsed; implement record \
-       destructuring in pat_tag_and_subs before enabling it"
-      (string_of_pat_span sp))
-  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ -> None
-
-(* Compile a pattern matrix to a TIR expression (decision tree).
-
-   [scruts]   — list of TIR atoms currently under scrutiny (one per column).
-   [rows]     — list of (pattern list, body): each pattern list has exactly
-                one element per scrutinee.  Rows are tried top-to-bottom; the
-                first matching row wins.
-   [fallback] — optional expression used when no row matches (non-exhaustive). *)
-(** True if a fallback expression is "small enough" that inlining it
-    multiple times in the decision tree is cheap.  Currently: only [EAtom]
-    qualifies (a single variable or literal reference).  Everything else
-    is hoisted into a local 0-arg function (join point) so that fall-through
-    sites become tiny calls instead of duplicated sub-trees.
-
-    Without this, decision-tree compilation of deeply-nested patterns with
-    fallbacks (e.g. nested [Cons] / string-literal patterns in a multi-arm
-    [match]) produces TIR that grows exponentially in the number of arms,
-    because the same fallback expression gets inlined into every failing
-    branch at every nesting level. *)
-and is_atomic_fallback : Tir.expr -> bool = function
-  | Tir.EAtom _ -> true
-  | _ -> false
-
-(** Public entry point: hoist a non-trivial [fallback] into a join point
-    before invoking [compile_matrix_impl].
-
-    The join point is materialized as a 0-arg lambda whose closure is
-    bound to a fresh variable; every fall-through site in the generated
-    decision tree becomes an indirect call to that closure rather than
-    an inline copy of the fallback expression.  This makes the lifted
-    fallback shared once by [Defun.defunctionalize] (via the standard
-    "lambda creation" pattern [ELetRec([fn], EAtom(AVar fn))]) instead
-    of being duplicated 4× per nesting level, which is what produces
-    the exponential TIR blowup for nested [Cons] / string-literal
-    patterns in multi-arm matches. *)
-and compile_matrix
-    (env      : env)
-    (scruts   : Tir.atom list)
-    (rows     : (Ast.pattern list * Tir.expr) list)
-    (fallback : Tir.expr option)
-  : Tir.expr =
-  match fallback with
-  | None -> compile_matrix_impl env scruts rows None
-  | Some fb when is_atomic_fallback fb ->
-    compile_matrix_impl env scruts rows fallback
-  | Some fb ->
-    let jp_fn_name = fresh_name "jp" in
-    let jp_fn_ty   = Tir.TFn ([], unknown_ty) in
-    (* The fn_def — body is the original fallback expression. *)
-    let jp_fn : Tir.fn_def = {
-      fn_name   = jp_fn_name;
-      fn_params = [];
-      fn_ret_ty = unknown_ty;
-      fn_body   = fb;
-      fn_kind   = Tir.FnJoinPoint;
-    } in
-    (* The fn-name var, used in the [EAtom(AVar …)] body of the lambda-
-       creation [ELetRec]. *)
-    let jp_fn_var : Tir.var = {
-      v_name = jp_fn_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
-    } in
-    (* Lambda-creation site: [ELetRec([jp_fn], EAtom(AVar jp_fn_var))].
-       Defun recognises this and lifts [jp_fn] to a top-level fn (with
-       a closure struct for any free variables of [fb]). *)
-    let lambda_expr = Tir.ELetRec ([jp_fn], Tir.EAtom (Tir.AVar jp_fn_var)) in
-    (* Bind the closure to a fresh var so we can call it multiple times. *)
-    let clo_name = fresh_name "jp_clo" in
-    let clo_var : Tir.var = {
-      v_name = clo_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
-    } in
-    (* Every fall-through site uses [EApp(clo_var, [])].  Defun rewrites
-       this to [ECallPtr] because [clo_var] has a [TFn] type and is not
-       a top-level name. *)
-    let jp_call = Tir.EApp (clo_var, []) in
-    let body    = compile_matrix_impl env scruts rows (Some jp_call) in
-    Tir.ELet (clo_var, lambda_expr, body)
-
-and compile_matrix_impl
-    (env      : env)
-    (scruts   : Tir.atom list)
-    (rows     : (Ast.pattern list * Tir.expr) list)
-    (fallback : Tir.expr option)
-  : Tir.expr =
-  match rows with
-  | [] ->
-    (match fallback with Some f -> f | None -> nonexhaustive_panic ())
-  | ([], body) :: _ -> body   (* zero scrutinees remaining → first row wins *)
-  | _ ->
-    match scruts with
-    | [] ->
-      (match rows with (_, body) :: _ -> body | [] ->
-        (match fallback with Some f -> f | None -> nonexhaustive_panic ()))
-    | scrut :: rest_scruts ->
-      (* Split rows into a front block of non-trivial first-column rows and
-         a (possibly empty) suffix starting at the first trivial first-column
-         row.  The suffix becomes the default for all ECase branches. *)
-      let rec split_at_trivial acc = function
-        | [] -> (List.rev acc, [])
-        | ((fp :: _), _) as row :: rest ->
-          if is_trivial_pat fp then (List.rev acc, row :: rest)
-          else split_at_trivial (row :: acc) rest
-        | rows -> (List.rev acc, rows)  (* empty pattern list — treat as trivial *)
-      in
-      let (ctor_rows, default_rows) = split_at_trivial [] rows in
-
-      (* Build the fallback expression for rows at and after the first trivial row. *)
-      let default =
-        match default_rows with
-        | [] -> fallback
-        | (fp :: rest_pats, body) :: more ->
-          (* Bind the trivial first-column pattern on [scrut], then continue
-             matching remaining columns (rest_scruts) with remaining patterns
-             (rest_pats).  Any further rows (more) become the inner fallback. *)
-          let inner_fb = compile_matrix env (scrut :: rest_scruts) more fallback in
-          let body_with_bindings = bind_trivial_pat env scrut fp body in
-          (* If there are more columns, we still need to compile them.
-             For the trivial row itself, the remaining columns are rest_pats
-             matched against rest_scruts. *)
-          let full_body =
-            if rest_pats = [] || rest_scruts = [] then body_with_bindings
-            else
-              let inner_rows = [(rest_pats, body_with_bindings)] in
-              compile_matrix env rest_scruts inner_rows (Some inner_fb)
-          in
-          (* The full default also handles any subsequent trivial rows via inner_fb *)
-          let _ = inner_fb in   (* inner_fb used above only as compile_matrix fallback *)
-          Some full_body
-        | ([], body) :: _ -> Some body
-      in
-
-      (* Group non-trivial ctor_rows by their first-column tag, preserving order. *)
-      (* tag_groups: assoc list of (tag, (arity, rows_rev ref)) *)
-      let tag_groups : (string * (int * (Ast.pattern list * Tir.expr) list ref)) list ref
-          = ref [] in
-      List.iter (fun (pats, body) ->
-          match pats with
-          | fp :: rest_pats ->
-            (match pat_tag_and_subs fp with
-             | None ->
-               (* [ctor_rows] only ever contains non-trivial first-column
-                  patterns (split_at_trivial routed every PatWild/PatVar/PatAs
-                  row into default_rows above), so pat_tag_and_subs returning
-                  None here means a discriminating pattern kind it doesn't
-                  know how to tag — e.g. before this fix, LitFloat and
-                  PatRecord.  Silently discarding the row (as this branch
-                  used to) makes the arm's body unreachable with no
-                  diagnostic — the exact B4 bug (float-literal match arms
-                  silently dropped in compiled mode).  Fail loudly instead. *)
-               failwith (Printf.sprintf
-                 "lower: unhandled pattern kind in match compilation at %s — \
-                  pat_tag_and_subs does not know how to tag this pattern, so \
-                  the arm would be silently dropped instead of compiled"
-                 (string_of_pat_span (span_of_pat fp)))
-             | Some (tag, subs) ->
-               let arity = List.length subs in
-               let row_entry = (subs @ rest_pats, body) in
-               (match List.assoc_opt tag !tag_groups with
-                | Some (_, rows_ref) -> rows_ref := !rows_ref @ [row_entry]
-                | None ->
-                  tag_groups := !tag_groups @ [(tag, (arity, ref [row_entry]))]))
-          | [] -> ()
-        ) ctor_rows;
-
-      (* For each tag group, compile sub-pattern rows recursively. *)
-      let tir_branches =
-        List.filter_map (fun (tag, (arity, rows_ref)) ->
-            let sub_vars = List.init arity (fun _ ->
-                { Tir.v_name = fresh_name "f"; v_ty = unknown_ty; v_lin = Tir.Unr }
-              ) in
-            let sub_atoms = List.map (fun v -> Tir.AVar v) sub_vars in
-            let combined_scruts = sub_atoms @ rest_scruts in
-            let branch_body =
-              compile_matrix env combined_scruts !rows_ref default
-            in
-            Some { Tir.br_tag = tag; br_vars = sub_vars; br_body = branch_body }
-          ) !tag_groups
-      in
-
-      (* If there are no ECase branches (all rows were trivial), the default
-         already covers everything — just return it. *)
-      if tir_branches = [] then
-        (match default with Some d -> d | None -> nonexhaustive_panic ())
-      else
-        (* A [None] default here reaches llvm_emit's [emit_case] as
-           [default_opt = None], which — for the literal-chain (int/atom/
-           bool/string/float) and switch encodings alike — emits a bare LLVM
-           `unreachable` terminator on the fallthrough edge.  `unreachable` is
-           undefined behaviour if actually executed at runtime: on this
-           target it was observed to silently fall through to whichever arm
-           the optimizer happened to place last, printing a WRONG matched
-           value with exit 0 — worse than a crash, and a second compiled/
-           interpreter divergence beyond B4's dropped-arm bug (the
-           interpreter panics via its own exhaustiveness check).  Ensure
-           every non-exhaustive [ECase] gets a real panic on the fallback
-           edge instead of relying on the typechecker's (incomplete, e.g. for
-           Float/String, which have no finite exhaustiveness check) static
-           guarantee. *)
-        let default = match default with
-          | Some _ -> default
-          | None -> Some (nonexhaustive_panic ())
-        in
-        Tir.ECase (scrut, tir_branches, default)
-
-(** Collect the (name, span) of every variable binding in a pattern,
-    including [PatAs] outer names.  Used to register pattern-bound locals
-    in [_fn_param_types] before lowering a branch body so that those
-    names are not rewritten through [_use_aliases] (e.g. a pattern
-    variable [status] must not become [HttpServer.status]). *)
-and collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
-  | Ast.PatWild _ -> []
-  | Ast.PatVar n -> [(n.txt, n.span)]
-  | Ast.PatCon (_, subs) -> List.concat_map collect_pat_names subs
-  | Ast.PatAtom (_, subs, _) -> List.concat_map collect_pat_names subs
-  | Ast.PatTuple (subs, _) -> List.concat_map collect_pat_names subs
-  | Ast.PatLit _ -> []
-  | Ast.PatRecord (fields, _) ->
-    List.concat_map (fun (_, p) -> collect_pat_names p) fields
-  | Ast.PatAs (p, n, _) -> (n.txt, n.span) :: collect_pat_names p
-
-(** Lower a branch body with the pattern's bound names registered in
-    [_fn_param_types] for the duration of the lowering.  Restores any
-    shadowed entries afterwards. *)
-and lower_branch_body_with_pat (env : env) (pat : Ast.pattern) (body : Ast.expr) : Tir.expr =
-  let names = collect_pat_names pat in
-  let saved_shadowed = List.filter_map (fun (name, _) ->
-      match Hashtbl.find_opt _fn_param_types name with
-      | Some ty -> Some (name, ty)
-      | None -> None) names in
-  List.iter (fun (name, sp) ->
-    Hashtbl.replace _fn_param_types name (ty_of_span env sp)) names;
-  let result = lower_expr env body in
-  List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) names;
-  List.iter (fun (name, ty) ->
-    Hashtbl.replace _fn_param_types name ty) saved_shadowed;
-  result
-
-(** Lower a single-scrutinee match to a TIR decision tree.
-    Branches with [when] guards are handled by embedding a boolean check
-    in the branch body: if the guard is false, control falls through to the
-    remaining branches. *)
-and lower_match (env : env) (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
-  let has_guards = List.exists (fun (br : Ast.branch) ->
-      br.branch_guard <> None) branches in
-  if not has_guards then begin
-    (* Fast path: no guards — use efficient matrix compilation. *)
-    let rows = List.map (fun (br : Ast.branch) ->
-        ([br.branch_pat],
-         lower_branch_body_with_pat env br.branch_pat br.branch_body)) branches in
-    compile_matrix env [scrut] rows None
-  end else begin
-    (* Guards present: compile each branch individually with fallthrough
-       to the remaining branches when the guard fails. *)
-    let rec go = function
-      | [] -> nonexhaustive_panic ()  (* every branch's guard failed *)
-      | (br : Ast.branch) :: rest ->
-        let rest_expr = go rest in
-        (* Register pattern-bound names while lowering the body and guard
-           so that [resolve_use_alias] treats them as locals. *)
-        let pat_names = collect_pat_names br.branch_pat in
-        let saved_shadowed = List.filter_map (fun (name, _) ->
-            match Hashtbl.find_opt _fn_param_types name with
-            | Some ty -> Some (name, ty)
-            | None -> None) pat_names in
-        List.iter (fun (name, sp) ->
-          Hashtbl.replace _fn_param_types name (ty_of_span env sp)) pat_names;
-        let body = lower_expr env br.branch_body in
-        let guarded_body = match br.branch_guard with
-          | None -> body
-          | Some guard ->
-            let guard_expr = lower_expr env guard in
-            let gv : Tir.var = { v_name = fresh_name "guard";
-                                 v_ty = Tir.TBool; v_lin = Tir.Unr } in
-            Tir.ELet (gv, guard_expr,
-              Tir.ECase (Tir.AVar gv,
-                [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
-                Some rest_expr))
-        in
-        List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
-        List.iter (fun (name, ty) ->
-          Hashtbl.replace _fn_param_types name ty) saved_shadowed;
-        compile_matrix env [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
-    in
-    go branches
-  end
-
-(* ── TIR renaming ───────────────────────────────────────────────── *)
-
-(** Rename [AVar] atoms whose [v_name] appears in [names] by prefixing with
-    [prefix].  Used when lowering [DMod] inner functions to rewrite unqualified
-    intra-module call sites (e.g. [from_string] → [IOList.from_string]).
-
-    Scope-aware: a local binder with the same name as a module function
-    (a fn parameter, [ELet]/[ELetRec] binding, or [ECase] branch variable)
-    shadows it — references to the shadowed name are left untouched within
-    the binder's scope.  Without this, e.g. a parameter named [fields] in a
-    module that also defines [fn fields(...)] had its body references
-    rewritten to the qualified global, which the emitter then compiled as a
-    zero-arg module-constant call ([call ptr @Mod.fields()]). *)
-let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : Tir.fn_def =
-  let module SSet = Set.Make (String) in
-  let rename_var bound (v : Tir.var) : Tir.var =
-    if List.mem v.Tir.v_name names && not (SSet.mem v.Tir.v_name bound)
-    then { v with Tir.v_name = prefix ^ v.Tir.v_name }
-    else v
-  in
-  let rename_atom bound = function
-    | Tir.AVar v -> Tir.AVar (rename_var bound v)
-    | a -> a
-  in
-  let add_params bound (params : Tir.var list) =
-    List.fold_left (fun acc (p : Tir.var) -> SSet.add p.Tir.v_name acc) bound params
-  in
-  let rec rename_expr bound = function
-    | Tir.EAtom a        -> Tir.EAtom (rename_atom bound a)
-    | Tir.EApp (v, args) -> Tir.EApp (rename_var bound v, List.map (rename_atom bound) args)
-    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom bound f, List.map (rename_atom bound) args)
-    | Tir.ELet (v, e1, e2) ->
-      Tir.ELet (v, rename_expr bound e1, rename_expr (SSet.add v.Tir.v_name bound) e2)
-    | Tir.ELetRec (fns, body) ->
-      let bound' = List.fold_left (fun acc (f : Tir.fn_def) ->
-          SSet.add f.Tir.fn_name acc) bound fns in
-      Tir.ELetRec (List.map (rename_fn bound') fns, rename_expr bound' body)
-    | Tir.ECase (scrut, branches, def) ->
-      Tir.ECase (rename_atom bound scrut,
-                 List.map (fun br ->
-                     let bound' = add_params bound br.Tir.br_vars in
-                     { br with Tir.br_body = rename_expr bound' br.Tir.br_body }) branches,
-                 Option.map (rename_expr bound) def)
-    | Tir.ETuple atoms   -> Tir.ETuple (List.map (rename_atom bound) atoms)
-    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom bound a)) fields)
-    | Tir.EField (a, f)  -> Tir.EField (rename_atom bound a, f)
-    | Tir.EUpdate (a, fields) ->
-      Tir.EUpdate (rename_atom bound a, List.map (fun (k, v) -> (k, rename_atom bound v)) fields)
-    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map (rename_atom bound) args)
-    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map (rename_atom bound) args)
-    | Tir.EFree a   -> Tir.EFree (rename_atom bound a)
-    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom bound a)
-    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom bound a)
-    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom bound a)
-    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom bound a)
-    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom bound a, ty, List.map (rename_atom bound) args)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr bound e1, rename_expr bound e2)
-  and rename_fn bound (f : Tir.fn_def) : Tir.fn_def =
-    let bound' = add_params bound f.Tir.fn_params in
-    { f with Tir.fn_body = rename_expr bound' f.Tir.fn_body }
-  in
-  rename_fn SSet.empty fn
-
-(* ── Declaration lowering ───────────────────────────────────────── *)
-
-(** Lower a single function definition (post-desugaring: exactly 1 clause). *)
-let lower_fn_def (env : env) (def : Ast.fn_def) : Tir.fn_def =
-  let clause = match def.fn_clauses with
-    | [c] -> c
-    | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
-                       def.fn_name.txt (List.length def.fn_clauses))
-  in
-  (* For polymorphic fn_defs, prefer the typechecker's inferred type over the
-     surface annotation.  The typechecker has already unified the source-level
-     named type variable (e.g. `a` in `fn nth(xs: List(a), n: Int) : a`) with
-     the unbound unification variable used in the body's typed expressions.
-     Using `lower_ty` on the annotation would emit `TVar "a"`, but the body
-     uses `TVar "_<id>"`.  Monomorphization's subst keys off the param TVar,
-     so the two names must match — otherwise the body's TVars never get
-     substituted and recursive calls fall back to a polymorphic specialization
-     named e.g. `List.nth$List_V__1771$Int`, causing runtime infinite recursion.
-     Only when the typechecker has no record for this span (placeholder
-     [TVar "_"]) do we fall back to the source annotation. *)
-  let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
-    match tc_ty, ann with
-    | Tir.TVar "_", Some t -> lower_ty t
-    | Tir.TVar "_", None -> tc_ty
-    | _ -> tc_ty
-  in
-  let params = List.map (fun fp ->
-      match fp with
-      | Ast.FPNamed p ->
-        let ty = ty_from_tc_or_ann (ty_of_span env p.param_name.span) p.param_ty in
-        { Tir.v_name = p.param_name.txt;
-          v_ty = ty;
-          v_lin = lower_linearity p.param_lin }
-      | Ast.FPPat (Ast.PatVar n) ->
-        { Tir.v_name = n.txt; v_ty = ty_of_span env n.span; v_lin = Tir.Unr }
-      | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
-    ) clause.fc_params in
-  let ret_ty =
-    (* Same rationale as params: prefer the typechecker's inferred return type,
-       falling back to the source annotation only when the typechecker has no
-       record for the body span. *)
-    let tc_ret = ty_of_expr env clause.fc_body in
-    ty_from_tc_or_ann tc_ret def.fn_ret_ty
-  in
-  (* Populate the parameter type scope so that body variable references can
-     fall back to the declared parameter type when ty_of_span gives TError.
-     Save/restore to handle nested lower_fn_def calls (impl methods, etc.). *)
-  let saved_scope = Hashtbl.copy _fn_param_types in
-  Hashtbl.clear _fn_param_types;
-  List.iter (fun v -> Hashtbl.replace _fn_param_types v.Tir.v_name v.Tir.v_ty) params;
-  let body = lower_expr env clause.fc_body in
-  Hashtbl.clear _fn_param_types;
-  Hashtbl.iter (fun k v -> Hashtbl.replace _fn_param_types k v) saved_scope;
-  { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body;
-    fn_kind = Tir.FnNormal }  (* parsed user/stdlib/impl-method fn *)
-
-(** Lower a type definition. *)
-let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_def) : Tir.type_def option =
-  match td with
-  | Ast.TDVariant variants ->
-    let ctors = List.map (fun (v : Ast.variant) ->
-        (v.var_name.txt, List.map lower_ty v.var_args)
-      ) variants in
-    Some (Tir.TDVariant (name.txt, ctors))
-  | Ast.TDRecord fields ->
-    let fs = List.map (fun (f : Ast.field) ->
-        (f.fld_name.txt, lower_ty f.fld_ty)
-      ) fields in
-    Some (Tir.TDRecord (name.txt, fs))
-  | Ast.TDAlias _ -> None
-
-(* ── Qualified module lowering (implementation) ───────────────── *)
-
-(** Lower all declarations from a stdlib module's body, adding functions
-    and types to the current module-level accumulator refs. *)
-let rec lower_stdlib_mod_decls (env : env) prefix decls =
-  let direct_fn_names = List.filter_map (function
-      | Ast.DFn (def, _) -> Some def.fn_name.txt
-      | Ast.DLet (_, b, _) ->
-        (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
-      | _ -> None) decls in
-  List.iter (fun d ->
-      match d with
-      | Ast.DFn (def, _) ->
-        let fn = lower_fn_def env def in
-        let fn = rename_tir_vars prefix direct_fn_names fn in
-        !_fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!_fns_ref)
-      | Ast.DType (_, tname, params, td, _)
-      | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
-        let qtname = { tname with txt = prefix ^ tname.txt } in
-        (match lower_type_def qtname params td with
-         | Some td' -> !_types_ref := td' :: !(!_types_ref)
-         | None -> ())
-      | Ast.DMod (sub_name, _, sub_decls, _) ->
-        lower_stdlib_mod_decls env (prefix ^ sub_name.txt ^ ".") sub_decls
-      | Ast.DLet (_, b, _) ->
-        (* Module-level let bindings are compiled as zero-arg functions so they
-           can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
-        (match b.bind_pat with
-         | Ast.PatVar n ->
-           let rhs = lower_expr env b.bind_expr in
-           let fn : Tir.fn_def = {
-             fn_name   = prefix ^ n.txt;
-             fn_params = [];
-             fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
-                          | None -> ty_of_expr env b.bind_expr);
-             fn_body   = rhs;
-             fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
-           } in
-           !_fns_ref := fn :: !(!_fns_ref)
-         | _ -> ())
-      | _ -> ()
-    ) decls
-
-let () = _ensure_module_lowered := (fun env mod_name ->
-  if not (Hashtbl.mem !_lowered_modules mod_name) then begin
-    Hashtbl.replace !_lowered_modules mod_name ();
-    match March_modules.Module_registry.find_stdlib_file mod_name with
-    | None -> ()
-    | Some path ->
-      (try
-         let ic = open_in_bin path in
-         let n = in_channel_length ic in
-         let b = Bytes.create n in
-         really_input ic b 0 n;
-         close_in ic;
-         let src = Bytes.to_string b in
-         let lexbuf = Lexing.from_string src in
-         lexbuf.Lexing.lex_curr_p <-
-           { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-         let ast = March_parser.Parser.module_
-                     (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-         let ast = March_desugar.Desugar.desugar_module ast in
-         lower_stdlib_mod_decls env (mod_name ^ ".") ast.mod_decls
-       with _ -> ())
-  end)
-
-(* ── Actor lowering ─────────────────────────────────────────────── *)
-
-(** Lower an actor declaration to TIR type defs + function defs.
-
-    For actor [Name] with state fields [f1:T1, ..., fn:Tn] (alphabetical) and
-    handlers [on H1(p...) body1, ...], we generate:
-
-    Types:
-      TDVariant("Name_Msg", [(H1, param_tys_1); ...])    -- in handler decl order
-      TDRecord ("Name_Actor", [("$d_dispatch",TPtr TUnit);
-                               ("$e_alive",TBool); f1:T1; ...fn:Tn])
-                                                          -- $d_dispatch first, $e_alive second
-                                                          -- (prefixed so alphabetical sort matches
-                                                          --  alloc/reuse order & C runtime layout)
-                                                          -- then state fields alphabetically
-
-    Functions:
-      Name_Hi(actor:ptr, p...) → Unit   -- one per handler
-      Name_dispatch(actor:ptr, msg:ptr) → Unit
-      Name_spawn() → ptr
-*)
-let lower_actor (env : env) ~hot_reload (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
-  (* State fields sorted alphabetically (matches TRecord ordering) *)
-  let state_fields_sorted : (string * Tir.ty) list =
-    List.sort (fun (a, _) (b, _) -> String.compare a b)
-      (List.map (fun (f : Ast.field) -> (f.fld_name.txt, lower_ty f.fld_ty))
-         actor.actor_state)
-  in
-  (* In hot_reload mode, state lives in a separate heap record.
-     state_type_name is the TIR name for that record. *)
-  let state_type_name = name ^ Tir_names.actor_state_suffix in
-
-  (* ── 1. Message variant type ─────────────────────────────── *)
-  let msg_type_name = name ^ Tir_names.actor_msg_suffix in
-  let msg_ctors : (string * Tir.ty list) list =
-    List.map (fun (h : Ast.actor_handler) ->
-        let param_tys = List.map (fun (p : Ast.param) ->
-            match p.param_ty with Some t -> lower_ty t | None -> unknown_ty
-          ) h.ah_params in
-        (h.ah_msg.txt, param_tys)
-      ) actor.actor_handlers
-  in
-  let msg_variant = Tir.TDVariant (msg_type_name, msg_ctors) in
-
-  (* ── 2. Actor struct type ────────────────────────────────── *)
-  let actor_type_name = name ^ Tir_names.actor_struct_suffix in
-  (* Layout order: $d_dispatch (field 0), $e_alive (field 1), state fields (fields 2+)
-     Names are prefixed so alphabetical sort ($d < $e < $f < letters) in llvm_emit.ml's
-     get_record_fields matches the alloc/reuse arg order and the C runtime's
-     hardcoded word indices (a[2]=dispatch, a[3]=alive).
-     In hot_reload mode: field 2 is $f_state (ptr to state record) → a[4]=state ptr. *)
-  let actor_struct_fields : (string * Tir.ty) list =
-    if hot_reload then
-      [(Tir_names.actor_dispatch_field, Tir.TPtr Tir.TUnit);
-       (Tir_names.actor_alive_field, Tir.TBool);
-       (Tir_names.actor_state_field, Tir.TCon (state_type_name, []))]
-    else
-      [(Tir_names.actor_dispatch_field, Tir.TPtr Tir.TUnit); (Tir_names.actor_alive_field, Tir.TBool)]
-      @ state_fields_sorted
-  in
-  let actor_record = Tir.TDRecord (actor_type_name, actor_struct_fields) in
-
-  (* ── 3. Handler functions ────────────────────────────────── *)
-  (* For handler "Hi" with params [(p1,T1);...]:
-       fn Name_Hi(actor: ptr, p1:T1, ...) : Unit =
-         let $sf1 = EField(actor, "sf1")    -- load each state field
-         ...
-         let state = ERecord [(sf1, $sf1); ...]
-         let $result = <body>
-         let $nf1 = EField($result, "sf1")  -- extract new state fields
-         ...
-         ESeq(EReuse(actor, Name_Actor, [$d_dispatch, $e_alive, $nf1, ...]), EAtom(unit))
-  *)
-  let actor_var (n : string) (ty : Tir.ty) : Tir.var =
-    { Tir.v_name = n; v_ty = ty; v_lin = Tir.Unr }
-  in
-  (* Using TCon(actor_type_name) (not TPtr TUnit) so that EField accesses on
-     the actor pointer resolve field indices correctly via field_map lookups.
-     All TCon → ptr in llvm_ty, so the LLVM function signatures are unaffected. *)
-  (* Mark actor param as Lin so Perceus won't add incrc for field loads.
-     The actor is uniquely owned — FBIP can safely mutate it in-place.
-     Fields $d_dispatch (index 0) and $e_alive (index 1) must stay first in
-     alphabetical sort order so that GEP indices match the C runtime layout. *)
-  let actor_param = { Tir.v_name = "$actor";
-                      v_ty = Tir.TCon (actor_type_name, []);
-                      v_lin = Tir.Lin } in
-  let actor_atom  = Tir.AVar actor_param in
-
-  let lower_handler (h : Ast.actor_handler) : Tir.fn_def =
-    let fn_name = name ^ "_" ^ h.ah_msg.txt in
-
-    (* Handler params (after the implicit $actor) *)
-    let params : Tir.var list =
-      actor_param ::
-      List.map (fun (p : Ast.param) ->
-          { Tir.v_name = p.param_name.txt;
-            v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
-            v_lin = Tir.Unr }
-        ) h.ah_params
-    in
-
-    (* Load each state field from actor struct and let-bind it.
-       Build the continuation bottom-up: first build inner body, wrap in lets. *)
-
-    (* Step 1: lower the handler body (uses `state` variable) *)
-    let body_tir = lower_expr env h.ah_body in
-
-    let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
-    (* Step 2: let $result = body_tir *)
-    let result_var = actor_var "$result" state_ty in
-
-    (* Step 3: load new state fields from $result *)
-    let new_field_vars : (string * Tir.var) list =
-      List.map (fun (fname, fty) ->
-          let v = actor_var ("$nf_" ^ fname) fty in
-          (fname, v)
-        ) state_fields_sorted
-    in
-
-    (* Step 4: build EReuse args: $d_dispatch, $e_alive, then new state fields *)
-    let dispatch_var = actor_var "$d_dispatch_v" (Tir.TPtr Tir.TUnit) in
-    let alive_var    = actor_var "$e_alive_v" Tir.TBool in
-    (* In hot_reload mode, a separate state ptr var ($f_state_v) holds the state record *)
-    let state_ptr_var = actor_var "$f_state_v" (Tir.TCon (state_type_name, [])) in
-
-    (* Build the innermost expression: ESeq(EReuse(...), unit) *)
-    let reuse_expr =
-      if hot_reload then
-        (* Two-level reuse: first update state record in-place, then write new ptr into actor *)
-        let new_state_var = actor_var "$new_state" (Tir.TCon (state_type_name, [])) in
-        Tir.ELet (new_state_var,
-          Tir.EReuse (Tir.AVar state_ptr_var, Tir.TCon (state_type_name, []),
-                      List.map (fun (_, v) -> Tir.AVar v) new_field_vars),
-          Tir.ESeq (
-            Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []),
-                        [Tir.AVar dispatch_var; Tir.AVar alive_var; Tir.AVar new_state_var]),
-            Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))))
-      else
-        let reuse_args : Tir.atom list =
-          [Tir.AVar dispatch_var; Tir.AVar alive_var]
-          @ List.map (fun (_, v) -> Tir.AVar v) new_field_vars
-        in
-        Tir.ESeq (
-          Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []), reuse_args),
-          Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")))
-    in
-
-    (* Wrap: let $nf_fi = EField($result, fi) for each state field *)
-    let inner_with_new_fields =
-      List.fold_right (fun (fname, nfv) acc ->
-          Tir.ELet (nfv, Tir.EField (Tir.AVar result_var, fname), acc)
-        ) new_field_vars reuse_expr
-    in
-
-    (* Wrap: let $result = body *)
-    let inner_with_result =
-      Tir.ELet (result_var, body_tir, inner_with_new_fields)
-    in
-
-    (* Wrap: let state = ERecord [(fname, AVar load_var); ...] *)
-    let state_field_vars : (string * Tir.var) list =
-      List.map (fun (fname, fty) ->
-          (fname, actor_var ("$sf_" ^ fname) fty)
-        ) state_fields_sorted
-    in
-    let state_record_fields : (string * Tir.atom) list =
-      List.map (fun (fname, v) -> (fname, Tir.AVar v)) state_field_vars
-    in
-    let state_var = actor_var "state" state_ty in
-    let inner_with_state =
-      Tir.ELet (state_var, Tir.ERecord state_record_fields, inner_with_result)
-    in
-
-    (* Wrap: let $sf_fi = EField(actor/$f_state_v, fi) for each state field.
-       In hot_reload mode, first load the state ptr from actor, then load fields from it. *)
-    let inner_with_state_loads =
-      if hot_reload then
-        Tir.ELet (state_ptr_var, Tir.EField (actor_atom, Tir_names.actor_state_field),
-          List.fold_right (fun (fname, sfv) acc ->
-              Tir.ELet (sfv, Tir.EField (Tir.AVar state_ptr_var, fname), acc)
-            ) state_field_vars inner_with_state)
-      else
-        List.fold_right (fun (fname, sfv) acc ->
-            Tir.ELet (sfv, Tir.EField (actor_atom, fname), acc)
-          ) state_field_vars inner_with_state
-    in
-
-    (* Wrap: let $e_alive_v = EField(actor, "$e_alive") *)
-    let inner_with_alive =
-      Tir.ELet (alive_var, Tir.EField (actor_atom, Tir_names.actor_alive_field), inner_with_state_loads)
-    in
-
-    (* Wrap: let $d_dispatch_v = EField(actor, "$d_dispatch") *)
-    let full_body =
-      Tir.ELet (dispatch_var, Tir.EField (actor_atom, Tir_names.actor_dispatch_field), inner_with_alive)
-    in
-
-    { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body;
-      (* Actor message-handler glue: a regular top-level fn (called only via
-         the dispatch ECase below), not a lifted lambda/join-point/apply
-         wrapper — no RC/codegen consumer sniffs actor fn names for fn_kind
-         purposes, so FnNormal is the honest label (set per plan guidance:
-         "actor glue ... FnNormal with a comment"). *)
-      fn_kind = Tir.FnNormal }
-  in
-
-  let handler_fns = List.map lower_handler actor.actor_handlers in
-
-  (* ── 4. Dispatch function ────────────────────────────────── *)
-  (* fn Name_dispatch(actor:ptr, msg:ptr) : Unit =
-       ECase(AVar msg_as_msg_type, [
-         {br_tag=H1; br_vars=[p1,...]; br_body=EApp(Name_H1, [actor, p1,...])};
-         ...
-       ], None)
-  *)
-  let msg_var = actor_var "$msg" (Tir.TCon (msg_type_name, [])) in
-  let dispatch_branches : Tir.branch list =
-    List.map (fun (h : Ast.actor_handler) ->
-        (* Prefix each branch variable with the handler name to avoid name collisions
-           when multiple handlers have parameters with the same name (e.g. both
-           Increment(n) and Decrement(n) would otherwise both define %n.addr). *)
-        let br_vars : Tir.var list =
-          List.map (fun (p : Ast.param) ->
-              { Tir.v_name = "$" ^ h.ah_msg.txt ^ "_" ^ p.param_name.txt;
-                v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
-                v_lin = Tir.Unr }
-            ) h.ah_params
-        in
-        let handler_fn_var : Tir.var = {
-          v_name = name ^ "_" ^ h.ah_msg.txt;
-          v_ty = Tir.TFn (
-            [Tir.TPtr Tir.TUnit] @ List.map (fun v -> v.Tir.v_ty) br_vars,
-            Tir.TUnit);
-          v_lin = Tir.Unr
-        } in
-        let call_args : Tir.atom list =
-          actor_atom :: List.map (fun v -> Tir.AVar v) br_vars
-        in
-        { Tir.br_tag = h.ah_msg.txt;
-          br_vars;
-          br_body = Tir.EApp (handler_fn_var, call_args) }
-      ) actor.actor_handlers
-  in
-  let dispatch_fn : Tir.fn_def = {
-    fn_name   = name ^ Tir_names.actor_dispatch_suffix;
-    fn_params = [actor_param; msg_var];
-    fn_ret_ty = Tir.TUnit;
-    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
-    fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
-  } in
-
-  (* ── 5. Spawn function ───────────────────────────────────── *)
-  (* fn Name_spawn() : ptr =
-       let $init_state = <lowered init expr>
-       let $sf1 = EField($init_state, "sf1")
-       ...
-       let $actor = EAlloc(Name_Actor, [AVar dispatch_fn_ptr, true, $sf1, ...])
-       EAtom($actor)
-  *)
-  let dispatch_fn_ptr_var : Tir.var = {
-    v_name = name ^ Tir_names.actor_dispatch_suffix;
-    v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit], Tir.TUnit);
-    v_lin  = Tir.Unr;
-  } in
-  let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
-  let init_var = actor_var "$init_state" state_ty in
-  let init_field_vars : (string * Tir.var) list =
-    List.map (fun (fname, fty) ->
-        (fname, actor_var ("$init_" ^ fname) fty)
-      ) state_fields_sorted
-  in
-  (* In hot_reload mode, pass $init_state directly as the state ptr ($f_state).
-     In normal mode, unpack each state field and pass them individually. *)
-  let alloc_args : Tir.atom list =
-    if hot_reload then
-      [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true); Tir.AVar init_var]
-    else
-      [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true)]
-      @ List.map (fun (_, v) -> Tir.AVar v) init_field_vars
-  in
-  let alloc_expr = Tir.EAlloc (Tir.TCon (actor_type_name, []), alloc_args) in
-  let actor_result_var = actor_var "$spawned" (Tir.TPtr Tir.TUnit) in
-  let spawn_inner =
-    Tir.ELet (actor_result_var, alloc_expr, Tir.EAtom (Tir.AVar actor_result_var))
-  in
-  let spawn_with_fields =
-    if hot_reload then
-      spawn_inner
-    else
-      List.fold_right (fun (fname, ifv) acc ->
-          Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
-        ) init_field_vars spawn_inner
-  in
-  (* ── 5b. Supervision registration ───────────────────────────────── *)
-  (* If this actor declares a supervise block, call march_register_supervisor
-     from the spawn function body so the runtime knows the supervision strategy.
-     Encoding: OneForOne=0, OneForAll=1, RestForOne=2. *)
-  let strategy_int (s : Ast.restart_strategy) : int =
-    match s with
-    | Ast.OneForOne  -> 0
-    | Ast.OneForAll  -> 1
-    | Ast.RestForOne -> 2
-  in
-  let mk_reg_sup_call (spawned_atom : Tir.atom) (sc : Ast.supervise_config) : Tir.expr =
-    let reg_sup_var : Tir.var = {
-      v_name = "register_supervisor";
-      v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
-      v_lin  = Tir.Unr;
-    } in
-    Tir.EApp (reg_sup_var, [
-      spawned_atom;
-      Tir.ALit (Ast.LitInt (strategy_int sc.Ast.sc_strategy));
-      Tir.ALit (Ast.LitInt sc.Ast.sc_max_restarts);
-      Tir.ALit (Ast.LitInt sc.Ast.sc_window_secs);
-    ])
-  in
-  (* Wrap the spawn body: after allocating the actor, register supervision if needed. *)
-  let spawn_body_with_sup =
-    match actor.actor_supervise with
-    | None -> Tir.ELet (init_var, lower_expr env actor.actor_init, spawn_with_fields)
-    | Some sc ->
-      (* Replace the final EAtom($spawned) with:
-           let $reg_sup_result = register_supervisor($spawned, strat, max, window) in
-           EAtom($spawned)
-         We thread the $spawned var through by wrapping the full body. *)
-      let rec wrap_sup (e : Tir.expr) : Tir.expr =
-        match e with
-        | Tir.ELet (v, Tir.EAlloc (ty, args), rest) when v.Tir.v_name = "$spawned" ->
-          (* After allocating, call march_spawn, then register_supervisor, then return *)
-          Tir.ELet (v, Tir.EAlloc (ty, args),
-            Tir.ELet ({ v_name = "$sup_reg"; v_ty = Tir.TUnit; v_lin = Tir.Unr },
-              mk_reg_sup_call (Tir.AVar v) sc,
-              rest))
-        | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap_sup body)
-        | other -> other
-      in
-      Tir.ELet (init_var, lower_expr env actor.actor_init, wrap_sup spawn_with_fields)
-  in
-  let spawn_fn : Tir.fn_def = {
-    fn_name   = name ^ Tir_names.actor_spawn_suffix;
-    fn_params = [];
-    fn_ret_ty = Tir.TPtr Tir.TUnit;
-    fn_body   = spawn_body_with_sup;
-    fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
-  } in
-
-  (* Also register a state record type so EField accesses on the init state
-     record resolve the correct field indices (needed when there are multiple
-     state fields). *)
-  let state_record = Tir.TDRecord (name ^ Tir_names.actor_state_suffix, state_fields_sorted) in
-
-  let type_defs = [state_record; msg_variant; actor_record] in
-  let fn_defs   = handler_fns @ [dispatch_fn; spawn_fn] in
-  (type_defs, fn_defs)
+(** Install this file's [lower_expr] into [Lower_match]'s forward ref.
+    Breaks the [lower.ml] <-> [Lower_match] mutual-recursion cycle (see
+    [Lower_match]'s module doc): [lower_expr]'s [EBlock]/[ELet] and
+    [EMatch] arms above call [Lower_match.collect_pat_names] /
+    [Lower_match.lower_match] directly (forward calls, fine at compile
+    time since [Lower_match] is an earlier compilation unit); the reverse
+    edge ([lower_branch_body_with_pat] and the guarded-match path in
+    [lower_match] calling back into THIS [lower_expr]) has to go through
+    this ref instead, since [Lower_match] cannot name [Lower.lower_expr]
+    directly without creating a real dependency cycle. Set exactly once at
+    module-load time — the same idiom as [_ensure_module_lowered] below. *)
+let () = Lower_match.install_lower_expr lower_expr
 
 (** Built-in type definitions that must always be present in TIR so that
     their constructors have stable tag assignments in the LLVM emitter.
@@ -2309,13 +977,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the dispatch entry — the function is already precompiled. *)
                 ignore mdef;
                 if lower_bodies then begin
-                  let fn = lower_fn_def env mdef in
+                  let fn = Lower_decls.lower_fn_def env mdef in
                   (* If this impl is inside a module, qualify any references to
                      module-local functions (e.g. bigint_eq_impl → BigInt.bigint_eq_impl)
                      so that mono can find them in fn_table (which uses the
                      prefixed names from lower_stdlib_mod_decls). *)
                   let fn = if mod_prefix <> "" && direct_fn_names <> [] then
-                    rename_tir_vars mod_prefix direct_fn_names fn
+                    Lower_decls.rename_tir_vars mod_prefix direct_fn_names fn
                   else fn in
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
@@ -2395,7 +1063,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       match d with
       | Ast.DFn (def, _) ->
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
-          let fn = lower_fn_def env def in   (* evaluate before reading !fns *)
+          let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
           fns := fn :: !fns
         end
       | _ -> ()
@@ -2422,12 +1090,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            The mangled versions (foo$N) are the real implementations used by TIR.
            Dispatchers are only needed by the interpreter for VMultiarity dispatch. *)
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
-          let fn = lower_fn_def env def in   (* evaluate before reading !fns *)
+          let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
       | Ast.DAlwaysLinearType (_, name, params, td, _) ->
-        (match lower_type_def name params td with
+        (match Lower_decls.lower_type_def name params td with
          | Some td' -> types := td' :: !types
          | None -> ())
       | Ast.DLet (_, b, _) ->
@@ -2443,7 +1111,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            top_lets := (v, rhs) :: !top_lets
          | _ -> ())
       | Ast.DActor (_, name, actor_def, _) ->
-        let (new_types, new_fns) = lower_actor env ~hot_reload name.txt actor_def in
+        let (new_types, new_fns) = Lower_actor.lower_actor env ~hot_reload name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
@@ -2476,13 +1144,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
-                let fn = lower_fn_def mod_env def in
-                let fn = rename_tir_vars prefix direct_fn_names fn in
+                let fn = Lower_decls.lower_fn_def mod_env def in
+                let fn = Lower_decls.rename_tir_vars prefix direct_fn_names fn in
                 fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
                 let qtname = { tname with txt = prefix ^ tname.txt } in
-                (match lower_type_def qtname params td with
+                (match Lower_decls.lower_type_def qtname params td with
                  | Some td' -> types := td' :: !types
                  | None -> ())
               | Ast.DMod (sub_name, _, sub_decls, _) ->
@@ -2563,30 +1231,16 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    Handler bodies reference the module's private helpers by short
                    name; rename_tir_vars rewrites them to their qualified names so
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
-                let (new_types, new_fns) = lower_actor mod_env ~hot_reload name.txt actor_def in
-                let renamed_fns = List.map (rename_tir_vars prefix direct_fn_names) new_fns in
+                let (new_types, new_fns) = Lower_actor.lower_actor mod_env ~hot_reload name.txt actor_def in
+                let renamed_fns = List.map (Lower_decls.rename_tir_vars prefix direct_fn_names) new_fns in
                 types := List.rev_append new_types !types;
                 fns   := List.rev_append renamed_fns !fns
               | Ast.DExtern (edef, _) ->
-                List.iter (fun (ef : Ast.extern_fn) ->
-                    let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
-                    let ret = lower_ty ef.ef_ret_ty in
-                    let c_name = match ef.ef_symbol with
-                      | Some s -> s
-                      | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
-                    let js_sym = match ef.ef_symbol with
-                      | Some s -> s
-                      | None   -> ef.ef_name.txt in
-                    externs := { Tir.ed_march_name = ef.ef_name.txt;
-                                 ed_c_name = c_name;
-                                 ed_lib_name = edef.ext_lib_name;
-                                 ed_js_sym = js_sym;
-                                 ed_params = params;
-                                 ed_consumed = ef.ef_param_consumed;
-                                 ed_blocking = ef.ef_blocking;
-                                 ed_raises = ef.ef_raises;
-                                 ed_ret = ret } :: !externs
-                  ) edef.ext_fns
+                (* Verified byte-identical (module leading whitespace) to the
+                   top-level DExtern arm below — both now share
+                   [Lower_decls.lower_extern_fns] rather than duplicating the
+                   extern-lowering logic. *)
+                externs := List.rev_append (Lower_decls.lower_extern_fns edef edef.ext_fns) !externs
               | _ -> ()
             ) decls);
           (* Save this module's aliases so the later test/setup lowering pass
@@ -2596,25 +1250,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         in
         lower_mod_decls env (mod_name.txt ^ ".") inner_decls
       | Ast.DExtern (edef, _) ->
-        List.iter (fun (ef : Ast.extern_fn) ->
-            let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
-            let ret = lower_ty ef.ef_ret_ty in
-            let c_name = match ef.ef_symbol with
-              | Some s -> s
-              | None   -> edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
-            let js_sym = match ef.ef_symbol with
-              | Some s -> s
-              | None   -> ef.ef_name.txt in
-            externs := { Tir.ed_march_name = ef.ef_name.txt;
-                         ed_c_name = c_name;
-                         ed_lib_name = edef.ext_lib_name;
-                         ed_js_sym = js_sym;
-                         ed_params = params;
-                         ed_consumed = ef.ef_param_consumed;
-                         ed_blocking = ef.ef_blocking;
-                         ed_raises = ef.ef_raises;
-                         ed_ret = ret } :: !externs
-          ) edef.ext_fns
+        (* Verified byte-identical to the nested [lower_mod_decls] DExtern
+           arm above (module leading whitespace) — dedup per Task 9's
+           boundary. *)
+        externs := List.rev_append (Lower_decls.lower_extern_fns edef edef.ext_fns) !externs
       | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
       | Ast.DProtocol _ | Ast.DSig _
       | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DApp _ | Ast.DDeriving _ | Ast.DSatisfy _
@@ -2679,121 +1318,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DDescribe _ | Ast.DOpts _ -> ()
     ) m.mod_decls;
   (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
-     them to TIR functions so they can be compiled into a test-runner binary. *)
+     them to TIR functions so they can be compiled into a test-runner binary.
+     [Lower_tests.run] appends to [fns]/[test_pairs] exactly as the inline
+     closures used to (see that module's doc for the closure→parameter
+     extraction rationale). *)
   let test_pairs = ref [] in   (* (fn_name, display_name) in declaration order *)
-  if test_mode then begin
-    let test_counter = ref 0 in
-    (* Qualify references to module-local fns/lets inside a lowered test or
-       setup body.  Test blocks written inside `mod X do ... end` call the
-       module's own (often private) helpers UNQUALIFIED, but those helpers
-       are emitted as "X.helper" — without the rename the test fn links
-       against an undefined bare symbol.  Same treatment as impl-method
-       bodies in collect_iface_impls. *)
-    let qualify_locals mod_prefix direct_fn_names fn =
-      if mod_prefix <> "" && direct_fn_names <> [] then
-        rename_tir_vars mod_prefix direct_fn_names fn
-      else fn
-    in
-    let direct_names_of decls =
-      List.filter_map (function
-        | Ast.DFn (def, _) -> Some def.fn_name.txt
-        | Ast.DLet (_, b, _) ->
-          (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
-        | _ -> None) decls
-    in
-    (* Lower a test-body expression to a zero-arg TIR function. *)
-    let lower_test_body test_env ~mod_prefix ~direct_fn_names display_name body =
-      let fn_name = Tir_names.test_fn_name !test_counter in
-      incr test_counter;
-      (* Register the enclosing module's own function names as current-module
-         locals while lowering the test body, so [resolve_use_alias] does NOT
-         rewrite a reference to a local function (e.g. a test-file-local
-         [fn list_len(lst)]) into an import alias of the same bare name (e.g. the
-         2-arg stdlib [Bytes.list_len]).  Without this the local def is shadowed
-         by the import BEFORE [qualify_locals] can prefix it, producing a call to
-         the wrong-arity stdlib function (arg dropped → uninitialized param). *)
-      let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
-      let fn : Tir.fn_def = {
-        fn_name;
-        fn_params = [];
-        fn_ret_ty = Tir.TCon ("Unit", []);
-        fn_body   = body';
-        (* `__march_test_N__` runner wrapper: an ordinary zero-arg top-level
-           fn from every RC/codegen consumer's perspective (dce.ml's root-set
-           detection and llvm_emit's --test driver key off Tir_names.test_fn_name
-           directly, not fn_kind), so FnNormal is honest here. *)
-        fn_kind   = Tir.FnNormal;
-      } in
-      let fn = qualify_locals mod_prefix direct_fn_names fn in
-      fns := fn :: !fns;
-      test_pairs := (fn_name, display_name) :: !test_pairs
-    in
-    (* Recursive collector: descends into DDescribe and DMod blocks.
-       [prefix] builds the human-readable display name; [mod_prefix] /
-       [direct_fn_names] track the enclosing module for symbol renaming.
-       [test_env] carries the CURRENT module's [current_module_aliases] —
-       re-loaded per [DMod] descent from [_module_alias_snapshots] below,
-       since this whole pass runs after [env]'s own module-alias scoping
-       (in [lower_mod_decls] above) has already unwound. *)
-    let rec collect_tests test_env prefix ~mod_prefix ~direct_fn_names decls =
-      List.iter (fun d ->
-        match d with
-        | Ast.DTest (tdef, _) ->
-          let display = if prefix = "" then tdef.Ast.test_name
-                        else prefix ^ " " ^ tdef.Ast.test_name in
-          lower_test_body test_env ~mod_prefix ~direct_fn_names display tdef.Ast.test_body
-        | Ast.DDescribe (label, inner, _) ->
-          let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
-          collect_tests test_env new_prefix ~mod_prefix ~direct_fn_names inner
-        | Ast.DSetup (body, _) ->
-          (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
-          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
-          let fn : Tir.fn_def = {
-            fn_name   = Tir_names.setup_fn_name;
-            fn_params = [];
-            fn_ret_ty = Tir.TCon ("Unit", []);
-            fn_body   = body';
-            fn_kind   = Tir.FnNormal;  (* `__march_setup__` — see test-runner comment above *)
-          } in
-          fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
-        | Ast.DSetupAll (body, _) ->
-          let body' = with_current_module_fns direct_fn_names (fun () -> lower_expr test_env body) in
-          let fn : Tir.fn_def = {
-            fn_name   = Tir_names.setup_all_fn_name;
-            fn_params = [];
-            fn_ret_ty = Tir.TCon ("Unit", []);
-            fn_body   = body';
-            fn_kind   = Tir.FnNormal;  (* `__march_setup_all__` — see test-runner comment above *)
-          } in
-          fns := qualify_locals mod_prefix direct_fn_names fn :: !fns
-        | Ast.DMod (mname, _, inner_decls, _) ->
-          let new_mod_prefix = mod_prefix ^ mname.txt ^ "." in
-          (* Re-load this module's import aliases (saved during lower_mod_decls)
-             so the test bodies inside resolve unqualified names via the module's
-             own imports — e.g. `close` → Connection.close, not the global
-             Db.close. A fresh [env] value (not a mutation of [test_env]), so
-             sibling [DMod]s at this level are unaffected — matching the old
-             code's save/restore around [_current_module_aliases] on the
-             normal path. NOTE the old dance here was NOT [Fun.protect]-
-             guarded (unlike lower_mod_decls'): a throw escaping this
-             recursion used to leave the ref dirty, which the env version
-             does not reproduce — an UNOBSERVABLE difference (see the
-             [env.current_module_aliases] field doc for the full trace:
-             no reader outside [lower_module]'s dynamic extent, and the
-             next call's entry preamble reset the ref before any read). *)
-          let inner_env = match Hashtbl.find_opt !_module_alias_snapshots new_mod_prefix with
-            | Some snap -> { test_env with current_module_aliases = snap }
-            | None -> test_env
-          in
-          collect_tests inner_env prefix
-            ~mod_prefix:new_mod_prefix
-            ~direct_fn_names:(direct_names_of inner_decls)
-            inner_decls
-        | _ -> ()
-      ) decls
-    in
-    collect_tests env "" ~mod_prefix:"" ~direct_fn_names:(direct_names_of m.mod_decls) m.mod_decls
-  end;
+  if test_mode then
+    Lower_tests.run env fns test_pairs m.mod_decls;
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
      top_lets to inject.  This avoids duplicate alloca names in mutco
