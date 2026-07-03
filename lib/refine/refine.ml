@@ -11,13 +11,41 @@ type outcome =
 (* None  = not yet attempted; Some None = attempted, z3 absent; Some (Some s) = live. *)
 let shared_solver : Solver.t option option ref = ref None
 
+(* Kill + reap the shared z3 child and forget it; a later discharge lazily
+   respawns.  Call at the end of a solving scope (the compiler calls it after
+   its refinement passes); also registered as an at_exit on first spawn so
+   every exit path — including `exit 1` on type errors — reaps the child. *)
+let shutdown () : unit =
+  match !shared_solver with
+  | Some (Some s) ->
+      shared_solver := None;
+      Solver.close s
+  | _ -> ()
+
+let at_exit_registered = ref false
+
 let get_solver () : Solver.t option =
   match !shared_solver with
   | Some s -> s
   | None ->
       let s = Solver.create () in
       shared_solver := Some s;
+      (match s with
+       | Some _ when not !at_exit_registered ->
+           at_exit_registered := true;
+           at_exit shutdown
+       | _ -> ());
       s
+
+(* One check against a live solver.  A broken pipe / EOF / garbage verdict all
+   mean the z3 child is dead or wedged: reap it and clear the slot so the
+   caller can respawn (supervised restart). *)
+let try_check ~preamble (s : Solver.t) (vc : Smt.vc) : Solver.result option =
+  try Some (Solver.check ~preamble s vc)
+  with End_of_file | Sys_error _ | Failure _ | Unix.Unix_error (_, _, _) ->
+    shared_solver := None;
+    Solver.close s;
+    None
 
 let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   let key = Vc_cache.key_of_vc ~preamble vc in
@@ -25,12 +53,30 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
     match Vc_cache.lookup ~root key with
     | Some r -> r
     | None -> (
-        match get_solver () with
-        | None -> Solver.Unknown (* z3 unavailable; do not cache *)
-        | Some s ->
-            let r = Solver.check ~preamble s vc in
+        let checked =
+          match get_solver () with
+          | None -> None (* z3 unavailable; do not cache *)
+          | Some s -> (
+              match try_check ~preamble s vc with
+              | Some r -> Some r
+              | None -> (
+                  (* Solver died mid-run: restart once.  If the replacement
+                     also fails, mark z3 unavailable for the rest of the run
+                     rather than respawning per VC. *)
+                  match get_solver () with
+                  | None -> None
+                  | Some s2 -> (
+                      match try_check ~preamble s2 vc with
+                      | Some r -> Some r
+                      | None ->
+                          shared_solver := Some None;
+                          None)))
+        in
+        match checked with
+        | Some r ->
             Vc_cache.store ~root key r;
-            r)
+            r
+        | None -> Solver.Unknown)
   in
   match result with
   | Solver.Unsat -> Verified
