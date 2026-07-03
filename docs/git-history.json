@@ -1,18 +1,122 @@
 [
   {
+    "hash": "84b422e04588d0ff3872f0470cef0dfac6c4c537",
+    "short_hash": "84b422e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T23:16:00-04:00",
+    "message": "Merge main into claude/hopeful-kapitsa-9f49f3: wave-2 testing infra x main record_put/CSRF work\n\nUnion-merged append-only specs; converted main's new\ntest_compiled_record_put_large_even_int to the W2.0 loud-skip helpers\n(find_main_exe + compile_march_or_skip) per the whole-branch review.\nVerified: six runners exit 0 (incl. IR gate over main's record_put\nemitter changes; zero TIR snapshot churn).",
+    "files_changed": 0
+  },
+  {
+    "hash": "62d907e3f631d8cc8c4811e281ad139d0cfed7d4",
+    "short_hash": "62d907e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T22:59:54-04:00",
+    "message": "docs(specs): record Wave 2 (testing infrastructure + audit findings); snapshot doc corrections",
+    "files_changed": 3
+  },
+  {
+    "hash": "62d907e3f631d8cc8c4811e281ad139d0cfed7d4",
+    "short_hash": "62d907e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T22:59:54-04:00",
+    "message": "docs(specs): record Wave 2 (testing infrastructure + audit findings); snapshot doc corrections",
+    "files_changed": 3
+  },
+  {
+    "hash": "dfcd19d7c8607debc5e31d8d20cbe7d4735ad457",
+    "short_hash": "dfcd19d",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T22:40:24-04:00",
+    "message": "test(tir): golden snapshot infrastructure — post-lower + post-perceus dumps, UPDATE_SNAPSHOTS regen (W2.2)",
+    "files_changed": 48
+  },
+  {
+    "hash": "59a9fb9f8efc157e56ff9b58bd32731d8279b389",
+    "short_hash": "59a9fb9",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T21:57:04-04:00",
+    "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
+    "files_changed": 6
+  },
+  {
+    "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
+    "short_hash": "d685bc6",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T21:57:04-04:00",
+    "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
+    "files_changed": 6
+  },
+  {
+    "hash": "43faba9fd31a41071039690cfacf5777de4d3df3",
+    "short_hash": "43faba9",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T21:57:04-04:00",
+    "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
+    "files_changed": 6
+  },
+  {
+    "hash": "867d5a3392acf3583832ce31e371ab628485b94f",
+    "short_hash": "867d5a3",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T21:25:08-04:00",
+    "message": "test(harness): in-repo failures fail loudly — no silent skips for link/compile errors; JIT gate canary (W2.0)",
+    "files_changed": 5
+  },
+  {
+    "hash": "5de438e89f79c824a5b6802e8d0fd79059c1d508",
+    "short_hash": "5de438e",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T20:30:18-04:00",
+    "message": "fix(llvm): march_-prefixed user locals must not hit the extern-address arm (B9 regression)\n\nThe B9 fix resurrected emit_atom's march_-extern arm without the var_slot\nshadow guard its sibling arms carry; a user local named march_* (legal\nidentifier) was emitted as a bare @global — 'use of undefined value\n@march_bin' — breaking any program with such a local (first hit:\nbastion forge/console.march, blocking forgepm builds). Native fixture\nmarch_prefixed_local pins the local-load path.",
+    "files_changed": 4
+  },
+  {
+    "hash": "c28595bbb09ba9d1400d994b47a3e8d61c0a9a50",
+    "short_hash": "c28595b",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T17:13:59-04:00",
+    "message": "Merge branch 'claude/compassionate-wiles-64e8e2': record builtin uniform value handoff\n\nReconciled with Wave 1's B5 fix (march_record_update_dyn), which landed\non main first and supersedes this branch's chained-record_put lowering\nfor erased-base { r with } updates:\n\n- Kept main's EUpdate -> march_record_update_dyn lowering; dropped the\n  branch's chained-put fallback.\n- Kept the branch's uniform (tagged) record_put value handoff and\n  rec_field_norm_in 'i'-case delegation to rec_field_norm_uniform.\n- Switched record_update_dyn's emit site from natural to uniform scalar\n  repr — it inherited record_put's natural convention and therefore the\n  same crash: any even Int >= 4096 was sniffed as a heap pointer and\n  march_incrc dereferenced the integer's value.  The runtime needed no\n  change (it normalizes through the shared rec_field_norm_in).\n\nVerified on the merged tree: both 100k-iteration repros print the\nclosed-form sum 15000350000 (record_put chain AND { with } via\nrecord_update_dyn, repeat-run stable); regression test case 27 green;\nsuites: compiler 384, eval 227, codegen 337, stdlib 792 (incl. Slow),\nstdlib_march 53.",
+    "files_changed": 0
+  },
+  {
+    "hash": "a0d29724de5c975236d798e10ced5e746577970c",
+    "short_hash": "a0d2972",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T16:21:03-04:00",
+    "message": "fix(mono,llvm): specialize interface impls with arg substitution; forbid Iface$ names in unqualified fallback (println-of-list miscompile)",
+    "files_changed": 5
+  },
+  {
+    "hash": "ffe6fba8960c7f2a8169cdfc6121f4cc4bf9de43",
+    "short_hash": "ffe6fba",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T16:21:03-04:00",
+    "message": "fix(mono,llvm): specialize interface impls with arg substitution; forbid Iface$ names in unqualified fallback (println-of-list miscompile)",
+    "files_changed": 5
+  },
+  {
+    "hash": "f65cec9544b990cc8974798df28ca36d918cbe21",
+    "short_hash": "f65cec9",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T15:22:38-04:00",
+    "message": "docs(CLAUDE): document user-global shared dune cache (escape hatch + trim); record measured cache win in spec",
+    "files_changed": 2
+  },
+  {
+    "hash": "8290a53de14d5e597e9bba10759ed2994ad7f5d8",
+    "short_hash": "8290a53",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-02T15:20:29-04:00",
+    "message": "docs: spec for shared dune cache to cut cross-worktree rebuild contention",
+    "files_changed": 1
+  },
+  {
     "hash": "ff444c29001747c9ed3076c858c4eaf8e21925e9",
     "short_hash": "ff444c2",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T15:15:01-04:00",
     "message": "Merge main (extra_fns B11-sibling fix): union JIT tests; keep 4-file JIT runtime list",
-    "files_changed": 0
-  },
-  {
-    "hash": "3cd0559b30caa478c3cea3afea965be52417adaa",
-    "short_hash": "3cd0559",
-    "author": "Matthew Gilliam",
-    "date": "2026-07-02T15:10:07-04:00",
-    "message": "Merge main into claude/hopeful-kapitsa-9f49f3: wave-1 P0 fixes x main repr-audit/erased-Option work\n\nResolution rule per final whole-branch review: main's niche/repr logic wins,\nthis branch's ctx.type_defs plumbing wins (cur_type_defs global stays deleted;\nmain's repr-audit machinery and erased-TVar niche payload logic retained and\nconverted to ctx.type_defs). Union-merged append-only specs records. Verified:\nfive runners exit 0; tree_transform/list_ops/binary_trees/mutual_recursion\ncompiled benchmarks correct.",
     "files_changed": 0
   },
   {
@@ -72,16 +176,16 @@
     "files_changed": 3
   },
   {
-    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
-    "short_hash": "a9b5663",
+    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
+    "short_hash": "b32d856",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
     "files_changed": 3
   },
   {
-    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
-    "short_hash": "b32d856",
+    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
+    "short_hash": "a9b5663",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
@@ -2864,16 +2968,16 @@
     "files_changed": 1
   },
   {
-    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
-    "short_hash": "95c4365",
+    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
+    "short_hash": "76126ef",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
     "files_changed": 1
   },
   {
-    "hash": "76126effbfbefe689a49520b02b5022e2438fdfd",
-    "short_hash": "76126ef",
+    "hash": "95c4365968dffb371bd84c2ed9d79632d7a8b90f",
+    "short_hash": "95c4365",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:44:10-04:00",
     "message": "fix(zed): use Zed's injection capture names (@content, @language)\n\nZed uses non-standard tree-sitter capture names: @content instead of\n@injection.content, and @language instead of @injection.language.\nThe standard names broke all syntax highlighting.",
@@ -2920,16 +3024,16 @@
     "files_changed": 1
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -2984,16 +3088,16 @@
     "files_changed": 7
   },
   {
-    "hash": "58d9def0a67218538caa00c08ef290249b824764",
-    "short_hash": "58d9def",
+    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
+    "short_hash": "300c62c",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
     "files_changed": 8
   },
   {
-    "hash": "300c62cb8fa64130f26e17b4efcfa6d8d969a425",
-    "short_hash": "300c62c",
+    "hash": "58d9def0a67218538caa00c08ef290249b824764",
+    "short_hash": "58d9def",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T18:12:43-04:00",
     "message": "feat(tree-sitter,lsp): add sigil expression support to grammar and LSP\n\nTree-sitter: add sigil_expression rule using external scanner for ~X prefix\ntokens (avoids lexer conflict with type_identifier). Includes test corpus\nand syntax highlighting queries.\n\nLSP: add ~ as completion trigger character and sigil snippet completions\n(~H for HTML templates, ~R for regex, ~J for JSON).",
