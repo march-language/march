@@ -35,28 +35,140 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
   { Tir.v_name = Printf.sprintf "$rc_%d" !_rc_fresh_ctr;
     v_ty = ty; v_lin = Tir.Unr }
 
-(* ── Borrow map — module-level state ─────────────────────────────────────── *)
+(* ── Env — immutable state threaded through insert_rc_expr (Wave 3 Task 4) ──
 
-(** The current module's borrow map, set at the start of [perceus] and cleared
-    on exit.  Using a ref (rather than threading it through every helper) keeps
-    the helpers' signatures unchanged and avoids pervasive API churn. *)
-let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
+   Replaces the module-level mutable refs that a prior version of this file
+   used.  Each field below documents the ref it replaces and that ref's
+   scoping discipline, which the corresponding field preserves EXACTLY:
 
-(** Module type definitions, used to query whether a matched scrutinee's
-    constructor shares its heap object with the bound payload (newtype/niche
-    representations). *)
-let _type_defs : Tir.type_def list ref = ref []
+   - Module-scoped fields ([borrow_map], [type_defs], [fn_kinds],
+     [extern_names]): set once per [perceus] run, read-only for the whole
+     traversal.  No save/restore needed — every [insert_rc_expr] call for
+     every function in the module sees the identical value.
+   - Function-scoped fields ([current_fn_name], [closure_fvs], [actor_sent]):
+     set once per top-level [insert_rc] call, constant across that function's
+     entire [insert_rc_expr] traversal (nested [ELetRec] closures reuse the
+     SAME env — they are not separately entered via [insert_rc], matching the
+     old refs' behavior of never being reset mid-traversal for nested fns).
+   - Subtree-scoped fields ([borrowed_field_vars], [var_ctx]): change as the
+     traversal descends into [ELet] bindings / [ECase] branches.  Each
+     recursive call receives an [env] with the field already updated
+     (`{ env with field = ... }`), which is exactly the save/restore dance the
+     old code performed by hand — the "restore" is implicit because the
+     caller's own [env] value is never touched; only the callee's copy
+     differs. *)
+type env = {
+  (* Module-scoped: constant for the whole [perceus] run. *)
+  borrow_map : Borrow.borrow_map;
+      (** The current module's borrow map (was [_borrow_map]). *)
+  type_defs : Tir.type_def list;
+      (** Module type definitions, used to query whether a matched
+          scrutinee's constructor shares its heap object with the bound
+          payload (newtype/niche representations).  Was [_type_defs]. *)
+  fn_kinds : Tir.fn_kind StringMap.t;
+      (** name → [Tir.fn_kind] for every fn_def in the current module
+          (Wave 3 Task 3).  [is_apply_fn] (below) is a CALL-SITE check — it
+          only has the callee's [Tir.var] name, not its defining [fn_def] —
+          so this table is the bridge from "the name I'm looking at" to
+          "the honest role its definition was tagged with".  Used ONLY for
+          the transitional assert that [Tir_names.is_apply_fn]'s
+          name-sniffing answer still agrees with the flag; the callee's
+          actual RC-relevant DECISION still goes through [is_apply_fn]
+          (unchanged) this chunk — see the plan's "assertions come out in
+          Chunk 2" note.  Was [_fn_kinds]. *)
+  extern_names : StringSet.t;
+      (** Names of user-defined extern (FFI) functions.  These are called via
+          [ECallPtr] (not [EApp]) but, unlike opaque closures, their
+          parameter ownership is known from the borrow map (seeded in
+          [Borrow.infer_module]).  Used in the [ECallPtr] case to apply
+          borrow-aware RC — borrowed args are not consumed by the callee, so
+          the caller frees dead-after args.  Was [_extern_names]. *)
+  (* Function-scoped: constant across one function's traversal. *)
+  current_fn_name : string;
+      (** Name of the function currently being processed by [insert_rc].
+          Used in the EApp case to detect self-recursive calls, so that
+          ESeq(EApp(self,...), EDecRC(arg)) is left intact for TCO to handle
+          (the EDecRC becomes dead code after the back-edge is emitted).
+          Was [_current_fn_name]. *)
+  closure_fvs : StringSet.t;
+      (** Closure free-variable names for the function currently being
+          processed.  Variables in this set are bound by [let fv =
+          $clo.$fvN] in apply functions.  They are OWNED by the closure, not
+          by the apply function body.  The closure's RC keeps them alive for
+          the duration of every call, so:
+          - They must NOT be decreffed at last use (suppresses
+            post_dec_vars).
+          - They must NOT be increffed when passed as arguments (suppresses
+            find_inc_vars).
+          - A dead binding of such a variable must NOT emit EDecRC / EFree.
+          Removing these RC ops also eliminates the data race between the
+          non-atomic [march_decrc_local] in the generated apply function and
+          the atomic [march_incrc] in the C HTTP runtime's per-request
+          incref loop.  Was [_closure_fvs]. *)
+  actor_sent : StringSet.t;
+      (** Variables that appear as message arguments to [send()] in the
+          current function.  Values in this set use atomic RC operations.
+          Was [_actor_sent]. *)
+  (* Subtree-scoped: updated on descent into ELet bindings / ECase branches. *)
+  borrowed_field_vars : StringSet.t;
+      (** Variables that were extracted from a borrowed record/tuple
+          parameter via EField and are therefore themselves borrowed
+          references.  Perceus must not emit EDecRC, EIncRC, or post-call
+          EDecRC for these variables:
+          - The record owner is responsible for the fields' RC — the callee
+            only reads them.
+          - Emitting post_dec_vars for such a variable would underflow the
+            field string's RC after every call inside a loop that re-uses
+            the same record (the "process + use_cfg" RC underflow pattern).
+          - Emitting EIncRC at non-last-use (the EAtom non-last-use path)
+            would inflate the RC without a matching decrement, leaking the
+            value.
 
-(** name → [Tir.fn_kind] for every fn_def in the current module, set at the
-    start of [perceus] (Wave 3 Task 3). [is_apply_fn] (below) is a CALL-SITE
-    check — it only has the callee's [Tir.var] name, not its defining
-    [fn_def] — so this table is the bridge from "the name I'm looking at" to
-    "the honest role its definition was tagged with". Used ONLY for the
-    transitional assert that [Tir_names.is_apply_fn]'s name-sniffing answer
-    still agrees with the flag; the callee's actual RC-relevant DECISION
-    still goes through [is_apply_fn] (unchanged) this chunk — see the plan's
-    "assertions come out in Chunk 2" note. *)
-let _fn_kinds : Tir.fn_kind StringMap.t ref = ref StringMap.empty
+          Populated dynamically in [insert_rc_expr]'s ELet case when the
+          binding is of the form [let v = src.field] where [src] is itself
+          in [live_after] (the record outlives this binding) or [src] is
+          already in [borrowed_field_vars] (alias chain propagation: [let v
+          = borrowed_field]).  Each ELet scope descends with its own updated
+          copy of this field so inner bindings do not contaminate the
+          caller's [env] (was: saved/restored via [_borrowed_field_vars]). *)
+  var_ctx : Tir.var StringMap.t;
+      (** Variable context: maps each in-scope variable name to its
+          [Tir.var] record, giving the type needed to emit correct
+          EDecRC/EIncRC ops.
+          - Populated in [insert_rc] with the current function's parameters.
+          - Extended in [insert_rc_expr]'s ELet case for each let-bound
+            variable (descending with an updated copy to handle shadowing
+            correctly).
+          Used by the ECase cross-branch dead-variable EDecRC pass:
+          variables that are in scope at a case expression and live in
+          *some* branches but dead in *others* need EDecRC in the dead
+          branches.  Without this, owned parameters whose last use is
+          inside an ECase arm do not get decremented in arms where they are
+          unused — causing both reference leaks and (via RC imbalance in
+          complex HOF call chains) use-after-free crashes.
+
+          Example: [Map.node_fold(..., f)] where [f : TFn] is unused in the
+          HEmpty arm.  Without cross-branch EDecRC, [f] leaks in every
+          HEmpty arm visit.  In deep HAMTs this accumulates enough
+          misbalance to produce a use-after-free when the go-closure's
+          function-pointer slot is misread as a Bytes payload pointer,
+          triggering the observed march_decrc crash.  Was [_var_ctx]. *)
+}
+
+(** The env used before any module has been processed / after [perceus]
+    finishes with a function — mirrors the old refs' initial values
+    ([Borrow.empty], [[]], [StringMap.empty], [StringSet.empty], ...). *)
+let empty_env : env = {
+  borrow_map = Borrow.empty;
+  type_defs = [];
+  fn_kinds = StringMap.empty;
+  extern_names = StringSet.empty;
+  current_fn_name = "";
+  closure_fvs = StringSet.empty;
+  actor_sent = StringSet.empty;
+  borrowed_field_vars = StringSet.empty;
+  var_ctx = StringMap.empty;
+}
 
 (** True when a value of type [ty] shares its heap object with the payload of
     its single relevant constructor — i.e. newtype- (S(x)≡x) or niche-
@@ -65,72 +177,10 @@ let _fn_kinds : Tir.fn_kind StringMap.t ref = ref StringMap.empty
     IS the scrutinee object.  Freeing the scrutinee separately would therefore
     double-free the object the branch variable now owns — the cause of the
     Toml get_str / nested-Option RC underflow. *)
-let scrutinee_shares_payload_storage (ty : Tir.ty) : bool =
-  match Repr.repr_of_ty !_type_defs ty with
+let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
+  match Repr.repr_of_ty env.type_defs ty with
   | Repr.Newtype _ | Repr.Niche _ -> true
   | Repr.Boxed -> false
-
-(** Names of user-defined extern (FFI) functions.  These are called via
-    [ECallPtr] (not [EApp]) but, unlike opaque closures, their parameter
-    ownership is known from the borrow map (seeded in [Borrow.infer_module]).
-    We use this set in the [ECallPtr] case to apply borrow-aware RC — borrowed
-    args are not consumed by the callee, so the caller frees dead-after args. *)
-let _extern_names : StringSet.t ref = ref StringSet.empty
-
-(** Name of the function currently being processed by [insert_rc].
-    Used in the EApp case to detect self-recursive calls, so that
-    ESeq(EApp(self,...), EDecRC(arg)) is left intact for TCO to handle
-    (the EDecRC becomes dead code after the back-edge is emitted). *)
-let _current_fn_name : string ref = ref ""
-
-(** Closure free-variable names for the function currently being processed.
-    Variables in this set are bound by [let fv = $clo.$fvN] in apply functions.
-    They are OWNED by the closure, not by the apply function body.
-    The closure's RC keeps them alive for the duration of every call, so:
-    - They must NOT be decreffed at last use (suppresses post_dec_vars).
-    - They must NOT be increffed when passed as arguments (suppresses find_inc_vars).
-    - A dead binding of such a variable must NOT emit EDecRC / EFree.
-    Removing these RC ops also eliminates the data race between the non-atomic
-    [march_decrc_local] in the generated apply function and the atomic
-    [march_incrc] in the C HTTP runtime's per-request incref loop. *)
-let _closure_fvs : StringSet.t ref = ref StringSet.empty
-
-(** Variables that were extracted from a borrowed record/tuple parameter via
-    EField and are therefore themselves borrowed references.  Perceus must not
-    emit EDecRC, EIncRC, or post-call EDecRC for these variables:
-    - The record owner is responsible for the fields' RC — the callee only
-      reads them.
-    - Emitting post_dec_vars for such a variable would underflow the field
-      string's RC after every call inside a loop that re-uses the same record
-      (the "process + use_cfg" RC underflow pattern).
-    - Emitting EIncRC at non-last-use (the EAtom non-last-use path) would
-      inflate the RC without a matching decrement, leaking the value.
-
-    Populated dynamically in [insert_rc_expr]'s ELet case when the binding is
-    of the form [let v = src.field] where [src] is itself in [live_after] (the
-    record outlives this binding) or [src] is already in [_borrowed_field_vars]
-    (alias chain propagation: [let v = borrowed_field]).  Saved/restored on
-    each ELet scope exit so inner bindings do not contaminate outer scopes. *)
-let _borrowed_field_vars : StringSet.t ref = ref StringSet.empty
-
-(** Variable context: maps each in-scope variable name to its [Tir.var] record,
-    giving the type needed to emit correct EDecRC/EIncRC ops.
-    - Populated in [insert_rc] with the current function's parameters.
-    - Extended in [insert_rc_expr]'s ELet case for each let-bound variable
-      (using a save/restore pattern to handle shadowing correctly).
-    Used by the ECase cross-branch dead-variable EDecRC pass: variables that
-    are in scope at a case expression and live in *some* branches but dead in
-    *others* need EDecRC in the dead branches.  Without this, owned parameters
-    whose last use is inside an ECase arm do not get decremented in arms where
-    they are unused — causing both reference leaks and (via RC imbalance in
-    complex HOF call chains) use-after-free crashes.
-
-    Example: [Map.node_fold(..., f)] where [f : TFn] is unused in the HEmpty
-    arm.  Without cross-branch EDecRC, [f] leaks in every HEmpty arm visit.
-    In deep HAMTs this accumulates enough misbalance to produce a
-    use-after-free when the go-closure's function-pointer slot is misread as
-    a Bytes payload pointer, triggering the observed march_decrc crash. *)
-let _var_ctx : Tir.var StringMap.t ref = ref StringMap.empty
 
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
@@ -162,11 +212,6 @@ let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
 
 (* ── Actor-send analysis ─────────────────────────────────────────────────── *)
 
-(** Variables that appear as message arguments to [send()] in the current
-    function.  Set by [insert_rc] before processing each function body.
-    Values in this set use atomic RC operations. *)
-let _actor_sent : StringSet.t ref = ref StringSet.empty
-
 (** Collect the set of variable names passed as messages to [send()].
     [send(actor, msg)] — msg is the 2nd argument. *)
 let rec collect_actor_sent_vars (e : Tir.expr) : StringSet.t =
@@ -197,14 +242,14 @@ let rec collect_actor_sent_vars (e : Tir.expr) : StringSet.t =
 
 (** Choose the appropriate IncRC variant for [v].
     Actor-sent vars use atomic; all others use local (non-atomic). *)
-let incrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
-  if StringSet.mem v.Tir.v_name !_actor_sent
+let incrc_for (env : env) (v : Tir.var) (a : Tir.atom) : Tir.expr =
+  if StringSet.mem v.Tir.v_name env.actor_sent
   then Tir.EAtomicIncRC a
   else Tir.EIncRC a
 
 (** Choose the appropriate DecRC variant for [v]. *)
-let decrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
-  if StringSet.mem v.Tir.v_name !_actor_sent
+let decrc_for (env : env) (v : Tir.var) (a : Tir.atom) : Tir.expr =
+  if StringSet.mem v.Tir.v_name env.actor_sent
   then Tir.EAtomicDecRC a
   else Tir.EDecRC a
 
@@ -414,9 +459,9 @@ let rec name_free_in (name : string) (e : Tir.expr) : bool =
 (* ── Phase 2: RC Insertion ────────────────────────────────────────────────── *)
 
 (** Wrap [inner] with IncRC (atomic if actor-sent) for each variable in [incs]. *)
-let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
+let wrap_incrcs (env : env) (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
   List.fold_right (fun v acc ->
-    Tir.ESeq (incrc_for v (Tir.AVar v), acc)
+    Tir.ESeq (incrc_for env v (Tir.AVar v), acc)
   ) incs inner
 
 (** Determine which AVar atoms in a list need EIncRC because they are
@@ -427,7 +472,7 @@ let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
     keeps the closure's reference alive regardless of how many times the apply
     function is invoked (i.e., when the closure's own RC > 1). *)
 let find_inc_vars ?(include_borrowed_fields = true)
-    (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
+    (env : env) (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
   (* Every atom here is at a CONSUMING position (call arg, constructor / tuple /
      record capture, return).  The caller holds exactly ONE reference to an
      owned variable (its binding), but a variable may appear at [count]
@@ -450,7 +495,7 @@ let find_inc_vars ?(include_borrowed_fields = true)
     v.Tir.v_lin = Tir.Unr
     && needs_rc v.Tir.v_ty
     && (include_borrowed_fields
-        || not (StringSet.mem v.Tir.v_name !_borrowed_field_vars))
+        || not (StringSet.mem v.Tir.v_name env.borrowed_field_vars))
   in
   let counts : (string, int) Hashtbl.t = Hashtbl.create 8 in
   let vrec   : (string, Tir.var) Hashtbl.t = Hashtbl.create 8 in
@@ -475,7 +520,7 @@ let find_inc_vars ?(include_borrowed_fields = true)
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
     live_before is the set of variables live before this expression. *)
-let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
+let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     : Tir.expr * live_set =
   match e with
   | Tir.EAtom (Tir.AVar v) ->
@@ -491,7 +536,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          an alias it believes it owns — the caller's consume frees the field
          the record still references (use-after-free in sitemap/feed and
          entry_tags reuse). *)
-      (Tir.ESeq (incrc_for v (Tir.AVar v), e), lb)
+      (Tir.ESeq (incrc_for env v (Tir.AVar v), e), lb)
     else
       (e, lb)
 
@@ -505,7 +550,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (* Borrow-aware Inc insertion for direct (known) calls.
        For each argument at position [i]:
          - Standard (owned) parameter: insert EIncRC if Unr+needs_rc+live_after.
-         - Borrowed parameter (per _borrow_map):
+         - Borrowed parameter (per env.borrow_map):
              • Arg still live after call → skip EIncRC (callee will not Dec).
              • Arg NOT live after call  → no EIncRC (same as before), but emit
                EDecRC *after* the call because the callee will not Dec it. *)
@@ -513,7 +558,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (* 1. Args that go to owned parameters — standard Inc logic. *)
     let non_borrowed_args =
       List.filter_map (fun (i, a) ->
-        if Borrow.is_borrowed !_borrow_map f.Tir.v_name i then None
+        if Borrow.is_borrowed env.borrow_map f.Tir.v_name i then None
         else Some a
       ) indexed_args
     in
@@ -523,7 +568,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        pointers.  Including f here was harmless when needs_rc (TFn _) = false
        but after 831e315 causes spurious EIncRC for operator names like &&, ||
        whose llvm_name maps to @__ — an undefined symbol that fails to link. *)
-    let inc_vars = find_inc_vars non_borrowed_args live_after in
+    let inc_vars = find_inc_vars env non_borrowed_args live_after in
     (* 2. Borrowed args whose last use is this call: caller is responsible for Dec.
           Closure FVs are exempt: the closure owns them and keeps them alive.
           Dedup by v_name: when the same variable is passed at multiple
@@ -535,13 +580,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        still makes the actual RC decision above (unchanged this chunk) — this
        assert only proves the name-sniffing answer agrees with the honest
        [fn_kind] flag set at the fn's synthesis site. A callee name absent
-       from [_fn_kinds] (builtin operators like "+", externs, or any callee
+       from [env.fn_kinds] (builtin operators like "+", externs, or any callee
        not defined as a fn_def in THIS module — e.g. cross-module refs seen
        pre-mono) has no flag to check against, so it is skipped rather than
        treated as a mismatch. If this ever fires, it means some synthesis
        site mints an "$apply$"-shaped name without tagging FnApply (or vice
        versa) — fix the synthesis site, do not weaken this assert. *)
-    (match StringMap.find_opt f.Tir.v_name !_fn_kinds with
+    (match StringMap.find_opt f.Tir.v_name env.fn_kinds with
      | Some kind -> assert ((kind = Tir.FnApply) = callee_is_apply)
      | None -> ());
     let post_dec_vars =
@@ -552,7 +597,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           when v.Tir.v_lin = Tir.Unr
                && needs_rc v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
-               && Borrow.is_borrowed !_borrow_map f.Tir.v_name i
+               && Borrow.is_borrowed env.borrow_map f.Tir.v_name i
                (* The closure slot (arg 0) of an apply function follows the
                   closure-apply ABI: the callee consumes the closure regardless
                   of the borrow map.  Emitting a caller-side post-call EDecRC
@@ -560,8 +605,8 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                   trigger when $clo is borrow-classified) double-frees the
                   closure — the heap corruption behind the List.sort_by crash. *)
                && not (i = 0 && callee_is_apply)
-               && not (StringSet.mem v.Tir.v_name !_closure_fvs)
-               && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)
+               && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+               && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->
           (* Borrowed field vars (extracted from a borrowed record parameter)
              are exempt from post-call EDecRC: ownership stays with the record
@@ -582,11 +627,11 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        before the last read of the borrowed alias.  For a SELF call, drop the
        post-dec instead: TCO rewrites the trailing ESeq'd EDecRC into dead
        code, so a balancing inc would leak one reference per iteration. *)
-    let is_self_call = String.equal f.Tir.v_name !_current_fn_name in
+    let is_self_call = String.equal f.Tir.v_name env.current_fn_name in
     let owned_pos_names =
       List.fold_left (fun s (i, a) ->
         match a with
-        | Tir.AVar v when not (Borrow.is_borrowed !_borrow_map f.Tir.v_name i) ->
+        | Tir.AVar v when not (Borrow.is_borrowed env.borrow_map f.Tir.v_name i) ->
           StringSet.add v.Tir.v_name s
         | _ -> s)
         StringSet.empty indexed_args
@@ -600,7 +645,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       if is_self_call then (inc_vars, post_dec_vars)
       else (inc_vars @ dual_pos_vars, post_dec_vars @ dual_pos_vars)
     in
-    let e' = wrap_incrcs inc_vars e in
+    let e' = wrap_incrcs env inc_vars e in
     (* Wrap with post-call Decs.
        When there are post-call decrefs and the call has a non-unit return
        type, ESeq would discard the call result (ESeq returns its LAST
@@ -618,7 +663,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       | _ when is_self_call ->
         (* Self-tail-call: keep ESeq so TCO detection finds the call *)
         List.fold_left (fun acc v ->
-          Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+          Tir.ESeq (acc, decrc_for env v (Tir.AVar v))
         ) e' post_dec_vars
       | _ ->
         let call_ret_ty = match f.Tir.v_ty with
@@ -629,7 +674,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          | Tir.TUnit ->
            (* Unit return: plain ESeq is fine *)
            List.fold_left (fun acc v ->
-             Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+             Tir.ESeq (acc, decrc_for env v (Tir.AVar v))
            ) e' post_dec_vars
          | _ ->
            (* Non-unit return: bind result, run decrefs, return result.
@@ -639,7 +684,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            let tmp = fresh_rc_var call_ret_ty in
            let decrcs =
              List.fold_right (fun v acc ->
-               Tir.ESeq (decrc_for v (Tir.AVar v), acc)
+               Tir.ESeq (decrc_for env v (Tir.AVar v), acc)
              ) post_dec_vars (Tir.EAtom (Tir.AVar tmp))
            in
            Tir.ELet (tmp, e', decrcs))
@@ -655,7 +700,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e'', lb)
 
   | Tir.ECallPtr (Tir.AVar fv, args)
-    when StringSet.mem fv.Tir.v_name !_extern_names ->
+    when StringSet.mem fv.Tir.v_name env.extern_names ->
     (* Known user extern (FFI): the callee is a C symbol with a known borrow
        map (seeded in Borrow.infer_module), so apply EApp-style borrow-aware
        RC.  Borrowed args are NOT consumed by the C callee, so the caller keeps
@@ -666,11 +711,11 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let indexed_args = List.mapi (fun i a -> (i, a)) args in
     let non_borrowed_args =
       List.filter_map (fun (i, a) ->
-        if Borrow.is_borrowed !_borrow_map fname i then None else Some a
+        if Borrow.is_borrowed env.borrow_map fname i then None else Some a
       ) indexed_args
     in
     (* The callee symbol fv is a code address, not a heap closure — never inc it. *)
-    let inc_vars = find_inc_vars non_borrowed_args live_after in
+    let inc_vars = find_inc_vars env non_borrowed_args live_after in
     let post_dec_vars =
       let seen = ref StringSet.empty in
       List.filter_map (fun (i, a) ->
@@ -679,9 +724,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           when v.Tir.v_lin = Tir.Unr
                && needs_rc v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
-               && Borrow.is_borrowed !_borrow_map fname i
-               && not (StringSet.mem v.Tir.v_name !_closure_fvs)
-               && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)
+               && Borrow.is_borrowed env.borrow_map fname i
+               && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+               && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->
           seen := StringSet.add v.Tir.v_name !seen;
           Some v
@@ -697,7 +742,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let owned_pos_names =
       List.fold_left (fun s (i, a) ->
         match a with
-        | Tir.AVar v when not (Borrow.is_borrowed !_borrow_map fname i) ->
+        | Tir.AVar v when not (Borrow.is_borrowed env.borrow_map fname i) ->
           StringSet.add v.Tir.v_name s
         | _ -> s)
         StringSet.empty indexed_args
@@ -708,7 +753,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           (fun (v : Tir.var) -> StringSet.mem v.Tir.v_name owned_pos_names)
           post_dec_vars
     in
-    let e' = wrap_incrcs inc_vars e in
+    let e' = wrap_incrcs env inc_vars e in
     let e'' =
       match post_dec_vars with
       | [] -> e'
@@ -720,13 +765,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         (match ret_ty with
          | Tir.TUnit ->
            List.fold_left (fun acc v ->
-             Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+             Tir.ESeq (acc, decrc_for env v (Tir.AVar v))
            ) e' post_dec_vars
          | _ ->
            let tmp = fresh_rc_var ret_ty in
            let decrcs =
              List.fold_right (fun v acc ->
-               Tir.ESeq (decrc_for v (Tir.AVar v), acc)
+               Tir.ESeq (decrc_for env v (Tir.AVar v), acc)
              ) post_dec_vars (Tir.EAtom (Tir.AVar tmp))
            in
            Tir.ELet (tmp, e', decrcs))
@@ -750,8 +795,8 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        plumbing them through the call dispatch — a sizeable architectural
        change deferred beyond this audit pass. *)
     let all_atoms = a :: args in
-    let inc_vars = find_inc_vars all_atoms live_after in
-    let e' = wrap_incrcs inc_vars e in
+    let inc_vars = find_inc_vars env all_atoms live_after in
+    let e' = wrap_incrcs env inc_vars e in
     let lb =
       live_after
       |> StringSet.union (vars_of_atom a)
@@ -778,29 +823,30 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let field_src_is_borrowed (src : Tir.var) : bool =
       (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
       && (StringSet.mem src.Tir.v_name live_after
-          || StringSet.mem src.Tir.v_name !_borrowed_field_vars
+          || StringSet.mem src.Tir.v_name env.borrowed_field_vars
           || StringSet.mem src.Tir.v_name (live_before e2 live_after)
-          || StringMap.mem src.Tir.v_name !_var_ctx)
+          || StringMap.mem src.Tir.v_name env.var_ctx)
     in
     (* Look through [to_string(_)] (identity for String, see llvm_emit.ml) and
        nested ELet chains that bind a borrowed field then convert it, e.g.
        [let v = (let f = src.field in to_string(f))].  Returns true when the
-       result of [e] aliases a borrowed field reference. *)
-    let rec result_is_borrowed_field (e : Tir.expr) : bool =
+       result of [e] aliases a borrowed field reference.
+       [bfv] is a purely-local, read-then-extended view of the borrowed-field
+       set for this lookahead only — it mirrors the old code's hand-rolled
+       save/restore around this same recursion (always restored before
+       returning, on every branch, so a plain immutable parameter is exactly
+       equivalent: the caller's [env.borrowed_field_vars] is never touched). *)
+    let rec result_is_borrowed_field (bfv : StringSet.t) (e : Tir.expr) : bool =
       match e with
       | Tir.EApp (f, [Tir.AVar a])
         when f.Tir.v_name = "to_string" && a.Tir.v_ty = Tir.TString ->
-        StringSet.mem a.Tir.v_name !_borrowed_field_vars
+        StringSet.mem a.Tir.v_name bfv
       | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
         when needs_rc iv.Tir.v_ty && field_src_is_borrowed src ->
         (* [iv] is a borrowed field var inside this sub-scope; check the body
            with that knowledge. *)
-        let saved = !_borrowed_field_vars in
-        _borrowed_field_vars := StringSet.add iv.Tir.v_name saved;
-        let r = result_is_borrowed_field ibody in
-        _borrowed_field_vars := saved;
-        r
-      | Tir.ELet (_, _, ibody) -> result_is_borrowed_field ibody
+        result_is_borrowed_field (StringSet.add iv.Tir.v_name bfv) ibody
+      | Tir.ELet (_, _, ibody) -> result_is_borrowed_field bfv ibody
       | _ -> false
     in
     let is_borrowed_field =
@@ -808,7 +854,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       | _ when needs_rc v.Tir.v_ty
                && (match e1 with
                    | Tir.EField _ | Tir.EAtom _ -> false  (* handled below *)
-                   | _ -> result_is_borrowed_field e1) ->
+                   | _ -> result_is_borrowed_field env.borrowed_field_vars e1) ->
         (* RHS evaluates to a borrowed field reference (possibly via the
            identity [to_string] and intervening field-extraction lets).  The
            record owner manages its RC; emitting an EDecRC here would free a
@@ -821,7 +867,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                 closure FVs managed by the borrowed' set (d2cf09e): Perceus
                 emits EIncRC before any consuming call so the closure's own
                 reference survives repeated invocations.  Marking a closure FV
-                as is_borrowed_field would add it to _borrowed_field_vars and
+                as is_borrowed_field would add it to borrowed_field_vars and
                 suppress that EIncRC, causing RC underflow on the 2nd call.
                 This check must precede all four conditions below because
                 conditions 1–3 fire whenever $clo is in live_after (which
@@ -829,9 +875,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                 borrowed'), and condition 4 already has this TPtr guard. *)
              && (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
              && (StringSet.mem src.Tir.v_name live_after
-                 || StringSet.mem src.Tir.v_name !_borrowed_field_vars
+                 || StringSet.mem src.Tir.v_name env.borrowed_field_vars
                  || StringSet.mem src.Tir.v_name (live_before e2 live_after)
-                 || (StringMap.mem src.Tir.v_name !_var_ctx
+                 || (StringMap.mem src.Tir.v_name env.var_ctx
                      && (match src.Tir.v_ty with
                          | Tir.TPtr _ -> false
                          | _ -> true))) ->
@@ -839,31 +885,30 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            Four cases where the field must NOT be treated as independently owned:
            1. src in live_after: record is a borrowed parameter (present in the
               initial live-at-exit borrowed set) — the caller outlives this binding.
-           2. src in _borrowed_field_vars: src was itself extracted from a borrowed
+           2. src in borrowed_field_vars: src was itself extracted from a borrowed
               record (alias chain).
            3. src in live_before(e2): the record is used again in the body after
               this extraction (sequential multi-field access pattern).
-           4. src in _var_ctx and src is a heap record (not TPtr): the record is
+           4. src in var_ctx and src is a heap record (not TPtr): the record is
               a locally-owned variable still in scope (e.g. returned by a
               cross-module function call).  TPtr sources (like the closure struct
               $clo: TPtr TUnit) are excluded — their fields (closure FVs) are
               managed by the borrowed' set and must receive EIncRC before
-              consuming calls, which _borrowed_field_vars would suppress. *)
+              consuming calls, which borrowed_field_vars would suppress. *)
         true
       | Tir.EAtom (Tir.AVar src)
         when needs_rc v.Tir.v_ty
-             && StringSet.mem src.Tir.v_name !_borrowed_field_vars ->
+             && StringSet.mem src.Tir.v_name env.borrowed_field_vars ->
         (* Alias of a borrowed field var — propagate the borrowed status. *)
         true
       | _ -> false
     in
-    let prev_bfv = !_borrowed_field_vars in
-    if is_borrowed_field then
-      _borrowed_field_vars := StringSet.add v.Tir.v_name !_borrowed_field_vars;
     (* Process e2 first to discover what's live going into it.
-       Extend _var_ctx with [v] so that nested ECase cross-branch EDecRC
+       Extend var_ctx with [v] so that nested ECase cross-branch EDecRC
        insertion can look up [v]'s type when [v] is live in some arms and
-       dead in others.  Save/restore handles shadowing correctly.
+       dead in others.  Descending with an updated [env] copy handles
+       shadowing correctly (the caller's own [env] is untouched, matching the
+       old code's save/restore).
 
        A borrowed-field binding is additionally added to e2's live-at-exit
        set.  This makes Perceus treat it exactly like a borrowed parameter /
@@ -878,21 +923,23 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        — the consumer's free leaves the record with a dangling field
        (observed: sitemap_items freeing entry dates that feed_items then
        read; flat_map freeing tags lists that a later filter re-read). *)
-    let prev_v = StringMap.find_opt v.Tir.v_name !_var_ctx in
-    _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
+    let env_for_e2 =
+      { env with
+        var_ctx = StringMap.add v.Tir.v_name v env.var_ctx;
+        borrowed_field_vars =
+          if is_borrowed_field
+          then StringSet.add v.Tir.v_name env.borrowed_field_vars
+          else env.borrowed_field_vars }
+    in
     let live_after_e2 =
       if is_borrowed_field then StringSet.add v.Tir.v_name live_after
       else live_after
     in
-    let (e2', live_into_e2) = insert_rc_expr e2 live_after_e2 in
-    _borrowed_field_vars := prev_bfv;  (* restore after e2 *)
-    (match prev_v with
-     | None    -> _var_ctx := StringMap.remove v.Tir.v_name !_var_ctx
-     | Some pv -> _var_ctx := StringMap.add v.Tir.v_name pv !_var_ctx);
+    let (e2', live_into_e2) = insert_rc_expr env_for_e2 e2 live_after_e2 in
     (* Check if v is dead in e2 *)
     let e2'' =
       if not (StringSet.mem v.Tir.v_name live_into_e2)
-         && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+         && not (StringSet.mem v.Tir.v_name env.closure_fvs)
          && not is_borrowed_field then
         (* Dead binding — insert cleanup at start of e2.
            Use atomic DecRC for actor-sent values (may be concurrently accessed).
@@ -900,7 +947,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            function must not decrement values it does not own.
            Borrowed field vars are exempt: the record owner manages their RC. *)
         if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty then
-          Tir.ESeq (decrc_for v (Tir.AVar v), e2')
+          Tir.ESeq (decrc_for env v (Tir.AVar v), e2')
         else if v.Tir.v_lin = Tir.Lin || v.Tir.v_lin = Tir.Aff then
           if needs_rc v.Tir.v_ty then
             Tir.ESeq (Tir.EFree (Tir.AVar v), e2')
@@ -916,7 +963,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       match e1 with
       | Tir.EAtom (Tir.AVar src)
         when is_borrowed_field
-             && StringSet.mem src.Tir.v_name !_borrowed_field_vars ->
+             && StringSet.mem src.Tir.v_name env.borrowed_field_vars ->
         (* Borrowed-alias binding [let w = v] where v is itself a borrowed
            field: w inherits borrowed status (marked above) and will receive
            its own dup at any consuming use.  Skip RC processing of the RHS
@@ -924,7 +971,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            extended) live set and emit a second EIncRC for the same logical
            reference, which nothing ever decrements (a leak). *)
         (e1, StringSet.add src.Tir.v_name live_for_e1)
-      | _ -> insert_rc_expr e1 live_for_e1
+      | _ -> insert_rc_expr env e1 live_for_e1
     in
     (* Fix value-discarding ESeq patterns in the processed RHS.
        Borrow inference may produce ESeq(call, DecRC(arg)) at tail positions
@@ -949,9 +996,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (Tir.ELet (v, e1_fixed, e2''), live_before_e1)
 
   | Tir.ELetRec (fns, body) ->
-    let (body', live_body) = insert_rc_expr body live_after in
+    let (body', live_body) = insert_rc_expr env body live_after in
     let fns' = List.map (fun fn ->
-      let (fb, _) = insert_rc_expr fn.Tir.fn_body StringSet.empty in
+      let (fb, _) = insert_rc_expr env fn.Tir.fn_body StringSet.empty in
       { fn with Tir.fn_body = fb }
     ) fns in
     let fn_names =
@@ -981,7 +1028,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                         branch variable (S(x)≡x, Some(x)≡x); the variable's own
                         RC lifecycle frees the shared object, so emitting a
                         separate scrutinee free here would double-free it. *)
-                     && not (scrutinee_shares_payload_storage v.Tir.v_ty) ->
+                     && not (scrutinee_shares_payload_storage env v.Tir.v_ty) ->
         (* Use the concrete ctor type so FBIP can recognise the tag.
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
@@ -1004,7 +1051,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
             { v with Tir.v_ty = Tir.TCon (encoded_tag, dummy_args) }
           | _ -> v
         in
-        Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
+        Tir.ESeq (decrc_for env v (Tir.AVar ctor_v), body)
       | _ -> body
     in
     let branches_processed = List.map (fun br ->
@@ -1069,23 +1116,22 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           la br.Tir.br_vars
       else la
       in
-      (* Add br_vars to _var_ctx so nested cross-branch EDecRC can find their
+      (* Add br_vars to var_ctx so nested cross-branch EDecRC can find their
          types.  Branch-bound constructor fields are not ELet-bound and would
          otherwise be invisible to the cross-branch dead-variable pass inside
          the branch body (e.g. [root] of [PVec(n,shift,root,tail)] in the
          tail-access sub-path of Array.get where root is dead).
-         Save/restore handles shadowing correctly. *)
-      let saved_br_var_ctx = List.map (fun (v : Tir.var) ->
-        let prev = StringMap.find_opt v.Tir.v_name !_var_ctx in
-        _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
-        (v.Tir.v_name, prev)
-      ) br.Tir.br_vars in
-      let (body', live_before_br) = insert_rc_expr br.Tir.br_body la in
-      List.iter (fun (name, prev) ->
-        match prev with
-        | None    -> _var_ctx := StringMap.remove name !_var_ctx
-        | Some pv -> _var_ctx := StringMap.add name pv !_var_ctx
-      ) saved_br_var_ctx;
+         Descending with an updated [env] copy handles shadowing correctly
+         (the caller's [env] for sibling branches is untouched, matching the
+         old code's save/restore). *)
+      let env_for_br =
+        { env with
+          var_ctx =
+            List.fold_left (fun ctx (v : Tir.var) ->
+              StringMap.add v.Tir.v_name v ctx
+            ) env.var_ctx br.Tir.br_vars }
+      in
+      let (body', live_before_br) = insert_rc_expr env_for_br br.Tir.br_body la in
       (* Emit EDecRC for br_vars that are heap-typed but dead in this branch body.
          These fields were bound by the pattern but not used anywhere in the arm
          (e.g. [root] and [tail] in [PVec(n,_,_,_) -> n]).
@@ -1099,9 +1145,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       let body'' = List.fold_right (fun (v : Tir.var) body_acc ->
         if needs_rc v.Tir.v_ty
            && not (StringSet.mem v.Tir.v_name live_before_br)
-           && not (StringSet.mem v.Tir.v_name !_closure_fvs)
-           && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) then
-          Tir.ESeq (decrc_for v (Tir.AVar v), body_acc)
+           && not (StringSet.mem v.Tir.v_name env.closure_fvs)
+           && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars) then
+          Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         else
           body_acc
       ) br.Tir.br_vars body'
@@ -1121,15 +1167,15 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          1. Compute union of live_before_br across all arms.
          2. For each arm, the set of "dead here, live elsewhere" vars is
             (union \ live_before_br_i) \ {arm-bound vars} \ live_after
-                                       \ _closure_fvs.
-         3. For each such var that has a type record in _var_ctx, emit
+                                       \ env.closure_fvs.
+         3. For each such var that has a type record in env.var_ctx, emit
             EDecRC at the head of that arm's body.
 
        Exclusions:
          - live_after: var is expected to survive the whole case.
          - arm-bound vars: the arm's pattern bind these, so they are locally
            new values, not the outer var.
-         - _closure_fvs: owned by the closure struct; the apply function
+         - env.closure_fvs: owned by the closure struct; the apply function
            must not decrement them.
          - the scrutinee's own variable (scrutinee_name below): its lifecycle
            is entirely owned by [add_scrutinee_free_for], which independently
@@ -1164,16 +1210,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         |> (fun s -> StringSet.diff s live_before_br)
         |> (fun s -> StringSet.diff s bound)
         |> (fun s -> StringSet.diff s live_after)
-        |> (fun s -> StringSet.diff s !_closure_fvs)
-        |> (fun s -> StringSet.diff s !_borrowed_field_vars)
+        |> (fun s -> StringSet.diff s env.closure_fvs)
+        |> (fun s -> StringSet.diff s env.borrowed_field_vars)
         |> (fun s -> match scrutinee_name with
             | Some n -> StringSet.remove n s
             | None -> s)
       in
       StringSet.fold (fun name body_acc ->
-        match StringMap.find_opt name !_var_ctx with
+        match StringMap.find_opt name env.var_ctx with
         | Some v when v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty ->
-          Tir.ESeq (decrc_for v (Tir.AVar v), body_acc)
+          Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         | _ -> body_acc
       ) dead_here body
     in
@@ -1184,7 +1230,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       { br with Tir.br_body = body_with_cross }
     ) branches_processed in
     let default' = Option.map (fun d ->
-      let (d_rc, d_lb) = insert_rc_expr d live_after in
+      let (d_rc, d_lb) = insert_rc_expr env d live_after in
       (* Default branch: no constructor tag known, use original type.
          Only free the scrutinee if the branch body does NOT use it directly —
          if the body uses it, ownership transfers into the body. *)
@@ -1192,7 +1238,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        | Tir.AVar v when needs_rc v.Tir.v_ty
                       && not (StringSet.mem v.Tir.v_name live_after)
                       && not (name_free_in v.Tir.v_name d) ->
-         Tir.ESeq (decrc_for v (Tir.AVar v), d_rc)
+         Tir.ESeq (decrc_for env v (Tir.AVar v), d_rc)
        | _ -> d_rc)
       in
       (* Cross-branch EDecRC for the default arm too *)
@@ -1203,35 +1249,35 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (Tir.ECase (a, branches', default'), lb)
 
   | Tir.ESeq (e1, e2) ->
-    let (e2', l2) = insert_rc_expr e2 live_after in
-    let (e1', l1) = insert_rc_expr e1 l2 in
+    let (e2', l2) = insert_rc_expr env e2 live_after in
+    let (e1', l1) = insert_rc_expr env e1 l2 in
     (Tir.ESeq (e1', e2'), l1)
 
   | Tir.ETuple atoms ->
-    let inc_vars = find_inc_vars atoms live_after in
-    let e' = wrap_incrcs inc_vars e in
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars e in
     let lb = StringSet.union live_after (vars_of_atoms atoms) in
     (e', lb)
 
   | Tir.ERecord fields ->
     let atoms = List.map snd fields in
-    let inc_vars = find_inc_vars atoms live_after in
-    let e' = wrap_incrcs inc_vars e in
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars e in
     let lb = StringSet.union live_after (vars_of_atoms atoms) in
     (e', lb)
 
   | Tir.EField (a, f) ->
     (* Field projection BORROWS the record: no ownership changes hands, so a
        borrowed-field record var must not be dup'd here (it would leak). *)
-    let inc_vars = find_inc_vars ~include_borrowed_fields:false [a] live_after in
-    let e' = wrap_incrcs inc_vars (Tir.EField (a, f)) in
+    let inc_vars = find_inc_vars ~include_borrowed_fields:false env [a] live_after in
+    let e' = wrap_incrcs env inc_vars (Tir.EField (a, f)) in
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e', lb)
 
   | Tir.EUpdate (a, fields) ->
     let atoms = a :: List.map snd fields in
-    let inc_vars = find_inc_vars atoms live_after in
-    let e' = wrap_incrcs inc_vars e in
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars e in
     let lb =
       live_after
       |> StringSet.union (vars_of_atom a)
@@ -1240,14 +1286,14 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e', lb)
 
   | Tir.EAlloc (ty, atoms) ->
-    let inc_vars = find_inc_vars atoms live_after in
-    let e' = wrap_incrcs inc_vars (Tir.EAlloc (ty, atoms)) in
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars (Tir.EAlloc (ty, atoms)) in
     let lb = StringSet.union live_after (vars_of_atoms atoms) in
     (e', lb)
 
   | Tir.EStackAlloc (ty, atoms) ->
-    let inc_vars = find_inc_vars atoms live_after in
-    let e' = wrap_incrcs inc_vars (Tir.EStackAlloc (ty, atoms)) in
+    let inc_vars = find_inc_vars env atoms live_after in
+    let e' = wrap_incrcs env inc_vars (Tir.EStackAlloc (ty, atoms)) in
     let lb = StringSet.union live_after (vars_of_atoms atoms) in
     (e', lb)
 
@@ -1265,8 +1311,8 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
 
   | Tir.EReuse (a, ty, atoms) ->
     let all_atoms = a :: atoms in
-    let inc_vars = find_inc_vars all_atoms live_after in
-    let e' = wrap_incrcs inc_vars (Tir.EReuse (a, ty, atoms)) in
+    let inc_vars = find_inc_vars env all_atoms live_after in
+    let e' = wrap_incrcs env inc_vars (Tir.EReuse (a, ty, atoms)) in
     let lb =
       live_after
       |> StringSet.union (vars_of_atom a)
@@ -1396,16 +1442,25 @@ let rec dup_field_results (e : Tir.expr) : Tir.expr =
       dup_field_results body)
   | other -> other
 
-let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
+(** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one
+    function.  [module_env] carries the module-scoped fields (borrow_map,
+    type_defs, fn_kinds, extern_names) set once per [perceus] run; this
+    function fills in the function-scoped fields (current_fn_name,
+    closure_fvs, actor_sent) and the initial subtree-scoped fields (var_ctx
+    seeded with params, borrowed_field_vars reset to empty) — exactly what
+    the old code did by mutating the refs before calling [insert_rc_expr] and
+    restoring them after.  Since each top-level function gets a FRESH [env]
+    value here (rather than mutating shared refs), no restore step is needed
+    afterward: the caller ([perceus]'s [List.map]) never sees this function's
+    env — it only sees the returned [fn_def]. *)
+let insert_rc ~(module_env : env) ?(borrowed = StringSet.empty)
+    (fn : Tir.fn_def) : Tir.fn_def =
   (* Rename ELet/ECase-bound variables that shadow borrowed parameters before
      RC insertion.  See [rename_borrowed_shadows] for the full rationale. *)
   let body_renamed = rename_borrowed_shadows borrowed fn.Tir.fn_body in
   let body_normed = dup_field_results body_renamed in
   let fn' = { fn with Tir.fn_body = body_normed } in
-  _actor_sent    := collect_actor_sent_vars fn'.Tir.fn_body;
-  _current_fn_name := fn'.Tir.fn_name;
   let closure_fvs = collect_closure_fvs fn' in
-  _closure_fvs   := closure_fvs;
   (* Closure FVs are owned by the closure struct, not by the apply function.
      The apply function merely borrows them for the duration of one call.
      Adding them to the borrowed set makes Perceus treat them as always-live:
@@ -1420,18 +1475,17 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
   (* Seed the variable context with function parameters so that the ECase
      cross-branch dead-variable pass can emit correctly-typed EDecRC ops
      for parameters that are live in some arms but unused in others. *)
-  let prev_var_ctx = !_var_ctx in
-  _var_ctx := List.fold_left (fun ctx v ->
-    StringMap.add v.Tir.v_name v ctx
-  ) !_var_ctx fn'.Tir.fn_params;
-  let prev_bfv = !_borrowed_field_vars in
-  _borrowed_field_vars := StringSet.empty;
-  let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed' in
-  _actor_sent           := StringSet.empty;
-  _current_fn_name      := "";
-  _closure_fvs          := StringSet.empty;
-  _borrowed_field_vars  := prev_bfv;
-  _var_ctx              := prev_var_ctx;
+  let fn_env =
+    { module_env with
+      current_fn_name = fn'.Tir.fn_name;
+      closure_fvs;
+      actor_sent = collect_actor_sent_vars fn'.Tir.fn_body;
+      borrowed_field_vars = StringSet.empty;
+      var_ctx =
+        List.fold_left (fun ctx v -> StringMap.add v.Tir.v_name v ctx)
+          module_env.var_ctx fn'.Tir.fn_params }
+  in
+  let (body', _) = insert_rc_expr fn_env fn'.Tir.fn_body borrowed' in
   { fn' with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
@@ -1447,7 +1501,7 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
     Atomicity strictness (audit P4): a cancel pair is only elided when BOTH
     halves have the same atomicity.  Mixed (atomic↔non-atomic) pairs are
     left in place.  Rationale: [incrc_for] and [decrc_for] pick atomicity
-    from [_actor_sent] per function, so same-variable ops should always
+    from [env.actor_sent] per function, so same-variable ops should always
     match in correct code.  If a future pass ever produces a mismatch
     (e.g. inliner copying code across actor-send boundaries), eliding would
     silently drop the atomic op and introduce a data race.  Being strict
@@ -1827,19 +1881,30 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   (* Reset the fresh-name counter per module so that compiling the same module
      twice produces identical IR.  A monotonic counter that survives across
      modules makes IR diffs unstable and causes spurious churn in test
-     baselines. *)
+     baselines.  This counter is an accumulator, not env-shaped state: it is
+     mutated (never restored) throughout the whole module's traversal, so it
+     remains a ref rather than becoming an [env] field (Wave 3 Task 4 — see
+     the plan's guidance on accumulator- vs scope-shaped refs). *)
   _rc_fresh_ctr := 0;
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
-  _borrow_map := borrow_map;
-  _type_defs := m.Tir.tm_types;
-  _fn_kinds :=
+  let fn_kinds =
     List.fold_left (fun acc (fd : Tir.fn_def) ->
       StringMap.add fd.Tir.fn_name fd.Tir.fn_kind acc
-    ) StringMap.empty m.Tir.tm_fns;
-  _extern_names :=
+    ) StringMap.empty m.Tir.tm_fns
+  in
+  let extern_names =
     List.fold_left (fun s (ed : Tir.extern_decl) ->
-      StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs;
+      StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs
+  in
+  (* Module-scoped env fields: constant for every function processed below. *)
+  let module_env =
+    { empty_env with
+      borrow_map;
+      type_defs = m.Tir.tm_types;
+      fn_kinds;
+      extern_names }
+  in
   let repl_set =
     List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
   in
@@ -1857,7 +1922,7 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
              else s
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
-         insert_rc ~borrowed fn)
+         insert_rc ~module_env ~borrowed fn)
   in
   let fns' =
     fns_after_insert
@@ -1869,6 +1934,4 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
     let after  = count_rc_ops_module fns' in
     print_perceus_stats ~label:m.Tir.tm_name ~before ~after ()
   end;
-  _borrow_map := Borrow.empty;
-  _fn_kinds := StringMap.empty;
   { m with Tir.tm_fns = fns' }
