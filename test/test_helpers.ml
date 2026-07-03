@@ -769,6 +769,210 @@ let compile_march_or_skip ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~
   | `Ok bin -> Some bin
   | `Skipped -> None
 
+(* ── LLVM IR validity gate infra (W2 Task 3 / W2.1) ──────────────────────
+   Policy mirrors setup_jit_runtime / compile_march above: a skip is
+   legitimate ONLY when no LLVM verifier tool is reachable on this machine
+   (genuine environment gap, counted via record_jit_skip so it shows up in
+   the same at_exit summary as the clang-absence skips — one unified
+   "skipped because tooling missing" ledger for the whole suite). Once a
+   tool IS found, any invalid-IR result is real signal, never swallowed.
+   Note this is a SEPARATE tool-absence class from clang: `--emit-llvm`
+   never shells out to clang (it writes textual IR and exits — see
+   bin/main.ml's `--emit-llvm only: write IR and exit` branch), so emitting
+   IR never needs a skip check; only the VERIFY step (running an external
+   `opt`/`llvm-as`) can legitimately be skipped for tool-absence. *)
+
+(** Locate an LLVM module verifier. Tries, in order:
+    1. `opt` on PATH (accepts modern `-passes=verify` pass-manager syntax).
+    2. `opt` at the Homebrew LLVM keg prefix (`brew --prefix llvm`), which is
+       not linked onto PATH by default because Homebrew's LLVM would shadow
+       Xcode's `clang`. Apple's Xcode Command Line Tools ship `clang` but
+       deliberately do NOT ship `opt`/`llvm-as` (no `xcrun -f opt`), so on a
+       stock macOS toolchain PATH alone finds nothing — the brew keg is the
+       realistic place a verifier lives on a dev machine even when `opt` is
+       not exported.
+    3. `llvm-as` (assembler) at either location as a fallback: it can't run
+       the module-verifier pass, but IR that fails to parse as valid LLVM
+       assembly is caught by its parser — this project treats "fails to
+       parse" and "parses but fails to verify" as the same detectable class
+       of ill-typed IR (both surface as a non-zero exit + a locatable
+       line:col error) — see the RED test below, which exercises the
+       parse-level failure mode `opt` also rejects.
+    Memoized: the probe shells out (`command -v`, `brew --prefix`), so it
+    only needs to run once per test process. *)
+let llvm_verifier_tool : [ `Opt of string | `LlvmAs of string | `None ] option ref = ref None
+
+let find_llvm_verifier_tool () =
+  match !llvm_verifier_tool with
+  | Some t -> t
+  | None ->
+    let on_path name =
+      if Sys.command (Printf.sprintf "command -v %s >/dev/null 2>&1" name) = 0
+      then Some name else None
+    in
+    let brew_llvm_bin =
+      let tmp = Filename.temp_file "march_brew_prefix" ".txt" in
+      let rc = Sys.command (Printf.sprintf "brew --prefix llvm >%s 2>/dev/null" (Filename.quote tmp)) in
+      let out = if rc = 0 then String.trim (read_file_contents tmp) else "" in
+      (try Sys.remove tmp with Sys_error _ -> ());
+      if out = "" then None else Some (Filename.concat out "bin")
+    in
+    let at_brew name =
+      match brew_llvm_bin with
+      | None -> None
+      | Some dir ->
+        let p = Filename.concat dir name in
+        if Sys.file_exists p then Some p else None
+    in
+    let result =
+      match on_path "opt" with
+      | Some p -> `Opt p
+      | None ->
+        match at_brew "opt" with
+        | Some p -> `Opt p
+        | None ->
+          match on_path "llvm-as" with
+          | Some p -> `LlvmAs p
+          | None ->
+            match at_brew "llvm-as" with
+            | Some p -> `LlvmAs p
+            | None -> `None
+    in
+    llvm_verifier_tool := Some result;
+    result
+
+(** Run the discovered verifier tool against a single `.ll` file.
+    Returns `Ok on valid IR, `Invalid error_output on a verifier/parser
+    rejection, `NoTool if no verifier is reachable (caller should convert
+    this to a legitimate, counted skip — never a silent pass). *)
+let verify_llvm_ir_file (path : string) : [ `Ok | `Invalid of string | `NoTool ] =
+  match find_llvm_verifier_tool () with
+  | `None -> `NoTool
+  | `Opt opt_path ->
+    let cmd = Printf.sprintf "%s -passes=verify -disable-output %s"
+      (Filename.quote opt_path) (Filename.quote path) in
+    let (rc, output) = run_capture cmd in
+    if rc = 0 then `Ok else `Invalid output
+  | `LlvmAs llvm_as_path ->
+    let cmd = Printf.sprintf "%s -o %s %s"
+      (Filename.quote llvm_as_path) (Filename.quote Filename.null) (Filename.quote path) in
+    let (rc, output) = run_capture cmd in
+    if rc = 0 then `Ok else `Invalid output
+
+(** Human-readable name of the tool actually in use (for report/skip messages). *)
+let llvm_verifier_tool_name () =
+  match find_llvm_verifier_tool () with
+  | `Opt p -> Printf.sprintf "opt -passes=verify (%s)" p
+  | `LlvmAs p -> Printf.sprintf "llvm-as (%s, parse-only fallback)" p
+  | `None -> "none"
+
+(** Recursively delete a temp directory tree we created. Needed because
+    running the compiler with a temp dir as CWD leaves more than the compile
+    outputs behind: even `--emit-llvm` creates a `.march/cas/vc/<xx>/<hash>`
+    verdict-cache tree under its CWD, so a bare `Unix.rmdir` after removing
+    the known files silently fails (ENOTEMPTY) and leaks one directory per
+    compile.
+
+    SELF-CONFINING: a recursive-delete primitive must defend itself rather
+    than rely on call-site discipline ("" was only accidentally safe via
+    ENOENT; "/" lstats as a directory and would have been walked). The
+    function REFUSES — [Alcotest.failf], deleting nothing — unless the
+    realpath-resolved target is a strict descendant of the realpath-resolved
+    system temp root ([Filename.get_temp_dir_name ()], the same root
+    [Filename.temp_file] creates under). "" and "/" are rejected outright
+    before any stat. Resolving BOTH sides through [Unix.realpath] also
+    neutralizes the macOS `/tmp` → `/private/tmp` and `/var` → `/private/var`
+    symlink mismatches between $TMPDIR's spelling and the filesystem's.
+    A path that does not exist is a no-op (nothing to delete; keeps cleanup
+    idempotent) — only an EXISTING path outside the temp root fails loudly.
+
+    Within the confined tree: structure-safe (lstat-based; symlinks are
+    removed as links, never followed) and best-effort (per-entry errors
+    ignored). The unconfined worker is deliberately local to this function
+    so no caller can reach it without the guard. *)
+let rm_rf_temp_dir path =
+  if path = "" || path = "/" then
+    Alcotest.failf
+      "rm_rf_temp_dir: refusing to delete %S (empty path or filesystem root)"
+      path;
+  let temp_root =
+    let raw = Filename.get_temp_dir_name () in
+    try Unix.realpath raw with Unix.Unix_error _ -> raw
+  in
+  match (try Some (Unix.realpath path) with Unix.Unix_error _ -> None) with
+  | None -> ()  (* target does not exist: nothing to delete *)
+  | Some real ->
+    let root_slash =
+      let n = String.length temp_root in
+      if n > 0 && temp_root.[n - 1] = '/' then temp_root else temp_root ^ "/"
+    in
+    let is_strict_descendant =
+      String.length real > String.length root_slash
+      && String.sub real 0 (String.length root_slash) = root_slash
+    in
+    if not is_strict_descendant then
+      Alcotest.failf
+        "rm_rf_temp_dir: refusing to delete %s (outside temp root %s)"
+        real temp_root
+    else begin
+      let rec go p =
+        match (try Some (Unix.lstat p) with Unix.Unix_error _ -> None) with
+        | None -> ()
+        | Some st ->
+          if st.Unix.st_kind = Unix.S_DIR then begin
+            (try
+               Sys.readdir p
+               |> Array.iter (fun f -> go (Filename.concat p f))
+             with Sys_error _ -> ());
+            (try Unix.rmdir p with Unix.Unix_error _ -> ())
+          end else
+            (try Sys.remove p with Sys_error _ -> ())
+      in
+      go real
+    end
+
+(** Emit LLVM IR for [src] to a fresh temp `.ll` file via `main_exe
+    --emit-llvm`, bypassing the CAS artifact cache entirely (unlike plain
+    `--compile`, `--emit-llvm` always regenerates and writes `<file>.ll`
+    rather than possibly short-circuiting on a cache hit with no `.ll`
+    write) so the gate always inspects freshly emitted text, never a stale
+    or absent file. Returns the `.ll` path on success. Never a legitimate
+    skip: `--emit-llvm` shells out to nothing (no clang, no linker — see
+    bin/main.ml's `--emit-llvm only: write IR and exit` branch), and
+    `main_exe` itself is the same never-legitimately-absent binary
+    `find_main_exe` already asserts on, so any failure here is a real
+    compiler bug and must fail loudly with the captured output. *)
+let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
+  let tmp_dir = Filename.temp_file "march_ir_verify" "" in
+  Sys.remove tmp_dir;
+  Unix.mkdir tmp_dir 0o755;
+  let base = Filename.remove_extension (Filename.basename src) in
+  let march_copy = Filename.concat tmp_dir (base ^ ".march") in
+  (* Copy rather than compile in place: native/*.march fixtures may sit next
+     to sibling .expected/.c files, and we must not clobber any real .ll a
+     concurrent dune action for the SAME fixture might be producing. *)
+  let ic = open_in src in
+  let contents = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let oc = open_out march_copy in
+  output_string oc contents;
+  close_out oc;
+  let ll_path = Filename.concat tmp_dir (base ^ ".ll") in
+  let cmd = Printf.sprintf "cd %s && %s --emit-llvm %s </dev/null"
+    (Filename.quote tmp_dir) (Filename.quote main_exe) (Filename.quote (Filename.basename march_copy)) in
+  let (rc, output) = run_capture cmd in
+  if rc = 0 && Sys.file_exists ll_path then `Ok ll_path
+  else begin
+    (* Failure: the caller gets no path back, so nothing in tmp_dir is
+       reachable afterwards — clean it up here (source copy, any partial
+       .ll, the .march/ verdict-cache tree the compiler drops in its CWD),
+       or a failing corpus would leak one temp dir per failing fixture. On
+       success the caller owns ll_path and cleans the dir up after
+       verifying (see run_fixture in test_ir_verify.ml). *)
+    rm_rf_temp_dir tmp_dir;
+    `Failed (rc, output)
+  end
+
 (** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
 let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let s = March_ast.Ast.dummy_span in

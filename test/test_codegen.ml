@@ -6396,4 +6396,5 @@ let codegen_suites =
             test_compiled_println_nested_list_parity;
         ] );
   ]
+  @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
 
