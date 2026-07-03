@@ -776,6 +776,9 @@ let run_test_cmd args =
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
     March_refinecheck.Cap_infer.check_module errors desugared;
+    (* Solving scope ends here: reap the shared z3 child now rather than
+       holding an idle solver process for the rest of the run. *)
+    March_refine.Refine.shutdown ();
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -1308,6 +1311,10 @@ let compile filename =
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
+  (* Solving scope ends here: reap the shared z3 child now rather than holding
+     an idle solver for the rest of the run (eval servers live indefinitely).
+     --check-migration below lazily respawns; its child is reaped by at_exit. *)
+  March_refine.Refine.shutdown ();
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules

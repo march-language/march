@@ -1,5 +1,16 @@
 open March_refine
 
+(* Orphan-probe mode (see lifecycle_suite): when re-exec'd with this env var,
+   spawn a solver, report the z3 pid, and exit WITHOUT closing it — simulating
+   a parent that dies with no cleanup.  Must run before Alcotest.run. *)
+let () =
+  if Sys.getenv_opt "MARCH_Z3_ORPHAN_PROBE" = Some "1" then begin
+    (match Solver.create () with
+     | None -> print_string "none\n"
+     | Some t -> Printf.printf "%d\n" t.Solver.pid);
+    exit 0
+  end
+
 let smoke_suite =
   [ Alcotest.test_case "library links" `Quick (fun () ->
         Alcotest.(check string) "version" "a0" Smt.version) ]
@@ -162,6 +173,102 @@ let refine_suite =
               (List.assoc_opt "d" model)
         | _ -> Alcotest.fail "expected Refuted") ]
 
+(* ── Solver-process lifecycle (regression: 2026-07 z3 orphan leak) ────────
+   Every compile/check run used to leave one immortal z3: the shared solver
+   was never closed, and the child inherited the write end of its own stdin
+   pipe (no cloexec), so it never saw EOF after the parent died. *)
+
+(* Pids of z3 processes whose parent is THIS test binary. *)
+let z3_children () : int list =
+  let ic =
+    Unix.open_process_in
+      (Printf.sprintf "pgrep -P %d -x z3" (Unix.getpid ()))
+  in
+  let rec loop acc =
+    match input_line ic with
+    | line -> loop (int_of_string (String.trim line) :: acc)
+    | exception End_of_file -> acc
+  in
+  let pids = loop [] in
+  ignore (Unix.close_process_in ic);
+  pids
+
+let mkdtemp prefix =
+  let d = Filename.temp_file prefix "" in
+  Sys.remove d;
+  Unix.mkdir d 0o700;
+  d
+
+let lifecycle_suite =
+  [ Alcotest.test_case "shared solver: 1 child while solving, 0 after shutdown"
+      `Quick (fun () ->
+        match Solver.create () with
+        | None -> Printf.printf "\n[skip] solver lifecycle: no z3 on PATH\n"
+        | Some probe ->
+            Solver.close probe;
+            let root = mkdtemp "march_refine_leak" in
+            (* Distinct VCs (d > n ==> d != 0) so each one misses the disk
+               cache and actually exercises the shared solver. *)
+            List.iter
+              (fun n ->
+                let vc : Smt.vc =
+                  { decls = [ ("d", Smt.SInt) ];
+                    assumptions = [ Smt.Gt (Smt.Const "d", Smt.IntLit n) ];
+                    goal = Smt.Ne (Smt.Const "d", Smt.IntLit 0) }
+                in
+                match Refine.discharge ~root vc with
+                | Refine.Verified -> ()
+                | _ -> Alcotest.fail "expected Verified")
+              [ 1; 2; 3 ];
+            Alcotest.(check int) "one z3 child while shared solver is live" 1
+              (List.length (z3_children ()));
+            Refine.shutdown ();
+            Alcotest.(check int) "no z3 children after shutdown" 0
+              (List.length (z3_children ())));
+
+    Alcotest.test_case "z3 dies when parent exits without closing it" `Quick
+      (fun () ->
+        (* Re-exec this binary in orphan-probe mode: it spawns a solver,
+           prints the z3 pid, and exits with NO cleanup.  With cloexec pipes
+           the orphaned z3 must see EOF on stdin and exit promptly; before
+           the fix it inherited its own stdin write end and lived forever. *)
+        let out_r, out_w = Unix.pipe ~cloexec:true () in
+        let self = Sys.executable_name in
+        let env =
+          Array.append (Unix.environment ()) [| "MARCH_Z3_ORPHAN_PROBE=1" |]
+        in
+        let child =
+          Unix.create_process_env self [| self |] env Unix.stdin out_w
+            Unix.stderr
+        in
+        Unix.close out_w;
+        let ic = Unix.in_channel_of_descr out_r in
+        let line = try input_line ic with End_of_file -> "none" in
+        ignore (Unix.waitpid [] child);
+        close_in ic;
+        match int_of_string_opt (String.trim line) with
+        | None -> Printf.printf "\n[skip] orphan probe: no z3 on PATH\n"
+        | Some z3_pid ->
+            let alive pid =
+              try
+                Unix.kill pid 0;
+                true
+              with Unix.Unix_error (Unix.ESRCH, _, _) -> false
+            in
+            let deadline = Unix.gettimeofday () +. 5.0 in
+            let rec wait_dead () =
+              if not (alive z3_pid) then true
+              else if Unix.gettimeofday () > deadline then false
+              else begin
+                ignore (Unix.select [] [] [] 0.05);
+                wait_dead ()
+              end
+            in
+            let died = wait_dead () in
+            if not died then (try Unix.kill z3_pid Sys.sigkill with _ -> ());
+            Alcotest.(check bool) "orphaned z3 exits on parent death" true died)
+  ]
+
 let () =
   Alcotest.run "march-refine"
     [ ("smoke", smoke_suite);
@@ -169,4 +276,5 @@ let () =
       ("model", model_suite);
       ("solver", solver_suite);
       ("cache", cache_suite);
-      ("refine", refine_suite) ]
+      ("refine", refine_suite);
+      ("lifecycle", lifecycle_suite) ]
