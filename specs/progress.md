@@ -282,6 +282,17 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-03, Phase 5C final whole-branch review fixes — actor-handler caps + gate hygiene)
+
+Final whole-branch review of Phase 5C Parts A & B (six individually-reviewed tasks) found one Critical gap no single task's review could catch, plus three smaller issues. All four fixed in this pass:
+
+- **C1 (Critical) — actor handler capabilities were silently dropped from the manifest.** `record_fn_caps` in `check_module_needs` (`lib/typecheck/typecheck.ml`) was only ever called for `DFn`/`DExtern`, never for actor handlers, even though TIR hashes every synthesized handler function (named `{ActorName}_{MsgName}`, `lib/tir/lower.ml`'s `lower_handler`) as a `.hcr_manifest` boundary entry. A handler doing IO (e.g. `println`) compiled clean with an empty `caps=` field, invisible to the Part B monotonicity gate. Fixed in two parts: (1) `check_module_needs`'s `DActor` branch now body-scans each handler and calls `record_fn_caps` keyed by the actor's **bare** name + `_` + message name (verified empirically — TIR never module-qualifies the handler fn_name, even for actors nested 2+ levels deep, unlike sibling `DFn`s in the same module which DO get qualified); (2) the existing `body_cap_uses` fold (same one `DFn`/`DLet` already populate — no new AST walk) now also scans handler bodies, so a handler doing undeclared IO trips the same "capability not declared in needs" warning a plain function body would. New tests: `test/test_compiler.ml` (`test_actor_handler_body_io_missing_needs_warns`/`..._no_warning`, 2-level-nested-module fixture), `test/test_stdlib_suite.ml` (`test_hcr_manifest_actor_handler_caps_populated`, `Slow`).
+- **I2 (Important) — `compute_cap_narrowing` used exact match instead of subsumption.** `forge/lib/cmd_deploy_hot.ml`: a prior cap could be misreported as "narrowed away" when the new build still holds a broader covering cap (e.g. new `IO` root covering prior `IO.FileRead`). Log-only (not the gate itself), but misleading. Fixed to use `Cap_lattice.cap_subsumes`, mirroring `compute_cap_widening`'s existing pattern. New test in `forge/test/test_forge.ml`'s `hcr-cap-gate` group.
+- **M3 (Minor) — diagnostic column padding.** `print_widening_diagnostic`'s hardcoded `%-12s` misaligned for caps longer than 12 chars (e.g. `IO.NetConnect.TLS`). Now computed dynamically from the longest cap name being printed.
+- **M5 (Minor) — non-deterministic widening attribution.** `attribute_widening` searched `manifest.functions` in `Hashtbl.iter`'s unspecified order, so which function got blamed in the "(from <fn>)" diagnostic could vary build-to-build. Now sorts by `fn_name` before searching.
+
+**Verification:** full suite green (391 compiler / 230 eval / 364 codegen / 793 stdlib — all four `run-tests.sh` runners exit 0); `forge/test/test_forge.exe` 112/112 green (not part of `run-tests.sh`'s four suites, run separately). Full report: `.superpowers/sdd/final-review-fix-report.md`.
+
 ## Current State (as of 2026-07-03, Phase 5C Parts A & B — capability-safe hot deploys, manifest + monotonicity gate)
 
 **HCR Phase 5C Parts A & B complete across five tasks (commits df323bb7 through f94a5c3e, all reviewed and approved).** Parts A and B deliver the operational capability-safety apparatus; Part C (node-local admission at dlopen time) remains open as documented in the item's "Part C" section in todos.md.

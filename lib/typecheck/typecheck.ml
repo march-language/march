@@ -5214,7 +5214,26 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
-    | Ast.DActor (_, _, actor, sp) ->
+    | Ast.DActor (_, name, actor, sp) ->
+      (* C1 fix: also record each handler's own per-function cap closure,
+         keyed EXACTLY the way TIR names the synthesized handler function
+         (see lib/tir/lower.ml's [lower_handler]: [fn_name = name ^ "_" ^
+         h.ah_msg.txt], where [name] there is the actor's OWN BARE name —
+         never module-prefixed, confirmed empirically: a handler on actor
+         [Weeble] nested inside [App.Sub] still lowers to bare
+         [Weeble_Zorp], NOT [Sub.Weeble_Zorp], even though sibling [DFn]s in
+         the same nested module DO get the "Sub." prefix). So the handler's
+         qualified name must use the actor's bare [name.txt] directly — NOT
+         [cap_qname name.txt] — while the signature-cap diagnostics above
+         and the body-scanned caps below still merge in [module_wide_caps]
+         via [record_fn_caps] the same way [DFn] does. *)
+      List.iter (fun (h : Ast.actor_handler) ->
+          let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
+          let body_caps = List.filter_map (fun (call_name, _) ->
+              List.assoc_opt call_name builtin_cap_table
+            ) (calls_in_expr [] h.Ast.ah_body) in
+          record_fn_caps fn_qname body_caps
+        ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
@@ -5249,6 +5268,22 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
         ) (calls_in_expr [] b.Ast.bind_expr)
+      (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
+         this branch already performs for DFn/DLet, rather than a second/
+         parallel AST walk — a handler doing undeclared IO must trip the
+         same "capability not declared in needs" diagnostic (Check 1b,
+         below) that a plain function body would. Cap-closure recording for
+         handlers already happened above in [used_caps]'s DActor branch (so
+         it isn't duplicated here); this only needs to surface the
+         (cap, span) pairs for the Check 1b/Check 2 diagnostics. *)
+      | Ast.DActor (_, _, actor, _) ->
+        List.concat_map (fun (h : Ast.actor_handler) ->
+            List.filter_map (fun (call_name, call_span) ->
+              match List.assoc_opt call_name builtin_cap_table with
+              | Some cap_name -> Some (cap_name, call_span)
+              | None -> None
+            ) (calls_in_expr [] h.Ast.ah_body)
+          ) actor.actor_handlers
       | _ -> []
     ) decls in
     List.fold_left (fun acc (cap_name, sp) ->

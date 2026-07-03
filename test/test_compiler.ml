@@ -1296,6 +1296,81 @@ let test_actor_handler_cap_missing_needs_error () =
   end|} in
   Alcotest.(check bool) "actor handler cap without needs: error" true (has_errors ctx)
 
+(* ── C1 fix: actor handler BODY IO with no declared `needs` ───────────────
+   Finding C1 (final whole-branch review, HCR Phase 5C): [record_fn_caps] was
+   never called for actor handlers at all, so handler functions ended up as
+   `.hcr_manifest` boundary entries with an empty `caps=` field regardless of
+   what IO they actually performed — invisible to the hot-deploy monotonicity
+   gate. Part 2 of the fix folds handler bodies into the SAME body-scan
+   [check_module_needs]'s `body_cap_uses` already does for `DFn`/`DLet`
+   bodies, so a handler calling an IO builtin with no covering `needs`
+   now produces the same "capability not declared in needs" diagnostic a
+   plain function body would (Check 1b — a warning, matching the existing
+   DFn/DLet body-scan diagnostic's severity).
+
+   This fixture uses a 2-level-deep nested module (`Outer.Inner`) to also
+   exercise the qualified-name path through [check_module_needs]'s
+   [cap_qname_prefix] threading (mirrors the nesting depth Task 2's earlier
+   `DFn` qualified-name fix was verified against). *)
+let test_actor_handler_body_io_missing_needs_warns () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "IO.Console") m 0); true
+           with Not_found -> false)
+          && (try ignore (Str.search_forward (Str.regexp_string "needs") m 0); true
+              with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with no needs: warns to declare needs IO.Console"
+    true has_warning
+
+(* Counterpart: when the module DOES declare the needed cap, no such warning
+   fires — confirms the new body-scan doesn't introduce a false positive. *)
+let test_actor_handler_body_io_with_needs_no_warning () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      needs IO.Console
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "not declare") m 0); true
+           with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with needs declared: no missing-needs warning"
+    false has_warning
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5347,6 +5422,9 @@ let compiler_suites =
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
+          (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
+          Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
+          Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
           Alcotest.test_case "actor handler wrong return type"         `Quick test_actor_handler_wrong_return_type;

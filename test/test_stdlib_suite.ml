@@ -10588,6 +10588,71 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
        Alcotest.(check (option string)) "cap_root stable across two independent builds"
          cap_root1 cap_root2)
 
+(* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
+   silently dropped from the manifest — [record_fn_caps] was called for
+   [DFn]/[DExtern] but never for actor handlers, even though TIR hashes every
+   lowered function INCLUDING synthesized actor-handler functions (named
+   "{ActorName}_{MsgName}", see lib/tir/lower.ml's [lower_handler]) as
+   `.hcr_manifest` boundary entries. Before the fix, a handler calling
+   `println` (IO.Console) compiled clean with an EMPTY `caps=` field.
+
+   Fixture nests the actor two levels deep (Outer.Inner) to also confirm the
+   qualified-name convention holds: TIR names the handler fn using the
+   actor's OWN BARE name (confirmed empirically — a handler on actor
+   [Weeble] inside [Outer.Inner] lowers to bare "Weeble_Zorp", NOT
+   "Inner.Weeble_Zorp"), so [check_module_needs]'s DActor branch must key
+   [record_fn_caps] the same bare way rather than through [cap_qname]. *)
+let hcr_manifest_actor_handler_caps_fixture_src =
+  "mod Outer do\n\
+  \  mod Inner do\n\
+  \    needs IO.Console\n\
+  \    actor Weeble do\n\
+  \      state { count : Int }\n\
+  \      init { count: 0 }\n\
+  \      on Zorp(msg : String) do\n\
+  \        println(msg)\n\
+  \        state\n\
+  \      end\n\
+  \    end\n\
+  \    fn run_it() do\n\
+  \      let pid = spawn(Weeble)\n\
+  \      send(pid, Zorp(\"hi\"))\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    Inner.run_it()\n\
+  \  end\n\
+   end\n"
+
+let test_hcr_manifest_actor_handler_caps_populated () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_hcractorcaps" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actorcaps.march" in
+  let oc = open_out src in
+  output_string oc hcr_manifest_actor_handler_caps_fixture_src;
+  close_out oc;
+  let bin = Filename.concat tmp "actorcapsbin" in
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+          ~extra_args:"--hot-reload Outer --compile-so" () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let mf = bin ^ ".hcr_manifest" in
+    Alcotest.(check bool) "manifest sidecar written" true (Sys.file_exists mf);
+    let (fn_lines, _cap_root) = parse_hcr_manifest mf in
+    (* The handler's synthesized TIR fn name is bare "Weeble_Zorp" — the
+       actor's own short name + "_" + the message name — NOT qualified by
+       the enclosing "Inner." module prefix (unlike a sibling DFn such as
+       "Inner.run_it", which IS prefixed). *)
+    (match List.assoc_opt "Weeble_Zorp" fn_lines with
+     | None -> Alcotest.failf "no FN line for Weeble_Zorp found in manifest %s" mf
+     | Some caps ->
+       Alcotest.(check string) "Weeble_Zorp (actor handler) caps = IO.Console"
+         "IO.Console" caps)
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -11814,6 +11879,8 @@ let stdlib_suites =
           test_compiled_hot_reload_dispatch;
         Alcotest.test_case "HCR manifest: caps= fields + ROOT cap_root= (Phase5C-A.3), stable across builds" `Slow
           test_hcr_manifest_emits_caps_and_cap_root;
+        Alcotest.test_case "HCR manifest: actor handler caps populated (C1 fix)" `Slow
+          test_hcr_manifest_actor_handler_caps_populated;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
       ]);
