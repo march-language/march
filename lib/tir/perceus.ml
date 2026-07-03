@@ -115,10 +115,10 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
    used.  Each field below documents the ref it replaces and that ref's
    scoping discipline, which the corresponding field preserves EXACTLY:
 
-   - Module-scoped fields ([borrow_map], [type_defs], [fn_kinds],
-     [extern_names]): set once per [perceus] run, read-only for the whole
-     traversal.  No save/restore needed — every [insert_rc_expr] call for
-     every function in the module sees the identical value.
+   - Module-scoped fields ([borrow_map], [type_defs], [extern_names]): set
+     once per [perceus] run, read-only for the whole traversal.  No
+     save/restore needed — every [insert_rc_expr] call for every function in
+     the module sees the identical value.
    - Function-scoped fields ([current_fn_name], [closure_fvs], [actor_sent]):
      set once per top-level [insert_rc] call, constant across that function's
      entire [insert_rc_expr] traversal (nested [ELetRec] closures reuse the
@@ -139,17 +139,6 @@ type env = {
       (** Module type definitions, used to query whether a matched
           scrutinee's constructor shares its heap object with the bound
           payload (newtype/niche representations).  Was [_type_defs]. *)
-  fn_kinds : Tir.fn_kind StringMap.t;
-      (** name → [Tir.fn_kind] for every fn_def in the current module
-          (Wave 3 Task 3).  [is_apply_fn] (below) is a CALL-SITE check — it
-          only has the callee's [Tir.var] name, not its defining [fn_def] —
-          so this table is the bridge from "the name I'm looking at" to
-          "the honest role its definition was tagged with".  Used ONLY for
-          the transitional assert that [Tir_names.is_apply_fn]'s
-          name-sniffing answer still agrees with the flag; the callee's
-          actual RC-relevant DECISION still goes through [is_apply_fn]
-          (unchanged) this chunk — see the plan's "assertions come out in
-          Chunk 2" note.  Was [_fn_kinds]. *)
   extern_names : StringSet.t;
       (** Names of user-defined extern (FFI) functions.  These are called via
           [ECallPtr] (not [EApp]) but, unlike opaque closures, their
@@ -235,7 +224,6 @@ type env = {
 let empty_env : env = {
   borrow_map = Borrow.empty;
   type_defs = [];
-  fn_kinds = StringMap.empty;
   extern_names = StringSet.empty;
   current_fn_name = "";
   closure_fvs = StringSet.empty;
@@ -511,19 +499,6 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           the caller still owns exactly one reference and must emit exactly
           one DecRC.  Without dedup we would underflow the RC. *)
     let callee_is_apply = is_apply_fn f.Tir.v_name in
-    (* TRANSITION SAFETY (Wave 3 Task 3, removed in Chunk 2): [is_apply_fn]
-       still makes the actual RC decision above (unchanged this chunk) — this
-       assert only proves the name-sniffing answer agrees with the honest
-       [fn_kind] flag set at the fn's synthesis site. A callee name absent
-       from [env.fn_kinds] (builtin operators like "+", externs, or any callee
-       not defined as a fn_def in THIS module — e.g. cross-module refs seen
-       pre-mono) has no flag to check against, so it is skipped rather than
-       treated as a mismatch. If this ever fires, it means some synthesis
-       site mints an "$apply$"-shaped name without tagging FnApply (or vice
-       versa) — fix the synthesis site, do not weaken this assert. *)
-    (match StringMap.find_opt f.Tir.v_name env.fn_kinds with
-     | Some kind -> assert ((kind = Tir.FnApply) = callee_is_apply)
-     | None -> ());
     let post_dec_vars =
       let seen = ref StringSet.empty in
       List.filter_map (fun (i, a) ->
@@ -1379,7 +1354,7 @@ let rec dup_field_results (e : Tir.expr) : Tir.expr =
 
 (** [insert_rc ~module_env ~borrowed fn] runs Phase 2 (RC insertion) over one
     function.  [module_env] carries the module-scoped fields (borrow_map,
-    type_defs, fn_kinds, extern_names) set once per [perceus] run; this
+    type_defs, extern_names) set once per [perceus] run; this
     function fills in the function-scoped fields (current_fn_name,
     closure_fvs, actor_sent) and the initial subtree-scoped fields (var_ctx
     seeded with params, borrowed_field_vars reset to empty) — exactly what
@@ -1545,11 +1520,6 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   _rc_fresh_ctr := 0;
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
-  let fn_kinds =
-    List.fold_left (fun acc (fd : Tir.fn_def) ->
-      StringMap.add fd.Tir.fn_name fd.Tir.fn_kind acc
-    ) StringMap.empty m.Tir.tm_fns
-  in
   let extern_names =
     List.fold_left (fun s (ed : Tir.extern_decl) ->
       StringSet.add ed.Tir.ed_march_name s) StringSet.empty m.Tir.tm_externs
@@ -1559,7 +1529,6 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
     { empty_env with
       borrow_map;
       type_defs = m.Tir.tm_types;
-      fn_kinds;
       extern_names }
   in
   let repl_set =

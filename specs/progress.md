@@ -282,6 +282,17 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-03, Wave 3 chunk 2 Task 2 — transitional fn_kind asserts retired)
+
+`specs/plans/2026-07-03-wave3-chunk2-emit-lower.md` Task 2 is done, gated on Task 1's FnFused coverage test (landed, commit `4404b2fa`). The three transitional flag-vs-name-sniff asserts introduced in Wave 3 chunk 1 Task 3 (`perceus.ml`'s `EApp`-case assert, `llvm_emit.ml`'s `EApp`-case assert, `llvm_emit.ml`'s `emit_fn` self-check) are removed; the `is_apply_fn` name-sniff remains the sole RC/ABI decision authority in both files, exactly as chunk 1's design intended.
+
+- **`perceus.ml`:** removed the `EApp`-case assert AND `env.fn_kinds` in its entirety (field, `empty_env` init, per-module table build) — confirmed by grep (before/after, across all of `lib/tir/*.ml` including the 4 perceus-split modules) that the assert was the field's only reader. The RC decision (`callee_is_apply = is_apply_fn f.Tir.v_name`) was already name-sniff-driven and is unchanged.
+- **`llvm_emit.ml`:** removed the `EApp`-case assert AND `ctx.top_fn_kind` in its entirety (field, `make_ctx` init, `emit_module` population loop) — same no-other-reader confirmation via grep across all of `lib/`. Also removed `emit_fn`'s self-check assert (no table involved — it read the fn_def's own `fn_kind` directly). Both files' `ret_ty`/ABI decisions are unchanged.
+- **No BLOCKED condition:** every removed table/assert was pure cross-check scaffolding; no consumer was found deciding from a table instead of the name-sniff or the fn_def's own flag — chunk 1's review claim held exactly.
+- **`lib/cas/serialize.ml`'s fn_kind exclusion warning verified untouched** — a separate, permanent design decision (fn_kind stays out of the BLAKE3-hashed impl/sig hash used for RPC admission and the CAS cache key, since it's a same-binary compiler-internal tag) unrelated to this task's scaffolding removal.
+- **Standard gates:** six runners exit 0 at 384 compiler / 230 eval / 370 codegen / 791 stdlib / 53 stdlib_march / 29 snapshots — zero `.expected` diffs (test counts unchanged from Task 1 — this task removes dead asserts, adds no tests). Baseline IR diff: `--emit-llvm` on all four benchmarks (fib, binary_trees, tree_transform, list_ops) against a clean sibling-worktree build of base commit `4404b2fa` — byte-identical `.ll` in all four. Compiled (`--compile --opt 2`) outputs byte-identical; timings within noise (largest delta +6.1%, well under the ±10% gate). `scripts/check-docs.sh` clean.
+- **Reference:** `specs/plans/2026-07-03-wave3-chunk2-emit-lower.md` Task 2. Full writeup in `.superpowers/sdd/w3c2-task-2-report.md`. **Six-runner counts: 384 compiler / 230 eval / 370 codegen / 791 stdlib / 53 stdlib_march / 29 snapshots — all exit 0, zero `.expected` diffs, doc-lint passes.**
+
 ## Current State (as of 2026-07-03, Wave 3 chunk 2 Task 1 — FnFused coverage test + known_call/mono name-contract stragglers)
 
 `specs/plans/2026-07-03-wave3-chunk2-emit-lower.md` Task 1 is done. This task had a gating role: chunk 1 Task 3 added `Tir.fn_kind`'s `FnFused` constructor (fusion.ml's 3 loop-fusion synthesis sites) with zero consumers or asserts — filed as chunk-1 triage item (c). Chunk 2 Task 2 (retiring the transitional `fn_kind` asserts) requires this gap closed first, or `FnFused` would become the only kind ever exercised with zero test signal once the other kinds' name-sniffing fallback is removed.
