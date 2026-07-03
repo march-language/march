@@ -1,6 +1,13 @@
 -- Mutual tail-call pair (is_even/is_odd): pins the mutual-TCO lowering
--- shape distinct from self-TCO (see B7: self-TCO handles the Perceus
--- dec-chain, mutual-TCO historically didn't).
+-- shape distinct from self-TCO, as produced by the Lower->Mono->Defun->
+-- Perceus slice this snapshot suite dumps. NOTE: this pipeline slice
+-- stops BEFORE llvm_emit's TCO/back-edge rewriting (that pass runs only
+-- during LLVM codegen, not during Lower/Mono/Defun/Perceus), so this
+-- snapshot pins pre-TCO tail-call lowering shape only — it cannot
+-- demonstrate B7's dec-chain-before-back-edge behavior (see B7: self-TCO
+-- handles the Perceus dec-chain, mutual-TCO historically didn't). That
+-- behavior is covered by llvm_emit-level tests in test/test_codegen.ml
+-- instead.
 mod MutualTco do
   fn is_even(n : Int) : Bool do
     if n == 0 do
