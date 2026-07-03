@@ -6502,6 +6502,473 @@ let test_scrutinee_borrowed_cross_branch_no_double_dec () =
     ~expected:"-1"
     ()
 
+(** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
+
+    These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
+    hand-written preamble blob (the [Buffer.add_string buf {| ... |}]
+    literals that used to sit inside [emit_preamble], before Wave 3 Task 4
+    replaced them with [Llvm_builtins.emit_preamble] generating the same
+    text from the declarative builtin table). They are kept here ONLY as a
+    regression golden — this test's entire job is to fail loudly the
+    moment [Llvm_builtins]'s generated preamble stops matching this
+    literal byte-for-byte.
+
+    DELETE THIS GOLDEN (and loosen the test) only when someone
+    DELIBERATELY changes the preamble's content/order/whitespace — at that
+    point this test's failure is expected and its golden is stale by
+    design, not a regression. *)
+let golden_preamble_core : string = {|; Runtime declarations
+; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)
+declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
+declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
+declare void @march_dispatch_leave(i32 %name_id, i32 %version)
+declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
+declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
+declare void @march_dispatch_init(i32 %n_slots)
+declare void @march_dispatch_register_name(i32, ptr)
+declare void @march_reload_server_start(ptr)
+declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
+declare ptr  @getenv(ptr)
+declare ptr  @march_alloc(i64 %sz)
+declare void @march_incrc(ptr %p)
+declare void @march_decrc(ptr %p)
+declare i64  @march_decrc_freed(ptr %p)
+declare void @march_incrc_local(ptr %p)
+declare void @march_decrc_local(ptr %p)
+declare void @march_free(ptr %p)
+declare void @march_print(ptr %s)
+declare void @march_panic(ptr %s)
+declare ptr  @march_panic_ext(ptr %s)
+declare ptr  @march_todo_ext(ptr %s)
+declare void @march_test_init(i32 %argc, ptr %argv)
+declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
+declare void @march_test_setup_all(ptr %fn)
+declare i32  @march_test_report()
+declare void @march_println(ptr %s)
+declare void @march_print_stderr(ptr %s)
+declare ptr  @march_io_read_line()
+declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare ptr  @march_html_auto_escape(ptr %v)
+declare i32  @march_record_shape_intern(ptr %desc)
+declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
+declare ptr  @march_record_keys(ptr %rec)
+declare ptr  @march_record_values(ptr %rec)
+declare ptr  @march_record_entries(ptr %rec)
+declare ptr  @march_record_get(ptr %rec, ptr %key, i64 %kind)
+declare i64  @march_record_has_key(ptr %rec, ptr %key)
+declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)
+declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)
+declare ptr  @march_record_from_list(ptr %list)
+declare ptr  @march_record_from_list_k(ptr %list, i64 %kind)
+declare ptr  @march_record_field_dyn(ptr %rec, ptr %name, i64 %len)
+declare ptr  @march_record_update_dyn(ptr %rec, i64 %n, ...)
+declare ptr  @march_int_to_string(i64 %n)
+declare ptr    @march_float_to_string(double %f)
+declare ptr    @march_bool_to_string(i64 %b)
+; Checked float division — aborts on divisor == 0.0 instead of returning inf/NaN
+declare double @march_checked_fdiv(double %a, double %b)
+; Checked integer division/remainder — panic on a zero divisor (matches interpreter)
+declare i64    @march_checked_idiv(i64 %a, i64 %b)
+declare i64    @march_checked_imod(i64 %a, i64 %b)
+declare i64    @march_checked_umod(i64 %a, i64 %b)
+; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
+declare i64    @march_checked_div_op(i64 %a, i64 %b)
+declare i64    @march_checked_mod_op(i64 %a, i64 %b)
+declare ptr  @march_string_concat(ptr %a, ptr %b)
+declare i64  @march_string_eq(ptr %a, ptr %b)
+declare i64  @march_poly_eq(ptr %a, ptr %b)
+; Ord / Hash builtins
+declare i64    @march_compare_int(i64 %x, i64 %y)
+declare i64    @march_compare_float(double %x, double %y)
+declare i64    @march_compare_string(ptr %x, ptr %y)
+declare i64    @march_hash_int(i64 %x)
+declare i64    @march_hash_float(double %x)
+declare i64    @march_hash_string(ptr %x)
+declare i64    @march_hash_bool(i64 %x)
+declare i64  @march_string_byte_length(ptr %s)
+declare i64  @march_string_is_empty(ptr %s)
+declare ptr  @march_string_to_int(ptr %s)
+declare ptr  @march_string_join(ptr %list, ptr %sep)
+; Float builtins
+declare double @march_float_abs(double %f)
+declare i64    @march_float_ceil(double %f)
+declare i64    @march_float_floor(double %f)
+declare i64    @march_float_round(double %f)
+declare i64    @march_float_truncate(double %f)
+declare double @march_int_to_float(i64 %n)
+; Char builtins
+declare ptr    @march_char_from_int(i64 %n)
+declare i64    @march_char_to_int(ptr %c)
+declare i64    @march_char_is_digit(ptr %c)
+declare i64    @march_char_is_alphanumeric(ptr %c)
+declare i64    @march_char_is_whitespace(ptr %c)
+; Float/Int conversion builtins
+declare i64    @march_float_to_int(double %f)
+; Math builtins
+declare double @march_math_sin(double %f)
+declare double @march_math_cos(double %f)
+declare double @march_math_tan(double %f)
+declare double @march_math_asin(double %f)
+declare double @march_math_acos(double %f)
+declare double @march_math_atan(double %f)
+declare double @march_math_atan2(double %y, double %x)
+declare double @march_math_sinh(double %f)
+declare double @march_math_cosh(double %f)
+declare double @march_math_tanh(double %f)
+declare double @march_math_sqrt(double %f)
+declare double @march_math_cbrt(double %f)
+declare double @march_math_exp(double %f)
+declare double @march_math_exp2(double %f)
+declare double @march_math_log(double %f)
+declare double @march_math_log2(double %f)
+declare double @march_math_log10(double %f)
+declare double @march_math_pow(double %b, double %e)
+; Extended string builtins
+declare ptr  @march_string_chars(ptr %s)
+declare ptr  @march_string_from_chars(ptr %list)
+declare i64  @march_string_contains(ptr %s, ptr %sub)
+declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
+declare i64  @march_string_ends_with(ptr %s, ptr %suffix)
+declare ptr  @march_string_slice(ptr %s, i64 %start, i64 %len)
+declare ptr  @march_string_split(ptr %s, ptr %sep)
+declare ptr  @march_string_split_first(ptr %s, ptr %sep)
+declare ptr  @march_string_replace(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_replace_all(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_to_lowercase(ptr %s)
+declare ptr  @march_string_to_uppercase(ptr %s)
+declare ptr  @march_string_trim(ptr %s)
+declare ptr  @march_string_trim_start(ptr %s)
+declare ptr  @march_string_trim_end(ptr %s)
+declare ptr  @march_string_repeat(ptr %s, i64 %n)
+declare ptr  @march_string_reverse(ptr %s)
+declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
+declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
+declare i64  @march_string_grapheme_count(ptr %s)
+declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_to_float(ptr %s)
+; List builtins
+declare ptr  @march_list_append(ptr %a, ptr %b)
+declare ptr  @march_list_concat(ptr %lists)
+; IOList builtins
+declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
+; Vault (key-value store) builtins
+declare ptr  @march_vault_new(ptr %name)
+declare ptr  @march_vault_whereis(ptr %name)
+declare ptr  @march_vault_set(ptr %table, ptr %key, ptr %value)
+declare ptr  @march_vault_set_ttl(ptr %table, ptr %key, ptr %value, i64 %ttl)
+declare i64  @march_vault_put_new(ptr %table, ptr %key, ptr %value, i64 %ttl)
+declare i64  @march_vault_incr(ptr %table, ptr %key, i64 %delta)
+declare ptr  @march_vault_push_capped(ptr %table, ptr %key, ptr %value, i64 %max)
+declare ptr  @march_vault_get(ptr %table, ptr %key)
+declare ptr  @march_vault_drop(ptr %table, ptr %key)
+declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
+declare i64  @march_vault_size(ptr %table)
+declare ptr  @march_vault_keys(ptr %table)
+declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)
+declare ptr  @march_vault_ns_get(ptr %ns, ptr %key)
+declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
+; Crypto / hash builtins
+declare ptr  @march_md5(ptr %b)
+declare ptr  @march_sha256(ptr %b)
+declare ptr  @march_sha512(ptr %b)
+declare ptr  @march_sha1_bytes(ptr %b)
+declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
+declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)
+declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
+declare ptr  @march_base64_encode(ptr %b)
+declare ptr  @march_base64_decode(ptr %s)
+declare ptr  @march_random_bytes(i64 %n)
+; Compression builtins (runtime/march_compress.c)
+declare ptr  @march_gzip_encode(ptr %b, i64 %level)
+declare ptr  @march_gzip_decode(ptr %b)
+declare ptr  @march_deflate_encode(ptr %b)
+declare ptr  @march_deflate_decode(ptr %b)
+declare ptr  @march_zstd_encode(ptr %b, i64 %level)
+declare ptr  @march_zstd_decode(ptr %b)
+declare ptr  @march_brotli_encode(ptr %b, i64 %mode, i64 %quality)
+declare ptr  @march_brotli_decode(ptr %b)
+; System introspection builtins
+declare i64  @march_sys_uptime_ms()
+declare i64  @march_sys_heap_bytes()
+declare i64  @march_sys_word_size()
+declare i64  @march_sys_minor_gcs()
+declare i64  @march_sys_major_gcs()
+declare i64  @march_sys_actor_count()
+declare i64  @march_sys_cpu_count()
+declare i64  @march_sys_cpu_load_milli()
+declare i64  @march_sys_mem_total_bytes()
+declare i64  @march_sys_mem_available_bytes()
+declare ptr  @march_sys_os()
+declare ptr  @march_sys_arch()
+declare ptr  @march_get_version()
+; UUID / identity builtins
+declare ptr  @march_uuid_v4()
+; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)
+declare void @march_remote_init()
+declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)
+declare i64  @march_remote_count()
+declare i64  @march_remote_check_march(ptr %impl_hash, ptr %sig_hash)
+declare ptr  @march_remote_invoke_march(ptr %impl_hash, ptr %args)
+; Integer math helpers
+declare i64  @march_int_pow(i64 %base, i64 %exp)
+; LLVM intrinsics
+declare i64  @llvm.ctpop.i64(i64 %val)
+declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
+declare ptr  @llvm.stacksave()
+declare void @llvm.stackrestore(ptr %ptr)
+; Logger builtins
+declare ptr  @march_logger_set_level(i64 %level)
+declare i64  @march_logger_get_level()
+declare ptr  @march_logger_add_context(ptr %key, ptr %value)
+declare ptr  @march_logger_clear_context()
+declare ptr  @march_logger_get_context()
+declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)
+; REPL JIT persistent variable slot table (march_extras.c)
+declare i64  @march_repl_get(i64 %slot)
+declare void @march_repl_set(i64 %slot, i64 %val)
+
+|}
+
+let golden_preamble_native_actor : string = {|; Actor builtins
+declare void @march_kill(ptr %actor)
+declare i64  @march_is_alive(ptr %actor)
+declare ptr  @march_send(ptr %actor, ptr %msg)
+declare ptr  @march_send_linear(ptr %actor, ptr %msg)
+declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
+declare ptr  @march_spawn(ptr %actor)
+declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
+declare void @march_actor_reply(ptr %ref, ptr %result)
+declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
+|}
+
+let golden_preamble_native_net_io : string = {|
+; TCP/network builtins
+declare ptr  @march_tcp_listen(i64 %port)
+declare ptr  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
+declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
+declare ptr  @march_tcp_send_all(i64 %fd, ptr %data)
+declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_tcp_peer_addr(i64 %fd)
+declare ptr  @march_http_parse_request(ptr %raw)
+declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
+declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare void @march_http_server_wait(i64 %handle)
+declare void @march_ws_handshake(i64 %fd, ptr %key)
+declare ptr  @march_ws_recv(i64 %fd)
+declare void @march_ws_send(i64 %fd, ptr %frame)
+declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
+; File/Dir builtins
+declare i64  @march_file_exists(ptr %s)
+declare i64  @march_dir_exists(ptr %s)
+declare ptr  @march_file_open(ptr %path)
+declare ptr  @march_file_close(ptr %handle)
+declare ptr  @march_file_read(ptr %path)
+declare ptr  @march_file_read_line(ptr %handle)
+declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
+declare ptr  @march_file_write(ptr %path, ptr %data)
+declare ptr  @march_file_append(ptr %path, ptr %data)
+declare ptr  @march_file_delete(ptr %path)
+declare ptr  @march_file_copy(ptr %src, ptr %dst)
+declare ptr  @march_file_rename(ptr %src, ptr %dst)
+declare ptr  @march_file_stat(ptr %path)
+declare ptr  @march_dir_mkdir(ptr %path)
+declare ptr  @march_dir_mkdir_p(ptr %path)
+declare ptr  @march_dir_rmdir(ptr %path)
+declare ptr  @march_dir_rm_rf(ptr %path)
+declare ptr  @march_dir_list(ptr %path)
+declare ptr  @march_dir_list_full(ptr %path)
+declare ptr  @march_process_argv()
+declare ptr  @march_process_cwd()
+declare ptr  @march_process_env(ptr %name)
+declare i64  @march_process_set_env(ptr %name, ptr %value)
+declare i64  @march_process_exit(i64 %code)
+declare i64  @march_process_pid()
+declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)
+declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)
+declare ptr  @march_process_spawn_async(ptr %cmd, ptr %args)
+declare ptr  @march_process_read_line(ptr %proc)
+declare i64  @march_process_write(ptr %proc, ptr %data)
+declare i64  @march_process_kill_proc(ptr %proc)
+declare i64  @march_process_wait_proc(ptr %proc)
+; TCP recv-all
+declare ptr  @march_tcp_recv_all(i64 %fd, i64 %max_bytes, i64 %timeout_ms)
+declare ptr  @march_tcp_recv_chunk(i64 %fd, i64 %max_bytes)
+declare ptr  @march_tcp_recv_http_headers(i64 %fd)
+declare ptr  @march_tcp_recv_chunked_frame(i64 %fd)
+; TLS builtins
+declare ptr  @march_tls_client_ctx(ptr %ca_file, ptr %alpn_list, i64 %verify_peer, i64 %timeout_ms)
+declare ptr  @march_tls_server_ctx(ptr %cert_file, ptr %key_file, ptr %ca_file, ptr %alpn_list, i64 %verify_peer)
+declare ptr  @march_tls_connect(i64 %fd, i64 %ctx_handle, ptr %hostname)
+declare ptr  @march_tls_accept(i64 %fd, i64 %ctx_handle)
+declare ptr  @march_tls_read(i64 %ssl_handle, i64 %max_bytes)
+declare ptr  @march_tls_write(i64 %ssl_handle, ptr %data)
+declare void @march_tls_close(i64 %ssl_handle)
+declare void @march_tls_ctx_free(i64 %ctx_handle)
+declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)
+declare ptr  @march_tls_peer_cn(i64 %ssl_handle)
+; TypedArray builtins
+declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)
+declare ptr  @march_typed_array_from_list(ptr %list)
+declare ptr  @march_typed_array_to_list(ptr %arr)
+declare i64  @march_typed_array_length(ptr %arr)
+declare ptr  @march_typed_array_get(ptr %arr, i64 %i)
+declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
+declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+; NativeIntArr builtins — flat i64 arrays for vectorizable loops
+declare ptr    @native_int_arr_make(i64 %len, i64 %def)
+declare i64    @native_int_arr_length(ptr %arr)
+declare i64    @native_int_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
+declare i64    @native_int_arr_sum(ptr %arr)
+declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_int_arr_from_list(ptr %lst)
+declare ptr    @native_int_arr_to_list(ptr %arr)
+declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
+; NativeFloatArr builtins — flat double arrays for vectorizable loops
+declare ptr    @native_float_arr_make(i64 %len, double %def)
+declare i64    @native_float_arr_length(ptr %arr)
+declare double @native_float_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
+declare double @native_float_arr_sum(ptr %arr)
+declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_float_arr_from_list(ptr %lst)
+declare ptr    @native_float_arr_to_list(ptr %arr)
+declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
+; Time builtins
+declare double @march_unix_time()
+declare ptr  @march_tcp_connect(ptr %host, i64 %port)
+; HTTP client builtins
+declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
+declare ptr  @march_http_parse_response(ptr %raw)
+; CSV builtins
+declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
+declare ptr  @march_csv_next_row(ptr %handle)
+declare ptr  @march_csv_close(ptr %handle)
+; Resource ownership
+declare void @march_own(ptr %pid, ptr %value)
+; Capability builtins
+declare ptr  @march_cap_narrow(ptr %cap)
+; Monitor/supervision builtins
+declare void @march_demonitor(i64 %ref)
+declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare i64  @march_mailbox_size(ptr %pid)
+declare void @march_run_until_idle()
+declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
+declare ptr  @march_get_cap(ptr %pid)
+declare void @march_send_checked(ptr %cap, ptr %msg)
+declare ptr  @march_pid_of_int(i64 %n)
+declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
+declare void @march_link(ptr %actor_a, ptr %actor_b)
+declare void @march_unlink(ptr %actor_a, ptr %actor_b)
+declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
+declare ptr  @march_value_to_string(ptr %v)
+; Session-typed channel builtins (binary)
+declare ptr  @march_chan_new(ptr %proto_name)
+declare ptr  @march_chan_send(ptr %ep, ptr %val)
+declare ptr  @march_chan_recv(ptr %ep)
+declare i64  @march_chan_close(ptr %ep)
+declare ptr  @march_chan_choose(ptr %ep, ptr %label)
+declare ptr  @march_chan_offer(ptr %ep)
+; Multi-party session type (MPST) builtins
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
+declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
+declare i64  @march_mpst_close(ptr %ep)
+|}
+
+let golden_preamble_wasm_stub : string = {|; WASM: plain global (no TLS), no-op scheduler stub
+@march_tls_reductions = external global i64
+declare void @march_yield_from_compiled()
+declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
+|}
+
+(** Reassemble the historical preamble text for a given (is_wasm, repl)
+    combination exactly as the OLD [emit_preamble] used to nest its
+    [Buffer.add_string] calls — see the deleted function's structure (git
+    history, commit before W3C2.4). *)
+let golden_preamble ~(is_wasm : bool) ~(repl : bool) : string =
+  if is_wasm then
+    golden_preamble_core ^ golden_preamble_wasm_stub
+  else
+    let tls_insert =
+      if repl then ""
+      else "@march_tls_reductions = external thread_local global i64
+declare void @march_yield_from_compiled()
+"
+    in
+    golden_preamble_core ^ golden_preamble_native_actor ^ tls_insert ^ golden_preamble_native_net_io
+
+let test_preamble_byte_identical_native () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false ~triple:"x86_64-unknown-linux-gnu" ~repl:false buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "x86_64-unknown-linux-gnu"
+    ^ golden_preamble ~is_wasm:false ~repl:false
+  in
+  Alcotest.(check string) "native, non-repl preamble byte-identical to historical blob" expected actual
+
+let test_preamble_byte_identical_native_repl () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false ~triple:"x86_64-unknown-linux-gnu" ~repl:true buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "x86_64-unknown-linux-gnu"
+    ^ golden_preamble ~is_wasm:false ~repl:true
+  in
+  Alcotest.(check string) "native, REPL preamble byte-identical to historical blob" expected actual
+
+let test_preamble_byte_identical_wasm () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:true ~triple:"wasm64-wasi" ~repl:false buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "wasm64-wasi"
+    ^ golden_preamble ~is_wasm:true ~repl:false
+  in
+  Alcotest.(check string) "WASM preamble byte-identical to historical blob" expected actual
+
+(** [Llvm_emit.emit_preamble] (the thin wrapper) must delegate to
+    [Llvm_builtins.emit_preamble] with no behavior change: same output for
+    the same [target_config]/[repl] as calling the new function directly
+    with the equivalent [is_wasm]/[triple]. *)
+let test_preamble_wrapper_delegates () =
+  let buf_old = Buffer.create 4096 in
+  March_tir.Llvm_emit.emit_preamble ~target:March_tir.Llvm_emit.Native ~repl:false buf_old;
+  let buf_new = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false
+    ~triple:(March_tir.Llvm_emit.target_triple March_tir.Llvm_emit.Native) ~repl:false buf_new;
+  Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
+    (Buffer.contents buf_new) (Buffer.contents buf_old)
+
 let codegen_suites =
   [
       ( "tir_names", [
@@ -7006,6 +7473,16 @@ let codegen_suites =
       ( "scrutinee_borrowed_cross_branch_dec_codegen", [
           Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
             test_scrutinee_borrowed_cross_branch_no_double_dec;
+        ] );
+      ( "llvm_builtins_preamble_golden", [
+          Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_native;
+          Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_native_repl;
+          Alcotest.test_case "WASM preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_wasm;
+          Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
+            test_preamble_wrapper_delegates;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
