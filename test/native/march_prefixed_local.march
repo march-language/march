@@ -1,0 +1,8 @@
+mod MarchBinRepro do
+  fn main() do
+    let march_bin = String.concat("/usr/bin/", "march")
+    println(march_bin)
+    println(march_bin)
+    println(march_bin)
+  end
+end

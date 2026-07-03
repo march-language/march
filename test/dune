@@ -1787,3 +1787,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/rpc_auto_enroll.expected native_rpc_auto_enroll.out)))
+
+; ── Regression (2026-07-02): a user local named with the march_ prefix
+; (`let march_bin = ...`) must take the normal local-load path, not be
+; emitted as a bare @global by emit_atom's march_-extern arm (the B9 arm
+; needed the var_slot shadow guard; first hit: bastion forge/console.march).
+(rule
+ (targets native_march_prefixed_local native_march_prefixed_local.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/march_prefixed_local.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_march_prefixed_local
+        native/march_prefixed_local.march)
+   (with-stdout-to native_march_prefixed_local.out
+        (system "./native_march_prefixed_local")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/march_prefixed_local.expected native_march_prefixed_local.out)))
