@@ -282,6 +282,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-03, Phase 5C Parts A & B — capability-safe hot deploys, manifest + monotonicity gate)
+
+**HCR Phase 5C Parts A & B complete across five tasks (commits df323bb7 through f94a5c3e, all reviewed and approved).** Parts A and B deliver the operational capability-safety apparatus; Part C (node-local admission at dlopen time) remains open as documented in the item's "Part C" section in todos.md.
+
+**Part A (capability-manifest emission):** `lib/caps/cap_lattice.ml` (new, 413 lines, Task 1) — factored `io_cap_hierarchy`/`cap_subsumes`/`normalize` out of duplication across `lib/typecheck/typecheck.ml` and `lib/refinecheck/cap_infer.ml` into a single source of truth for the capability partial order. `lib/typecheck/typecheck.ml` (Task 2) records a per-function **fully-qualified** IO-capability closure (matching TIR's dotted `mod_prefix` naming) exposed via `fn_capability_closures : (string * Cap_lattice.io_cap list) list` — required a two-phase fix to correct naming scoping (Task 2's secondary fix). `bin/main.ml` (Task 3) now emits a `.hcr_manifest` with a `caps=<sorted-csv>` field per function (sourced from `fn_capability_closures` via `hr_impl_hashes`/`caps_for`) and a top-level `ROOT cap_root=<hex>` line (BLAKE3 of the sorted manifest, via the existing `march_cas` dependency — no new dependencies added).
+
+**Part B (monotonicity gate):** `forge/lib/cmd_deploy_hot.ml` (Task 4) implements a monotonicity enforcement gate: `forge deploy hot` reads a local `.hcr_manifest.prev` baseline (mirroring the existing schema-compat baseline pattern), computes capability widening/narrowing via `Cap_lattice.subsumes`, and aborts before any network call if the new build's authority widens. Task 4 also fixed two manifest-parsing landmines (a `ROOT` line that could be misparsed as a phantom function; a `caps=` field at a variable position). `forge/bin/main.ml` + `cmd_deploy_hot.ml` (Task 5) adds a repeatable `--grant-cap <C>` flag that authorizes specific widenings via capability subsumption, with an audit-line print for each granted widening and an updated abort diagnostic.
+
+**What's NOT done (Part C):** node-side admission (`ACTIVATE4`, `MARCH_DEPLOY_POLICY`, server-side `cap_root` tamper check), and the compile-time `migrate_state` IO-free bound — these remain as documented in todos.md's Part C section.
+
+**Verification:** full suite green (384 compiler / 230 eval / 364 codegen / 791 stdlib / 53 stdlib_march — all six runners exit 0, zero failures). `scripts/check-docs.sh` passes with no changes needed (new `lib/caps/cap_lattice.ml` module and new `--grant-cap` flag do not trigger doc-lint issues).
+
 ## Current State (as of 2026-07-03, Phase5C-A cap-closure key fix — fully-qualified naming to match TIR)
 
 Code-review-driven fix (post Phase5C-A.2/A.3, commits `591b24df`/`dee1d39a`/`19b0c36a`): `fn_capability_closures`
