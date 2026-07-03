@@ -5076,7 +5076,8 @@ let test_tap_in_actor_context () =
 (*                                                                     *)
 (* These tests run the same March code through BOTH the interpreter   *)
 (* (repl_eval_exprs) and JIT (when available) and compare outputs.    *)
-(* JIT tests skip gracefully when clang/runtime is unavailable.       *)
+(* JIT tests skip (counted) only when clang is absent; runtime-source *)
+(* or link problems fail loudly per W2.0 — see setup_jit_runtime.     *)
 (* ------------------------------------------------------------------ *)
 
 (** Run an expression through the interpreter and return (value_str, type_str) option. *)
