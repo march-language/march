@@ -1,5 +1,13 @@
 [
   {
+    "hash": "c28ff465005d5967e5ca6464ac672eb5b2724098",
+    "short_hash": "c28ff46",
+    "author": "Matthew Gilliam",
+    "date": "2026-07-03T09:06:22-04:00",
+    "message": "refactor(tir): fn_kind role flags on fn_def; consumers assert against legacy name-sniffing (W3.3)\n\nAdds Tir.fn_kind (FnNormal | FnLambda | FnJoinPoint | FnApply | FnFused) to\nevery fn_def, set honestly at all 21 synthesis sites in lower.ml/defun.ml/\nfusion.ml. Dropped FnTryThunk (no synthesis site: __try_call/__try_call_val\nare typecheck/eval builtins, never a TIR fn_def); added FnFused (fusion.ml's\nloop-fusion helpers, a synthesis site the plan's suggested list missed).\n\nConverts all three Tir_names.is_apply_fn call sites (perceus.ml's post-call\nEDecRC gating, llvm_emit.ml's emit_fn and general EApp case) to check the\nflag, each guarded by a transitional assert proving flag-vs-name-sniff\nagreement (perceus.ml's new _fn_kinds table, llvm_emit.ml's new\nctx.top_fn_kind table) — zero firings across the full six-runner suite\n(1851 tests). borrow.ml's is_clo_struct/is_try_call are left unconverted\nwith in-place doc comments: is_clo_struct checks a Tir.ty, not a fn_def;\nis_try_call checks builtin names that are never lowered to a fn_def, so\nneither has a flag to assert against.\n\npp.ml/tir.ml's fn_def printers write fields by name (not exhaustive record\nmatches) so they needed no edit and never print fn_kind — zero TIR snapshot\nchurn. lib/cas/serialize.ml's content-hash writers are the same shape;\nannotated (not modified) to warn fn_kind must never be hashed there, since\nthat would silently invalidate every CAS artifact and cross-binary impl_hash.\n\nAdding a mandatory field forced every Tir.fn_def literal in bench/ and\ntest/ to set it, including test/test_properties.ml (nominally untouchable\nthis wave) — same exception the plan already grants bin/ for forced\nreference updates.",
+    "files_changed": 20
+  },
+  {
     "hash": "0cd6b62716a756a92dab53d660b1b4e267c9934a",
     "short_hash": "0cd6b62",
     "author": "Matthew Gilliam",
@@ -8,12 +16,12 @@
     "files_changed": 7
   },
   {
-    "hash": "c1ad25dd993e0bf9c71ea86d592b278b9365b1d7",
-    "short_hash": "c1ad25d",
+    "hash": "0cd6b62716a756a92dab53d660b1b4e267c9934a",
+    "short_hash": "0cd6b62",
     "author": "Matthew Gilliam",
-    "date": "2026-07-03T08:05:59-04:00",
-    "message": "refactor(tir): Tir_names — single home for cross-pass name contracts (W3.1)",
-    "files_changed": 15
+    "date": "2026-07-03T08:31:55-04:00",
+    "message": "refactor(tir): Rc_types — canonical needs_rc + borrow_eligible with documented divergence (W3.2)\n\nThe two copies of needs_rc (perceus.ml, borrow.ml — the latter tagged\n'duplicated to avoid a cyclic dependency') were never the same predicate:\nthey deliberately diverge on FOUR constructor patterns, not the two the\nplan documented. TFn / bare TVar: needs_rc true (closures + type-erased\nheap ptrs must be RC-tracked — Map.fold crash, Gate.cast UAF) but\nborrow_eligible false (closure-FV ownership contract: a705cc95, d2cf09e,\nfd520110, 78e31ff7). TTuple / TRecord: needs_rc false (aggregates never\nRC-freed; fields reconciled via _borrowed_field_vars — 390dff00 #4, Toml\npair-list corruption) but borrow_eligible true (field-only readers must\ninfer cfg:borrowed — 0b52510d record-liveness underflow). The TTuple/\nTRecord half was undocumented until now; task initially reported BLOCKED\nper its stop rule, controller confirmed intentional via git history.\n\nNew lib/tir/rc_types.ml holds both predicates (byte-identical moves) with\nthe full 11-constructor truth table, per-fork rationale, fix-history\ncommits, and break-it-in-each-direction consequences as the module doc.\nperceus.ml keeps a one-line alias (minimal diff ahead of W3.4); borrow.ml's\ncopy deleted, use sites call Rc_types.borrow_eligible.\n\nNew 'rc_types' suite in test/test_codegen.ml: 20-row table-driven truth\ntable for both predicates + an exactness test pinning the divergence set\nto precisely {TFn _, bare TVar _, TTuple _, TRecord _}.\n\nGate: six runners exit 0 (384/230/364/791/53/29); zero TIR snapshot churn\n(all 15 post-perceus snapshots green); byte-identical LLVM IR (0 diff\nlines) on all four benchmarks vs the c00bcb6c baseline; outputs correct.",
+    "files_changed": 7
   },
   {
     "hash": "c1ad25dd993e0bf9c71ea86d592b278b9365b1d7",
@@ -112,16 +120,16 @@
     "files_changed": 48
   },
   {
-    "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
-    "short_hash": "d685bc6",
+    "hash": "43faba9fd31a41071039690cfacf5777de4d3df3",
+    "short_hash": "43faba9",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T21:57:04-04:00",
     "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
     "files_changed": 6
   },
   {
-    "hash": "43faba9fd31a41071039690cfacf5777de4d3df3",
-    "short_hash": "43faba9",
+    "hash": "d685bc6103cca80a3faef1c3837c0283dd8bb95c",
+    "short_hash": "d685bc6",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T21:57:04-04:00",
     "message": "test(codegen): LLVM IR validity gate over native fixture corpus (W2.1)",
@@ -256,16 +264,16 @@
     "files_changed": 3
   },
   {
-    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
-    "short_hash": "b32d856",
+    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
+    "short_hash": "a9b5663",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
     "files_changed": 3
   },
   {
-    "hash": "a9b5663fae14a60c2a0ca8253df27b99bc53f2bb",
-    "short_hash": "a9b5663",
+    "hash": "b32d8569d854fe3732609e10ad65e01e88d667f7",
+    "short_hash": "b32d856",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T13:38:52-04:00",
     "message": "fix(llvm): REPL closure wrapper uses canonical clo_wrap_define ptr ABI (B11)",
@@ -304,16 +312,16 @@
     "files_changed": 1
   },
   {
-    "hash": "ed66a874e4f457fe7f3efdb128e74fc1665dd396",
-    "short_hash": "ed66a87",
+    "hash": "b2b5047cd7afb33b45070c3f6d5af53fe8c9f0cd",
+    "short_hash": "b2b5047",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T11:25:15-04:00",
     "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
     "files_changed": 2
   },
   {
-    "hash": "b2b5047cd7afb33b45070c3f6d5af53fe8c9f0cd",
-    "short_hash": "b2b5047",
+    "hash": "ed66a874e4f457fe7f3efdb128e74fc1665dd396",
+    "short_hash": "ed66a87",
     "author": "Matthew Gilliam",
     "date": "2026-07-02T11:25:15-04:00",
     "message": "fix(lsp/test): migrate embedded March sources to { k: v } record syntax\n\n22 LSP tests (depot phases A/B/C, actor info, named-record recovery,\nannotation, dot-completion, actor boilerplate) failed since 6486a275\ncut record literal/update syntax over from { x = e } to { x: e }: the\nmigration perl in that commit ran over *.march files only, so March\nsources embedded as OCaml string literals in lsp/test/test_lsp.ml kept\nthe old syntax, parse-failed at analysis time, and every\nanalysis-derived assertion saw empty results.\n\nApply the same migration regex to the 33 affected lines (record\nliterals, 'with' updates, actor init records). No test logic changed.\n331 LSP tests pass (was 309/331). Swept test/, lsp/, forge/ OCaml\nsources — no other embedded old-syntax March remains.",
@@ -3088,14 +3096,6 @@
     "files_changed": 3
   },
   {
-    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
-    "short_hash": "4398656",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T22:28:27-04:00",
-    "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
-    "files_changed": 1
-  },
-  {
     "hash": "36a21bc57855c399f98bc4b0c1fb5df5d4adb7a1",
     "short_hash": "36a21bc",
     "author": "Matthew Gilliam",
@@ -3104,16 +3104,24 @@
     "files_changed": 1
   },
   {
-    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
-    "short_hash": "29bd16d",
+    "hash": "439865622a8d6ab029e63397d219b39d761036ee",
+    "short_hash": "4398656",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T22:28:27-04:00",
+    "message": "feat(zed): add HTML injection query for ~H sigils\n\nZed reads query files from zed-march/languages/march/, not from\ntree-sitter-march/queries/. Added injections.scm to the correct\nlocation so ~H sigil content gets HTML syntax highlighting.",
+    "files_changed": 1
+  },
+  {
+    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
+    "short_hash": "331665a",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
     "files_changed": 5
   },
   {
-    "hash": "331665a13c16dfef67c251366ec617b269e8f646",
-    "short_hash": "331665a",
+    "hash": "29bd16dcefc78e4d5cbe0aa65c285eb5333039fd",
+    "short_hash": "29bd16d",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T22:06:51-04:00",
     "message": "feat: add interpolation to triple-quoted strings and HTML injection queries\n\nTriple-quoted strings (\"\"\"...\"\"\") now support ${expr} interpolation,\nmatching regular string behavior. Added \\$ escape for literal dollar signs.\nCreated tree-sitter injection queries for HTML highlighting in ~H sigils.\n\nUpdated sigil demo to use multi-line ~H\"\"\"...\"\"\" with interpolation.",
@@ -3136,14 +3144,6 @@
     "files_changed": 1
   },
   {
-    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
-    "short_hash": "63e7c83",
-    "author": "Matthew Gilliam",
-    "date": "2026-03-26T20:10:54-04:00",
-    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
-    "files_changed": 3
-  },
-  {
     "hash": "1f0c21a57fd7e55d5290386e366307d567819f9a",
     "short_hash": "1f0c21a",
     "author": "Matthew Gilliam",
@@ -3152,16 +3152,24 @@
     "files_changed": 3
   },
   {
-    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
-    "short_hash": "5be6787",
+    "hash": "63e7c836e71daee264867c92f97513fc91763b29",
+    "short_hash": "63e7c83",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-26T20:10:54-04:00",
+    "message": "fix(tree-sitter): use internal token for sigil_prefix instead of external scanner\n\nThe external scanner approach caused tree-sitter parse CLI to fail because\nthe CLI resolves parsers through its language config (pointing to the main\nworktree) rather than CWD. Switching to an internal token with\ntoken(prec(10, /~[A-Z]/)) fixes parsing in all contexts.",
+    "files_changed": 3
+  },
+  {
+    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
+    "short_hash": "391f9eb",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
     "files_changed": 7
   },
   {
-    "hash": "391f9eb4fd7b8d216ba054be2577e4659b858a64",
-    "short_hash": "391f9eb",
+    "hash": "5be67874f18d0628d48c184e9483dfa7bb3402c6",
+    "short_hash": "5be6787",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T20:00:16-04:00",
     "message": "fix: resolve all test failures — 1151 tests passing\n\n- LSP: add Token_filter.make to stdlib loader (fixes 443 LSP errors from\n  NL tokens flooding the parser when loading stdlib files)\n- parser: make PIPE optional in choose_branch; use NL as arm separator;\n  push Match context in token_filter for choose-by blocks\n- eval: hmac_sha256 and pbkdf2_sha256 return Ok(Bytes) with raw bytes;\n  base64_decode returns Ok(Bytes)/Err(String) instead of throwing\n- tests: fix ~100 test cases for new syntax — remove leading | from match\n  arms, wrap multi-statement arms in do...end, remove duplicate if lines,\n  wrap DataFrame column list literals with typed_array_from_list,\n  replace List.nth on TypedArray data with typed_array_get\n- specs: update progress.md (1151 tests, 0 failures) and todos.md",
@@ -3192,16 +3200,16 @@
     "files_changed": 15
   },
   {
-    "hash": "5030a28488a12deec33c48b8635e600a52183126",
-    "short_hash": "5030a28",
+    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
+    "short_hash": "cd4de52",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",
     "files_changed": 17
   },
   {
-    "hash": "cd4de5260a5c06da198761d54c4b754751a4ae2f",
-    "short_hash": "cd4de52",
+    "hash": "5030a28488a12deec33c48b8635e600a52183126",
+    "short_hash": "5030a28",
     "author": "Matthew Gilliam",
     "date": "2026-03-26T17:44:40-04:00",
     "message": "feat(syntax): add sigil expressions (~H for HTML templates, generic ~X)\n\nAdd generic sigil syntax to the March language as a prerequisite for\nBastion's template compilation. ~X\"...\" and ~X\"\"\"...\"\"\" where X is any\nuppercase letter. Supports string interpolation via ${expr}.\n\nDesugars ESigil('H', content, sp) → Sigil.h(content) in the desugar\npass. Sigil.h wraps the interpolated string as an IOList for zero-copy\nwire sending to the browser.\n\n- Lexer: ~X emits SIGIL_PREFIX token\n- AST: ESigil of char * expr * span\n- Parser: combines SIGIL_PREFIX with string/interp/triple-quoted\n- Desugar: transforms to Sigil.x(content) module-qualified call\n- Typecheck/eval/coverage/TIR/formatter/LSP: exhaustive match coverage\n- stdlib/sigil.march: Sigil.h returns IOList.from_string(content)\n- 6 tests: basic, interpolation, triple-quoted, IOList type, empty, complex",

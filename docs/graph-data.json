@@ -17709,6 +17709,17 @@
       "created_at": "2026-07-03T09:02:31.052080-04:00",
       "updated_at": "2026-07-03T09:02:31.052080-04:00",
       "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1611,
+      "change_id": "1795b3b5-9d48-4d89-9b22-9bc5c366dcc6",
+      "node_type": "outcome",
+      "title": "Task 3 landed: fn_kind role flags added to fn_def, is_apply_fn consumers assert flag-vs-sniff agreement (0 firings), zero snapshot churn, benchmarks within noise",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T09:06:27.253758-04:00",
+      "updated_at": "2026-07-03T09:06:27.253758-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"c28ff465\",\"confidence\":92}"
     }
   ],
   "edges": [
@@ -30383,6 +30394,17 @@
       "weight": 1.0,
       "rationale": "Task 3 of the Wave 3 chunk 1 plan",
       "created_at": "2026-07-03T09:02:34.200604-04:00"
+    },
+    {
+      "id": 1169,
+      "from_node_id": 1610,
+      "to_node_id": 1611,
+      "from_change_id": "9670d934-2f61-45c7-9cc5-1dd64cd6177d",
+      "to_change_id": "1795b3b5-9d48-4d89-9b22-9bc5c366dcc6",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation outcome of the fn_kind action",
+      "created_at": "2026-07-03T09:06:31.301157-04:00"
     }
   ]
 }
