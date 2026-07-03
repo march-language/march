@@ -282,6 +282,46 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-03, Phase5C-A cap-closure key fix — fully-qualified naming to match TIR)
+
+Code-review-driven fix (post Phase5C-A.2/A.3, commits `591b24df`/`dee1d39a`/`19b0c36a`): `fn_capability_closures`
+keyed each function's capability closure by only its *immediately-enclosing* `DMod`'s own single-segment name
+(e.g. `"Sub.f"` for `Entry > Lib > Sub > f`), not the fully-dotted path (`"Lib.Sub.f"`) that TIR's `mod_prefix`
+accumulation (`lib/tir/lower.ml:2174`, `~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")`) and `bin/main.ml`'s
+`hr_impl_hashes`/`caps_for` manifest lookup actually use. Any function nested two-or-more `DMod` levels below
+the entry module got a **falsely empty** `caps=` field in the `.hcr_manifest` — the exact failure mode a
+capability-safety manifest exists to catch — because `caps_for` missed the mis-keyed entry and silently fell
+back to `[]`. Single-level nesting (the shipped test fixture) happened to avoid the bug, masking it.
+
+- **Fix (`lib/typecheck/typecheck.ml`):** new `env` field `cap_qual_prefix : string` accumulates the dotted
+  `DMod` path exactly like TIR's `mod_prefix` (empty at the entry module, then `"Lib"`, then `"Lib.Sub"`, …) —
+  added alongside, and explicitly NOT replacing, the pre-existing `current_module` field (which is *replaced*
+  rather than accumulated on each nested-module entry and is read at several unrelated call sites left
+  untouched). `check_module_needs` takes a new `~cap_qname_prefix` label (the accumulated prefix, no trailing
+  dot) instead of deriving its cap-closure keys from the bare `mod_name` parameter; `mod_name` itself is
+  unchanged for all diagnostics/messages/`proof_caps` self-declaration checks. The top-level `check_module_needs`
+  call passes `~cap_qname_prefix:""` (TIR unwraps the entry module — its own top-level functions get bare names,
+  confirmed empirically by lowering a probe module and inspecting `tm_fns`); the nested-`DMod` call site in
+  `check_decl` passes the parent's accumulated prefix extended by the module's own name.
+- **Verification:** new test `test_fn_cap_closure_two_level_nesting` (`test/test_compiler.ml`, alongside the
+  existing 4 `test_fn_cap_closure_*` cases) builds the exact `Entry > Lib > Sub > f` repro from the review and
+  asserts the closure is keyed `"Lib.Sub.f"` (with `IO.Console`), NOT `"Sub.f"`. Fixing the keying also exposed
+  that 3 of the 4 *pre-existing* `test_fn_cap_closure_*` tests asserted the wrong (bug-compatible) key for their
+  single-level entry-module fixtures (e.g. expected `"Greeter.greet"` where TIR's real key is bare `"greet"`,
+  confirmed via the same empirical lowering probe) — corrected to match TIR's actual naming.
+  `test_hcr_manifest_emits_caps_and_cap_root` (`test/test_stdlib_suite.ml`, one level of nesting) needed no
+  change — its expected key `"Core.logger"` was already correct at that depth.
+- **`bin/main.ml` needed no changes** — its `caps_for` lookup by TIR name now agrees with the corrected
+  `fn_capability_closures` keys once the two naming schemes were unified at the source.
+- **Secondary fix (test isolation, `test_stdlib_suite.ml`):** `test_hcr_manifest_emits_caps_and_cap_root`'s
+  `HOME=%s cd %s && ` command-prefix construction didn't actually export `HOME` to the compiler subprocess run
+  after `&&` (POSIX scopes a bare `VAR=val` prefix to only the immediately-following command); changed to
+  `cd %s && env HOME=%s ` so `env` exports for the rest of the command line. The test's determinism assertion
+  was never actually broken (the `cd`-into-fresh-tmp-dir half of the isolation was always effective and is what
+  forces two independent compiles), but the mechanism/comment was misleading about *why*.
+- **Full suite: 389 compiler / 230 eval / 364 codegen / 792 stdlib / 53 stdlib_march — all six runners exit 0,
+  zero failures** (`scripts/run-tests.sh`, full run including Slow tests).
+
 ## Current State (as of 2026-07-03, Wave 3 chunk 1 complete — shared modules + Perceus restructure, bookkeeping)
 
 Wave 3 chunk 1 (`specs/plans/2026-07-03-wave3-chunk1-refactors.md`) is done — five behavior-preserving refactor commits targeting the two highest fix-density files identified by `specs/analysis/2026-07-01-pipeline-deep-review.md` §7 (perceus.ml/borrow.ml: 89% of their commits are fixes). This entry is the consolidated wrap-up; each task's own detailed "Current State" entry (below) still has the full proof/evidence writeup — this is the map of what moved where and the cross-cutting evidence pattern, not a duplicate of the per-task detail.

@@ -4144,13 +4144,23 @@ let test_cap_body_foreign_blocking () =
 
 (* A function with only declared `needs` on the module — the accessor returns
    that declared set (normalized) attributed to the function. *)
+(* NOTE on expected keys: [Greeter]/[Reader]/[Bindings] here are the ENTRY
+   module (this is the whole source passed to [typecheck_full]/[check_module]),
+   and TIR unwraps the entry module — its own top-level functions are lowered
+   under their BARE name with no module prefix (confirmed empirically against
+   [lib/tir/lower.ml]'s entry-module handling, ~line 2238: "the entry module's
+   own top-level function names" get no prefix, unlike a nested/sibling DMod's
+   functions which DO get `mod_prefix ^ fn_name`). So the cap-closure key here
+   must be the bare fn name, not "Greeter.greet" etc. — see
+   test_fn_cap_closure_two_level_nesting below for the nested-DMod case where
+   a prefix IS expected. *)
 let test_fn_cap_closure_declared_needs () =
   let (_errors, env) = typecheck_full {|mod Greeter do
     needs IO.Console
     fn greet(name) do name end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
-  let caps = List.assoc_opt "Greeter.greet" closures in
+  let caps = List.assoc_opt "greet" closures in
   Alcotest.(check bool) "declared needs recorded for fn" true
     (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
 
@@ -4161,7 +4171,7 @@ let test_fn_cap_closure_inferred_builtin () =
     fn load(path) do file_read(path) end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
-  let caps = List.assoc_opt "Reader.load" closures in
+  let caps = List.assoc_opt "load" closures in
   Alcotest.(check bool) "inferred builtin cap recorded for fn" true
     (match caps with Some cs -> List.mem "IO.FileRead" cs | None -> false)
 
@@ -4175,7 +4185,7 @@ let test_fn_cap_closure_extern () =
     end
   end|} in
   let closures = March_typecheck.Typecheck.fn_capability_closures env in
-  let caps = List.assoc_opt "Bindings.read" closures in
+  let caps = List.assoc_opt "read" closures in
   Alcotest.(check bool) "extern fn recorded with IO.Foreign" true
     (match caps with Some cs -> List.mem "IO.Foreign" cs | None -> false)
 
@@ -4199,6 +4209,31 @@ let test_fn_cap_closure_propagated_import () =
   let caps = List.assoc_opt "Consumer.run" closures in
   Alcotest.(check bool) "propagated import cap recorded for consumer fn" true
     (match caps with Some cs -> List.mem "IO.Mut" cs | None -> false)
+
+(* A function nested THREE levels deep (Entry > Lib > Sub > f) must be keyed
+   by its full dotted path relative to the entry module ("Lib.Sub.f"), NOT by
+   just its immediately-enclosing DMod's own name ("Sub.f"). This matches
+   TIR's [mod_prefix] accumulation in lib/tir/lower.ml (line ~2174), which
+   bin/main.ml's manifest writer uses to look up `hr_impl_hashes` keys —
+   before this fix, the two naming schemes disagreed for any nesting depth
+   greater than one, causing a silently-empty caps list in HCR manifests for
+   real multi-module code (see task-2/3 capability-manifest security review). *)
+let test_fn_cap_closure_two_level_nesting () =
+  let (_errors, env) = typecheck_full {|mod Entry do
+    mod Lib do
+      mod Sub do
+        needs IO.Console
+        fn f(x) do println(x) end
+      end
+    end
+    fn main() do Lib.Sub.f("hi") end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  Alcotest.(check bool) "not falsely keyed under bare immediate-parent name" true
+    (List.assoc_opt "Sub.f" closures = None);
+  let caps = List.assoc_opt "Lib.Sub.f" closures in
+  Alcotest.(check bool) "fully-qualified key records IO.Console" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
 
 (* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
 
@@ -5512,6 +5547,7 @@ let compiler_suites =
           Alcotest.test_case "fn_capability_closures: inferred builtin"     `Quick test_fn_cap_closure_inferred_builtin;
           Alcotest.test_case "fn_capability_closures: extern IO.Foreign"    `Quick test_fn_cap_closure_extern;
           Alcotest.test_case "fn_capability_closures: propagated import"    `Quick test_fn_cap_closure_propagated_import;
+          Alcotest.test_case "fn_capability_closures: two-level nesting"    `Quick test_fn_cap_closure_two_level_nesting;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;

@@ -481,6 +481,17 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  cap_qual_prefix : string;
+  (** Accumulated dotted-path prefix of enclosing [DMod]s, for keying
+      [cap_closures] so it matches TIR's fully-qualified function-name
+      convention (see [lib/tir/lower.ml]'s [mod_prefix] accumulation).  Unlike
+      [current_module] (which is REPLACED, not accumulated, on entry to each
+      nested module — see the [Ast.DMod] branch of [check_decl] — and is used
+      elsewhere for unrelated purposes that must not be perturbed),
+      [cap_qual_prefix] accumulates across nesting: "" at the entry module,
+      then "Lib", then "Lib.Sub", etc., mirroring [prebind_mod_members]'s
+      [prefix ^ "." ^ mname.txt] recursion. The entry module's own name is
+      NOT included (TIR unwraps the entry module), so this starts empty. *)
   no_panic_mod : bool;
   (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
@@ -519,6 +530,7 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
   pure_mod = false;
@@ -5132,8 +5144,26 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
-    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate. *)
-let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list) =
+    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate.
+
+    [cap_qname_prefix] is the fully-accumulated dotted path (from
+    [env.cap_qual_prefix] extended by [mod_name.txt], or [mod_name.txt] alone
+    at the entry module) used ONLY to key [env.cap_closures] so it matches
+    TIR's fully-qualified function-name convention (see [lib/tir/lower.ml]'s
+    [mod_prefix]). [mod_name] itself continues to be used for all
+    diagnostics/messages and the [proof_caps] self-declaration check below,
+    unchanged. *)
+let check_module_needs (env : env) (mod_name : Ast.name)
+    ~(cap_qname_prefix : string) (decls : Ast.decl list) =
+  (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
+     Build the fully-qualified cap-closure key for a function/extern name,
+     omitting the leading dot when the prefix is empty (top-level function of
+     the entry module) — matching TIR's [mod_prefix ^ name] convention where
+     [mod_prefix] is "" at the entry level. *)
+  let cap_qname (leaf_name : string) : string =
+    if cap_qname_prefix = "" then leaf_name
+    else cap_qname_prefix ^ "." ^ leaf_name
+  in
   let declared_needs = List.concat_map (function
     | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
     | _ -> []
@@ -5178,7 +5208,7 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
       let ret_tys = Option.to_list def.fn_ret_ty in
       let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
-      let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
+      let qname = cap_qname def.fn_name.txt in
       record_fn_caps qname sig_caps;
       List.map (fun cap -> (cap, sp)) sig_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
@@ -5210,7 +5240,7 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
             | None -> None
           ) (calls_in_expr [] clause.Ast.fc_body)
         ) def.fn_clauses in
-        let qname = mod_name.txt ^ "." ^ def.fn_name.txt in
+        let qname = cap_qname def.fn_name.txt in
         record_fn_caps qname (List.concat_map (List.map fst) per_clause);
         List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
@@ -5232,7 +5262,7 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         let base = [("IO.Foreign", sp)] in
         let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
         List.iter (fun (ef : Ast.extern_fn) ->
-            let qname = mod_name.txt ^ "." ^ ef.ef_name.txt in
+            let qname = cap_qname ef.ef_name.txt in
             let own = if ef.Ast.ef_blocking then ["IO.Foreign"; "IO.Foreign.Blocking"] else ["IO.Foreign"] in
             record_fn_caps qname own
           ) edef.ext_fns;
@@ -6472,7 +6502,10 @@ let rec check_decl env (d : Ast.decl) : env =
                            fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
-      ) { env with local_fns = StrMap.empty; current_module = name.txt } decls in
+      ) { env with local_fns = StrMap.empty; current_module = name.txt;
+          cap_qual_prefix =
+            (if env.cap_qual_prefix = "" then name.txt
+             else env.cap_qual_prefix ^ "." ^ name.txt) } decls in
     let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
@@ -6541,7 +6574,9 @@ let rec check_decl env (d : Ast.decl) : env =
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
     (* Validate capability declarations for this module *)
-    check_module_needs env name decls;
+    check_module_needs env name decls
+      ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
+                         else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)
     validate_island_protocol env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
@@ -7845,7 +7880,14 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
   let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
-  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  (* The entry module's own name is NOT a prefix segment for cap-closure keys:
+     TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]
+     accumulation, which starts empty at the entry level), so top-level
+     functions are keyed by their bare name and nested DMod functions are
+     keyed starting from that nested module's own name (e.g. "Lib.Sub.f"),
+     never "EntryName.Lib.Sub.f". *)
+  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
+    ~cap_qname_prefix:"";
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;
