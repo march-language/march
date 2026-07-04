@@ -436,10 +436,12 @@ Each `pat <- expr` binding: if `expr` matches `pat`, continue; otherwise fall th
 ```march
 if x > 0 do
   "positive"
+else
+  "non-positive"
 end
 ```
 
-With optional `else` block (both branches can be multi-statement):
+Both branches can be multi-statement:
 
 ```march
 if x > 0 do
@@ -450,7 +452,17 @@ else
 end
 ```
 
-`else` is optional — `if` without `else` returns `()`. There is no `then` keyword.
+`else` is **mandatory** — omitting it is a parse error:
+
+```
+March `if` expressions always need an `else` branch:
+```
+
+There is no `then` keyword — `if c then e1 else e2` is rejected with a targeted parse error:
+
+```
+I don't recognize `then` here — March uses do/end blocks instead.
+```
 
 ---
 
@@ -905,6 +917,270 @@ end
 dbg()                         -- unconditional breakpoint
 dbg(some_expr)                -- trace / conditional
 ```
+
+---
+
+## Semantics notes
+
+Behaviors real users hit that aren't obvious from the syntax above. Each was
+verified against HEAD with a runnable probe program — not carried over from
+an older finding without re-checking.
+
+### Top-level `let` RHS: re-evaluated once per referencing function (compiled), once total (interpreter)
+
+A module-level `let name = rhs` is a single binding in source, but the two
+backends give it different evaluation counts when `rhs` has a side effect and
+multiple functions reference `name`. The interpreter evaluates `rhs` exactly
+once (during module env construction) and every function sees the same
+value. The compiled backend has no shared module-init step for top-level
+lets — instead, the top-level-let injection post-pass in `lib/tir/lower.ml`
+(the `fn_body_uses` scan, marked by the comment "Inject top-level let
+bindings into function bodies that reference them") walks each function body
+and, for every top-level let it references, injects a fresh
+`ELet (v, rhs, body)` at the top of *that function*. If two functions and
+`main` all reference the binding, the compiled binary re-evaluates `rhs`
+three times — once per injection site.
+
+```march
+mod Main do
+  let shared = do
+    println("evaluating shared RHS")
+    42
+  end
+
+  fn use_a() do
+    println("use_a sees: " ++ int_to_string(shared))
+  end
+
+  fn use_b() do
+    println("use_b sees: " ++ int_to_string(shared))
+  end
+
+  fn main() do
+    use_a()
+    use_b()
+    println("main sees: " ++ int_to_string(shared))
+  end
+end
+```
+
+Interpreter output — one evaluation:
+
+```
+evaluating shared RHS
+use_a sees: 42
+use_b sees: 42
+main sees: 42
+```
+
+Compiled (`--compile`) — `evaluating shared RHS` prints **three times**, one
+per referencing function (verified with `| grep -c`). The exact interleaving
+of the injected evaluations relative to the other output lines is not
+guaranteed and has been observed to differ across builds — the invariant is
+the *count*: one evaluation per function that references the binding, versus
+exactly one total in the interpreter.
+
+Only pure top-level lets are safe across both backends; a side-effecting or
+non-idempotent top-level `let` RHS will observably run more times in compiled
+code.
+
+### Newline-glom: a continuation token on the next line joins the previous expression
+
+Outside `match` bodies, `lib/parser/token_filter.ml`'s NL filter
+unconditionally swallows newline tokens (the `NL` dispatch arm whose fallback
+reads `next lexbuf  (* outside match body — swallow *)`) — the parser never
+sees them. Statement separation inside `block_body` (the
+`block_body: nonempty_list(block_expr)` production in
+`lib/parser/parser.mly`) is therefore purely a side effect of where
+Menhir's grammar happens to close one `expr` and open the next. A line that
+*starts* with a token that can continue the prior expression — `(` (call/tuple),
+`-` (binary minus), or any infix operator (`++`, `+`, etc.) — gloms onto the
+previous line instead of starting a new statement.
+
+```march
+-- `- 1` on its own line binds to the previous let, not a new statement:
+let a = 10
+let b = a
+- 1
+-- desugars to `let b = a - 1`  (b = 9), not two statements
+```
+
+```march
+-- a `(...)` line is parsed as a call on the preceding expression:
+let f = identity
+(5)
+-- desugars to `let f = identity(5)`  (f = 5), not `f = identity` then a bare `(5)`
+```
+
+The sharpest trap is when the previous line's value isn't callable — the
+error surfaces far from the real mistake:
+
+```march
+let a = 5
+println("a = " ++ int_to_string(a))
+let b = 10
+(negate(b))
+println("...")
+```
+
+fails to typecheck with `This is not a function — it has type Int`, pointing
+at `let b = 10` — because `let b = 10 \n (negate(b))` glommed into
+`let b = 10(negate(b))`. The fix is to make the continuation impossible:
+start the next line with something that cannot extend an expression (another
+`let`, a bare identifier call with no leading operator/paren ambiguity), or
+parenthesize/terminate the prior expression so the next line can't attach.
+
+### Derived `Ord`/`Hash` ignore constructor payloads — and crash compiled on newtype-shaped variants
+
+Two distinct problems, one derive site.
+
+**Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
+for T` and `derive Hash for T` on a variant type only look at the
+constructor's declared index — never its payload fields. `expand_derive` in
+`lib/desugar/desugar.ml` builds the derived `compare` body (its `"Ord"` case)
+as `ctor_index(a) - ctor_index(b)`, matching each constructor with wildcard
+patterns (`PatWild`) that discard the arguments; the derived `hash` body (the
+`"Hash"` case) does the same, returning the bare constructor index. Two
+values built from the *same* constructor always compare equal and hash equal,
+regardless of payload. Derived `Eq` is different — it IS payload-aware
+(`eq(Wrap(1), Wrap(2))` is `false`), so a type deriving both `Eq` and `Ord`
+reports `eq(a, b) == false` yet `compare(a, b) == 0` for same-constructor
+values with different payloads.
+
+```march
+mod Main do
+  type Wrap = Wrap(Int)
+  derive Ord for Wrap
+  derive Hash for Wrap
+
+  fn main() do
+    println(int_to_string(compare(Wrap(1), Wrap(2))))  -- 0, not -1
+    println(int_to_string(hash(Wrap(1))))               -- 0
+    println(int_to_string(hash(Wrap(2))))               -- 0 (same as Wrap(1))
+  end
+end
+```
+
+Interpreter output: `0` / `0` / `0` — payload ignored.
+
+**Compiled crash (single-constructor, single-field variants):** the program
+above does NOT reproduce that output under `--compile` — it SIGSEGVs (exit
+139) before printing anything. A single-ctor single-field variant is exactly
+the `Newtype` representation (`repr_of_ty` in `lib/tir/repr.ml`: one variant
+with one field → represented as the raw payload, no box), and calling a
+derived method *by name* on such a value crashes the compiled binary.
+Verified matrix at HEAD:
+
+| type shape | derive, call form | interpreted | compiled |
+|---|---|---|---|
+| `Wrap(Int)` — 1 ctor, 1 field | `compare`/`hash` (named) | `0` (payload ignored) | **SIGSEGV, exit 139** |
+| `Wrap(Int)` | `eq(a, b)` (named) | payload-aware, correct | **SIGSEGV, exit 139** |
+| `Wrap(Int)` | `a == b` (operator) | correct | correct |
+| `WrapS(String)` — 1 ctor, 1 field | `compare` (named) | `0` | **`panic: non-exhaustive pattern match`, exit 1** |
+| `Pair(Int, Int)` — 1 ctor, 2 fields | `compare` (named) | `0` (payload ignored) | `0` (works; payload ignored) |
+| `Circle(Int) \| Square(Int)` — 2 ctors | `compare` (named) | index-based | index-based (works) |
+
+The crash family tracks the newtype repr exactly: the derived method bodies
+pattern-match their argument (`match x do Wrap(_) -> ... end`), and compiled
+via the named-interface-method path that match is lowered against a boxed
+constructor the value doesn't have — an `Int` payload is a tagged scalar
+(dereferenced → SIGSEGV); a `String` payload is a heap pointer with a
+non-ctor header (no arm matches → non-exhaustive panic). Two-field
+constructors are `Boxed`, and multi-ctor types aren't newtypes — both work.
+The `==` operator does not go through the derived named method
+(structural-equality codegen), so it works even where `eq(...)` crashes.
+Filed as a P1 compiler bug in `specs/todos.md` (derived-method codegen on
+`Newtype`-repr variants).
+
+Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
+field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
+variant type whose constructors carry payload data that should affect
+ordering or hashing — write a manual `impl` instead; and until the codegen
+bug is fixed, do not call derived methods by name on a single-ctor
+single-field variant in compiled code.
+
+### Nested-module default-arg functions silently drop default values
+
+A `fn f(x, y \\ default)` defined at the top level of a module gets expanded
+by `expand_defaults_decl` (`lib/desugar/desugar.ml`) into mangled full-arity
+and short-arity wrapper decls, so calling with fewer arguments dispatches to
+a variant that supplies the default. That expansion only runs on top-level
+`DFn` decls. A default-arg function declared inside a *nested*
+`mod ... do ... end` never reaches `expand_defaults_decl`; instead it takes
+the `desugar_fn_def` fast path (same file) that just strips every
+`FPDefault` down to a required `FPNamed` — its own comment reads *"Default
+values are dropped here ... nested default-arg dispatch was never wired
+up"*. The nested function's real signature ends up requiring **all**
+parameters — the default expression is discarded entirely, not deferred or
+evaluated.
+
+```march
+mod Main do
+  mod Inner do
+    fn add(x, y \\ 10, z \\ 20) do x + y + z end
+  end
+
+  fn main() do
+    let partial = Inner.add(1)      -- typechecks as a partial application
+    println(int_to_string(partial(2, 3)))
+  end
+end
+```
+
+Calling `Inner.add(1)` alone in a context expecting `Int` fails typecheck
+(`expected Int but got Int -> Int -> Int`); calling it as a genuine partial
+application (as above) typechecks but crashes at runtime with `arity
+mismatch: expected 3 args, got 1` — there is no 1-arg or 2-arg overload for a
+nested default-arg function, unlike its top-level counterpart. (This
+replaced an earlier, worse bug — commit `92dadd92` — where the nested
+function boxed all parameters into a synthesized tuple and could
+use-after-free an erased closure parameter; the current behavior is safe but
+still incomplete.) Give nested default-arg functions all their arguments
+explicitly, or hoist them to the top level of the module.
+
+Note: this campaign also found — orthogonally — that even a *top-level*
+default-arg function's short name cannot be resolved from March source: the
+typechecker binds `DFn` declarations by their post-desugar name only (the
+mangled `f$N`), and never reconstructs the arity-dispatch overload set that
+the interpreter's env-builder and the TIR's `_default_dispatch` table build
+for themselves later in the pipeline. A source-level call like `add(1)` to a
+default-arg top-level function fails with `I cannot find `add`` under
+`--check`, `--compile`, and plain interpretation alike — at ANY arity,
+including full arity; only OCaml-level test harnesses that call
+`call_fn env "add" [...]` directly (bypassing name resolution) exercise the
+arity-dispatch machinery today. Filed as a P1 compiler bug in
+`specs/todos.md` (typecheck-level default-arg name resolution + the test
+gap).
+
+### Reserved soft-keyword asymmetry: bindable but not referenceable
+
+A handful of identifiers double as keywords elsewhere in the grammar —
+`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
+`in`, `for` — and are listed in the `soft_lower_name` production
+(`lib/parser/parser.mly`) so they can be used in *binding* positions:
+function params, patterns, and `let` bindings. They are **not** listed in
+the primary-expression rule for a bare variable reference (the
+`id = LOWER_IDENT { EVar (mk_name id $loc) }` production in the same file),
+so referencing one of them in expression position — even a bare reference,
+not just inside an arithmetic expression — is a parse error:
+
+```march
+let init = 3           -- parses: `init` accepted as a binding name
+println(int_to_string(init))       -- "I got stuck here" — `init` rejected as an expr
+println(int_to_string(init + 1))   -- same error
+```
+
+The same restriction blocks declaring a function named `init` (`fn init(x)
+do ... end` — function names use the plain `lower_name` rule, not
+`soft_lower_name`, so this is also a parse error) — it is the identical root
+cause as the expression-position gap, not a separate bug.
+
+`tag` is the one exception: commit `4bb0e87c` promoted it to a full soft
+keyword by adding it to *both* the `lower_name` production (declarations,
+dot-access, record fields) and the primary-expression variable-reference
+rule, so `let tag = 3` followed by `tag + 1` works end-to-end. The other
+soft keywords above have not received the same treatment — the asymmetry is
+current behavior, not a stale finding.
 
 ---
 

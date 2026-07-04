@@ -1,10 +1,15 @@
 # March — TODO List
 
-**Last updated:** 2026-07-03 (Wave 3 chunk 2 Task 10: bookkeeping — chunk 2 complete, `specs/analysis/2026-07-01-pipeline-deep-review.md` §7 fully done; only Wave 4 (docs) remains of the original deep-review plan)
+**Last updated:** 2026-07-03 (Wave 4 Task 6 — deep-review program closeout sweep: added the one P0 previously tracked only in the internal session ledger, not here — a dynamic-record RC/GC crash in TCO loops, chip `task_0b1491ee` from Wave 1 Task 5. Everything else the campaign opened already had a landing commit or a disposition. Previous: Task 5 two P1s from semantics-notes verification — see `specs/progress.md`'s program-closeout entry for the full campaign summary)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
 ---
+
+## Grammar / lint contradictions (2026-07-03)
+
+- [ ] **`style/no-redundant-else` lint advises code the parser rejects** — found during Wave 4 Task 4. The lint (`lib/lint/lint.ml` ~262-320) and its doc (`docs/coding-standards.md` "style/no-redundant-else") tell users to remove `else` after a Never-typed branch (guard-clause pattern), with an auto-fix that "removes else, dedents body" — but `else` is mandatory in the grammar, so the advice/auto-fix produces a hard parse error ("March `if` expressions always need an `else` branch"; the doc's own "Good" example doesn't parse). Decide: retire the lint, grow an else-less statement-position `if` (language design — needs user sign-off), or make the auto-fix produce valid code; then fix the doc example. Check whether the LSP code-action path exposes the auto-fix.
+- ✅ **Undocumented `if c then e1 else e2` production removed (Wave 4 Task 4, 2026-07-03)** — the parser silently accepted the then-form (contradicting both syntax docs and da7ce42b's targeted then-error, which only fired on incomplete forms). User decision: REMOVE + MIGRATE. Accepting production deleted from `lib/parser/parser.mly` (THEN token + targeted error production kept — every then-form now gets "I don't recognize `then` here — March uses do/end blocks instead."); live uses migrated (`stdlib/config.march` + `share/march/` mirror, `test_properties.ml` generators/oracles, `forge new` scaffold template, June-17-cutover leftover twins in four test files, LSP fixture); `then` dropped from REPL/LSP keyword completions and the REPL multiline heuristic; both syntax docs + tour + SKILL + linear-types doc corrected to verified truth (else MANDATORY). Menhir conflicts unchanged (7/59). **385 compiler / 230 eval / 374 codegen / 791 stdlib / 53 stdlib_march / 29 snapshots.** Full report: `.superpowers/sdd/w4-task-4-report.md`.
 
 ## Compiled-backend codegen bugs in HTTP handler paths (2026-06-29)
 
@@ -13,6 +18,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P0 — Blocking / Active
 
+- [x] **Dynamic-record RC/GC crash in TCO loops (chip `task_0b1491ee`, follow-up from Wave 1 Task 5, 2026-07-02)** — a dynamic/erased-shape record used inside a TCO'd (tail-recursive) loop crashes under RC/GC; spawned as a separate background chip by the Wave 1 Task 5 implementer (`0d1a829e`, the B5 `EUpdate`-on-erased-record fix) rather than fixed inline, since it's a distinct code path from the `EUpdate` OOB write B5 addressed. Tracked only in `.superpowers/sdd/progress.md`'s internal ledger until this closeout entry — no commit has landed and no prior `specs/todos.md`/`specs/progress.md` entry existed for it. **Disposition (Wave 4 Task 6 sweep, amended same-day): VERIFIED FIXED — closing.** Controller probe at HEAD `f145439a` (the closeout amendment's parent): a 10k-iteration self-TCO loop doing `record_from_list` + `record_put` + two `record_get`s per iteration compiles and runs clean (exit 0, arithmetically exact sum `100030000`, cross-checked). The crash was resolved by the record-builtin uniform-value handoff that landed on main during Wave 2 (merge `c28595bb` era — `record_put` values UNIFORM/tagged, fixing the even-int-≥4096 misclassified-as-heap-pointer incrc SIGSEGV that made these loops "crash above ~10k iterations": that is when `i*2` crossed 4096). The 20k-iteration guard test (`test_compiled_record_put_large_even_int`, test/test_stdlib_suite.ml) pins it. Chip `task_0b1491ee`'s session contributed that fix; the loop was only ever missing this cross-reference.
 - [ ] **Interpreter/compiled divergence: `ERecordUpdate` on a missing field (eval.ml vs llvm_emit.ml)** — found during Wave 1's B5 fix (`0d1a829e`, `specs/analysis/2026-07-01-pipeline-deep-review.md`). Compiled mode now panics via `march_record_update_dyn` when an `{ base with field: v }` update names a field absent from the base record's actual shape (the typechecker can't catch this against an erased/generic base). The tree-walking interpreter's `ERecordUpdate` (`lib/eval/eval.ml`) still silently *appends* the unknown field instead of erroring — so the same source program panics compiled and succeeds (with a fabricated field) interpreted. Reconcile by making `eval.ml`'s `ERecordUpdate` fail loudly on an unknown field name, matching the compiled contract (the safer of the two).
 - [ ] **Monomorphization limit reached compiling a self-recursive nested closure (2026-07-02)** — found during Wave 2 Task 2 (test-harness loud-skip hardening, `specs/plans/2026-07-02-wave2-testing-infra.md`) when a previously-vacuous `if compile_rc <> 0 then ()` skip in `test/test_stdlib_suite.ml`'s `test_compiled_recursive_closure_capture` was converted to a loud failure and immediately caught a real, independently-reproducible compiler crash: `march --compile` on a trivial nested closure that recurses via a captured outer-fn parameter —
   ```march
@@ -46,6 +52,42 @@ This file tracks everything that still needs to get done. Organized by priority 
 ---
 
 ## P1 — High Impact / Near-Term
+
+### Compiler (found during Wave 4 Task 5 semantics-notes verification, 2026-07-03)
+
+- [ ] **Derived-method calls crash compiled on `Newtype`-repr variants (single ctor, single field) — SIGSEGV / non-exhaustive panic.** Calling a derived `compare`, `hash`, or `eq` *by name* on a value of a single-constructor single-field variant type works interpreted but crashes the compiled binary. Verified matrix at `f8b25df7`:
+
+  | type shape | derive, call form | interpreted | compiled |
+  |---|---|---|---|
+  | `Wrap(Int)` — 1 ctor, 1 field | `compare`/`hash` (named) | `0` (payload ignored) | **SIGSEGV, exit 139, no output** (lldb: EXC_BAD_ACCESS in `Ord$Wrap.compare`) |
+  | `Wrap(Int)` | `eq(a, b)` (named) | payload-aware, correct | **SIGSEGV, exit 139** |
+  | `Wrap(Int)` | `a == b` (operator) | correct | correct (structural-equality codegen, not the derived method) |
+  | `WrapS(String)` — 1 ctor, 1 field | `compare` (named) | `0` | **`panic: non-exhaustive pattern match`, exit 1** |
+  | `Pair(Int, Int)` — 1 ctor, 2 fields | `compare` (named) | `0` | `0` (works) |
+  | `Circle(Int) \| Square(Int)` — 2 ctors | `compare` (named) | index-based | index-based (works) |
+
+  Minimal repro (SIGSEGV compiled, fine interpreted):
+  ```march
+  mod Main do
+    type Wrap = Wrap(Int)
+    derive Ord for Wrap
+    fn main() do
+      println(int_to_string(compare(Wrap(1), Wrap(2))))
+    end
+  end
+  ```
+  The crash family tracks the newtype/niche repr exactly: `Wrap(Int)`/`WrapS(String)` are `Repr.repr_of_ty`'s `Newtype payload` case (`lib/tir/repr.ml` — one variant, one field → represented as the raw payload, no box), and the derived impl bodies generated by `expand_derive` (`lib/desugar/desugar.ml`, `"Ord"`/`"Hash"`/`"Eq"` cases) pattern-match their argument (`match x do Wrap(_) -> ... end`). Compiled via the named-interface-method path, that match appears to be lowered against a boxed-ctor assumption the value doesn't satisfy: an Int payload is a tagged scalar (dereferenced as a pointer → SIGSEGV); a String payload is a heap pointer with a non-ctor header (no arm matches → non-exhaustive panic). Two-field ctors are `Boxed` and multi-ctor types aren't newtypes — both work. Start from how the derived impl's `EMatch` scrutinee repr is resolved when lowering interface-method bodies (versus the same match written in a normal fn), i.e. the `Repr`/`llvm_case` interplay for `Newtype`-repr scrutinees inside `$`-mangled impl methods. Doc note: `syntax_reference.md` § "Semantics notes → Derived Ord/Hash". Also worth fixing while there: the payload-ignoring `compare`/`hash` semantics for variant ctors (same `expand_derive` cases; derived `Eq` IS payload-aware, so `eq(a,b)=false` while `compare(a,b)=0` today).
+
+- [ ] **Top-level default-arg functions are unreachable by name from March source — typecheck resolution gap (any arity, both backends).** A source-level call to a default-arg function's own name fails typecheck with ``I cannot find `add`.`` under `--check`, `--compile`, and plain interpretation alike — at every arity including full:
+  ```march
+  mod Main do
+    fn add(x, y \\ 10, z \\ 20) do x + y + z end
+    fn main() do
+      println(int_to_string(add(1, 5, 6)))   -- I cannot find `add`.  (exit 1)
+    end
+  end
+  ```
+  Root cause: `expand_defaults_decl` (`lib/desugar/desugar.ml`) deliberately emits ONLY mangled `add$1`/`add$2`/`add$3` decls — no bare-name dispatcher decl (its doc comment: the interpreter's env-builder auto-creates `VMultiarity` entries for the base name from the `foo$N` pattern, and the TIR lowering rewrites call sites via `_default_dispatch` in `lib/tir/lower.ml`). But the TYPECHECKER runs between desugar and both of those consumers, binds each `DFn` under its literal post-desugar name only (`lib/typecheck/typecheck.ml`), and has no equivalent arity-dispatch reconstruction — so bare `add` is never in scope and every source-level call dies before eval or TIR ever run. **Test gap that hid this:** every existing default-arg test (`test/test_stdlib_suite.ml`: `test_default_arg_used`, `test_default_arg_overridden`, `test_default_multiple_defaults`) invokes the function from the OCaml harness via `call_fn env "greet" [...]`, which bypasses source-level name resolution entirely; `test_default_arg_typechecks` only checks the *definition* typechecks, not a call site. No test in the tree contains a March-source call to a default-arg function. (The `greet("World")` example in `syntax_reference.md` § Functions does not compile today.) Fix should add a source-level call-site test at every arity, top-level AND nested. Related, distinct: nested-module default-arg fns additionally DROP their default values entirely (`desugar_fn_def`'s `FPDefault` fast path — "nested default-arg dispatch was never wired up"), so even after the typecheck gap is fixed, nested reduced-arity calls will still fail. Doc note: `syntax_reference.md` § "Semantics notes → Nested-module default-arg functions".
 
 ### Runtime / stdlib
 
@@ -374,6 +416,10 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 - [ ] **Language reference manual** — Comprehensive user-facing docs covering all syntax forms, built-in types, stdlib modules, and the compiler CLI.
 - [ ] **Tutorial / getting-started guide** — Walk through writing a first March program, compiling it, and using the REPL.
+
+### Housekeeping
+
+- [ ] **Stale "protects sort_by" rationale in `lib/tir/perceus.ml`'s scrutinee-borrowed comment (around lines 984, 995)** — still cites the retired "root cause of the sort_by RC underflow" / "cause the sort_by underflow to recur" story as the justification for the path-insensitive conservatism. sort_by was formally exonerated (`.superpowers/sdd/sortby-diagnosis.md`; real bug was `mono.ml`'s empty-substitution interface-impl resolution, fixed in `ffe6fba8`) and has nothing to do with `ECase` scrutinee ownership. `specs/perceus-invariants.md` §6 documents the current (non-sort_by) justification: leak-not-crash for genuine single-sub-path uses, plus the `20d1d144` cross-branch dec exclusion. Reword the comment to match — found during Wave 4 Task 2 (docs-only scope; comment edits are `lib/` and were out of that task's scope). **Third site (found by Task 2's review):** `test/snapshots/src/scrutinee_borrowed_conservatism.march`'s header comment carries the same retired rationale verbatim ("...per the sort_by regression this documents") — reword it in the same pass; it is lexer-stripped so the `.expected` snapshot will not churn.
 
 ---
 

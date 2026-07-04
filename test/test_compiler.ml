@@ -356,11 +356,9 @@ let test_tc_dotted_sibling_module_order () =
     false (has_errors ctx)
 
 let test_tc_if_bad_cond () =
-  (* Condition must be Bool — using Int + 1 should produce an error.
-     if/then/else needs no `end`; only fn do…end and match…end do. *)
+  (* Condition must be Bool — using Int + 1 should produce an error. *)
   let ctx = typecheck {|mod Test do
     fn bad(x) do if x + 1 do 0 else 1 end end
-    fn bad(x) do if x + 1 then 0 else 1 end
   end|} in
   Alcotest.(check bool) "non-Bool condition is an error" true (has_errors ctx)
 
@@ -2392,7 +2390,7 @@ let test_fn_when_constraint_satisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -2408,7 +2406,7 @@ let test_fn_when_constraint_unsatisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -4637,6 +4635,18 @@ let test_parse_error_then_primary_message () =
   Alcotest.(check bool) "if-then error: primary message is about `then`, not else" true
     (not (_contains_substr output "always need an `else` branch"))
 
+let test_parse_error_then_else_form_rejected () =
+  (* W4.4: the complete `if c then e1 else e2` expression form used to be
+     silently ACCEPTED by an undocumented production while the docs claimed
+     `then` did not exist.  The production is removed; the form must now hit
+     the same targeted error as the incomplete then-form, naming do/end. *)
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 else 2\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "if-then-else form rejected: targeted message names `then`" true
+    (_contains_substr output "I don't recognize `then` here");
+  Alcotest.(check bool) "if-then-else form rejected: hint shows do/end shape" true
+    (_contains_substr output "do/end")
+
 let test_if_branch_mismatch_reason_is_if_specific () =
   (* When if-branch types disagree, the reason note should say "if expression",
      not "All branches of a match must have the same type." *)
@@ -5484,6 +5494,7 @@ let compiler_suites =
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;
+          Alcotest.test_case "W4.4: complete if-then-else form rejected"    `Quick test_parse_error_then_else_form_rejected;
           Alcotest.test_case "fix: if-branch mismatch reason says if expr"  `Quick test_if_branch_mismatch_reason_is_if_specific;
           Alcotest.test_case "fix: if-branch mismatch no 'match' in note"   `Quick test_if_branch_mismatch_reason_not_match;
           Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;

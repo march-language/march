@@ -13,16 +13,21 @@ description: March programming language reference — syntax, builtins, stdlib A
 
 These are the patterns most frequently generated incorrectly. Memorize these.
 
-### Conditionals: `then` does not exist
+### Conditionals: `then` does not exist, and `else` is mandatory
 
 ```march
 -- WRONG: March has no `then` keyword
+-- ("I don't recognize `then` here — March uses do/end blocks instead.")
 if x > 0 then x end
 
--- RIGHT
+-- WRONG: missing `else` is a parse error
+-- ("March `if` expressions always need an `else` branch")
 if x > 0 do x end
 
--- RIGHT with else
+-- RIGHT (inline)
+if x > 0 do x else 0 end
+
+-- RIGHT (multi-statement branches)
 if x > 0 do
   x
 else
@@ -130,7 +135,7 @@ match xs
 end
 
 -- RIGHT
-if x > 0 do x end
+if x > 0 do x else 0 end
 
 match xs do
   Nil        -> 0

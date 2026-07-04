@@ -3921,7 +3921,7 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
   ) (* end depot_field_at match *)
 
 let keywords = [
-  "mod"; "end"; "do"; "fn"; "let"; "match"; "if"; "then"; "else";
+  "mod"; "end"; "do"; "fn"; "let"; "match"; "if"; "else";
   "type"; "interface"; "impl"; "derive"; "use"; "alias"; "needs";
   "extern"; "app"; "actor"; "protocol"; "when"; "as";
   "true"; "false"; "linear"; "affine"; "pub";

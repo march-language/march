@@ -45,7 +45,6 @@ let test_eval_recursion () =
 let test_eval_if () =
   let env = eval_module {|mod Test do
     fn abs(x) do if x < 0 do negate(x) else x end end
-    fn abs(x) do if x < 0 then negate(x) else x end
   end|} in
   let v = call_fn env "abs" [March_eval.Eval.VInt (-5)] in
   Alcotest.(check int) "abs(-5) = 5" 5
@@ -539,7 +538,6 @@ let test_tir_lower_let () =
 let test_tir_lower_if () =
   let m = lower_module {|mod Test do
     fn pick(b : Bool) : Int do if b do 1 else 0 end end
-    fn pick(b : Bool) : Int do if b then 1 else 0 end
   end|} in
   let f = find_fn "pick" m in
   let rec has_case = function

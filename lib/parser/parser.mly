@@ -1050,8 +1050,6 @@ expr:
         $startpos($3) }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
     { EIf (cond, t, f, mk_span ($loc)) }
-  | IF; cond = expr; THEN; t = expr; ELSE; f = expr
-    { EIf (cond, t, f, mk_span ($loc)) }
   | IF; _c = expr; DO; _t = block_body; ELSE; _f = block_body; error
     { error_raise
         "I was expecting `end` to close the if expression here:"

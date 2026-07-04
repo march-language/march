@@ -29,7 +29,7 @@ let lib_source name = function
       (snake_to_pascal name) name
 
 let test_source name =
-  Printf.sprintf "mod %sTest do\n\n  fn test_placeholder() : Bool do\n    true\n  end\n\n  fn main() do\n    let result = test_placeholder()\n    if result then println(\"All tests passed.\") else println(\"Tests failed.\")\n  end\n\nend\n"
+  Printf.sprintf "mod %sTest do\n\n  fn test_placeholder() : Bool do\n    true\n  end\n\n  fn main() do\n    let result = test_placeholder()\n    if result do println(\"All tests passed.\") else println(\"Tests failed.\") end\n  end\n\nend\n"
     (snake_to_pascal name)
 
 let editorconfig =
