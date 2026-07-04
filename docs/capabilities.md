@@ -379,11 +379,13 @@ When using `forge deploy hot` to upgrade a running application, the node has a s
 
 ### How it works
 
-`forge deploy hot` extracts every IO capability that the new artifact declares (combining all `needs` clauses across all modules) and embeds this set in the deployment message. The receiving node:
+A hot deploy activates only the **functions that changed** (each is sent as a separate signed activation message). For **each activated function**, `forge deploy hot` embeds that function's own inferred IO capabilities — the capabilities its own body actually requires — in the message. Admission is checked per activated function, not over the whole artifact. (This granularity matters: `--hot-reload` links the entire standard library, so a *whole-artifact* capability set would be dominated by the stdlib's footprint and identical for every app — useless for a policy. Gating on the changed function's own caps is what makes the policy discriminating.) The trust boundary is: the **base server binary is trusted** — the operator built and started it, with a policy — and each **hot-patched function** is what the gate governs.
 
-1. **Recomputes the capability set** — normalizes and hashes it using BLAKE3, reproducing the digest that was signed during the deploy.
-2. **Tamper-checks** — compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen.
-3. **Applies the deployment policy** — if `MARCH_DEPLOY_POLICY` is set (a file path), the node loads it and verifies that every capability in the new artifact is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
+The receiving node, for each activated function:
+
+1. **Recomputes the capability set** — normalizes the function's declared caps and hashes them with BLAKE3, reproducing the digest that was signed during the deploy.
+2. **Tamper-checks** — compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a genuinely cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
+3. **Applies the deployment policy** — if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
 
 ### Configuring the policy
 
@@ -403,7 +405,7 @@ IO.NetConnect.TLS
 IO.Clock
 ```
 
-An empty policy file or absent `MARCH_DEPLOY_POLICY` ⇒ permissive (all artifacts admitted). This is the default for backward compatibility.
+An empty policy file or absent `MARCH_DEPLOY_POLICY` ⇒ permissive (all activations admitted). This is the default for backward compatibility. A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
 
 ### Threat model and scope
 
