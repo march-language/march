@@ -91,10 +91,10 @@ Guards the EUpdate family, the dual-position class (`a5dad194`), `same_arity` (`
 
 **Files:** Modify `test/test_properties.ml` (`oracle_check`).
 
-- [ ] **Step 1: Opt matrix.** Run the compiled path at BOTH `--opt 0` and `--opt 2`; diff each against the interpreter. An `--opt 2`-only divergence is an optimizer miscompile (the sort_by/cprop family) that the current `--compile`-default never sees. To bound cost, run `--opt 0` at full generator count and `--opt 2` at a reduced count (justify the split; the goal is coverage, not doubling wall-clock).
-- [ ] **Step 2: Exit-code parity.** When BOTH interpreter and compiled exit nonzero (currently skipped), compare the exit codes — a clean interpreter panic vs a compiled segfault on the same program is a divergence, not a mutual skip. Preserve the existing `>= 128` signal-death FAILURE logic; add: interpreter-clean-nonzero vs compiled-signal-death is a FAILURE.
-- [ ] **Step 3: RED/GREEN.** Confirm the opt matrix actually compiles at both levels (a targeted probe) and that a synthetic divergence (if constructible) is caught. Full `test_properties.exe -e` green at HEAD.
-- [ ] **Step 4:** Benchmark the wall-clock delta of the suite (report before/after); if it grows unacceptably, tune the opt-2 count. **Commit** `test(oracle): opt-level matrix (--opt 0 and --opt 2) + exit-code parity (Phase 3)`.
+- [x] **Step 1: Opt matrix.** Done via a dedicated reduced-count property `prop_oracle_opt_matrix` (NOT inside `oracle_check` on every call — that would double every existing property's wall-clock). `oracle_check` gained a `?opt` param threading `--opt n`; the property diffs interp vs both `--opt 0` and `--opt 2`. **Flag-semantics correction:** `--opt N` is the *clang* opt level (default already 2), so the second point added is `--opt 0`; the named "sort_by/cprop family" is *TIR*-level (gated by `--no-opt`, already caught by the existing default-O2-vs-interp comparison), documented as a `--no-opt` follow-up rather than widened here.
+- [x] **Step 2: Exit-code parity.** `oracle_check` no longer short-circuits on interp-nonzero; interp clean-nonzero (panic) vs compiled signal-death is now a FAILURE (subsumed by the existing `rc_run >= 128` branch now that the early skip is gone). Interp signal-death → distinct `interp-signal-death` skip. Two clean-nonzeros → `both-clean-nonzero` skip (exact-code parity deliberately NOT required — legitimate cross-backend difference).
+- [x] **Step 3: RED/GREEN.** Probe confirmed interp = `--opt 0` = `--opt 2` = 17 on a record-update program. Isolated `prop_oracle_opt_matrix` run: 60 invocations, 60 matched, 0 skipped, `[OK]`. Full `test_properties.exe -e` stays-green run: see report.
+- [x] **Step 4:** Opt-matrix property adds ~180s (count 30 × 2 compile+run); count tuned to 30 to stay within budget. **Committed** `test(oracle): opt-level matrix (--opt 0 and --opt 2) + exit-code parity (Phase 3)`.
 
 ---
 

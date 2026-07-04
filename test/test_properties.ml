@@ -1468,7 +1468,7 @@ let classify_compile (rc : int) (stderr : string) : [ `Fail of string | `Skip of
     Returns Ok () on match, Error msg on mismatch, or None to skip.
     Every [None] result has already been counted via [record_skip]; every
     [Some _] result has been counted via [record_match]. *)
-let oracle_check src =
+let oracle_check ?(opt = None) src =
   incr oracle_invocations;
   match Lazy.force march_bin_opt with
   | None ->
@@ -1477,21 +1477,28 @@ let oracle_check src =
   | Some bin ->
     let src_file = write_temp_march src in
     let bin_file = src_file ^ ".bin" in
-    (* Interpreter mode *)
+    (* Interpreter mode — the reference oracle. *)
     let interp_cmd = Printf.sprintf "%s %s" (Filename.quote bin) (Filename.quote src_file) in
     let (rc_interp, interp_out) = run_capture ~timeout:10 interp_cmd in
-    if rc_interp <> 0 then (
-      (* Interpreter failed — skip (generated program may have runtime error) *)
+    if rc_interp >= 128 then (
+      (* The interpreter itself was killed by a signal.  The interpreter IS the
+         oracle; a segfaulting interpreter gives us no ground truth to compare
+         against — skip (counted, with a distinct reason so it stays visible in
+         the summary and can't masquerade as a match). *)
       cleanup_temp_march src_file;
-      record_skip "interp-nonzero-exit";
+      record_skip "interp-signal-death";
       None
     ) else begin
       (* Compile mode — stderr captured so we can tell a compiler CRASH
          (segfault, uncaught OCaml exception) from a clean "unsupported
-         feature" exit; see [classify_compile]. *)
+         feature" exit; see [classify_compile].  [opt = None] keeps the
+         historical default flags (clang -O2, TIR passes on); [Some n]
+         additionally passes [--opt n] (clang -On) so the Phase-3 opt-matrix
+         property can diff each optimization level against the interpreter. *)
+      let opt_flag = match opt with None -> "" | Some n -> Printf.sprintf " --opt %d" n in
       let compile_cmd =
-        Printf.sprintf "%s --compile %s -o %s"
-          (Filename.quote bin) (Filename.quote src_file) (Filename.quote bin_file)
+        Printf.sprintf "%s --compile%s %s -o %s"
+          (Filename.quote bin) opt_flag (Filename.quote src_file) (Filename.quote bin_file)
       in
       let (rc_compile, _compile_out, compile_err) = run_capture3 ~timeout:30 compile_cmd in
       if rc_compile <> 0 then (
@@ -1509,22 +1516,50 @@ let oracle_check src =
         cleanup_temp_march src_file;
         if rc_run >= 128 then begin
           (* Signal-killed binary (sh reports 128+signal: SIGABRT=134,
-             SIGSEGV=139, SIGBUS=138…).  The interpreter already succeeded on
-             this program, so a crashing binary is a compiler bug (usually an
-             RC miscompile) — a FAILURE, not a skip.  Clean nonzero exits stay
-             skips below: the generated program may legitimately error at
-             runtime (process_exit, runtime panics), and `timeout` reports 124. *)
+             SIGSEGV=139, SIGBUS=138…).  The interpreter did NOT signal-die
+             (checked above), so whether it exited 0 or clean-nonzero, a
+             compiled *signal* death is a divergence — a compiler bug (usually
+             an RC miscompile), a FAILURE.  This subsumes the Phase-3
+             exit-code-parity case: an interpreter clean-nonzero exit (a clean
+             panic) vs a compiled signal-death (segfault/abort) on the same
+             program is now a FAILURE rather than a mutual skip. *)
           record_match ();
-          Some (Error (interp_out,
-                       Printf.sprintf "<binary killed by signal %d (exit %d)> %s"
-                         (rc_run - 128) rc_run compiled_out))
-        end else if rc_run <> 0 then begin
-          record_skip "run-nonzero-exit";
-          None  (* clean nonzero error exit — skip *)
-        end else begin
+          Some (Error (
+            Printf.sprintf "%s<interpreter exit %d>" interp_out rc_interp,
+            Printf.sprintf "<binary killed by signal %d (exit %d)> %s"
+              (rc_run - 128) rc_run compiled_out))
+        end
+        else if rc_interp = 0 && rc_run = 0 then begin
+          (* Both sides ran cleanly to completion — the normal output check. *)
           record_match ();
           if interp_out = compiled_out then Some (Ok ())
           else Some (Error (interp_out, compiled_out))
+        end
+        else if rc_interp = 0 then begin
+          (* Interpreter succeeded, compiled exited clean-nonzero (rc in
+             1..127).  SKIP (unchanged): the run may have hit a resource/time
+             limit (`timeout` reports 124) or a legitimate runtime error the
+             interpreter reaches differently — comparing here risks spurious
+             diffs. *)
+          record_skip "run-nonzero-exit";
+          None
+        end
+        else if rc_run = 0 then begin
+          (* Interpreter errored cleanly, compiled succeeded.  A divergence in
+             principle, but flagging it risks false positives (the interpreter
+             enforces some runtime checks the compiled runtime does not).  Skip
+             conservatively, with a distinct reason so the quadrant stays
+             visible for later inspection. *)
+          record_skip "interp-nonzero-compiled-zero";
+          None
+        end
+        else begin
+          (* Both exited clean-nonzero.  Different clean exit codes for the same
+             logical runtime error are legitimate across the two backends, so
+             (per the Phase-3 scope decision) do NOT require exact-code parity —
+             only the clean-vs-signal asymmetry above is a failure.  Skip. *)
+          record_skip "both-clean-nonzero";
+          None
         end
       end
     end
@@ -2461,6 +2496,44 @@ let prop_oracle_erased_flow =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
+(** Phase 3 — opt-level matrix.  Every other [prop_oracle_*] property diffs the
+    interpreter against a SINGLE compiled configuration (the [--compile]
+    default = clang -O2, TIR passes on).  This one diffs the interpreter
+    against the compiled binary at BOTH [--opt 0] (clang -O0) AND [--opt 2]
+    (clang -O2) — a level that diverges from the interpreter while another
+    agrees is an LLVM-level optimizer miscompile the single-config oracle would
+    miss.  (Note: the TIR-level optimizer-miscompile family — the sort_by/cprop
+    class — is gated by the separate [--no-opt] flag, NOT by [--opt N], and is
+    already caught by the default-O2-vs-interpreter comparison the existing
+    properties run; a [--no-opt] axis is a documented Phase-3 follow-up.)
+
+    REDUCED COUNT: each draw runs TWO full compile+run cycles (~3.5s each ≈ 7s/
+    draw, vs ~3.5s for the single-config properties), so this runs at count 30
+    (≈ 210s) rather than 50, keeping the suite within its wall-clock budget
+    while still exercising both levels across a spread of generated programs.
+    Reuses [gen_record_update_module] — a generator whose interpreter output is
+    reliably exit-0 and deterministic (a single Int sum). *)
+let prop_oracle_opt_matrix =
+  Test.make ~name:"oracle (opt-matrix): interp = compiled at --opt 0 and --opt 2"
+    ~count:30 ~print:(fun s -> s)
+    gen_record_update_module
+    (fun src ->
+       let check_at n =
+         match oracle_check ~opt:(Some n) src with
+         | None           -> true   (* skip — already counted via record_skip *)
+         | Some (Ok ())   -> true
+         | Some (Error (interp, compiled)) ->
+           Printf.eprintf
+             "OPT-MATRIX MISMATCH @ --opt %d:\n  interp:   %S\n  compiled: %S\n%!"
+             n interp compiled;
+           false
+       in
+       (* Evaluate both levels regardless of the first's result so the log
+          shows exactly which optimization level(s) diverge. *)
+       let ok0 = check_at 0 in
+       let ok2 = check_at 2 in
+       ok0 && ok2)
+
 (* ── Documented-skip: record-update on a missing field over an ERASED base
    (OPEN divergence, specs/todos.md "Interpreter/compiled divergence:
    ERecordUpdate on a missing field") ─────────────────────────────────────
@@ -2713,5 +2786,7 @@ let () =
       prop_oracle_dual_position_borrow;
       prop_oracle_fbip_same_arity;
       prop_oracle_erased_flow;
+      (* Opt-level matrix (--opt 0 vs --opt 2) + exit-code parity — Phase 3 *)
+      prop_oracle_opt_matrix;
     ];
   ]
