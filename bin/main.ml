@@ -321,6 +321,28 @@ let load_stdlib ?(for_js=false) () =
       with _ -> ());
       decls
 
+(* clang cflags/libs to make libblake3 linkable into the runtime, mirroring
+   lib/cas/discover.ml's probe (same homebrew/usr-local search, same
+   preference for a static libblake3.a on macOS so the compiled binary
+   carries no blake3 dylib dependency). Used to compile+link
+   runtime/march_blake3.c (see march_blake3.h) so march_reload.c can
+   recompute cap_root with the same BLAKE3 algorithm the compiler uses
+   (March_cas.Blake3, Phase5C-A). Only needed on the paths that link
+   march_reload.c (i.e. not --compile-so patches). *)
+let blake3_link_flags () =
+  let is_macos = Sys.file_exists "/opt/homebrew" || Sys.file_exists "/usr/local/opt" in
+  if is_macos then
+    let prefix =
+      if Sys.file_exists "/opt/homebrew/include/blake3.h" then "/opt/homebrew" else "/usr/local"
+    in
+    let archive = prefix ^ "/lib/libblake3.a" in
+    if Sys.file_exists archive then
+      Printf.sprintf " -I%s/include %s" prefix archive
+    else
+      Printf.sprintf " -I%s/include -L%s/lib -lblake3" prefix prefix
+  else
+    " -lblake3"
+
 (** Pre-compile the C runtime to a shared library.
     Cached at ~/.cache/march/libmarch_runtime_<hash>.so, where <hash> covers
     every C source/header that goes into the build plus the clang flags.
@@ -402,6 +424,7 @@ let ensure_runtime_so () =
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
+      ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
     in
@@ -469,13 +492,17 @@ let ensure_runtime_so () =
     let so_san_flag =
       if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined" else ""
     in
+    (* BLAKE3 flags: needed when march_blake3.c is included (links alongside
+       march_reload.c so the reload server can recompute cap_root). *)
+    let blake3_c = Filename.concat runtime_dir "march_blake3.c" in
+    let blake3_flags = if Sys.file_exists blake3_c then blake3_link_flags () else "" in
     (* Content key: digests of every C input (the .c files named in the
        command plus every header in runtime/) and the full flag string.
        Identical inputs across worktrees share one artifact; any divergence
        gets its own filename instead of overwriting a shared one. *)
     let flags_sig = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags in
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
     let c_inputs =
@@ -1967,6 +1994,7 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_blake3.c")    else "")  (* BLAKE3 for server-side cap_root recompute *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
@@ -2035,6 +2063,10 @@ let compile filename =
               if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined"
               else ""
             in
+            (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
+               guarded by not !compile_so above, same as march_reload.c). *)
+            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
+            let blake3_flags2 = if not !compile_so && Sys.file_exists blake3_c2 then blake3_link_flags () else "" in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
@@ -2071,8 +2103,8 @@ let compile filename =
                   ""
               else "" in
             let cmd = Printf.sprintf
-              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s %s -o %s%s%s"
-              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
+              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1

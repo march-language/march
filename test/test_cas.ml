@@ -125,6 +125,22 @@ let test_blake3_known_vector () =
   let expected = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262" in
   Alcotest.(check string) "empty input hash matches known vector" expected h
 
+(* Phase5C-C.2: cross-implementation agreement between this OCaml BLAKE3
+   (lib/cas/blake3_stubs.c, via libblake3) and the C-runtime helper
+   (runtime/march_blake3.c, also via libblake3) that march_reload.c
+   (Phase5C-C.3) will use to recompute cap_root server-side. Both sides
+   assert the *same* fixture hashes to the *same* literal — see
+   test/test_blake3_agreement.c for the C-side half of this check. A
+   mismatch here (this test, or the C test) means the two implementations
+   have diverged and cap_root tamper checks would silently break. *)
+let test_blake3_cross_impl_agreement_fixture () =
+  let h = March_cas.Blake3.hash_string "march-hcr-blake3-agreement-fixture" in
+  let expected = "24b435176d98631a620c35d049975df9e07dd4d761d89593f1e6b55fe3767717" in
+  Alcotest.(check string)
+    "OCaml Blake3.hash_string(fixture) matches the literal also asserted by \
+     test_blake3_agreement.c's runtime march_blake3_hex(fixture)"
+    expected h
+
 let test_hash_fn_def () =
   let fd : fn_def = {
     fn_name   = "add";
@@ -749,6 +765,7 @@ let () =
       Alcotest.test_case "different inputs → different hashes" `Quick test_blake3_different_inputs_different_hashes;
       Alcotest.test_case "output is 64 hex chars"             `Quick test_blake3_output_is_64_hex_chars;
       Alcotest.test_case "known empty-input vector"           `Quick test_blake3_known_vector;
+      Alcotest.test_case "cross-impl agreement w/ runtime march_blake3_hex" `Quick test_blake3_cross_impl_agreement_fixture;
       Alcotest.test_case "hash_fn_def produces hashes"        `Quick test_hash_fn_def;
       Alcotest.test_case "impl_hash changes with body"        `Quick test_impl_hash_changes_with_body;
       Alcotest.test_case "sig_hash stable across body change" `Quick test_sig_hash_stable_across_body_change;
