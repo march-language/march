@@ -1119,6 +1119,73 @@ let test_gate_attribution_names_introducing_function () =
   Alcotest.(check (list (pair string string))) "attributes widened cap to its function"
     [("IO.Process", "MyApp.Server.handle")] attributed
 
+(* ─── compute_scoped_caps: per-fn monotonicity scoping (Granularity revision,
+   2026-07-04) ── this is the pure function factored out of `run`'s inlined
+   prior/new computation so the rescoped gate (own-caps of ACTIVATED
+   functions only, not the whole-artifact union) is unit-testable without a
+   live socket. *)
+
+let fm ~name ~caps =
+  { Cmd_deploy_hot.fn_name = name; fn_impl_hash = "h"; fn_sig_hash = "s";
+    fn_callers = []; fn_caps = caps; fn_has_caps = true }
+
+let test_scoped_caps_no_prior_baseline_permissive () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let (prior_caps, new_caps) = Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:None in
+  Alcotest.(check (list string)) "no baseline -> empty prior" [] prior_caps;
+  Alcotest.(check (list string)) "no baseline -> normalized new caps"
+    ["IO.Console"; "IO.FileWrite"] new_caps
+
+let test_scoped_caps_new_function_compares_against_empty () =
+  (* Function present in to_activate but absent from the prior baseline
+     entirely (e.g. newly added this deploy) -> its caps compare against
+     [], so ALL its caps show up as widening. *)
+  let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = [] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "all of new fn's caps widen"
+    ["IO.Console"; "IO.FileWrite"] widening
+
+let test_scoped_caps_existing_function_adds_cap_widens () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "added cap widens" ["IO.FileWrite"] widening;
+  Alcotest.(check (list string)) "nothing narrows" [] narrowing
+
+let test_scoped_caps_existing_function_drops_cap_narrows () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "nothing widens" [] widening;
+  Alcotest.(check (list string)) "dropped cap narrows" ["IO.FileWrite"] narrowing
+
+let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
+  (* prior holds IO.Network; new adds IO.NetConnect, which IO.Network
+     subsumes -> normalize drops it, so no widening is reported. *)
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  Alcotest.(check (list string)) "subsumed cap dropped from new_caps" ["IO.Network"] new_caps;
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "subsumed add is not widening" [] widening
+
 (* ─── fn_cap_root: per-function cap_root, must match the server's recipe ────
    runtime/march_reload.c's compute_cap_root: split_cap_csv -> sort_uniq ->
    march_cap_normalize -> join "\n" -> blake3. Forge's fn_cap_root mirrors
@@ -1157,6 +1224,33 @@ let test_fn_cap_root_normalizes_subsumed_caps () =
   let just_root = Cmd_deploy_hot.fn_cap_root ["IO"] in
   Alcotest.(check string) "normalize collapses subsumed cap before hashing"
     just_root with_subsumed
+
+(* Multi-cap agreement with the SERVER's independent recipe (runtime/
+   march_reload.c's compute_cap_root: split -> sort_uniq -> normalize ->
+   join "\n" -> blake3). These hand-encode the server's expected output
+   directly (sorted order, literal "\n" join, no call to fn_cap_root's own
+   Cap_lattice.normalize) so a future accidental reordering on EITHER side
+   (forge's fn_cap_root or the server's recipe) that still agrees with
+   itself internally would be caught here — the existing
+   test_fn_cap_root_sorts_before_joining only checks internal
+   order-independence, not agreement with an independently-computed
+   server-shaped expected value. *)
+
+let test_fn_cap_root_multi_cap_disjoint_matches_server_recipe () =
+  (* Disjoint set: neither cap subsumes the other, so normalize keeps both.
+     Server sorts ["IO.FileWrite"; "IO.Console"] -> ["IO.Console"; "IO.FileWrite"],
+     joins with "\n", hashes. Hand-encode that exact string independently of
+     fn_cap_root's own normalize call. *)
+  let expected = March_cas.Blake3.hash_string "IO.Console\nIO.FileWrite" in
+  Alcotest.(check string) "multi-cap disjoint set matches hand-encoded server recipe"
+    expected (Cmd_deploy_hot.fn_cap_root ["IO.FileWrite"; "IO.Console"])
+
+let test_fn_cap_root_multi_cap_subsumption_matches_server_recipe () =
+  (* IO.NetConnect's parent is IO.Network (lib/caps/cap_lattice.ml hierarchy),
+     so normalize drops IO.NetConnect, leaving only IO.Network to hash. *)
+  let expected = March_cas.Blake3.hash_string "IO.Network" in
+  Alcotest.(check string) "multi-cap subsumed set matches hand-encoded server recipe"
+    expected (Cmd_deploy_hot.fn_cap_root ["IO.Network"; "IO.NetConnect"])
 
 (* ─── --grant-cap: filter_granted_widening (Phase 5C Part B, Task 5) ──────── *)
 
@@ -1435,10 +1529,17 @@ let () =
       Alcotest.test_case "gate: parent widen blocked"           `Quick test_gate_parent_widen_blocked;
       Alcotest.test_case "gate: IO root add blocked"            `Quick test_gate_io_root_add_blocked;
       Alcotest.test_case "gate: attribution names introducer"  `Quick test_gate_attribution_names_introducing_function;
+      Alcotest.test_case "scoped caps: no prior baseline is permissive" `Quick test_scoped_caps_no_prior_baseline_permissive;
+      Alcotest.test_case "scoped caps: new fn compares against empty prior" `Quick test_scoped_caps_new_function_compares_against_empty;
+      Alcotest.test_case "scoped caps: existing fn adding a cap widens" `Quick test_scoped_caps_existing_function_adds_cap_widens;
+      Alcotest.test_case "scoped caps: existing fn dropping a cap narrows" `Quick test_scoped_caps_existing_function_drops_cap_narrows;
+      Alcotest.test_case "scoped caps: existing fn adding subsumed cap does not widen" `Quick test_scoped_caps_existing_function_adds_subsumed_cap_no_widen;
       Alcotest.test_case "fn_cap_root: single cap matches raw blake3" `Quick test_fn_cap_root_single_cap_matches_blake3_of_bare_string;
       Alcotest.test_case "fn_cap_root: empty matches blake3(\"\")" `Quick test_fn_cap_root_empty_matches_blake3_of_empty_string;
       Alcotest.test_case "fn_cap_root: order-independent, sorts before join" `Quick test_fn_cap_root_sorts_before_joining;
       Alcotest.test_case "fn_cap_root: normalizes subsumed caps before hashing" `Quick test_fn_cap_root_normalizes_subsumed_caps;
+      Alcotest.test_case "fn_cap_root: multi-cap disjoint set matches server recipe" `Quick test_fn_cap_root_multi_cap_disjoint_matches_server_recipe;
+      Alcotest.test_case "fn_cap_root: multi-cap subsumed set matches server recipe" `Quick test_fn_cap_root_multi_cap_subsumption_matches_server_recipe;
       Alcotest.test_case "grant: no grants leaves widening blocked" `Quick test_grant_no_grants_leaves_widening_blocked;
       Alcotest.test_case "grant: exact-match grant covers widening" `Quick test_grant_exact_match_covers_widening;
       Alcotest.test_case "grant: broader subsuming grant covers widening" `Quick test_grant_broader_subsuming_grant_covers_widening;

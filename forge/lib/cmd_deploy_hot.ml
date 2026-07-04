@@ -158,6 +158,44 @@ let compute_cap_widening ~(prior : string list) ~(new_caps : string list) : stri
 let compute_cap_narrowing ~(prior : string list) ~(new_caps : string list) : string list =
   List.filter (fun p -> not (List.exists (fun n -> March_caps.Cap_lattice.cap_subsumes n p) new_caps)) prior
 
+(** [compute_scoped_caps ~to_activate ~prior] — pure factoring of the
+    per-function-scoped monotonicity gate (Granularity revision, 2026-07-04).
+
+    Returns [(prior_caps, new_caps)], both normalized, ready to hand to
+    [compute_cap_widening] / [compute_cap_narrowing]:
+
+      - [prior = None] (no baseline — first deploy / legacy): returns
+        [([], normalize (union of to_activate's own caps))], matching the
+        permissive "NOTE" branch in [run].
+      - [prior = Some prior_manifest]: for each function being activated,
+        look up that SAME function's own caps in the prior baseline by name
+        ([] if the function is new relative to the baseline — not present in
+        the prior manifest at all), union and normalize across all activated
+        functions for [prior_caps]; union and normalize each activated
+        function's CURRENT own caps for [new_caps]. This is scoped to
+        [to_activate] only — deliberately not the whole-artifact union, which
+        is dominated by the linked stdlib and app-invariant, so it can't
+        discriminate a real widening. *)
+let compute_scoped_caps ~(to_activate : fn_manifest list) ~(prior : manifest option)
+  : string list * string list =
+  let new_caps =
+    March_caps.Cap_lattice.normalize
+      (List.concat_map (fun fm -> fm.fn_caps) to_activate)
+  in
+  match prior with
+  | None -> ([], new_caps)
+  | Some prior_manifest ->
+    let prior_by_name : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun fm -> Hashtbl.replace prior_by_name fm.fn_name fm.fn_caps)
+      prior_manifest.functions;
+    let prior_caps =
+      March_caps.Cap_lattice.normalize
+        (List.concat_map (fun fm ->
+             Option.value ~default:[] (Hashtbl.find_opt prior_by_name fm.fn_name))
+            to_activate)
+    in
+    (prior_caps, new_caps)
+
 (* ─── ACTIVATE3 / ACTIVATE4 wire-line builders (Phase 5C Part C, Task C4) ────
 
    Factored into pure functions (no socket I/O) so the wire shape is
@@ -681,19 +719,9 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           | None ->
             Printf.printf
               "NOTE: no prior capability baseline found — capability widening gate is permissive for this deploy (legacy/first deploy).\n%!"
-          | Some prior_manifest ->
-            let prior_by_name : (string, string list) Hashtbl.t = Hashtbl.create 16 in
-            List.iter (fun fm -> Hashtbl.replace prior_by_name fm.fn_name fm.fn_caps)
-              prior_manifest.functions;
-            let prior_caps =
-              March_caps.Cap_lattice.normalize
-                (List.concat_map (fun fm ->
-                     Option.value ~default:[] (Hashtbl.find_opt prior_by_name fm.fn_name))
-                    to_activate)
-            in
-            let new_caps =
-              March_caps.Cap_lattice.normalize
-                (List.concat_map (fun fm -> fm.fn_caps) to_activate)
+          | Some _ ->
+            let (prior_caps, new_caps) =
+              compute_scoped_caps ~to_activate ~prior:prior_manifest_opt
             in
             let widening = compute_cap_widening ~prior:prior_caps ~new_caps in
             let narrowing = compute_cap_narrowing ~prior:prior_caps ~new_caps in
