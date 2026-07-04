@@ -1,3 +1,141 @@
+> ## STATUS ADDENDUM (2026-07-03) — program closed out, Waves 1–4
+>
+> This block is an append-style addendum prepended above the original 2026-07-01
+> report. Nothing below this block has been rewritten; dispositions are recorded
+> here, against the section numbers they resolve. Campaign plans: Wave 1
+> `specs/plans/2026-07-01-wave1-p0-fixes.md`, Wave 2
+> `specs/plans/2026-07-02-wave2-testing-infra.md`, Wave 3 chunk 1
+> `specs/plans/2026-07-03-wave3-chunk1-refactors.md`, Wave 3 chunk 2
+> `specs/plans/2026-07-03-wave3-chunk2-emit-lower.md`, Wave 4
+> `specs/plans/2026-07-04-wave4-docs.md`. Full per-wave ledger:
+> `.superpowers/sdd/progress.md`. Program-closeout paragraph:
+> `specs/progress.md` "Program closeout" entry.
+>
+> ### §2 P0s — ALL FIXED (Waves 1–2)
+>
+> All 16 lettered findings (B1–B16) plus the FLOAT pattern-arm gap are fixed.
+> B-id → landing commit:
+>
+> | Finding | Commit | Landed |
+> |---|---|---|
+> | B1 (owned+borrowed double-dec) | `a5dad194` | pre-Wave-1 (sibling lineage, merged; also the governing commit Wave 4 Task 2 cites) |
+> | B2 (FBIP arity/type-param conflation) | `a5dad194` | pre-Wave-1 (same commit as B1) |
+> | B13 (oracle skips compiled crashes) | `a5dad194` | pre-Wave-1 (same commit as B1/B2) |
+> | B3 (guard-exhaustion returns 0) | `11925401` | Wave 1 Task 1 |
+> | B4 (dropped PatRecord/LitFloat rows) | `e8a43b7b` | Wave 1 Task 2 |
+> | FLOAT missing from `is_pattern_start` | `6e376e4d` | Wave 1 (token-filter gap, same series) |
+> | B9 (`march_` prefix off-by-one) | `cd0770d9` | Wave 1 Task 3 |
+> | B10 (RC-op shadow guard gap) | `b98115da` | Wave 1 Task 4 |
+> | B5 (EUpdate on erased record) | `0d1a829e` | Wave 1 Task 5 |
+> | B15 (lexer newline desync) | `f169070c` | Wave 1 Task 11 (cherry-picked from Stream B) |
+> | B6 (pipe-into-match discards scrutinee) | `b579f848` | Wave 1 Task 12 (cherry-picked from Stream B) |
+> | B14 (interleaved fn-clause groups) | `4cdc65de` | Wave 1 Task 13 (cherry-picked from Stream B) |
+> | B16 (`~H` CSRF free-variable injection) | `f39a5c49` | Wave 1 Task 14 (cherry-picked from Stream B) |
+> | B7 (mutual-TCO dec-chain drop) | `05d9e46b` | Wave 1 Task 6 |
+> | B8 (mutual-TCO no reduction check) | `bc5b0e22` | Wave 1 Task 7 |
+> | B12 (`cur_type_defs` stale global) | `53c70a0e` | Wave 1 Task 8 |
+> | B11 (REPL closure wrapper ptr-ABI) | `b32d8569` | Wave 1 Task 9 |
+>
+> Final-review pass over Wave 1 (commit `926b14f4`) additionally closed an
+> `in_tail` blind spot in mutual-TCO group formation that the B7/B8 fixes had
+> left open, plus REPL desugar-diagnostic rendering (the LSP-analogous gap —
+> `lsp/lib/analysis.ml` threading `~errors` into `desugar_module` — landed the
+> same family via merged commit `07fdb5b7`, cross-referenced in
+> `specs/progress.md`). Wave 2's double-dec_rc P0 (a distinct, newly-discovered
+> bug surfaced by the Wave 2 Task 4 snapshot corpus, not one of the original 16)
+> was fixed in `20d1d144` and excludes the scrutinee from cross-branch decs —
+> see the Task 2 note below on the scrutinee-borrowed approximation.
+>
+> ### §7 refactors — COMPLETE (Wave 3 chunks 1–2)
+>
+> Every module split and shared-contract extraction in §7.1–§7.4 landed, each
+> as a pure-move commit verified byte-identical-IR against the pre-move
+> compiler (×4 benchmarks/fixtures per step) with zero snapshot churn:
+> `Tir_names` (§7.1, commit `c1ad25dd`), `Rc_types` (§7.1, `0cd6b627`),
+> `fn_kind` role flags replacing name-sniffing (§7.1, `c28ff465`), Perceus
+> env-record threading (§7.3, `98d4a96d`), the `lib/tir/perceus/` file split
+> into 5 modules (§7.3, `743b581b`); then in chunk 2, `llvm_ctx.ml` tag-helper
+> extraction (§7.4, `50c30f18`), the declarative builtin table (§7.4,
+> `7d10fe02`), `llvm_eq.ml`/`llvm_data.ml`/`llvm_case.ml` (§7.4, `ec294fb8`),
+> `llvm_calls.ml`/`llvm_tco.ml` (§7.4, `ce2fb5aa`), `llvm_toplevel.ml`/
+> `llvm_repl.ml` with `llvm_emit.ml` reduced to an 8-module orchestrator (§7.4,
+> `c37e81df`), `lower.ml` env-record threading (§7.2, `fe046757`), and the
+> `lower.ml` split into 5 focused modules plus orchestrator (§7.2, `190c0797`).
+> `perceus.ml` went from 1937 to a 162-line orchestrator + 4 modules;
+> `llvm_emit.ml` went from 6879 to a 2957-line orchestrator + 8 modules;
+> `lower.ml` went from 2868 to a 1399-line orchestrator + 6 modules. The
+> transitional `fn_kind` asserts seeded in chunk 1 were retired once `FnFused`
+> gained bidirectional test coverage (chunk 2 Task 1/2, `4404b2fa`/`7d10fe02`).
+>
+> ### §8 testing — items 1–4 LANDED; W2.0 loud-skips beyond the plan; items 5–8 OPEN BY CHOICE
+>
+> Landed: **(1)** the differential-oracle fix is part of the same `a5dad194`
+> commit as B1/B2/B13 above — it is what let both criticals be caught at all.
+> **(2)** the confirmed repros landed as compiled regression tests in the same
+> commit series (`both(s,s,1)` owned+borrowed shape, FBIP dead-binding-reuse
+> shape) — see `test/test_stdlib_suite.ml`/`test/test_codegen.ml`'s
+> `fbip_p8`/`same_arity_raw_type_refused` entries. **(3)** the LLVM IR validity
+> gate landed as Wave 2 Task 3 (`d685bc61`) — `opt -passes=verify` over all
+> 37 native-target fixtures, wired into `run_codegen`. **(4)** TIR snapshot
+> infrastructure landed as Wave 2 Task 4 (`dfcd19d7`) — 14-program corpus, 29
+> tests, a 6th runner (`run_snapshots.exe`); its own audit pass additionally
+> found a genuine double-`dec_rc` P0 (fixed `20d1d144`) beyond anything §8
+> asked for. **Beyond the plan:** W2.0 (commit `867d5a33`) converted ~23
+> vacuous test-harness skip-sites to loud failures — not one of items 1–8, but
+> the same "stop swallowing compiled-mode failures" discipline; it caught the
+> still-open Monomorphization-limit P0 (below) as a direct result. **Open by
+> choice, items 5–8:** the RC balance/gc-trace harness (item 5), codegen
+> twin-path FileCheck-style tests (item 6), property-test generators biased at
+> the known weak spots (item 7), and the menhir conflict budget (item 10 in the
+> original numbering) were never scheduled into Waves 1–4 — the campaign
+> judged items 1–4 sufficient leverage for the fix backlog in hand and
+> deliberately left 5–8 for a future testing-infra wave. They remain valid,
+> undiminished recommendations; see `specs/todos.md` P2 "Testing infrastructure"
+> family for the open entries where any exist.
+>
+> ### §9 docs — COMPLETE (Wave 4)
+>
+> All seven documentation recommendations landed as four new/extended docs:
+> `docs/value-representation.md` (Wave 4 Task 1, commit `94b7c36d` — item 1);
+> `specs/perceus-invariants.md` (Task 2, `e5343e84` — item 2, including the
+> scrutinee-borrowed approximation rewritten for post-campaign truth: sort_by
+> was exonerated, per `.superpowers/sdd/sortby-diagnosis.md`, the real bug was
+> `mono.ml`'s empty-substitution interface-impl resolution fixed in `ffe6fba8`,
+> not `ECase` scrutinee ownership); `specs/features/tir-invariants.md` plus the
+> actor-layout runtime mirror comment (Task 3, `68f8055b` — items 3 and 4); the
+> if/then correction removing the undocumented `then` production from the
+> grammar plus both syntax docs corrected to verified truth (Task 4, `f8b25df7`
+> — part of item 5, the "wrong docs found during review" cleanup); and the
+> user-facing semantics notes section in `syntax_reference.md` covering
+> top-level-let re-evaluation, newline-glom continuation, derived-Ord/Hash
+> payload-blindness, nested-default-arg value dropping, and the soft-keyword
+> asymmetry (Task 5, amended to `f145439a` — item 6). Item 7 (the synthetic-name
+> registry) is folded into Task 3's `tir-invariants.md` rather than a standalone
+> spec. The stale `compiler-rc` skill `test/test_snapshots.ml` reference (item
+> 5's other half) was corrected in Wave 2 Task 4.
+>
+> **Two new P1s Wave 4 itself discovered** — evidence the program's discipline
+> outlived the program: while verifying Task 5's semantics-notes claims by
+> re-executing every probe (per the wave's own claim-verification gate), the
+> reviewer's fix cycle caught that the *original* probes had run against the
+> wrong compiler binary (a stale shell `cwd` resolved to a different checkout
+> entirely), and re-running them at the correct HEAD surfaced two previously
+> undocumented compiler bugs rather than confirming the milder behavior first
+> assumed: **(1)** derived `compare`/`hash`/`eq` called *by name* (not via the
+> `==` operator) on a `Newtype`-repr variant (single constructor, single field)
+> crashes the compiled binary — SIGSEGV for an `Int` payload, a non-exhaustive
+> panic for a `String` payload — while the interpreter runs fine; the `==`
+> operator path is unaffected. **(2)** top-level default-arg functions are
+> unreachable by their own name from March source at any arity, in every mode
+> (`--check`/`--compile`/interpreted) — `expand_defaults_decl` emits only
+> mangled `f$N` decls and the typechecker (unlike the interpreter's
+> `VMultiarity` reconstruction and the TIR's `_default_dispatch` rewrite) never
+> learns the bare name exists. Both are filed with full repros, root-cause
+> pointers, and test-gap notes in `specs/todos.md` P1 "Compiler (found during
+> Wave 4 Task 5 semantics-notes verification, 2026-07-03)"; neither is fixed by
+> this campaign (Wave 4's scope was documentation, not new code repair) — see
+> `specs/progress.md`'s program-closeout entry for the full disposition.
+
 # March Compiler Pipeline — Deep Review & Recommendations
 
 **Date:** 2026-07-01
