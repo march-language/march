@@ -437,6 +437,68 @@ Regression tests: `test/test_stdlib_suite.ml` adversarial-regressions `test_comp
 - **New `Tir_names.specialize_mangle : string -> string -> string`** centralizes mono.ml's specialization-suffix "$"-glue (`mangle_name`'s `base ^ "$" ^ mangled_ty`, including the Wave 2 double-mangle case for interface impls). `mangle_ty` itself (the type→string algorithm) stays in mono.ml — a computation, not a cross-pass name contract. Doc comment proves the helper can never trip `is_iface_mangled` (the `$`-before-last-`.` predicate from Wave 2 Task 1): it never introduces a `.` or moves a `$` before an existing one. Fixed the stale `enqueue_specialized_impl` comment ("no shared Tir_names-style helper exists yet — that's Wave 3").
 - **Standard gates:** six runners exit 0 at 384 compiler / 230 eval / 370 codegen (+6 net: 4 `fnfused_coverage` + 1 `specialize_mangle` + 1 `is_clo_name` equivalence) / 791 stdlib / 53 stdlib_march / 29 snapshots — zero `.expected` diffs. Baseline IR diff: `--emit-llvm` on all four `specs/benchmarks.md` benchmarks against a clean sibling-worktree build of base commit `00c68894` — byte-identical `.ll` in all four. Compiled (`--compile --opt 2`) outputs byte-identical; timings within noise. `scripts/check-docs.sh` clean.
 - **Reference:** `specs/plans/2026-07-03-wave3-chunk2-emit-lower.md` Task 1. Full writeup in `.superpowers/sdd/w3c2-task-1-report.md`. **Six-runner counts: 384 compiler / 230 eval / 370 codegen / 791 stdlib / 53 stdlib_march / 29 snapshots — all exit 0, zero `.expected` diffs, doc-lint passes.**
+## Current State (as of 2026-07-03, Phase 5C final whole-branch review fixes — actor-handler caps + gate hygiene)
+
+Final whole-branch review of Phase 5C Parts A & B (six individually-reviewed tasks) found one Critical gap no single task's review could catch, plus three smaller issues. All four fixed in this pass:
+
+- **C1 (Critical) — actor handler capabilities were silently dropped from the manifest.** `record_fn_caps` in `check_module_needs` (`lib/typecheck/typecheck.ml`) was only ever called for `DFn`/`DExtern`, never for actor handlers, even though TIR hashes every synthesized handler function (named `{ActorName}_{MsgName}`, `lib/tir/lower.ml`'s `lower_handler`) as a `.hcr_manifest` boundary entry. A handler doing IO (e.g. `println`) compiled clean with an empty `caps=` field, invisible to the Part B monotonicity gate. Fixed in two parts: (1) `check_module_needs`'s `DActor` branch now body-scans each handler and calls `record_fn_caps` keyed by the actor's **bare** name + `_` + message name (verified empirically — TIR never module-qualifies the handler fn_name, even for actors nested 2+ levels deep, unlike sibling `DFn`s in the same module which DO get qualified); (2) the existing `body_cap_uses` fold (same one `DFn`/`DLet` already populate — no new AST walk) now also scans handler bodies, so a handler doing undeclared IO trips the same "capability not declared in needs" warning a plain function body would. New tests: `test/test_compiler.ml` (`test_actor_handler_body_io_missing_needs_warns`/`..._no_warning`, 2-level-nested-module fixture), `test/test_stdlib_suite.ml` (`test_hcr_manifest_actor_handler_caps_populated`, `Slow`).
+- **I2 (Important) — `compute_cap_narrowing` used exact match instead of subsumption.** `forge/lib/cmd_deploy_hot.ml`: a prior cap could be misreported as "narrowed away" when the new build still holds a broader covering cap (e.g. new `IO` root covering prior `IO.FileRead`). Log-only (not the gate itself), but misleading. Fixed to use `Cap_lattice.cap_subsumes`, mirroring `compute_cap_widening`'s existing pattern. New test in `forge/test/test_forge.ml`'s `hcr-cap-gate` group.
+- **M3 (Minor) — diagnostic column padding.** `print_widening_diagnostic`'s hardcoded `%-12s` misaligned for caps longer than 12 chars (e.g. `IO.NetConnect.TLS`). Now computed dynamically from the longest cap name being printed.
+- **M5 (Minor) — non-deterministic widening attribution.** `attribute_widening` searched `manifest.functions` in `Hashtbl.iter`'s unspecified order, so which function got blamed in the "(from <fn>)" diagnostic could vary build-to-build. Now sorts by `fn_name` before searching.
+
+**Verification:** full suite green (391 compiler / 230 eval / 364 codegen / 793 stdlib — all four `run-tests.sh` runners exit 0); `forge/test/test_forge.exe` 112/112 green (not part of `run-tests.sh`'s four suites, run separately). Full report: `.superpowers/sdd/final-review-fix-report.md`.
+
+## Current State (as of 2026-07-03, Phase 5C Parts A & B — capability-safe hot deploys, manifest + monotonicity gate)
+
+**HCR Phase 5C Parts A & B complete across five tasks (commits df323bb7 through f94a5c3e, all reviewed and approved).** Parts A and B deliver the operational capability-safety apparatus; Part C (node-local admission at dlopen time) remains open as documented in the item's "Part C" section in todos.md.
+
+**Part A (capability-manifest emission):** `lib/caps/cap_lattice.ml` (new, 413 lines, Task 1) — factored `io_cap_hierarchy`/`cap_subsumes`/`normalize` out of duplication across `lib/typecheck/typecheck.ml` and `lib/refinecheck/cap_infer.ml` into a single source of truth for the capability partial order. `lib/typecheck/typecheck.ml` (Task 2) records a per-function **fully-qualified** IO-capability closure (matching TIR's dotted `mod_prefix` naming) exposed via `fn_capability_closures : (string * Cap_lattice.io_cap list) list` — required a two-phase fix to correct naming scoping (Task 2's secondary fix). `bin/main.ml` (Task 3) now emits a `.hcr_manifest` with a `caps=<sorted-csv>` field per function (sourced from `fn_capability_closures` via `hr_impl_hashes`/`caps_for`) and a top-level `ROOT cap_root=<hex>` line (BLAKE3 of the sorted manifest, via the existing `march_cas` dependency — no new dependencies added).
+
+**Part B (monotonicity gate):** `forge/lib/cmd_deploy_hot.ml` (Task 4) implements a monotonicity enforcement gate: `forge deploy hot` reads a local `.hcr_manifest.prev` baseline (mirroring the existing schema-compat baseline pattern), computes capability widening/narrowing via `Cap_lattice.subsumes`, and aborts before any network call if the new build's authority widens. Task 4 also fixed two manifest-parsing landmines (a `ROOT` line that could be misparsed as a phantom function; a `caps=` field at a variable position). `forge/bin/main.ml` + `cmd_deploy_hot.ml` (Task 5) adds a repeatable `--grant-cap <C>` flag that authorizes specific widenings via capability subsumption, with an audit-line print for each granted widening and an updated abort diagnostic.
+
+**What's NOT done (Part C):** node-side admission (`ACTIVATE4`, `MARCH_DEPLOY_POLICY`, server-side `cap_root` tamper check), and the compile-time `migrate_state` IO-free bound — these remain as documented in todos.md's Part C section.
+
+**Verification:** full suite green (384 compiler / 230 eval / 364 codegen / 791 stdlib / 53 stdlib_march — all six runners exit 0, zero failures). `scripts/check-docs.sh` passes with no changes needed (new `lib/caps/cap_lattice.ml` module and new `--grant-cap` flag do not trigger doc-lint issues).
+
+## Current State (as of 2026-07-03, Phase5C-A cap-closure key fix — fully-qualified naming to match TIR)
+
+Code-review-driven fix (post Phase5C-A.2/A.3, commits `591b24df`/`dee1d39a`/`19b0c36a`): `fn_capability_closures`
+keyed each function's capability closure by only its *immediately-enclosing* `DMod`'s own single-segment name
+(e.g. `"Sub.f"` for `Entry > Lib > Sub > f`), not the fully-dotted path (`"Lib.Sub.f"`) that TIR's `mod_prefix`
+accumulation (`lib/tir/lower.ml:2174`, `~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")`) and `bin/main.ml`'s
+`hr_impl_hashes`/`caps_for` manifest lookup actually use. Any function nested two-or-more `DMod` levels below
+the entry module got a **falsely empty** `caps=` field in the `.hcr_manifest` — the exact failure mode a
+capability-safety manifest exists to catch — because `caps_for` missed the mis-keyed entry and silently fell
+back to `[]`. Single-level nesting (the shipped test fixture) happened to avoid the bug, masking it.
+
+- **Fix (`lib/typecheck/typecheck.ml`):** new `env` field `cap_qual_prefix : string` accumulates the dotted
+  `DMod` path exactly like TIR's `mod_prefix` (empty at the entry module, then `"Lib"`, then `"Lib.Sub"`, …) —
+  added alongside, and explicitly NOT replacing, the pre-existing `current_module` field (which is *replaced*
+  rather than accumulated on each nested-module entry and is read at several unrelated call sites left
+  untouched). `check_module_needs` takes a new `~cap_qname_prefix` label (the accumulated prefix, no trailing
+  dot) instead of deriving its cap-closure keys from the bare `mod_name` parameter; `mod_name` itself is
+  unchanged for all diagnostics/messages/`proof_caps` self-declaration checks. The top-level `check_module_needs`
+  call passes `~cap_qname_prefix:""` (TIR unwraps the entry module — its own top-level functions get bare names,
+  confirmed empirically by lowering a probe module and inspecting `tm_fns`); the nested-`DMod` call site in
+  `check_decl` passes the parent's accumulated prefix extended by the module's own name.
+- **Verification:** new test `test_fn_cap_closure_two_level_nesting` (`test/test_compiler.ml`, alongside the
+  existing 4 `test_fn_cap_closure_*` cases) builds the exact `Entry > Lib > Sub > f` repro from the review and
+  asserts the closure is keyed `"Lib.Sub.f"` (with `IO.Console`), NOT `"Sub.f"`. Fixing the keying also exposed
+  that 3 of the 4 *pre-existing* `test_fn_cap_closure_*` tests asserted the wrong (bug-compatible) key for their
+  single-level entry-module fixtures (e.g. expected `"Greeter.greet"` where TIR's real key is bare `"greet"`,
+  confirmed via the same empirical lowering probe) — corrected to match TIR's actual naming.
+  `test_hcr_manifest_emits_caps_and_cap_root` (`test/test_stdlib_suite.ml`, one level of nesting) needed no
+  change — its expected key `"Core.logger"` was already correct at that depth.
+- **`bin/main.ml` needed no changes** — its `caps_for` lookup by TIR name now agrees with the corrected
+  `fn_capability_closures` keys once the two naming schemes were unified at the source.
+- **Secondary fix (test isolation, `test_stdlib_suite.ml`):** `test_hcr_manifest_emits_caps_and_cap_root`'s
+  `HOME=%s cd %s && ` command-prefix construction didn't actually export `HOME` to the compiler subprocess run
+  after `&&` (POSIX scopes a bare `VAR=val` prefix to only the immediately-following command); changed to
+  `cd %s && env HOME=%s ` so `env` exports for the rest of the command line. The test's determinism assertion
+  was never actually broken (the `cd`-into-fresh-tmp-dir half of the isolation was always effective and is what
+  forces two independent compiles), but the mechanism/comment was misleading about *why*.
+- **Full suite: 389 compiler / 230 eval / 364 codegen / 792 stdlib / 53 stdlib_march — all six runners exit 0,
+  zero failures** (`scripts/run-tests.sh`, full run including Slow tests).
 
 ## Current State (as of 2026-07-03, Wave 3 chunk 1 complete — shared modules + Perceus restructure, bookkeeping)
 

@@ -1,3 +1,3 @@
 (library
  (name march_typecheck)
- (libraries march_ast march_errors march_modules))
+ (libraries march_ast march_errors march_modules march_caps))

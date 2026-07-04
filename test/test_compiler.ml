@@ -1294,6 +1294,81 @@ let test_actor_handler_cap_missing_needs_error () =
   end|} in
   Alcotest.(check bool) "actor handler cap without needs: error" true (has_errors ctx)
 
+(* ── C1 fix: actor handler BODY IO with no declared `needs` ───────────────
+   Finding C1 (final whole-branch review, HCR Phase 5C): [record_fn_caps] was
+   never called for actor handlers at all, so handler functions ended up as
+   `.hcr_manifest` boundary entries with an empty `caps=` field regardless of
+   what IO they actually performed — invisible to the hot-deploy monotonicity
+   gate. Part 2 of the fix folds handler bodies into the SAME body-scan
+   [check_module_needs]'s `body_cap_uses` already does for `DFn`/`DLet`
+   bodies, so a handler calling an IO builtin with no covering `needs`
+   now produces the same "capability not declared in needs" diagnostic a
+   plain function body would (Check 1b — a warning, matching the existing
+   DFn/DLet body-scan diagnostic's severity).
+
+   This fixture uses a 2-level-deep nested module (`Outer.Inner`) to also
+   exercise the qualified-name path through [check_module_needs]'s
+   [cap_qname_prefix] threading (mirrors the nesting depth Task 2's earlier
+   `DFn` qualified-name fix was verified against). *)
+let test_actor_handler_body_io_missing_needs_warns () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "IO.Console") m 0); true
+           with Not_found -> false)
+          && (try ignore (Str.search_forward (Str.regexp_string "needs") m 0); true
+              with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with no needs: warns to declare needs IO.Console"
+    true has_warning
+
+(* Counterpart: when the module DOES declare the needed cap, no such warning
+   fires — confirms the new body-scan doesn't introduce a false positive. *)
+let test_actor_handler_body_io_with_needs_no_warning () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      needs IO.Console
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "not declare") m 0); true
+           with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with needs declared: no missing-needs warning"
+    false has_warning
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -4135,6 +4210,104 @@ let test_cap_body_foreign_blocking () =
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
 
+(* ── fn_capability_closures: per-function IO-capability closure (Phase5C-A.2) ─
+   check_module_needs records, per fully-qualified function name, the
+   normalized set of IO capabilities it requires. These tests exercise the
+   accessor directly via typecheck_full's returned env. *)
+
+(* A function with only declared `needs` on the module — the accessor returns
+   that declared set (normalized) attributed to the function. *)
+(* NOTE on expected keys: [Greeter]/[Reader]/[Bindings] here are the ENTRY
+   module (this is the whole source passed to [typecheck_full]/[check_module]),
+   and TIR unwraps the entry module — its own top-level functions are lowered
+   under their BARE name with no module prefix (confirmed empirically against
+   [lib/tir/lower.ml]'s entry-module handling, ~line 2238: "the entry module's
+   own top-level function names" get no prefix, unlike a nested/sibling DMod's
+   functions which DO get `mod_prefix ^ fn_name`). So the cap-closure key here
+   must be the bare fn name, not "Greeter.greet" etc. — see
+   test_fn_cap_closure_two_level_nesting below for the nested-DMod case where
+   a prefix IS expected. *)
+let test_fn_cap_closure_declared_needs () =
+  let (_errors, env) = typecheck_full {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do name end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "greet" closures in
+  Alcotest.(check bool) "declared needs recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
+
+(* A function calling an IO builtin with no declared `needs` — the accessor
+   returns the inferred set from builtin_cap_table for that function. *)
+let test_fn_cap_closure_inferred_builtin () =
+  let (_errors, env) = typecheck_full {|mod Reader do
+    fn load(path) do file_read(path) end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "load" closures in
+  Alcotest.(check bool) "inferred builtin cap recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.FileRead" cs | None -> false)
+
+(* An extern function — the accessor returns a set including IO.Foreign. *)
+let test_fn_cap_closure_extern () =
+  let (_errors, env) = typecheck_full {|mod Bindings do
+    needs IO.Foreign
+    needs IO.FileSystem
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "read" closures in
+  Alcotest.(check bool) "extern fn recorded with IO.Foreign" true
+    (match caps with Some cs -> List.mem "IO.Foreign" cs | None -> false)
+
+(* A function that imports a module needing IO (Check 4 propagation) — the
+   accessor returns the union, normalized, including the propagated cap. *)
+let test_fn_cap_closure_propagated_import () =
+  let (_errors, env) = typecheck_full {|mod Outer do
+    mod Lib do
+      needs IO.Mut
+      fn setup() do
+        let _ = vault_new("t")
+        ()
+      end
+    end
+    mod Consumer do
+      needs IO.Mut
+      fn run() do () end
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Consumer.run" closures in
+  Alcotest.(check bool) "propagated import cap recorded for consumer fn" true
+    (match caps with Some cs -> List.mem "IO.Mut" cs | None -> false)
+
+(* A function nested THREE levels deep (Entry > Lib > Sub > f) must be keyed
+   by its full dotted path relative to the entry module ("Lib.Sub.f"), NOT by
+   just its immediately-enclosing DMod's own name ("Sub.f"). This matches
+   TIR's [mod_prefix] accumulation in lib/tir/lower.ml (line ~2174), which
+   bin/main.ml's manifest writer uses to look up `hr_impl_hashes` keys —
+   before this fix, the two naming schemes disagreed for any nesting depth
+   greater than one, causing a silently-empty caps list in HCR manifests for
+   real multi-module code (see task-2/3 capability-manifest security review). *)
+let test_fn_cap_closure_two_level_nesting () =
+  let (_errors, env) = typecheck_full {|mod Entry do
+    mod Lib do
+      mod Sub do
+        needs IO.Console
+        fn f(x) do println(x) end
+      end
+    end
+    fn main() do Lib.Sub.f("hi") end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  Alcotest.(check bool) "not falsely keyed under bare immediate-parent name" true
+    (List.assoc_opt "Sub.f" closures = None);
+  let caps = List.assoc_opt "Lib.Sub.f" closures in
+  Alcotest.(check bool) "fully-qualified key records IO.Console" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
+
 (* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
 
 (* A module that declares `needs IO.Mut` only to satisfy transitive enforcement
@@ -5259,6 +5432,9 @@ let compiler_suites =
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
+          (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
+          Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
+          Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
           Alcotest.test_case "actor handler wrong return type"         `Quick test_actor_handler_wrong_return_type;
@@ -5455,6 +5631,11 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+          Alcotest.test_case "fn_capability_closures: declared needs"       `Quick test_fn_cap_closure_declared_needs;
+          Alcotest.test_case "fn_capability_closures: inferred builtin"     `Quick test_fn_cap_closure_inferred_builtin;
+          Alcotest.test_case "fn_capability_closures: extern IO.Foreign"    `Quick test_fn_cap_closure_extern;
+          Alcotest.test_case "fn_capability_closures: propagated import"    `Quick test_fn_cap_closure_propagated_import;
+          Alcotest.test_case "fn_capability_closures: two-level nesting"    `Quick test_fn_cap_closure_two_level_nesting;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;

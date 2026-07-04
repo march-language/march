@@ -481,6 +481,17 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  cap_qual_prefix : string;
+  (** Accumulated dotted-path prefix of enclosing [DMod]s, for keying
+      [cap_closures] so it matches TIR's fully-qualified function-name
+      convention (see [lib/tir/lower.ml]'s [mod_prefix] accumulation).  Unlike
+      [current_module] (which is REPLACED, not accumulated, on entry to each
+      nested module — see the [Ast.DMod] branch of [check_decl] — and is used
+      elsewhere for unrelated purposes that must not be perturbed),
+      [cap_qual_prefix] accumulates across nesting: "" at the entry module,
+      then "Lib", then "Lib.Sub", etc., mirroring [prebind_mod_members]'s
+      [prefix ^ "." ^ mname.txt] recursion. The entry module's own name is
+      NOT included (TIR unwraps the entry module), so this starts empty. *)
   no_panic_mod : bool;
   (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
@@ -496,6 +507,15 @@ type env = {
   deterministic_mod : bool;
   (** True when the module currently being checked has `cap deterministic`.
       Set by [check_decl] on [DOpts ["deterministic"]]; read by [check_deterministic_module]. *)
+  cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function inferred IO-capability closure: fully-qualified function
+      name ("Mod.fn") → normalized list of cap paths that function requires,
+      as computed by [check_module_needs] (declared [needs] in scope, Cap-typed
+      signatures, body-scanned builtin calls, extern-implied caps, and
+      transitively-imported module needs). Mutated in place (shared across all
+      [env] copies derived from the same root, like [type_map]) so it survives
+      threading through [check_decl]'s per-declaration env folds. Read via
+      [fn_capability_closures]; a later hot-deploy manifest task consumes this. *)
 }
 
 let make_env errors type_map = {
@@ -510,11 +530,13 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
+  cap_closures = Hashtbl.create 64;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -924,32 +946,10 @@ let _t_pid    = t_pid
 
 (* =================================================================
    Capability hierarchy for needs / Cap checking.
-   Each entry: (cap_path, parent_path option).
-   Paths are dot-joined strings, e.g. "IO.FileRead".
-   FFI caps like "LibC" are valid but not in this table — they are
-   their own roots and have no subtyping relationship.
+   Moved to March_caps.Cap_lattice (Phase5C-A.1) — shared with
+   March_refinecheck.Cap_infer, which previously carried a verbatim
+   duplicate of this table.
    ================================================================= *)
-
-let io_cap_hierarchy : (string * string option) list = [
-  ("IO",            None);
-  ("IO.Console",    Some "IO");
-  ("IO.FileSystem", Some "IO");
-  ("IO.FileRead",   Some "IO.FileSystem");
-  ("IO.FileWrite",  Some "IO.FileSystem");
-  ("IO.Network",    Some "IO");
-  ("IO.NetConnect", Some "IO.Network");
-  ("IO.NetListen",  Some "IO.Network");
-  ("IO.Process",    Some "IO");
-  ("IO.Clock",      Some "IO");
-  ("IO.Random",     Some "IO");
-  ("IO.Database",   Some "IO.NetConnect");
-  ("IO.Spawn",      Some "IO");
-  ("IO.Mut",        Some "IO");
-  ("IO.Telemetry",  Some "IO");
-  ("IO.NetConnect.TLS", Some "IO.NetConnect");
-  ("IO.Foreign",         Some "IO");
-  ("IO.Foreign.Blocking", Some "IO.Foreign");
-]
 
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
@@ -1054,22 +1054,10 @@ let builtin_cap_table : (string * string) list = [
   ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
-(** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
-    E.g., "IO.FileRead" → ["IO.FileRead"; "IO.FileSystem"; "IO"].
-    FFI caps not in the table return just themselves. *)
-let cap_ancestors cap =
-  let rec go c acc =
-    let acc' = c :: acc in
-    match List.assoc_opt c io_cap_hierarchy with
-    | Some (Some parent) -> go parent acc'
-    | _ -> acc'
-  in
-  List.rev (go cap [])
-
 (** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
-    E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
-let cap_subsumes parent child =
-  List.mem parent (cap_ancestors child)
+    E.g., cap_subsumes "IO" "IO.FileRead" = true.
+    See [March_caps.Cap_lattice.cap_subsumes]. *)
+let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
 
 (** [cap_path_of_names names] joins AST name list to dot-string. *)
 let cap_path_of_names names =
@@ -5156,12 +5144,61 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
-    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate. *)
-let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list) =
+    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate.
+
+    [cap_qname_prefix] is the fully-accumulated dotted path (from
+    [env.cap_qual_prefix] extended by [mod_name.txt], or [mod_name.txt] alone
+    at the entry module) used ONLY to key [env.cap_closures] so it matches
+    TIR's fully-qualified function-name convention (see [lib/tir/lower.ml]'s
+    [mod_prefix]). [mod_name] itself continues to be used for all
+    diagnostics/messages and the [proof_caps] self-declaration check below,
+    unchanged. *)
+let check_module_needs (env : env) (mod_name : Ast.name)
+    ~(cap_qname_prefix : string) (decls : Ast.decl list) =
+  (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
+     Build the fully-qualified cap-closure key for a function/extern name,
+     omitting the leading dot when the prefix is empty (top-level function of
+     the entry module) — matching TIR's [mod_prefix ^ name] convention where
+     [mod_prefix] is "" at the entry level. *)
+  let cap_qname (leaf_name : string) : string =
+    if cap_qname_prefix = "" then leaf_name
+    else cap_qname_prefix ^ "." ^ leaf_name
+  in
   let declared_needs = List.concat_map (function
     | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
     | _ -> []
   ) decls in
+  (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
+     same cap data the checks below already compute to the owning function and
+     records it into [env.cap_closures] for a later hot-deploy
+     capability-manifest task. Purely additive bookkeeping — does not affect
+     any Check 1/1b/1c/2/3/4/5/6 validation logic or diagnostics below.
+     [record_fn_caps] is called as a side effect from within [used_caps],
+     [body_cap_uses], and [extern_cap_uses] below (each of which already
+     iterates [decls] and already computes sig/body/extern caps per-DFn or
+     per-DExtern) rather than via a separate re-traversal, so no function body
+     or signature is walked twice. Merge order across the three call sites
+     doesn't matter: [record_fn_caps] always merges with whatever is already
+     in [env.cap_closures] for that qualified name. *)
+  let module_wide_caps : string list =
+    (* Caps that apply to every function in this module regardless of which
+       function's own signature/body/extern-block produced them: declared
+       [needs] (in-scope for the whole module body) and caps propagated in
+       from imported modules (Check 4). *)
+    let propagated = List.concat_map (function
+      | Ast.DUse (ud, _) ->
+        let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+        (match List.assoc_opt imported env.module_caps with
+         | None -> [] | Some req_caps -> req_caps)
+      | _ -> []
+    ) decls in
+    declared_needs @ propagated
+  in
+  let record_fn_caps (fn_qname : string) (own_caps : string list) =
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+    let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+    Hashtbl.replace env.cap_closures fn_qname merged
+  in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
@@ -5170,13 +5207,33 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         | _ -> None
       ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
       let ret_tys = Option.to_list def.fn_ret_ty in
-      List.concat_map (fun t ->
-        List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
-      ) (param_tys @ ret_tys)
+      let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
+      let qname = cap_qname def.fn_name.txt in
+      record_fn_caps qname sig_caps;
+      List.map (fun cap -> (cap, sp)) sig_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
-    | Ast.DActor (_, _, actor, sp) ->
+    | Ast.DActor (_, name, actor, sp) ->
+      (* C1 fix: also record each handler's own per-function cap closure,
+         keyed EXACTLY the way TIR names the synthesized handler function
+         (see lib/tir/lower.ml's [lower_handler]: [fn_name = name ^ "_" ^
+         h.ah_msg.txt], where [name] there is the actor's OWN BARE name —
+         never module-prefixed, confirmed empirically: a handler on actor
+         [Weeble] nested inside [App.Sub] still lowers to bare
+         [Weeble_Zorp], NOT [Sub.Weeble_Zorp], even though sibling [DFn]s in
+         the same nested module DO get the "Sub." prefix). So the handler's
+         qualified name must use the actor's bare [name.txt] directly — NOT
+         [cap_qname name.txt] — while the signature-cap diagnostics above
+         and the body-scanned caps below still merge in [module_wide_caps]
+         via [record_fn_caps] the same way [DFn] does. *)
+      List.iter (fun (h : Ast.actor_handler) ->
+          let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
+          let body_caps = List.filter_map (fun (call_name, _) ->
+              List.assoc_opt call_name builtin_cap_table
+            ) (calls_in_expr [] h.Ast.ah_body) in
+          record_fn_caps fn_qname body_caps
+        ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
@@ -5195,19 +5252,38 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
   let body_cap_uses : (string * Ast.span) list =
     let all = List.concat_map (function
       | Ast.DFn (def, _) ->
-        List.concat_map (fun clause ->
+        let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
             match List.assoc_opt call_name builtin_cap_table with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
           ) (calls_in_expr [] clause.Ast.fc_body)
-        ) def.fn_clauses
+        ) def.fn_clauses in
+        let qname = cap_qname def.fn_name.txt in
+        record_fn_caps qname (List.concat_map (List.map fst) per_clause);
+        List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
           match List.assoc_opt call_name builtin_cap_table with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
         ) (calls_in_expr [] b.Ast.bind_expr)
+      (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
+         this branch already performs for DFn/DLet, rather than a second/
+         parallel AST walk — a handler doing undeclared IO must trip the
+         same "capability not declared in needs" diagnostic (Check 1b,
+         below) that a plain function body would. Cap-closure recording for
+         handlers already happened above in [used_caps]'s DActor branch (so
+         it isn't duplicated here); this only needs to surface the
+         (cap, span) pairs for the Check 1b/Check 2 diagnostics. *)
+      | Ast.DActor (_, _, actor, _) ->
+        List.concat_map (fun (h : Ast.actor_handler) ->
+            List.filter_map (fun (call_name, call_span) ->
+              match List.assoc_opt call_name builtin_cap_table with
+              | Some cap_name -> Some (cap_name, call_span)
+              | None -> None
+            ) (calls_in_expr [] h.Ast.ah_body)
+          ) actor.actor_handlers
       | _ -> []
     ) decls in
     List.fold_left (fun acc (cap_name, sp) ->
@@ -5220,6 +5296,11 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       | Ast.DExtern (edef, sp) ->
         let base = [("IO.Foreign", sp)] in
         let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
+        List.iter (fun (ef : Ast.extern_fn) ->
+            let qname = cap_qname ef.ef_name.txt in
+            let own = if ef.Ast.ef_blocking then ["IO.Foreign"; "IO.Foreign.Blocking"] else ["IO.Foreign"] in
+            record_fn_caps qname own
+          ) edef.ext_fns;
         if has_blocking then base @ [("IO.Foreign.Blocking", sp)] else base
       | _ -> []
     ) decls
@@ -5468,6 +5549,20 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         ) all_param_tys
     | _ -> ()
   ) decls
+
+(** [fn_capability_closures env] returns the per-function inferred IO-capability
+    closure recorded by [check_module_needs] for every function checked so far
+    in [env]'s lineage: [(fully_qualified_fn_name, normalized_cap_paths)] pairs,
+    one per function ("Mod.fn" for [DFn]/actor-owning modules, "Mod.extern_fn"
+    for FFI functions declared in an [extern] block). The list combines each
+    function's own inferred requirements (Cap-typed signature, body-scanned
+    builtin calls, extern-implied [IO.Foreign]/[IO.Foreign.Blocking]) with the
+    caps that apply to every function in its module (declared [needs] and
+    caps propagated in from imported modules per Check 4), normalized via
+    [March_caps.Cap_lattice.normalize]. Order is unspecified (backed by a hashtable).
+    Consumed by the (future) hot-deploy capability manifest. *)
+let fn_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.cap_closures []
 
 (* =================================================================
    §16a  Session type projection and duality
@@ -6442,7 +6537,10 @@ let rec check_decl env (d : Ast.decl) : env =
                            fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
-      ) { env with local_fns = StrMap.empty; current_module = name.txt } decls in
+      ) { env with local_fns = StrMap.empty; current_module = name.txt;
+          cap_qual_prefix =
+            (if env.cap_qual_prefix = "" then name.txt
+             else env.cap_qual_prefix ^ "." ^ name.txt) } decls in
     let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
@@ -6511,7 +6609,9 @@ let rec check_decl env (d : Ast.decl) : env =
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
     (* Validate capability declarations for this module *)
-    check_module_needs env name decls;
+    check_module_needs env name decls
+      ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
+                         else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)
     validate_island_protocol env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
@@ -7815,7 +7915,14 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
   let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
-  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  (* The entry module's own name is NOT a prefix segment for cap-closure keys:
+     TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]
+     accumulation, which starts empty at the entry level), so top-level
+     functions are keyed by their bare name and nested DMod functions are
+     keyed starting from that nested module's own name (e.g. "Lib.Sub.f"),
+     never "EntryName.Lib.Sub.f". *)
+  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
+    ~cap_qname_prefix:"";
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;
