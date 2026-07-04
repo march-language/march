@@ -1095,7 +1095,27 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
 (* File compiler                                                       *)
 (* ------------------------------------------------------------------ *)
 
+(* Exit code for "the compile pipeline (Lower -> Perceus/Opt -> Llvm_emit)
+   raised an uncaught OCaml exception on a program that already typechecked
+   cleanly" — i.e. an internal compiler bug, not a diagnosed user error.
+   Distinct from the exit codes already in use elsewhere in this file:
+     0 = success, 1 = diagnosed error (parse/typecheck/user), 2 = usage/CLI
+   error.  3 is otherwise unused; picked here and documented so callers
+   (notably the differential oracle, test/test_properties.ml) can treat it
+   as an unambiguous "compiler crashed" signal instead of sniffing stderr
+   text. See specs/2026-07-04-differential-oracle-design.md §4.1: a survey
+   of lib/tir/*.ml's ~33 failwith/assert-false sites (Oracle Task 2) found
+   NONE are a deliberate "typechecked but not lowerable yet" marker — every
+   site is an internal-invariant check (the typechecker/desugarer should
+   have prevented reaching that state) or closed-set exhaustiveness (e.g.
+   operator-name tables). There is no genuine "unsupported construct"
+   category to signal separately; anything that reaches here is a bug. *)
+let internal_compiler_error_exit_code = 3
+
 let compile filename =
+  (* Enable backtraces so an internal-error report (below) is actionable
+     even without OCAMLRUNPARAM=b. *)
+  Printexc.record_backtrace true;
   let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
     try read_file filename
@@ -1432,6 +1452,7 @@ let compile filename =
       exit 0
   end
   else if compile_mode then begin
+   try
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in
     let snap_tir label tir =
@@ -2330,6 +2351,31 @@ let compile filename =
         Printf.eprintf "wrote %s\n" ll_file
       end
     end
+   with
+   | March_errors.Errors.ParseError _ as exn -> raise exn
+   | March_tir.Js_emit.Js_emit_error _ as exn -> raise exn
+   | exn ->
+     (* Every diagnosed failure in this pipeline (parse errors, typecheck
+        errors, user-file capability-policy violations, clang/link failures)
+        already prints its own message and calls `exit` directly — `exit`
+        terminates the process without raising, so it never reaches this
+        handler.  Anything that DOES land here is an OCaml exception that
+        escaped the compile pipeline (Lower -> Mono -> Perceus -> Opt ->
+        Llvm_emit) uncaught: per the Oracle Task 2 survey, every failwith/
+        assert-false site in lib/tir is an internal-invariant check, so this
+        is always a compiler bug, never a "this construct isn't supported"
+        signal.  Render it like a diagnostic instead of letting OCaml print
+        a raw "Fatal error: exception ..." with no span and no guidance, and
+        exit with a distinct, documented code so tooling (the differential
+        oracle) can tell "the compiler crashed" apart from a clean, graceful
+        nonzero exit. *)
+     let bt = Printexc.get_backtrace () in
+     Printf.eprintf "march: internal compiler error: %s\n" (Printexc.to_string exn);
+     if bt <> "" then Printf.eprintf "%s" bt;
+     Printf.eprintf
+       "This is a compiler bug, not a problem with your program. Please file \
+        an issue with a minimal reproduction.\n%!";
+     exit internal_compiler_error_exit_code
   end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()

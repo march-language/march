@@ -888,14 +888,32 @@ let contains_substring ~needle haystack =
     in
     go 0
 
+(** Exit code the compiler itself now uses (bin/main.ml,
+    [internal_compiler_error_exit_code]) when an OCaml exception escapes the
+    compile pipeline (Lower -> Mono -> Perceus -> Opt -> Llvm_emit) uncaught.
+    Oracle Task 2's survey of every failwith/assert-false site in lib/tir
+    found none of them are a deliberate "typechecked but not lowerable yet"
+    marker — all ~33 are internal-invariant checks — so there is no separate
+    "unsupported construct" signal to distinguish from this one; exit 3
+    always means "compiler bug", full stop. This is now the authoritative,
+    positive signal (no stderr text-sniffing needed); the [internal_error_markers]
+    heuristic below stays as a fallback for older binaries / paths that don't
+    (yet) go through the wrapped pipeline (e.g. a differently-built `march`
+    on PATH during a bisect). *)
+let internal_compiler_error_exit_code = 3
+
 (** Classify a compiler-step outcome given its exit code and captured stderr.
 
+    - [rc = internal_compiler_error_exit_code]: the compiler's own top-level
+      handler caught an escaped exception and reported it as an internal
+      error — always [`Fail], no heuristics needed (Oracle Task 2).
     - [rc >= 128]: the compiler was killed by a signal (segfault, abort, …)
       while compiling a well-typed program — always a compiler bug: [`Fail].
     - stderr carries an OCaml internal-error marker (an uncaught exception's
       backtrace, an [Assert_failure], a [Failure(...)], or a "Called from"
       backtrace line) — the compiler's own machinery crashed even though it
-      exited "cleanly" (rc in 1..127): [`Fail].
+      exited "cleanly" (rc in 1..127): [`Fail]. Kept as a fallback for
+      binaries built before the exit-3 signal existed.
     - otherwise, a clean nonzero exit with no crash signature is treated as a
       graceful "this construct isn't supported yet": [`Skip].
 
@@ -905,6 +923,8 @@ let contains_substring ~needle haystack =
 let classify_compile (rc : int) (stderr : string) : [ `Fail of string | `Skip of string ] =
   if rc = 0 then
     `Skip "unreachable-rc-zero"
+  else if rc = internal_compiler_error_exit_code then
+    `Fail (Printf.sprintf "internal compiler error (exit %d)" rc)
   else if rc >= 128 then
     `Fail (Printf.sprintf "compiler killed by signal %d (exit %d)" (rc - 128) rc)
   else
@@ -1733,12 +1753,37 @@ let test_classify_compile_signal_wins_over_clean_stderr () =
   | `Fail _ -> ()
   | `Skip r -> Alcotest.failf "expected `Fail for SIGABRT rc=134, got `Skip %S" r
 
+(** Oracle Task 2 (Phase 1b): bin/main.ml now exits with a dedicated code
+    ([internal_compiler_error_exit_code] = 3) whenever its top-level handler
+    catches an exception escaping the compile pipeline, and prints
+    "march: internal compiler error: ..." (no OCaml backtrace markers
+    required for the oracle to recognize it — this is a positive signal, not
+    a heuristic). Confirms the fast path fires ahead of, and independent of,
+    stderr content. *)
+let test_classify_compile_exit_3_is_internal_error () =
+  let stderr =
+    "march: internal compiler error: Failure(\"some future TIR bug\")\n\
+     This is a compiler bug, not a problem with your program. Please file \
+     an issue with a minimal reproduction.\n"
+  in
+  match classify_compile internal_compiler_error_exit_code stderr with
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for exit-3 internal-error signal, got `Skip %S" r
+
+let test_classify_compile_exit_3_wins_with_no_stderr () =
+  (* The exit code alone is conclusive — no stderr text needed. *)
+  match classify_compile internal_compiler_error_exit_code "" with
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for exit-3 with empty stderr, got `Skip %S" r
+
 let classify_compile_unit_tests = [
   "segfault rc classifies as Fail", `Quick, test_classify_compile_segfault;
   "OCaml backtrace stderr classifies as Fail", `Quick, test_classify_compile_backtrace;
   "Assert_failure marker classifies as Fail", `Quick, test_classify_compile_assert_failure;
   "clean unsupported exit classifies as Skip", `Quick, test_classify_compile_clean_unsupported;
   "signal death wins even with clean stderr", `Quick, test_classify_compile_signal_wins_over_clean_stderr;
+  "exit-3 internal-error signal classifies as Fail", `Quick, test_classify_compile_exit_3_is_internal_error;
+  "exit-3 wins even with no stderr", `Quick, test_classify_compile_exit_3_wins_with_no_stderr;
 ]
 
 (* ── Test suite registration ────────────────────────────────────────────── *)
