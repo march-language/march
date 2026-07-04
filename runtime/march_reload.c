@@ -13,6 +13,15 @@
  *                                                   → OK <impl_hash> | ERR <reason>  (v2, signed epoch+callers)
  *   ACTIVATE3 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> callers:<sorted-csv>
  *                                                   → OK <impl_hash> | ERR <reason>  (v3, migrate_required signed)
+ *   ACTIVATE4 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> cap_root:<hex>
+ *             caps:<sorted-csv> callers:<sorted-csv>
+ *                                                   → OK <impl_hash> | ERR <reason>  (v4, cap_root admission)
+ *     ACTIVATE4 recomputes cap_root server-side from the (unsigned) `caps:` set
+ *     — sort+uniq, march_cap_normalize, join with '\n', BLAKE3 — and rejects a
+ *     mismatch with the signed `cap_root` (ERR cap_tamper). If
+ *     $MARCH_DEPLOY_POLICY names a file of permitted cap paths, every received
+ *     cap must be subsumed by some policy entry (ERR cap_policy <cap>). Both
+ *     gates are skipped when `caps:` is empty/absent (legacy-shaped artifact).
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n>  (n committed)
  *   ROLLBACK_BATCH                                    → OK
@@ -29,6 +38,8 @@
 #include "march_reload.h"
 #include "march_dispatch.h"
 #include "march_runtime.h"
+#include "march_cap_lattice.h"
+#include "march_blake3.h"
 #include "tweetnacl.h"
 #include <stdatomic.h>
 #include <pthread.h>
@@ -482,6 +493,140 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
     write_safe(fd, resp, n, sizeof(resp));
 }
 
+/* ── ACTIVATE4: cap_root admission (Phase5C-C.3) ───────────────────────── */
+
+#define MARCH_CAP_MAX_TOKENS   256   /* mirrors the callers-CSV token cap */
+#define MARCH_CAP_TOKEN_MAX    128   /* max length of one cap path, incl NUL */
+#define MARCH_POLICY_MAX_CAPS  256
+#define MARCH_POLICY_LINE_MAX  128
+
+/* Loaded lazily from $MARCH_DEPLOY_POLICY (newline-delimited cap-path file).
+ * Absent env var or unreadable file => g_policy_loaded stays 0 => permissive
+ * (skip the policy check entirely). Loaded at most once per process. */
+static char g_policy_caps[MARCH_POLICY_MAX_CAPS][MARCH_POLICY_LINE_MAX];
+static int  g_policy_n_caps   = 0;
+static int  g_policy_loaded   = 0;   /* 1 once load_deploy_policy() has run */
+static int  g_policy_present  = 0;   /* 1 iff a policy file was successfully read */
+
+static void load_deploy_policy(void) {
+    if (g_policy_loaded) return;
+    g_policy_loaded = 1;
+    const char *path = getenv("MARCH_DEPLOY_POLICY");
+    if (!path || !path[0]) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[MARCH_POLICY_LINE_MAX + 32];
+    while (g_policy_n_caps < MARCH_POLICY_MAX_CAPS && fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        if (len == 0) continue;  /* skip blank lines */
+        if (len >= MARCH_POLICY_LINE_MAX) len = MARCH_POLICY_LINE_MAX - 1;  /* bound, truncate */
+        memcpy(g_policy_caps[g_policy_n_caps], line, len);
+        g_policy_caps[g_policy_n_caps][len] = '\0';
+        g_policy_n_caps++;
+    }
+    fclose(f);
+    g_policy_present = 1;
+}
+
+/* Parse a bounded CSV of cap tokens from `csv` (already NUL-terminated and
+ * length-bounded by the caller) into `tokens`/`out_n`. Mutates a private
+ * copy `buf` (caller-supplied scratch, must outlive `tokens`, since tokens
+ * are pointers into it) — never mutates the wire buffer directly. Returns 1
+ * on success, 0 if the token count would exceed MARCH_CAP_MAX_TOKENS or a
+ * single token would exceed MARCH_CAP_TOKEN_MAX-1 bytes. */
+static int split_cap_csv(char *buf, char *tokens[], int *out_n) {
+    int ntok = 0;
+    if (buf[0] == '\0') { *out_n = 0; return 1; }
+    char *p = buf;
+    while (*p) {
+        if (ntok >= MARCH_CAP_MAX_TOKENS) return 0;
+        char *start = p;
+        char *c = strchr(p, ',');
+        size_t tok_len = c ? (size_t)(c - start) : strlen(start);
+        if (tok_len == 0 || tok_len >= MARCH_CAP_TOKEN_MAX) return 0;
+        tokens[ntok++] = start;
+        if (c) { *c = '\0'; p = c + 1; } else { break; }
+    }
+    *out_n = ntok;
+    return 1;
+}
+
+/* strcmp-based comparator for qsort over `char *` tokens (byte-lexicographic,
+ * matching OCaml String.compare / List.sort_uniq). */
+static int cap_token_cmp(const void *a, const void *b) {
+    const char *sa = *(const char * const *)a;
+    const char *sb = *(const char * const *)b;
+    return strcmp(sa, sb);
+}
+
+/* Sort tokens[0..n) byte-lexicographically and drop exact-duplicate strings
+ * in place, returning the deduped count. Mirrors OCaml List.sort_uniq
+ * String.compare. */
+static int sort_uniq_tokens(char *tokens[], int n) {
+    if (n <= 1) return n;
+    qsort(tokens, (size_t)n, sizeof(char *), cap_token_cmp);
+    int w = 1;
+    for (int i = 1; i < n; i++) {
+        if (strcmp(tokens[i], tokens[w-1]) != 0) tokens[w++] = tokens[i];
+    }
+    return w;
+}
+
+/* Recompute cap_root over the received (unsigned) caps set, reproducing
+ * Part A's OCaml recipe exactly:
+ *   all_caps_sorted = List.sort_uniq String.compare caps
+ *   artifact_caps   = Cap_lattice.normalize all_caps_sorted
+ *   cap_root        = Blake3.hash_string (String.concat "\n" artifact_caps)
+ * `caps_csv` must already be NUL-terminated and length-bounded (drawn from
+ * the same tmp[]-style bounded scan used elsewhere in this file). Writes the
+ * 64-char lowercase hex digest into out_hex[65]. Returns 1 on success, 0 on
+ * a malformed/oversized caps CSV (caller should respond ERR bad_format). */
+static int compute_cap_root(char *caps_csv, char out_hex[65]) {
+    char *tokens[MARCH_CAP_MAX_TOKENS];
+    int ntok = 0;
+    if (!split_cap_csv(caps_csv, tokens, &ntok)) return 0;
+
+    int nsorted = sort_uniq_tokens(tokens, ntok);
+
+    const char *normalized[MARCH_CAP_MAX_TOKENS];
+    int nnorm = march_cap_normalize((const char **)tokens, nsorted, normalized);
+
+    /* Join survivors with '\n', no trailing newline. */
+    char joined[MARCH_CAP_MAX_TOKENS * MARCH_CAP_TOKEN_MAX];
+    size_t jlen = 0;
+    for (int i = 0; i < nnorm; i++) {
+        if (i > 0) {
+            if (jlen + 1 >= sizeof(joined)) return 0;
+            joined[jlen++] = '\n';
+        }
+        size_t sl = strlen(normalized[i]);
+        if (jlen + sl >= sizeof(joined)) return 0;
+        memcpy(joined + jlen, normalized[i], sl);
+        jlen += sl;
+    }
+
+    march_blake3_hex((const unsigned char *)joined, jlen, out_hex);
+    return 1;
+}
+
+/* Policy check: every cap in tokens[0..n) must be march_cap_subsumes'd by
+ * some policy entry. Returns NULL if all pass, or the (borrowed) offending
+ * cap string on the first violation. No-op (always passes) if no policy is
+ * loaded. */
+static const char *check_cap_policy(char *tokens[], int n) {
+    load_deploy_policy();
+    if (!g_policy_present) return NULL;  /* no policy => permissive */
+    for (int i = 0; i < n; i++) {
+        int allowed = 0;
+        for (int j = 0; j < g_policy_n_caps; j++) {
+            if (march_cap_subsumes(g_policy_caps[j], tokens[i])) { allowed = 1; break; }
+        }
+        if (!allowed) return tokens[i];
+    }
+    return NULL;
+}
+
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
 
@@ -888,6 +1033,202 @@ static void handle_client(int fd) {
 #endif
             if (in_batch) {
                 /* Stage: verify sig and record for COMMIT_BATCH */
+                if (n_staged >= MARCH_MAX_BATCH) {
+                    wresp(fd, "ERR batch_full\n"); continue;
+                }
+                strncpy(staged[n_staged].name,      name,            255);
+                strncpy(staged[n_staged].impl_hash, impl_hash,       127);
+                strncpy(staged[n_staged].cas_hash,  cas_hash,        127);
+                strncpy(staged[n_staged].callers,   callers_sorted, 1023);
+                staged[n_staged].epoch           = activate_epoch;
+                staged[n_staged].migrate_required = migrate_required;
+                staged[n_staged].name[255]      = '\0';
+                staged[n_staged].impl_hash[127] = '\0';
+                staged[n_staged].cas_hash[127]  = '\0';
+                staged[n_staged].callers[1023]  = '\0';
+                n_staged++;
+                char resp[256];
+                int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
+                write_safe(fd, resp, n, sizeof(resp));
+            } else {
+                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                            activate_epoch, callers_sorted);
+            }
+
+        /* ── ACTIVATE4 ─────────────────────────────────────────────────── */
+        /* Protocol v4: adds cap_root/caps admission. cap_root is signed
+         * (tamper-evident); caps is NOT signed — its integrity comes solely
+         * from the server recomputing cap_root over it and matching the
+         * signed value (see compute_cap_root / THE CRUX in the task brief).
+         * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
+         *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
+        } else if (strncmp(line, "ACTIVATE4 ", 10) == 0) {
+            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+            char migrate_str[8] = {0};
+            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+                wresp(fd, "ERR bad_format\n"); continue;
+            }
+            if (!is_hex64(cas_hash)) {
+                wresp(fd, "ERR bad_cas_hash\n"); continue;
+            }
+            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+
+            /* Parse mandatory epoch:<N>. */
+            uint32_t activate_epoch = 0;
+            {
+                const char *ep = strstr(line, " epoch:");
+                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
+                activate_epoch = (uint32_t)atoi(ep + 7);
+            }
+
+            /* Parse mandatory cap_root:<hex64>. */
+            char cap_root[65] = {0};
+            {
+                const char *cr = strstr(line, " cap_root:");
+                if (!cr) { wresp(fd, "ERR bad_format missing_cap_root\n"); continue; }
+                const char *hex = cr + 10;
+                size_t hlen = 0;
+                while (hex[hlen] && hex[hlen] != ' ' && hlen < sizeof(cap_root) - 1) hlen++;
+                memcpy(cap_root, hex, hlen); cap_root[hlen] = '\0';
+                if (!is_hex64(cap_root)) { wresp(fd, "ERR bad_format bad_cap_root\n"); continue; }
+            }
+
+            /* Parse optional caps:<csv> — bounded scan to the NEXT " <key>:"
+             * boundary (i.e. up to " callers:"), NOT to end-of-line, since
+             * callers follows caps on the wire. Legacy/empty caps => the two
+             * cap gates below are skipped (permissive). */
+            char caps_buf[1024] = {0};
+            {
+                const char *cp = strstr(line, " caps:");
+                if (cp) {
+                    const char *csv = cp + 6;
+                    const char *end = strstr(csv, " callers:");
+                    size_t clen = end ? (size_t)(end - csv) : strlen(csv);
+                    /* Also stop at CR/LF in case callers: is absent (shouldn't
+                     * happen given the protocol, but bound defensively). */
+                    size_t bound = 0;
+                    while (bound < clen && csv[bound] != '\n' && csv[bound] != '\r') bound++;
+                    if (bound > clen) bound = clen;
+                    if (bound >= sizeof(caps_buf)) bound = sizeof(caps_buf) - 1;  /* truncate defensively */
+                    memcpy(caps_buf, csv, bound);
+                    caps_buf[bound] = '\0';
+                }
+            }
+
+            /* Parse mandatory callers:<csv>, then sort for canonical form. */
+            char callers_sorted[1024] = {0};
+            {
+                const char *cp = strstr(line, " callers:");
+                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
+                const char *csv = cp + 9;
+                char tmp[1024]; size_t tlen = 0;
+                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                       && tlen < sizeof(tmp) - 1)
+                    tlen++;
+                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+                if (tmp[0] != '\0') {
+                    char *tokens[256]; int ntok = 0;
+                    char *p = tmp;
+                    while (*p && ntok < 255) {
+                        tokens[ntok++] = p;
+                        char *c = strchr(p, ',');
+                        if (!c) break;
+                        *c = '\0'; p = c + 1;
+                    }
+                    for (int i = 1; i < ntok; i++) {
+                        char *key = tokens[i]; int j = i - 1;
+                        while (j >= 0 && strcmp(tokens[j], key) > 0)
+                            { tokens[j+1] = tokens[j]; j--; }
+                        tokens[j+1] = key;
+                    }
+                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                    for (int i = 0; i < ntok && rem > 1; i++) {
+                        if (i > 0) { *out++ = ','; rem--; }
+                        size_t sl = strlen(tokens[i]);
+                        if (sl >= rem) sl = rem - 1;
+                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                    }
+                    *out = '\0';
+                }
+            }
+
+#if HAVE_SIGNING_KEY
+            if (!g_pubkey_loaded) {
+                wresp(fd, "ERR signing_not_configured\n"); continue;
+            }
+            int all_zero = 1;
+            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
+
+            /* Reconstruct the canonical signed message — cap_root is signed,
+             * caps is NOT (see file-header note above). */
+            char signed_msg[2048];
+            int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                                 "ACTIVATE4 %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                                 name, impl_hash, cas_hash, migrate_required,
+                                 activate_epoch, cap_root, callers_sorted);
+            if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
+                wresp(fd, "ERR signed_msg_truncated\n"); continue;
+            }
+
+            unsigned char sigbytes[64];
+            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
+
+            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
+            memcpy(sm, sigbytes, 64);
+            memcpy(sm + 64, signed_msg, (size_t)smlen);
+            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+            unsigned long long m_out_len = 0;
+            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                       (unsigned long long)(smlen + 64), g_pubkey);
+            free(sm); free(m_out);
+            if (vrc != 0) {
+                write_audit_log(name, impl_hash, cas_hash, "err_sig");
+                wresp(fd, "ERR bad_signature\n"); continue;
+            }
+#else
+            (void)sig_b64;
+            write_audit_log(name, impl_hash, cas_hash, "err_sig");
+            wresp(fd, "ERR signing_not_configured\n"); continue;
+#endif
+
+            /* Cap admission gates — run AFTER sig-verify, BEFORE staging/
+             * do_activate, so both batched and immediate activations are
+             * gated identically. Empty caps:<csv> (legacy-shaped artifact)
+             * skips both checks (permissive). */
+            if (caps_buf[0] != '\0') {
+                char tamper_scratch[1024];
+                snprintf(tamper_scratch, sizeof(tamper_scratch), "%s", caps_buf);
+                char recomputed_root[65];
+                if (!compute_cap_root(tamper_scratch, recomputed_root)) {
+                    wresp(fd, "ERR bad_format bad_caps\n"); continue;
+                }
+                if (strcmp(recomputed_root, cap_root) != 0) {
+                    write_audit_log(name, impl_hash, cas_hash, "err_cap_tamper");
+                    wresp(fd, "ERR cap_tamper\n"); continue;
+                }
+
+                char policy_scratch[1024];
+                snprintf(policy_scratch, sizeof(policy_scratch), "%s", caps_buf);
+                char *ptokens[MARCH_CAP_MAX_TOKENS]; int pntok = 0;
+                if (!split_cap_csv(policy_scratch, ptokens, &pntok)) {
+                    wresp(fd, "ERR bad_format bad_caps\n"); continue;
+                }
+                const char *violation = check_cap_policy(ptokens, pntok);
+                if (violation) {
+                    write_audit_log(name, impl_hash, cas_hash, "err_cap_policy");
+                    char resp[256];
+                    int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
+                    write_safe(fd, resp, n, sizeof(resp));
+                    continue;
+                }
+            }
+
+            if (in_batch) {
                 if (n_staged >= MARCH_MAX_BATCH) {
                     wresp(fd, "ERR batch_full\n"); continue;
                 }
