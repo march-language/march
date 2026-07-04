@@ -4,12 +4,12 @@
  (libraries dune-configurator))
 
 (rule
- (targets blake3_cflags.sexp blake3_libs.sexp)
+ (targets blake3_cflags.sexp blake3_libs.sexp blake3_flags.ml)
  (action (run ./discover.exe)))
 
 (library
  (name march_cas)
- (modules blake3 serialize hash cas scc pipeline)
+ (modules blake3 blake3_flags serialize hash cas scc pipeline)
  (libraries march_tir march_ast unix)
  (foreign_stubs (language c) (names blake3_stubs)
   (flags (:standard (:include blake3_cflags.sexp))))
