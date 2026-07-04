@@ -804,6 +804,168 @@ let gen_derived_method_record_module : string Gen.t =
     (Gen.pair (Gen.int_range (-50) 50) (Gen.int_range (-50) 50))
     Gen.bool
 
+(* ── Record-update / dual-position-borrow / FBIP / erased-flow generators
+   (Phase 2c, Task 5) ──────────────────────────────────────────────────────
+   Four generators guarding four distinct FIXED bug classes:
+
+   (a) [gen_record_update_module] — `{ base with f: v }` functional update on
+       a STATICALLY-KNOWN-SHAPE record where the updated field EXISTS.
+       Guards the `EUpdate` family fixed in `0d1a829e` (B5: erased-shape
+       `EUpdate` wrote past the allocation; `march_record_update_dyn` now
+       handles it with one alloc + base-copy + named overwrite). This
+       generator deliberately stays on a statically-typed record (`{ x: Int,
+       y: Int }` declared as a nominal type), never a `record_from_list` /
+       `record_put`-produced erased base — updating a field that does NOT
+       exist on an erased base is the OPEN interpreter/compiled divergence
+       (`specs/todos.md`: compiled panics via `march_record_update_dyn`,
+       interpreter silently fabricates the field). That case is NOT
+       generated here; see [test_record_update_missing_field_on_erased_base_
+       diverges_documented] below for a targeted, citation-bearing
+       documented-skip covering it instead, per this plan's "constrain to
+       the currently-working subset" rule.
+
+   (b) [gen_dual_position_borrow_module] — a fn `both(a: String, b: String,
+       n: Int)` called as `both(s, s, n)` with `s` dead afterwards: the SAME
+       variable flows into what Perceus infers as an OWNED position (`a`,
+       returned on one branch) and a BORROWED position (`b`, only read via
+       `String.byte_size`) of the same call. Guards the dual-position
+       owned+borrowed double-consumption fixed in `a5dad194` (was RC
+       underflow, exit 134, compiled-only — interpreter always fine).
+       Mirrors `test_compiled_dual_position_owned_borrowed` in
+       test_stdlib_suite.ml exactly, with the threshold/length randomized.
+
+   (c) [gen_fbip_same_arity_module] — a dead binding of `Result(Int, String)`
+       (a MULTI type-param ADT — two params, `a` and `b`) immediately before
+       a same-arity allocation of the SAME type (`Ok(_)`/`Err(_)` are both
+       1-field ctors, so the reused cell is genuinely the right size —
+       exactly the shape the fix's `$fbip$`-marked arity encoding must get
+       right for a 2-type-param TCon). Guards the FBIP `same_arity`
+       conflation fixed in `a5dad194` (a TCon's type-PARAMETER count was
+       compared against a constructor's FIELD count; a dead binding's raw
+       declared type let a narrower cell get reused for a wider constructor,
+       overflowing the heap cell — `Result`'s 2 type params vs. `Ok`/`Err`'s
+       1 field is precisely the parameter-count/field-count mismatch the
+       bug conflated). Mirrors `test_compiled_fbip_arity_no_overflow` in
+       test_stdlib_suite.ml (which uses a 5-type-param/1-vs-5-field type),
+       parameterized over the churn seed.
+
+   (d) [gen_erased_flow_module] — a value flows through a bare-`TVar`
+       generic wrapper (`type Box(a) = Box(a)`, plus a generic `identity`
+       function) and is then used CONCRETELY (arithmetic on the unwrapped
+       Int). Exercises the erased/type-erased representation path (no
+       static shape known inside `unwrap`/`identity`) merging back into a
+       concrete numeric use — the general class of erased-repr flow that
+       B5's fix and the newtype/niche repr work above both had to get right
+       for. All four generators print a single stable Int or String via
+       `to_string`/bare `println` — no `==`/`hash`/tuple-or-container
+       `to_string` (per this plan's determinism constraints). *)
+
+(** (a) Record update on a statically-known-shape record, updated field
+    EXISTS. Guards `0d1a829e` (EUpdate family). *)
+let gen_record_update_module : string Gen.t =
+  Gen.map3
+    (fun x y dx ->
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Point = { x: Int, y: Int }\n\
+         \  fn main() do\n\
+         \    let p = { x: %d, y: %d }\n\
+         \    let q = { p with x: p.x + %d }\n\
+         \    println(to_string(q.x + q.y))\n\
+         \  end\n\
+          end"
+         x y dx)
+    (Gen.int_range (-100) 100)
+    (Gen.int_range (-100) 100)
+    (Gen.int_range (-50) 50)
+
+(** (b) Dual-position borrow: `both(a: String, b: String, n: Int)` called as
+    `both(s, s, n)`, `s` dead afterwards. `a` is used on the owned
+    (returned) branch, `b` only via `String.byte_size` (borrowed). The
+    string is forced past 15 bytes (inline-string threshold) so it is
+    actually heap-allocated and RC-tracked. Guards `a5dad194`. *)
+let gen_dual_position_borrow_module : string Gen.t =
+  Gen.map2
+    (fun tag threshold ->
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn both(a : String, b : String, n : Int) : String do\n\
+         \    if String.byte_size(b) > n do\n\
+         \      a\n\
+         \    else\n\
+         \      \"short\"\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(%d)\n\
+         \    let r = both(s, s, %d)\n\
+         \    println(r)\n\
+         \  end\n\
+          end"
+         tag threshold)
+    (Gen.int_range 0 999)
+    (Gen.int_range 1 5)
+
+(** (c) FBIP same_arity: a dead binding of `Result(Int, String)` — a
+    multi-type-param (2) ADT — immediately before a same-arity allocation
+    (`mk_result` returns either `Ok(n)` [1 field] or `Err(msg)` [1 field] of
+    the SAME 2-type-param `Result`). Mirrors the exact overflow shape from
+    `test_compiled_fbip_arity_no_overflow`: a dead `Ok`/`Err` cell followed
+    by a live one, matched immediately after. Guards `a5dad194`. *)
+let gen_fbip_same_arity_module : string Gen.t =
+  Gen.map2
+    (fun seed bump ->
+       Printf.sprintf
+         "mod Main do\n\
+         \  pfn churn(n : Int) : Int do\n\
+         \    if n > 100 do n else churn(n + 7) end\n\
+         \  end\n\
+         \  pfn mk_result(n : Int) : Result(Int, String) do\n\
+         \    if n > 0 do Ok(n) else Err(\"bad\") end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let n = churn(%d)\n\
+         \    let dead = mk_result(n)\n\
+         \    let q = mk_result(n + %d)\n\
+         \    match q do\n\
+         \      Ok(v) -> println(to_string(v))\n\
+         \      Err(e) -> println(e)\n\
+         \    end\n\
+         \  end\n\
+          end"
+         seed bump)
+    (Gen.int_range 1 20)
+    (Gen.int_range 1 90)
+
+(** (d) Erased flow: a value passes through a bare-`TVar` generic wrapper
+    (`Box(a)`) and a generic `identity` function — both fully type-erased
+    inside their own bodies — then is used CONCRETELY (arithmetic) after
+    unwrapping. Guards the general erased-representation flow class
+    (generic identity/HOF over an unknown-shape payload). *)
+let gen_erased_flow_module : string Gen.t =
+  Gen.map2
+    (fun n delta ->
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Box(a) = Box(a)\n\
+         \  fn unwrap(b : Box(a)) : a do\n\
+         \    match b do\n\
+         \      Box(v) -> v\n\
+         \    end\n\
+         \  end\n\
+         \  fn identity(x : a) : a do\n\
+         \    x\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let boxed = Box(identity(%d))\n\
+         \    let n = unwrap(boxed)\n\
+         \    println(to_string(n + %d))\n\
+         \  end\n\
+          end"
+         n delta)
+    (Gen.int_range (-100) 100)
+    (Gen.int_range (-50) 50)
+
 (** Any of the well-typed module generators (original + new). *)
 let gen_well_typed_module : string Gen.t =
   Gen.oneof [
@@ -840,6 +1002,12 @@ let gen_well_typed_module : string Gen.t =
     gen_derived_method_boxed_module;
     gen_derived_method_enum_module;
     gen_derived_method_record_module;
+    (* Record-update / dual-position-borrow / FBIP / erased-flow generators
+       (Phase 2c / Task 5) *)
+    gen_record_update_module;
+    gen_dual_position_borrow_module;
+    gen_fbip_same_arity_module;
+    gen_erased_flow_module;
   ]
 
 (* ── TIR AST generators ─────────────────────────────────────────────────── *)
@@ -2220,6 +2388,153 @@ let prop_oracle_derived_method_record =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
+(* ── Oracle properties: record-update / dual-position-borrow / FBIP /
+   erased-flow (Phase 2c, Task 5) ────────────────────────────────────────
+   As with the container and derived-method oracle props above, these four
+   run the ACTUAL interpreter-vs-compiled diff (via [oracle_check]) on the
+   four generators defined above — the generators are ALSO unioned into
+   [gen_well_typed_module] for crash/structural coverage, but only these
+   dedicated props exercise the diff itself. All four guard bug classes
+   that are FIXED (0d1a829e / a5dad194), so all four must stay green; a RED
+   here is either a fix regression (report it) or a generator determinism
+   bug (fix the generator), never an expected failure. *)
+
+(** Oracle (a): record functional-update on a statically-known-shape record
+    where the updated field exists. Guards `0d1a829e` (EUpdate family). *)
+let prop_oracle_record_update =
+  Test.make ~name:"oracle (gen): record update {base with f: v} — interp = compiled"
+    ~count:50
+    gen_record_update_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (b): dual-position owned+borrowed argument (`both(s, s, n)`, `s`
+    dead afterwards). Guards `a5dad194`'s RC double-consumption fix (was
+    exit 134 "RC underflow" compiled-only). *)
+let prop_oracle_dual_position_borrow =
+  Test.make ~name:"oracle (gen): dual-position owned+borrowed arg — interp = compiled"
+    ~count:50
+    gen_dual_position_borrow_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (c): FBIP same_arity — dead binding of a multi-type-param
+    `Result(Int, String)` immediately before a same-arity allocation.
+    Guards `a5dad194`'s arity-encoding fix (was a heap overflow past the
+    reused cell, observed as the compiled binary taking the wrong match
+    arm). *)
+let prop_oracle_fbip_same_arity =
+  Test.make ~name:"oracle (gen): FBIP same_arity on Result(a,b) — interp = compiled"
+    ~count:50
+    gen_fbip_same_arity_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (d): erased flow through a bare-TVar generic wrapper (`Box(a)`)
+    and a generic `identity`, unwrapped and used concretely. Guards the
+    general erased-representation flow class exercised by the newtype/niche
+    repr and B5 record-update fixes above. *)
+let prop_oracle_erased_flow =
+  Test.make ~name:"oracle (gen): erased TVar wrapper flow — interp = compiled"
+    ~count:50
+    gen_erased_flow_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(* ── Documented-skip: record-update on a missing field over an ERASED base
+   (OPEN divergence, specs/todos.md "Interpreter/compiled divergence:
+   ERecordUpdate on a missing field") ─────────────────────────────────────
+   Per this plan's "constrain each generator to the currently-working
+   subset" rule, [gen_record_update_module] above NEVER generates this
+   shape — it only updates fields that exist on a statically-typed record.
+   This is a standalone, non-QCheck unit test (using [oracle_check] directly
+   on ONE fixed program, not a property) that pins the CURRENT, OPEN
+   divergence: `{ record_from_list([...]) with z: 99 }` where `z` is absent
+   from the base's actual shape. The interpreter's [ERecordUpdate] (eval.ml)
+   silently fabricates the field (`Some(99)`, exit 0); the compiled backend
+   panics via `march_record_update_dyn` ("no field \"z\" in record", clean
+   exit 1 — NOT a signal, so this exact shape would never surface as a
+   [`Fail] through [oracle_check]'s normal signal-vs-clean-exit
+   classification; it is a silent "compiled skip" there, invisible unless
+   asserted on directly, which is exactly what this test does). This test
+   is EXPECTED TO STAY THIS WAY (a "documented skip", not a bug for Task 5
+   to fix) until `lib/eval/eval.ml`'s `ERecordUpdate` is made to fail loudly
+   on an unknown field name, matching the compiled contract — see the
+   todos.md entry for the reconciliation plan. If a future fix makes both
+   sides converge (either both succeed or both fail identically), this test
+   should be revisited and folded into the main generator per this plan's
+   "when the underlying bug is fixed, a follow-up widens the generator"
+   note. *)
+let test_record_update_missing_field_on_erased_base_diverges_documented () =
+  let src =
+    "mod Main do\n\
+    \  fn main() do\n\
+    \    let base = record_from_list([(\"a\", 1)])\n\
+    \    let updated = { base with z: 99 }\n\
+    \    println(to_string(record_get(updated, \"z\")))\n\
+    \  end\n\
+     end\n"
+  in
+  match Lazy.force march_bin_opt with
+  | None ->
+    Alcotest.skip ()  (* legitimate, counted skip: no march binary available *)
+  | Some bin ->
+    let src_file = write_temp_march src in
+    let interp_cmd = Printf.sprintf "%s %s" (Filename.quote bin) (Filename.quote src_file) in
+    let (rc_interp, interp_out) = run_capture ~timeout:10 interp_cmd in
+    let bin_file = src_file ^ ".bin" in
+    let compile_cmd =
+      Printf.sprintf "%s --compile %s -o %s"
+        (Filename.quote bin) (Filename.quote src_file) (Filename.quote bin_file)
+    in
+    let (rc_compile, _compile_out, _compile_err) = run_capture3 ~timeout:30 compile_cmd in
+    if rc_compile <> 0 then begin
+      cleanup_temp_march src_file;
+      Alcotest.failf
+        "expected the missing-field update to COMPILE (and panic at RUNTIME); \
+         compile itself failed (rc=%d) — the documented divergence shape may \
+         have changed, revisit this test" rc_compile
+    end else begin
+      (* [run_capture3], not [run_capture]: the runtime panic message is
+         written to STDERR (verified by hand), and [run_capture] discards
+         stderr — using it here would leave [compiled_err] empty and this
+         test would silently stop checking the panic text. *)
+      let (rc_run, _compiled_out, compiled_err) =
+        run_capture3 ~timeout:10 (Filename.quote bin_file) in
+      cleanup_temp_march src_file;
+      (* Documented, OPEN divergence: interpreter succeeds and fabricates the
+         field; compiled panics with a clean (non-signal) nonzero exit. *)
+      Alcotest.(check int) "interpreter succeeds on missing-field update (fabricates field)"
+        0 rc_interp;
+      Alcotest.(check string) "interpreter fabricates the missing field as Some(99)"
+        "Some(99)" (String.trim interp_out);
+      Alcotest.(check bool) "compiled binary exits nonzero (panics), NOT a signal death"
+        true (rc_run <> 0 && rc_run < 128);
+      Alcotest.(check bool) "compiled stderr mentions the record-update panic"
+        true (contains_substring ~needle:"no field" compiled_err
+              || contains_substring ~needle:"panic" compiled_err)
+    end
+
 (* ── Unit tests for classify_compile (RED proof for Task 1) ─────────────── *)
 
 (** Before this change, [oracle_check]'s compile step collapsed ALL nonzero
@@ -2313,12 +2628,21 @@ let classify_compile_unit_tests = [
   "exit-3 wins even with no stderr", `Quick, test_classify_compile_exit_3_wins_with_no_stderr;
 ]
 
+(** Documented-skip unit test for the OPEN record-update-missing-field-on-
+    erased-base divergence (Phase 2c, Task 5) — see the doc comment above
+    [test_record_update_missing_field_on_erased_base_diverges_documented]. *)
+let record_update_documented_skip_unit_tests = [
+  "record update on missing field over erased base: documented OPEN divergence",
+  `Quick, test_record_update_missing_field_on_erased_base_diverges_documented;
+]
+
 (* ── Test suite registration ────────────────────────────────────────────── *)
 
 let () =
   let open Alcotest in
   run "March property tests" [
     "oracle: classify_compile (unit)", classify_compile_unit_tests;
+    "oracle: record-update documented skip (unit)", record_update_documented_skip_unit_tests;
     "parse+typecheck", List.map QCheck_alcotest.to_alcotest [
       prop_parse_no_unexpected_exception;
       prop_typecheck_no_crash;
@@ -2383,5 +2707,11 @@ let () =
       prop_oracle_derived_method_boxed;
       prop_oracle_derived_method_enum;
       prop_oracle_derived_method_record;
+      (* Record-update / dual-position-borrow / FBIP / erased-flow diff
+         coverage (0d1a829e / a5dad194 classes) — Task 5 Phase 2c *)
+      prop_oracle_record_update;
+      prop_oracle_dual_position_borrow;
+      prop_oracle_fbip_same_arity;
+      prop_oracle_erased_flow;
     ];
   ]
