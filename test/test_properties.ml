@@ -676,37 +676,253 @@ let find_march_bin () =
 let march_bin_opt : string option Lazy.t =
   lazy (find_march_bin ())
 
-(** Run a shell command and capture stdout+stderr, with timeout.
-    Returns (exit_code, output_string). *)
-let run_capture ?(timeout=15) cmd =
-  let tmp = Filename.temp_file "march_prop_out" ".txt" in
+(* ── Timeout mechanism detection (P0: the oracle must actually run) ──────── *)
+
+(** The oracle bounds every subprocess so a generated infinite loop can't hang
+    the suite.  Historically this used a hardcoded `timeout N sh -c ...`, but
+    GNU coreutils `timeout` is NOT present on macOS by default (and CI's macOS
+    runner brew-installs blake3/brotli/zstd/llvm — not coreutils), so on those
+    hosts every `timeout ...` invocation failed with 127 (command-not-found),
+    the interpreter step saw rc<>0, and EVERY oracle check silently skipped —
+    the ultimate vacuous-green: the oracle "passed" while testing nothing.
+
+    Detect the mechanism ONCE at module load and build the command prefix from
+    whatever exists: prefer `timeout`, then `gtimeout` (Homebrew coreutils),
+    then a portable perl fallback that actually bounds runtime.  The perl
+    fallback forks the child into its own process group and, on ALARM, kills
+    the whole group and exits 124 — preserving the `timeout` convention that
+    124 == timed-out.  It also reconstructs the shell's 128+signal convention
+    for signal deaths (segfault/abort) so [classify_compile] and the
+    `rc_run >= 128` crash check keep working: `$? & 127` is the death signal,
+    `$? >> 8` the exit code. *)
+
+(** Is [name] an executable on PATH?  Uses `command -v` (POSIX, always present)
+    rather than `which` (not guaranteed).  Silent — output discarded. *)
+let on_path name =
+  Sys.command (Printf.sprintf "command -v %s >/dev/null 2>&1" (Filename.quote name)) = 0
+
+(** The perl fallback body (a single -e program).  Args at runtime:
+    <seconds> <program> [args...].  Kept as one string constant so the exact
+    quoting is auditable in one place. *)
+let perl_timeout_prog =
+  "my $t=shift @ARGV; my $p=fork; \
+   if(!$p){ setpgrp(0,0); exec @ARGV or exit 127 } \
+   $SIG{ALRM}=sub{ kill 9,-$p; exit 124 }; \
+   alarm $t; waitpid $p,0; my $s=$?; \
+   exit($s & 127 ? 128 + ($s & 127) : $s >> 8)"
+
+(** Chosen mechanism, resolved once.  [`Timeout]/[`Gtimeout] use the coreutils
+    binary directly; [`Perl] uses the fallback; [`None_avail] means we could
+    not bound subprocesses at all (perl absent too) — in that case we still
+    run, unbounded, but LOUDLY warn, because an unbounded oracle can hang. *)
+let timeout_mechanism : [ `Timeout | `Gtimeout | `Perl | `None_avail ] Lazy.t =
+  lazy (
+    if on_path "timeout" then `Timeout
+    else if on_path "gtimeout" then `Gtimeout
+    else if on_path "perl" then `Perl
+    else `None_avail
+  )
+
+(** Build the command prefix that bounds [cmd] (already a single shell-word,
+    typically [Filename.quote]d) to [timeout] seconds.  The caller appends
+    redirections; the whole thing runs under the default shell via
+    [Sys.command].  For every mechanism the bounded command is executed as
+    `sh -c <cmd>`, matching the original semantics exactly. *)
+let bounded_command ~timeout ~quoted_cmd =
+  match Lazy.force timeout_mechanism with
+  | `Timeout  -> Printf.sprintf "timeout %d sh -c %s" timeout quoted_cmd
+  | `Gtimeout -> Printf.sprintf "gtimeout %d sh -c %s" timeout quoted_cmd
+  | `Perl     ->
+    Printf.sprintf "perl -e %s %d /bin/sh -c %s"
+      (Filename.quote perl_timeout_prog) timeout quoted_cmd
+  | `None_avail ->
+    (* No bounding available — run directly.  A generated infinite loop CAN
+       hang here; that's why we warn loudly at startup below. *)
+    Printf.sprintf "sh -c %s" quoted_cmd
+
+(** Loud one-line note at startup recording which mechanism was chosen — the
+    loud-skip doctrine applied to the timeout mechanism itself, so a future
+    run's log shows "using gtimeout" / "using perl fallback" instead of the
+    silent 100%-skip that hid this bug. *)
+let () =
+  let note =
+    match Lazy.force timeout_mechanism with
+    | `Timeout    -> "using `timeout` (GNU coreutils on PATH)"
+    | `Gtimeout   -> "using `gtimeout` (Homebrew coreutils on PATH)"
+    | `Perl       -> "using perl fallback (no timeout/gtimeout on PATH)"
+    | `None_avail -> "WARNING: no timeout/gtimeout/perl — subprocesses run \
+                      UNBOUNDED; a generated infinite loop may hang the suite"
+  in
+  Printf.eprintf "[oracle] subprocess timeout mechanism: %s\n%!" note
+
+(** Run a shell command and capture stdout AND stderr separately, with
+    timeout.  Returns (exit_code, stdout_string, stderr_string).
+
+    stderr is captured (not discarded) so callers can distinguish a compiler
+    CRASH (OCaml backtrace, "Fatal error: exception", segfault) from a clean
+    "unsupported feature" exit — see [classify_compile] below.
+
+    The subprocess is bounded via [bounded_command] (timeout/gtimeout/perl —
+    whichever is available), which preserves the shell conventions the
+    classifiers rely on: 124 == timed-out, 128+N == killed by signal N. *)
+let run_capture3 ?(timeout=15) cmd =
+  let tmp     = Filename.temp_file "march_prop_out" ".txt" in
+  let tmp_err = Filename.temp_file "march_prop_err" ".txt" in
   let rc  = Sys.command (Printf.sprintf
-      "timeout %d sh -c %s > %s 2>/dev/null"
-      timeout (Filename.quote cmd) tmp) in
-  let out =
+      "%s > %s 2> %s"
+      (bounded_command ~timeout ~quoted_cmd:(Filename.quote cmd)) tmp tmp_err) in
+  let read_file path =
     try
-      let ic = open_in tmp in
+      let ic = open_in path in
       let s  = In_channel.input_all ic in
       close_in ic; s
     with _ -> ""
   in
+  let out = read_file tmp in
+  let err = read_file tmp_err in
   (try Sys.remove tmp with _ -> ());
+  (try Sys.remove tmp_err with _ -> ());
+  (rc, out, err)
+
+(** Thin wrapper preserving the original (exit_code, stdout) interface for
+    callers that don't need stderr. *)
+let run_capture ?(timeout=15) cmd =
+  let (rc, out, _err) = run_capture3 ~timeout cmd in
   (rc, out)
 
-(** Write src to a temp file and return the path. *)
+(** Write [src] to `prog.march` inside a fresh, dedicated temp DIRECTORY and
+    return that file's path.
+
+    Why a dedicated dir and not `Filename.temp_file` directly in `TMPDIR`:
+    the march compiler auto-discovers *sibling* `.march` files in the entry
+    file's own source directory (bin/main.ml — `Filename.dirname filename` is
+    added to the module search path).  If the entry lives directly in a shared
+    `TMPDIR`, that sibling walk enumerates everything in `TMPDIR` — and on
+    macOS `TMPDIR` (`/var/folders/.../T/`) contains a Spotlight-managed
+    `TemporaryItems` directory that is permission-denied, so `Sys.readdir`
+    inside the compiler's walk throws
+    `Sys_error("…/TemporaryItems: Operation not permitted")` and the compiler
+    exits 2 on EVERY program — a spurious "compiler crash" that has nothing to
+    do with the generated program.  Isolating each generated program in its
+    own directory (containing only `prog.march`) means the sibling walk sees
+    exactly one file and never touches the poisoned directory. *)
 let write_temp_march src =
-  let tmp = Filename.temp_file "march_prop" ".march" in
-  let oc  = open_out tmp in
+  let dir = Filename.temp_file "march_prop_dir" "" in
+  (* temp_file made a regular file; replace it with a directory of the same
+     name so we get a collision-free unique directory. *)
+  (try Sys.remove dir with _ -> ());
+  Sys.mkdir dir 0o700;
+  let path = Filename.concat dir "prog.march" in
+  let oc  = open_out path in
   output_string oc src;
   close_out oc;
-  tmp
+  path
+
+(** Remove the dedicated temp directory that [write_temp_march] created for a
+    program, given the `prog.march` path (or its `.bin` sibling).  Removes the
+    whole containing directory and its contents so nothing leaks. *)
+let cleanup_temp_march src_file =
+  let dir = Filename.dirname src_file in
+  (* Only rm dirs we created (name guard), never a shared TMPDIR root. *)
+  if
+    let base = Filename.basename dir in
+    String.length base >= 14 && String.sub base 0 14 = "march_prop_dir"
+  then begin
+    Array.iter
+      (fun e -> try Sys.remove (Filename.concat dir e) with _ -> ())
+      (try Sys.readdir dir with _ -> [||]);
+    (try Sys.rmdir dir with _ -> ())
+  end
+
+(* ── Loud skip accounting (Wave-2 doctrine: no invisible skips) ─────────── *)
+
+(** Every [oracle_check] outcome that is neither a match nor a failure must be
+    routed through [record_skip] with a short reason tag.  A per-run summary
+    is printed at process exit so a skip can never silently vanish — if the
+    oracle's green run is actually "everything got skipped," this makes that
+    visible instead of indistinguishable from "everything passed." *)
+let oracle_invocations = ref 0
+let oracle_matched     = ref 0
+let skip_counts : (string, int) Hashtbl.t = Hashtbl.create 16
+
+let record_skip reason =
+  let n = try Hashtbl.find skip_counts reason with Not_found -> 0 in
+  Hashtbl.replace skip_counts reason (n + 1)
+
+let record_match () =
+  incr oracle_matched
+
+let () =
+  at_exit (fun () ->
+    if !oracle_invocations > 0 then begin
+      Printf.eprintf "\n── oracle skip summary ──────────────────────────────\n";
+      Printf.eprintf "  total invocations : %d\n" !oracle_invocations;
+      Printf.eprintf "  matched (Ok/Fail) : %d\n" !oracle_matched;
+      let skipped = Hashtbl.fold (fun _ n acc -> acc + n) skip_counts 0 in
+      Printf.eprintf "  skipped           : %d\n" skipped;
+      Hashtbl.iter (fun reason n -> Printf.eprintf "    - %-28s %d\n" reason n) skip_counts;
+      Printf.eprintf "──────────────────────────────────────────────────────\n%!"
+    end)
+
+(* ── Compile-outcome classifier (pure, unit-testable) ────────────────────── *)
+
+(** Markers that indicate the compiler itself crashed (an OCaml exception
+    escaped to top level, printing a backtrace) rather than gracefully
+    reporting "this program is not supported yet." *)
+let internal_error_markers = [
+  "Fatal error: exception";
+  "Assert_failure";
+  "Failure(";
+  "Called from";
+]
+
+let contains_substring ~needle haystack =
+  let nlen = String.length needle in
+  let hlen = String.length haystack in
+  if nlen = 0 then true
+  else
+    let rec go i =
+      if i + nlen > hlen then false
+      else if String.sub haystack i nlen = needle then true
+      else go (i + 1)
+    in
+    go 0
+
+(** Classify a compiler-step outcome given its exit code and captured stderr.
+
+    - [rc >= 128]: the compiler was killed by a signal (segfault, abort, …)
+      while compiling a well-typed program — always a compiler bug: [`Fail].
+    - stderr carries an OCaml internal-error marker (an uncaught exception's
+      backtrace, an [Assert_failure], a [Failure(...)], or a "Called from"
+      backtrace line) — the compiler's own machinery crashed even though it
+      exited "cleanly" (rc in 1..127): [`Fail].
+    - otherwise, a clean nonzero exit with no crash signature is treated as a
+      graceful "this construct isn't supported yet": [`Skip].
+
+    [rc = 0] is not a valid input (callers only classify nonzero compiles);
+    it is treated as [`Skip "unreachable-rc-zero"] rather than raising, so the
+    function stays total. *)
+let classify_compile (rc : int) (stderr : string) : [ `Fail of string | `Skip of string ] =
+  if rc = 0 then
+    `Skip "unreachable-rc-zero"
+  else if rc >= 128 then
+    `Fail (Printf.sprintf "compiler killed by signal %d (exit %d)" (rc - 128) rc)
+  else
+    match List.find_opt (fun m -> contains_substring ~needle:m stderr) internal_error_markers with
+    | Some marker -> `Fail (Printf.sprintf "internal compiler error (stderr marker %S)" marker)
+    | None        -> `Skip "unsupported"
 
 (** Run the oracle: compile a March source string and check that
     interpreter output == compiled output.
-    Returns Ok () on match, Error msg on mismatch, or None to skip. *)
+    Returns Ok () on match, Error msg on mismatch, or None to skip.
+    Every [None] result has already been counted via [record_skip]; every
+    [Some _] result has been counted via [record_match]. *)
 let oracle_check src =
+  incr oracle_invocations;
   match Lazy.force march_bin_opt with
-  | None -> None  (* no binary — skip *)
+  | None ->
+    record_skip "no-march-binary";
+    None
   | Some bin ->
     let src_file = write_temp_march src in
     let bin_file = src_file ^ ".bin" in
@@ -715,36 +931,50 @@ let oracle_check src =
     let (rc_interp, interp_out) = run_capture ~timeout:10 interp_cmd in
     if rc_interp <> 0 then (
       (* Interpreter failed — skip (generated program may have runtime error) *)
-      (try Sys.remove src_file with _ -> ());
+      cleanup_temp_march src_file;
+      record_skip "interp-nonzero-exit";
       None
     ) else begin
-      (* Compile mode *)
+      (* Compile mode — stderr captured so we can tell a compiler CRASH
+         (segfault, uncaught OCaml exception) from a clean "unsupported
+         feature" exit; see [classify_compile]. *)
       let compile_cmd =
         Printf.sprintf "%s --compile %s -o %s"
           (Filename.quote bin) (Filename.quote src_file) (Filename.quote bin_file)
       in
-      let (rc_compile, _) = run_capture ~timeout:30 compile_cmd in
-      (try Sys.remove src_file with _ -> ());
+      let (rc_compile, _compile_out, compile_err) = run_capture3 ~timeout:30 compile_cmd in
       if rc_compile <> 0 then (
-        (* Compile failed — skip (generator hit an unimplemented feature) *)
-        (try Sys.remove bin_file with _ -> ());
-        None
+        cleanup_temp_march src_file;
+        match classify_compile rc_compile compile_err with
+        | `Fail reason ->
+          record_match ();
+          Some (Error (interp_out,
+                       Printf.sprintf "<compiler crashed: %s>\nstderr: %s" reason compile_err))
+        | `Skip reason ->
+          record_skip ("compile-" ^ reason);
+          None
       ) else begin
         let (rc_run, compiled_out) = run_capture ~timeout:10 (Filename.quote bin_file) in
-        (try Sys.remove bin_file with _ -> ());
-        if rc_run >= 128 then
+        cleanup_temp_march src_file;
+        if rc_run >= 128 then begin
           (* Signal-killed binary (sh reports 128+signal: SIGABRT=134,
              SIGSEGV=139, SIGBUS=138…).  The interpreter already succeeded on
              this program, so a crashing binary is a compiler bug (usually an
              RC miscompile) — a FAILURE, not a skip.  Clean nonzero exits stay
              skips below: the generated program may legitimately error at
              runtime (process_exit, runtime panics), and `timeout` reports 124. *)
+          record_match ();
           Some (Error (interp_out,
                        Printf.sprintf "<binary killed by signal %d (exit %d)> %s"
                          (rc_run - 128) rc_run compiled_out))
-        else if rc_run <> 0 then None  (* clean nonzero error exit — skip *)
-        else if interp_out = compiled_out then Some (Ok ())
-        else Some (Error (interp_out, compiled_out))
+        end else if rc_run <> 0 then begin
+          record_skip "run-nonzero-exit";
+          None  (* clean nonzero error exit — skip *)
+        end else begin
+          record_match ();
+          if interp_out = compiled_out then Some (Ok ())
+          else Some (Error (interp_out, compiled_out))
+        end
       end
     end
 
@@ -1329,12 +1559,18 @@ let prop_oracle_println_adt =
           let ctor = if use_circle then Printf.sprintf "Circle(%d)" (abs n mod 20 + 1)
                                    else Printf.sprintf "Square(%d)" (abs n mod 20 + 1) in
           Printf.sprintf
+            (* NOTE: match arms are newline-separated with NO leading `|` —
+               March removed the pipe-separated match form.  A leading `|`
+               here made EVERY generated program parse-fail, so this oracle
+               prop silently skipped 100%% of the time (surfaced by the
+               loud skip accounting as `interp-nonzero-exit`).  Fixed so the
+               ADT oracle actually exercises programs. *)
             "mod Main do\n\
             \  type Shape = Circle(Int) | Square(Int)\n\
             \  fn area(s : Shape) : Int do\n\
             \    match s do\n\
-            \    | Circle(r) -> r * r\n\
-            \    | Square(n) -> n * 4\n\
+            \      Circle(r) -> r * r\n\
+            \      Square(n) -> n * 4\n\
             \    end\n\
             \  end\n\
             \  fn main() do\n\
@@ -1410,12 +1646,15 @@ let prop_oracle_println_list =
     (Gen.map3
        (fun a b c ->
           Printf.sprintf
+            (* NOTE: newline-separated match arms, NO leading `|` — see the
+               ADT oracle above.  The old leading-`|` form parse-failed on
+               every program, making this list oracle prop 100%% vacuous. *)
             "mod Main do\n\
             \  type IntList = Nil | Cons(Int, IntList)\n\
             \  fn sum(lst : IntList) : Int do\n\
             \    match lst do\n\
-            \    | Nil        -> 0\n\
-            \    | Cons(h, t) -> h + sum(t)\n\
+            \      Nil        -> 0\n\
+            \      Cons(h, t) -> h + sum(t)\n\
             \    end\n\
             \  end\n\
             \  fn main() do\n\
@@ -1434,11 +1673,80 @@ let prop_oracle_println_list =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
+(* ── Unit tests for classify_compile (RED proof for Task 1) ─────────────── *)
+
+(** Before this change, [oracle_check]'s compile step collapsed ALL nonzero
+    compile exits — segfault, uncaught OCaml exception, or genuine
+    "unsupported feature" — into an identical, silent [None] (skip).  A
+    compiler CRASH on a well-typed program was therefore indistinguishable
+    from "the generator hit a construct we don't lower yet."
+
+    These are synthetic (rc, stderr) tuples fed directly to the pure
+    [classify_compile] classifier — no compiler invocation needed, so the
+    proof is deterministic and instant.  Run against the OLD logic (bare
+    [if rc_compile <> 0 then None]), all three cases below would have
+    produced the SAME verdict: skip.  Against the NEW classifier:
+      - a segfault-shaped rc           -> `Fail
+      - a clean rc with backtrace text -> `Fail
+      - a clean rc with no backtrace   -> `Skip
+    i.e. two of the three flip from "invisible skip" to "loud failure." *)
+
+let test_classify_compile_segfault () =
+  (* rc = 139 = 128 + SIGSEGV. No stderr needed — signal death alone is
+     conclusive: the compiler was killed compiling a well-typed program. *)
+  match classify_compile 139 "" with
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for segfault rc=139, got `Skip %S" r
+
+let test_classify_compile_backtrace () =
+  (* rc = 2 (OCaml's default uncaught-exception exit code) with a genuine
+     OCaml backtrace on stderr, e.g. from an internal `failwith` /
+     `assert false` site reached on a well-typed program. *)
+  let stderr =
+    "Fatal error: exception Failure(\"lower: unsupported construct XYZ\")\n\
+     Raised at Stdlib.failwith in file \"stdlib.ml\", line 29, characters 17-33\n\
+     Called from March_tir__Lower.lower_expr in file \"lib/tir/lower.ml\", line 412, characters 4-40\n"
+  in
+  match classify_compile 2 stderr with
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for backtrace stderr, got `Skip %S" r
+
+let test_classify_compile_clean_unsupported () =
+  (* rc = 1, stderr is a normal diagnostic with no OCaml crash signature —
+     the genuine "typechecked but not lowerable yet" case, which must stay
+     a (counted) skip, not a failure. *)
+  let stderr = "march: error: unsupported construct 'foo' in --compile mode\n" in
+  match classify_compile 1 stderr with
+  | `Skip _ -> ()
+  | `Fail r -> Alcotest.failf "expected `Skip for clean unsupported exit, got `Fail %S" r
+
+let test_classify_compile_assert_failure () =
+  let stderr = "Fatal error: exception Assert_failure(\"lib/tir/perceus.ml\", 88, 2)\n" in
+  match classify_compile 1 stderr with
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for Assert_failure marker, got `Skip %S" r
+
+let test_classify_compile_signal_wins_over_clean_stderr () =
+  (* Even if stderr happens to be empty/clean, a signal-death rc alone is
+     sufficient to classify as `Fail — rc is checked before stderr content. *)
+  match classify_compile 134 "" with (* 128 + SIGABRT *)
+  | `Fail _ -> ()
+  | `Skip r -> Alcotest.failf "expected `Fail for SIGABRT rc=134, got `Skip %S" r
+
+let classify_compile_unit_tests = [
+  "segfault rc classifies as Fail", `Quick, test_classify_compile_segfault;
+  "OCaml backtrace stderr classifies as Fail", `Quick, test_classify_compile_backtrace;
+  "Assert_failure marker classifies as Fail", `Quick, test_classify_compile_assert_failure;
+  "clean unsupported exit classifies as Skip", `Quick, test_classify_compile_clean_unsupported;
+  "signal death wins even with clean stderr", `Quick, test_classify_compile_signal_wins_over_clean_stderr;
+]
+
 (* ── Test suite registration ────────────────────────────────────────────── *)
 
 let () =
   let open Alcotest in
   run "March property tests" [
+    "oracle: classify_compile (unit)", classify_compile_unit_tests;
     "parse+typecheck", List.map QCheck_alcotest.to_alcotest [
       prop_parse_no_unexpected_exception;
       prop_typecheck_no_crash;
