@@ -325,6 +325,53 @@ let is_actor_dispatch_fn (fn_name : string) : bool =
   let nl = String.length fn_name and sl = String.length sfx in
   nl > sl && String.sub fn_name (nl - sl) sl = sfx
 
+(* ── State-migration fn naming convention (Phase5C-C.5) ─────────────────
+   Hot-reload state migrations follow a `{actor_lower}_migrate_state`
+   suffix convention (parent design: hcr-phase5-design.md; TIR/llvm_emit's
+   `__migrate_<Actor>` alias export consumes it). Two DISTINCT predicates
+   were independently name-sniffed at four sites before this consolidation
+   — they are NOT the same check, so they stay separate here:
+     - [is_migrate_fn_name]: bare "_migrate_state" suffix ("is this ANY
+       migrate function?"), used by lib/tir/dce.ml (DCE seed), lib/tir/
+       mono.ml (mono seed), and lib/tir/llvm_emit.ml (visibility-prefix
+       decisions + the __migrate_<Actor> alias-export site).
+     - [is_migrate_fn_for]: suffix + actor-prefix match ("is this the
+       migrate fn for THIS actor?"), used by bin/main.ml's
+       [find_migrate_fn] (the `--check-migration` SMT mode, which must
+       disambiguate between multiple actors' migrate_state functions in
+       the same program). *)
+
+let migrate_state_suffix = "_migrate_state"
+
+(** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless
+    of which actor it belongs to. Mirrors the byte-identical inline checks
+    in lib/tir/dce.ml, lib/tir/mono.ml, and lib/tir/llvm_emit.ml (multiple
+    sites). *)
+let is_migrate_fn_name (fn_name : string) : bool =
+  let sfx = migrate_state_suffix in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+
+(** True if [fn_name] is the migrate_state function for [actor]: it ends in
+    "_migrate_state" AND the dotted-path component immediately before that
+    suffix (i.e. everything after the last '.', or the whole prefix if
+    there is no '.') equals [lowercase actor]. Mirrors bin/main.ml's
+    [find_migrate_fn] `matches` helper exactly — used by the
+    `--check-migration` SMT mode to pick out one actor's migration fn among
+    possibly several in the same program. *)
+let is_migrate_fn_for ~(actor : string) (fn_name : string) : bool =
+  if not (is_migrate_fn_name fn_name) then false
+  else begin
+    let sfx = migrate_state_suffix in
+    let n = String.length fn_name and suf_len = String.length sfx in
+    let prefix = String.sub fn_name 0 (n - suf_len) in
+    let last_part = match String.rindex_opt prefix '.' with
+      | None   -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1)
+    in
+    last_part = String.lowercase_ascii actor
+  end
+
 (* ── Bool tags: "True"/"False" / "true"/"false" / string_of_bool ────────
    Three distinct spellings coexist across the pipeline (documented, NOT
    unified this chunk — see the plan's Task 1 scope note: "ONLY centralize

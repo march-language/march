@@ -105,9 +105,7 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
      deploy time by march_reload.c. *)
   List.iter (fun (fd : Tir.fn_def) ->
     let n = fd.Tir.fn_name in
-    let suf = "_migrate_state" in
-    let ln = String.length n and ls = String.length suf in
-    if ln >= ls && String.sub n (ln - ls) ls = suf then begin
+    if Tir_names.is_migrate_fn_name n then begin
       Queue.push n queue; has_seeds := true
     end
   ) m.Tir.tm_fns;

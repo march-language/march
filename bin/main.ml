@@ -1023,31 +1023,18 @@ let make_newstate_decl (new_fields : March_forge.Schema_diff.field list) : March
    Convention (from TIR/llvm_emit): user writes `fn {actor_lower}_migrate_state`
    as a top-level DFn; TIR picks it up by suffix and exports @__migrate_<Actor>.
    We match any DFn whose name ends with "_migrate_state" and whose last
-   dotted component before the suffix equals lowercase(actor). *)
+   dotted component before the suffix equals lowercase(actor) — see
+   [March_tir.Tir_names.is_migrate_fn_for]. *)
 let find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
     : March_ast.Ast.fn_def option =
   let module A = March_ast.Ast in
-  let actor_lower = String.lowercase_ascii actor in
-  let suffix = "_migrate_state" in
-  let suf_len = String.length suffix in
-  let matches fn_name =
-    let n = String.length fn_name in
-    if n < suf_len then false
-    else if String.sub fn_name (n - suf_len) suf_len <> suffix then false
-    else begin
-      let prefix = String.sub fn_name 0 (n - suf_len) in
-      let last_part = match String.rindex_opt prefix '.' with
-        | None   -> prefix
-        | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1)
-      in
-      last_part = actor_lower
-    end
-  in
   let rec walk = function
     | [] -> None
     | d :: rest ->
       let found = match d with
-        | A.DFn (fd, _) when matches fd.A.fn_name.A.txt -> Some fd
+        | A.DFn (fd, _) when
+            March_tir.Tir_names.is_migrate_fn_for ~actor fd.A.fn_name.A.txt ->
+          Some fd
         | A.DMod (_, _, inner, _) -> walk inner
         | _ -> None
       in

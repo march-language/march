@@ -516,6 +516,18 @@ type env = {
       [env] copies derived from the same root, like [type_map]) so it survives
       threading through [check_decl]'s per-declaration env folds. Read via
       [fn_capability_closures]; a later hot-deploy manifest task consumes this. *)
+  own_cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function OWN inferred IO-capability closure: fully-qualified function
+      name ("Mod.fn") -> normalized list of cap paths that function's own
+      signature/body/extern usage requires, WITHOUT the [module_wide_caps]
+      merge that [cap_closures] performs. Accumulated across the multiple
+      [record_fn_caps] call sites per function (sig + body + extern) exactly
+      like [cap_closures], just without folding in the module-level [needs].
+      This is the projection the migrate_state IO-free check needs: a
+      [migrate_state] function living in an actor module that declares
+      [needs IO.Console] for its *handlers* must not be falsely flagged just
+      because the module-wide merge would attribute that cap to it too.
+      Read via [fn_own_capability_closures]. *)
 }
 
 let make_env errors type_map = {
@@ -537,6 +549,7 @@ let make_env errors type_map = {
   no_extern_mod = false;
   deterministic_mod = false;
   cap_closures = Hashtbl.create 64;
+  own_cap_closures = Hashtbl.create 64;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -5141,6 +5154,20 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELit _ | Ast.EVar _ -> acc
   | _ -> acc
 
+(** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless of
+    which actor it belongs to — the hot-reload state-migration naming
+    convention (Phase5C-C.5). This is a local copy of
+    [March_tir.Tir_names.is_migrate_fn_name]: [march_typecheck] cannot depend
+    on [march_tir] ([march_tir]'s dune already depends on
+    [march_typecheck]), so the bare-suffix predicate this module's
+    migrate_state IO-free check needs (see below) is duplicated here rather
+    than shared. Keep byte-identical to [Tir_names.is_migrate_fn_name] if
+    either changes. *)
+let is_migrate_fn_name (fn_name : string) : bool =
+  let sfx = "_migrate_state" in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
@@ -5197,7 +5224,15 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   let record_fn_caps (fn_qname : string) (own_caps : string list) =
     let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
     let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
-    Hashtbl.replace env.cap_closures fn_qname merged
+    Hashtbl.replace env.cap_closures fn_qname merged;
+    (* Parallel own-caps-only projection (Phase5C-C.5 design correction): same
+       accumulate-across-call-sites behavior as [cap_closures] above, but
+       WITHOUT folding in [module_wide_caps]. This is what the migrate_state
+       IO-free check needs — the merged closure would falsely blame a pure
+       migrate_state for its module's handler-level [needs]. *)
+    let prior_own = Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures fn_qname) in
+    let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
+    Hashtbl.replace env.own_cap_closures fn_qname merged_own
   in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
@@ -5548,6 +5583,43 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           end
         ) all_param_tys
     | _ -> ()
+  ) decls;
+  (* Check 8 - migrate_state must be IO-free, Phase5C-C.5.
+     State-migration functions, the actor_lower plus _migrate_state naming
+     convention, see is_migrate_fn_name, run during the hot-migration window,
+     ahead of any pending user messages; doing IO there is dangerous. Use the
+     own-caps projection, env.own_cap_closures / fn_own_capability_closures,
+     NOT the merged cap_closures: the merged closure folds in the module
+     declared needs, typically present for the module handlers, which
+     would falsely flag a migrate_state whose own body or signature touches
+     no capability at all. *)
+  let check_migrate_fn_io_free (qname : string) (sp : Ast.span) =
+    let own_caps =
+      Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures qname)
+    in
+    if own_caps <> [] then
+      Err.error env.errors ~span:sp
+        (render_parts [
+          MPText "migrate_state must be IO-free"; MPBreak;
+          MPCode qname; MPText " calls capabilities that need ";
+          MPCode (String.concat ", " own_caps); MPText ".";
+          MPBreak; MPText "migrate_state runs during the hot-migration window, before user messages.";
+          MPBreak; MPText "hint: move side effects into a normal handler that runs after migration completes." ])
+  in
+  List.iter (function
+    | Ast.DFn (def, sp) when is_migrate_fn_name def.fn_name.txt ->
+      check_migrate_fn_io_free (cap_qname def.fn_name.txt) sp
+    (* An extern-declared fn following the migrate_state naming convention is
+       equally recognized: its own caps were recorded under [ef_name.txt] by
+       the extern-implied-caps pass above (any extern block is IO.Foreign,
+       [blocking] adds IO.Foreign.Blocking), and that alone must fail the
+       IO-free bound just like a body-scanned builtin call would for a DFn. *)
+    | Ast.DExtern (edef, sp) ->
+      List.iter (fun (ef : Ast.extern_fn) ->
+        if is_migrate_fn_name ef.Ast.ef_name.txt then
+          check_migrate_fn_io_free (cap_qname ef.Ast.ef_name.txt) sp
+      ) edef.ext_fns
+    | _ -> ()
   ) decls
 
 (** [fn_capability_closures env] returns the per-function inferred IO-capability
@@ -5563,6 +5635,18 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     Consumed by the (future) hot-deploy capability manifest. *)
 let fn_capability_closures (env : env) : (string * string list) list =
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.cap_closures []
+
+(** [fn_own_capability_closures env] returns each function's OWN inferred
+    IO-capability closure — [(fully_qualified_fn_name, normalized_cap_paths)]
+    pairs — WITHOUT the module-wide [needs]/import-propagated merge that
+    [fn_capability_closures] performs. Use this projection, not the merged
+    one, for any "is this one function IO-free" question (e.g. the
+    migrate_state check): the merged closure attributes a module's
+    handler-level [needs] to every function in the module, including a pure
+    migrate_state, which would falsely fail such a check. Order is
+    unspecified (backed by a hashtable). *)
+let fn_own_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
 
 (* =================================================================
    §16a  Session type projection and duality

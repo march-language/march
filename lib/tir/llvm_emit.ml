@@ -5807,14 +5807,9 @@ let emit_fn ctx (fn : Tir.fn_def) =
                          valid LLVM IR, so keep the migrate_state fn visible *)
   let vis_prefix =
     let fname = fn.Tir.fn_name in
-    let flen  = String.length fname in
-    let ends_with sfx =
-      let sl = String.length sfx in
-      flen > sl && String.sub fname (flen - sl) sl = sfx
-    in
     if ctx.compile_so
        && not (Tir_names.is_actor_dispatch_fn fname)
-       && not (ends_with "_migrate_state")
+       && not (Tir_names.is_migrate_fn_name fname)
     then "hidden "
     else ""
   in
@@ -6086,14 +6081,9 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     in
     let wrap_vis =
       let fname = fn.Tir.fn_name in
-      let flen  = String.length fname in
-      let ends_with sfx =
-        let sl = String.length sfx in
-        flen > sl && String.sub fname (flen - sl) sl = sfx
-      in
       if ctx.compile_so
          && not (Tir_names.is_actor_dispatch_fn fname)
-         && not (ends_with "_migrate_state")
+         && not (Tir_names.is_migrate_fn_name fname)
       then "hidden " else ""
     in
     Buffer.add_string ctx.buf
@@ -6784,8 +6774,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
      already emitted (as wrappers) by emit_mutual_tco_group above. *)
   let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
                            "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
-  let migrate_suffix = "_migrate_state" in
-  let migrate_suffix_len = String.length migrate_suffix in
+  let migrate_suffix_len = String.length Tir_names.migrate_state_suffix in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
       else if List.mem fn.Tir.fn_name mutual_fn_names then ()
@@ -6804,8 +6793,7 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
              → alias "@__migrate_Counter"
            The march_reload.c runtime forms the same name by stripping
            "_dispatch" from the ACTIVATE name "Counter_dispatch". *)
-        if flen > migrate_suffix_len
-           && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
+        if Tir_names.is_migrate_fn_name fname
         then begin
           (* Take the part before _migrate_state, then extract the last
              dot-separated component (strips module prefix), then capitalize

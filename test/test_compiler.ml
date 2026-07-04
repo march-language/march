@@ -4310,6 +4310,118 @@ let test_fn_cap_closure_two_level_nesting () =
   Alcotest.(check bool) "fully-qualified key records IO.Console" true
     (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
 
+(* ── fn_own_capability_closures / migrate_state IO-free check (Phase5C-C.5) ─
+   [fn_own_capability_closures] is the OWN-caps-only projection (no
+   [module_wide_caps] merge) — the projection the migrate_state IO-free
+   check must use. These tests exercise both the projection itself and the
+   compile error it powers. *)
+
+(* Local substring helper (the shared [_contains_substr] is defined later in
+   this file, after these tests) — same naive O(n*m) scan. *)
+let migrate_test_contains_substr haystack needle =
+  let hn = String.length haystack and nn = String.length needle in
+  if nn = 0 then true
+  else begin
+    let found = ref false in
+    for i = 0 to hn - nn do
+      if String.sub haystack i nn = needle then found := true
+    done;
+    !found
+  end
+
+(* The load-bearing test: a module declares `needs IO.Console` (as if for its
+   handlers) alongside two functions — one that actually calls `println`
+   (own caps = IO.Console) and one pure function (own caps = []).
+   [fn_capability_closures] (merged) attributes IO.Console to BOTH, since the
+   module-wide `needs` folds into every function's closure. But
+   [fn_own_capability_closures] must give the pure function an EMPTY own-caps
+   entry — proving the own-caps table only records what a function itself
+   uses, not what its module declares. *)
+let test_fn_own_cap_closure_excludes_module_wide () =
+  let (_errors, env) = typecheck_full {|mod Actor do
+    needs IO.Console
+    fn noisy(x) do println(x) end
+    fn pure_fn(x) do x + 1 end
+  end|} in
+  let merged = March_typecheck.Typecheck.fn_capability_closures env in
+  let own = March_typecheck.Typecheck.fn_own_capability_closures env in
+  Alcotest.(check bool) "merged closure attributes module-wide needs to noisy" true
+    (match List.assoc_opt "noisy" merged with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check bool) "merged closure ALSO attributes module-wide needs to pure_fn (the bug being guarded against)" true
+    (match List.assoc_opt "pure_fn" merged with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check bool) "own closure attributes IO.Console to noisy (it actually calls println)" true
+    (match List.assoc_opt "noisy" own with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check (list string)) "own closure is EMPTY for pure_fn (module-wide needs excluded)" []
+    (match List.assoc_opt "pure_fn" own with Some cs -> cs | None -> [])
+
+(* migrate_state calling file_write with no declared needs -> IO-free error. *)
+let test_migrate_state_file_write_error () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do
+      let _ = file_write("x", "y")
+      old
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state calling file_write: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* migrate_state calling println -> IO-free error. *)
+let test_migrate_state_println_error () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do
+      let _ = println(old)
+      old
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state calling println: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* migrate_state whose OWN signature is Cap(IO.Foreign)-implied via an extern
+   block sharing the naming convention -> IO-free error (extern-implied cap). *)
+let test_migrate_state_extern_error () =
+  let ctx = typecheck {|mod Counter do
+    needs IO.Foreign
+    extern "libc" : Cap(IO.Foreign) do
+      fn counter_migrate_state(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state as extern fn: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* THE crux test: a pure migrate_state in a module that DOES declare a
+   module-level `needs IO.Console` (as if for its handlers) must compile
+   CLEAN — no error. This is the exact case the merged closure would wrongly
+   reject; it only passes if the check consumes the own-caps projection. *)
+let test_migrate_state_pure_with_module_needs_clean () =
+  let ctx = typecheck {|mod Counter do
+    needs IO.Console
+    fn counter_migrate_state(old) do old end
+    fn handle_inc(state) do
+      let _ = println("incrementing")
+      state
+    end
+  end|} in
+  Alcotest.(check bool) "pure migrate_state in module with needs IO.Console: no error" false (has_errors ctx)
+
+(* A pure migrate_state in a module with no needs at all -> clean. *)
+let test_migrate_state_pure_no_needs_clean () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do old end
+  end|} in
+  Alcotest.(check bool) "pure migrate_state, no module needs: no error" false (has_errors ctx)
+
 (* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
 
 (* A module that declares `needs IO.Mut` only to satisfy transitive enforcement
@@ -5626,6 +5738,12 @@ let compiler_suites =
           Alcotest.test_case "fn_capability_closures: extern IO.Foreign"    `Quick test_fn_cap_closure_extern;
           Alcotest.test_case "fn_capability_closures: propagated import"    `Quick test_fn_cap_closure_propagated_import;
           Alcotest.test_case "fn_capability_closures: two-level nesting"    `Quick test_fn_cap_closure_two_level_nesting;
+          Alcotest.test_case "fn_own_capability_closures: excludes module-wide needs" `Quick test_fn_own_cap_closure_excludes_module_wide;
+          Alcotest.test_case "migrate_state calling file_write: error"     `Quick test_migrate_state_file_write_error;
+          Alcotest.test_case "migrate_state calling println: error"       `Quick test_migrate_state_println_error;
+          Alcotest.test_case "migrate_state as extern fn: error"          `Quick test_migrate_state_extern_error;
+          Alcotest.test_case "pure migrate_state + module needs: clean"   `Quick test_migrate_state_pure_with_module_needs_clean;
+          Alcotest.test_case "pure migrate_state, no needs: clean"        `Quick test_migrate_state_pure_no_needs_clean;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
