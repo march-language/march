@@ -965,13 +965,22 @@ let deploy_hot_cmd =
                  permits one capability (or anything it subsumes) that the running \
                  version did not previously hold.")
   in
-  let run o s e c t grant_caps =
+  let no_cap_gate =
+    Arg.(value & flag &
+         info ["no-cap-gate"]
+           ~doc:"Escape hatch (Phase 5C Part C): force the legacy ACTIVATE3 protocol, \
+                 skipping cap_root/capability admission entirely. Use this to deploy \
+                 against a server that predates capability admission, or to \
+                 deliberately bypass the gate.")
+  in
+  let run o s e c t grant_caps no_cap_gate =
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ()
       else
-        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t ~grant_caps ()
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t
+          ~grant_caps ~no_cap_gate ()
     in
     match result with
     | Ok () -> ()
@@ -979,7 +988,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap)
+    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")

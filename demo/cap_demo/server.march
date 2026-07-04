@@ -1,0 +1,26 @@
+-- Phase 5C capability-admission demo server (v1: console-only boundary fn).
+-- Server.handle's OWN inferred caps = {IO.Console}. A node policy permitting
+-- IO.Console admits this. See server_v2.march for the over-authority patch.
+mod App do
+  needs IO.NetListen
+  needs IO.Console
+
+  mod Server do
+    needs IO.Console
+    fn handle(x : Int) : Int do
+      println("handle v1 (console only)")
+      x + 1
+    end
+  end
+
+  fn main() do
+    println("cap-demo server up")
+    let _ = Server.handle(1)
+    match tcp_listen(9099) do
+      Err(e) -> println("listen err: " ++ e)
+      Ok(fd) ->
+        let _ = tcp_accept(fd)
+        println("server shutting down")
+    end
+  end
+end

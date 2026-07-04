@@ -120,6 +120,150 @@
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
 
+; ── HCR capability-lattice C table unit test ──────────────────────────────
+; Verifies runtime/march_cap_lattice.{h,c} (generated from
+; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
+; hand-verified hierarchy, exhaustively over every pair.
+(rule
+ (targets test_cap_lattice_runner)
+ (deps    test_cap_lattice.c
+          ../runtime/march_cap_lattice.c
+          ../runtime/march_cap_lattice.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_cap_lattice.c ../runtime/march_cap_lattice.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_cap_lattice_runner))
+ (action  (run ./test_cap_lattice_runner)))
+
+; ── BLAKE3 cross-implementation agreement (Phase5C-C.2) ───────────────────
+; The compiler's cap_root (Phase5C-A) is BLAKE3 via March_cas.Blake3 (OCaml
+; FFI over libblake3, lib/cas/blake3_stubs.c). The reload server
+; (runtime/march_reload.c, Phase5C-C.3) must recompute cap_root with the
+; *same* algorithm using runtime/march_blake3.c, a pure-C helper over the
+; same libblake3 API. This test proves the two agree on a fixed fixture
+; string whose expected hex digest is also asserted OCaml-side in
+; test_cas.ml's test_blake3_cross_impl_agreement_fixture — a single literal
+; can only satisfy both assertions if the implementations match bit-for-bit.
+; Reuses the same discovered blake3_cflags.sexp/blake3_libs.sexp that
+; lib/cas/dune uses (via lib/cas/discover.exe), so the include/lib paths
+; never drift from the OCaml side's probe.
+(rule
+ (targets test_blake3_agreement_runner)
+ (deps    test_blake3_agreement.c
+          ../runtime/march_blake3.c
+          ../runtime/march_blake3.h
+          ../lib/cas/blake3_cflags.sexp
+          ../lib/cas/blake3_libs.sexp)
+ (action
+  (run bash -c
+   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
+    %{cc} -std=gnu11 -Wall -Wextra -I../runtime \
+      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+      -o %{targets} test_blake3_agreement.c ../runtime/march_blake3.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp)")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_blake3_agreement_runner))
+ (action  (run ./test_blake3_agreement_runner)))
+
+; ── ACTIVATE4 cap_root admission end-to-end (Phase5C-C.3) ─────────────────
+; Starts the real reload server (march_reload.c) on a Unix-domain socket and
+; drives the ACTIVATE4 wire protocol as a real client would: builds a signed
+; message, signs it with a real ed25519 key, and asserts the server's cap_root
+; tamper check / MARCH_DEPLOY_POLICY gate behave per specs/hot-code-reload.md.
+;
+; The signing pubkey is baked into march_reload.c at compile time via
+; -DMARCH_SIGNING_PUBKEY_HEX (mirrors bin/main.ml's --signing-pubkey flow), so
+; a keypair must exist *before* compiling the test binary. test_reload_keygen
+; generates one at build time; its stdout (pubkey_hex\nsk_hex\n) is captured
+; to reload_keys.txt, whose first line seeds the -D flag for the real test,
+; and whose full contents the test binary re-reads at run time to sign.
+(rule
+ (targets test_reload_keygen_runner)
+ (deps    test_reload_keygen.c ../runtime/tweetnacl.c ../runtime/tweetnacl.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets} test_reload_keygen.c ../runtime/tweetnacl.c)))
+
+(rule
+ (targets reload_keys.txt)
+ (deps    (file test_reload_keygen_runner))
+ (action  (with-stdout-to reload_keys.txt (run ./test_reload_keygen_runner))))
+
+(rule
+ (targets test_reload_activate4_runner)
+ (deps    test_reload_activate4.c
+          reload_keys.txt
+          ../runtime/march_reload.c ../runtime/march_reload.h
+          ../runtime/march_dispatch.c ../runtime/march_dispatch.h
+          ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
+          ../runtime/march_blake3.c ../runtime/march_blake3.h
+          ../runtime/tweetnacl.c ../runtime/tweetnacl.h
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
+          ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
+          (glob_files ../runtime/*.h))
+ (action
+  (run bash -c
+   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
+    PK=$(head -n1 reload_keys.txt); \
+    %{cc} -std=gnu11 -Wall -I../runtime -O2 -DMARCH_SIGNING_PUBKEY_HEX=\\\"$PK\\\" \
+      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+      -o %{targets} test_reload_activate4.c \
+      ../runtime/march_reload.c ../runtime/march_dispatch.c \
+      ../runtime/march_cap_lattice.c ../runtime/march_blake3.c \
+      ../runtime/tweetnacl.c ../runtime/march_runtime.c \
+      ../runtime/march_scheduler.c ../runtime/march_message.c \
+      ../runtime/march_heap.c ../runtime/march_gc.c \
+      ../runtime/march_monitor_registry.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread")))
+
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt))
+ (action (run ./test_reload_activate4_runner reload_keys.txt)))
+
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt))
+ (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
+          (run ./test_reload_activate4_runner reload_keys.txt policy))))
+
+; ── HCR capability-lattice anti-drift check ───────────────────────────────
+; Regenerates runtime/march_cap_lattice.{h,c} from lib/caps/cap_lattice.ml
+; via the emitter and diffs the result against the checked-in copy, so the
+; two can never silently drift apart (see lib/caps/emit_c_table.ml).
+(rule
+ (targets cap_lattice_fresh_march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.c)
+ (deps    (file %{exe:../lib/caps/emit_c_table.exe}))
+ (action  (run %{exe:../lib/caps/emit_c_table.exe} . cap_lattice_fresh_)))
+
+(rule
+ (alias cap_lattice_check)
+ (deps  ../runtime/march_cap_lattice.h
+        ../runtime/march_cap_lattice.c
+        cap_lattice_fresh_march_cap_lattice.h
+        cap_lattice_fresh_march_cap_lattice.c)
+ (action
+  (progn
+   (diff ../runtime/march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.h)
+   (diff ../runtime/march_cap_lattice.c cap_lattice_fresh_march_cap_lattice.c))))
+
+; Also run as part of `dune runtest` (CI), but exposed as its own alias
+; above so it can be targeted directly (`dune build @test/cap_lattice_check`)
+; without pulling in the rest of the (large, slow) runtest universe.
+(alias
+ (name runtest)
+ (deps (alias cap_lattice_check)))
+
 ; ── Distributed-OTP function-by-identity registry unit test ──────────────
 (rule
  (targets test_remote_registry_runner)
