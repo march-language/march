@@ -358,20 +358,6 @@ let send_binary conn data offset len =
   in
   loop offset len
 
-(* ─── SHA-256 via digestif for CAS hash of the .so ─────────────────────── *)
-
-let sha256_file path =
-  let ic = open_in_bin path in
-  let ctx = Digestif.SHA256.empty in
-  let buf = Bytes.create 65536 in
-  let ctx = ref ctx in
-  (try while true do
-     let n = input ic buf 0 65536 in
-     if n = 0 then raise Exit;
-     ctx := Digestif.SHA256.feed_bytes !ctx (Bytes.sub buf 0 n)
-   done with Exit | End_of_file -> ());
-  close_in ic;
-  Digestif.SHA256.get !ctx |> Digestif.SHA256.to_hex
 
 (* ─── SSH tunnel ─────────────────────────────────────────────────────────── *)
 
@@ -750,7 +736,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             end);
 
           (* 6. CAS_PUT the .so if not already present *)
-          (* NOTE (2026-07-04): the former skew check compared `sha256_file so_path`
+          (* NOTE (2026-07-04): the former skew check SHA-256-hashed the .so
              to `manifest.cas_hash`, but cas_hash is the compiler's BLAKE3
              *compilation hash* (blake3 of impl_hash+target+identities+flags,
              March_cas.Cas.compilation_hash), NOT a SHA-256 of the .so bytes — the
