@@ -7103,6 +7103,53 @@ let test_preamble_wrapper_delegates () =
   Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
     (Buffer.contents buf_new) (Buffer.contents buf_old)
 
+(* ── Robustness: an unreadable sibling directory must not crash the compiler ──
+   The compiler auto-discovers sibling `.march` modules in the entry file's own
+   source directory (`resolve_imports` plus the early-CAS sibling hash both walk
+   it via `collect_lib_files`).  That recursive walk called `Sys.readdir` on
+   every subdirectory with no exception guard, so a permission-denied sibling
+   directory — e.g. macOS's `$TMPDIR/TemporaryItems`, which is "Operation not
+   permitted" — raised an uncaught `Sys_error` and killed an otherwise
+   well-typed compile (exit 2, no output).  The walk now skips directories it
+   cannot read.  `--check` exercises the exact crashing path (it shares the
+   early-CAS/resolver walk with `--compile`) without needing clang, so this
+   test runs everywhere.  Perms on the 0000 dir are always restored via
+   [Fun.protect] so it never lingers to break later cleanup. *)
+let test_unreadable_sibling_dir_does_not_crash_check () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_permdenied"
+      "mod PdEntry do\n\
+      \  fn main() : Int do\n\
+      \    1 + 2\n\
+      \  end\n\
+       end\n"
+  in
+  (* A permission-denied sibling directory beside the entry file.  Its contents
+     are irrelevant: the crash was in [Sys.readdir] on the directory itself,
+     which fails before any entry can be read. *)
+  let denied = Filename.concat tmp "TemporaryItems" in
+  Unix.mkdir denied 0o755;
+  Unix.chmod denied 0o000;
+  Fun.protect
+    ~finally:(fun () ->
+      (* Restore perms so the temp tree can be reclaimed; ignore if already gone. *)
+      (try Unix.chmod denied 0o755 with Unix.Unix_error _ -> ()))
+    (fun () ->
+      (* Run from the project root so the compiler resolves its CWD-relative
+         stdlib/ (same trick as the other compiled-regression tests).  The
+         scanned directory is [Filename.dirname src] = [tmp] (an absolute
+         path), independent of CWD. *)
+      let cmd = Printf.sprintf "cd %s && %s --check %s 2>&1; echo EXIT:$?"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote src) in
+      let out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        (Printf.sprintf
+          "--check exits 0 despite an unreadable sibling dir (no Sys_error crash); got:\n%s"
+          out)
+        true
+        (ir_contains out "EXIT:0"))
+
 let codegen_suites =
   [
       ( "tir_names", [
@@ -7631,6 +7678,10 @@ let codegen_suites =
             test_preamble_byte_identical_wasm;
           Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
             test_preamble_wrapper_delegates;
+        ] );
+      ( "compiler_robustness", [
+          Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
+            test_unreadable_sibling_dir_does_not_crash_check;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

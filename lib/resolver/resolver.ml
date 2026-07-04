@@ -106,7 +106,13 @@ let collect_lib_files dir =
   let rec walk acc d =
     if not (Sys.file_exists d && Sys.is_directory d) then acc
     else begin
-      let entries = Sys.readdir d in
+      (* A permission-denied directory (e.g. macOS's $TMPDIR/TemporaryItems,
+         which [Sys.is_directory] reports as a directory since it stats fine,
+         but whose contents are "Operation not permitted") makes [Sys.readdir]
+         raise [Sys_error].  Treat any directory we cannot read as empty and
+         skip it rather than crashing the whole compile — an unrelated
+         unreadable sibling must never abort an otherwise well-typed build. *)
+      let entries = try Sys.readdir d with Sys_error _ -> [||] in
       Array.sort compare entries;
       Array.fold_left (fun acc name ->
           let p = Filename.concat d name in
