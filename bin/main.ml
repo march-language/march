@@ -2104,30 +2104,34 @@ let compile filename =
            without having to dlopen the artifact.  Format:
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
-             ROOT cap_root=<64-char blake3 hex>
              <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
            of a sig-changed function are also being updated.
-           caps: (Phase5C-A.3) the function's normalized, sorted inferred
-           IO-capability closure from
-           March_typecheck.Typecheck.fn_capability_closures — always present,
-           empty when the function needs no capabilities.  ROOT cap_root is
-           the BLAKE3 hash (same algorithm as cas_hash, to avoid mixing two
-           digest algorithms in one manifest) of the newline-joined, sorted,
-           Cap_lattice-normalized union of every FN line's caps — a single
-           artifact-wide fingerprint of the capability surface, so a deploy
-           tool can detect a capability-surface change without re-parsing
-           every FN line's caps= field individually. *)
+           caps: (Phase5C-A.3, revised 2026-07-04 for granularity) the
+           function's OWN normalized, sorted inferred IO-capability closure
+           from March_typecheck.Typecheck.fn_own_capability_closures — always
+           present, empty when the function needs no capabilities.  This is
+           deliberately the per-function OWN projection, not the module-merged
+           closure: the whole-artifact union is dominated by the linked
+           stdlib and is app-invariant, which made the deploy capability gate
+           unable to discriminate between artifacts.  There is no
+           artifact-wide ROOT cap_root line any more; cap_root is computed
+           per-function downstream by the deploy tool from that function's
+           own caps= field. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
-          (* Per-fn cap closures, keyed by qualified name ("Mod.fn").
-             fn_capability_closures returns caps already normalized by
-             Cap_lattice.normalize; sort here only for deterministic CSV
-             output (List.sort does not mutate the underlying set). *)
+          (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
+             fn_own_capability_closures returns each function's own caps
+             (body/sig/extern), WITHOUT the module-wide `needs` merge that
+             fn_capability_closures performs — that merge is what made the
+             whole-artifact union app-invariant (Granularity revision,
+             2026-07-04).  Caps are already normalized by Cap_lattice.normalize;
+             sort here only for deterministic CSV output (List.sort does not
+             mutate the underlying set). *)
           let fn_caps_tbl : (string, string list) Hashtbl.t = Hashtbl.create 16 in
           List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
-            (March_typecheck.Typecheck.fn_capability_closures typecheck_env);
+            (March_typecheck.Typecheck.fn_own_capability_closures typecheck_env);
           let caps_for name =
             match Hashtbl.find_opt fn_caps_tbl name with
             | Some caps -> List.sort_uniq String.compare caps
@@ -2192,23 +2196,10 @@ let compile filename =
             let deduped = List.sort_uniq String.compare callers in
             Hashtbl.replace callee_to_callers callee deduped
           ) callee_to_callers;
-          (* Aggregate artifact_caps = normalize(sorted(union of every boundary
-             fn's caps)): sort first so the pre-normalize input order is a
-             deterministic function of the cap set (not of Hashtbl.iter's
-             unspecified order), then normalize away any cap subsumed by a
-             broader one already in the union. *)
-          let all_caps_sorted =
-            Hashtbl.fold (fun name _ acc -> caps_for name @ acc) hr_impl_hashes []
-            |> List.sort_uniq String.compare
-          in
-          let artifact_caps = March_caps.Cap_lattice.normalize all_caps_sorted in
-          let cap_root =
-            March_cas.Blake3.hash_string (String.concat "\n" artifact_caps) in
           let mf = out_bin ^ ".hcr_manifest" in
           (try
              let oc = open_out mf in
              Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch;
-             Printf.fprintf oc "ROOT cap_root=%s\n" cap_root;
              Hashtbl.iter (fun name impl_h ->
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in

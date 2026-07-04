@@ -22,12 +22,19 @@ type fn_manifest = {
   fn_impl_hash : string;
   fn_sig_hash  : string;
   fn_callers   : string list;  (* Phase 8: functions that call this one *)
-  fn_caps      : string list;  (* Phase 5C: IO-capability authority required *)
+  fn_caps      : string list;  (* Phase 5C: IO-capability authority required (this
+                                   function's OWN caps as of the 2026-07-04
+                                   granularity revision — no longer an
+                                   artifact-wide union) *)
+  fn_has_caps  : bool;  (* true iff the manifest FN line carried a `caps=`
+                           field at all (even `caps=`, empty). Distinguishes
+                           a genuinely pre-Phase-5C legacy manifest (no fn
+                           has this field) from a current manifest where a
+                           capless function legitimately has fn_caps = []. *)
 }
 
 type manifest = {
   cas_hash  : string;
-  cap_root  : string;  (* Phase 5C: ROOT cap_root=<hex>; "" when absent (legacy manifest) *)
   functions : fn_manifest list;
 }
 
@@ -35,7 +42,6 @@ let parse_manifest path : (manifest, string) result =
   try
     let ic = open_in path in
     let cas_hash = ref "" in
-    let cap_root = ref "" in
     let fns = ref [] in
     (try while true do
        let line = String.trim (input_line ic) in
@@ -44,15 +50,12 @@ let parse_manifest path : (manifest, string) result =
          if String.length line > 10 && String.sub line 0 10 = "# cas_hash" then
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
-         (* ROOT cap_root=<hex> — must be special-cased BEFORE the FN-line
-            splitter below, otherwise `String.split_on_char ' '` produces
-            ["ROOT"; "cap_root=<hex>"], which matches the `[name; impl_h]`
-            fallback and silently fabricates a phantom function named "ROOT". *)
-         let rest = String.sub line 5 (String.length line - 5) in
-         let prefix = "cap_root=" in
-         let plen = String.length prefix in
-         if String.length rest >= plen && String.sub rest 0 plen = prefix then
-           cap_root := String.sub rest plen (String.length rest - plen)
+         (* Legacy pre-2026-07-04 manifests may still carry a
+            "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
+            Recognize and skip it so `String.split_on_char ' '` doesn't
+            otherwise fall into the FN-line branches below and fabricate a
+            phantom function named "ROOT". *)
+         ()
        end else begin
          let has_prefix field prefix =
            let plen = String.length prefix in
@@ -80,31 +83,51 @@ let parse_manifest path : (manifest, string) result =
              | Some f -> parse_callers f
              | None -> []
            in
+           let has_caps = List.exists (fun f -> has_prefix f "caps=") tail in
            let caps =
              match List.find_opt (fun f -> has_prefix f "caps=") tail with
              | Some f -> parse_caps f
              | None -> []
            in
-           (callers, caps)
+           (callers, caps, has_caps)
          in
          (match String.split_on_char ' ' line with
          | name :: impl_h :: sig_h :: tail when tail <> [] ->
-           let (callers, caps) = extract_from_tail tail in
+           let (callers, caps, has_caps) = extract_from_tail tail in
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = callers; fn_caps = caps } :: !fns
+                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps } :: !fns
          | [name; impl_h; sig_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = []; fn_caps = [] } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
          | [name; impl_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
-                    fn_callers = []; fn_caps = [] } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
          | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
     close_in ic;
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
-    else Ok { cas_hash = !cas_hash; cap_root = !cap_root; functions = List.rev !fns }
+    else Ok { cas_hash = !cas_hash; functions = List.rev !fns }
   with Sys_error m -> Error m
+
+(** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
+    function line carries a `caps=` field at all. A current manifest always
+    has `caps=` on every FN line (possibly `caps=` empty for a capless
+    function), so this only fires for manifests written before Phase 5C
+    Part A landed. *)
+let is_legacy_manifest (m : manifest) : bool =
+  not (List.exists (fun fm -> fm.fn_has_caps) m.functions)
+
+(** [fn_cap_root own_caps] — per-function cap_root, matching byte-for-byte the
+    server's recompute recipe in runtime/march_reload.c's compute_cap_root:
+    split → sort_uniq → march_cap_normalize → join "\n" → blake3. Mirrored
+    here as: Cap_lattice.normalize (order-preserving) then List.sort (to
+    match the server's sort-before-normalize canonical order) then
+    concat "\n" then Blake3.hash_string. *)
+let fn_cap_root (own_caps : string list) : string =
+  let normalized = March_caps.Cap_lattice.normalize own_caps in
+  let sorted = List.sort String.compare normalized in
+  March_cas.Blake3.hash_string (String.concat "\n" sorted)
 
 (* ─── Capability monotonicity gate (Phase 5C Part B, Task 4/5) ───────────────
 
@@ -134,11 +157,6 @@ let compute_cap_widening ~(prior : string list) ~(new_caps : string list) : stri
     [new_caps] subsumes it. *)
 let compute_cap_narrowing ~(prior : string list) ~(new_caps : string list) : string list =
   List.filter (fun p -> not (List.exists (fun n -> March_caps.Cap_lattice.cap_subsumes n p) new_caps)) prior
-
-(** Union (via [March_caps.Cap_lattice.normalize]) of every function's [fn_caps] in a
-    manifest's function list. *)
-let manifest_caps (functions : fn_manifest list) : string list =
-  March_caps.Cap_lattice.normalize (List.concat_map (fun fm -> fm.fn_caps) functions)
 
 (* ─── ACTIVATE3 / ACTIVATE4 wire-line builders (Phase 5C Part C, Task C4) ────
 
@@ -652,13 +670,31 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               | Error _ -> None
             else None
           in
+          (* Granularity revision (2026-07-04): scope the monotonicity gate to
+             the functions actually being activated (to_activate), not the
+             whole-artifact union — the union is dominated by the linked
+             stdlib and is app-invariant, so it can't discriminate a real
+             widening. For each activated function, compare its new own-caps
+             to that SAME function's own-caps in the prior baseline ([] if
+             the function is new relative to the baseline). *)
           (match prior_manifest_opt with
           | None ->
             Printf.printf
               "NOTE: no prior capability baseline found — capability widening gate is permissive for this deploy (legacy/first deploy).\n%!"
           | Some prior_manifest ->
-            let prior_caps = manifest_caps prior_manifest.functions in
-            let new_caps = manifest_caps manifest.functions in
+            let prior_by_name : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+            List.iter (fun fm -> Hashtbl.replace prior_by_name fm.fn_name fm.fn_caps)
+              prior_manifest.functions;
+            let prior_caps =
+              March_caps.Cap_lattice.normalize
+                (List.concat_map (fun fm ->
+                     Option.value ~default:[] (Hashtbl.find_opt prior_by_name fm.fn_name))
+                    to_activate)
+            in
+            let new_caps =
+              March_caps.Cap_lattice.normalize
+                (List.concat_map (fun fm -> fm.fn_caps) to_activate)
+            in
             let widening = compute_cap_widening ~prior:prior_caps ~new_caps in
             let narrowing = compute_cap_narrowing ~prior:prior_caps ~new_caps in
             if narrowing <> [] then
@@ -678,7 +714,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                 Printf.printf "  granted widening: %s (via --grant-cap %s)\n%!" cap covering_grant
               ) granted_caps;
               if ungranted <> [] then begin
-                let attributed = attribute_widening manifest.functions ungranted in
+                let attributed = attribute_widening to_activate ungranted in
                 print_widening_diagnostic ~prior_caps ~attributed;
                 Unix.close fd;
                 raise (Failure "capability widening — deploy aborted")
@@ -797,34 +833,39 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             (* Protocol v3/v4: migrate_required is also signed so it can't be
                forged between the signature and the server.
 
-               Phase 5C Part C, Task C4: emit ACTIVATE4 (cap_root admission)
-               when the manifest carries a cap_root and the operator hasn't
-               forced the legacy path with --no-cap-gate. A legacy manifest
-               (no ROOT line, cap_root = "") always falls back to ACTIVATE3,
-               since there is no cap_root to admit against. *)
+               Phase 5C Part C, Task C4 (revised 2026-07-04 for granularity):
+               emit ACTIVATE4 (cap_root admission) when this manifest carries
+               per-fn caps= fields and the operator hasn't forced the legacy
+               path with --no-cap-gate. A genuinely pre-Phase-5C legacy
+               manifest (no fn line anywhere carries caps=) always falls back
+               to ACTIVATE3, since there is no per-fn cap data to admit
+               against. Each activated function now sends its OWN cap_root,
+               computed from its OWN caps — never the whole-artifact union. *)
             let callers_sorted = List.sort String.compare fm.fn_callers in
             let callers_csv = String.concat "," callers_sorted in
             let epoch_n = if hcr_epoch > 0 then hcr_epoch else 0 in
-            let use_activate4 = manifest.cap_root <> "" && not no_cap_gate in
-            if not use_activate4 && manifest.cap_root <> "" && no_cap_gate then
+            let use_activate4 = (not (is_legacy_manifest manifest)) && not no_cap_gate in
+            if not use_activate4 && (not (is_legacy_manifest manifest)) && no_cap_gate then
               Printf.printf
                 "  NOTE: %s — --no-cap-gate forces legacy ACTIVATE3 (capability admission skipped)\n%!"
                 fm.fn_name
             else if not use_activate4 then
               Printf.printf
-                "  NOTE: %s — legacy manifest (no cap_root) — emitting ACTIVATE3\n%!"
+                "  NOTE: %s — legacy manifest (no caps= fields) — emitting ACTIVATE3\n%!"
                 fm.fn_name;
             if use_activate4 then begin
-              let caps_csv = String.concat "," (List.sort String.compare (manifest_caps manifest.functions)) in
+              let fn_caps_sorted = List.sort String.compare fm.fn_caps in
+              let caps_csv = String.concat "," fn_caps_sorted in
+              let this_cap_root = fn_cap_root fm.fn_caps in
               let (signed, wire_head) =
                 build_activate4_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
-                  ~migrate:migrate_required ~epoch:epoch_n ~cap_root:manifest.cap_root
+                  ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
                   ~callers_csv
               in
               let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
               let cmd = Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
-                wire_head sig_b64 migrate_required epoch_n manifest.cap_root caps_csv callers_csv in
+                wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv in
               send_line conn cmd;
               let resp = recv_line conn in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
