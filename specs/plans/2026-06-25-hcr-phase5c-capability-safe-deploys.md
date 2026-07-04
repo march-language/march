@@ -806,7 +806,25 @@ exists).
       list; absent ⇒ permissive (skip the check). If present: every cap in the
       received set must be `march_cap_subsumes`d by some policy entry. Violation ⇒
       `wresp("ERR cap_policy <cap>\n")`, `write_audit_log(..., "err_cap_policy")`.
-      Empty/absent `caps:` (legacy artifact) ⇒ permissive.
+      An empty cap set trivially satisfies any policy (no cap to violate), so the
+      policy check may be gated on a non-empty set. **The tamper check (Step 3),
+      however, must be UNCONDITIONAL** — see the security note below.
+
+> **Security correction (2026-07-04, whole-branch review finding C-1):** an
+> earlier draft said "empty/absent `caps:` ⇒ permissive (legacy artifact)" and
+> skipped BOTH gates on empty caps. That is a **caps-stripping bypass**: `caps:`
+> rides the wire UNSIGNED, so a non-key-holding MITM can blank it on a
+> legitimately-signed `ACTIVATE4` (the signature still verifies — it covers
+> `cap_root`, not `caps`), and if empty caps skips the tamper check the server
+> admits the real over-authority artifact (identified by the signed `cas_hash`)
+> with no policy enforcement. The fix: within `ACTIVATE4` the tamper check is
+> **always** performed — recompute `cap_root` over the received caps (empty ⇒
+> `blake3("")` = `af1349b9…`) and require it equals the signed `cap_root`. A
+> genuinely capless artifact passes (its real `cap_root` *is* `blake3("")`); a
+> stripped forgery of a non-empty artifact fails (`signed cap_root =
+> blake3(real caps) ≠ blake3("")`). "Legacy permissive" is expressed by the
+> *verb* (`ACTIVATE3`, which carries no signed `cap_root`), NOT by an empty
+> `caps:` field inside `ACTIVATE4`.
 - [ ] **Step 5:** On all checks passing, call the shared `do_activate` (`:377`)
       exactly as `ACTIVATE3` does — the cap logic is a gate *before* `do_activate`,
       not a change to it.
