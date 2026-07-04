@@ -959,6 +959,147 @@ let mk_fn_def name params body : fn_def =
       fc_span   = dummy_span;
     }] }
 
+(* ── Derive-expansion span uniquification ──────────────────────────────
+
+   Every AST node minted by [derive_impl] used to carry the SAME [dummy_span].
+   The typechecker records inferred types keyed by span ([env.type_map],
+   [Hashtbl.replace] — last write wins) and TIR lowering reads them back
+   ([Lower_state.ty_of_span]), so a shared span made every derived node
+   collide on ONE table entry: lowering saw arbitrary garbage types for
+   derived params and body exprs (e.g. [Ord$Wrap.compare(a : (Wrap) -> Int)]),
+   and the LLVM backend then picked the wrong representation strategy for the
+   receiver match — SIGSEGV / non-exhaustive panic on Newtype-repr variant
+   types (P1 in specs/todos.md).  Rewriting every span inside the generated
+   decls to a fresh structurally-unique key gives each node its own type_map
+   entry, so derived methods typecheck+lower exactly like hand-written impls.
+   The file stays "<none>" so span-based synthetic-code filters (coverage's
+   file check, the LSP's [= dummy_span] checks compare the whole record and
+   never map "<none>" spans onto a document) keep treating derived code as
+   synthetic. *)
+
+let _synthetic_span_counter = ref 0
+
+let fresh_synthetic_span () : span =
+  incr _synthetic_span_counter;
+  { file = "<none>"; start_line = !_synthetic_span_counter; start_col = 0;
+    end_line = !_synthetic_span_counter; end_col = 0 }
+
+let respan_name (n : name) : name = { n with span = fresh_synthetic_span () }
+
+let rec respan_pat (p : pattern) : pattern =
+  match p with
+  | PatWild _            -> PatWild (fresh_synthetic_span ())
+  | PatVar n             -> PatVar (respan_name n)
+  | PatCon (n, subs)     -> PatCon (respan_name n, List.map respan_pat subs)
+  | PatAtom (s, subs, _) -> PatAtom (s, List.map respan_pat subs, fresh_synthetic_span ())
+  | PatTuple (subs, _)   -> PatTuple (List.map respan_pat subs, fresh_synthetic_span ())
+  | PatLit (l, _)        -> PatLit (l, fresh_synthetic_span ())
+  | PatRecord (fs, _)    ->
+    PatRecord (List.map (fun (n, p) -> (respan_name n, respan_pat p)) fs,
+               fresh_synthetic_span ())
+  | PatAs (p, n, _)      -> PatAs (respan_pat p, respan_name n, fresh_synthetic_span ())
+
+let rec respan_ty (t : ty) : ty =
+  match t with
+  | TyCon (n, args)      -> TyCon (respan_name n, List.map respan_ty args)
+  | TyVar n              -> TyVar (respan_name n)
+  | TyArrow (a, b)       -> TyArrow (respan_ty a, respan_ty b)
+  | TyTuple ts           -> TyTuple (List.map respan_ty ts)
+  | TyRecord fs          -> TyRecord (List.map (fun (n, t) -> (respan_name n, respan_ty t)) fs)
+  | TyLinear (l, t)      -> TyLinear (l, respan_ty t)
+  | TyNat _ as t         -> t
+  | TyNatOp (op, a, b)   -> TyNatOp (op, respan_ty a, respan_ty b)
+  | TyChan (a, b)        -> TyChan (respan_name a, respan_name b)
+  | TyRefine (t, n, e)   -> TyRefine (respan_ty t, Option.map respan_name n, respan_expr e)
+
+and respan_expr (e : expr) : expr =
+  match e with
+  | ELit (l, _)          -> ELit (l, fresh_synthetic_span ())
+  | EVar n               -> EVar (respan_name n)
+  | EApp (f, args, _)    -> EApp (respan_expr f, List.map respan_expr args, fresh_synthetic_span ())
+  | ECon (n, args, _)    -> ECon (respan_name n, List.map respan_expr args, fresh_synthetic_span ())
+  | ELam (ps, body, _)   -> ELam (List.map respan_param ps, respan_expr body, fresh_synthetic_span ())
+  | EBlock (es, _)       -> EBlock (List.map respan_expr es, fresh_synthetic_span ())
+  | ELet (b, _)          -> ELet (respan_binding b, fresh_synthetic_span ())
+  | EMatch (s, brs, _)   -> EMatch (respan_expr s, List.map respan_branch brs, fresh_synthetic_span ())
+  | ETuple (es, _)       -> ETuple (List.map respan_expr es, fresh_synthetic_span ())
+  | ERecord (fs, _)      ->
+    ERecord (List.map (fun (n, e) -> (respan_name n, respan_expr e)) fs, fresh_synthetic_span ())
+  | ERecordUpdate (e, fs, _) ->
+    ERecordUpdate (respan_expr e,
+                   List.map (fun (n, e) -> (respan_name n, respan_expr e)) fs,
+                   fresh_synthetic_span ())
+  | EField (e, n, _)     -> EField (respan_expr e, respan_name n, fresh_synthetic_span ())
+  | EIf (c, t, f, _)     -> EIf (respan_expr c, respan_expr t, respan_expr f, fresh_synthetic_span ())
+  | ECond (arms, _)      ->
+    ECond (List.map (fun (c, b) -> (respan_expr c, respan_expr b)) arms, fresh_synthetic_span ())
+  | EPipe (a, b, _)      -> EPipe (respan_expr a, respan_expr b, fresh_synthetic_span ())
+  | EAnnot (e, t, _)     -> EAnnot (respan_expr e, respan_ty t, fresh_synthetic_span ())
+  | EHole (n, _)         -> EHole (Option.map respan_name n, fresh_synthetic_span ())
+  | EAtom (s, args, _)   -> EAtom (s, List.map respan_expr args, fresh_synthetic_span ())
+  | ESend (a, b, _)      -> ESend (respan_expr a, respan_expr b, fresh_synthetic_span ())
+  | ESpawn (e, _)        -> ESpawn (respan_expr e, fresh_synthetic_span ())
+  | EResultRef _ as e    -> e
+  | EDbg (e, _)          -> EDbg (Option.map respan_expr e, fresh_synthetic_span ())
+  | ELetFn (n, ps, rt, body, _) ->
+    ELetFn (respan_name n, List.map respan_param ps, Option.map respan_ty rt,
+            respan_expr body, fresh_synthetic_span ())
+  | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
+  | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
+  | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
+
+and respan_param (p : param) : param =
+  { param_name = respan_name p.param_name;
+    param_ty   = Option.map respan_ty p.param_ty;
+    param_lin  = p.param_lin }
+
+and respan_binding (b : binding) : binding =
+  { bind_pat  = respan_pat b.bind_pat;
+    bind_ty   = Option.map respan_ty b.bind_ty;
+    bind_lin  = b.bind_lin;
+    bind_expr = respan_expr b.bind_expr }
+
+and respan_branch (br : branch) : branch =
+  { branch_pat   = respan_pat br.branch_pat;
+    branch_guard = Option.map respan_expr br.branch_guard;
+    branch_body  = respan_expr br.branch_body }
+
+let respan_fn_param : fn_param -> fn_param = function
+  | FPPat p          -> FPPat (respan_pat p)
+  | FPNamed p        -> FPNamed (respan_param p)
+  | FPDefault (p, e) -> FPDefault (respan_param p, respan_expr e)
+
+let respan_fn_def (fd : fn_def) : fn_def =
+  { fd with
+    fn_name    = respan_name fd.fn_name;
+    fn_ret_ty  = Option.map respan_ty fd.fn_ret_ty;
+    fn_bounds  = List.map (fun (n, t) -> (respan_name n, respan_ty t)) fd.fn_bounds;
+    fn_clauses = List.map (fun c ->
+        { fc_params = List.map respan_fn_param c.fc_params;
+          fc_guard  = Option.map respan_expr c.fc_guard;
+          fc_body   = respan_expr c.fc_body;
+          fc_span   = fresh_synthetic_span () }) fd.fn_clauses }
+
+(** Uniquify every span inside a derive-generated decl (the decl's own
+    top-level span — the derive site — is kept: it is a real user span used
+    for error attribution).  [derive_impl] only emits [DImpl] and [DFn]
+    (Json); any other decl kind passes through unchanged, which merely keeps
+    today's shared-dummy-span behavior for it. *)
+let respan_derived_decl (d : decl) : decl =
+  match d with
+  | DImpl (idef, sp) ->
+    DImpl ({ impl_iface       = respan_name idef.impl_iface;
+             impl_ty          = respan_ty idef.impl_ty;
+             impl_constraints = List.map (fun (n, tys) ->
+                 (respan_name n, List.map respan_ty tys)) idef.impl_constraints;
+             impl_assoc_types = List.map (fun (n, t) ->
+                 (respan_name n, respan_ty t)) idef.impl_assoc_types;
+             impl_methods     = List.map (fun (n, fd) ->
+                 (respan_name n, respan_fn_def fd)) idef.impl_methods },
+           sp)
+  | DFn (fd, sp) -> DFn (respan_fn_def fd, sp)
+  | d -> d
+
 (** Build derived declarations for one interface on [type_name].
     Returns a list of [decl] — usually one [DImpl], but [Json] produces
     two standalone [DFn] declarations (to_json / from_json).
@@ -1519,6 +1660,7 @@ let expand_derive
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
         derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
+        |> List.map respan_derived_decl
       ) ifaces
 
 (** Collect top-level function definitions for satisfy expansion. *)
