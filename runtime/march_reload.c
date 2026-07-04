@@ -18,10 +18,18 @@
  *                                                   → OK <impl_hash> | ERR <reason>  (v4, cap_root admission)
  *     ACTIVATE4 recomputes cap_root server-side from the (unsigned) `caps:` set
  *     — sort+uniq, march_cap_normalize, join with '\n', BLAKE3 — and rejects a
- *     mismatch with the signed `cap_root` (ERR cap_tamper). If
+ *     mismatch with the signed `cap_root` (ERR cap_tamper). This tamper check
+ *     is ALWAYS performed within ACTIVATE4, even when `caps:` is empty: a
+ *     genuinely capless artifact's signed cap_root is blake3(""), a specific
+ *     known value, so an empty received set still recomputes correctly and
+ *     admits, while a stripped-caps forgery of a real (non-empty) artifact
+ *     recomputes to blake3("") which will NOT match the signed (non-empty)
+ *     cap_root and is rejected. (Legacy-shaped/no-cap-root artifacts arrive
+ *     over ACTIVATE3, distinguished by the verb, not by empty caps here.) If
  *     $MARCH_DEPLOY_POLICY names a file of permitted cap paths, every received
- *     cap must be subsumed by some policy entry (ERR cap_policy <cap>). Both
- *     gates are skipped when `caps:` is empty/absent (legacy-shaped artifact).
+ *     cap must be subsumed by some policy entry (ERR cap_policy <cap>); the
+ *     policy gate is a no-op when the received cap set is empty (trivially
+ *     satisfied — there is nothing to violate).
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n>  (n committed)
  *   ROLLBACK_BATCH                                    → OK
@@ -1096,8 +1104,9 @@ static void handle_client(int fd) {
 
             /* Parse optional caps:<csv> — bounded scan to the NEXT " <key>:"
              * boundary (i.e. up to " callers:"), NOT to end-of-line, since
-             * callers follows caps on the wire. Legacy/empty caps => the two
-             * cap gates below are skipped (permissive). */
+             * callers follows caps on the wire. An empty/absent caps:<csv>
+             * is a genuinely capless artifact (real cap_root = blake3("")) —
+             * the tamper check below always runs, empty or not. */
             char caps_buf[1024] = {0};
             {
                 const char *cp = strstr(line, " caps:");
@@ -1110,7 +1119,12 @@ static void handle_client(int fd) {
                     size_t bound = 0;
                     while (bound < clen && csv[bound] != '\n' && csv[bound] != '\r') bound++;
                     if (bound > clen) bound = clen;
-                    if (bound >= sizeof(caps_buf)) bound = sizeof(caps_buf) - 1;  /* truncate defensively */
+                    if (bound >= sizeof(caps_buf)) {
+                        /* Over-long caps field: distinct honest error, not a
+                         * silently-truncated value that would misleadingly
+                         * recompute to the wrong root and read as tampering. */
+                        wresp(fd, "ERR bad_format caps_too_long\n"); continue;
+                    }
                     memcpy(caps_buf, csv, bound);
                     caps_buf[bound] = '\0';
                 }
@@ -1198,9 +1212,19 @@ static void handle_client(int fd) {
 
             /* Cap admission gates — run AFTER sig-verify, BEFORE staging/
              * do_activate, so both batched and immediate activations are
-             * gated identically. Empty caps:<csv> (legacy-shaped artifact)
-             * skips both checks (permissive). */
-            if (caps_buf[0] != '\0') {
+             * gated identically.
+             *
+             * TAMPER CHECK IS UNCONDITIONAL — always recompute cap_root over
+             * the received (possibly-empty) caps set and compare against the
+             * signed cap_root, even when caps:<csv> is empty. A genuinely
+             * capless artifact's signed cap_root is blake3(""), a specific
+             * known value that an empty received set recomputes correctly,
+             * so it still admits. Skipping this check on empty caps would let
+             * a MITM strip the caps: field off a legitimately-signed ACTIVATE4
+             * for a real (non-empty-cap) artifact — the signature only covers
+             * cap_root/cas_hash, not caps — and have the server treat it as
+             * capless, bypassing policy entirely. */
+            {
                 char tamper_scratch[1024];
                 snprintf(tamper_scratch, sizeof(tamper_scratch), "%s", caps_buf);
                 char recomputed_root[65];
@@ -1211,7 +1235,14 @@ static void handle_client(int fd) {
                     write_audit_log(name, impl_hash, cas_hash, "err_cap_tamper");
                     wresp(fd, "ERR cap_tamper\n"); continue;
                 }
+            }
 
+            /* Policy check may remain gated on a non-empty received cap set:
+             * an empty set trivially satisfies any policy (nothing to
+             * violate), and the tamper check above already guarantees an
+             * empty caps_buf here really does correspond to a signed empty
+             * cap_root (blake3("")), not a stripped non-empty set. */
+            if (caps_buf[0] != '\0') {
                 char policy_scratch[1024];
                 snprintf(policy_scratch, sizeof(policy_scratch), "%s", caps_buf);
                 char *ptokens[MARCH_CAP_MAX_TOKENS]; int pntok = 0;

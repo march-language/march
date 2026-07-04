@@ -264,22 +264,59 @@ static void test_no_policy_is_permissive(void) {
     close(fd);
 }
 
-/* 4. Legacy shape: empty caps:<csv> (legacy artifact) skips both cap gates
- *    unconditionally, regardless of cap_root correctness. */
-static void test_empty_caps_is_permissive_legacy(void) {
+/* 4a. Caps-stripping bypass (whole-branch review C-1): empty caps:<csv> with
+ *     a BOGUS cap_root must now be rejected with ERR cap_tamper. This is the
+ *     enshrining regression test for the fix — the old version of this test
+ *     (test_empty_caps_is_permissive_legacy) asserted the opposite (that a
+ *     bogus root was silently admitted whenever caps: was empty), which is
+ *     exactly the MITM caps-stripping admission bypass: an attacker can
+ *     intercept a legitimately-signed ACTIVATE4 for a real (non-empty-cap)
+ *     artifact, blank the (unsigned) caps: field, and have the server treat
+ *     it as a legacy capless artifact and skip the tamper check entirely —
+ *     while the signed cap_root/cas_hash (and thus the artifact admitted)
+ *     are still the real, over-authority ones. The tamper check must be
+ *     unconditional: an empty received caps set only recomputes to a
+ *     matching root when the SIGNED root really is blake3(""). */
+static void test_empty_caps_bogus_root_rejected(void) {
     int fd = connect_sock(SOCK_PATH);
     CHECK(fd >= 0, "connected to reload server");
     if (fd < 0) return;
 
-    /* cap_root is present (mandatory field) but caps:<csv> is empty; the
-     * (necessarily bogus, since nothing hashed to it) cap_root must NOT be
-     * checked when caps is empty. */
+    /* cap_root is present (mandatory field) but caps:<csv> is empty and the
+     * cap_root is bogus (not blake3("")) — must be rejected as tampering,
+     * simulating a MITM that stripped caps: off a real signed artifact. */
     char bogus_root[65];
     memset(bogus_root, 'a', 64); bogus_root[64] = '\0';
     char resp[512];
     do_activate4(fd, "test_fn_legacy", "", bogus_root, "", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR cap_tamper") == 0,
+          "empty caps:<csv> with a bogus (non-blake3(\"\")) cap_root is rejected: "
+          "caps-stripping bypass is closed");
+    close(fd);
+}
+
+/* 4b. A genuinely capless artifact — empty caps:<csv> AND the real signed
+ *     cap_root = blake3("") (af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7
+ *     cc9a93cae41f326) — must still admit. The tamper check being
+ *     unconditional does not break the legitimate capless case: recomputing
+ *     cap_root over an empty received set reproduces blake3("") exactly, so
+ *     it matches the signed value and falls through to CAS-miss like every
+ *     other passing case in this file. */
+static void test_empty_caps_real_empty_root_admitted(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server");
+    if (fd < 0) return;
+
+    char real_empty_root[65];
+    expected_cap_root(NULL, 0, real_empty_root);
+    CHECK(strcmp(real_empty_root,
+                 "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262") == 0,
+          "blake3(\"\") matches the well-known empty-set cap_root constant");
+
+    char resp[512];
+    do_activate4(fd, "test_fn_legacy_ok", "", real_empty_root, "", resp, sizeof(resp));
     CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
-          "empty caps:<csv> skips cap gates entirely (legacy-shaped, permissive)");
+          "empty caps:<csv> with the real cap_root=blake3(\"\") admits (falls through to CAS-miss)");
     close(fd);
 }
 
@@ -348,6 +385,7 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(5, "test_fn_v3");
     march_dispatch_register_name(6, "test_fn_within_policy");
     march_dispatch_register_name(7, "test_fn_exceeds_policy");
+    march_dispatch_register_name(8, "test_fn_legacy_ok");
     march_reload_server_start(sock_path);
 
     int policy_mode = (argc >= 3 && strcmp(argv[2], "policy") == 0);
@@ -356,7 +394,8 @@ int main(int argc, char **argv) {
         test_tamper_check_matching_root_admits();
         test_tamper_check_mutated_caps_rejected();
         test_no_policy_is_permissive();
-        test_empty_caps_is_permissive_legacy();
+        test_empty_caps_bogus_root_rejected();
+        test_empty_caps_real_empty_root_admitted();
         test_activate3_regression();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
