@@ -1,0 +1,27 @@
+-- Phase 5C capability-admission demo server.
+-- Server.handle is the reloadable boundary function whose OWN caps the node
+-- gates on. v1 (this file): handle does console I/O only → needs IO.Console.
+--   Build: march --compile --hot-reload App --signing-pubkey $KEY -o cap_server server.march
+--   Run:   MARCH_HOT_RELOAD_SOCKET=/tmp/march_capdemo.sock ./cap_server
+mod App do
+  needs IO.NetListen
+  needs IO.Console
+
+  mod Server do
+    fn handle(x : Int) : Int do
+      println("handle v1 (console only)")
+      x + 1
+    end
+  end
+
+  fn main() do
+    println("cap-demo server up")
+    let _ = Server.handle(1)
+    match tcp_listen(9099) do
+      Err(e) -> println("listen err: " ++ e)
+      Ok(fd) ->
+        let _ = tcp_accept(fd)
+        println("server shutting down")
+    end
+  end
+end
