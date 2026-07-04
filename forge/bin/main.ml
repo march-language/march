@@ -958,13 +958,20 @@ let deploy_hot_cmd =
          info ["timeout"] ~docv:"MS"
            ~doc:"Canary health-check window in milliseconds (default: 30000).")
   in
-  let run o s e c t =
+  let grant_cap =
+    Arg.(value & opt_all string [] &
+         info ["grant-cap"] ~docv:"CAP"
+           ~doc:"Authorize a specific capability widening (repeatable). Each occurrence \
+                 permits one capability (or anything it subsumes) that the running \
+                 version did not previously hold.")
+  in
+  let run o s e c t grant_caps =
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ()
       else
-        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t ()
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t ~grant_caps ()
     in
     match result with
     | Ok () -> ()
@@ -972,7 +979,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-    Term.(const run $ output $ so $ env_name $ canary $ timeout)
+    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")

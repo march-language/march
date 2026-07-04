@@ -2090,12 +2090,35 @@ let compile filename =
            without having to dlopen the artifact.  Format:
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
-             <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>]
+             ROOT cap_root=<64-char blake3 hex>
+             <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
-           of a sig-changed function are also being updated. *)
+           of a sig-changed function are also being updated.
+           caps: (Phase5C-A.3) the function's normalized, sorted inferred
+           IO-capability closure from
+           March_typecheck.Typecheck.fn_capability_closures — always present,
+           empty when the function needs no capabilities.  ROOT cap_root is
+           the BLAKE3 hash (same algorithm as cas_hash, to avoid mixing two
+           digest algorithms in one manifest) of the newline-joined, sorted,
+           Cap_lattice-normalized union of every FN line's caps — a single
+           artifact-wide fingerprint of the capability surface, so a deploy
+           tool can detect a capability-surface change without re-parsing
+           every FN line's caps= field individually. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
+          (* Per-fn cap closures, keyed by qualified name ("Mod.fn").
+             fn_capability_closures returns caps already normalized by
+             Cap_lattice.normalize; sort here only for deterministic CSV
+             output (List.sort does not mutate the underlying set). *)
+          let fn_caps_tbl : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+          List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
+            (March_typecheck.Typecheck.fn_capability_closures typecheck_env);
+          let caps_for name =
+            match Hashtbl.find_opt fn_caps_tbl name with
+            | Some caps -> List.sort_uniq String.compare caps
+            | None -> []
+          in
           (* Build a reverse caller index: callee_name → sorted list of
              boundary caller names.  Walk the pre-opt TIR so that calls which
              the optimizer inlined away are still captured. *)
@@ -2155,10 +2178,23 @@ let compile filename =
             let deduped = List.sort_uniq String.compare callers in
             Hashtbl.replace callee_to_callers callee deduped
           ) callee_to_callers;
+          (* Aggregate artifact_caps = normalize(sorted(union of every boundary
+             fn's caps)): sort first so the pre-normalize input order is a
+             deterministic function of the cap set (not of Hashtbl.iter's
+             unspecified order), then normalize away any cap subsumed by a
+             broader one already in the union. *)
+          let all_caps_sorted =
+            Hashtbl.fold (fun name _ acc -> caps_for name @ acc) hr_impl_hashes []
+            |> List.sort_uniq String.compare
+          in
+          let artifact_caps = March_caps.Cap_lattice.normalize all_caps_sorted in
+          let cap_root =
+            March_cas.Blake3.hash_string (String.concat "\n" artifact_caps) in
           let mf = out_bin ^ ".hcr_manifest" in
           (try
              let oc = open_out mf in
              Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch;
+             Printf.fprintf oc "ROOT cap_root=%s\n" cap_root;
              Hashtbl.iter (fun name impl_h ->
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in
@@ -2167,7 +2203,8 @@ let compile filename =
                  | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
                  | _ -> ""
                in
-               Printf.fprintf oc "%s %s %s%s\n" name impl_h sig_h callers_field
+               let caps_field = "caps=" ^ String.concat "," (caps_for name) in
+               Printf.fprintf oc "%s %s %s%s %s\n" name impl_h sig_h callers_field caps_field
              ) hr_impl_hashes;
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
