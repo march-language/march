@@ -690,6 +690,74 @@ mode). **Depends on:** Task 2 (the accessor).
 
 ---
 
+## Granularity revision (2026-07-04) — gate on the activated function, not the whole artifact
+
+**Discovered by a real deploy test.** After Part C landed, compiling a *minimal*
+console-only app (`needs IO.Console`, one `println`) in `--hot-reload --compile-so`
+mode produced **7336 boundary functions** and an artifact cap union of **11 caps**
+(`IO.FileWrite`, `IO.Process`, `IO.Random`, `IO.NetConnect.TLS`, …) — byte-identical
+`cap_root` (`0c9234…`) to a stdlib-heavy app. `--hot-reload` links and versions the
+**entire stdlib**, so `artifact_caps = ⋃ over ALL boundary fns` is dominated by the
+stdlib's declared footprint and is **app-invariant**. Consequences:
+
+- The `MARCH_DEPLOY_POLICY` gate (Part C) is **effectively inert**: every artifact
+  declares the same maximal ~11-cap footprint, so a node must permit all 11 to admit
+  any real app, and nothing an app normally does exceeds that footprint (`IO.Foreign`
+  from `extern` never even enters the union — externs have no body). Nothing left to
+  reject.
+- Part B's monotonicity gate is weakened identically — prior and new artifacts both
+  carry the maximal union, so "widening" rarely triggers.
+
+The code correctly implements the spec; the **spec's whole-artifact-union aggregation
+is the defect**. Fix: gate on the caps of the **functions actually being activated**,
+not the whole artifact.
+
+### The corrected model (per-activation own-caps)
+
+- **`ACTIVATE4` is already per-function** — forge sends one per changed function
+  (`to_activate`). The bug is that each one carries the *whole-artifact* union. Each
+  should carry **that function's OWN caps** — its body/sig/`extern` caps, from C5's
+  `fn_own_capability_closures` projection (NOT the module-wide-merged closure, NOT the
+  artifact union).
+- **This matches the threat model exactly.** The base server binary (compiled, includes
+  the stdlib) is *trusted* — the operator built and started it with a policy. Hot
+  patches are the mobile code the gate governs. So gating each *activated function* on
+  its own caps means: a patch that adds `file_write` to a function's body is caught; a
+  patch to a pure function is clean; the trusted base stdlib is not re-declared on every
+  patch. Sound for the delta model — every function's own caps are policy-checked when
+  IT is activated; transitive reach through an *already-live* callee was admitted when
+  that callee was itself deployed (or is trusted base).
+- **`cap_root` becomes per-function** = `blake3(join "\n" (normalize(sort_uniq(fn own
+  caps))))`. Tiny (0–2 caps). The **C1/C2/C3 server machinery is unchanged** — the
+  server still recomputes `cap_root` over the received caps, tamper-checks, and
+  policy-checks; it just receives a per-function own-cap set instead of the artifact
+  union. C2's BLAKE3 and C1's lattice table are still used.
+- **Part B monotonicity becomes per-function**: for each activated function, compare its
+  new own-caps to its *prior version's* own-caps (from the `.hcr_manifest.prev`
+  baseline, which has per-fn caps); widening = a cap the prior version of *that function*
+  didn't have. More meaningful than the artifact-union diff.
+
+### What changes (revision tasks CR1–CR3)
+
+- **CR1 — Part A (`bin/main.ml`):** the per-fn `.hcr_manifest` `caps=` field becomes the
+  function's **own** caps (via `fn_own_capability_closures`, C5), not the merged closure.
+  Drop the whole-artifact `ROOT cap_root=` line (it's the app-invariant value that
+  started this) — per-fn `cap_root` is computed downstream. Keep per-fn `callers:`.
+- **CR2 — forge (`cmd_deploy_hot.ml`):** send the **activated function's** own caps + a
+  per-fn `cap_root = March_cas.Blake3.hash_string(join "\n" (normalize(sort own caps)))`
+  on its `ACTIVATE4`. Rework the monotonicity gate to per-function own-cap diff against
+  the prior baseline. `manifest_caps` (artifact union) is retired from the gate path.
+- **CR3 — server tests + docs:** the C3 `march_reload.c` logic is unchanged, but its
+  test fixtures now use realistic per-fn cap sets; update `docs/capabilities.md`'s
+  admission description to per-activation framing (a node gates each hot-patched
+  function on its own declared caps; the base binary is trusted).
+
+The old whole-artifact `cap_root`/union path is fully replaced, not layered — leaving
+both would reintroduce the app-invariant value. (Detailed CR1–CR3 step lists follow the
+Part C task list below once this approach is confirmed in code.)
+
+---
+
 ## Implementation Tasks — Part C
 
 **Scope:** node-side admission (`ACTIVATE4`, `MARCH_DEPLOY_POLICY`, tamper +
