@@ -420,6 +420,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
       ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)
+      ^ (opt_file (Filename.concat runtime_dir "march_cap_lattice.c")) (* cap subsumption/normalize for ACTIVATE4 admission *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
     in
@@ -1977,6 +1978,7 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_blake3.c")    else "")  (* BLAKE3 for server-side cap_root recompute *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_cap_lattice.c") else "")  (* cap subsumption/normalize for ACTIVATE4 admission *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
