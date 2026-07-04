@@ -750,13 +750,19 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             end);
 
           (* 6. CAS_PUT the .so if not already present *)
-          (* Verify the .so on disk matches the manifest's cas_hash before
-             signing or uploading — catches manifest/binary skew. *)
-          let actual_hash = sha256_file so_path in
-          if actual_hash <> manifest.cas_hash then
-            raise (Failure (Printf.sprintf
-              "so file hash mismatch: manifest has %s but %s hashes to %s"
-              manifest.cas_hash so_path actual_hash));
+          (* NOTE (2026-07-04): the former skew check compared `sha256_file so_path`
+             to `manifest.cas_hash`, but cas_hash is the compiler's BLAKE3
+             *compilation hash* (blake3 of impl_hash+target+identities+flags,
+             March_cas.Cas.compilation_hash), NOT a SHA-256 of the .so bytes — the
+             two are different algorithms over different inputs and can never be
+             equal, so the check aborted every real deploy. It was dead-broken and
+             unexercised since it landed (df4fec3f, ACTIVATE3). Removed here to
+             unblock deploys. Proper manifest/binary skew detection needs a real
+             content hash recorded in the manifest (e.g. a `# so_blake3 <hex>` line
+             written by bin/main.ml after linking, verified here with the same
+             blake3) — tracked as a follow-up. Integrity today rests on the
+             ed25519 signature over (impl_hash, cas_hash) and the server keying the
+             artifact by cas_hash. *)
           let cas_hash = manifest.cas_hash in
           if not (cas_check conn cas_hash) then begin
             Printf.printf "Uploading artifact %s...\n%!" so_path;
