@@ -389,11 +389,22 @@ let check_style ~config ~file ~acc ~type_map decls =
 (* Safety rules                                                        *)
 (* ------------------------------------------------------------------ *)
 
-(** True if [filename] looks like a library file (not app entry, not test). *)
+(** True if [filename] looks like a library file (not app entry, not test).
+
+    A file is treated as a test — and therefore exempt from library-only rules
+    such as [safety/no-panic-in-lib] — when its basename ends in [_test.march]
+    OR it lives under a [test]/[tests] directory. [forge lint] scans both [lib/]
+    and [test/], passing full paths, so the enclosing directory is the more
+    reliable signal: a plain [test/foo.march] carries no [_test] suffix. *)
 let is_lib_file filename =
   let base = Filename.basename filename in
-  not (String.length base >= 10 && String.sub base (String.length base - 10) 10 = "_test.march") &&
-  not (base = "main.march")
+  let is_test_file = Filename.check_suffix base "_test.march" in
+  let under_test_dir =
+    Filename.dirname filename
+    |> String.split_on_char '/'
+    |> List.exists (fun c -> c = "test" || c = "tests")
+  in
+  not is_test_file && not under_test_dir && base <> "main.march"
 
 (** Known fallible single-constructor patterns that are always partial. *)
 let is_partial_pat = function

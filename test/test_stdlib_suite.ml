@@ -9558,6 +9558,46 @@ end|} in
   Alcotest.(check bool) "format_inner not flagged via impl method" false
     (List.mem "format_inner" flagged)
 
+(* ── safety/no-panic-in-lib file classification (is_lib_file) ──────────────── *)
+
+(** A module in a `*_test.march` file panics legitimately (test helpers assert
+    via panic); no-panic-in-lib must NOT fire. Regression for the is_lib_file
+    off-by-one that made the `_test.march` suffix exclusion dead code. *)
+let panic_src = {|mod Demo do
+fn boom() do
+  panic("nope")
+end
+end|}
+
+let test_lint_no_panic_test_suffix_exempt () =
+  let diags = lint_check_named ~filename:"foo_test.march" panic_src in
+  Alcotest.(check bool) "panic in *_test.march NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** The same source in a plain library file MUST be flagged — the fix must not
+    suppress the rule for real library code. *)
+let test_lint_no_panic_lib_flagged () =
+  let diags = lint_check_named ~filename:"foo.march" panic_src in
+  Alcotest.(check bool) "panic in library file IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `test/` directory (any basename, no `_test` suffix) is also a
+    test — forge lint scans both lib/ and test/ with full paths, so the
+    directory is the reliable signal. Must NOT be flagged. *)
+let test_lint_no_panic_test_dir_exempt () =
+  let diags =
+    lint_check_named ~filename:"/proj/test/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under test/ dir NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `lib/` directory with the same basename IS flagged, confirming
+    it is the `test/` path component — not merely a deep path — that exempts. *)
+let test_lint_no_panic_lib_dir_flagged () =
+  let diags =
+    lint_check_named ~filename:"/proj/lib/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under lib/ dir IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
 (* ────────────────────────────────────────────────────────────────────────────
    Adversarial-regression tests
    Each test corresponds to a bug found by the adversarial compiler review.
@@ -11698,6 +11738,12 @@ let stdlib_suites =
         Alcotest.test_case "truly unused pfn IS flagged"           `Quick test_lint_pfn_truly_unused;
         Alcotest.test_case "pfn actor_init not flagged"            `Quick test_lint_pfn_actor_init;
         Alcotest.test_case "pfn impl method body not flagged"      `Quick test_lint_pfn_impl_method;
+      ]);
+      ("lint/safety/no-panic-in-lib", [
+        Alcotest.test_case "panic in *_test.march not flagged"     `Quick test_lint_no_panic_test_suffix_exempt;
+        Alcotest.test_case "panic in library file IS flagged"      `Quick test_lint_no_panic_lib_flagged;
+        Alcotest.test_case "panic under test/ dir not flagged"     `Quick test_lint_no_panic_test_dir_exempt;
+        Alcotest.test_case "panic under lib/ dir IS flagged"       `Quick test_lint_no_panic_lib_dir_flagged;
       ]);
       (* ── Adversarial bug regression tests ─────────────────────────────── *)
       ("adversarial-regressions", [

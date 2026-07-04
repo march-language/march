@@ -282,6 +282,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-03, lint: `safety/no-panic-in-lib` no longer misfires on test files — `is_lib_file` off-by-one fixed)
+
+`lib/lint/lint.ml`'s `is_lib_file` — the predicate gating `safety/no-panic-in-lib` — had an off-by-one that made its test-file exclusion dead code: it compared the 11-char suffix `"_test.march"` against only the last **10** characters (`String.sub base (len-10) 10`), so the equality never held and every `*_test.march` file was treated as library code. Test files legitimately `panic`/assert (via `stdlib/test.march` helpers), so the rule warned on all of them — noise in `forge lint`, the engine's consumer (`forge/lib/cmd_lint.ml`; `lib/refactor` also links it for auto-fixes). (The LSP does **not** currently invoke `March_lint` — there is no `march_lint` dep in `lsp/` — despite the module header comment's claim that "both [forge lint] and [march-lsp] consume this"; that stale comment is left as-is, out of scope here.)
+
+**Fix:** replaced the hand-rolled suffix slice with `Filename.check_suffix base "_test.march"`, and — because `forge lint` discovers files by walking both `lib/` and `test/` and passes the **full path** to `Lint.check_file` (`forge/lib/cmd_lint.ml`) — additionally exempt any file whose path contains a `test/` (or `tests/`) directory component. A plain `test/foo.march` has no `_test` suffix, so the enclosing directory is the more reliable signal; basename-suffix alone would still misfire on it. `main.march` (app entry) stays exempt. The change can only *remove* warnings (it widens the test/entry exemption), so it cannot introduce new false positives on library code.
+
+**Tests:** new `lint/safety/no-panic-in-lib` group in `test/test_stdlib_suite.ml` (4 cases), exercised through a new `lint_check_named ~filename` helper in `test/test_helpers.ml` (the existing `lint_check` hardcodes `"test.march"`, so it couldn't vary the path): panic in `foo_test.march` and under `/proj/test/…` must NOT be flagged; the identical source in `foo.march` and under `/proj/lib/…` MUST be. Verified RED (2/4 failing pre-fix, for the right reason — the exemption cases; the two positive cases passed, proving `panic` detection works) → GREEN (4/4). `docs/coding-standards.md` detection note updated to state the corrected predicate (and its pre-existing "module with no `fn main()`" wording tightened to the actual basename check).
+
+**Counts:** compiler 385, eval 230, codegen 374, stdlib 797 (+4, Slow incl.), stdlib_march 53, TIR snapshots 29 — all exit 0. `scripts/check-docs.sh` clean. No compiler/codegen surface touched (lint engine only), so no benchmark exposure.
+
 ## Current State (as of 2026-07-03, compiled actor runtime: niche-message SIGSEGV, run_until_idle no-op, exit hang — all fixed)
 
 Five related defects in the compiled actor path, found from a deterministic SIGSEGV repro (spawn → send×3 → `run_until_idle()` → `kill(pid)`; interpreter fine, compiled exit 139 before any handler ran):
