@@ -163,7 +163,23 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
        *_dispatch      — the reload server finds these with dlsym(ACTIVATE)
        *_migrate_state — the __migrate_* alias points to this function; a
                          hidden aliasee with a default-visibility alias is not
-                         valid LLVM IR, so keep the migrate_state fn visible *)
+                         valid LLVM IR, so keep the migrate_state fn visible
+       hr_names members — reloadable boundary functions (e.g. `Server.handle`)
+                         must be dlsym-able themselves: any one of them can be
+                         the function that changed in a given deploy, and
+                         [do_activate] resolves the patch by name. Leaving them
+                         default-visible does NOT reopen the "v1 wins" hazard
+                         above: every boundary→boundary call in the emitted IR
+                         (see [needs_dispatch] in llvm_emit.ml) is rewritten to
+                         an indirect call through march_dispatch_enter/_gen,
+                         which looks the callee up in the versioned dispatch
+                         table by NAME_ID rather than emitting a direct
+                         `call @Server.handle` — so there is no direct
+                         intra-.so PLT relocation for these names that process
+                         symbol resolution order could hijack. hr_names is the
+                         app's own boundary set (module_of_name under the
+                         --hot-reload prefix), not the whole linked stdlib, so
+                         the exemption's blast radius stays small. *)
   let vis_prefix =
     let fname = fn.Tir.fn_name in
     let flen  = String.length fname in
@@ -174,6 +190,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     if ctx.Llvm_ctx.compile_so
        && not (Tir_names.is_actor_dispatch_fn fname)
        && not (ends_with "_migrate_state")
+       && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
     else ""
   in
