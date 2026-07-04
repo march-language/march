@@ -48,8 +48,49 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
             List.for_all (fun t -> List.mem t ctor_names) ctor_tags)
       | _ -> false) ctx.Llvm_ctx.type_defs
   in
+  (* Newtype analogue of the niche recovery: [lower_match] mints destructured
+     sub-pattern variables with [unknown_ty], so a nested match on one (e.g.
+     the tuple elements of derived Eq's [match (a, b)], or any hand-written
+     nested destructure) reaches here typed [TVar] and would take the boxed
+     heap-tag strategy — a load at [scrut+8] — but a Newtype-repr value IS its
+     raw payload (tagged scalar or payload heap ptr): SIGSEGV on scalars, a
+     garbage tag (non-exhaustive panic) on heap payloads.  A single
+     Ctor-tagged branch identifies the type by ctor name: when every variant
+     typedef owning that ctor classifies as [Newtype] AND they agree on
+     payload tagging, the decode is identical whichever of them the scrutinee
+     really is, so we can commit to the Newtype strategy with the typedef's
+     payload — matching EAlloc's encode side exactly.  Any ambiguity (a boxed
+     type sharing the ctor name, or disagreeing tagging) keeps Boxed, the
+     status quo. *)
+  let newtype_recovery_payload () : Tir.ty option =
+    match branches with
+    | [br] when (let t = br.Tir.br_tag in
+                 String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z') ->
+      let tag = br.Tir.br_tag in
+      let owner_reprs = List.filter_map (function
+        | Tir.TDVariant (tname, variants)
+          when List.exists (fun (c, _) -> c = tag) variants ->
+          Some (Repr.repr_of_ty ctx.Llvm_ctx.type_defs (Tir.TCon (tname, [])))
+        | _ -> None) ctx.Llvm_ctx.type_defs in
+      (match owner_reprs with
+       | Repr.Newtype p0 :: rest
+         when List.for_all (function
+             | Repr.Newtype p ->
+               Repr.payload_needs_tag ctx.Llvm_ctx.type_defs p
+               = Repr.payload_needs_tag ctx.Llvm_ctx.type_defs p0
+             | _ -> false) rest ->
+         Some p0
+       | _ -> None)
+    | _ -> None
+  in
   let effective_repr =
     match Repr.repr_of_ty ctx.Llvm_ctx.type_defs scrut_tir_ty_init with
+    | Repr.Boxed
+      when (match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
+           && newtype_recovery_payload () <> None ->
+      (match newtype_recovery_payload () with
+       | Some p -> Repr.Newtype p
+       | None -> Repr.Boxed (* unreachable: guard checked <> None *))
     | Repr.Boxed
       when (
         (* TVar path: scrutinee type unknown (unresolved module body), recover
