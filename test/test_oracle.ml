@@ -441,7 +441,12 @@ let () =
   let n_divergence = count is_divergence in
   let n_known_div  = List.length (List.filter (fun (name, v) -> is_divergence v && known_divergence_reason name <> None) results) in
   let n_failure    = List.length (List.filter is_failure results) in
-  let n_cfail      = count (function CompileFail _ | CompileTimeout -> true | _ -> false) in
+  (* Only clean "unsupported feature" compile exits (nonzero, ≠3) + compile
+     timeouts belong here. A CompileFail 3 (internal compiler error) is a
+     DIVERGENCE (see [is_divergence]) already counted under KNOWN_DIVERGENCE or
+     UN-TRIAGED FAILURE — counting it here too would double-count it (the row
+     label says "!=3") and break the buckets-reconcile-to-total invariant. *)
+  let n_cfail      = count (function CompileFail n when n <> 3 -> true | CompileTimeout -> true | _ -> false) in
   let n_itimeout   = count (function InterpTimeout -> true | _ -> false) in
   let n_ifail      = count (function InterpFail _ -> true | _ -> false) in
   let n_skip       = count (function Skipped _ -> true | _ -> false) in
