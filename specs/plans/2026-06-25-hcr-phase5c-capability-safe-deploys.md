@@ -687,3 +687,212 @@ mode). **Depends on:** Task 2 (the accessor).
       `--grant-cap` flag — check whether either needs a doc-lint marker or a
       `docs/capabilities.md` mention).
 - [ ] **Commit** `docs(specs): Phase 5C Parts A/B — update todos/progress (Phase5C-A/B.done)`.
+
+---
+
+## Implementation Tasks — Part C
+
+**Scope:** node-side admission (`ACTIVATE4`, `MARCH_DEPLOY_POLICY`, tamper +
+policy check in the C reload server) and the compile-time `migrate_state`
+IO-free bound. Builds on Parts A & B (landed: `lib/caps/cap_lattice.ml`,
+`fn_capability_closures`, `.hcr_manifest` `caps=`/`cap_root`, the forge
+monotonicity gate + `--grant-cap`). Reflects the 2026-07-03 design corrections
+above: the cap set rides the `ACTIVATE4` wire (no CAS manifest read), and the
+`migrate_state` check uses a new own-caps projection (not the module-merged
+closure).
+
+### Global Constraints (Part C)
+
+- **`cap_root` is BLAKE3**, matching Part A and `cas_hash`. The server must
+  recompute with the *same* algorithm — it cannot substitute the SHA-512 that
+  `tweetnacl.c` already provides, because Part A's shipped `cap_root` is BLAKE3.
+  Getting BLAKE3 into the C runtime link is a real task (Task C2), not a given.
+- **The wire cap set is the artifact cap *union*** (normalized, ~11 entries
+  measured), not the per-function manifest. The server never reads a manifest
+  file.
+- **`caps:` is unsigned on the wire; `cap_root` is signed.** Trust comes from
+  the server recomputing `cap_root` over the received `caps:` and matching it
+  against the signed value — a forged cap set fails the tamper check.
+- **All gates opt-in/additive.** No `caps:`/legacy artifact ⇒ permissive
+  admission. No `MARCH_DEPLOY_POLICY` ⇒ permissive. `ACTIVATE4` is a new verb;
+  `ACTIVATE`/`2`/`3` legacy paths must remain byte-for-byte untouched.
+- **The generated C lattice table must not drift** from OCaml `Cap_lattice` —
+  enforced by a CI regenerate-and-diff check (Task C1). It lives in `runtime/`,
+  so the existing CAS `runtime_identity` (`lib/cas/cas.ml:168`, digests
+  `runtime/*.c`/`*.h`) auto-invalidates cached binaries when the lattice changes.
+- Standard gates before each commit: `dune build --root .`, `scripts/run-tests.sh`
+  (full). The reload server is exercised by the compiled/native admission tests —
+  the implementer must locate the existing `march_reload` test harness (grep
+  `test/` for `ACTIVATE`/`reload`/`do_activate` and the native-test dune rules)
+  and extend it rather than invent a new one.
+- One commit per task, `feat(hcr):` / `fix(typecheck):` / `docs(specs):` prefix
+  as appropriate.
+
+### Task C1: `runtime/march_cap_lattice.{h,c}` generated from `Cap_lattice`
+
+**Files:** New OCaml emitter (e.g. `lib/caps/emit_c_table.ml` as a small
+`executable`), new `runtime/march_cap_lattice.{h,c}` (generated, checked in),
+dune rule + CI freshness check. **Depends on:** nothing (Part A's `Cap_lattice`
+exists).
+
+- [ ] **Step 1:** Write an OCaml executable that reads `Cap_lattice.hierarchy`
+      (the `(cap_path, parent option)` list) and emits `runtime/march_cap_lattice.c`
+      + `.h` exposing two C functions: `int march_cap_subsumes(const char *parent,
+      const char *child)` and a `march_cap_normalize` (drop-subsumed) over a
+      string array — semantics identical to `Cap_lattice.cap_subsumes`/`normalize`.
+      The table is a static array of `{path, parent}` pairs; subsumption walks the
+      parent chain (mirror `cap_ancestors`). No hashing here — just the lattice.
+- [ ] **Step 2:** dune rule that runs the emitter and writes the two files. Decide
+      generate-at-build vs. checked-in-and-verified: given the CAS `runtime_identity`
+      digests `runtime/*.c`, the file must physically exist in `runtime/` at link
+      time — so **check the generated files in**, and add a CI check (a test, or a
+      `scripts/check-docs.sh`-adjacent guard) that regenerates and `diff`s against
+      the committed copy, failing on drift. This is the anti-drift mechanism; there
+      is **no existing generated-C precedent** in the repo, so document the workflow
+      in a header comment on the generated file ("DO NOT EDIT — regenerate with …").
+- [ ] **Step 3:** Unit-test the C functions match the OCaml ones on the full
+      hierarchy (every pair), plus root/sibling/unrelated cases — a C test or a
+      round-trip test that shells the emitter and compares.
+- [ ] **Step 4:** Standard gates. **Commit** `feat(hcr): generated C capability
+      lattice table from Cap_lattice, with anti-drift CI check (Phase5C-C.1)`.
+
+### Task C2: BLAKE3 available to the C runtime link
+
+**Files:** `bin/main.ml` (the runtime clang-link list, ~`:405` where
+`march_reload.c` is added), possibly a tiny `runtime/march_blake3.{c,h}` wrapper.
+**Depends on:** nothing.
+
+- [ ] **Step 1:** `march_reload.c` needs to compute a BLAKE3 hex digest, but the
+      runtime currently links only `tweetnacl.c` (ed25519 + SHA-512) — BLAKE3 lives
+      on the OCaml side (`lib/cas/blake3_stubs.c` + libblake3, via the
+      `blake3_cflags.sexp`/`blake3_libs.sexp` discovered flags). Make libblake3
+      linkable into the compiled-program runtime: add the same discovered
+      `blake3_libs`/`blake3_cflags` flags to `bin/main.ml`'s clang invocation for
+      the runtime, so `march_reload.c` can call the libblake3 C API (`blake3_hasher_*`)
+      directly. `blake3_stubs.c` itself is an OCaml-FFI stub — do **not** link that;
+      link the underlying library and call it from C.
+- [ ] **Step 2:** Add a small `march_blake3_hex(const unsigned char *buf, size_t
+      len, char out[65])` helper (new `runtime/march_blake3.{c,h}` or inline in
+      `march_reload.c`) producing the 64-char lowercase hex the OCaml
+      `March_cas.Blake3.hash_string` produces.
+- [ ] **Step 3:** **Cross-implementation agreement test** (critical — a mismatch
+      here silently breaks every `cap_root` tamper check): assert the runtime's
+      `march_blake3_hex` of a fixed byte string equals `March_cas.Blake3.hash_string`
+      of the same string. Reuse the Part-A determinism-test fixture value if one
+      exists.
+- [ ] **Step 4:** Standard gates. **Commit** `feat(hcr): link BLAKE3 into the C
+      runtime for server-side cap_root recompute (Phase5C-C.2)`.
+
+### Task C3: `ACTIVATE4` admission in `runtime/march_reload.c`
+
+**Files:** `runtime/march_reload.c`. **Depends on:** C1 (lattice table), C2 (BLAKE3).
+
+- [ ] **Step 1:** Add an `ACTIVATE4` branch (clone the `ACTIVATE3` branch at
+      `march_reload.c:791`; keep `ACTIVATE`/`2`/`3` untouched). Parse `cap_root:<hex>`
+      and `caps:<csv>` from the line — **both before `callers:`** (which still parses
+      to end-of-line at `:716–720`). Parse `caps:` by a bounded scan to the next
+      ` <key>:` boundary, not to EOL.
+- [ ] **Step 2:** Reconstruct the canonical signed message
+      `"ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> cap_root:<hex>
+      callers:<sorted-csv>"` (note: `caps` is **not** in the signed message) and
+      verify with `crypto_sign_open` exactly as `ACTIVATE3` does (`:877`), same
+      `err_sig` audit on failure.
+- [ ] **Step 3:** **Tamper check.** `march_cap_normalize` + sort the received
+      `caps:` set, `march_blake3_hex` it, compare to the signed `cap_root`. Mismatch
+      ⇒ `wresp("ERR cap_tamper\n")`, `write_audit_log(..., "err_cap_tamper")` (follow
+      the existing `err_abi`/`err_cas_miss`/`err_sig` convention at `:283`/`:669`).
+- [ ] **Step 4:** **Policy load + check.** At server startup (or lazily on first
+      ACTIVATE4), read `getenv("MARCH_DEPLOY_POLICY")` — a newline-delimited cap
+      list; absent ⇒ permissive (skip the check). If present: every cap in the
+      received set must be `march_cap_subsumes`d by some policy entry. Violation ⇒
+      `wresp("ERR cap_policy <cap>\n")`, `write_audit_log(..., "err_cap_policy")`.
+      Empty/absent `caps:` (legacy artifact) ⇒ permissive.
+- [ ] **Step 5:** On all checks passing, call the shared `do_activate` (`:377`)
+      exactly as `ACTIVATE3` does — the cap logic is a gate *before* `do_activate`,
+      not a change to it.
+- [ ] **Step 6:** Extend the admission tests: within-policy ⇒ activate; exceeds
+      policy ⇒ `err_cap_policy`; tampered `caps:` (root mismatch) ⇒ `err_cap_tamper`;
+      no policy ⇒ permissive; legacy `ACTIVATE3`/no-caps ⇒ permissive + unchanged
+      behavior.
+- [ ] **Step 7:** Standard gates. **Commit** `feat(hcr): ACTIVATE4 node admission —
+      cap_root tamper check + MARCH_DEPLOY_POLICY (Phase5C-C.3)`.
+
+### Task C4: forge emits `ACTIVATE4`
+
+**Files:** `forge/lib/cmd_deploy_hot.ml` (the `ACTIVATE3` send site at `:761`/`:765`),
+`forge/bin/main.ml` (the `--no-cap-gate` flag). **Depends on:** C3 (so it can be
+tested against a real server).
+
+- [ ] **Step 1:** In `run`, where `ACTIVATE3` is currently built, switch to
+      `ACTIVATE4` when the parsed manifest has a `cap_root` (Part B already parses
+      `cap_root` + per-fn `caps` — reuse `manifest.cap_root` and the artifact cap
+      union `manifest_caps manifest.functions`). Emit `cap_root:<hex> caps:<sorted-csv>`
+      **before** `callers:` on the wire; sign the ACTIVATE4 message (cap_root in the
+      signed string, caps not). Legacy manifest (no `cap_root`) ⇒ keep emitting
+      `ACTIVATE3` (a one-line note).
+- [ ] **Step 2:** **Compat matrix.** If the server replies unknown-command to
+      `ACTIVATE4` (old server predating Part C), abort with the actionable message
+      ("server predates capability admission (Phase 5C); upgrade the server or
+      re-run with `--no-cap-gate`") — the downgrade to `ACTIVATE3` is **only** via
+      the explicit `--no-cap-gate` flag, never automatic.
+- [ ] **Step 3:** Add `--no-cap-gate` to `forge/bin/main.ml`'s `deploy hot` term
+      (a `bool` flag, threaded like the Part B `--grant-cap` list) that forces the
+      `ACTIVATE3` path.
+- [ ] **Step 4:** Tests: `ACTIVATE4` wire string is well-formed (cap_root + caps
+      before callers, signed message excludes caps); `--no-cap-gate` produces
+      `ACTIVATE3`. (Full client↔server round-trip is a Slow/native test if the
+      harness supports it.)
+- [ ] **Step 5:** Standard gates + forge test runner. **Commit** `feat(forge):
+      emit ACTIVATE4 with inline cap set; --no-cap-gate downgrade (Phase5C-C.4)`.
+
+### Task C5: `migrate_state` IO-free bound + own-caps projection
+
+**Files:** `lib/typecheck/typecheck.ml` (+ `.mli`), `lib/tir/tir_names.ml`,
+the four existing `_migrate_state` sniff sites (`dce.ml`, `llvm_emit.ml`,
+`mono.ml`, `bin/main.ml`). **Depends on:** nothing (independent of C1–C4).
+
+- [ ] **Step 1:** **Own-caps projection.** In `check_module_needs`, alongside the
+      existing merged `cap_closures` table, record a parallel `own_cap_closures`
+      table storing each function's *own* caps (the `own_caps` value already
+      computed at each `record_fn_caps` call site — sig + body scan + extern),
+      **without** the `module_wide_caps` merge. Expose `fn_own_capability_closures`
+      via the `.mli`. This is the projection the migrate_state check needs (the
+      merged closure would falsely flag any migrate_state in a module with a
+      module-level `needs`).
+- [ ] **Step 2:** Add `Tir_names.is_migrate_fn : actor:string -> string -> bool`
+      (the `{actor_lower}_migrate_state` suffix convention currently in
+      `bin/main.ml:1005`'s `find_migrate_fn`). Convert the four existing sniff sites
+      (`dce.ml`, `llvm_emit.ml`, `mono.ml`, `bin/main.ml`) to it — Wave 3 chunk 2 is
+      merged, so this is a clean sweep against the settled module layout.
+- [ ] **Step 3:** In typecheck, for each `DFn` recognized by `is_migrate_fn`,
+      require its `fn_own_capability_closures` entry to be empty. Any own IO cap
+      (builtin or `extern`) ⇒ compile error, with the message from the plan's
+      migrate_state section (names the offending builtin + its cap).
+- [ ] **Step 4:** Tests: a migrate_state doing `file_write`/`println`/`extern` ⇒
+      IO-free error; a pure migrate_state in a module that *does* declare
+      module-level `needs IO.Console` (for its handlers) ⇒ **clean** (proves the
+      own-caps projection, not the merged closure, is used — this is the exact case
+      the merged closure would wrongly reject).
+- [ ] **Step 5:** Standard gates. **Commit** `fix(typecheck): migrate_state must be
+      IO-free (own-caps projection); is_migrate_fn in Tir_names (Phase5C-C.5)`.
+
+### Task C6: Bookkeeping
+
+- [ ] Update `specs/todos.md`: move Phase 5C Part C to Done; the whole Phase 5C
+      item is now complete.
+- [ ] Update `specs/progress.md`: add the node-admission + migrate_state-bound
+      bullets; note the generated-C-table precedent this establishes.
+- [ ] Update `docs/capabilities.md` if it documents deploy-time behavior (the
+      `MARCH_DEPLOY_POLICY` env var and `ACTIVATE4` admission are user-facing).
+- [ ] Confirm `scripts/check-docs.sh` passes.
+- [ ] **Commit** `docs(specs): Phase 5C Part C complete — node admission +
+      migrate_state bound (Phase5C-C.done)`.
+
+### Sequencing
+
+C1 (lattice table) and C2 (BLAKE3) are foundations for C3 (server). C3 then C4
+(the protocol pair — server first so forge tests against a real one). C5
+(migrate_state) is fully independent and can run in parallel with C1–C4. C6 last.
+The one place to watch is the C2 cross-impl BLAKE3 agreement test (Step 3) — get
+that green *before* C3 depends on it, or every C3 tamper check will fail for a
+reason that looks like a protocol bug.
