@@ -282,6 +282,24 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-04, Differential Oracle EXPANSION COMPLETE — Phase 5 / eval.ml refactor gate + closeout)
+
+The differential-oracle expansion (`specs/2026-07-04-differential-oracle-design.md`, plan `specs/plans/2026-07-04-differential-oracle-plan.md`) is **COMPLETE** — all 8 tasks / 5 phases landed on branch `claude/hopeful-kapitsa-9f49f3`, each independently reviewed:
+
+- **Phase 1** (`8bc7cbd7` + Task 1): compiler crash-vs-skip classification (`classify_compile`), the `--compile` internal-compiler-error exit-3 signal (`bin/main.ml`, top-level handler + `Printexc.record_backtrace`), and loud per-run skip accounting (`oracle_invocations`/`record_skip`/`record_match` + `at_exit` summary) — killed the vacuous-green "compiler crash silently skipped" class.
+- **Phase 2a/2b/2c** (`f0f3ff0d`/`692dd751`/`6c247953`): 14 new generators, each wired through `oracle_check` via a dedicated `prop_oracle_*` property (the DIFF-coverage wiring, not just `gen_well_typed_module`): generic containers, derived-method calls (Newtype/Boxed/enum/record), and record-update / dual-position-borrow / FBIP-same-arity / erased-`TVar`-flow. Each guards a specific RC/repr bug class; open bugs pinned as documented-skips rather than reddening CI.
+- **Phase 3** (`685ca687`): opt-level matrix (`prop_oracle_opt_matrix` diffs interp vs `--opt 0` AND `--opt 2`) + exit-code parity (interp clean-panic vs compiled signal-death is now a failure).
+- **Phase 4** (`3c1518fe`): the full-corpus conformance sweep (`test/test_oracle.ml`, `@oracle` slow lane) hardened — a compiled signal-crash or exit-3 ICE while the interpreter succeeds is now a divergence (was silently passing), gated by a `known_divergence` list distinct from the `nondeterministic_allowlist`.
+- **Phase 5** (this entry): the sweep is documented as the **`eval.ml` refactor gate** — an interpreter change must leave `@oracle` with zero NEW divergences (the interpreter analogue of the byte-identical-IR gate the backend refactors used) — in the `compiler-rc` skill (§6) and the design spec §5. Analysis-doc §8 items 1/3/4/5(partial)/7 marked landed.
+
+**Bugs the expansion found or reproduced** (the payoff — the net catches real divergences):
+- **NEW P0 (Phase 4):** DataFrame `group_by`/`Stats.mean` RC-misclassification SIGSEGV — `bench/dataframe_bench.march` runs clean interpreted, crashes compiled (`EXC_BAD_ACCESS` in `march_incrc`, tagged immediate `0x4010…` deref'd as a pointer), root-caused via `lldb` to the `DataFrame.eval_agg`→`Stats.mean`-fold call site — same RC-misclass CLASS as the sort family, distinct site. Filed P0.
+- **NEW P1s (Phase 2b):** `==` gives the WRONG answer (not a crash) compiled on a String-payload `Newtype` (`llvm_eq.ml` not Repr-aware); `hash()` is cross-backend non-portable for records (two independent hash impls — documented).
+- **Reproduced/confirmed (filed earlier, now guarded):** `to_string`-on-container `#<tag:N>` garbage (hello, list_lib); tuples have no `Show` impl compiled; bare/unpinned `None` fails to link; the sort-family RC-underflow crashes (5 benches); the monomorphization-limit ICE (`stats_basic` confirmed as a 2nd trigger on `List.fold_left`).
+- **Harness gap closed:** the conformance sweep's `is_failure` was `Mismatch`-only, so 7 compiled segfaults were passing silently — now `RunFail(signal)`/`CompileFail(3)` are divergences too.
+
+**Still open (folded into todos.md coverage-follow-ups, not this effort's scope):** the `--no-opt` (TIR-optimizer) matrix axis; extending the corpus beyond `bench/`+`examples/` (test/ triaged subset + stdlib-doctest extractor); the analysis-doc §8 RC-balance/ASAN harness (#5).
+
 ## Current State (as of 2026-07-04, Differential Oracle Task 7 / Phase 4 — full-corpus conformance sweep)
 
 `specs/plans/2026-07-04-differential-oracle-plan.md` Task 7. Extends the pre-existing standalone `@oracle` sweep (`test/test_oracle.ml`, a separate slow-CI-lane executable, NOT `@runtest`) to close its core classification gap and give it a triage contract so it can serve as a real conformance gate over the whole `bench/`+`examples/` corpus.

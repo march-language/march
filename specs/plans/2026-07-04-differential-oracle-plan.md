@@ -115,6 +115,6 @@ Guards the EUpdate family, the dual-position class (`a5dad194`), `same_arity` (`
 
 **Files:** Modify `~/.claude/commands/compiler-rc.md` (outside-repo — note in report), a testing-doc (`docs/` or the spec), `specs/progress.md`, `specs/todos.md`, and the design spec's status.
 
-- [ ] **Step 1:** Document that an `eval.ml` (interpreter) change must pass the conformance sweep with zero NEW divergences — the interpreter-refactor analogue of the byte-identical-IR gate the backend refactors used. Put this where a future refactorer will find it (the compiler-rc skill + a short note in the design spec's §4.4/§5).
-- [ ] **Step 2:** specs bookkeeping: mark analysis-doc §8 items 1/3/5 progressed; record what landed per phase; list every bug the conformance sweep found (Task 7).
-- [ ] **Step 3:** Six runners + `test_properties.exe` + the new conformance exe all green; doc-lint. **Commit** `docs(oracle): wire conformance sweep as the eval.ml refactor gate; record oracle-expansion completion (Phase 5)`.
+- [x] **Step 1:** Done — the `eval.ml`-refactor-gate rule ("an interpreter change must leave `@oracle` with zero NEW divergences") is documented in the `compiler-rc` skill (§6, with run instructions) and the design spec §5 STATUS block.
+- [x] **Step 2:** Done — analysis-doc §8 status note (items 1/3/4/5-partial/7 landed); progress.md "Differential Oracle EXPANSION COMPLETE" entry records every phase's commit + the full list of bugs the expansion found/reproduced (incl. the new DataFrame P0 and the two Phase-2b P1s); review Minor #1 fixed (corpus-scope follow-up moved from P0 → coverage-follow-ups).
+- [x] **Step 3:** Six runners + `test_properties.exe` (oracle group) + the `@oracle` conformance exe green; doc-lint. **Committed** `docs(oracle): wire conformance sweep as the eval.ml refactor gate; record oracle-expansion completion (Phase 5)`.
