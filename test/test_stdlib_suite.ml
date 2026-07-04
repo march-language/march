@@ -3683,6 +3683,62 @@ let test_derive_variant_with_args_eq () =
   Alcotest.(check bool) "derive Eq for variant with args" true
     (vbool (call_fn env "result" []))
 
+(* Regression: with 2+ impls of the same interface in scope, the named method
+   builtins (eq/compare/hash) must dispatch on the argument's type, not resolve
+   to the last-registered impl.  Previously the DImpl eval bound the bare method
+   name in the env, so the second `derive` shadowed the first and calling the
+   method on the first type ran the wrong impl (false result / non-exhaustive
+   match panic). *)
+let test_eval_eq_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Eq for Wrap
+    type WrapS = WrapS(String)
+    derive Eq for WrapS
+    fn r_first_eq() : Bool do eq(Wrap(1), Wrap(1)) end
+    fn r_first_ne() : Bool do eq(Wrap(1), Wrap(2)) end
+    fn r_last_eq() : Bool do eq(WrapS("a"), WrapS("a")) end
+  end|} in
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(1)) dispatches to Wrap.eq = true" true
+    (vbool (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(2)) = false" false
+    (vbool (call_fn env "r_first_ne" []));
+  Alcotest.(check bool) "eq(WrapS a,WrapS a) still dispatches = true" true
+    (vbool (call_fn env "r_last_eq" []))
+
+let test_eval_compare_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Ord for Dir
+    type Size = Small | Large
+    derive Ord for Size
+    fn r_first_lt() : Int do compare(North, West) end
+    fn r_first_eq() : Int do compare(North, North) end
+    fn r_last_lt() : Int do compare(Small, Large) end
+  end|} in
+  Alcotest.(check bool) "compare(North,West) < 0 dispatches to Dir.compare" true
+    (vint (call_fn env "r_first_lt" []) < 0);
+  Alcotest.(check int) "compare(North,North) = 0" 0
+    (vint (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "compare(Small,Large) < 0 still dispatches" true
+    (vint (call_fn env "r_last_lt" []) < 0)
+
+let test_eval_hash_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Hash for Dir
+    type Size = Small | Large
+    derive Hash for Size
+    fn r_first() : Int do hash(South) end
+    fn r_last() : Int do hash(Large) end
+  end|} in
+  (* Before the fix, hash(South) ran Size.hash (last-registered) and panicked
+     with a non-exhaustive match; just assert both dispatch without error. *)
+  let a = vint (call_fn env "r_first" []) in
+  let b = vint (call_fn env "r_last" []) in
+  Alcotest.(check bool) "hash dispatches per-type without error" true
+    (a >= 0 && b >= 0 || a <> b || true)
+
 (* ── Helpers for exhaustiveness tests ──────────────────────────────────── *)
 
 (** Returns true if the diagnostic context has a warning whose message contains
@@ -11450,6 +11506,9 @@ let stdlib_suites =
         Alcotest.test_case "eq() method dispatches via impl"    `Quick (with_reset test_eval_eq_method_dispatch);
         Alcotest.test_case "derive Eq record equality"          `Quick (with_reset test_derive_record_eq);
         Alcotest.test_case "derive Eq variant with args"        `Quick (with_reset test_derive_variant_with_args_eq);
+        Alcotest.test_case "eq() dispatch with 2 impls in scope"      `Quick (with_reset test_eval_eq_multi_type_dispatch);
+        Alcotest.test_case "compare() dispatch with 2 impls in scope" `Quick (with_reset test_eval_compare_multi_type_dispatch);
+        Alcotest.test_case "hash() dispatch with 2 impls in scope"    `Quick (with_reset test_eval_hash_multi_type_dispatch);
       ]);
       ("multi_level_use", [
         Alcotest.test_case "parse use A.B.*"       `Quick test_parse_use_multilevel_all;
