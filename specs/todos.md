@@ -53,6 +53,38 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P1 — High Impact / Near-Term
 
+### Compiler (found during Differential Oracle Task 3 generator scoping, 2026-07-04)
+
+- [ ] **Tuples have no `Show` impl — compiled `println`/`to_string` on any tuple is broken (link failure or garbage output).** stdlib/prelude.march defines `impl Show(List(a))`, `impl Show(Option(a))`, `impl Show(Result(a,e))` but no `impl Show` for tuples. `println((1, 2))` fails to even LINK compiled (`Undefined symbols for architecture arm64: "_show"` — the bare `show` call inside `println`'s prelude body never resolves for a tuple argument type). `to_string((1, 2))` compiles and runs but prints garbage: `#<tag:0>` instead of `(1, 2)`. Interpreted mode is correct in both cases (`value_to_string`'s `VTuple` case, `lib/eval/eval.ml`, produces `"(1, 2)"` exactly — confirmed by an existing test, `test/test_eval.ml:330`). Repro:
+  ```march
+  mod Main do
+    fn main() do
+      println((1, 2))   -- compiled: link error "Undefined symbols: _show"
+    end
+  end
+  ```
+  and, compiling successfully but wrong:
+  ```march
+  mod Main do
+    fn main() do
+      print(to_string((1, 2)))  -- interp: "(1, 2)"   compiled: "#<tag:0>"
+      print("\n")
+    end
+  end
+  ```
+  Fix needs either a dedicated `impl Show` for tuples (stdlib, if tuple types can be named in an `impl` head) or, more likely, a compiler-level special case in the `to_string`/`show` dispatch (`lib/tir/llvm_emit.ml`'s builtin `to_string` dispatch and/or mono's interface-impl resolution) that renders tuple element-wise like the interpreter does. Differential-oracle Task 3 (`test/test_properties.ml`) deliberately excludes tuple-container generators from `gen_well_typed_module` to avoid reddening the oracle on this pre-existing bug; a tuple generator can be added once this is fixed.
+- [ ] **`to_string` on any non-primitive type (`List`, `Option`, `Result`, tuples, custom ADTs) is broken compiled — bypasses `show` entirely, unlike `println`.** `println(x)` (prelude: `print(show(x)); print("\n")`) correctly dispatches through the `Show` interface and IS fixed for `List`/`Option` (the `ffe6fba8` fix). But `to_string(x)` used directly — not via `println` — is a SEPARATE builtin (`lib/tir/llvm_emit.ml`'s `to_string` dispatch handles `Int`/`Float`/`Bool`/`String` with dedicated C helpers; everything else, including `List`/`Option`/tuples, falls through to the generic runtime `march_value_to_string(ptr)`, which only recognizes tagged-int immediates, actor Pids, and raw string cells — any other heap object hits the fallback `"#<tag:%d>"` in `runtime/march_runtime.c`). Confirmed compiled-only divergences (interpreter is correct in all cases): `to_string([1,2,3])` → `"#<tag:1>"` (interp: `"[1, 2, 3]"`); `to_string(Some(9))` → `"9"` (interp: `"Some(9)"`); `to_string(None : Option(Int))` → `"nil"` (interp: `"None"`). This was already noted in passing as a "deferred discovery" under the `Check.all` property-test fix (this file, `Done` section) but never had its own tracked entry or a minimal repro. Differential-oracle Task 3's generators route every container print through `println` directly (never `to_string`) specifically to avoid this bug; a follow-up widening those generators to also cover `to_string(container)` should wait for this fix.
+- [ ] **A bare/unpinned `None` (no `Some(_)` of the same element type at the SAME call site) fails to LINK compiled — even with an explicit type annotation.** `println(None)` fails compiled with `Undefined symbols: _show` regardless of whether `None` carries an explicit `Option(Int)` annotation (`let x : Option(Int) = None; println(x)` fails identically). This is NOT fixed by a `Some(_)` of the same type appearing elsewhere in the program (even in an immediately preceding statement) — mono resolves each `println`/`show` call site's `Show$Option` specialization independently from its own static argument type, not globally across the module, so a sibling `Some` does not "pin" the type for a separate `None` call. `None` DOES compile correctly when it appears inside a list literal alongside a `Some(_)` in the SAME call site, e.g. `println([Some(1), None, Some(3)])` (this is the exact repro `ffe6fba8`'s own regression test uses and IS green). Repro (fails):
+  ```march
+  mod Main do
+    fn main() do
+      let x : Option(Int) = None
+      println(x)   -- link error: Undefined symbols: _show
+    end
+  end
+  ```
+  Likely same root cause as the two entries above (mono's interface-impl specialization needs a concrete element type to resolve `Show$Option.show`, and a lone `None` carries none at the call site — even a static annotation on the binding doesn't flow into the specialization). `test/test_properties.ml`'s new generic-container generators (Differential Oracle Task 3) deliberately never emit a bare `None` for this reason — every `Option` print is `Some(n)`, and every `None` appears only inside a mixed `[Some(...), None, ...]` list literal.
+
 ### Compiler (found during Wave 4 Task 5 semantics-notes verification, 2026-07-03)
 
 - [ ] **Derived-method calls crash compiled on `Newtype`-repr variants (single ctor, single field) — SIGSEGV / non-exhaustive panic.** Calling a derived `compare`, `hash`, or `eq` *by name* on a value of a single-constructor single-field variant type works interpreted but crashes the compiled binary. Verified matrix at `f8b25df7`:

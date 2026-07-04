@@ -454,6 +454,166 @@ let gen_nested_match_module : string Gen.t =
     Gen.nat_small
     Gen.nat_small
 
+(* ── New generators: generic-container println/show output ──────────────
+   Guards the `ffe6fba8` bug class: compiled `println([1,2,3])` (and any
+   generic container routed through prelude's `impl Show(List(a)) when
+   Show(a)` / `impl Show(Option(a)) when Show(a)`) never worked in compiled
+   mode — mono enqueued the specialized impl with an empty substitution, so
+   the nested element-level `show(x)` call survived to llvm_emit unresolved
+   and got silently rebound to the wrong impl (SIGSEGV / panic depending on
+   element type).  Fixed in `ffe6fba8`.  These generators are regression
+   protection for that whole family, so they must all be fully GREEN.
+
+   IMPORTANT — scope carefully verified by hand (`_build/default/bin/main.exe`
+   probes) before writing these, because two ADJACENT shapes are still
+   genuinely broken today and must NOT be generated here (that would redden
+   an otherwise-green oracle on a real, separate bug rather than the fixed
+   one):
+     - Tuples have NO `impl Show` in stdlib/prelude.march at all.
+       `println((1, 2))` fails to even LINK (`Undefined symbols: _show`) and
+       `to_string((1, 2))` compiles but prints garbage `#<tag:N>` (compiled
+       `to_string` on any non-primitive type bypasses `show` entirely — see
+       `specs/todos.md` "Deferred discoveries" under the `Check.all` fix, and
+       `.superpowers/sdd/oracle-task-3-report.md` for the fresh repro this
+       task found).  So: no tuple generator here.
+     - A bare/unpinned `None` (no `Some` anywhere to pin the element type)
+       ALSO fails to link compiled (`println(None)`) even with an explicit
+       `Option(Int)` annotation, and `to_string(None : Option(Int))` compiles
+       but prints `nil` instead of `None`.  So: every `Option`/`List(Option)`
+       generator below guarantees at least one `Some(_)` occurrence and never
+       emits a bare `None` on its own.
+     - `to_string(container)` (as opposed to `println(container)`, which
+       goes through prelude's `show`) is ALSO broken compiled for every
+       non-primitive type (confirmed: `to_string([1,2,3])` -> `#<tag:1>`,
+       `to_string(Some(9))` -> `9`, both compiled-only divergences from the
+       interpreter).  So every generator below prints via `println(<container
+       literal>)` directly — never `to_string(<container>)` — matching the
+       exact repro shape from `ffe6fba8`'s own regression tests
+       (`test/test_codegen.ml`'s `iface_impl_mono_codegen` suite). *)
+
+(** Module that prints a non-empty list of Ints via println/show.
+    Guards: println([1,2,3]) — the literal ffe6fba8 repro (was SIGSEGV). *)
+let gen_println_int_list_module : string Gen.t =
+  Gen.map
+    (fun xs ->
+       let elems = String.concat ", " (List.map string_of_int xs) in
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn main() do\n\
+         \    println([%s])\n\
+         \  end\n\
+          end"
+         elems)
+    (Gen.list_size (Gen.int_range 1 5) (Gen.int_range (-100) 100))
+
+(** Module that prints a non-empty list of Strings via println/show.
+    Guards: println(["a","b"]) — ffe6fba8's non-exhaustive-panic variant.
+    Strings are kept to a small safe alphanumeric alphabet: no quotes,
+    backslashes, or newlines, so the generated source is always
+    well-formed and the printed form is unambiguous. *)
+let gen_println_string_list_module : string Gen.t =
+  let gen_word : string Gen.t =
+    Gen.map
+      (fun cs -> String.init (List.length cs) (List.nth cs))
+      (Gen.list_size (Gen.int_range 1 4)
+         (Gen.map (fun i -> Char.chr (Char.code 'a' + i)) (Gen.int_range 0 25)))
+  in
+  Gen.map
+    (fun words ->
+       let elems = String.concat ", " (List.map (Printf.sprintf "%S") words) in
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn main() do\n\
+         \    println([%s])\n\
+         \  end\n\
+          end"
+         elems)
+    (Gen.list_size (Gen.int_range 1 5) gen_word)
+
+(** Module that prints Option(Int) via println/show.  Every value printed
+    here is `Some(n)` — never a bare `None` call — because a standalone
+    `println(None)` fails to LINK compiled (`Undefined symbols: _show`)
+    even when a `Some(...)` of the same element type appears elsewhere in
+    the program: verified by hand that mono resolves each `println` call
+    site's `Show$Option` specialization independently from its OWN static
+    argument, not globally across the module, so an earlier sibling
+    `println(Some(n))` does NOT pin the type for a later, separate
+    `println(None)` call (an earlier draft of this generator emitted
+    exactly that shape and produced real link failures — see
+    `.superpowers/sdd/oracle-task-3-report.md`).  `None` IS safely
+    exercised elsewhere in this file, but only inside a list literal
+    alongside a `Some(_)` in the SAME call site — see
+    [gen_println_list_of_options_module] below.
+    Guards: println(Some(5)) (ffe6fba8's SIGSEGV/SIGBUS Option variant). *)
+let gen_println_option_module : string Gen.t =
+  Gen.map2
+    (fun n m ->
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn main() do\n\
+         \    println(Some(%d))\n\
+         \    println(Some(%d))\n\
+         \  end\n\
+          end"
+         n m)
+    (Gen.int_range (-100) 100)
+    (Gen.int_range (-100) 100)
+
+(** Module that prints a nested list of Ints, `List(List(Int))`, via
+    println/show — every list at every level is non-empty (an empty list
+    literal, e.g. `[]`, fails to link compiled: verified by hand,
+    `println([])`/`println([[1],[]])`'s empty-inner-list sibling can still
+    compile since the OUTER element type is pinned by a non-empty sibling,
+    but to stay safely inside the green subset every inner list generated
+    here is non-empty too).
+    Guards: println([[1,2],[3]]) — ffe6fba8's nested/recursive-mono-
+    termination variant (Show$List specializing Show$List again). *)
+let gen_println_nested_list_module : string Gen.t =
+  let gen_inner : string Gen.t =
+    Gen.map
+      (fun xs -> "[" ^ String.concat ", " (List.map string_of_int xs) ^ "]")
+      (Gen.list_size (Gen.int_range 1 3) (Gen.int_range (-50) 50))
+  in
+  Gen.map
+    (fun inners ->
+       let elems = String.concat ", " inners in
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn main() do\n\
+         \    println([%s])\n\
+         \  end\n\
+          end"
+         elems)
+    (Gen.list_size (Gen.int_range 1 3) gen_inner)
+
+(** Module that prints a non-empty list of Option(Int), `List(Option(Int))`
+    — always includes at least one `Some(_)` so the element type is pinned
+    (an all-`None` list, e.g. `[None, None]`, fails to link compiled:
+    verified by hand — same root cause as the bare-`None` case above).
+    Guards: println([Some(1), None, Some(3)]) — the exact ffe6fba8
+    regression-test repro for `List(Option(Int))`. *)
+let gen_println_list_of_options_module : string Gen.t =
+  Gen.map
+    (fun opts ->
+       (* Force at least one Some by construction: map (bool, int) pairs to
+          Some/None, then guarantee element 0 is Some so the list is never
+          all-None regardless of what the bools drew. *)
+       let rendered =
+         List.mapi
+           (fun i (is_some, n) ->
+              if i = 0 || is_some then Printf.sprintf "Some(%d)" n else "None")
+           opts
+       in
+       let elems = String.concat ", " rendered in
+       Printf.sprintf
+         "mod Main do\n\
+         \  fn main() do\n\
+         \    println([%s])\n\
+         \  end\n\
+          end"
+         elems)
+    (Gen.list_size (Gen.int_range 1 5) (Gen.pair Gen.bool (Gen.int_range (-50) 50)))
+
 (** Any of the well-typed module generators (original + new). *)
 let gen_well_typed_module : string Gen.t =
   Gen.oneof [
@@ -477,6 +637,12 @@ let gen_well_typed_module : string Gen.t =
     gen_string_bool_module;
     gen_list_module;
     gen_nested_match_module;
+    (* Generic-container println/show generators (ffe6fba8 regression guard) *)
+    gen_println_int_list_module;
+    gen_println_string_list_module;
+    gen_println_option_module;
+    gen_println_nested_list_module;
+    gen_println_list_of_options_module;
   ]
 
 (* ── TIR AST generators ─────────────────────────────────────────────────── *)
@@ -1693,6 +1859,82 @@ let prop_oracle_println_list =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
+(* ── Oracle properties: generic-container println/show (ffe6fba8 class) ───
+   These five props run the ACTUAL interpreter-vs-compiled diff (via
+   [oracle_check]) on the five generic-container generators defined above.
+   The generators are ALSO unioned into [gen_well_typed_module] (crash /
+   structural coverage), but that pool only feeds the no-crash + TIR-pass
+   invariant properties — none of those call [oracle_check], so without
+   these dedicated props the diff coverage that is the whole point of the
+   ffe6fba8 regression guard would never run in the committed suite.  Each
+   mirrors [prop_oracle_println_arith] exactly: Ok -> pass, Error -> fail
+   with the interp/compiled diff logged, None -> handled skip. *)
+
+(** Oracle: println(List(Int)) — interp = compiled (ffe6fba8 regression). *)
+let prop_oracle_container_int_list =
+  Test.make ~name:"oracle (gen): println(List(Int)) — interp = compiled"
+    ~count:50
+    gen_println_int_list_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle: println(List(String)) — interp = compiled (ffe6fba8 regression). *)
+let prop_oracle_container_string_list =
+  Test.make ~name:"oracle (gen): println(List(String)) — interp = compiled"
+    ~count:50
+    gen_println_string_list_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle: println(Option(Int)) — interp = compiled (ffe6fba8 regression). *)
+let prop_oracle_container_option =
+  Test.make ~name:"oracle (gen): println(Option(Int)) — interp = compiled"
+    ~count:50
+    gen_println_option_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle: println(List(List(Int))) — interp = compiled (ffe6fba8 regression). *)
+let prop_oracle_container_nested_list =
+  Test.make ~name:"oracle (gen): println(List(List(Int))) — interp = compiled"
+    ~count:50
+    gen_println_nested_list_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle: println(List(Option(Int))) — interp = compiled (ffe6fba8 regression). *)
+let prop_oracle_container_list_of_options =
+  Test.make ~name:"oracle (gen): println(List(Option(Int))) — interp = compiled"
+    ~count:50
+    gen_println_list_of_options_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
 (* ── Unit tests for classify_compile (RED proof for Task 1) ─────────────── *)
 
 (** Before this change, [oracle_check]'s compile step collapsed ALL nonzero
@@ -1843,5 +2085,11 @@ let () =
       prop_oracle_println_hof;
       prop_oracle_println_tuple;
       prop_oracle_println_list;
+      (* Generic-container diff coverage (ffe6fba8 class) — Task 3 Phase 2a *)
+      prop_oracle_container_int_list;
+      prop_oracle_container_string_list;
+      prop_oracle_container_option;
+      prop_oracle_container_nested_list;
+      prop_oracle_container_list_of_options;
     ];
   ]
