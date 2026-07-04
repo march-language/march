@@ -4044,6 +4044,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     | Ast.ESpawn (actor, _) ->
       ignore (infer_expr env actor);
+      (* Both backends dispatch `spawn` by the actor's *name*, resolved at
+         compile time (it selects a statically generated `<Actor>_spawn`
+         function).  There is no runtime actor-descriptor value, so the argument
+         must be a plain actor name — not a computed expression.  The TIR
+         lowering assumes exactly this shape (`ECon(_, [], _)` / `EVar`); reject
+         anything else here with a clean diagnostic rather than letting a
+         well-typed program reach the internal `failwith` in lowering. *)
+      (match actor with
+       | Ast.ECon (_, [], _) | Ast.EVar _ -> ()
+       | _ ->
+         Err.error env.errors ~span:(span_of_expr actor)
+           "`spawn` needs a plain actor name written directly, like \
+            `spawn(Counter)`.\n\
+            A computed actor expression (from an `if`, `match`, or function \
+            call) isn't supported: March resolves which actor to spawn at \
+            compile time from its name.");
       TCon ("Pid", [fresh_var env.level])
 
     (* ── REPL result reference ─────────────────────────────────────── *)

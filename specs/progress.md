@@ -282,6 +282,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-04 — `spawn(<computed expr>)` compile-time crash fixed: shape restriction moved into the typechecker)
+
+Fixed a compiled-backend-only compiler crash on a well-typed program: `spawn(<computed actor expression>)` — e.g. `spawn(if true do Counter else Counter end)` — passed `--check` (exit 0) but crashed `--compile` with an uncaught `Fatal error: exception Failure("TIR lower: ESpawn argument must be a plain actor name")` (exit 2, no binary). Distinct from the known "Monomorphization limit reached" P0. Full repro, root-cause trace, and fix are in `specs/todos.md`'s Done section (search "computed expr").
+
+The parser and typechecker accepted `spawn(e)` for *any* expression, but TIR lowering (`lib/tir/lower.ml`) only handles a bare actor name (`ECon(_,[],_)`/`EVar` — `spawn` dispatches by *name* to a statically generated `<Actor>_spawn` function) and `failwith`s otherwise, with no `try/with` around the compile pipeline in `bin/main.ml`. Both backends require a plain actor name (the interpreter, `lib/eval/eval.ml:7122-7127`, already `eval_error`s on a complex expression), so "spawn a computed actor" is a feature that exists in *neither* backend — the right fix is to reject it earlier, not to invent runtime actor-descriptor values. The `ESpawn` arm in `lib/typecheck/typecheck.ml` now emits a structured `Err.error` (pointing at the argument span) for anything other than a plain actor name, so `--check`/`--compile`/interpret all reject the program uniformly before reaching the internal `failwith` (kept as a now-unreachable invariant backstop). Valid `spawn(Counter)` is unchanged (compiles + runs).
+
+- **Regression tests:** 2 new `test/test_compiler.ml` typecheck cases — `spawn computed actor: rejected` (error present + diagnostic mentions "spawn"/"plain actor name") and `spawn plain actor name: ok` (no false positive on the valid form).
+- **Gates:** six runners green: **394 compiler (+2 new) / 230 eval / 380 codegen / 799 stdlib / 53 stdlib_march / 29 snapshots — zero `.expected` diffs** (a typecheck-only change; no TIR-shape churn expected, and none observed). The lone stdlib "failure" (`test_compiled_actor_program_exits_without_kill`, exit 142 = SIGALRM) was a load-induced 60s-watchdog timeout during a 109s heavily-loaded full-suite run — it passes 3/3 in isolation (~0.7s each) and is unrelated to this typecheck-only change.
+- **Reference:** fix commit adjacent to this entry; full writeup in `specs/todos.md`'s Done section.
+
 ## Current State (as of 2026-07-04 — named derived-method calls fixed on `Newtype`-repr variants)
 
 Fixed the P1 filed at Wave 4 Task 5 semantics-notes verification: calling a derived `eq`/`compare`/`hash` *by name* on a single-ctor single-field ("`Newtype`-repr") variant type crashed the compiled binary (SIGSEGV or non-exhaustive panic) while the interpreter and the `==` operator path were always correct. Full repro matrix, root-cause trace, and fix description are in `specs/todos.md`'s Done section (search "Named derived-method calls").
