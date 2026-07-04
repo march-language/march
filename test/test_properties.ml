@@ -614,6 +614,196 @@ let gen_println_list_of_options_module : string Gen.t =
          elems)
     (Gen.list_size (Gen.int_range 1 5) (Gen.pair Gen.bool (Gen.int_range (-50) 50)))
 
+(* ── Derived-method-call generators (Newtype-derive fix regression guard,
+   commit 6cc676fc, 2026-07-04) ────────────────────────────────────────────
+   Each generator derives Eq/Ord/Hash for a type, then calls the derived
+   method BY NAME (`eq(x,y)`/`compare(x,y)`/`hash(x)`) — the path that used
+   to crash compiled on Newtype-repr (single-ctor single-field) variants:
+   SIGSEGV for an Int payload, a non-exhaustive-panic for a String payload.
+   The `==` OPERATOR path (`ensure_adt_eq_fn`, Repr-aware for the niche/
+   Boxed cases) was never affected by 6cc676fc's bug, and each generator
+   below also exercises `==` back-to-back with named `eq()` on the SAME
+   value — the exact discriminator that isolated "named-method-only" from
+   6cc676fc's own regression tests (`test_newtype_derived_eq_operator_vs_
+   named_parity` in test_codegen.ml).
+
+   Derived Ord/Hash on VARIANTS intentionally ignore ctor payload — only the
+   constructor's declared index matters (`syntax_reference.md` "Derived
+   Ord/Hash ignore constructor payloads"), so `compare`'s printed value is a
+   payload-independent, stable 0 for any same-constructor pair regardless of
+   which random payload the generator drew — deterministic across interp and
+   compiled by construction, not by luck. Records are the one case where
+   derived Ord/Hash DO look at payload (field-by-field) — see
+   [gen_derived_method_record_module] below for why `hash` is excluded there.
+
+   NEWTYPE STRING-PAYLOAD `==` OPERATOR CARVE-OUT (real bug found while
+   scoping this generator, distinct from 6cc676fc — filed to
+   specs/todos.md): for `type WrapS = WrapS(String)` (Newtype repr, String
+   payload), the `==` OPERATOR gives the WRONG answer compiled (`false` for
+   two content-equal strings; interp correctly gives `true`) while named
+   `eq()` on the same value is correct. Root cause: `ensure_adt_eq_fn`
+   (`lib/tir/llvm_eq.ml`) special-cases the Niche (Option-shaped) repr but
+   never consults `Repr.repr_of_ty` for `Newtype` — a String-payload Newtype
+   value is a bare heap string pointer with no ctor-tag header, but
+   `ensure_adt_eq_fn`'s generic fallback unconditionally reads a "ctor tag"
+   at `payload_ptr + 8` (inside the string's own heap layout) as if it were
+   a Boxed ADT cell, comparing garbage between two distinct string
+   allocations. Verified by hand (`.oraclehome/scratch2*.march` probes,
+   `--emit-llvm` IR dump showing `__march_eq_WrapS` takes the ctor-tag-table
+   path with no `march_string_eq` call) — an Int-payload Newtype does NOT
+   hit this (tagged scalar, never enters `ensure_adt_eq_fn` at all: `ty_a`
+   is `i64` not `ptr` at the `==`-lowering call site, llvm_emit.ml:1051).
+   Per this plan's "constrain to the currently-working subset" rule, the
+   String-payload Newtype generator below (Step 1b) calls named `eq()`
+   ONLY — never `==` — on that shape; the `==`-vs-`eq` discriminator is
+   still exercised on the Int-payload Newtype (Step 1a), Boxed (Step 1c),
+   multi-ctor enum (Step 1d), and record (Step 1e) shapes, all of which are
+   green via `==`. *)
+
+(** (a) Newtype-repr (single-ctor single-field), Int payload — the exact
+    shape 6cc676fc fixed for named eq/compare/hash. Exercises `==` AND
+    named `eq()` back-to-back on the same values (the discriminator). *)
+let gen_derived_method_newtype_int_module : string Gen.t =
+  Gen.map3
+    (fun n1 n2 same ->
+       let n2' = if same then n1 else n2 in
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Eq, Ord, Hash for Wrap\n\
+         \  fn main() do\n\
+         \    let a = Wrap(%d)\n\
+         \    let b = Wrap(%d)\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(int_to_string(compare(a, b)))\n\
+         \  end\n\
+          end"
+         n1 n2')
+    (Gen.int_range (-100) 100)
+    (Gen.int_range (-100) 100)
+    Gen.bool
+
+(** (b) Newtype-repr, String payload — 6cc676fc's non-exhaustive-panic
+    variant for named methods (now fixed). Named `eq()`/`compare()` ONLY —
+    the `==` OPERATOR on this exact shape has a separate, real, STILL-OPEN
+    bug (see the file-level comment above and specs/todos.md); this
+    generator deliberately stays inside the working subset per this plan's
+    "constrain to currently-working subset" rule. *)
+let gen_derived_method_newtype_string_module : string Gen.t =
+  let gen_word : string Gen.t =
+    Gen.map
+      (fun cs -> String.init (List.length cs) (List.nth cs))
+      (Gen.list_size (Gen.int_range 1 6)
+         (Gen.map (fun i -> Char.chr (Char.code 'a' + i)) (Gen.int_range 0 25)))
+  in
+  Gen.map3
+    (fun w1 w2 same ->
+       let w2' = if same then w1 else w2 in
+       Printf.sprintf
+         "mod Main do\n\
+         \  type WrapS = WrapS(String)\n\
+         \  derive Eq, Ord, Hash for WrapS\n\
+         \  fn main() do\n\
+         \    let a = WrapS(%S)\n\
+         \    let b = WrapS(%S)\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(int_to_string(compare(a, b)))\n\
+         \  end\n\
+          end"
+         w1 w2')
+    gen_word
+    gen_word
+    Gen.bool
+
+(** (c) Multi-field single-ctor (Boxed repr, NOT Newtype) — negative
+    control confirming the Boxed path (always worked) stays correct.
+    Exercises `==` and named `eq()`. *)
+let gen_derived_method_boxed_module : string Gen.t =
+  Gen.map3
+    (fun a1 a2 same ->
+       let a2' = if same then a1 else a2 in
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Pair = Pair(Int, Int)\n\
+         \  derive Eq, Ord, Hash for Pair\n\
+         \  fn main() do\n\
+         \    let a = Pair(%d, %d)\n\
+         \    let b = Pair(%d, %d)\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(int_to_string(compare(a, b)))\n\
+         \  end\n\
+          end"
+         (fst a1) (snd a1) (fst a2') (snd a2'))
+    (Gen.pair (Gen.int_range (-50) 50) (Gen.int_range (-50) 50))
+    (Gen.pair (Gen.int_range (-50) 50) (Gen.int_range (-50) 50))
+    Gen.bool
+
+(** (d) Multi-ctor enum — never Newtype/Niche-shaped with >=3 ctors or two
+    non-nullary ctors, so this always took the general Boxed ctor-table
+    path. Exercises `==` and named `eq()`; `compare` prints the
+    payload-IGNORING ctor-index difference (documented semantics). *)
+let gen_derived_method_enum_module : string Gen.t =
+  Gen.map3
+    (fun pick_a pick_b n ->
+       let ctor_of pick = match pick mod 2 with
+         | 0 -> Printf.sprintf "Circle(%d)" n
+         | _ -> Printf.sprintf "Square(%d)" n
+       in
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Shape = Circle(Int) | Square(Int)\n\
+         \  derive Eq, Ord, Hash for Shape\n\
+         \  fn main() do\n\
+         \    let a = %s\n\
+         \    let b = %s\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(int_to_string(compare(a, b)))\n\
+         \  end\n\
+          end"
+         (ctor_of pick_a) (ctor_of pick_b))
+    Gen.nat_small
+    Gen.nat_small
+    (Gen.int_range (-50) 50)
+
+(** (e) Record — derived Ord for records DOES look at payload (field-by-
+    field, unlike variants), so `compare` here is genuinely payload-
+    sensitive; still deterministic interp-vs-compiled since it's pure Int
+    field comparison. `hash` is deliberately NOT printed here: the derived
+    Hash body calls the polymorphic `hash()` builtin per field, and the
+    INTERPRETER's `hash` builtin is OCaml's `Hashtbl.hash` while the
+    COMPILED backend uses a distinct custom hash (`march_hash_int` et al,
+    runtime/march_runtime.c) — the two are intentionally different
+    algorithms with no cross-backend value equality contract (confirmed by
+    hand: `hash({x:1,y:2})` prints 28043382405 interpreted vs
+    6305855436935449413 compiled — expected, not a bug). Comparing hash
+    VALUES across backends would be a spurious, permanent divergence
+    unrelated to the Newtype-derive fix this generator guards; comparing
+    `eq`/`compare`/`==` (this generator's actual job) never touches hash's
+    backend-specific bits. *)
+let gen_derived_method_record_module : string Gen.t =
+  Gen.map3
+    (fun p1 p2 same ->
+       let p2' = if same then p1 else p2 in
+       Printf.sprintf
+         "mod Main do\n\
+         \  type Point = { x: Int, y: Int }\n\
+         \  derive Eq, Ord, Hash for Point\n\
+         \  fn main() do\n\
+         \    let a = { x: %d, y: %d }\n\
+         \    let b = { x: %d, y: %d }\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(int_to_string(compare(a, b)))\n\
+         \  end\n\
+          end"
+         (fst p1) (snd p1) (fst p2') (snd p2'))
+    (Gen.pair (Gen.int_range (-50) 50) (Gen.int_range (-50) 50))
+    (Gen.pair (Gen.int_range (-50) 50) (Gen.int_range (-50) 50))
+    Gen.bool
+
 (** Any of the well-typed module generators (original + new). *)
 let gen_well_typed_module : string Gen.t =
   Gen.oneof [
@@ -643,6 +833,13 @@ let gen_well_typed_module : string Gen.t =
     gen_println_option_module;
     gen_println_nested_list_module;
     gen_println_list_of_options_module;
+    (* Derived-method-call generators (Newtype-derive fix regression guard,
+       Task 4 / Phase 2b) *)
+    gen_derived_method_newtype_int_module;
+    gen_derived_method_newtype_string_module;
+    gen_derived_method_boxed_module;
+    gen_derived_method_enum_module;
+    gen_derived_method_record_module;
   ]
 
 (* ── TIR AST generators ─────────────────────────────────────────────────── *)
@@ -1935,6 +2132,94 @@ let prop_oracle_container_list_of_options =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
+(* ── Oracle properties: derived-method calls (Newtype-derive fix class,
+   6cc676fc) ────────────────────────────────────────────────────────────
+   These five props run the ACTUAL interpreter-vs-compiled diff (via
+   [oracle_check]) on the five derived-method generators defined above.
+   As with the container props, the generators are ALSO unioned into
+   [gen_well_typed_module] for crash/structural coverage, but only these
+   dedicated props exercise the diff itself — that's the whole point of
+   this regression guard, since the fixed bug was a compiled-only crash
+   that a no-crash-only property would never have caught before the fix
+   (and wouldn't catch a REGRESSION of the fix after it). *)
+
+(** Oracle (a): derived eq/compare/hash named calls on a Newtype-repr
+    (single-ctor single-field) Int-payload type — the exact shape 6cc676fc
+    fixed (was SIGSEGV compiled). *)
+let prop_oracle_derived_method_newtype_int =
+  Test.make ~name:"oracle (gen): derived eq/compare on Newtype(Int) — interp = compiled"
+    ~count:50
+    gen_derived_method_newtype_int_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (b): derived eq/compare named calls on a Newtype-repr
+    String-payload type — 6cc676fc's non-exhaustive-panic variant (now
+    fixed). Named-call only (see the file-level comment above the
+    generator: the `==` operator on this exact shape has its own, separate,
+    STILL-OPEN bug, filed to specs/todos.md, not this generator's job to
+    guard). *)
+let prop_oracle_derived_method_newtype_string =
+  Test.make ~name:"oracle (gen): derived eq/compare on Newtype(String) — interp = compiled"
+    ~count:50
+    gen_derived_method_newtype_string_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (c): derived eq/compare/hash named calls on a Boxed (multi-field
+    single-ctor) type — negative control, always worked, must stay green. *)
+let prop_oracle_derived_method_boxed =
+  Test.make ~name:"oracle (gen): derived eq/compare on Boxed ctor — interp = compiled"
+    ~count:50
+    gen_derived_method_boxed_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (d): derived eq/compare/hash named calls on a multi-ctor enum —
+    negative control, always worked, must stay green. *)
+let prop_oracle_derived_method_enum =
+  Test.make ~name:"oracle (gen): derived eq/compare on multi-ctor enum — interp = compiled"
+    ~count:50
+    gen_derived_method_enum_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
+(** Oracle (e): derived eq/compare named calls on a record (field-by-field
+    Ord, unlike variants) — negative control, always worked, must stay
+    green. `hash` deliberately excluded (see the generator's doc comment:
+    interp/compiled use genuinely different hash algorithms by design). *)
+let prop_oracle_derived_method_record =
+  Test.make ~name:"oracle (gen): derived eq/compare on record — interp = compiled"
+    ~count:50
+    gen_derived_method_record_module
+    (fun src ->
+       match oracle_check src with
+       | None           -> true
+       | Some (Ok ())   -> true
+       | Some (Error (interp, compiled)) ->
+         Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
+         false)
+
 (* ── Unit tests for classify_compile (RED proof for Task 1) ─────────────── *)
 
 (** Before this change, [oracle_check]'s compile step collapsed ALL nonzero
@@ -2091,5 +2376,12 @@ let () =
       prop_oracle_container_option;
       prop_oracle_container_nested_list;
       prop_oracle_container_list_of_options;
+      (* Derived-method-call diff coverage (Newtype-derive fix class,
+         6cc676fc) — Task 4 Phase 2b *)
+      prop_oracle_derived_method_newtype_int;
+      prop_oracle_derived_method_newtype_string;
+      prop_oracle_derived_method_boxed;
+      prop_oracle_derived_method_enum;
+      prop_oracle_derived_method_record;
     ];
   ]
