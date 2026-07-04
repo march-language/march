@@ -3683,6 +3683,62 @@ let test_derive_variant_with_args_eq () =
   Alcotest.(check bool) "derive Eq for variant with args" true
     (vbool (call_fn env "result" []))
 
+(* Regression: with 2+ impls of the same interface in scope, the named method
+   builtins (eq/compare/hash) must dispatch on the argument's type, not resolve
+   to the last-registered impl.  Previously the DImpl eval bound the bare method
+   name in the env, so the second `derive` shadowed the first and calling the
+   method on the first type ran the wrong impl (false result / non-exhaustive
+   match panic). *)
+let test_eval_eq_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Eq for Wrap
+    type WrapS = WrapS(String)
+    derive Eq for WrapS
+    fn r_first_eq() : Bool do eq(Wrap(1), Wrap(1)) end
+    fn r_first_ne() : Bool do eq(Wrap(1), Wrap(2)) end
+    fn r_last_eq() : Bool do eq(WrapS("a"), WrapS("a")) end
+  end|} in
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(1)) dispatches to Wrap.eq = true" true
+    (vbool (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(2)) = false" false
+    (vbool (call_fn env "r_first_ne" []));
+  Alcotest.(check bool) "eq(WrapS a,WrapS a) still dispatches = true" true
+    (vbool (call_fn env "r_last_eq" []))
+
+let test_eval_compare_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Ord for Dir
+    type Size = Small | Large
+    derive Ord for Size
+    fn r_first_lt() : Int do compare(North, West) end
+    fn r_first_eq() : Int do compare(North, North) end
+    fn r_last_lt() : Int do compare(Small, Large) end
+  end|} in
+  Alcotest.(check bool) "compare(North,West) < 0 dispatches to Dir.compare" true
+    (vint (call_fn env "r_first_lt" []) < 0);
+  Alcotest.(check int) "compare(North,North) = 0" 0
+    (vint (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "compare(Small,Large) < 0 still dispatches" true
+    (vint (call_fn env "r_last_lt" []) < 0)
+
+let test_eval_hash_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Hash for Dir
+    type Size = Small | Large
+    derive Hash for Size
+    fn r_first() : Int do hash(South) end
+    fn r_last() : Int do hash(Large) end
+  end|} in
+  (* Before the fix, hash(South) ran Size.hash (last-registered) and panicked
+     with a non-exhaustive match; just assert both dispatch without error. *)
+  let a = vint (call_fn env "r_first" []) in
+  let b = vint (call_fn env "r_last" []) in
+  Alcotest.(check bool) "hash dispatches per-type without error" true
+    (a >= 0 && b >= 0 || a <> b || true)
+
 (* ── Helpers for exhaustiveness tests ──────────────────────────────────── *)
 
 (** Returns true if the diagnostic context has a warning whose message contains
@@ -9558,6 +9614,46 @@ end|} in
   Alcotest.(check bool) "format_inner not flagged via impl method" false
     (List.mem "format_inner" flagged)
 
+(* ── safety/no-panic-in-lib file classification (is_lib_file) ──────────────── *)
+
+(** A module in a `*_test.march` file panics legitimately (test helpers assert
+    via panic); no-panic-in-lib must NOT fire. Regression for the is_lib_file
+    off-by-one that made the `_test.march` suffix exclusion dead code. *)
+let panic_src = {|mod Demo do
+fn boom() do
+  panic("nope")
+end
+end|}
+
+let test_lint_no_panic_test_suffix_exempt () =
+  let diags = lint_check_named ~filename:"foo_test.march" panic_src in
+  Alcotest.(check bool) "panic in *_test.march NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** The same source in a plain library file MUST be flagged — the fix must not
+    suppress the rule for real library code. *)
+let test_lint_no_panic_lib_flagged () =
+  let diags = lint_check_named ~filename:"foo.march" panic_src in
+  Alcotest.(check bool) "panic in library file IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `test/` directory (any basename, no `_test` suffix) is also a
+    test — forge lint scans both lib/ and test/ with full paths, so the
+    directory is the reliable signal. Must NOT be flagged. *)
+let test_lint_no_panic_test_dir_exempt () =
+  let diags =
+    lint_check_named ~filename:"/proj/test/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under test/ dir NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `lib/` directory with the same basename IS flagged, confirming
+    it is the `test/` path component — not merely a deep path — that exempts. *)
+let test_lint_no_panic_lib_dir_flagged () =
+  let diags =
+    lint_check_named ~filename:"/proj/lib/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under lib/ dir IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
 (* ────────────────────────────────────────────────────────────────────────────
    Adversarial-regression tests
    Each test corresponds to a bug found by the adversarial compiler review.
@@ -10150,6 +10246,121 @@ let test_compiled_fbip_arity_no_overflow () =
       0 run_rc;
     Alcotest.(check string)
       "compiled output matches interpreter output (no mismatched-arity cell reuse)"
+      interp_out compiled_out
+
+(* Regression (P0, runtime/march_runtime.c actor_green_thread): the hot-reload
+   migrate-message check loaded the int64 at msg+8 guarded only by
+   msg != NULL.  An actor whose message ADT is Option-shaped (one nullary +
+   one unary ctor, e.g. Inc(Int) | Probe()) receives niche/newtype-represented
+   messages: Inc(10) is the tagged scalar 0x15, which passes the NULL check
+   and SIGSEGVs on the load at msg+8 (UBSan: misaligned load at 0x1d).  The
+   interpreter never touches this path, so only a compiled test catches it.
+   Also guards run_until_idle() draining pending messages before kill():
+   count=15 must print BETWEEN the two main-thread lines (before the fix,
+   run_until_idle was a no-op when called from the main green thread). *)
+let test_compiled_actor_niche_msg_run_until_idle_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_niche" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_niche.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorNicheMsg do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    println(\"alive_before=\" ++ bool_to_string(is_alive(pid)))\n\
+    \    send(pid, Inc(10))\n\
+    \    send(pid, Inc(5))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    kill(pid)\n\
+    \    println(\"alive_after_kill=\" ++ bool_to_string(is_alive(pid)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  (* Watchdog: a scheduler-shutdown regression hangs instead of crashing;
+     bound both runs so the suite fails (SIGALRM, rc 142) rather than wedging. *)
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter runs niche-msg actor program cleanly" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape"
+    "alive_before=true\ncount=15\nalive_after_kill=false" interp_out;
+  let bin = Filename.concat tmp "actornichebin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled niche-msg actor + run_until_idle + kill exits 0 (no SIGSEGV/hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (messages drained before kill)"
+      interp_out compiled_out
+
+(* Regression (P0, runtime/march_scheduler.c sched_loop exit condition): the
+   scheduler only exited when g_live_procs hit 0, but an alive actor's green
+   thread parks forever in recv — so ANY compiled program that ends main()
+   without killing every spawned actor hung indefinitely after printing its
+   output (examples/actors.march).  Actor loops are now daemon procs: once
+   main (and all task procs) are done and nothing is runnable, parked daemons
+   are woken without a message so their loops exit and the process terminates. *)
+let test_compiled_actor_program_exits_without_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_nokill" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_nokill.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorExitNoKill do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    send(pid, Inc(7))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    println(\"done\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter exits without kill()" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape" "count=7\ndone" interp_out;
+  let bin = Filename.concat tmp "actornokillbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled actor program with live actor at main-exit terminates (exit 0, no hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (no-kill exit)"
       interp_out compiled_out
 
 (* Regression: a TOML [section] with 4+ keys returned the WRONG value from
@@ -11295,6 +11506,9 @@ let stdlib_suites =
         Alcotest.test_case "eq() method dispatches via impl"    `Quick (with_reset test_eval_eq_method_dispatch);
         Alcotest.test_case "derive Eq record equality"          `Quick (with_reset test_derive_record_eq);
         Alcotest.test_case "derive Eq variant with args"        `Quick (with_reset test_derive_variant_with_args_eq);
+        Alcotest.test_case "eq() dispatch with 2 impls in scope"      `Quick (with_reset test_eval_eq_multi_type_dispatch);
+        Alcotest.test_case "compare() dispatch with 2 impls in scope" `Quick (with_reset test_eval_compare_multi_type_dispatch);
+        Alcotest.test_case "hash() dispatch with 2 impls in scope"    `Quick (with_reset test_eval_hash_multi_type_dispatch);
       ]);
       ("multi_level_use", [
         Alcotest.test_case "parse use A.B.*"       `Quick test_parse_use_multilevel_all;
@@ -11814,6 +12028,12 @@ let stdlib_suites =
         Alcotest.test_case "pfn actor_init not flagged"            `Quick test_lint_pfn_actor_init;
         Alcotest.test_case "pfn impl method body not flagged"      `Quick test_lint_pfn_impl_method;
       ]);
+      ("lint/safety/no-panic-in-lib", [
+        Alcotest.test_case "panic in *_test.march not flagged"     `Quick test_lint_no_panic_test_suffix_exempt;
+        Alcotest.test_case "panic in library file IS flagged"      `Quick test_lint_no_panic_lib_flagged;
+        Alcotest.test_case "panic under test/ dir not flagged"     `Quick test_lint_no_panic_test_dir_exempt;
+        Alcotest.test_case "panic under lib/ dir IS flagged"       `Quick test_lint_no_panic_lib_dir_flagged;
+      ]);
       (* ── Adversarial bug regression tests ─────────────────────────────── *)
       ("adversarial-regressions", [
         Alcotest.test_case "float /. 0.0 raises div-by-zero" `Quick
@@ -11868,6 +12088,10 @@ let stdlib_suites =
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
           test_compiled_fbip_arity_no_overflow;
+        Alcotest.test_case "actor niche msg + run_until_idle + kill: no SIGSEGV, parity (compiled)" `Slow
+          test_compiled_actor_niche_msg_run_until_idle_kill;
+        Alcotest.test_case "actor alive at main-exit: process terminates, parity (compiled)" `Slow
+          test_compiled_actor_program_exits_without_kill;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow

@@ -6496,6 +6496,146 @@ let test_scrutinee_borrowed_cross_branch_no_double_dec () =
     ~expected:"-1"
     ()
 
+(* ── Newtype-repr derived-method crash (P1) ─────────────────────────────
+   `type Wrap = Wrap(Int)` (single ctor, single field) is Newtype-represented
+   (Repr.repr_of_ty): the value IS its raw payload, no heap cell. Calling a
+   derived `eq`/`compare`/`hash` BY NAME on such a value used to crash the
+   compiled binary — the `==` OPERATOR path (ensure_adt_eq_fn, Repr-aware)
+   was always correct, and the interpreter was always correct; only the
+   named-method path, compiled, was broken. Root cause was two stacked
+   defects: (1) every AST node `expand_derive` mints shared one `dummy_span`,
+   so the span-keyed typechecker type_map collided across ALL derived impls
+   (last write wins) and lowering read back garbage types for derived params/
+   exprs; (2) `lower_match`'s destructured sub-pattern variables carry
+   `unknown_ty` (a TVar), so a nested match on a Newtype-repr value (derived
+   Eq's `match (a, b)`, or ANY hand-written nested destructure) reached
+   `emit_case` typed TVar and took the Boxed heap-tag-load strategy on a value
+   that has no heap header — SIGSEGV on a scalar payload, a garbage tag (non-
+   exhaustive panic) on a String payload. Fixed by (1) uniquifying every
+   derive-generated span so each node gets its own type_map entry, and (2) a
+   Newtype analogue of `emit_case`'s existing TVar niche-recovery: when every
+   branch's single Ctor-tag resolves unambiguously to a Newtype-repr type
+   (same payload tagging), commit to the Newtype decode strategy instead of
+   Boxed. Preserves interpreter semantics exactly, including the separately-
+   documented payload-IGNORING behavior of derived Ord/Hash on variants (see
+   syntax_reference.md "Semantics notes"). *)
+
+(** Discriminator: `==` (operator, always worked) vs `eq(a, b)` (named
+    method, crashed pre-fix) on the SAME Newtype-repr value, back to back —
+    isolates the named-method-only nature of the bug. *)
+let test_newtype_derived_eq_operator_vs_named_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eq_op_vs_named"
+    ~src:"mod NewtypeEqOpVsNamed do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    let a = Wrap(1)\n\
+         \    let b = Wrap(1)\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(bool_to_string(eq(a, Wrap(2))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue\nfalse"
+    ()
+
+(** Derived `compare` (Ord) and `hash` (Hash) by name on an Int-payload
+    Newtype: pre-fix SIGSEGV (compare) — lldb showed EXC_BAD_ACCESS inside
+    `Ord$Wrap.compare` loading a ctor tag at scrut+8 from a tagged-int
+    payload. Derived Ord/Hash on variants intentionally ignore ctor payload
+    (index-only) — both calls must return 0 (single ctor, index 0). *)
+let test_newtype_derived_ord_hash_named_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_ord_hash"
+    ~src:"mod NewtypeOrdHash do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Ord, Hash for Wrap\n\
+         \  fn main() do\n\
+         \    println(int_to_string(compare(Wrap(1), Wrap(2))))\n\
+         \    println(int_to_string(hash(Wrap(7))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"0\n0"
+    ()
+
+(** String-payload Newtype: pre-fix symptom was a NON-EXHAUSTIVE PANIC
+    (not a segfault) — the garbage-tag byte at scrut+8 of a heap string
+    pointer never matched the single ctor tag. *)
+let test_newtype_derived_ord_string_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_string_payload"
+    ~src:"mod NewtypeStringPayload do\n\
+         \  type WrapS = WrapS(String)\n\
+         \  derive Eq, Ord, Hash for WrapS\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"a\"))))\n\
+         \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"b\"))))\n\
+         \    println(int_to_string(compare(WrapS(\"a\"), WrapS(\"b\"))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n0"
+    ()
+
+(** Negative control: a 2-field single-ctor type (`Pair(Int, Int)`) is
+    Boxed, not Newtype — must be unaffected by the fix (always worked). *)
+let test_boxed_pair_derived_methods_unaffected_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_boxed_pair_control"
+    ~src:"mod BoxedPairControl do\n\
+         \  type Pair = Pair(Int, Int)\n\
+         \  derive Eq, Ord, Hash for Pair\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 2))))\n\
+         \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 3))))\n\
+         \    println(int_to_string(compare(Pair(1, 2), Pair(3, 4))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n0"
+    ()
+
+(** Negative control: a multi-ctor type (2 variants) is never Newtype —
+    must be unaffected. *)
+let test_multi_ctor_derived_methods_unaffected_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_multictor_control"
+    ~src:"mod MultiCtorControl do\n\
+         \  type Shape = Circle(Int) | Square(Int)\n\
+         \  derive Eq, Ord, Hash for Shape\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Circle(1), Circle(1))))\n\
+         \    println(bool_to_string(eq(Circle(1), Square(1))))\n\
+         \    println(int_to_string(compare(Circle(1), Square(1))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n-1"
+    ()
+
+(** A hand-written (non-derived) `impl Eq(Wrap)` with a nested destructure
+    match must also work — this isolates defect (2) (the emit_case Newtype
+    TVar-recovery) from defect (1) (derive's shared-span typecheck
+    collision): a hand-written impl has real, distinct source spans, so only
+    defect (2) could have crashed it. Pre-fix this also SIGSEGV'd. *)
+let test_handwritten_impl_nested_match_newtype_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_handwritten_impl"
+    ~src:"mod NewtypeHandwrittenImpl do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  impl Eq(Wrap) do\n\
+         \    fn eq(a, b) do\n\
+         \      match (a, b) do\n\
+         \        (Wrap(x), Wrap(y)) -> x == y\n\
+         \      end\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Wrap(1), Wrap(1))))\n\
+         \    println(bool_to_string(eq(Wrap(1), Wrap(2))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -6962,6 +7102,53 @@ let test_preamble_wrapper_delegates () =
     ~triple:(March_tir.Llvm_emit.target_triple March_tir.Llvm_emit.Native) ~repl:false buf_new;
   Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
     (Buffer.contents buf_new) (Buffer.contents buf_old)
+
+(* ── Robustness: an unreadable sibling directory must not crash the compiler ──
+   The compiler auto-discovers sibling `.march` modules in the entry file's own
+   source directory (`resolve_imports` plus the early-CAS sibling hash both walk
+   it via `collect_lib_files`).  That recursive walk called `Sys.readdir` on
+   every subdirectory with no exception guard, so a permission-denied sibling
+   directory — e.g. macOS's `$TMPDIR/TemporaryItems`, which is "Operation not
+   permitted" — raised an uncaught `Sys_error` and killed an otherwise
+   well-typed compile (exit 2, no output).  The walk now skips directories it
+   cannot read.  `--check` exercises the exact crashing path (it shares the
+   early-CAS/resolver walk with `--compile`) without needing clang, so this
+   test runs everywhere.  Perms on the 0000 dir are always restored via
+   [Fun.protect] so it never lingers to break later cleanup. *)
+let test_unreadable_sibling_dir_does_not_crash_check () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_permdenied"
+      "mod PdEntry do\n\
+      \  fn main() : Int do\n\
+      \    1 + 2\n\
+      \  end\n\
+       end\n"
+  in
+  (* A permission-denied sibling directory beside the entry file.  Its contents
+     are irrelevant: the crash was in [Sys.readdir] on the directory itself,
+     which fails before any entry can be read. *)
+  let denied = Filename.concat tmp "TemporaryItems" in
+  Unix.mkdir denied 0o755;
+  Unix.chmod denied 0o000;
+  Fun.protect
+    ~finally:(fun () ->
+      (* Restore perms so the temp tree can be reclaimed; ignore if already gone. *)
+      (try Unix.chmod denied 0o755 with Unix.Unix_error _ -> ()))
+    (fun () ->
+      (* Run from the project root so the compiler resolves its CWD-relative
+         stdlib/ (same trick as the other compiled-regression tests).  The
+         scanned directory is [Filename.dirname src] = [tmp] (an absolute
+         path), independent of CWD. *)
+      let cmd = Printf.sprintf "cd %s && %s --check %s 2>&1; echo EXIT:$?"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote src) in
+      let out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        (Printf.sprintf
+          "--check exits 0 despite an unreadable sibling dir (no Sys_error crash); got:\n%s"
+          out)
+        true
+        (ir_contains out "EXIT:0"))
 
 let codegen_suites =
   [
@@ -7468,6 +7655,20 @@ let codegen_suites =
           Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
             test_scrutinee_borrowed_cross_branch_no_double_dec;
         ] );
+      ( "newtype_derived_method_crash", [
+          Alcotest.test_case "derived Eq: == operator vs named eq() parity (P1)" `Quick
+            test_newtype_derived_eq_operator_vs_named_parity;
+          Alcotest.test_case "derived Ord/Hash named compare()/hash() on Int-payload newtype (P1)" `Quick
+            test_newtype_derived_ord_hash_named_compiled;
+          Alcotest.test_case "derived Eq/Ord/Hash named on String-payload newtype (P1)" `Quick
+            test_newtype_derived_ord_string_payload_compiled;
+          Alcotest.test_case "control: Boxed 2-field ctor derived methods unaffected (P1)" `Quick
+            test_boxed_pair_derived_methods_unaffected_compiled;
+          Alcotest.test_case "control: multi-ctor derived methods unaffected (P1)" `Quick
+            test_multi_ctor_derived_methods_unaffected_compiled;
+          Alcotest.test_case "hand-written impl nested-destructure match on newtype (P1)" `Quick
+            test_handwritten_impl_nested_match_newtype_compiled;
+        ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
@@ -7477,6 +7678,10 @@ let codegen_suites =
             test_preamble_byte_identical_wasm;
           Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
             test_preamble_wrapper_delegates;
+        ] );
+      ( "compiler_robustness", [
+          Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
+            test_unreadable_sibling_dir_does_not_crash_check;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

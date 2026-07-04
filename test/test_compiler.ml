@@ -1369,6 +1369,64 @@ let test_actor_handler_body_io_with_needs_no_warning () =
     "actor handler body IO with needs declared: no missing-needs warning"
     false has_warning
 
+(* ── spawn requires a plain actor name, not a computed expression ─────────
+   Regression: a well-typed `spawn(<computed expr>)` — e.g. an `if` that
+   evaluates to an actor name — passed `--check` (exit 0) but crashed
+   `--compile` with an uncaught
+   `Failure("TIR lower: ESpawn argument must be a plain actor name")`.  Both
+   backends dispatch `spawn` by the actor's *name* at compile time (it selects
+   a statically generated `<Actor>_spawn` function); the TIR lowering only
+   handles a bare actor name (`ECon(_,[],_)`/`EVar`).  The shape restriction now
+   lives in the typechecker as a structured diagnostic, so the program is
+   rejected uniformly (check / compile / interpret) before it can reach the
+   internal failwith. *)
+let test_spawn_computed_actor_rejected () =
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value: Int }
+      init { value: 0 }
+      on Inc(n: Int) do
+        { state with value: state.value + n }
+      end
+    end
+    fn main() : Unit do
+      let c = spawn(if true do Counter else Counter end)
+      kill(c)
+    end
+  end|} in
+  Alcotest.(check bool) "computed actor spawn: error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let mentions m needle =
+    try ignore (Str.search_forward (Str.regexp_string needle) m 0); true
+    with Not_found -> false
+  in
+  let explains_spawn =
+    List.exists (fun d ->
+      let m = d.March_errors.Errors.message in
+      mentions m "spawn" && mentions m "plain actor name")
+      diags
+  in
+  Alcotest.(check bool)
+    "diagnostic explains spawn needs a plain actor name" true explains_spawn
+
+(* Counterpart: a bare actor name still typechecks cleanly — the guard must
+   not flag the valid `spawn(Counter)` form. *)
+let test_spawn_plain_actor_name_ok () =
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value: Int }
+      init { value: 0 }
+      on Inc(n: Int) do
+        { state with value: state.value + n }
+      end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      kill(c)
+    end
+  end|} in
+  Alcotest.(check bool) "plain actor spawn: no errors" false (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5435,6 +5493,9 @@ let compiler_suites =
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
           Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
+          (* spawn argument must be a plain actor name (not a computed expr) *)
+          Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
+          Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
           Alcotest.test_case "actor handler wrong return type"         `Quick test_actor_handler_wrong_return_type;

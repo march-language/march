@@ -88,3 +88,33 @@ and payload_needs_tag (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
      | Newtype inner -> payload_needs_tag type_defs inner
      | _ -> false)
   | _ -> false
+
+(** Niche classification for a NON-GENERIC Option-shaped ADT (a [TCon] with no
+    type params, e.g. an actor message type [Inc(Int) | Probe]).  [repr_of_ty]
+    cannot classify these (it reads the payload from the TCon's params, which
+    only generic instantiations like Option(Int) carry), but the variant
+    definition's single-field ctor carries the concrete payload type directly.
+
+    Returns [Some (Niche ...)] with the SAME payload/tagged classification the
+    EAlloc/EReuse encode sites derive from their argument's type, or [None]
+    when the payload is not niche-safe (e.g. Float) — in which case the encode
+    sites box, and the decode site must fall back to Boxed to match.  Keeping
+    encode and decode keyed on the same predicate is what guarantees a tagged
+    scalar payload (Inc(10) stored as (10<<1)|1) is untagged again at the
+    match binding; decoding it as tagged=false hands the raw tagged word to
+    the branch body (observed as count = 21 + 11 instead of 10 + 5). *)
+let niche_repr_of_concrete (type_defs : Tir.type_def list) (name : string)
+    : repr option =
+  match find_variant type_defs name with
+  | Some [ (_nullary, []); (_single, [ p ]) ]
+  | Some [ (_single, [ p ]); (_nullary, []) ] ->
+    (match p with
+     (* Erased payload in the def (generic type reached without params):
+        keep the erased convention — values are uniform (heap ptr raw /
+        scalar tagged), untagged at their concrete use sites. *)
+     | Tir.TVar _ -> Some (Niche { payload = p; tagged = false })
+     | _ ->
+       if niche_payload_ok type_defs p
+       then Some (Niche { payload = p; tagged = payload_needs_tag type_defs p })
+       else None)
+  | _ -> None

@@ -645,18 +645,20 @@ let fmt_file filename =
   in
   formatted <> src, formatted
 
-(** Collect all .march files under a directory recursively. *)
+(** Collect all .march files under a directory recursively.
+    Tolerant of unreadable entries: a permission-denied subdirectory (whose
+    [Sys.readdir] raises) or an entry we cannot [Sys.is_directory]-stat (e.g. a
+    dangling symlink) is skipped rather than aborting the whole walk — mirrors
+    [March_resolver.Resolver.collect_lib_files]. *)
 let rec march_files_in dir =
-  let entries = Sys.readdir dir in
+  let entries = try Sys.readdir dir with Sys_error _ -> [||] in
   Array.sort compare entries;
   Array.fold_left (fun acc entry ->
     let path = Filename.concat dir entry in
-    if Sys.is_directory path then
-      acc @ march_files_in path
-    else if Filename.check_suffix path ".march" then
-      acc @ [path]
-    else
-      acc
+    match Sys.is_directory path with
+    | true -> acc @ march_files_in path
+    | false -> if Filename.check_suffix path ".march" then acc @ [path] else acc
+    | exception (Sys_error _ | Unix.Unix_error _) -> acc
   ) [] entries
 
 (** Run the test subcommand and exit.
@@ -687,7 +689,11 @@ let run_test_cmd args =
       let test_dir = "test" in
       if not (Sys.file_exists test_dir) then []
       else
-        let entries = List.sort compare (Array.to_list (Sys.readdir test_dir)) in
+        (* Skip an unreadable test/ (permission-denied) the same way we skip a
+           missing one, rather than crashing on the [Sys.readdir]. *)
+        let entries =
+          List.sort compare
+            (Array.to_list (try Sys.readdir test_dir with Sys_error _ -> [||])) in
         List.filter_map (fun name ->
           if (String.length name > 6 && String.sub name 0 5 = "test_"
               && Filename.check_suffix name ".march")

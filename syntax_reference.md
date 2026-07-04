@@ -1030,9 +1030,12 @@ start the next line with something that cannot extend an expression (another
 `let`, a bare identifier call with no leading operator/paren ambiguity), or
 parenthesize/terminate the prior expression so the next line can't attach.
 
-### Derived `Ord`/`Hash` ignore constructor payloads — and crash compiled on newtype-shaped variants
+### Derived `Ord`/`Hash` ignore constructor payloads
 
-Two distinct problems, one derive site.
+(The compiled-crash half of this section — named `eq`/`compare`/`hash` on
+`Newtype`-repr variants SIGSEGV'ing or panicking — was fixed 2026-07-04; see
+`specs/todos.md`'s Done section for the root cause and fix. The
+payload-ignoring `Ord`/`Hash` *semantics* below are unchanged and intentional.)
 
 **Semantics (interpreter, and compiled where it doesn't crash):** `derive Ord
 for T` and `derive Hash for T` on a variant type only look at the
@@ -1061,43 +1064,14 @@ mod Main do
 end
 ```
 
-Interpreter output: `0` / `0` / `0` — payload ignored.
-
-**Compiled crash (single-constructor, single-field variants):** the program
-above does NOT reproduce that output under `--compile` — it SIGSEGVs (exit
-139) before printing anything. A single-ctor single-field variant is exactly
-the `Newtype` representation (`repr_of_ty` in `lib/tir/repr.ml`: one variant
-with one field → represented as the raw payload, no box), and calling a
-derived method *by name* on such a value crashes the compiled binary.
-Verified matrix at HEAD:
-
-| type shape | derive, call form | interpreted | compiled |
-|---|---|---|---|
-| `Wrap(Int)` — 1 ctor, 1 field | `compare`/`hash` (named) | `0` (payload ignored) | **SIGSEGV, exit 139** |
-| `Wrap(Int)` | `eq(a, b)` (named) | payload-aware, correct | **SIGSEGV, exit 139** |
-| `Wrap(Int)` | `a == b` (operator) | correct | correct |
-| `WrapS(String)` — 1 ctor, 1 field | `compare` (named) | `0` | **`panic: non-exhaustive pattern match`, exit 1** |
-| `Pair(Int, Int)` — 1 ctor, 2 fields | `compare` (named) | `0` (payload ignored) | `0` (works; payload ignored) |
-| `Circle(Int) \| Square(Int)` — 2 ctors | `compare` (named) | index-based | index-based (works) |
-
-The crash family tracks the newtype repr exactly: the derived method bodies
-pattern-match their argument (`match x do Wrap(_) -> ... end`), and compiled
-via the named-interface-method path that match is lowered against a boxed
-constructor the value doesn't have — an `Int` payload is a tagged scalar
-(dereferenced → SIGSEGV); a `String` payload is a heap pointer with a
-non-ctor header (no arm matches → non-exhaustive panic). Two-field
-constructors are `Boxed`, and multi-ctor types aren't newtypes — both work.
-The `==` operator does not go through the derived named method
-(structural-equality codegen), so it works even where `eq(...)` crashes.
-Filed as a P1 compiler bug in `specs/todos.md` (derived-method codegen on
-`Newtype`-repr variants).
+Interpreter output: `0` / `0` / `0` — payload ignored. Compiled output is
+identical (this used to crash on single-ctor single-field — `Newtype`-repr —
+variants; fixed 2026-07-04, see `specs/todos.md` Done section).
 
 Records are unaffected: derived `Ord`/`Hash` for `TDRecord` compares/hashes
 field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
 variant type whose constructors carry payload data that should affect
-ordering or hashing — write a manual `impl` instead; and until the codegen
-bug is fixed, do not call derived methods by name on a single-ctor
-single-field variant in compiled code.
+ordering or hashing — write a manual `impl` instead.
 
 ### Nested-module default-arg functions silently drop default values
 

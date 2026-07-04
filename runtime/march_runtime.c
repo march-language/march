@@ -1279,10 +1279,20 @@ static void actor_green_thread(void *arg) {
          * Check BEFORE the alive gate so the message is always freed even if
          * the actor died between injection and receipt.
          * The migrate message is malloc'd (not march-heap), so free with free().
-         * Guard against msg==NULL: zero-arg constructors (e.g. Inc()) are
-         * legitimately represented as the null pointer by the niche optimization;
-         * they are never migrate messages. */
-        if (msg != NULL && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+         * Gates, in order:
+         *   - dispatch_name_id: march_actor_broadcast_migrate only ever
+         *     targets hot-reload actors (it filters on this id), so regular
+         *     actors must skip the check entirely — both for speed and so a
+         *     user message whose word 1 happens to equal MARCH_MIGRATE_TAG
+         *     can never be misread as a migrate message.
+         *   - IS_HEAP_PTR: niche/newtype-optimized messages are immediates —
+         *     zero-arg constructors (e.g. Probe()) arrive as NULL and unary
+         *     scalar constructors (e.g. Inc(10)) arrive as odd tagged values.
+         *     Dereferencing those SIGSEGVs; a real migrate message is always
+         *     a malloc'd struct, which IS_HEAP_PTR accepts. */
+        if (meta->dispatch_name_id
+                && IS_HEAP_PTR(msg)
+                && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
             march_migrate_msg_t *mm = (march_migrate_msg_t *)msg;
             if (a[3] && mm->migrate_fn) {
                 /* a[4] is the state record pointer (state indirection layout).
@@ -1330,6 +1340,14 @@ static void actor_green_thread(void *arg) {
 
         march_sched_tick();
     }
+
+    /* The loop has exited (actor killed, or woken without a message at
+     * scheduler shutdown) and this proc is about to die and be freed by
+     * sched_loop.  Clear the meta handle so march_kill / march_send observe
+     * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
+    pthread_mutex_lock(&g_tbl_mu);
+    meta->green_thread = NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
@@ -1415,7 +1433,10 @@ void *march_spawn(void *actor) {
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
     }
-    meta->green_thread = march_sched_spawn(actor_green_thread, meta);
+    /* Daemon: an actor recv loop parks forever unless killed; it must not
+     * keep the scheduler (and thus the process) alive once main and all
+     * task procs have finished — see wake_idle_daemons in march_scheduler.c. */
+    meta->green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
      * For non-HTTP programs this is harmless: march_run_scheduler() joins
@@ -3135,8 +3156,23 @@ int64_t march_mailbox_size(void *pid) {
     return atomic_load_explicit(&meta->down_count, memory_order_relaxed);
 }
 
-/* run_until_idle: flush the async message queue by running the scheduler. */
+/* run_until_idle: flush the async message queue.
+ *
+ * Compiled main() runs as a green thread inside the scheduler
+ * (march_spawn_main), so the common case is the in-scheduler one: yield
+ * cooperatively until no other proc is runnable and no mailbox is non-empty.
+ * The old unconditional march_run_scheduler() call was a silent NO-OP here —
+ * its g_in_scheduler re-entrancy guard returned immediately, so pending
+ * messages were NOT drained and a following kill() raced the handlers.
+ *
+ * From outside the scheduler (REPL/JIT main thread with the background
+ * scheduler running), fall through to march_run_scheduler, which requests
+ * shutdown and joins the background thread. */
 void march_run_until_idle(void) {
+    if (march_sched_in_scheduler()) {
+        march_sched_wait_idle();
+        return;
+    }
     march_run_scheduler();
 }
 

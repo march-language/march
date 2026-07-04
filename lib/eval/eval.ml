@@ -256,6 +256,22 @@ let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
     Reset per module eval via [reset_scheduler_state]. *)
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
+(** Interface methods that are dispatched by the argument's type through a
+    type-directed builtin ([show], [eq], [compare], [hash]) rather than by name.
+
+    For these, the DImpl eval must NOT bind the bare method name in the outer
+    env: doing so lets the last-registered impl shadow the builtin, so a second
+    `derive` of the same interface breaks dispatch for the first type (wrong
+    result, or a non-exhaustive-match panic when the wrong impl's clauses run).
+    Instead they are registered only in [impl_tbl], keyed by (iface, type), and
+    the builtin resolves the correct impl from the value's type at call time.
+    A plain (non-self-referential) closure is used so recursive calls in the
+    body (e.g. [eq] on nested fields) also route through builtin dispatch. *)
+let is_type_dispatched_method iface meth =
+  match iface, meth with
+  | "Show", "show" | "Eq", "eq" | "Ord", "compare" | "Hash", "hash" -> true
+  | _ -> false
+
 (** Constructor → type name mapping.
     Maps each data constructor name (e.g. "Red") to its declaring type (e.g. "Color").
     Populated when [eval_decl] processes [DType] nodes.
@@ -8212,18 +8228,18 @@ let rec eval_decl (env : env) (d : decl) : env =
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
     List.fold_left (fun env (mname, fn_def) ->
-        (* For Show.show: create a non-self-referential closure so that
-           recursive `show(x)` calls inside the body go through the builtin
-           dispatch (impl_tbl), not back to this impl's function. *)
-        let is_show_method =
-          idef.impl_iface.txt = "Show" && mname.txt = "show"
+        (* Type-dispatched methods (show/eq/compare/hash) use a
+           non-self-referential closure so recursive calls inside the body go
+           through the builtin dispatch (impl_tbl), not back to this impl. *)
+        let is_dispatched =
+          is_type_dispatched_method idef.impl_iface.txt mname.txt
         in
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
             let v = eval_expr env fc_body in
             (mname.txt, v) :: env
-          | _ when is_show_method ->
-            (* Plain closure: `show` in body → builtin dispatch, not self. *)
+          | _ when is_dispatched ->
+            (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
             let clo = VClosure (env, params, clause.fc_body) in
@@ -8246,9 +8262,10 @@ let rec eval_decl (env : env) (d : decl) : env =
         (* For Json derive: to_json only registers in impl_tbl (so the
            builtin dispatcher can route by value type); from_json binds in
            env (since we can't dispatch on the target type from a JsonValue).
-           Same for Show.show: the builtin `show` dispatches through impl_tbl,
-           so binding `show` in the global env would shadow the builtin. *)
-        if (is_json_iface && mname.txt = "to_json") || is_show_method then env
+           For type-dispatched methods (show/eq/compare/hash) the builtin
+           dispatches through impl_tbl, so binding the bare name in the env
+           would shadow the builtin and break dispatch when 2+ impls exist. *)
+        if (is_json_iface && mname.txt = "to_json") || is_dispatched then env
         else new_env
       ) env idef.impl_methods
 
@@ -8526,14 +8543,14 @@ let eval_module_env (m : module_) : env =
         && String.sub idef.impl_iface.txt 0 4 = "Json"
       in
       let env' = List.fold_left (fun acc_env (mname, fn_def) ->
-          let is_show_method =
-            idef.impl_iface.txt = "Show" && mname.txt = "show"
+          let is_dispatched =
+            is_type_dispatched_method idef.impl_iface.txt mname.txt
           in
           let new_acc = match fn_def.fn_clauses with
             | [{ fc_params = []; fc_body; _ }] ->
               let v = eval_expr acc_env fc_body in
               (mname.txt, v) :: acc_env
-            | _ when is_show_method ->
+            | _ when is_dispatched ->
               let clause = List.hd fn_def.fn_clauses in
               let params = clause_params clause in
               let clo = VClosure (acc_env, params, clause.fc_body) in
@@ -8555,8 +8572,10 @@ let eval_module_env (m : module_) : env =
           end;
           (* For Json derive: to_json only registers in impl_tbl;
              from_json binds in env (can't dispatch on target type).
-             Show.show: plain closure above, don't rebind show globally. *)
-          if is_json_iface || is_show_method then acc_env
+             Type-dispatched methods (show/eq/compare/hash): plain closure
+             above, don't rebind the bare name globally — it would shadow the
+             builtin and break dispatch when 2+ impls of the iface exist. *)
+          if is_json_iface || is_dispatched then acc_env
           else new_acc
         ) env idef.impl_methods in
       env_ref := env';

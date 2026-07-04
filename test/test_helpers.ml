@@ -1875,6 +1875,13 @@ let lint_check src =
   let config = March_lint.Lint.default_config () in
   March_lint.Lint.check_file ~config ~filename:"test.march" ~src
 
+(** Like [lint_check] but lets the caller control the file path, so rules that
+    depend on the filename (e.g. [safety/no-panic-in-lib]'s lib-vs-test
+    classification) can be exercised. *)
+let lint_check_named ~filename src =
+  let config = March_lint.Lint.default_config () in
+  March_lint.Lint.check_file ~config ~filename ~src
+
 let has_lint_rule rule diags =
   List.exists (fun d -> d.March_lint.Lint.rule = rule) diags
 
