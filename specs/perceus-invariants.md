@@ -509,7 +509,7 @@ retired "protects sort_by" / "cause the sort_by underflow to recur"
 rationale verbatim. This document supersedes that comment's *rationale*
 (§6 above is the current justification); the comment itself is a `lib/`
 edit and out of scope for this task. A one-line follow-up item has been
-filed in `specs/todos.md` (P3, "Housekeeping") to reword the comment.
+filed in `specs/todos.md` (P4 → Housekeeping) to reword the comment.
 
 ---
 

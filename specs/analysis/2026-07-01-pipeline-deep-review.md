@@ -90,8 +90,8 @@
 > original numbering) were never scheduled into Waves 1–4 — the campaign
 > judged items 1–4 sufficient leverage for the fix backlog in hand and
 > deliberately left 5–8 for a future testing-infra wave. They remain valid,
-> undiminished recommendations; see `specs/todos.md` P2 "Testing infrastructure"
-> family for the open entries where any exist.
+> undiminished recommendations; §8 items 5–8 have no todos entries — this
+> section is their canonical record until someone schedules that wave.
 >
 > ### §9 docs — COMPLETE (Wave 4)
 >
