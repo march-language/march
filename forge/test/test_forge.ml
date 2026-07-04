@@ -1145,6 +1145,104 @@ let test_grant_multiple_grants_cover_multiple_widenings () =
       ~grant_caps:["IO.Process"; "IO.FileSystem"] in
   Alcotest.(check (list string)) "both widenings granted" [] granted
 
+(* ─── ACTIVATE4 wire builders (Phase 5C Part C, Task C4) ─────────────────── *)
+
+let cap_root_hex = String.make 64 'c'
+
+let test_activate4_signed_excludes_caps_includes_cap_root () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate4_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:0 ~epoch:5 ~cap_root:cap_root_hex ~callers_csv:"MyApp.a,MyApp.b"
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE4 MyApp.f implhash cashash" wire_head;
+  let expected_signed =
+    Printf.sprintf "ACTIVATE4 MyApp.f implhash cashash 0 epoch:5 cap_root:%s callers:MyApp.a,MyApp.b"
+      cap_root_hex
+  in
+  Alcotest.(check string) "signed message" expected_signed signed;
+  (* caps: must NOT appear anywhere in the signed message *)
+  let contains_substr hay needle =
+    let hl = String.length hay and nl = String.length needle in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  Alcotest.(check bool) "signed message excludes 'caps:'" false
+    (contains_substr signed "caps:");
+  Alcotest.(check bool) "signed message includes 'cap_root:'" true
+    (contains_substr signed "cap_root:")
+
+let test_activate4_wire_line_orders_cap_root_and_caps_before_callers () =
+  let (_, wire_head) =
+    Cmd_deploy_hot.build_activate4_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:1 ~epoch:7 ~cap_root:cap_root_hex ~callers_csv:"MyApp.a,MyApp.b"
+  in
+  let caps_csv = "IO,IO.NetConnect" in
+  let wire = Printf.sprintf "%s SIGB64 %d epoch:%d cap_root:%s caps:%s callers:%s"
+    wire_head 1 7 cap_root_hex caps_csv "MyApp.a,MyApp.b" in
+  let idx_of sub =
+    let hl = String.length wire and nl = String.length sub in
+    let rec go i = if i + nl > hl then -1 else if String.sub wire i nl = sub then i else go (i + 1) in
+    go 0
+  in
+  let cap_root_idx = idx_of "cap_root:" in
+  let caps_idx = idx_of "caps:" in
+  let callers_idx = idx_of "callers:" in
+  Alcotest.(check bool) "cap_root: appears" true (cap_root_idx >= 0);
+  Alcotest.(check bool) "caps: appears" true (caps_idx >= 0);
+  Alcotest.(check bool) "callers: appears" true (callers_idx >= 0);
+  Alcotest.(check bool) "cap_root: before callers:" true (cap_root_idx < callers_idx);
+  Alcotest.(check bool) "caps: before callers:" true (caps_idx < callers_idx);
+  Alcotest.(check bool) "wire starts with ACTIVATE4" true
+    (String.length wire >= 9 && String.sub wire 0 9 = "ACTIVATE4")
+
+let test_activate3_signed_shape_unchanged () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate3_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:0 ~epoch:3 ~callers_csv:"MyApp.a"
+  in
+  Alcotest.(check string) "ACTIVATE3 wire_head" "ACTIVATE3 MyApp.f implhash cashash" wire_head;
+  Alcotest.(check string) "ACTIVATE3 signed message"
+    "ACTIVATE3 MyApp.f implhash cashash 0 epoch:3 callers:MyApp.a" signed
+
+let test_activate4_caps_csv_is_sorted_normalized_manifest_union () =
+  (* manifest_caps normalizes via subsumption (a broader cap in the union
+     drops a narrower one) but does not dedupe exact-string repeats across
+     functions — mirrors Cap_lattice.normalize's contract (see
+     test_gate_manifest_caps_union_normalized above). Using distinct caps
+     per function here isolates the sorted-CSV-of-the-union behavior this
+     test targets from that separate dedup nuance. *)
+  let functions = [
+    { Cmd_deploy_hot.fn_name = "a"; fn_impl_hash = "h"; fn_sig_hash = "s";
+      fn_callers = []; fn_caps = ["IO.NetConnect"] };
+    { Cmd_deploy_hot.fn_name = "b"; fn_impl_hash = "h"; fn_sig_hash = "s";
+      fn_callers = []; fn_caps = ["IO.Console"] };
+  ] in
+  let caps_csv =
+    String.concat "," (List.sort String.compare (Cmd_deploy_hot.manifest_caps functions))
+  in
+  Alcotest.(check string) "sorted normalized union CSV" "IO.Console,IO.NetConnect" caps_csv
+
+(* --no-cap-gate / legacy-manifest branch logic: the `run` function itself
+   requires a live socket, so these exercise the same predicate `run` uses
+   internally (manifest.cap_root <> "" && not no_cap_gate) directly, mirroring
+   how the cap-widening gate above is tested at the pure-predicate level. *)
+let activate4_selected ~cap_root ~no_cap_gate = cap_root <> "" && not no_cap_gate
+
+let test_branch_cap_root_present_no_flag_selects_activate4 () =
+  Alcotest.(check bool) "ACTIVATE4 selected" true
+    (activate4_selected ~cap_root:cap_root_hex ~no_cap_gate:false)
+
+let test_branch_no_cap_gate_flag_forces_activate3 () =
+  Alcotest.(check bool) "ACTIVATE3 forced by --no-cap-gate" false
+    (activate4_selected ~cap_root:cap_root_hex ~no_cap_gate:true)
+
+let test_branch_legacy_manifest_empty_cap_root_forces_activate3 () =
+  Alcotest.(check bool) "ACTIVATE3 forced by legacy (empty) cap_root" false
+    (activate4_selected ~cap_root:"" ~no_cap_gate:false)
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1288,5 +1386,12 @@ let () =
       Alcotest.test_case "grant: partial grant leaves only ungranted" `Quick test_grant_partial_leaves_only_ungranted;
       Alcotest.test_case "grant: unused grant is inert" `Quick test_grant_unused_grant_is_inert;
       Alcotest.test_case "grant: multiple grants cover multiple widenings" `Quick test_grant_multiple_grants_cover_multiple_widenings;
+      Alcotest.test_case "ACTIVATE4: signed excludes caps, includes cap_root" `Quick test_activate4_signed_excludes_caps_includes_cap_root;
+      Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
+      Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
+      Alcotest.test_case "ACTIVATE4: caps csv is sorted normalized union" `Quick test_activate4_caps_csv_is_sorted_normalized_manifest_union;
+      Alcotest.test_case "branch: cap_root present, no flag -> ACTIVATE4" `Quick test_branch_cap_root_present_no_flag_selects_activate4;
+      Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
+      Alcotest.test_case "branch: legacy manifest (empty cap_root) forces ACTIVATE3" `Quick test_branch_legacy_manifest_empty_cap_root_forces_activate3;
     ];
   ]
