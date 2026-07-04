@@ -4521,7 +4521,6 @@ let test_hash_prop_eq_consistency () =
       let a = Red
       let b = Red
       if a == b do hash(a) == hash(b) else true end
-      if a == b then hash(a) == hash(b) else true
     end
   end|} in
   Alcotest.(check bool) "Hash/Eq consistency: a==b => hash(a)==hash(b)" true
@@ -4735,24 +4734,24 @@ let test_parse_empty_module () =
     (List.length m.March_ast.Ast.mod_decls)
 
 let test_parse_deeply_nested_if () =
-  (* 8 levels of nested if/then/else *)
+  (* 8 levels of nested if/do/else/end *)
   let src = {|mod Test do
     fn deep(x : Int) : Int do
-      if x > 0 then
-        if x > 1 then
-          if x > 2 then
-            if x > 3 then
-              if x > 4 then
-                if x > 5 then
-                  if x > 6 then
+      if x > 0 do
+        if x > 1 do
+          if x > 2 do
+            if x > 3 do
+              if x > 4 do
+                if x > 5 do
+                  if x > 6 do
                     if x > 7 do x else 7 end
-                  else 6
-                else 5
-              else 4
-            else 3
-          else 2
-        else 1
-      else 0
+                  else 6 end
+                else 5 end
+              else 4 end
+            else 3 end
+          else 2 end
+        else 1 end
+      else 0 end
     end
   end|} in
   let m = parse_module src in

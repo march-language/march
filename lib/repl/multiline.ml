@@ -93,11 +93,12 @@ let ends_with_continuation buf =
       || (l.[n-1] = '-' && (n < 2 || (l.[n-2] <> '-' && l.[n-2] <> '>')))  (* - but not -- or -> *)
       || l.[n-1] = '*'
       || (l.[n-1] = '/' && (n < 2 || l.[n-2] <> '/')) in  (* / but not // *)
-    (* Trailing keyword: then or else *)
+    (* Trailing keyword: else (a right branch must follow).  `then` is not
+       March syntax — submitting immediately surfaces the targeted error. *)
     let trailing_kw =
       let words = String.split_on_char ' ' (String.trim l) in
       match List.rev words with
-      | w :: _ -> w = "then" || w = "else"
+      | w :: _ -> w = "else"
       | []     -> false
     in
     trailing_arrow || trailing_pipe || trailing_eq || trailing_binop || trailing_kw

@@ -157,7 +157,7 @@ See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of
 
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
-- Conditionals: `if cond do ... end` — use `do...end`, `else` is optional, NO `then` keyword
+- Conditionals: `if cond do ... else ... end` — `else` is MANDATORY (omitting it: "March `if` expressions always need an `else` branch"); `then` is rejected ("I don't recognize `then` here — March uses do/end blocks instead.")
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - Result propagation: `let? p = e` binds the `Ok` payload and returns `Err(e)` immediately; RHS must be `Result`; cannot be the last expr in a block
 - No `;` — use newlines to separate block expressions

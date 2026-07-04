@@ -5,7 +5,7 @@
 let repl_commands = [":quit"; ":q"; ":env"; ":help"; ":type"; ":inspect"; ":i"; ":clear"; ":reset"; ":load"; ":reload"; ":doc"; ":set"; ":save"]
 
 let keywords = [
-  "fn"; "do"; "end"; "let"; "match"; "with"; "if"; "then"; "else";
+  "fn"; "do"; "end"; "let"; "match"; "with"; "if"; "else";
   "mod"; "actor"; "type"; "pub"; "use"; "impl"; "interface"; "sig";
   "spawn"; "send"; "on"; "state"; "init"; "respond"; "when"; "as";
   "linear"; "affine"; "extern"; "loop"; "protocol"; "unsafe"

@@ -197,7 +197,7 @@ Returns Err(reason) otherwise.
 fn validate(ns, key, predicate) do
   match vault_get(global_table(), (ns, key)) do
   None    -> Err("Config: key not set")
-  Some(v) -> if predicate(v) then Ok(v) else Err("Config: validation failed")
+  Some(v) -> if predicate(v) do Ok(v) else Err("Config: validation failed") end
   end
 end
 
@@ -208,7 +208,7 @@ Returns Ok(value) or Err(reason).
 fn validate_in(ns, section, key, predicate) do
   match vault_get(global_table(), (ns, section, key)) do
   None    -> Err("Config: key not set")
-  Some(v) -> if predicate(v) then Ok(v) else Err("Config: validation failed")
+  Some(v) -> if predicate(v) do Ok(v) else Err("Config: validation failed") end
   end
 end
 

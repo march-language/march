@@ -436,10 +436,12 @@ Each `pat <- expr` binding: if `expr` matches `pat`, continue; otherwise fall th
 ```march
 if x > 0 do
   "positive"
+else
+  "non-positive"
 end
 ```
 
-With optional `else` block (both branches can be multi-statement):
+Both branches can be multi-statement:
 
 ```march
 if x > 0 do
@@ -450,7 +452,17 @@ else
 end
 ```
 
-`else` is optional — `if` without `else` returns `()`. There is no `then` keyword.
+`else` is **mandatory** — omitting it is a parse error:
+
+```
+March `if` expressions always need an `else` branch:
+```
+
+There is no `then` keyword — `if c then e1 else e2` is rejected with a targeted parse error:
+
+```
+I don't recognize `then` here — March uses do/end blocks instead.
+```
 
 ---
 

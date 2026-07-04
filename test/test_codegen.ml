@@ -597,12 +597,10 @@ let test_mutual_tco_non_tail_no_loop () =
     @[no_warn_recursion]
     fn count_f(n : Int) : Int do
       if n == 0 do 1 else count_g(n - 1) + 1 end
-      if n == 0 then 1 else count_g(n - 1) + 1
     end
     @[no_warn_recursion]
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
-      if n == 0 then 1 else count_f(n - 1) + 1
     end
     fn main() : Unit do println(int_to_string(count_f(10))) end
   end|} in
@@ -617,7 +615,6 @@ let test_mutual_tco_self_tco_unaffected () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
-      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(10))) end
   end|} in
@@ -825,7 +822,6 @@ let test_phase4_tco_fn_reduction_in_loop () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
-      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(100))) end
   end|} in
@@ -4994,7 +4990,6 @@ let test_reduction_counter_exhausts () =
 let test_eval_yields_after_budget () =
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   March_eval.Eval.set_reduction_counting true;
@@ -5010,7 +5005,6 @@ let test_eval_no_yield_when_disabled () =
   March_eval.Eval.set_reduction_counting false;
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in

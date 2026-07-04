@@ -18270,6 +18270,17 @@
       "created_at": "2026-07-03T18:44:50.046670-04:00",
       "updated_at": "2026-07-03T18:44:50.046670-04:00",
       "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"confidence\":90}"
+    },
+    {
+      "id": 1662,
+      "change_id": "f9c6fea1-5b98-443a-bf99-b75c8f567a10",
+      "node_type": "outcome",
+      "title": "Committed 68f8055b",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-07-03T18:45:29.678562-04:00",
+      "updated_at": "2026-07-03T18:45:29.678562-04:00",
+      "metadata_json": "{\"branch\":\"claude/hopeful-kapitsa-9f49f3\",\"commit\":\"68f8055b\",\"confidence\":95}"
     }
   ],
   "edges": [
@@ -31472,6 +31483,17 @@
       "weight": 1.0,
       "rationale": "Task 3 action produced this outcome",
       "created_at": "2026-07-03T18:44:53.239710-04:00"
+    },
+    {
+      "id": 1217,
+      "from_node_id": 1661,
+      "to_node_id": 1662,
+      "from_change_id": "e389a8da-8b63-456c-85f6-16b898bb5eef",
+      "to_change_id": "f9c6fea1-5b98-443a-bf99-b75c8f567a10",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "commit landed",
+      "created_at": "2026-07-03T18:45:32.399893-04:00"
     }
   ]
 }

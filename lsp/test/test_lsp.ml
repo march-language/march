@@ -2791,8 +2791,8 @@ let test_perf_tail_call_not_flagged () =
   let src = {|
 mod Test do
   pfn count_down(n: Int, acc: Int): Int do
-    if n == 0 then acc
-    else count_down(n - 1, acc + 1)
+    if n == 0 do acc
+    else count_down(n - 1, acc + 1) end
   end
 end
 |} in

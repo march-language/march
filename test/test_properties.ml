@@ -86,10 +86,10 @@ let gen_bool_cmp : string Gen.t =
     gen_int_lit
     Gen.unit
 
-(** if/then/else with integer branches, condition is a bool comparison. *)
+(** if/do/else/end with integer branches, condition is a bool comparison. *)
 let gen_if_int_expr : string Gen.t =
   Gen.map3
-    (fun cond t f -> "if " ^ cond ^ " then " ^ t ^ " else " ^ f)
+    (fun cond t f -> "if " ^ cond ^ " do " ^ t ^ " else " ^ f ^ " end")
     gen_bool_cmp
     gen_arith_expr
     gen_arith_expr
@@ -106,7 +106,7 @@ let gen_let_chain : string Gen.t =
 let gen_arith_module : string Gen.t =
   Gen.map wrap_main gen_arith_expr
 
-(** Module with an if/then/else expression in main. *)
+(** Module with an if/do/else/end expression in main. *)
 let gen_if_module : string Gen.t =
   Gen.map wrap_main gen_if_int_expr
 
@@ -277,7 +277,7 @@ let gen_recursive_module : string Gen.t =
        Printf.sprintf
          "mod Main do\n\
          \  fn fact(n : Int) : Int do\n\
-         \    if n <= 1 then 1 else n * fact(n - 1)\n\
+         \    if n <= 1 do 1 else n * fact(n - 1) end\n\
          \  end\n\
          \  fn main() do\n\
          \    fact(%d)\n\
@@ -755,7 +755,7 @@ let oracle_check src =
        our well-typed source programs (parse errors are ok, panics are not). *)
 let prop_parse_no_unexpected_exception =
   Test.make ~name:"parse: no unexpected exceptions on generated programs"
-    ~count:500
+    ~count:500 ~print:(fun s -> s)
     gen_well_typed_module
     (fun src ->
        match parse_src src with
@@ -952,24 +952,24 @@ let prop_sub_self_zero =
        | Some n -> n = 0
        | None   -> true)
 
-(** 13. If-then-else: when condition is false, else branch is taken. *)
-let prop_if_else_branch =
-  Test.make ~name:"oracle: if false then t else f = f"
+(** 13. If expression: when condition is false, the else branch is taken. *)
+let prop_if_false_branch =
+  Test.make ~name:"oracle: if false do t else f end = f"
     ~count:300
     Gen.(pair (int_range (-100) 100) (int_range (-100) 100))
     (fun (t, f) ->
-       let body = Printf.sprintf "if (1 == 2) then %d else %d" t f in
+       let body = Printf.sprintf "if (1 == 2) do %d else %d end" t f in
        match eval_int_src body with
        | Some n -> n = f
        | None   -> true)
 
-(** 14. If-then-else: when condition is true, then branch is taken. *)
-let prop_if_then_branch =
-  Test.make ~name:"oracle: if true then t else f = t"
+(** 14. If expression: when condition is true, the first branch is taken. *)
+let prop_if_true_branch =
+  Test.make ~name:"oracle: if true do t else f end = t"
     ~count:300
     Gen.(pair (int_range (-100) 100) (int_range (-100) 100))
     (fun (t, f) ->
-       let body = Printf.sprintf "if (1 == 1) then %d else %d" t f in
+       let body = Printf.sprintf "if (1 == 1) do %d else %d end" t f in
        match eval_int_src body with
        | Some n -> n = t
        | None   -> true)
@@ -1038,9 +1038,9 @@ let prop_tuple_swap_involution =
          \  fn main() do\n\
          \    let t = (%d, %d)\n\
          \    let swapped_twice = swap(swap(t))\n\
-         \    if fst_eq(swapped_twice, %d) then\n\
-         \      if snd_eq(swapped_twice, %d) then 1 else 0\n\
-         \    else 0\n\
+         \    if fst_eq(swapped_twice, %d) do\n\
+         \      if snd_eq(swapped_twice, %d) do 1 else 0 end\n\
+         \    else 0 end\n\
          \  end\n\
           end"
          a b a b
@@ -1458,8 +1458,8 @@ let () =
       prop_add_zero_identity;
       prop_mul_one_identity;
       prop_sub_self_zero;
-      prop_if_then_branch;
-      prop_if_else_branch;
+      prop_if_true_branch;
+      prop_if_false_branch;
     ];
     "semantic properties (source)", List.map QCheck_alcotest.to_alcotest [
       prop_adt_match_correct;

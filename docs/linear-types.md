@@ -84,8 +84,10 @@ fn maybe_connect(affine cap : NetworkCap) : () do
   -- OK to drop cap without using it
   if should_connect do
     connect(cap)
+  else
+    ()
   end
-  -- No error if we fall through without using cap
+  -- No error if cap goes unused on the else path
 end
 ```
 

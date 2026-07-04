@@ -1,10 +1,15 @@
 # March — TODO List
 
-**Last updated:** 2026-07-03 (Wave 3 chunk 2 Task 10: bookkeeping — chunk 2 complete, `specs/analysis/2026-07-01-pipeline-deep-review.md` §7 fully done; only Wave 4 (docs) remains of the original deep-review plan)
+**Last updated:** 2026-07-03 (Wave 4 Task 4: `if/then/else` expression form removed from the grammar; `else` documented as mandatory; stdlib/tests/docs migrated — see `specs/progress.md`)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
 ---
+
+## Grammar / lint contradictions (2026-07-03)
+
+- [ ] **`style/no-redundant-else` lint advises code the parser rejects** — found during Wave 4 Task 4. The lint (`lib/lint/lint.ml` ~262-320) and its doc (`docs/coding-standards.md` "style/no-redundant-else") tell users to remove `else` after a Never-typed branch (guard-clause pattern), with an auto-fix that "removes else, dedents body" — but `else` is mandatory in the grammar, so the advice/auto-fix produces a hard parse error ("March `if` expressions always need an `else` branch"; the doc's own "Good" example doesn't parse). Decide: retire the lint, grow an else-less statement-position `if` (language design — needs user sign-off), or make the auto-fix produce valid code; then fix the doc example. Check whether the LSP code-action path exposes the auto-fix.
+- ✅ **Undocumented `if c then e1 else e2` production removed (Wave 4 Task 4, 2026-07-03)** — the parser silently accepted the then-form (contradicting both syntax docs and da7ce42b's targeted then-error, which only fired on incomplete forms). User decision: REMOVE + MIGRATE. Accepting production deleted from `lib/parser/parser.mly` (THEN token + targeted error production kept — every then-form now gets "I don't recognize `then` here — March uses do/end blocks instead."); live uses migrated (`stdlib/config.march` + `share/march/` mirror, `test_properties.ml` generators/oracles, `forge new` scaffold template, June-17-cutover leftover twins in four test files, LSP fixture); `then` dropped from REPL/LSP keyword completions and the REPL multiline heuristic; both syntax docs + tour + SKILL + linear-types doc corrected to verified truth (else MANDATORY). Menhir conflicts unchanged (7/59). **385 compiler / 230 eval / 374 codegen / 791 stdlib / 53 stdlib_march / 29 snapshots.** Full report: `.superpowers/sdd/w4-task-4-report.md`.
 
 ## Compiled-backend codegen bugs in HTTP handler paths (2026-06-29)
 
