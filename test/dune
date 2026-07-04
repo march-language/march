@@ -120,6 +120,52 @@
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
 
+; ── HCR capability-lattice C table unit test ──────────────────────────────
+; Verifies runtime/march_cap_lattice.{h,c} (generated from
+; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
+; hand-verified hierarchy, exhaustively over every pair.
+(rule
+ (targets test_cap_lattice_runner)
+ (deps    test_cap_lattice.c
+          ../runtime/march_cap_lattice.c
+          ../runtime/march_cap_lattice.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_cap_lattice.c ../runtime/march_cap_lattice.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_cap_lattice_runner))
+ (action  (run ./test_cap_lattice_runner)))
+
+; ── HCR capability-lattice anti-drift check ───────────────────────────────
+; Regenerates runtime/march_cap_lattice.{h,c} from lib/caps/cap_lattice.ml
+; via the emitter and diffs the result against the checked-in copy, so the
+; two can never silently drift apart (see lib/caps/emit_c_table.ml).
+(rule
+ (targets cap_lattice_fresh_march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.c)
+ (deps    (file %{exe:../lib/caps/emit_c_table.exe}))
+ (action  (run %{exe:../lib/caps/emit_c_table.exe} . cap_lattice_fresh_)))
+
+(rule
+ (alias cap_lattice_check)
+ (deps  ../runtime/march_cap_lattice.h
+        ../runtime/march_cap_lattice.c
+        cap_lattice_fresh_march_cap_lattice.h
+        cap_lattice_fresh_march_cap_lattice.c)
+ (action
+  (progn
+   (diff ../runtime/march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.h)
+   (diff ../runtime/march_cap_lattice.c cap_lattice_fresh_march_cap_lattice.c))))
+
+; Also run as part of `dune runtest` (CI), but exposed as its own alias
+; above so it can be targeted directly (`dune build @test/cap_lattice_check`)
+; without pulling in the rest of the (large, slow) runtest universe.
+(alias
+ (name runtest)
+ (deps (alias cap_lattice_check)))
+
 ; ── Distributed-OTP function-by-identity registry unit test ──────────────
 (rule
  (targets test_remote_registry_runner)
