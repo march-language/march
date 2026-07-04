@@ -92,7 +92,7 @@ Parts A and C are mostly engineering on machinery Phase 5 already shipped (CAS, 
 | Cap lattice ownership | Factor `io_cap_hierarchy` + `cap_subsumes` (`typecheck.ml:933`, `:1071`) into a shared `lib/caps/cap_lattice.ml` that typecheck, refinecheck, and forge all depend on — two identical copies exist today (`typecheck.ml:933` and `refinecheck/cap_infer.ml:26`); this removes the duplication and adds the C-table emitter |
 | Manifest carrier | Extend the existing `.hcr_manifest` sidecar (already per-fn `impl_hash`/`sig_hash`/`callers:`) with a `caps=` field per fn + a top-level `cap_root`; content covered by `cas_hash` |
 | `cap_root` hash | **BLAKE3, hex** — same algorithm as `cas_hash`/`impl_hash`/`sig_hash`. OCaml side: `March_cas.Blake3.hash_string` (`lib/cas/blake3.ml`), already a transitive dependency of `bin/main.ml` via `march_cas` — no new dependency. Part C's server-side recompute (out of scope here) can link the existing `lib/cas/blake3_stubs.c` C source into the runtime build. |
-| Protocol | New verb **`ACTIVATE4`** = ACTIVATE3 + `cap_root:<hex>` in wire and signed message. A new verb, not an appended field: (a) adding anything to the signed message makes old servers reconstruct a different message and fail with a misleading `bad_signature`; (b) the server parses `callers:` to end-of-line, so a trailing field would be swallowed into the CSV. Old servers answer `ACTIVATE4` with a clean unknown-command error. |
+| Protocol | New verb **`ACTIVATE4`** = ACTIVATE3 + `cap_root:<hex>` (signed) + `caps:<csv>` (unsigned, integrity-checked by recomputing `cap_root` over it) in the wire message, both before `callers:`. A new verb, not an appended field: (a) adding anything to the signed message makes old servers reconstruct a different message and fail with a misleading `bad_signature`; (b) the server parses `callers:` to end-of-line, so a trailing field would be swallowed into the CSV. Old servers answer `ACTIVATE4` with a clean unknown-command error. The cap *set* rides the wire (not the CAS) because the manifest is a client-side per-function sidecar never stored in the CAS; the union it digests is tiny (~11 caps measured). |
 | Monotonicity rule | Deploy may *narrow* freely; *widening* (a new cap not subsumed by any prior-held cap) aborts before activation unless an explicit `--grant-cap <C>` authorizes each widened cap |
 | Grant authority | A widening grant rides the deployer's ed25519 signature: `cap_root` is added to the signed activation payload, so the authority claim is tamper-evident and audit-logged |
 | Multi-node baseline | The prior-caps baseline is a **local file** (`<project>/.march/<name>_hot.so.hcr_manifest.prev`, mirroring the existing `prev_schemas_path` pattern) — not a network fetch. Computed once per `deploy`/`deploy_env` call and passed unchanged to every server via `deploy_one`, so the gate runs exactly once per deploy regardless of fleet size. Updated to the new manifest after a successful deploy (mirroring `save_schemas_baseline`). |
@@ -222,6 +222,41 @@ The earlier draft's phrase "regardless of who signed it" was too strong; the pol
 what a node will *admit as declared*, and the declaration is only as honest as the toolchain
 that produced it.
 
+**A deeper caveat than adversarial honesty: the manifest's completeness is bounded by the
+completeness of Part A's *AST-level* cap inference, and nothing structurally guards it.** The
+final whole-branch review's C1 finding is the existence proof — actor handlers were hashed as
+boundary functions but their caps were silently dropped, with *no adversary involved*, just a
+desync between "functions the CAS hashes" and "constructs `check_module_needs` walks". Empirically
+(measured 2026-07-03 on a stdlib-using actor app): **7202 of 7340 boundary functions carry an
+empty `caps=` field**, because the CAS hashes post-lowering/mono/defun TIR (monomorphized
+specializations like `List.filter_map$List_Result…`, defunctionalized closures like `$jp…$apply`,
+actor glue like `_dispatch`/`_spawn`), while cap inference runs on the surface AST and sees only
+user-level `DFn`/`DActor`-handler/`DExtern` constructs. The artifact-wide `cap_root` *union* is
+still complete in practice because a synthesized function's IO is attributed to its enclosing
+user construct at the AST level — but this means:
+
+- A naive "every boundary function must have a non-empty cap entry" check is **wrong** — it would
+  fire on 7000+ legitimately-empty synthesized functions. (This corrects an earlier hardening
+  idea.) The tractable invariant is narrower: *every user-level AST construct that becomes a
+  hashed boundary function (`DFn`, each actor handler, `DExtern`) has a recorded cap closure* —
+  which is what the C1 fix restored, and which is worth locking in as a regression guard so the
+  next new construct or codegen path that synthesizes a boundary function trips a loud failure at
+  emit time instead of silently under-reporting authority. That guard is a real (if small) design
+  item, not the cheap assert the earlier draft imagined, because it requires enumerating "AST
+  constructs that become boundary functions" independently of the recording pass.
+- The gate's soundness ceiling is: **it is a same-toolchain integrity check whose completeness
+  equals `check_module_needs`'s coverage of authority-bearing AST constructs.** Every new IO
+  builtin, `extern` form, or lowering path that manufactures a boundary function is a potential
+  silent under-report until that guard exists.
+
+**Good news on granularity (measured, same run):** the cap union of a full stdlib-using app is
+*fine-grained* (`IO.NetConnect.TLS`, `IO.NetListen`, `IO.Random`, `IO.Clock`, `IO.FileWrite`, …,
+11 distinct caps) and does **not** collapse to a blanket `IO.Foreign` — bare `extern` declarations
+have no lowered body, so their `IO.Foreign` never enters the union, while the FFI-using stdlib
+modules declare specific `needs`. So a node policy is genuinely discriminating; an earlier concern
+that FFI would flood every artifact with `IO.Foreign` and nullify the policy check does not bear
+out.
+
 ### Node deploy policy
 
 The server loads an optional policy at startup (`runtime/march_reload.c`): `MARCH_DEPLOY_POLICY` points to a newline-delimited list of permitted cap paths (subsumption-expanded — listing `IO.Network` permits `IO.NetConnect`, etc.). Absent ⇒ permissive (unchanged behavior). A policy of e.g.
@@ -243,12 +278,30 @@ Wire:   ACTIVATE3 <name> <impl_hash> <cas_hash> <sig_b64> <migrate> epoch:<N> ca
 Signed: "ACTIVATE3 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> callers:<sorted-csv>"
 ```
 
-Phase 5C defines **`ACTIVATE4`**, which inserts `cap_root:<hex>` **before** `callers:`:
+Phase 5C defines **`ACTIVATE4`**, which inserts `cap_root:<hex>` and `caps:<sorted-csv>` **before** `callers:`:
 
 ```
-Wire:   ACTIVATE4 <name> <impl_hash> <cas_hash> <sig_b64> <migrate> epoch:<N> cap_root:<hex> callers:<sorted-csv>
+Wire:   ACTIVATE4 <name> <impl_hash> <cas_hash> <sig_b64> <migrate> epoch:<N> cap_root:<hex> caps:<sorted-csv> callers:<sorted-csv>
 Signed: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> cap_root:<hex> callers:<sorted-csv>"
 ```
+
+**Why the cap set rides the wire (design correction, 2026-07-03).** An earlier draft had the
+server *read the `.hcr_manifest` from the CAS* to recover the cap set. That is not possible as
+written: the CAS stores the `.so` keyed by `cas_hash`; the `.hcr_manifest` is a **client-side
+sidecar** that is never put in the CAS, and it is the full **per-function** manifest (7000+
+lines for a stdlib-using app — see below), not the artifact cap set. The clean fix falls out
+of how `cap_root` is actually computed: Part A's `cap_root = blake3(sorted artifact_caps)` is a
+digest of the **artifact-wide cap union**, which is *tiny* — an empirically-measured 11 distinct
+caps for a full stdlib-using app. So `ACTIVATE4` carries that union inline as `caps:<sorted-csv>`
+(a handful of entries, not the whole manifest). The set is **not** in the signed message — only
+`cap_root` is — because the server *recomputes* `cap_root` over the received `caps:` set and
+checks it against the signed `cap_root`; tampering with the wire cap set is therefore detected
+by the tamper check (recomputed root ≠ signed root). This removes the entire "server reads +
+parses a manifest from the CAS" surface the earlier draft proposed — **no CAS manifest read, no
+manifest line-parser in the C runtime** (and hence no attacker-influenced-input parser on the
+receiving side, which was a real attack surface). The server still needs BLAKE3 (to recompute
+`cap_root`) and the generated lattice table (to `normalize` the received set identically to the
+compiler before hashing, and to subsumption-check the policy).
 
 Two wire-format constraints force this shape (both verified against `march_reload.c`):
 
@@ -258,10 +311,12 @@ Two wire-format constraints force this shape (both verified against `march_reloa
   `ERR bad_signature`. An unknown `ACTIVATE4` verb instead yields a clean unknown-command
   error, which forge turns into an actionable diagnostic. This matches how 2 and 3 were
   introduced.
-- **`cap_root:` before `callers:`.** The server's callers parse consumes from `callers:` to
-  end-of-line (`march_reload.c:716–720`) — the CSV is definitionally "the rest of the line".
-  Any field placed after it would be silently absorbed into the callers set and corrupt the
-  canonical form. `callers:` stays last.
+- **`cap_root:` and `caps:` before `callers:`.** The server's callers parse consumes from
+  `callers:` to end-of-line (`march_reload.c:716–720`) — the CSV is definitionally "the rest
+  of the line". Any field placed after it would be silently absorbed into the callers set and
+  corrupt the canonical form. Both new fields go before `callers:`; `callers:` stays last.
+  (`caps:` is itself a CSV; parse it by the same bounded-token scan `callers:` would use if it
+  weren't last, i.e. read to the next ` <key>:` boundary, not to end-of-line.)
 
 **Compatibility matrix (explicit, no silent fallback):**
 
@@ -274,9 +329,9 @@ Two wire-format constraints force this shape (both verified against `march_reloa
 
 Server flow on `ACTIVATE4`, after sig-verify + CAS-load (existing) and before `dlopen`:
 
-1. Read the just-received artifact's `.hcr_manifest` from the CAS; recompute `cap_root'` over its `caps` (BLAKE3, via `lib/cas/blake3_stubs.c` linked into the runtime build). **This is new C code** — today the server never reads the manifest (it is parsed only client-side in `cmd_deploy_hot.ml`); the server needs the manifest path derivation, a line parser for `FN`/`ROOT`, and the digest call.
-2. **Tamper check:** `cap_root' == cap_root` (the signed value). Mismatch ⇒ `ERR cap_tamper`, audit `err_cap_tamper` (naming follows the existing `err_abi`/`err_cas_miss`/`err_sig` convention in `write_audit_log`).
-3. **Policy check:** every cap in the artifact set is subsumed by some policy entry. Violation ⇒ `ERR cap_policy <cap>`, audit `err_cap_policy`.
+1. Take the `caps:<csv>` set from the wire message (no CAS read — see the design correction above); `normalize` it via the generated lattice table and recompute `cap_root'` over the sorted result (BLAKE3, via `lib/cas/blake3_stubs.c` linked into the runtime build). **New C code**, but far smaller than the earlier draft: a CSV split, a `normalize`/sort against the lattice table, and one BLAKE3 call — no manifest path derivation, no `FN`/`ROOT` line parser.
+2. **Tamper check:** `cap_root' == cap_root` (the signed value). Mismatch ⇒ `ERR cap_tamper`, audit `err_cap_tamper` (naming follows the existing `err_abi`/`err_cas_miss`/`err_sig` convention in `write_audit_log`). This is what makes the unsigned wire `caps:` set trustworthy — a forged set produces a different root.
+3. **Policy check:** every cap in the received set is subsumed by some policy entry. Violation ⇒ `ERR cap_policy <cap>`, audit `err_cap_policy`.
 4. Proceed to `dlopen` + `march_dispatch_publish` as today (extend the shared `do_activate()` helper, `march_reload.c:377`).
 
 This is the single runtime checkpoint that re-materializes the erased static cap discipline at the trust boundary. The subsumption check in C works off a **generated table** emitted from `Cap_lattice` so it cannot drift from the OCaml hierarchy. Note there is currently **no precedent** in this repo for OCaml-generated C sources — this needs a dune rule that runs the emitter and a CI freshness check (regenerate + diff) as the anti-drift mechanism. The generated file lives in `runtime/`, so the existing CAS cache key (which digests `runtime/*.c` and `*.h`) automatically invalidates cached binaries when the lattice changes.
@@ -287,7 +342,11 @@ State-migration functions run as the actor's next turn, ahead of any pending use
 
 **Where recognition actually lives today** (correcting the earlier draft): the typechecker does *not* recognize migration functions. Recognition is a name-suffix heuristic in `bin/main.ml:1005` (`find_migrate_fn`): a `DFn` whose name ends in `_migrate_state` and whose prefix equals `lowercase(actor_name)`, used by the `--check-migration` SMT mode. The parent design's "function named exactly `migrate_state` with return-type disambiguation" (`hcr-phase5-design.md:170`) is what TIR/llvm_emit implemented as the `{actor_lower}_migrate_state` convention.
 
-**Change:** teach **typecheck** the same suffix convention (it owns the cap-closure machinery Part A exposes, so the check is one map lookup), and require the recognized function's IO cap closure to be empty. Any IO builtin or `extern` ⇒ compile error. `bin/main.ml`'s `find_migrate_fn` stays as-is for the SMT mode; the shared predicate belongs in **`lib/tir/tir_names.ml`** — Wave 3's designated single home for cross-pass name contracts (W3.1). Note the `_migrate_state` suffix is currently name-sniffed in four places (`dce.ml`, `llvm_emit.ml`, `mono.ml`, `bin/main.ml`) and not yet in `Tir_names`; 5C should add the predicate there and convert its own uses to it rather than adding a fifth sniff site. Converting the existing four is Wave-3-flavored cleanup, best coordinated with chunk 2 (which is actively restructuring `llvm_emit`).
+**Change:** teach **typecheck** the same suffix convention and require the recognized function's IO caps to be empty. Any IO builtin or `extern` ⇒ compile error.
+
+**Do not use `fn_capability_closures` for this check (design correction, 2026-07-03).** Part A's `record_fn_caps` records `module_wide_caps @ own_caps` — it *merges the module's declared `needs` and import-propagated caps into every function's closure*, deliberately, so the artifact-wide `cap_root` union is complete. That makes the exposed closure **wrong for the "is this one function IO-free" question**: a `migrate_state` living in an actor module that declares `needs IO.Console` for its *handlers* — the common case, since any actor doing IO in a handler declares it at module level — would carry `IO.Console` in its merged closure and **falsely fail** the IO-free check even though the migration body touches nothing. Part A therefore needs a **second projection** exposing each function's *own* inferred caps (sig + body scan, pre-module-merge); the migrate_state check uses that. Recording the own-caps map is a small addition alongside the existing merged one (the `own_caps` value is already computed at each `record_fn_caps` call site — it just needs storing in a parallel table and an accessor), and should land in the same task as the migrate_state check that consumes it, not speculatively ahead of it.
+
+`bin/main.ml`'s `find_migrate_fn` stays as-is for the SMT mode; the shared predicate belongs in **`lib/tir/tir_names.ml`** — Wave 3's designated single home for cross-pass name contracts (W3.1). Note the `_migrate_state` suffix is currently name-sniffed in four places (`dce.ml`, `llvm_emit.ml`, `mono.ml`, `bin/main.ml`) and not yet in `Tir_names`; 5C should add the predicate there and convert its own uses to it. **Wave 3 chunk 2 is now merged** (the `llvm_emit`/`lower` restructure landed on `main`), so the four-site conversion no longer needs coordination — it's a straightforward sweep against the settled module layout.
 
 ```
 error: migrate_state must be IO-free
@@ -313,7 +372,7 @@ This is the cleanest first application of "capability-bounded migration sandbox.
 | `forge/lib/cmd_deploy_hot.ml` | Parse `caps=`/`ROOT cap_root=` lines; maintain a local `.hcr_manifest.prev` baseline (mirroring `prev_schemas_path`/`save_schemas_baseline`); monotonicity diff; `--grant-cap` handling; emit `ACTIVATE4` with `cap_root` in the signed message; explicit old-server diagnostic + `--no-cap-gate`; widening diagnostic; cap-change lines in `status` |
 | `forge/bin/main.ml` | `--grant-cap` via Cmdliner `Arg.opt_all` (first repeatable flag in forge); `--no-cap-gate` |
 | `lib/cas/dune` / `runtime/dune` (Part C, out of scope here) | Link `lib/cas/blake3_stubs.c` into the runtime build so the server can recompute `cap_root` with the same BLAKE3 the compiler used |
-| `runtime/march_reload.c` | New `ACTIVATE4` branch (extend `do_activate()` at `:377`); **new** server-side `.hcr_manifest` CAS read + parse (none exists today); `cap_root` recompute + tamper check; load `MARCH_DEPLOY_POLICY`; policy check; `err_cap_tamper`/`err_cap_policy` audit results |
+| `runtime/march_reload.c` | New `ACTIVATE4` branch (extend `do_activate()` at `:377`); parse the inline `caps:<csv>` set (no CAS read, no manifest parser — see the ACTIVATE4 design correction); `normalize` + BLAKE3 recompute of `cap_root` + tamper check; load `MARCH_DEPLOY_POLICY`; subsumption policy check; `err_cap_tamper`/`err_cap_policy` audit results |
 | `runtime/march_cap_lattice.{h,c}` (new, generated) | C subsumption table emitted from `Cap_lattice`; needs a dune emit rule + CI regenerate-and-diff freshness check (no generated-C precedent exists in the repo); covered by the existing `runtime/*` CAS cache key |
 | `runtime/march_dispatch.{h,c}` | Optional: per-slot `cap_root` field on `MarchDispatchSlot` (alongside the existing `signer_hex`/`callers_str`) for `VERSIONS_DETAIL` reporting |
 
