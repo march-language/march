@@ -22,42 +22,10 @@ module Err = March_errors.Errors
 
 (* ── Capability hierarchy ────────────────────────────────────────────────── *)
 
-(** Same hierarchy as [io_cap_hierarchy] in typecheck.ml. *)
-let io_cap_hierarchy : (string * string option) list = [
-  ("IO",                    None);
-  ("IO.Console",            Some "IO");
-  ("IO.FileSystem",         Some "IO");
-  ("IO.FileRead",           Some "IO.FileSystem");
-  ("IO.FileWrite",          Some "IO.FileSystem");
-  ("IO.Network",            Some "IO");
-  ("IO.NetConnect",         Some "IO.Network");
-  ("IO.NetListen",          Some "IO.Network");
-  ("IO.Process",            Some "IO");
-  ("IO.Clock",              Some "IO");
-  ("IO.Random",             Some "IO");
-  ("IO.Database",           Some "IO.NetConnect");
-  ("IO.Spawn",              Some "IO");
-  ("IO.Mut",                Some "IO");
-  ("IO.Telemetry",          Some "IO");
-  ("IO.NetConnect.TLS",     Some "IO.NetConnect");
-  ("IO.Foreign",            Some "IO");
-  ("IO.Foreign.Blocking",   Some "IO.Foreign");
-]
-
-(** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first. *)
-let cap_ancestors cap =
-  let rec go c acc =
-    let acc' = c :: acc in
-    match List.assoc_opt c io_cap_hierarchy with
-    | Some (Some parent) -> go parent acc'
-    | _ -> acc'
-  in
-  List.rev (go cap [])
-
-(** [cap_subsumes parent child] — true when [parent] is an ancestor of (or
-    equal to) [child].  E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
-let cap_subsumes parent child =
-  List.mem parent (cap_ancestors child)
+(** Hierarchy + subsumption now live in [March_caps.Cap_lattice] (Phase5C-A.1)
+    — shared with the typechecker's body-scan pass, which previously carried
+    a verbatim duplicate of this table. *)
+let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
 
 (* ── Builtin → capability table ──────────────────────────────────────────── *)
 
