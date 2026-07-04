@@ -1,13 +1,12 @@
--- Phase 5C capability-admission demo server.
--- Server.handle is the reloadable boundary function whose OWN caps the node
--- gates on. v1 (this file): handle does console I/O only → needs IO.Console.
---   Build: march --compile --hot-reload App --signing-pubkey $KEY -o cap_server server.march
---   Run:   MARCH_HOT_RELOAD_SOCKET=/tmp/march_capdemo.sock ./cap_server
+-- Phase 5C capability-admission demo server (v1: console-only boundary fn).
+-- Server.handle's OWN inferred caps = {IO.Console}. A node policy permitting
+-- IO.Console admits this. See server_v2.march for the over-authority patch.
 mod App do
   needs IO.NetListen
   needs IO.Console
 
   mod Server do
+    needs IO.Console
     fn handle(x : Int) : Int do
       println("handle v1 (console only)")
       x + 1

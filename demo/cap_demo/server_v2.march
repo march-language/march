@@ -1,0 +1,31 @@
+-- Phase 5C capability-admission demo — v2 over-authority patch.
+-- Server.handle now writes a file → OWN caps = {IO.Console, IO.FileWrite}.
+-- vs v1 ({IO.Console}) this is a WIDENING (forge monotonicity gate blocks it
+-- unless --grant-cap IO.FileWrite); and a node whose MARCH_DEPLOY_POLICY omits
+-- IO.FileWrite rejects it with ERR cap_policy IO.FileWrite.
+mod App do
+  needs IO.NetListen
+  needs IO.Console
+  needs IO.FileWrite
+
+  mod Server do
+    needs IO.Console
+    needs IO.FileWrite
+    fn handle(x : Int) : Int do
+      println("handle v2 (now writes a file!)")
+      let _ = file_write("/tmp/capdemo_v2_wrote_this", "v2 was here")
+      x + 2
+    end
+  end
+
+  fn main() do
+    println("cap-demo server up")
+    let _ = Server.handle(1)
+    match tcp_listen(9099) do
+      Err(e) -> println("listen err: " ++ e)
+      Ok(fd) ->
+        let _ = tcp_accept(fd)
+        println("server shutting down")
+    end
+  end
+end
