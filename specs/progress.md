@@ -282,6 +282,28 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-04, Phase 5C Part C COMPLETE — wire-carried cap-set + node-local admission + migrate_state IO-free bound)
+
+**HCR Phase 5C Part C complete across five tasks (C1–C5, all reviewed and approved).** The three-part Phase 5C (Parts A, B, C) is now fully done. Part C establishes two critical engineering patterns for the repo:
+
+1. **First OCaml-generates-checked-in-C precedent** — `lib/caps/emit_c_table.ml` generates `runtime/march_cap_lattice.{h,c}` from OCaml's `Cap_lattice` hierarchy. Checked-in (not generated-at-build) so the CAS cache key digests it; anti-drift enforced via a test-time `cap_lattice_check` rule that regenerates and diffs. This unblocks future OCaml-to-C code generation (e.g., dispatch tables, introspection) with zero-drift guarantees.
+
+2. **Wire-carried capability-set design** — Instead of requiring the server to parse a manifest sidecar or read the CAS, `forge deploy hot` emits the artifact's capability union in the `ACTIVATE4` message itself as an unsigned `caps:` field. The server recomputes `cap_root` from this wire-carried set (normalize → BLAKE3), enabling node-local tamper-detection + `MARCH_DEPLOY_POLICY` gating without manifest I/O. This is a lightweight, trustworthy design suitable for commodity deployments.
+
+**Part C tasks:**
+- **C1 (commits 187a2b19):** Generated C capability-lattice table + anti-drift CI check.
+- **C2 (commits 86a7c095 + 87e50194):** Pure-C BLAKE3 hex helpers + unified `blake3_flags.ml` discovery.
+- **C3 (commit 09f758ea):** `ACTIVATE4` admission gate in `march_reload.c` — server-side `cap_root` recompute + tamper-check + policy subsumption.
+- **C4 (commit b2ce6892):** `forge deploy hot` emits `ACTIVATE4` with wire-carried caps; fallback to `ACTIVATE3` for legacy manifests/servers.
+- **C5 (commit 98cb6f14):** Compile-time `migrate_state` IO-free bound + own-caps projection + consolidated naming predicates.
+
+**Verification:** all five tasks individually reviewed and approved; full test suite green (397 compiler / 230 eval / 364 codegen / 793 stdlib); `scripts/check-docs.sh` passes.
+
+**Remaining follow-ons (not done, carried forward):**
+- Extract `is_migrate_fn_name` into `march_ast` for a single source (currently duplicated between `Tir_names` and `typecheck.ml`).
+- IR-level `no_alloc`/`no_panic` `migrate_state` bound (blocked on `policy_dce` optimization).
+- Refinement-verified migration totality (Z3-backed proof that all state mutations are covered).
+
 ## Current State (as of 2026-07-04, Phase 5C Part C Task C5 — migrate_state IO-free bound + own-caps projection)
 
 **HCR Phase 5C Part C Task C5 done** (independent of C1–C4; all OCaml, no C/runtime touched). Adds a compile-time bound that a state-migration function does no IO, plus a design correction to Part A's capability-closure recording that the migrate_state check depends on.

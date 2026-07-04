@@ -373,6 +373,50 @@ All `Cap(X)` values are **runtime-erased**. They compile to `null` in LLVM IR an
 
 ---
 
+## Hot-deploy authorization — node-local admission control
+
+When using `forge deploy hot` to upgrade a running application, the node has a second opportunity to enforce capability discipline at deployment time — after signature verification, before the new code is loaded.
+
+### How it works
+
+`forge deploy hot` extracts every IO capability that the new artifact declares (combining all `needs` clauses across all modules) and embeds this set in the deployment message. The receiving node:
+
+1. **Recomputes the capability set** — normalizes and hashes it using BLAKE3, reproducing the digest that was signed during the deploy.
+2. **Tamper-checks** — compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen.
+3. **Applies the deployment policy** — if `MARCH_DEPLOY_POLICY` is set (a file path), the node loads it and verifies that every capability in the new artifact is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
+
+### Configuring the policy
+
+Set the `MARCH_DEPLOY_POLICY` environment variable to a file path:
+
+```bash
+export MARCH_DEPLOY_POLICY=/etc/march/deploy-policy.txt
+```
+
+The policy file is line-delimited. Each non-empty, non-comment line is a permitted capability path:
+
+```
+# /etc/march/deploy-policy.txt
+IO
+IO.FileRead
+IO.NetConnect.TLS
+IO.Clock
+```
+
+An empty policy file or absent `MARCH_DEPLOY_POLICY` ⇒ permissive (all artifacts admitted). This is the default for backward compatibility.
+
+### Threat model and scope
+
+The policy is **authorization on a self-reported manifest** — a defense-in-depth layer, not a sandbox. A party with the signing key can lie about what capabilities the code uses. The node admission gate proves:
+
+- The artifact was signed by the expected entity (Phase 4 ed25519 signature).
+- The declared capability set has not been tampered with in transit (BLAKE3 tamper-check).
+- The declared capabilities are within a static policy envelope (subsumption check).
+
+It does **not** prove that the code actually *uses* only those capabilities — only that the manifest claims it does, and the claim is signed and untampered. Runtime enforcement via `cap no_panic`, `cap no_alloc`, FFI sandboxing, or OS-level confinement can provide stronger guarantees. For most deployments, the combination of compile-time capability verification + signed manifests + policy gates is sufficient.
+
+---
+
 ## Proof caps — encoding initialization order
 
 IO caps control *which resources* a module may touch. Proof caps control *when* dependent code may run. They're separate concerns.
