@@ -1,0 +1,33 @@
+mod Main do
+  -- The all-false path of ECond. When NO specific arm's condition holds, the
+  -- interpreter's `go` loop keeps recursing on `VBool false` (eval.ml:7103)
+  -- until it either finds a `VBool true` arm or runs off the end of the list —
+  -- and running off the end is a RUNTIME ERROR:
+  --   `eval_error "non-exhaustive `match do` — no arm matched"` (eval.ml:7099),
+  -- panicking `non-exhaustive match do` compiled. ECond is therefore NOT
+  -- statically total (the typechecker checks each condition is Bool and the
+  -- bodies agree, typecheck.ml:4015-4031, but does NOT check exhaustiveness).
+  --
+  -- A crashing program can't be a golden MATCH (a nonzero interpreter exit is
+  -- an automatic INTERP FAIL under verify.sh), so this witness instead makes
+  -- every specific condition false and relies on a terminal catch-all arm to
+  -- select. The parser desugars a bare `_ ->` arm to a literal-`true` condition
+  -- (parser.mly:1295-1296: `UNDERSCORE ARROW body` builds `(ELit (LitBool
+  -- true), body)`), so `_ ->` is exactly the always-true final arm that keeps
+  -- the chain total. For `sign(0)` both `n > 0` and `n < 0` are false, so
+  -- control reaches the `_` arm — the complementary fact to g31's middle-arm
+  -- selection: the LAST arm is selected precisely when every earlier one is
+  -- false.
+  fn sign(n) do
+    match do
+      n > 0 -> "positive"
+      n < 0 -> "negative"
+      _     -> "zero"
+    end
+  end
+  fn main() do
+    println(sign(42))
+    println(sign(-7))
+    println(sign(0))
+  end
+end

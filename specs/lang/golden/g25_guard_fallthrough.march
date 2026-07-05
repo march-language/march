@@ -1,0 +1,18 @@
+mod Main do
+  -- The FIRST branch's pattern (PatVar n) matches EVERY value, but its guard
+  -- `when n > 10` gates selection: a false guard falls through to the next
+  -- branch (eval.ml:7340), which also matches but has no guard. Proves the
+  -- guard is evaluated in the pattern-extended env and false ⇒ next branch.
+  fn size(n) do
+    match n do
+      n when n > 10 -> "big"
+      n when n > 0 -> "small"
+      _ -> "nonpositive"
+    end
+  end
+  fn main() do
+    println(size(42))
+    println(size(5))
+    println(size(0))
+  end
+end

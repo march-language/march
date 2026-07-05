@@ -1,0 +1,18 @@
+mod Main do
+  -- A local recursive `fn go` that CLOSES OVER an outer `let` binding (`step`)
+  -- WHILE also calling itself — proving lexical capture and recursion together.
+  -- The env_ref the closure re-reads (eval.ml:6880) is the block's env extended
+  -- with both `step` (the prior `let`) and `go` itself, so the body sees both
+  -- the captured outer variable and its own name (eval.ml:6882-6883).
+  fn main() do
+    let step = 2
+    fn go(n) do
+      if n == 0 do
+        0
+      else
+        step + go(n - 1)
+      end
+    end
+    println(int_to_string(go(4)))
+  end
+end

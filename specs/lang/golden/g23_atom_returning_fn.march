@@ -1,0 +1,18 @@
+mod Main do
+  fn classify(n) do
+    if n == 0 do
+      :zero
+    else
+      :nonzero
+    end
+  end
+
+  fn main() do
+    println(bool_to_string(classify(0) == :zero))
+    match classify(5) do
+      :zero -> println("was zero")
+      :nonzero -> println("was nonzero")
+      _ -> println("was other")
+    end
+  end
+end

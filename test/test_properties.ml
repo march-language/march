@@ -2534,31 +2534,29 @@ let prop_oracle_opt_matrix =
        let ok2 = check_at 2 in
        ok0 && ok2)
 
-(* ── Documented-skip: record-update on a missing field over an ERASED base
-   (OPEN divergence, specs/todos.md "Interpreter/compiled divergence:
-   ERecordUpdate on a missing field") ─────────────────────────────────────
+(* ── Converged: record-update on a missing field over an ERASED base
+   (formerly an OPEN divergence; RESOLVED by Core March spec Task 3,
+   specs/lang/core-march.md §4 ERecordUpdate rule) ─────────────────────────
    Per this plan's "constrain each generator to the currently-working
    subset" rule, [gen_record_update_module] above NEVER generates this
    shape — it only updates fields that exist on a statically-typed record.
-   This is a standalone, non-QCheck unit test (using [oracle_check] directly
-   on ONE fixed program, not a property) that pins the CURRENT, OPEN
-   divergence: `{ record_from_list([...]) with z: 99 }` where `z` is absent
-   from the base's actual shape. The interpreter's [ERecordUpdate] (eval.ml)
-   silently fabricates the field (`Some(99)`, exit 0); the compiled backend
-   panics via `march_record_update_dyn` ("no field \"z\" in record", clean
-   exit 1 — NOT a signal, so this exact shape would never surface as a
-   [`Fail] through [oracle_check]'s normal signal-vs-clean-exit
-   classification; it is a silent "compiled skip" there, invisible unless
-   asserted on directly, which is exactly what this test does). This test
-   is EXPECTED TO STAY THIS WAY (a "documented skip", not a bug for Task 5
-   to fix) until `lib/eval/eval.ml`'s `ERecordUpdate` is made to fail loudly
-   on an unknown field name, matching the compiled contract — see the
-   todos.md entry for the reconciliation plan. If a future fix makes both
-   sides converge (either both succeed or both fail identically), this test
-   should be revisited and folded into the main generator per this plan's
-   "when the underlying bug is fixed, a follow-up widens the generator"
-   note. *)
-let test_record_update_missing_field_on_erased_base_diverges_documented () =
+   This is a standalone, non-QCheck unit test (using a direct interp-vs-
+   compiled comparison on ONE fixed program, not a property) that used to
+   pin an OPEN divergence: `{ record_from_list([...]) with z: 99 }` where
+   `z` is absent from the base's actual shape. The interpreter's
+   [ERecordUpdate] (eval.ml) used to silently fabricate the field
+   (`Some(99)`, exit 0) while the compiled backend panicked via
+   `march_record_update_dyn` ("no field \"z\" in record", clean exit 1).
+   The Core March spec (Task 3) adjudicated the NORMATIVE rule as the
+   compiled contract — a functional update of a field absent from the
+   record's actual shape is a runtime error — and `eval.ml`'s
+   [ERecordUpdate] arm was changed to match (fails loudly via
+   [eval_error] instead of appending). Both backends now agree: this test
+   confirms CONVERGENCE (both sides exit nonzero, neither is a signal
+   death) rather than pinning a divergence. Kept as a standalone unit test
+   (not folded into [gen_record_update_module]) because it specifically
+   targets the ERASED-base shape the property generator still avoids. *)
+let test_record_update_missing_field_on_erased_base_converged () =
   let src =
     "mod Main do\n\
     \  fn main() do\n\
@@ -2574,7 +2572,11 @@ let test_record_update_missing_field_on_erased_base_diverges_documented () =
   | Some bin ->
     let src_file = write_temp_march src in
     let interp_cmd = Printf.sprintf "%s %s" (Filename.quote bin) (Filename.quote src_file) in
-    let (rc_interp, interp_out) = run_capture ~timeout:10 interp_cmd in
+    (* [run_capture3], not [run_capture]: eval_error's message is written to
+       STDERR, and [run_capture] discards stderr — using it here would leave
+       [interp_err] empty and this test would silently stop checking the
+       error text. *)
+    let (rc_interp, _interp_out, interp_err) = run_capture3 ~timeout:10 interp_cmd in
     let bin_file = src_file ^ ".bin" in
     let compile_cmd =
       Printf.sprintf "%s --compile %s -o %s"
@@ -2585,22 +2587,19 @@ let test_record_update_missing_field_on_erased_base_diverges_documented () =
       cleanup_temp_march src_file;
       Alcotest.failf
         "expected the missing-field update to COMPILE (and panic at RUNTIME); \
-         compile itself failed (rc=%d) — the documented divergence shape may \
-         have changed, revisit this test" rc_compile
+         compile itself failed (rc=%d) — the converged shape may have \
+         changed, revisit this test" rc_compile
     end else begin
-      (* [run_capture3], not [run_capture]: the runtime panic message is
-         written to STDERR (verified by hand), and [run_capture] discards
-         stderr — using it here would leave [compiled_err] empty and this
-         test would silently stop checking the panic text. *)
       let (rc_run, _compiled_out, compiled_err) =
         run_capture3 ~timeout:10 (Filename.quote bin_file) in
       cleanup_temp_march src_file;
-      (* Documented, OPEN divergence: interpreter succeeds and fabricates the
-         field; compiled panics with a clean (non-signal) nonzero exit. *)
-      Alcotest.(check int) "interpreter succeeds on missing-field update (fabricates field)"
-        0 rc_interp;
-      Alcotest.(check string) "interpreter fabricates the missing field as Some(99)"
-        "Some(99)" (String.trim interp_out);
+      (* Converged: BOTH backends now reject the missing-field update with a
+         clean (non-signal) nonzero exit, and both error messages mention the
+         missing field. *)
+      Alcotest.(check bool) "interpreter exits nonzero (errors loudly), NOT a signal death"
+        true (rc_interp <> 0 && rc_interp < 128);
+      Alcotest.(check bool) "interpreter stderr mentions the missing field"
+        true (contains_substring ~needle:"no field" interp_err);
       Alcotest.(check bool) "compiled binary exits nonzero (panics), NOT a signal death"
         true (rc_run <> 0 && rc_run < 128);
       Alcotest.(check bool) "compiled stderr mentions the record-update panic"
@@ -2701,12 +2700,13 @@ let classify_compile_unit_tests = [
   "exit-3 wins even with no stderr", `Quick, test_classify_compile_exit_3_wins_with_no_stderr;
 ]
 
-(** Documented-skip unit test for the OPEN record-update-missing-field-on-
-    erased-base divergence (Phase 2c, Task 5) — see the doc comment above
-    [test_record_update_missing_field_on_erased_base_diverges_documented]. *)
-let record_update_documented_skip_unit_tests = [
-  "record update on missing field over erased base: documented OPEN divergence",
-  `Quick, test_record_update_missing_field_on_erased_base_diverges_documented;
+(** Unit test confirming the CONVERGED record-update-missing-field-on-
+    erased-base behavior (Phase 2c, Task 5; converged by Core March spec
+    Task 3) — see the doc comment above
+    [test_record_update_missing_field_on_erased_base_converged]. *)
+let record_update_converged_unit_tests = [
+  "record update on missing field over erased base: converged (both backends error)",
+  `Quick, test_record_update_missing_field_on_erased_base_converged;
 ]
 
 (* ── Test suite registration ────────────────────────────────────────────── *)
@@ -2715,7 +2715,7 @@ let () =
   let open Alcotest in
   run "March property tests" [
     "oracle: classify_compile (unit)", classify_compile_unit_tests;
-    "oracle: record-update documented skip (unit)", record_update_documented_skip_unit_tests;
+    "oracle: record-update converged (unit)", record_update_converged_unit_tests;
     "parse+typecheck", List.map QCheck_alcotest.to_alcotest [
       prop_parse_no_unexpected_exception;
       prop_typecheck_no_crash;
