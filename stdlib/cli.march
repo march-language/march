@@ -30,7 +30,6 @@ mod Cli do
     = UnknownFlag(String)
     | MissingValue(String)
     | MissingRequired(String)
-    | InvalidValue(String, String)
 
   type ParsedArgs = {
     values:     List((String, String)),
@@ -88,11 +87,24 @@ mod Cli do
       end)
   end
 
+  -- A single-dash token whose next character is a digit (or nothing after
+  -- the dash) is a negative number / bare "-", not a flag — e.g. "-5".
+  -- A "--"-prefixed token is always flag-shaped, even "--5".
+  pfn single_dash_is_negative_number_or_bare(token : String) : Bool do
+    let len = String.byte_size(token)
+    if len <= 1 do true
+    else Char.is_digit(String.slice(token, 1, 1))
+    end
+  end
+
   -- Strip a leading "--" or "-" from a token, returning the bare name, or
   -- None if the token isn't flag-shaped (used to detect positionals).
   pfn flag_name(token : String) : Option(String) do
     if String.starts_with(token, "--") do Some(String.slice(token, 2, String.byte_size(token) - 2))
-    else if String.starts_with(token, "-") do Some(String.slice(token, 1, String.byte_size(token) - 1))
+    else if String.starts_with(token, "-") do
+      if single_dash_is_negative_number_or_bare(token) do None
+      else Some(String.slice(token, 1, String.byte_size(token) - 1))
+      end
     else None end
     end
   end
@@ -275,7 +287,6 @@ mod Cli do
     UnknownFlag(f) -> "unknown flag: --" ++ f
     MissingValue(f) -> "flag --" ++ f ++ " requires a value"
     MissingRequired(f) -> "missing required flag: --" ++ f
-    InvalidValue(f, v) -> "invalid value for --" ++ f ++ ": " ++ v
     end
   end
 

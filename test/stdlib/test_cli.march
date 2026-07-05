@@ -111,6 +111,34 @@ describe "Cli.parse" do
     end
   end
 
+  test "negative number token is treated as positional, not an unknown flag" do
+    match Cli.parse([], ["-5"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (List.length(Cli.positional(parsed)) == 1)
+      assert (List.nth(Cli.positional(parsed), 0) == "-5")
+    end
+  end
+
+  test "a flag passed twice keeps the first occurrence (accumulate-then-reverse)" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "1", "--port", "2"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "?") == "1")
+    end
+  end
+
+  test "empty argv against a spec with a required flag is an error" do
+    match Cli.parse(sample_specs(), []) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingRequired(f) -> assert (f == "name")
+      _ -> assert false
+      end
+    end
+  end
+
 end
 
 describe "Cli typed accessors and error messages" do
@@ -141,7 +169,36 @@ describe "Cli typed accessors and error messages" do
     assert (Cli.error_message(UnknownFlag("bogus")) == "unknown flag: --bogus")
     assert (Cli.error_message(MissingValue("port")) == "flag --port requires a value")
     assert (Cli.error_message(MissingRequired("name")) == "missing required flag: --name")
-    assert (Cli.error_message(InvalidValue("port", "abc")) == "invalid value for --port: abc")
+  end
+
+end
+
+describe "Cli end-to-end composition" do
+
+  test "the same spec list drives parse and help_text, and accessors compose on one parsed result" do
+    let specs = sample_specs()
+    match Cli.parse(specs, ["--name", "alice", "-v", "serve", "now"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "name", "") == "alice")
+      assert (Cli.get_bool(parsed, "verbose") == true)
+      assert (Cli.get_string_or(parsed, "port", "4000") == "4000")
+      match Cli.get_int(parsed, "port") do
+      Some(_) -> assert false
+      None -> assert true
+      end
+      assert (List.length(Cli.positional(parsed)) == 2)
+      assert (List.nth(Cli.positional(parsed), 0) == "serve")
+      assert (List.nth(Cli.positional(parsed), 1) == "now")
+    end
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "Usage: myapp [OPTIONS]"))
+    assert (String.contains(text, "--verbose, -v"))
+    assert (String.contains(text, "Verbose output"))
+    assert (String.contains(text, "--port, -p"))
+    assert (String.contains(text, "(default: 4000)"))
+    assert (String.contains(text, "--name"))
+    assert (String.contains(text, "(required)"))
   end
 
 end
