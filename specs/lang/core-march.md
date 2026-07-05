@@ -83,6 +83,7 @@ expr     e  ::= ELit ℓ                                      -- literal
              |  ELetFn f [x…] e                             -- local recursive fn (ast.ml:77)
              |  EMatch e [ p when g? -> e … ]               -- pattern match
              |  EIf e e e                                   -- if c do … else … end
+             |  ECond [(e_cond, e_body)…]                   -- scrutinee-less boolean match: match do c -> b … end (ast.ml:66)
              |  EAtom a [e…]                                -- atom expression: :ok, :error(x) (ast.ml:70)
                                                             (ast.ml:51–91)
 
@@ -235,6 +236,34 @@ forms:
   statement local to one block, visible only to the rest of that block (like a
   `let`), not to the whole module.
 
+**`ECond` is the scrutinee-*less* sibling of `EMatch` — a boolean chain, and it
+IS reachable from surface syntax (like `ELetFn`, unlike `PatRecord`/`PatAs`).**
+`Ast.expr`'s `ECond of (expr * expr) list * span` (`ast.ml:66`) is a list of
+`(condition, body)` arm pairs, written `match do c₁ -> b₁  c₂ -> b₂  … end` —
+syntactically a `match` with **no scrutinee expression between `match` and
+`do`**, whose "patterns" are ordinary boolean *conditions* rather than
+patterns. The parser production is `MATCH DO option(arm_sep)
+separated_nonempty_list(arm_sep, cond_branch) END ⇒ ECond(bs, …)`
+(`parser.mly:1075`), a distinct grammar alternative from the scrutinee-bearing
+`MATCH e DO … branch … END ⇒ EMatch(…)` one line above it (`parser.mly:1073`) —
+so whether a `match … do … end` parses to `EMatch` or `ECond` is decided purely
+by whether a scrutinee expression sits between `match` and `do`. Confirmed by
+hand — `match do x > 0 -> "pos"  true -> "nonpos" end` parses, interprets, and
+compiles+runs (see g31–g32, §5).
+
+A `cond_branch` (`parser.mly:1292`–`1296`) is either `e -> body` — an arbitrary
+boolean *expression* `e` as the condition — **or** a bare `_ -> body`, which the
+parser desugars to `(ELit (LitBool true, …), body)` (`parser.mly:1295`–`1296`):
+i.e. `_ ->` is not a wildcard *pattern* here (there is no scrutinee to match
+against) but sugar for an **always-true final arm**, exactly equivalent to
+writing `true -> body`. This is the idiomatic way to make an `ECond` total (see
+E-Cond's all-false behavior in §4.2). `ECond` is **distinct from `EIf`**: `EIf`
+is a fixed two-way branch (`ast.ml:65`, `EIf of expr * expr * expr`) with a
+*mandatory* `else`, whereas `ECond` is an n-way boolean chain with **no implicit
+else** — running off the end of an all-false chain is a runtime error, not a
+`VUnit` default (§4.2, E-Cond). Both are grouped together as the fragment's
+"conditionals" in §4.2.
+
 Two facts that a reader coming from surface syntax must know, because they are
 load-bearing for every rule below:
 
@@ -271,6 +300,7 @@ the parser) and multi-clause functions.
 | `e.f` (`EField`) | **not** pure identity — if `e` is a chain of `ECon`/`EField` that flattens to a dotted path (a module reference, e.g. `A.B.f`), rewrite to a single qualified `EVar "A.B.f"` (or `ECon` if `f` starts uppercase, i.e. a qualified constructor); otherwise identity (recurse into `e`, keep `EField`) | `desugar.ml:613–633` |
 | `match e do … end` (`EMatch`) | identity (recurse scrutinee, guards, bodies) | `desugar.ml:595–600` |
 | `if c do a else b end` (`EIf`) | **identity** — `EIf` is *not* rewritten to a match on the bool | `desugar.ml:635–636` |
+| `match do c -> b, … end` (`ECond`) | **identity** — recurse into each arm's condition and body; arm order preserved verbatim, NOT rewritten to nested `EIf`s. (The `_ -> b` catch-all was already turned into a `true`-condition arm by the *parser*, `parser.mly:1295–1296`, before desugar sees it.) | `desugar.ml:638–639` |
 | `ELit`, `EVar` | identity | `desugar.ml:548` |
 | `type C = A \| B` (`DType`) | identity — the desugarer never touches type declarations or constructors | `desugar.ml:798–800` |
 
@@ -396,6 +426,8 @@ Values do not reduce further; a lambda becomes a closure immediately
             ─────────────────────────────────────
             ρ ⊢ EApp e_f [e₁…e_k] ⇓ f [v₁…v_k]
 
+-- ── Conditionals (EIf and ECond, presented together — see prose below) ──
+
 (E-If-T)    ρ ⊢ e_c ⇓ VBool true    ρ ⊢ e_t ⇓ v                   eval.ml:7085
             ────────────────────────────────────
             ρ ⊢ EIf e_c e_t e_e ⇓ v
@@ -405,10 +437,69 @@ Values do not reduce further; a lambda becomes a closure immediately
             ρ ⊢ EIf e_c e_t e_e ⇓ v
             -- a non-Bool condition ⇒ eval_error "if condition must be a boolean" (eval.ml:7095)
 
+(E-Cond-Sel)  ρ ⊢ c_j ⇓ VBool false  (j = 1..i−1)                   eval.ml:7097–7106
+              ρ ⊢ c_i ⇓ VBool true    ρ ⊢ b_i ⇓ v
+              ────────────────────────────────────────────────────
+              ρ ⊢ ECond [(c₁,b₁)…(c_n,b_n)] ⇓ v
+              -- the arms' CONDITIONS are evaluated top-to-bottom (`go` walks
+                 the arm list, eval.ml:7098–7106); the FIRST arm whose condition
+                 evaluates to `VBool true` is selected and ONLY its body runs
+                 (eval.ml:7102). Every earlier arm's condition evaluated to
+                 `VBool false` and was skipped (eval.ml:7103, `go rest`); every
+                 later arm is never consulted. Bodies of non-selected arms are
+                 NOT evaluated.
+
+(E-Cond-Fail) ρ ⊢ c_j ⇓ VBool false  (j = 1..n)                    eval.ml:7099
+              ────────────────────────────────────────────────────
+              ρ ⊢ ECond [(c₁,b₁)…(c_n,b_n)] ⇓ ⊥
+              -- ALL-FALSE BEHAVIOR (pinned from the code, not guessed): if `go`
+                 runs off the end of the arm list with no condition having been
+                 `VBool true`, it raises `eval_error "non-exhaustive `match do` —
+                 no arm matched"` (eval.ml:7099) — a RUNTIME error, NOT a VUnit
+                 default and NOT a required literal-true catch-all. Compiled, the
+                 same all-false path panics `non-exhaustive match do`. So `ECond`
+                 is NOT statically total: the typechecker checks each condition
+                 is Bool and the bodies unify (typecheck.ml:4015–4031) but does
+                 NOT check exhaustiveness — an all-false chain typechecks and
+                 fails at runtime, exactly as a non-exhaustive `EMatch` does
+                 (§4.3's Match_failure rule). A final `true ->` arm — or the
+                 `_ ->` sugar for it (parser.mly:1295–1296) — makes the chain
+                 total.
+              -- a non-`VBool` condition ⇒ eval_error "`match do` condition must
+                 be Bool" (eval.ml:7104) — but this is unreachable from a
+                 well-typed program: typecheck.ml:4022,4026 force every condition
+                 to `t_bool`, the ECond analogue of E-If's non-Bool guard above.
+
 (E-Match)   ρ ⊢ e_s ⇓ v    selectᵨ(v, branches) = v'              eval.ml:6998, 7317
             ──────────────────────────────────────
             ρ ⊢ EMatch e_s branches ⇓ v'
 ```
+
+**Conditionals: `EIf` and `ECond` are the fragment's two branching-on-Bool
+forms, presented together above.** They share the same evaluation shape — a
+`Bool`-valued test drives the choice of exactly one continuation — but differ
+in arity and totality:
+
+- **`EIf e_c e_t e_e`** (E-If-T / E-If-F, `eval.ml:7085`–`7095`) is a fixed
+  **two-way** branch with a *mandatory* `else` (§Syntax: `else` is not optional
+  — the parser rejects `if c do … end` without it, `parser.mly:1058`–`1062`).
+  It is therefore **always total**: `e_c` is either `VBool true` (run `e_t`) or
+  `VBool false` (run `e_e`), with no third outcome for a well-typed program (a
+  non-Bool `e_c` ⇒ `eval_error`, but the typechecker rules that out).
+- **`ECond [(c₁,b₁)…(c_n,b_n)]`** (E-Cond-Sel / E-Cond-Fail, `eval.ml:7097`–
+  `7106`) is an **n-way** boolean chain — the scrutinee-less
+  `match do c -> b … end` — with **no implicit else**. It evaluates conditions
+  top-to-bottom and runs the first `VBool true` arm's body (E-Cond-Sel); crucially,
+  unlike `EIf`, it is **NOT total** — if every condition is false it raises at
+  runtime (E-Cond-Fail), because there is no fall-through default. Authors make
+  it total with a final `true ->` arm (or the `_ ->` sugar the parser rewrites
+  to `true ->`, `parser.mly:1295`–`1296`).
+
+The desugarer leaves BOTH forms structurally intact (§3): neither is rewritten
+into the other — `EIf` is *not* lowered to a one-arm `ECond`, and `ECond` is
+*not* lowered to a nest of `EIf`s. They remain two distinct `eval_expr` arms,
+each with its own big-step rule(s) above, and the golden corpus exercises `EIf`
+(pervasively, e.g. g28's `if n == 0 do …`) and `ECond` (g31–g32) separately.
 
 **`EField` also doubles as qualified module-member access, tried FIRST.**
 Before `EField`'s "look up a record field" behavior (E-Field above) is even
@@ -1008,7 +1099,7 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Thirty programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty-two programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -1030,7 +1121,18 @@ recursive-knot) — a self-referential `fn go` computing factorial, a local
 recursive fn CLOSING OVER an outer `let` binding (lexical capture + recursion
 together), and a recursion whose result is bound by a following `let` and used
 by the rest of the block (proving the `ELetFn` binding is visible to the block
-continuation, not only inside its own body):
+continuation, not only inside its own body); `g31`–`g32` are Task 7's addition,
+covering the boolean-chain conditional (`ECond`, §4.2's E-Cond-Sel /
+E-Cond-Fail — the scrutinee-less `match do c -> b … end`) — a chain where a
+MIDDLE arm is the first `VBool true` and is selected (earlier false arms
+skipped, later arms including the terminal catch-all never consulted), and the
+all-false path routed through a terminal `_ ->`/`true ->` catch-all arm (the
+non-crashing witness of "the last arm is selected precisely when every earlier
+condition is false"; the genuinely-all-false chain that would raise
+`non-exhaustive match do` at runtime is deliberately NOT a golden program, since
+a nonzero interpreter exit is an automatic `INTERP FAIL` under `verify.sh` — the
+same harness limitation §4.4.1 / §4.3 note for the crashing strict-`&&` and
+`Match_failure` witnesses):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -1064,8 +1166,10 @@ continuation, not only inside its own body):
 | `g28_letfn_factorial.march` | a local self-referential `fn go(n)` computing factorial recursively — `go` calls itself via the env_ref recursive knot (E-LetFn, `eval.ml:6875–6884`) | `120`/`1` |
 | `g29_letfn_capture.march` | a local recursive `fn go` that CLOSES OVER an outer `let` binding (`step`) while recursing — proves lexical capture + recursion together (the re-read env `!env_ref` contains both the outer `let` and `go` itself, `eval.ml:6880–6883`) | `8` |
 | `g30_letfn_sum_result.march` | a recursive `fn go` (sum-to-n) whose RESULT is bound by a following `let` and used by the rest of the block — proves the `ELetFn` binding is visible to the block continuation (`eval.ml:6884`), like `let` | `55`/`110` |
+| `g31_cond_middle_arm.march` | `ECond` boolean chain where the FIRST condition is false and the SECOND (middle) is the first `VBool true`, so the MIDDLE arm is selected — top-to-bottom, first-true-wins, earlier false arms skipped and later arms (incl. the `true` catch-all) never consulted (E-Cond-Sel, `eval.ml:7097–7106`) | `A`/`B`/`C`/`F` |
+| `g32_cond_all_false_catchall.march` | `ECond` where every SPECIFIC condition (`n > 0`, `n < 0`) is false for `n = 0`, so control reaches the terminal `_ ->` catch-all — the non-crashing witness of the all-false path (a genuinely all-false chain raises at runtime, E-Cond-Fail `eval.ml:7099`; `_ ->` is parser sugar for a `true ->` arm, `parser.mly:1295–1296`, keeping the chain total) | `positive`/`negative`/`zero` |
 
-**Result: 30 / 30 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 32 / 32 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
@@ -1204,7 +1308,7 @@ next wiring (§6).
   golden table — is a workable template to replicate per fragment.
 
 **Deferred (the widening queue — each becomes a slice like this one):**
-strings as data; `if`-less boolean `match`/`ECond`; `to_string`/`show` and the
+strings as data; `to_string`/`show` and the
 interface-dispatch machinery; effects/IO ordering; actors; refinements;
 capabilities; the Perceus RC discipline (its own Level-3 track). (Tuples were
 covered by Task 2; records — literals, field access, functional update,
@@ -1212,7 +1316,10 @@ covered by Task 2; records — literals, field access, functional update,
 Task 3; atoms — `EAtom`/`PatAtom`, the `VAtom`↔`VCon` payload-arity split, and
 both `PatAtom` matching arms — by Task 4; the full pattern language's
 matching + guard + exhaustiveness slice by Task 5; local recursive functions
-(`ELetFn`, the env_ref recursive-knot fixpoint — §4.2's E-LetFn) by Task 6.
+(`ELetFn`, the env_ref recursive-knot fixpoint — §4.2's E-LetFn) by Task 6;
+boolean conditionals (`ECond`, the scrutinee-less `match do c -> b … end`
+chain — §4.2's E-Cond-Sel / E-Cond-Fail — grouped with the pre-existing `EIf`
+as the fragment's two "conditionals") by Task 7.
 This line was stale after Task 2 landed tuples without updating it — noted here
 so it doesn't happen again: keep this list in sync with §0/§2's actual fragment
 coverage as each task lands.)
