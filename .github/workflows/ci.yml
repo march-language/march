@@ -74,3 +74,55 @@ jobs:
         run: |
           eval $(opam env)
           dune fmt 2>&1 || true
+
+  # Cross-compilation gate (P1): cross-compile the deterministic examples corpus
+  # to Linux via `zig cc` and assert byte-identical output to the native build,
+  # running the cross binaries in Docker.  Ubuntu runner has Docker preinstalled;
+  # QEMU binfmt lets it run linux/arm64 images.  This validates cross-arch codegen
+  # (datalayout / arch-flag / ABI) end to end.
+  cross-linux-oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies (blake3 for the native reference build)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Install zig (the C cross-compiler)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Set up QEMU (run linux/arm64 images on an x86_64 runner)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Install dependencies
+        run: opam install --deps-only --with-test -y .
+
+      - name: Build compiler + oracle
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe test/test_oracle.exe
+
+      - name: Cross oracle (linux/arm64, native-referenced)
+        run: |
+          eval $(opam env)
+          MARCH_ORACLE_CROSS=arm64 \
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+          MARCH_ROOT="$PWD" \
+          ./_build/default/test/test_oracle.exe
