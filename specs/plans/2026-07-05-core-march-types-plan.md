@@ -41,7 +41,10 @@ truth (bidirectional HM: `infer_expr` :3236 ⇒, `check_expr` :4164 ⇐,
 - **Faithfulness is the whole point.** Every typing rule MUST cite the
   `typecheck.ml` line(s) it is transcribed from. Rules are human-reviewed; the
   `accept/reject` corpus is the mechanical anchor. A rule with no citation is a
-  defect.
+  defect. **Line numbers in this plan are as-of-plan-time and DRIFT** (the file
+  is edited by other work) — every task must re-`grep` the construct/function in
+  the *current* `typecheck.ml` and cite the LIVE line, treating this plan's
+  numbers as approximate pointers to the right function, not authoritative.
 - **`check_types.sh` must stay GREEN at every commit.** Run it
   (`MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh`,
   ~seconds). Every `accept/*.march` must typecheck (exit 0); every `reject/*.march`
@@ -142,33 +145,46 @@ for `PatAtom`.
 
 **Deliverable:** rules **(T-Atom-0)** / **(T-Atom-N)** + `match(PatAtom)`, cited,
 including the payload-type-erasure fact. ≥2 `accept/` (nullary atom; payload atom
-in a `match`), ≥1 `reject/` if a well-typed rejection exists for atoms (else note
-none and say why). Green. Commit `docs(spec): Core March typing — atoms`.
+in a `match`). **Reject: DEFAULT to noting no atom-specific type rejection exists**
+— because `EAtom` returns bare `Atom` regardless of payload (payload types are
+inferred then discarded), atoms do not originate type errors; a payload
+sub-expression error would fire without the atom and is not an atom-typing
+rejection. Only add a `reject/` program if you find a genuine atom-*typing*
+rejection (not a payload-subexpression error). Green. Commit `docs(spec): Core March typing — atoms`.
 
 ---
 
-### Task 4: Full pattern typing + guards + exhaustiveness
+### Task 4: Full pattern typing + guards + exhaustiveness + conditionals (`ECond`)
 
 **Files:** Modify `specs/lang/core-march-types.md`; Create accept/reject programs.
 
-**Constructs:** consolidate the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` over ALL
-core patterns (from Tasks 1–3), plus **guards** (`branch_guard` typed against
-`Bool`) and **exhaustiveness** — determine from the code whether `typecheck.ml`
-checks match exhaustiveness at type-check time (a warning? an error? nothing —
-deferred to runtime `Match_failure`?), and pin the answer with a citation and a
-corpus program.
+**Constructs:** (a) consolidate the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` over
+all core VALUE-pattern forms introduced in Tasks 1–3 (`PatCon`/`PatVar`/`PatWild`/
+`PatLit`/`PatTuple`/`PatRecord`/`PatAtom`); **`PatAs` (`p as x`) is documented-as-
+unreachable** in the operational spec (`core-march.md` §4.3.1 — no surface
+grammar) — state its typing rule for fidelity if `infer_pattern` handles it,
+explicitly marked unreachable exactly as the operational spec does, NOT silently
+omitted. (b) **guards** (`branch_guard` typed against `Bool`). (c) **exhaustiveness**
+— determine from the code whether `typecheck.ml` checks match exhaustiveness (the
+plan reviewer found `check_exhaustiveness` reports `severity = Warning`, so a
+non-exhaustive `match` is NOT exit-1 — confirm and cite the live line). (d)
+**`ECond`** (the scrutinee-less `match do c -> b … end`) typing — arm conditions
+checked against `Bool`, bodies unified; the type-side of the operational E-Cond
+rules.
 
 **Extraction (cite):** `infer_pattern` (:2566) fully; where the guard is typed
-(grep `branch_guard` in typecheck); the exhaustiveness check site if any (grep
-`exhaustiv`/`non-exhaustive`/`unreachable` in `typecheck.ml`).
+(grep `branch_guard`); the exhaustiveness site (grep `exhaustiv`/`non-exhaustive`/
+`unreachable` — pin the `severity = Warning`); the `ECond` arm of `infer_expr`.
 
-**Deliverable:** the complete pattern-typing relation, the guard rule, and the
-exhaustiveness finding (with its actual behavior), cited. ≥2 `accept/` (a guarded
-branch; a nested pattern), ≥1 `reject/` if the typechecker rejects a
-type-incorrect pattern (e.g. a `PatLit` int against a `String` scrutinee — pin the
-message). If exhaustiveness is a WARNING (not exit-1), note that `check_types.sh`
-keys on exit code so a non-exhaustive `accept/` still passes — document it, don't
-rely on it as a reject. Green. Commit `docs(spec): Core March typing — patterns + guards + exhaustiveness`.
+**Deliverable:** the complete pattern-typing relation (incl. the `PatAs`-as-
+unreachable note), the guard rule, the exhaustiveness finding (Warning, not
+exit-1), and **(T-Cond)**, each cited. ≥2 `accept/` (a guarded branch; a nested
+pattern; an `ECond` chain), and ≥1 `reject/` that is GENUINELY NEW (not a
+duplicate of Task 1's `PatLit`-mismatch reject) — e.g. a non-`Bool` guard, or an
+`ECond` with mismatched branch body types — pin the ACTUAL message. Since
+exhaustiveness is a Warning (`check_types.sh` keys on exit code), a non-exhaustive
+`accept/` still passes — document that, do NOT rely on it as a reject. Green.
+Commit `docs(spec): Core March typing — patterns + guards + exhaustiveness + conditionals`.
 
 ---
 
@@ -193,32 +209,39 @@ Green. Commit `docs(spec): Core March typing — local recursive functions`.
 
 ---
 
-### Task 6: Interface-constraint model + conditionals (`ECond`)
+### Task 6: Interface-constraint model (`Num`/`Eq`/`Ord`/`Show`)
 
 **Files:** Modify `specs/lang/core-march-types.md`; Create accept/reject programs.
 
-**Constructs:** (a) the **interface-constraint model** — how the `Num`/`Eq` (and
+**Constructs:** the **interface-constraint model** — how the `Num`/`Eq` (and
 `Ord`/`Show`) constraints from `+`/`==`/comparisons/`show` (the skeleton's §2.1)
 are represented (`CInterface`/`CNum` in schemes, `env.pending_constraints`) and
 **discharged** (where/how the solver resolves a constraint against a built-in
-`impl`; what happens when no `impl` exists). (b) **`ECond`** (`match do c -> b … end`)
-typing — arms' conditions checked against `Bool`, bodies unified (the type-side of
-the operational E-Cond rules).
+`impl`; what happens when no `impl` exists). Also fold in the remaining boolean
+primitives **`&&`/`||`/`not`** (base-env `Bool → Bool → Bool`, monomorphic — no
+constraint), completing operational/typing parity with `core-march.md` §4.4.1's
+strictness note (their *typing* is unremarkable; the point is not to leave them
+silently absent).
 
-**Extraction (cite):** the constraint types (grep `CInterface`/`CNum`/`pending_constraints`);
-the discharge/solve site (grep `solve`/`discharge`/`resolve_constraint`/`CInterface`
-handling); the `ECond` arm of `infer_expr`.
+**Extraction (cite):** the constraint types (grep `CInterface`/`CNum`/
+`pending_constraints`); the discharge/solve site (grep `solve`/`discharge`/
+`resolve`/`does not implement` — the plan reviewer located the no-`impl` errors at
+the `"%s does not implement %s"` / `"String does not implement Num (only Int and
+Float do)"` sites, ~:4962/:4969/:5007); the `&&`/`||`/`not` base-env bindings.
 
 **Scope:** document the constraint MODEL for the built-in interfaces
 (`Num`/`Eq`/`Ord`/`Show`) — how a constraint arises, is carried on a scheme, and is
 discharged — NOT a full user-defined-trait coherence formalization (deferred).
 
-**Deliverable:** an "interface constraints" subsection (constraint syntax on
-schemes, the discharge rule, the no-`impl` error) + **(T-Cond)**, cited. ≥2
-`accept/` (`1 + 2` and `1.0 +. 2.0` both discharge `Num`; `x == y` on two Ints
-discharges `Eq`; an `ECond` chain), ≥2 `reject/` (`1 + "x"` — the two `+` args
-can't share one `a`, pin the message; a type with no `Eq`/`Num` impl used with
-`==`/`+` if such a reject exists — pin it). Green. Commit `docs(spec): Core March typing — interface constraints + conditionals`.
+**Deliverable:** an "interface constraints" subsection: constraint syntax on
+schemes, a **labeled `(T-Discharge)` rule** for resolving a scheme's constraint
+against a built-in `impl`, the no-`impl` error, and the trivial **(δT-And)** /
+**(δT-Or)** / **(δT-Not)** `Bool`-primitive typings. ≥2 `accept/` (`1 + 2` and
+`1.0 +. 2.0` both discharge `Num`; `x == y` on two `Int`s discharges `Eq`), ≥2
+`reject/` — **capture the ACTUAL messages** (the reviewer found `1 + "x"` yields
+`String does not implement Num (only Int and Float do)`; pin a distinctive
+substring of it) plus a second no-`impl`/mismatch case if one exists. Green.
+Commit `docs(spec): Core March typing — interface-constraint model`.
 
 ---
 
@@ -229,8 +252,10 @@ can't share one `a`, pin the message; a type with no `Eq`/`Num` impl used with
 No new typing rules — assembly + versioning + CI wiring. (a) Re-title/re-status
 `core-march-types.md` from "walking skeleton v0" to "Static Semantics reference v1
 (core fragment complete)"; unify §2 into one coherent rule set grouped by
-construct with every citation preserved (self-check: the count of `(T-…)` labels
-and `typecheck.ml:` citations must not DROP); update §5's deferred list to the
+construct with every citation preserved (self-check: **no `typecheck.ml:` citation
+is LOST** — every source line cited pre-restructure still appears afterward; a
+legitimate rule *merge* that lowers the raw `(T-…)` label count is fine as long as
+every citation survives); update §5's deferred list to the
 roadmap Phase-2b/3 queue; collect any "known typing divergence" notes from Tasks
 1–6 into one subsection. (b) Create `specs/lang/types/INDEX.md` mapping each
 `accept/reject` program to the rule it anchors. (c) **Wire `check_types.sh` into a
