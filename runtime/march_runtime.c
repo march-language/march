@@ -347,8 +347,26 @@ void *march_int_to_string(int64_t n) {
 }
 
 void *march_float_to_string(double f) {
+    /* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
+     * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
+     *   - `%.12g` gives the same 12-significant-digit form as OCaml's
+     *     format_float (both defer to the platform libc);
+     *   - valid_float_lexem appends a bare '.' when every character is a
+     *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
+     * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
+     * interpreter on both precision and whole numbers — the golden oracle
+     * (specs/lang/golden/g09_float_show.march) now pins the agreement. */
     char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%g", f);
+    int len = snprintf(buf, sizeof(buf), "%.12g", f);
+    int bare_int = 1;
+    for (int i = 0; i < len; i++) {
+        char c = buf[i];
+        if (!((c >= '0' && c <= '9') || c == '-')) { bare_int = 0; break; }
+    }
+    if (bare_int && len > 0 && len < (int)sizeof(buf) - 1) {
+        buf[len++] = '.';
+        buf[len] = '\0';
+    }
     return march_string_lit(buf, len);
 }
 

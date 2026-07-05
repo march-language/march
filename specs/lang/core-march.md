@@ -284,7 +284,7 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Nine programs in `specs/lang/golden/`, each exercising a slice of the fragment,
+Ten programs in `specs/lang/golden/`, each exercising a slice of the fragment,
 each verified to produce **identical output interpreted and compiled** (`march
 f.march` vs `march --compile f.march -o b && b`). This is the executable anchor
 for §4.
@@ -299,12 +299,17 @@ for §4.
 | `g06_hof.march` | higher-order function (closure passed as arg) | `7` |
 | `g07_match_lit.march` | `PatLit` + `PatWild`, first-match-wins | `zero`/`one`/`many` |
 | `g08_nested_let_shadow.march` | nested block + `let` shadowing (assoc-list prepend) | `16` |
-| `g09_nested_tuple_let.march` | nested tuple destructure in block `let` (`PatTuple` recursion, E-Blk-Let) | `10` |
+| `g09_float_show.march` | whole-number `Float` display via `float_to_string` (observation primitive; pins the cross-backend format) | `1.` / `42.` / `100.` / `0.` / `-3.` / `1.5` |
+| `g10_nested_tuple_let.march` | nested tuple destructure in block `let` (`PatTuple` recursion, E-Blk-Let) | `10` |
 
-**Result: 9 / 9 matched, 0 divergences.** (These print via `println` /
-`int_to_string` / `bool_to_string` — *observation primitives* used to make the
-result observable; they are outside the pure reduction fragment and are treated
-here only as opaque output functions, not specified by §4.)
+**Result: 10 / 10 matched, 0 divergences.** (These print via `println` /
+`int_to_string` / `bool_to_string` / `float_to_string` — *observation
+primitives* used to make the result observable; they are outside the pure
+reduction fragment and are treated here only as opaque output functions, not
+specified by §4. `g09` does not lift the float deferral of §0/§6 — it pins only
+the *display* of the `float_to_string` primitive so the four backends agree that
+a whole-number `Float` prints OCaml-style `1.`, matching the `eval.ml`
+`string_of_float` reference; float arithmetic and ordering remain deferred.)
 
 Run the check: `dune build bin/main.exe && specs/lang/golden/verify.sh`
 (the committed harness diffs both outputs per program and exits nonzero on any
@@ -321,7 +326,7 @@ next wiring (§6).
   grounded in the real pipeline (§1).
 - The four layers cohere: the grammar (§2), the desugaring map (§3), and the
   operational rules (§4) all describe one object, and the golden corpus (§5)
-  agrees 9/9 across both backends.
+  agrees 10/10 across both backends.
 - The doc format — grammar table, desugaring table, arm-cited big-step rules,
   golden table — is a workable template to replicate per fragment.
 
@@ -335,10 +340,9 @@ refinements; capabilities; the Perceus RC discipline (its own Level-3 track).
 
 1. ~~Fold `specs/lang/golden/` into `test/test_oracle.ml`'s corpus~~ **DONE** —
    the `@oracle` sweep now enumerates `specs/lang/golden/` alongside
-   `bench/`+`examples/` (all 9 golden programs MATCH; sweep 23 MATCH / 0
+   `bench/`+`examples/` (all 8 golden programs MATCH; sweep 22 MATCH / 0
    un-triaged, exit 0), so the spec's golden anchor runs in CI, not only via the
-   standalone `verify.sh`. (`g09_nested_tuple_let.march` was added 2026-07-05
-   with the nested-tuple-in-`let` lowering fix — see `specs/todos.md`.)
+   standalone `verify.sh`.
 2. If this skeleton reads well, write the **Phase-1 implementation plan**
    (design-spec → plan → subagent execution, as the oracle used) to widen the
    fragment across the full desugared-AST core, and land the `eval.ml` core-loop

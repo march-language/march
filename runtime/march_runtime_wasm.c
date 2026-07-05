@@ -195,8 +195,12 @@ void *march_float_to_string(double f) {
         buf[pos++] = '0' + digit;
         fpart -= digit;
     }
-    /* Trim trailing zeros (keep at least one decimal) */
-    while (pos > 2 && buf[pos-1] == '0' && buf[pos-2] != '.') pos--;
+    /* Trim ALL trailing fractional zeros down to the bare '.', mirroring the
+     * interpreter's OCaml string_of_float (1.0 -> "1.", not "1.0"/"1"): the
+     * always-emitted '.' halts the trim, so the integer part is never touched.
+     * (Freestanding wasm keeps its 6-decimal precision cap for fractional
+     * values — full %.12g agreement there is a separate, deferred concern.) */
+    while (pos > 1 && buf[pos-1] == '0') pos--;
     char *data = (char *)march_alloc(pos + 1);
     for (int i = 0; i < pos; i++) data[i] = buf[i];
     data[pos] = '\0';
