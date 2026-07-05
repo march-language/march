@@ -17,10 +17,10 @@ mean"). This document is "which programs are well-typed."
 documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the same
 kind of small fragment: literals, variables, `let` (with generalization), lambda,
 application, the `+`/`==` primitives, `if`, (as of Task 1) **ADT constructors
-and `match`**, and (as of Task 2) **tuples and records**. Same discipline as
-the operational skeleton: **every rule is transcribed arm-for-arm from
-`lib/typecheck/typecheck.ml` and cited by line**, and a conformance corpus
-keeps it honest.
+and `match`**, (as of Task 2) **tuples and records**, and (as of Task 3)
+**atoms**. Same discipline as the operational skeleton: **every rule is
+transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
+and a conformance corpus keeps it honest.
 
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is nothing to
@@ -31,9 +31,9 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-Deferred (later typing slices, matching `core-march.md`'s deferred set):
-atoms typing, the interface/impl resolution machinery, refinements, linearity,
-capabilities, effects.
+Deferred (later typing slices, matching `core-march.md`'s deferred set): the
+interface/impl resolution machinery, refinements, linearity, capabilities,
+effects.
 
 ## 1. The typing judgment
 
@@ -229,6 +229,53 @@ pattern's bindings):
           --   pattern is typed independently (no `~expected` threading here,
           --   unlike P-Con, since a tuple has no declared per-slot type to
           --   thread in)
+
+(P-Atom)  ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, k ≥ 0, componentwise    typecheck.ml:2666–2669
+          recursion — τᵢ computed but then DISCARDED, only Γᵢ kept)
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ PatAtom(a, [p₁…pₖ]) : Atom ⊣ Γ, Γ₁, …, Γₖ
+          -- same erasure as T-Atom (§2): the OVERALL pattern type is the
+          --   bare, tag-erased `Atom` regardless of `a` or `k` — verbatim
+          --   `Ast.PatAtom (_, ps, _) -> let bs_tys = List.map (infer_pattern
+          --   env) ps in let bindings = List.concat_map fst bs_tys in
+          --   bindings, t_atom` (typecheck.ml:2666–2669). `:ok` and
+          --   `:count(x)` are both, as PATTERNS, simply `Atom` — nothing
+          --   about the tag name or arity survives into the type this arm
+          --   returns.
+          -- UNLIKE P-Con, there is no `~expected` threading into the
+          --   sub-pattern recursion and no `unify(τᵢ, type_of(pᵢ))` call
+          --   afterward — each `pᵢ`'s own type `τᵢ` (the `snd` of
+          --   `infer_pattern`'s result pair) is computed and then silently
+          --   dropped (only the *bindings*, the `fst`, are kept via
+          --   `List.concat_map fst`). Concretely, a payload `PatVar x` inside
+          --   `:tag(x)` is typed by the ordinary `PatVar` rule (§2.2 above:
+          --   `x` bound to a FRESH, otherwise-unconstrained unification
+          --   variable `β`, typecheck.ml:2572–2577) — and because this arm
+          --   never unifies that `β` against anything, `x`'s type stays
+          --   whatever the branch body's later use of `x` happens to pin it
+          --   to (or remains an unresolved TVar if `x` goes unused) — there is
+          --   NO type-level connection between an atom pattern's payload
+          --   binding and the value that was actually constructed there.
+          -- no arity check either: a nullary `PatAtom(a, [])` and an
+          --   n-payload `PatAtom(a, [p₁…pₙ])` both simply return `Atom`;
+          --   whether a given `PatAtom` can actually MATCH a given atom VALUE
+          --   at runtime (nullary pattern vs. `VAtom`, or n-ary pattern vs.
+          --   `VCon` of matching arity) is an operational-side concern
+          --   (`match_pattern`'s two `PatAtom` cases, core-march.md:790–813),
+          --   not something this typing rule enforces or even inspects.
+          -- cf. operational match(PatAtom, VAtom)/match(PatAtom, VCon),
+          --   core-march.md:790–813 (E-Atom-0/E-Atom-N's pattern-side mirror)
+          --   — the type side collapses BOTH of those operational shapes
+          --   (nullary-vs-`VAtom`, payload-vs-`VCon`) into the one judgment
+          --   above, because typing never needed the nullary/payload
+          --   distinction the operational rules must make to pick the right
+          --   value shape.
+          -- this is the SAME divergence T-Atom documents (§2): the type
+          --   system tracks strictly less than the operational semantics
+          --   does for atoms, in both directions (expression AND pattern) —
+          --   already flagged as the root cause of a (since-fixed)
+          --   `Show(Atom)` compiled-link bug in core-march.md:1354–1359,
+          --   which traces through both this arm and T-Atom's `EAtom` arm.
 ```
 
 **No `(P-Record)` rule: `PatRecord` is unreachable from surface syntax**, exactly
@@ -358,6 +405,52 @@ sides go through `instantiate_ctor` against the same `ctor_info`.
            --   other concrete non-record type) ⇒ "I can only use `{ … with
            --   … }` on a record, but this expression has type `<τ_b>`."       typecheck.ml:3892–3897
            -- cf. operational (E-Update), core-march.md:402–436
+
+(T-Atom-0) ──────────────────────────────                        typecheck.ml:4050–4052
+           Γ ⊢ EAtom a [] ⇒ Atom
+(T-Atom-N) Γ ⊢ eᵢ ⇒ (discarded)   (i = 1..k, k ≥ 1, typechecked    typecheck.ml:4050–4052
+           left-to-right for their unification side effects only)
+           ────────────────────────────────────────────────────
+           Γ ⊢ EAtom a [e₁…e_k] ⇒ Atom
+           -- ERASURE, the load-bearing fact: EVERY EAtom — nullary or
+           --   payload-carrying, whatever its tag `a` — has ONE monomorphic
+           --   type, `Atom` (`t_atom = TCon("Atom",[])`, typecheck.ml:948).
+           --   The tag name `a` and the payload argument list `args` are BOTH
+           --   erased at the type level: `Ast.EAtom (_, args, _) -> List.iter
+           --   (fun a -> ignore (infer_expr env a)) args; t_atom`
+           --   (typecheck.ml:4050–4052, verbatim). Concretely: `:ok`, `:red`,
+           --   `:count(1)`, and `:count("x")` ALL synthesize the exact same
+           --   type `Atom` — there is no `Atom("ok")` or `Atom(Int)` refinement
+           --   anywhere in the type system (contrast `T-Con`, §2 above, where
+           --   each ADT constructor keeps its OWN declared `result_ty`/
+           --   `arg_tys` — atoms have no such per-tag typing at all).
+           -- the payload IS typechecked, not skipped: `infer_expr env a` runs
+           --   for every argument expression (so a payload type error, e.g.
+           --   `:count(1 + "x")`, still fires — the `Num`/unify error comes
+           --   from the `+` sub-expression itself, not from anything in this
+           --   arm); but each result is `ignore`d — the payload's inferred
+           --   type never flows anywhere (not into a returned type, not into
+           --   any environment binding). It is computed ONLY for its
+           --   unification side effects (discharging that sub-expression's own
+           --   constraints/error-reporting) and then thrown away.
+           -- since NOTHING distinguishes `:ok` (0 args) from `:tag(x, y)` (2
+           --   args) in the result type, two atoms with DIFFERENT tags, or
+           --   the same tag with structurally different payloads, freely
+           --   coexist and unify at every call site — e.g. `if c do :red else
+           --   :blue end : Atom` typechecks with no special-casing, the same
+           --   way `if c do 1 else 2 end : Int` does, simply because both
+           --   branches synthesize the identical monomorphic `Atom`.
+           -- cf. operational (E-Atom-0/E-Atom-N), core-march.md:370–375 —
+           --   eval's EAtom arms build a `VAtom a` (nullary) or `VCon a
+           --   [v₁…v_k]` (payload-carrying) and KEEP the tag name and payload
+           --   values at runtime; this rule is the typing counterpart, and the
+           --   divergence is exactly the point — the operational side
+           --   preserves what the type side discards. This is the same
+           --   erasure already flagged in core-march.md:1354–1359 as the root
+           --   cause of a (since-fixed) `Show(Atom)` compiled-link bug: an
+           --   atom payload variable bound via a `match` (see P-Atom, §2.2)
+           --   carries no concrete type from this rule alone, only from
+           --   whatever the branch body later does with it.
 ```
 
 ## 3. Conformance corpus
@@ -392,8 +485,20 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `reject/t07_field_missing` | reject | T-Field "no such field" (`EField` arm) | `` This record does not have a field called `z`. `` |
 | `reject/t08_tuple_arity_mismatch` | reject | T-Tuple/unify length mismatch, via T-App checking a `(Int,Int)`-annotated param against a 3-tuple argument | `` expected `(Int, Int)` but got `(Int, Int, Int)`. `` |
 | `reject/t09_record_update_missing_field` | reject | T-Update "no such field" (`ERecordUpdate` arm, concrete-`TRecord` base) | `` This record does not have a field called `z`. `` |
+| `accept/t11_atom_nullary_eq_match` | accept | T-Atom-0 + P-Atom — a nullary `:ok` returned, compared via `==`, and matched by a nullary `PatAtom` | typechecks |
+| `accept/t12_atom_payload_and_name_erasure` | accept | T-Atom-N + P-Atom — a payload atom `:count(n+1)` matched with its payload bound, AND two DIFFERENT-named nullary atoms (`:red`/`:blue`) returned from the two arms of one `if`, proving name-erasure (both branches synthesize the identical `Atom`) | typechecks |
 
-**Result: 19 / 19 (10 accept typecheck, 9 reject with the declared error).**
+**Result: 21 / 21 (12 accept typecheck, 9 reject with the declared error).**
+
+**No atom-specific `reject/` program.** Every `EAtom`/`PatAtom` occurrence —
+nullary or payload-carrying, whatever the tag — synthesizes the single bare
+`Atom` type (T-Atom-0/T-Atom-N, P-Atom, §2/§2.2); there is no per-tag or
+per-arity typing distinction for atoms to violate, so atoms cannot originate a
+type error in isolation. A payload sub-expression can still fail to typecheck
+(e.g. `:count(1 + "x")`), but that failure comes from `+`'s own `Num`
+constraint (δT-Add, §2.1) — an ordinary unification/interface error already
+covered by the existing corpus — not from anything atom-specific, so it would
+not add coverage as a *new* reject program here.
 
 ## 4. Faithfulness + the key findings
 
@@ -445,6 +550,26 @@ pins that are easy to get wrong and are load-bearing:
    (typecheck.ml:2122), so a length mismatch instead falls to the catch-all
    `report_mismatch` and renders as a generic `expected \`(τ…)\` but got
    \`(τ…)\`.` (`reject/t08_tuple_arity_mismatch` is the witness).
+8. **Atoms are fully type-erased — name AND payload both.** Unlike every other
+   construct in this document, `EAtom`/`PatAtom` carry NO information into the
+   type system beyond "this is an atom": `t_atom = TCon("Atom",[])` is the
+   entire type, for `:ok` and `:count(1,2,3)` alike (T-Atom-0/T-Atom-N, P-Atom,
+   §2/§2.2). The payload IS still typechecked on both sides — `EAtom`'s
+   arguments via ordinary `infer_expr` (typecheck.ml:4050–4052) and `PatAtom`'s
+   sub-patterns via ordinary `infer_pattern` (typecheck.ml:2666–2669) — so a
+   malformed payload expression or sub-pattern still errors; only the
+   *resulting* payload type(s) are discarded rather than folded into the
+   atom's own type or unified against anything. This is exactly the
+   mechanism `core-march.md:1354–1359` traces as the root cause of the
+   (since-fixed) compiled `Show(Atom)`/`println(:ok)` link bug: an atom
+   payload binding (e.g. `msg` in `:error(msg) -> …`) gets no type from the
+   atom machinery itself, only from how the branch body later uses it — if
+   unused, it stays an unresolved type variable all the way to codegen.
+   `t12_atom_payload_and_name_erasure` is the witness for the erasure itself
+   (two differently-tagged nullary atoms, `:red`/`:blue`, both typecheck as
+   plain `Atom` from the two arms of one `if`); no dedicated `reject/`
+   program exists because there is no atom-specific way to violate this —
+   every atom, by construction, already has the one type this rule assigns.
 
 ## 5. What this validated, and what's next
 
@@ -475,10 +600,21 @@ missing-field-on-update divergence adjudicated operationally in
 missing-field update is a typecheck-time rejection (T-Update, §2), and the
 runtime error path is only live for an erased `TVar` base.
 
-**Next (widening slices, each like this one):** atoms typing (`PatAtom`,
-`EAtom`/`t_atom`, already sketched in `infer_pattern` typecheck.ml:2666–2669
-but not yet given a rule here); then the interface/impl resolution that
-discharges the `Num`/`Eq` constraints (§2.1) — the richest and most bug-prone
-part, and the type-side complement to the operational core. Together,
-`core-march.md` (operational) + this document (typing) are **Level-1 for the
-Core March fragment**.
+**Task 3 (this slice) added:** atoms typing — (T-Atom-0), (T-Atom-N), and the
+pattern-typing relation extended with `(P-Atom)` (§2, §2.2), transcribed from
+the `EAtom` arm of `infer_expr` (typecheck.ml:4050–4052) and the `PatAtom` arm
+of `infer_pattern` (typecheck.ml:2666–2669). The key finding: March's type
+layer collapses EVERY atom — nullary or payload-carrying, any tag — to the
+one monomorphic `Atom` type; the tag name and payload are typechecked (for
+their own sub-expression/sub-pattern errors) but their types are discarded
+rather than folded into the atom's type. This is the same erasure
+`core-march.md:1354–1359` already traces as the root cause of a (since-fixed)
+compiled `Show(Atom)` bug. No `reject/` program was added: because every atom
+already has the one type this rule assigns, there is no atom-specific way to
+violate it (§3, §4 finding 8).
+
+**Next (widening slices, each like this one):** the interface/impl resolution
+that discharges the `Num`/`Eq` constraints (§2.1) — the richest and most
+bug-prone part, and the type-side complement to the operational core.
+Together, `core-march.md` (operational) + this document (typing) are
+**Level-1 for the Core March fragment**.
