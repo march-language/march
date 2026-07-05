@@ -1,0 +1,16 @@
+mod Main do
+  fn main() do
+    println(bool_to_string(3 != 4))
+    println(bool_to_string(3 != 3))
+    println(bool_to_string(3 < 4))
+    println(bool_to_string(4 < 3))
+    println(bool_to_string(3 <= 3))
+    println(bool_to_string(4 <= 3))
+    println(bool_to_string(4 > 3))
+    println(bool_to_string(3 > 4))
+    println(bool_to_string(3 >= 3))
+    println(bool_to_string(3 >= 4))
+    println(bool_to_string(1.5 < 2.5))
+    println(bool_to_string("abc" < "abd"))
+  end
+end
