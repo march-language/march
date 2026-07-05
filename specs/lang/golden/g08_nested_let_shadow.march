@@ -1,0 +1,10 @@
+mod Main do
+  fn main() do
+    let x = 1
+    let y = do
+      let x = 10
+      x + 5
+    end
+    println(int_to_string(x + y))
+  end
+end

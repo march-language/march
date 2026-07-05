@@ -1,0 +1,7 @@
+mod Main do
+  fn twice(f, x) do f(f(x)) end
+  fn main() do
+    let inc = fn n -> n + 1
+    println(int_to_string(twice(inc, 5)))
+  end
+end

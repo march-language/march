@@ -1,0 +1,14 @@
+mod Main do
+  fn classify(n) do
+    match n do
+      0 -> "zero"
+      1 -> "one"
+      _ -> "many"
+    end
+  end
+  fn main() do
+    println(classify(0))
+    println(classify(1))
+    println(classify(9))
+  end
+end

@@ -1,0 +1,13 @@
+mod Main do
+  type Color = Red | Green
+  fn name(c) do
+    match c do
+      Red -> "red"
+      Green -> "green"
+    end
+  end
+  fn main() do
+    println(name(Red))
+    println(name(Green))
+  end
+end
