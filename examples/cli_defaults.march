@@ -1,0 +1,9 @@
+mod Main do
+  fn main() do
+    let specs = [Cli.value_flag("name", "")]
+    match Cli.parse(specs, []) do
+      Ok(p) -> println(Cli.get_string_or(p, "name", "anon"))
+      Err(e) -> println("err: " ++ Cli.error_message(e))
+    end
+  end
+end
