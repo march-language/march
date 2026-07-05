@@ -175,9 +175,9 @@ mod Cli do
   end
 
   doc """
-  Look up a flag's raw string value. Falls back to the spec's `default` list
-  entry if the caller passed one via `defaults`; use `get_string_or` for the
-  common "just give me a default" case.
+  Look up a flag's raw string value from the parsed args. Returns `None` if
+  the flag was never supplied — this does not consult `FlagSpec.default`;
+  use `get_string_or` for the common "just give me a default" case.
 
   ## Examples
 
