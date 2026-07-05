@@ -234,11 +234,17 @@ accumulated prefix.
 
 **Conformance-corpus consequence:** an `accept/` program with a deliberately
 non-exhaustive `match` is CORRECT — it is SUPPOSED to typecheck
-(`accept/t14_nonexhaustive_match_still_typechecks` is the witness: exit 0,
-with a rendered `-- WARNING --` block reading "Non-exhaustive pattern match —
-missing case: Bloo"). A non-exhaustive match can NEVER be used to construct a
-`reject/` program in this corpus, because `check_types.sh` keys purely on the
-process exit code (§3) and a Warning never changes it.
+(`accept/t14_nonexhaustive_match_still_typechecks` is the witness). Under
+`march --check` — the mode `check_types.sh` uses (§3) — the program **exits 0
+silently**: the `--check` printer only renders `severity = Error` diagnostics
+for user files (`bin/main.ml:819–824`), so the exhaustiveness `Warning` is
+computed but NOT displayed. The rendered `-- WARNING --` block ("Non-exhaustive
+pattern match — missing case: Bloo") is emitted only on the *run/compile* paths
+(e.g. a plain `march file.march`, which prints the block to stderr and still
+exits 0). Either way the exit code is 0, which is all the harness keys on. A
+non-exhaustive match can NEVER be used to construct a `reject/` program in this
+corpus, because `check_types.sh` keys purely on the process exit code (§3) and a
+Warning never changes it.
 
 This is the type-side counterpart of `core-march.md`'s §4.3
 `Match_failure`/panic rule: an accepted-but-non-exhaustive `match` is exactly
@@ -687,7 +693,7 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `accept/t11_atom_nullary_eq_match` | accept | T-Atom-0 + P-Atom — a nullary `:ok` returned, compared via `==`, and matched by a nullary `PatAtom` | typechecks |
 | `accept/t12_atom_payload_and_name_erasure` | accept | T-Atom-N + P-Atom — a payload atom `:count(n+1)` matched with its payload bound, AND two DIFFERENT-named nullary atoms (`:red`/`:blue`) returned from the two arms of one `if`, proving name-erasure (both branches synthesize the identical `Atom`) | typechecks |
 | `accept/t13_match_guard` | accept | (T-Guard) — three `when`-guarded `PatVar` arms (`n when n > 0`/`n when n < 0`/`_`), guard checked against `Bool` in the pattern-extended env | typechecks |
-| `accept/t14_nonexhaustive_match_still_typechecks` | accept | **(T-Match: Exhaustiveness) — the brittleness witness**: a 2-ctor ADT `match` covering only ONE ctor (`Rood`, no `Bloo`, no `_`) | typechecks — exit 0 WITH a rendered `-- WARNING --` ("Non-exhaustive pattern match — missing case: Bloo"); proves exhaustiveness is advisory, not enforced |
+| `accept/t14_nonexhaustive_match_still_typechecks` | accept | **(T-Match: Exhaustiveness) — the brittleness witness**: a 2-ctor ADT `match` covering only ONE ctor (`Rood`, no `Bloo`, no `_`) | typechecks — `--check` exits 0 **silently** (the exhaustiveness `Warning` is computed but not rendered in `--check`; the `-- WARNING --` "missing case: Bloo" block shows only on run/compile); proves exhaustiveness is advisory, not enforced |
 | `accept/t15_econd_chain` | accept | (T-Cond) — a 3-arm `match do` boolean chain (`n > 0`/`n < 0`/`_`), all conditions `Bool`, all bodies `String` | typechecks |
 | `reject/t10_guard_not_bool` | reject | (T-Guard) non-Bool guard (`n when n + 1 -> …`, an `Int` guard) | `Match guards must be Bool.` |
 | `reject/t11_econd_condition_not_bool` | reject | (T-Cond) non-Bool condition (bare `n -> …` where `n : Int`) | `` Each condition in `match do` must be Bool. `` |
