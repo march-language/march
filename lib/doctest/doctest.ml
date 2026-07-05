@@ -17,6 +17,13 @@
       march> Option.unwrap(None)
       ** panic: Option.unwrap called on None
 
+    A [march> let x = ...] line with no expected output before the next
+    [march> ] line chains onto it as one example (so [x] stays bound):
+
+      march> let parsed = Cli.parse([Cli.value_flag("name", "")], [])
+      march> match parsed do | Ok(p) -> Cli.get_string_or(p, "name", "anon") | Err(_) -> "?" end
+      "anon"
+
     Indentation is auto-detected from the doc string's minimum leading
     whitespace across non-blank lines, then stripped uniformly before
     matching the prompt prefixes.  This means doc strings inside `mod`
@@ -121,10 +128,25 @@ let extract doc =
     let line    = strip_indent dedent raw_line in
     let trimmed = String.trim line in
     if starts_with prompt line then begin
-      (* New example — flush any previous one without expected output *)
-      flush ExpectNothing;
-      Buffer.add_string cur_src (after prompt line);
-      active := true
+      (* A `march>` line while a `let`-headed example is still active (no
+         expected-output line has closed it yet) continues the SAME example:
+         the bound variable needs to stay in scope for the next statement.
+         Otherwise this is a fresh example — flush the previous one (which
+         had no expected output) and start over. *)
+      let continues_let_chain =
+        !active &&
+        (let buffered = String.trim (Buffer.contents cur_src) in
+         starts_with "let " buffered || starts_with "let? " buffered
+         || starts_with "linear let " buffered)
+      in
+      if continues_let_chain then begin
+        Buffer.add_char cur_src '\n';
+        Buffer.add_string cur_src (after prompt line)
+      end else begin
+        flush ExpectNothing;
+        Buffer.add_string cur_src (after prompt line);
+        active := true
+      end
     end else if !active && starts_with cont line then begin
       (* Continuation line — append to current expression *)
       Buffer.add_char cur_src '\n';
