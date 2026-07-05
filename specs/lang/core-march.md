@@ -80,6 +80,7 @@ expr     e  ::= ELit ℓ                                      -- literal
              |  EField e f                                  -- field access: e.f (ast.ml:64)
              |  EBlock [e…]                                 -- do … end sequence
              |  ELet (p = e)                                -- block-scoped binding
+             |  ELetFn f [x…] e                             -- local recursive fn (ast.ml:77)
              |  EMatch e [ p when g? -> e … ]               -- pattern match
              |  EIf e e e                                   -- if c do … else … end
              |  EAtom a [e…]                                -- atom expression: :ok, :error(x) (ast.ml:70)
@@ -206,6 +207,34 @@ in the grammar at all. This is the single most load-bearing, non-obvious
 fact about atoms (see the `EAtom` evaluation rule and the `PatAtom` matching
 rules below, both cited against `eval.ml`).
 
+**`ELetFn` is a local *recursive* function — and, unlike `PatRecord`/`PatAs`,
+it IS reachable from surface syntax.** `Ast.expr`'s `ELetFn of name * param
+list * ty option * expr * span` (`ast.ml:77`) is a **named function bound
+*inside a block*** — written `fn go(params) do body end` as an `EBlock`
+statement, sitting alongside `let` bindings — whose defining feature is that
+its own name is in scope *within its body*, so it can call **itself**
+(`go(n - 1)`). It has a real grammar production (`parser.mly:1015`–`1027`:
+`FN lower_name ( params ) [ret_annot] DO block_body END` ⇒ `ELetFn(name,
+params, ret, body, …)`), confirmed by hand — a `fn go(n) do … end` inside
+`main` parses, interprets, and compiles+runs (see g28–g30, §5). This is the
+first construct this spec adds that carries a recursive-binding semantics, and
+it is the reason §4.2's block rules need one extra rule beyond E-Blk-Let.
+
+`ELetFn` is **distinct from both** of the fragment's other two function-shaped
+forms:
+
+- from a **lambda `ELam [x…] e`** (§2 above): a lambda is an anonymous
+  *expression* value that is **not self-referential** — its body's environment
+  is exactly the `ρ` captured at `VClosure` creation (E-Lam), with no binding of
+  the lambda to any name, so a lambda cannot recurse by name. `ELetFn` binds a
+  name AND makes that name visible inside the body (the recursive knot,
+  E-LetFn below).
+- from a **top-level `DFn`** (a module-level `fn f(…) do … end` declaration,
+  outside any block): `DFn` is a *declaration*, entered into the module's
+  top-level environment before `main` runs; `ELetFn` is an *expression-level*
+  statement local to one block, visible only to the rest of that block (like a
+  `let`), not to the whole module.
+
 Two facts that a reader coming from surface syntax must know, because they are
 load-bearing for every rule below:
 
@@ -232,6 +261,7 @@ the parser) and multi-clause functions.
 | `do let x = e₁  e₂ end` | `EBlock([ELet(x = e₁'); e₂'])` — left structural; only `bind_expr` is recursively desugared | `desugar.ml:573–593` |
 | multi-clause `fn f(0) -> …  fn f(n) -> …` | **one** clause `fn f(a) -> EMatch(a, [PatLit 0 -> …; PatVar n -> …])` on a synthesized arg (tuple if arity > 1) | `desugar.ml:697–786` |
 | `fn x -> e` (`ELam`) | identity (recurse body) | `desugar.ml:568–571` |
+| `fn go(x…) do e end` (`ELetFn`) | **structural identity** — recurse into the body only; name/params/return-type carried verbatim. (It runs the body under `with_conn_scope (lam_params_bind_conn params)`, connection-linearity bookkeeping irrelevant to this fragment; no reshaping.) | `desugar.ml:653–657` |
 | `f(e…)` (`EApp`) | identity, plus a qualified-`ECon` fold for `Mod.Ctor(args)` | `desugar.ml:552–563` |
 | `C(e…)` (`ECon`) | identity (recurse args) | `desugar.ml:565–566` |
 | `:ok`, `:error(e…)` (`EAtom`) | identity (recurse args; `[]` for a nullary atom) | `desugar.ml:644–645` |
@@ -495,14 +525,59 @@ non-final non-`let` statement is evaluated and discarded (`eval.ml:6861`):
               ρ ⊢ EBlock (ELet(p = e₁) :: rest) ⇓ v
               -- match failure ⇒ Match_failure (eval.ml:6869)
 
-(E-Blk-Seq)   ρ ⊢ e ⇓ _    ρ ⊢ EBlock rest ⇓ v    (e not an ELet, rest ≠ [])
+(E-LetFn)     r = ref ρ   (fresh mutable cell, initially the pre-binding ρ)   eval.ml:6875–6884
+              c = VBuiltin("<rec:f>", λargs. apply (VClosure(!r, [x…], e_b)) args)
+              ρ' = (f ↦ c) · ρ        r := ρ'        ρ' ⊢ EBlock rest ⇓ v
+              ────────────────────────────────────────────────────────────────
+              ρ ⊢ EBlock (ELetFn f [x…] e_b :: rest) ⇓ v
+              -- f is bound to a SELF-REFERENTIAL closure: because c's body
+                 re-reads the mutable ref `r` on every call (eval.ml:6880) and
+                 r has been back-patched to ρ' = (f ↦ c)·ρ (eval.ml:6882–6883),
+                 the environment c runs its body `e_b` in CONTAINS f ↦ c itself
+                 — so `f(…)` inside e_b resolves to c and recurses. The binding
+                 is visible to the REST of the block (rest runs in ρ', not ρ —
+                 eval.ml:6884), exactly like a block-`let`. This is the ONE
+                 construct in the fragment that needs the mutable-ref fixpoint;
+                 see the prose below for why a persistent env cannot express it.
+
+(E-Blk-Seq)   ρ ⊢ e ⇓ _    ρ ⊢ EBlock rest ⇓ v   (e neither ELet nor ELetFn, rest ≠ [])
               ──────────────────────────────────
               ρ ⊢ EBlock (e :: rest) ⇓ v
 ```
 
 (A bare `ELet` evaluated *outside* a block just evaluates its RHS and drops the
 binding — `eval.ml:6993` — because binding is only meaningful relative to a
-continuation, which the block supplies.)
+continuation, which the block supplies. A bare `ELetFn` evaluated *outside* a
+block — e.g. as the last/only statement of a block, which the `[e]` last-arm
+sends to `eval_expr`, not `eval_block` — ties the SAME knot but simply RETURNS
+the closure `c` as the block's value instead of binding it and continuing
+(`eval.ml:7262`–`7271`); `c` is still self-referential, so the returned value
+can recurse if later applied, but nothing in that block ever sees `f` by name.)
+
+**Why `ELetFn` is the one construct that needs a mutable ref.** Every other
+rule in §4 threads the environment as a **persistent** association list: a
+binding is created by *prepending* `(name ↦ value)` to `ρ` (§4.1), and the
+value being bound is fully evaluated *before* the extended environment exists.
+That order is fine for `let x = e` (E-Blk-Let) — `e` is evaluated in the
+*old* `ρ`, so `x` need not be in scope while computing its own value. But a
+*recursive* function's value (its closure) must capture an environment in
+which its **own name already resolves to that very closure** — a cyclic
+dependency the strict "evaluate the value, then extend the env" order cannot
+satisfy directly, because the closure and the environment each need the other
+first. `eval_block`'s `ELetFn` arm (`eval.ml:6875`–`6884`) breaks the cycle
+with the single use of mutation in the otherwise-persistent environment: it
+allocates a `ref` (`env_ref`, `eval.ml:6878`) initialized to the *pre-binding*
+`ρ`, builds the closure-carrying `VBuiltin` wrapper whose body **defers**
+reading the environment until call time (`let call_env = !env_ref`,
+`eval.ml:6880` — read on *every* application, not captured once), extends `ρ`
+with `f ↦ c` to get `ρ'` (`eval.ml:6882`), and only THEN back-patches
+`env_ref := ρ'` (`eval.ml:6883`). By the time `f` is ever *called*, `!env_ref`
+is `ρ'`, which contains `f ↦ c` — so the deferred read hands the body an
+environment in which `f` is itself, closing the recursive knot. The
+indirection through `VBuiltin`-wrapping-`VClosure` (rather than a plain
+`VClosure` captured directly) exists precisely so the environment read can be
+deferred past the moment the closure is constructed; a bare `VClosure` would
+have to snapshot its environment at creation, before `f ↦ c` existed.
 
 ### 4.3 Branch selection and pattern matching
 
@@ -933,7 +1008,7 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Twenty-seven programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -949,7 +1024,13 @@ matching + guard + exhaustiveness slice — a deeply nested pattern (con → tup
 → con), a guarded branch that FALLS THROUGH to a later branch, a deliberate
 `_` catch-all after specific patterns, and a guard reading its branch's own
 pattern-bound variables (the reachable substitute for the unparseable `PatAs`
-as-pattern — see the `PatAs` note in §4.3):
+as-pattern — see the `PatAs` note in §4.3); `g28`–`g30` are Task 6's addition,
+covering local recursive functions (`ELetFn`, §4.2's E-LetFn / the env_ref
+recursive-knot) — a self-referential `fn go` computing factorial, a local
+recursive fn CLOSING OVER an outer `let` binding (lexical capture + recursion
+together), and a recursion whose result is bound by a following `let` and used
+by the rest of the block (proving the `ELetFn` binding is visible to the block
+continuation, not only inside its own body):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -980,8 +1061,11 @@ as-pattern — see the `PatAs` note in §4.3):
 | `g25_guard_fallthrough.march` | a `PatVar` branch whose guard `when n > 10` is FALSE for `n = 5`, so it falls through (`eval.ml:7340`) to a later branch that matches — the guard-fall-through witness | `big`/`small`/`nonpositive` |
 | `g26_catchall.march` | specific `PatCon` branches (`Red`/`Green`) then a deliberate `PatWild` (`_`) catch-all, which selects for every other value (`Blue`, `Other(7)`) and keeps the `match` total | `1`/`2`/`0`/`0` |
 | `g27_guard_binding.march` | a guard `when a == b` reading variables bound by its OWN branch pattern `P(a, b)` (guard evaluated in the pattern-extended env, `eval.ml:7327,7332`); false for `P(3, 10)` ⇒ falls through — the reachable substitute for the unparseable as-pattern | `0`/`7` |
+| `g28_letfn_factorial.march` | a local self-referential `fn go(n)` computing factorial recursively — `go` calls itself via the env_ref recursive knot (E-LetFn, `eval.ml:6875–6884`) | `120`/`1` |
+| `g29_letfn_capture.march` | a local recursive `fn go` that CLOSES OVER an outer `let` binding (`step`) while recursing — proves lexical capture + recursion together (the re-read env `!env_ref` contains both the outer `let` and `go` itself, `eval.ml:6880–6883`) | `8` |
+| `g30_letfn_sum_result.march` | a recursive `fn go` (sum-to-n) whose RESULT is bound by a following `let` and used by the rest of the block — proves the `ELetFn` binding is visible to the block continuation (`eval.ml:6884`), like `let` | `55`/`110` |
 
-**Result: 27 / 27 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 30 / 30 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
@@ -1120,17 +1204,18 @@ next wiring (§6).
   golden table — is a workable template to replicate per fragment.
 
 **Deferred (the widening queue — each becomes a slice like this one):**
-strings as data; `if`-less boolean `match`/`ECond`; local recursive functions
-(`ELetFn`, already visible in `eval_block`); `to_string`/`show` and the
+strings as data; `if`-less boolean `match`/`ECond`; `to_string`/`show` and the
 interface-dispatch machinery; effects/IO ordering; actors; refinements;
 capabilities; the Perceus RC discipline (its own Level-3 track). (Tuples were
 covered by Task 2; records — literals, field access, functional update,
 `PatRecord` matching, and the `ERecordUpdate` missing-field adjudication — by
 Task 3; atoms — `EAtom`/`PatAtom`, the `VAtom`↔`VCon` payload-arity split, and
-both `PatAtom` matching arms — by this task, Task 4. This line was stale
-after Task 2 landed tuples without updating it — noted here so it doesn't
-happen again: keep this list in sync with §0/§2's actual fragment coverage as
-each task lands.)
+both `PatAtom` matching arms — by Task 4; the full pattern language's
+matching + guard + exhaustiveness slice by Task 5; local recursive functions
+(`ELetFn`, the env_ref recursive-knot fixpoint — §4.2's E-LetFn) by Task 6.
+This line was stale after Task 2 landed tuples without updating it — noted here
+so it doesn't happen again: keep this list in sync with §0/§2's actual fragment
+coverage as each task lands.)
 
 **Next steps:**
 

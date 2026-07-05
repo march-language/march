@@ -1,0 +1,20 @@
+mod Main do
+  -- A second recursion shape: a local recursive `fn go` computing sum-to-n,
+  -- whose RESULT is bound by a following `let` and used by the rest of the
+  -- block — proving the ELetFn binding is visible to the block continuation
+  -- (like `let`: eval.ml:6884 evaluates `rest` in the extended env `env'`),
+  -- not just callable from within its own body.
+  fn main() do
+    fn go(n) do
+      if n == 0 do
+        0
+      else
+        n + go(n - 1)
+      end
+    end
+    let total = go(10)
+    let doubled = total + total
+    println(int_to_string(total))
+    println(int_to_string(doubled))
+  end
+end
