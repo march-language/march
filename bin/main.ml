@@ -2125,9 +2125,26 @@ let compile filename =
                   Printf.eprintf "march: --signing-pubkey: invalid base64 or not 32 bytes\n";
                   ""
               else "" in
+            (* Target-derived C compiler + arch flags (cross-compilation).
+               [xtarget] is re-parsed locally so these decisions never depend on
+               the build host. *)
+            let xtarget = parse_target !target_str in
+            let cc_driver =
+              match March_tir.Llvm_emit.zig_target xtarget with
+              | Some zt -> Printf.sprintf "zig cc -target %s" zt
+              | None    -> "clang"
+            in
+            let arch_cflags =
+              match xtarget with
+              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> ""   (* NEON by default; SSE flags are x86-only *)
+              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
+              | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
+            in
             let cmd = Printf.sprintf
-              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
-              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+            (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+               Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
