@@ -6142,6 +6142,76 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
+   `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
+   referenced a/b/c/d as undefined global functions (`call ptr @a()`), so clang
+   rejected the module.  Root cause: the block-`let` PatTuple lowering in
+   lib/tir/lower.ml bound only *direct* PatVar tuple elements and silently
+   dropped any nested sub-pattern (`| _ -> inner`), so a nested tuple's leaf
+   vars were never bound and later resolved to global fn references.  The
+   interpreter and the equivalent `match ((1,2),(3,4)) do ((a,b),(c,d)) -> ..`
+   form always got this right; only the compiled block-`let` path diverged.
+   Compile-and-run because the symptom is a codegen failure / wrong value, not
+   an IR shape (same rationale as the float-literal tests above). *)
+let test_nested_tuple_let_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let"
+    "mod NestedTupleLet do\n\
+    \  fn main() do\n\
+    \    let ((a, b), (c, d)) = ((1, 2), (3, 4))\n\
+    \    println(int_to_string(a + b + c + d))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: destructures nested tuple correctly --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter destructures nested tuple in let" "10" interp_out;
+  (* --- compiled: must bind all four leaf vars and produce the same value --- *)
+  let bin = Filename.concat tmp "nestedtupleletbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled nested-tuple `let` binds every leaf var (a/b/c/d), producing \
+       the SAME value as the interpreter (not `use of undefined value @a`)"
+      "10" run_out
+
+(** Deeper coverage of the same recursion: 3-level nesting, a wildcard element,
+    and a nested-tuple element, all in one block-`let`.  Locks down that
+    [bind_subpat] recurses through interior tuples and skips wildcards, rather
+    than only handling the flat two-element repro above. *)
+let test_nested_tuple_let_deep_wildcard_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let_deep"
+    "mod NestedTupleLetDeep do\n\
+    \  fn main() do\n\
+    \    let ((a, (b, c)), _, (d, e)) = ((1, (2, 3)), 99, (4, 5))\n\
+    \    println(int_to_string(a + b + c + d + e))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter: deep nested tuple let with wildcard element"
+    "15" interp_out;
+  (* --- compiled: must match --- *)
+  let bin = Filename.concat tmp "nestedtupledeepbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled deep nested-tuple `let` (3-level nesting, wildcard element, \
+       interior nested tuple) matches the interpreter"
+      "15" run_out
+
 (* ── EUpdate on type-erased records (B5) ─────────────────────────────────
    `{ base with f: v }` where the base's static shape is unknown
    (get_record_fields = [], e.g. a record_from_list/record_put result) used
@@ -7726,6 +7796,12 @@ let codegen_suites =
             test_float_lit_match_arm_compiled;
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "nested_tuple_let_codegen", [
+          Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
+            test_nested_tuple_let_destructure_compiled;
+          Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
+            test_nested_tuple_let_deep_wildcard_compiled;
         ] );
       ( "erased_record_update_codegen", [
           Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick

@@ -183,35 +183,71 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          v_lin = lower_linearity b.bind_lin;
        } in
        Tir.ELet (v, rhs, body)
-     | Ast.PatTuple (pats, _) ->
+     | Ast.PatTuple (_, _) ->
        (* let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; …
           Recover the tuple's element types from the rhs and give each field var
           its concrete type.  Tuple scalar fields are stored low-bit tagged; a
           field var left at TVar makes ELet trust the raw ptr load (no untag), so
           int_to_string(field) prints (n<<1)|1.  The match-pattern path already
-          propagates element types from the scrutinee's tuple type — mirror it. *)
+          propagates element types from the scrutinee's tuple type — mirror it.
+
+          Sub-patterns may themselves be compound (a NESTED tuple, e.g.
+          `let ((a,b),(c,d)) = ...`), so recurse via [bind_subpat] instead of
+          only handling a leaf [PatVar] per element.  The prior version matched
+          `PatVar` and dropped every other element (`| _ -> inner`), leaving a
+          nested tuple's leaf vars unbound — they then resolved to undefined
+          global fn references (`call ptr @a()`) and clang rejected the module.
+          This mirrors the match path (compile_matrix), which decomposes nested
+          tuple patterns field-by-field. *)
        let rhs_tuple_ty = match b.bind_ty with
          | Some t -> lower_ty t
          | None -> ty_of_expr env b.bind_expr in
-       let elem_tys = match rhs_tuple_ty with
-         | Tir.TTuple ts -> ts
-         | _ -> [] in
-       let elem_ty_at i = match List.nth_opt elem_tys i with
-         | Some t -> t
-         | None -> unknown_ty in
+       (* Recursively bind an irrefutable sub-pattern [pat] over the scrutinee
+          atom [scrut] (of type [scrut_ty]), wrapping [inner].  Handles the
+          shapes a `let` binding can take: wildcard (skip), var (bind), as-var
+          (bind outer name + recurse), and nested tuple (decompose fields). *)
+       let rec bind_subpat (scrut : Tir.atom) (scrut_ty : Tir.ty)
+           (pat : Ast.pattern) (inner : Tir.expr) : Tir.expr =
+         match pat with
+         | Ast.PatWild _ -> inner
+         | Ast.PatVar n ->
+           let fv : Tir.var = { v_name = n.txt; v_ty = scrut_ty; v_lin = Tir.Lin } in
+           Tir.ELet (fv, Tir.EAtom scrut, inner)
+         | Ast.PatAs (sub, n, _) ->
+           let fv : Tir.var = { v_name = n.txt; v_ty = scrut_ty; v_lin = Tir.Lin } in
+           Tir.ELet (fv, Tir.EAtom scrut, bind_subpat scrut scrut_ty sub inner)
+         | Ast.PatTuple (subs, _) ->
+           let elem_tys = match scrut_ty with Tir.TTuple ts -> ts | _ -> [] in
+           let elem_ty_at i = match List.nth_opt elem_tys i with
+             | Some t -> t
+             | None -> unknown_ty in
+           (* fold_right so field 0 is the outermost let *)
+           List.fold_right (fun (i, sub) acc ->
+             match sub with
+             | Ast.PatWild _ -> acc  (* wildcard element → no binding *)
+             | Ast.PatVar n ->
+               (* Bind the field directly, skipping an intermediate copy let —
+                  preserves the original RC-friendly single-level shape. *)
+               let fv : Tir.var = { v_name = n.txt; v_ty = elem_ty_at i; v_lin = Tir.Lin } in
+               Tir.ELet (fv, Tir.EField (scrut, Tir_names.fv_field i), acc)
+             | _ ->
+               (* Compound element (nested tuple / as-pattern): bind a fresh var
+                  to the field, then recurse into it. *)
+               let ety = elem_ty_at i in
+               let fname = fresh_name "p" in
+               let fv : Tir.var = { v_name = fname; v_ty = ety; v_lin = Tir.Lin } in
+               Tir.ELet (fv, Tir.EField (scrut, Tir_names.fv_field i),
+                 bind_subpat (Tir.AVar fv) ety sub acc)
+           ) (List.mapi (fun i p -> (i, p)) subs) inner
+         | _ ->
+           (* Records / refutable sub-patterns in an irrefutable `let` are not
+              decomposed here (unchanged from prior behaviour — a bare `let`
+              with such a pattern falls through to the catch-all arm below). *)
+           inner
+       in
        let tname = fresh_name "p" in
        let tv : Tir.var = { v_name = tname; v_ty = rhs_tuple_ty; v_lin = Tir.Lin } in
-       let tv_atom = Tir.AVar tv in
-       (* Build inner ELet chain: fold_right so field 0 is the outermost let *)
-       let body_with_fields =
-         List.fold_right (fun (i, pat) inner ->
-           match pat with
-           | Ast.PatVar n ->
-             let fv : Tir.var = { v_name = n.txt; v_ty = elem_ty_at i; v_lin = Tir.Lin } in
-             Tir.ELet (fv, Tir.EField (tv_atom, Tir_names.fv_field i), inner)
-           | _ -> inner  (* wildcard / other → skip *)
-         ) (List.mapi (fun i p -> (i, p)) pats) body
-       in
+       let body_with_fields = bind_subpat (Tir.AVar tv) rhs_tuple_ty b.bind_pat body in
        Tir.ELet (tv, rhs, body_with_fields)
      | _ ->
        let bind_name = fresh_name "p" in

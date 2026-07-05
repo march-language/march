@@ -282,6 +282,40 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-05, nested-tuple destructure in block-`let` fixed)
+
+Found by the Core March golden corpus (Phase 1 Task 2, tuples): a nested tuple
+destructured in a block-level `let` — `let ((a, b), (c, d)) = ((1, 2), (3, 4))` —
+ran correctly interpreted and via the equivalent `match`, but failed to compile
+(`--compile` emitted `call ptr @a()` for each leaf var → clang `use of undefined
+value '@a'`, exit 1).
+
+- **Root cause (`lib/tir/lower.ml`):** the block-`let` `PatTuple` lowering bound
+  only *direct* `PatVar` tuple elements; its inner fold dropped every non-var
+  element (`| _ -> inner`), so a NESTED `PatTuple` (`(a,b)` inside `((a,b),(c,d))`)
+  was silently skipped and its leaf vars never bound. Later uses resolved through
+  `resolve_use_alias` to nonexistent global functions (`@a`). `collect_pat_names`
+  already recursed (names typechecked), so the divergence surfaced only at codegen.
+- **Fix:** a recursive `bind_subpat scrut scrut_ty pat inner` helper mirroring the
+  match path's `compile_matrix` decomposition — handles `PatWild`/`PatVar`/`PatAs`
+  and recurses into nested `PatTuple`, threading each element's concrete type from
+  the parent tuple type so nested scalar fields untag correctly. Flat-tuple and
+  direct-`PatVar` lowering is byte-identical (29 TIR snapshots unchanged); the
+  interpreter path is untouched.
+- **Coverage:** new `nested_tuple_let_codegen` group in `test/test_codegen.ml`
+  (repro → `10`; 3-level-nesting + wildcard + interior tuple → `15`), both
+  RED→GREEN; new golden `specs/lang/golden/g09_nested_tuple_let.march` (`10`),
+  added to `specs/lang/core-march.md` §5 (8→9 programs).
+- **Gates:** 400 compiler / 230 eval / 387 codegen (+2) / 773 stdlib-quick /
+  53 stdlib_march / 29 snapshots — all exit 0; golden `verify.sh` 9/9 MATCH; the
+  `@oracle` sweep (solo, isolated HOME) exits 0 at **23 MATCH / 9 KNOWN_DIVERGENCE
+  / 0 un-triaged** (g09 is the +1 MATCH vs the prior 22). Full-stdlib-with-Slow's
+  15 `adversarial-regressions` failures and codegen `llvm_ir_validity_gate #3`
+  are **pre-existing** — identical failure sets with the fix reverted to base
+  (file-copy swap, no stash): distributed-program `non-pointer scrutinee` ICEs,
+  `Unknown module IO/Process`, and `cannot find runtime` CWD/env artifacts, none
+  reachable by a TIR-lowering change.
+
 ## Current State (as of 2026-07-04, Differential Oracle EXPANSION COMPLETE — Phase 5 / eval.ml refactor gate + closeout)
 
 The differential-oracle expansion (`specs/2026-07-04-differential-oracle-design.md`, plan `specs/plans/2026-07-04-differential-oracle-plan.md`) is **COMPLETE** — all 8 tasks / 5 phases landed on branch `claude/hopeful-kapitsa-9f49f3`, each independently reviewed:
