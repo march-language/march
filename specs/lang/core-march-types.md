@@ -140,19 +140,112 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           ρ fresh                                                              typecheck.ml:4274
           ∀(pᵢ → gᵢ? → bᵢ) ∈ branches:
               Γ ⊢ pᵢ : τ_s ⊣ Γᵢ   (pattern-typing relation, §2.2; unified against τ_s)  typecheck.ml:4276–4277
-              Γ, Γᵢ ⊢ gᵢ ⇐ Bool   (if a guard is present)                       typecheck.ml:4280–4284
+              Γ, Γᵢ ⊢ gᵢ ⇐ Bool   (T-Guard, if a guard is present — see below)   typecheck.ml:4280–4284
               Γ, Γᵢ ⊢ bᵢ ⇐ ρ                                                   typecheck.ml:4285–4286
           ──────────────────────────────────────────────────────────────
           Γ ⊢ EMatch e_s [(p₁,g₁?,b₁) … (pₙ,gₙ?,bₙ)] ⇒ ρ         typecheck.ml:4273–4290 (infer_match)
           -- one branch's body type disagreeing with another's ⇒ "All branches of
           --   a match must have the same type." (RMatchArm, typecheck.ml:47,67)
-          -- non-exhaustive patterns ⇒ a separate WARNING (check_exhaustiveness,
-          --   typecheck.ml:4288), not a typing error — does not block accept/reject.
+          -- ⚠ EXHAUSTIVENESS AND REDUNDANCY ARE NON-BLOCKING WARNINGS, NOT
+          --   TYPING ERRORS — see "Exhaustiveness and redundancy" below for the
+          --   full finding; a non-exhaustive `match` is WELL-TYPED (`--check`
+          --   exits 0).
           -- cf. operational (E-Match), core-march.md:504 — eval's EMatch arm selects
           --   the first branch whose pattern matches the scrutinee value; this rule
           --   is its typing counterpart (every branch must ⇐-check against ONE
           --   shared fresh result type `ρ`, unified branch-by-branch via `check_expr`).
 ```
+
+**(T-Guard)** — the guard clause of T-Match, stated separately for the `when g`
+form:
+
+```
+(T-Guard) Γ, Γᵢ ⊢ pᵢ : τ_s ⊣ Γᵢ   (pattern bindings brought into scope first)   typecheck.ml:4276–4279
+          Γ, Γᵢ ⊢ gᵢ ⇐ Bool                                                    typecheck.ml:4280–4284
+          ──────────────────────────────────────────────────────────────
+          (the guard clause of T-Match — part of the same judgment, not a
+           separate expression form)
+          -- `branch_guard : expr option` (`Ast.branch`) is threaded through BOTH
+          --   typing entry points for a match: the synthesis path (`infer_match`,
+          --   typecheck.ml:4280–4284) AND the checking path (the `EMatch` arm of
+          --   `check_expr`, typecheck.ml:4192–4196) — identical shape, identical
+          --   reason string, at both sites.
+          -- the guard is `check_expr`'d (⇐), NOT inferred — against the
+          --   monomorphic `t_bool`, in `env'` = Γ extended with THIS branch's own
+          --   pattern bindings (`bind_pattern_bindings scrut bindings env`,
+          --   typecheck.ml:4191/4279, computed BEFORE the guard is checked) — so
+          --   a guard can read variables its own branch's pattern just bound
+          --   (e.g. `P(a, b) when a == b -> …`).
+          -- non-Bool guard ⇒ the ordinary unify-mismatch headline "expected
+          --   `Bool` but got `<τ>`." with the note "Match guards must be Bool."
+          --   (`RBuiltin "Match guards must be Bool."`, typecheck.ml:4282–4283 /
+          --   4194–4195) — e.g. `n when n + 1 -> …` (an `Int`-typed guard) is
+          --   REJECTED at typecheck time with exactly this note (captured live;
+          --   `reject/t10_guard_not_bool` is the witness).
+          -- cf. operational (E-Match's guard clause), core-march.md:741–751 — the
+          --   guard is evaluated in the SAME pattern-extended env `env'`
+          --   (`eval.ml:7327,7332`) and must reduce to a `VBool` at runtime
+          --   (`eval_error "guard must evaluate to a boolean"`, `eval.ml:7334`,
+          --   for a non-`VBool` result) — but that runtime error is unreachable
+          --   for a well-typed program: this rule is what makes it dead code for
+          --   anything that passed typecheck (same shape as T-Cond's non-Bool-
+          --   condition runtime check being unreachable, below).
+```
+
+**Exhaustiveness and redundancy — WARNING, NOT AN ERROR.** This note is part
+of (T-Match): both checks run unconditionally at the end of every `match`
+(`typecheck.ml:4288–4289`, and the `EMatch` arm of `check_expr`,
+`typecheck.ml:4199`), but neither can fail typechecking.
+
+```
+check_exhaustiveness env span scrut_ty branches                      typecheck.ml:3159–3185 (defn), 4288 (call site)
+check_redundant_arms  env      scrut_ty branches                     typecheck.ml:3131–3155 (defn), 4289 (call site)
+```
+
+Both diagnostics are constructed with `severity = Warning`:
+  - non-exhaustive, with a concrete missing-case example — message
+    `"Non-exhaustive pattern match — missing case: %s"`              (typecheck.ml:3172–3177)
+  - non-exhaustive, no concrete example available — message
+    `"Non-exhaustive pattern match"`                                 (typecheck.ml:3179–3184)
+  - a redundant (unreachable) arm — message
+    `"This pattern can never be reached."`                           (typecheck.ml:3143–3151)
+
+**⚠ THIS IS THE BRITTLE, LOAD-BEARING FACT OF THIS SLICE:** `--check`'s exit
+code is driven by `has_user_errors`, which filters strictly on `d.severity =
+March_errors.Errors.Error` (`bin/main.ml:819–821`) — a `Warning`-severity
+diagnostic (either of the above two kinds) NEVER sets `has_user_errors`, so a
+non-exhaustive `match` or a redundant arm **typechecks (`--check` exits 0)**.
+This is NOT "the typechecker forgot to check exhaustiveness" —
+`check_exhaustiveness` runs on EVERY `match` (unconditionally, at the end of
+both `infer_match` and the `EMatch` arm of `check_expr`, typecheck.ml:
+4199/4288) and DOES emit a diagnostic for a missing case; that diagnostic is
+simply non-fatal by design.
+
+Exhaustiveness checking is also SKIPPED ENTIRELY (not merely downgraded) when
+ANY branch of the match carries a guard: `let has_guards = List.exists (…
+branch_guard <> None) branches in if has_guards then () else …`
+(typecheck.ml:3161–3164) — "coverage becomes undecidable" once a guard is
+present (the comment at typecheck.ml:3158), since a guard can make an
+otherwise-total pattern set partial at runtime (E-Match's guard-false
+fall-through, core-march.md:741–751). Redundancy checking, by contrast, only
+skips INDIVIDUAL guarded arms (`if br.branch_guard = None then …`,
+typecheck.ml:3136) while still checking the unguarded ones against the
+accumulated prefix.
+
+**Conformance-corpus consequence:** an `accept/` program with a deliberately
+non-exhaustive `match` is CORRECT — it is SUPPOSED to typecheck
+(`accept/t14_nonexhaustive_match_still_typechecks` is the witness: exit 0,
+with a rendered `-- WARNING --` block reading "Non-exhaustive pattern match —
+missing case: Bloo"). A non-exhaustive match can NEVER be used to construct a
+`reject/` program in this corpus, because `check_types.sh` keys purely on the
+process exit code (§3) and a Warning never changes it.
+
+This is the type-side counterpart of `core-march.md`'s §4.3
+`Match_failure`/panic rule: an accepted-but-non-exhaustive `match` is exactly
+the program shape that can raise a runtime "no matching branch" error
+(interpreted) or panic (compiled) on an uncovered value at RUNTIME — the
+Warning is the typechecker's only static signal that this is possible, and it
+is advisory, not enforced.
 
 ### 2.1 Primitive typing (δ-typing)
 
@@ -171,6 +264,52 @@ interfaces layered on HM*, not overloading resolved by the parser — a genuinel
 load-bearing fact (a program `1 + "x"` fails because `+`'s two args must share one
 `a`, and `Int`/`String` don't unify, **not** because `+` is "the Int operator").
 
+### 2.1a Conditionals without a scrutinee: `ECond` (`match do c -> b … end`)
+
+```
+(T-Cond)  arms = (c₁,b₁) … (c_n,b_n),  n ≥ 1                                    typecheck.ml:4020–4036 (ECond arm of infer_expr)
+          Γ ⊢ c₁ ⇐ Bool                                                        typecheck.ml:4027–4028
+          ρ = (Γ ⊢ b₁ ⇒ ·)                                                     typecheck.ml:4029
+          ∀i = 2..n:  Γ ⊢ cᵢ ⇐ Bool                                             typecheck.ml:4031–4032
+                      Γ ⊢ bᵢ ⇒ τᵢ    unify(ρ, τᵢ)                               typecheck.ml:4033–4034
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ ECond [(c₁,b₁)…(c_n,b_n)] ⇒ ρ
+          -- n = 0 (an `ECond` with zero arms) ⇒ a DEDICATED error, not a
+          --   unify/fallthrough one: "A `match do` expression needs at least one
+          --   arm." (typecheck.ml:4022–4024) — a plain `Err.error`, not routed
+          --   through `report_mismatch`/`RBuiltin`, since there is no type
+          --   mismatch to report when there are no arms to synthesize a result
+          --   type from.
+          -- a non-Bool condition (any arm, first or later) ⇒ the ordinary
+          --   unify-mismatch headline "expected `Bool` but got `<τ>`." with the
+          --   note "Each condition in `match do` must be Bool." (`RBuiltin
+          --   "Each condition in `match do` must be Bool."`, typecheck.ml:4028,
+          --   4032) — e.g. bare `n -> "positive"` where `n : Int` is REJECTED
+          --   with exactly this note (captured live;
+          --   `reject/t11_econd_condition_not_bool` is the witness).
+          -- branch-body type mismatch (a later arm's body doesn't unify with the
+          --   FIRST arm's body type ρ) ⇒ falls to the SAME "All branches of a
+          --   match must have the same type." headline `EMatch` uses (`RMatchArm
+          --   sp`, typecheck.ml:4034/47/67) — `ECond` and `EMatch` share this one
+          --   reason string; there is no `ECond`-specific branch-mismatch message.
+          -- unlike (T-Match), there is NO exhaustiveness/redundancy check here at
+          --   all — `check_exhaustiveness`/`check_redundant_arms` are called only
+          --   from `infer_match`/`EMatch`'s `check_expr` arm (typecheck.ml:4199,
+          --   4288–4289), never from the `ECond` arm. This matches the
+          --   operational finding that `ECond` is NOT statically total
+          --   (`core-march.md:492–498`, E-Cond-Fail): an all-false chain
+          --   typechecks unconditionally (no Warning either — not even the
+          --   advisory one (T-Match) gets) and raises a runtime
+          --   "non-exhaustive `match do`" error (`eval.ml:7099`) unless a final
+          --   `true ->`/`_ ->` arm is present.
+          -- cf. operational (E-Cond-Sel / E-Cond-Fail), core-march.md:471–502 —
+          --   eval's `ECond` arm evaluates conditions top-to-bottom and runs the
+          --   first `VBool true` arm's body; this rule is its typing counterpart
+          --   (every condition ⇐-checked against `Bool`, every body unified into
+          --   ONE shared result type `ρ` — anchored at the FIRST arm's inferred
+          --   type rather than a fresh var, unlike (T-Match)'s `ρ fresh`).
+```
+
 ### 2.2 Pattern typing: `Γ ⊢ p : τ ⊣ Γ'`
 
 `infer_pattern` (typecheck.ml:2566, `?expected` optionally threads in the
@@ -179,7 +318,18 @@ two types — can be disambiguated by matching the expected type's head `TCon`,
 typecheck.ml:2593–2603) computes both the type a pattern *expects* to match
 AND the bindings (`(name, scheme) list`) it introduces into `Γ'` for the branch
 body / rest of the match. Written `Γ ⊢ p : τ ⊣ Γ'` (`Γ'` = `Γ` extended with the
-pattern's bindings):
+pattern's bindings).
+
+**This is now the COMPLETE relation** — every arm of `infer_pattern`
+(typecheck.ml:2566–2685) is accounted for below, one way or the other:
+`PatWild`/`PatVar`/`PatLit`/`PatCon`/`PatTuple`/`PatAtom` each get a live rule
+((P-Wild)/(P-Var)/(P-Lit)/(P-Con)/(P-Tuple)/(P-Atom), added across Tasks 1–3);
+`PatRecord` and `PatAs` are each documented as **unreachable from surface
+grammar** instead of given a live rule (both have a real, working
+`infer_pattern` arm — the code path is not dead in the OCaml sense — but no
+March program a user can actually write ever constructs one, so per this
+document's own methodology, §0, no rule is stated for either — see the
+`PatRecord` note after (P-Atom) and the `PatAs` note immediately below):
 
 ```
 (P-Wild)  ──────────────────────────────           typecheck.ml:2569–2570
@@ -290,6 +440,55 @@ own methodology (§0: "every rule is transcribed... and cited"), no `(P-Record)`
 rule is stated here — inventing one would document code the parser can never
 reach, mirroring exactly how `core-march.md` handled the same gap for its
 `match(PatRecord …)` rule.
+
+**No `(P-As)` rule either: `PatAs` (`p as x`) is likewise unreachable from
+surface syntax**, exactly as `core-march.md` documents for the operational
+side (`core-march.md:872–904`, §4.3.1 "Implemented-but-unreachable pattern
+forms"). Verified fresh for this task:
+
+- `infer_pattern` DOES have a live, working arm for it:
+  ```
+  | Ast.PatAs (inner, name, _) ->
+    let bindings, t = infer_pattern env inner in
+    Hashtbl.replace env.type_map name.span t;
+    (name.txt, Mono t) :: bindings, t
+  ```
+  (typecheck.ml:2682–2685, verbatim) — it types the inner pattern, then binds
+  `name` to that SAME type `t` in addition to whatever `inner` itself bound
+  (i.e. `Γ ⊢ p as x : τ ⊣ Γ, Γ_inner, x:τ` would be the rule, were it reachable
+  — the pattern-typing analog of `PatVar`'s binding, layered on top of an
+  arbitrary sub-pattern rather than replacing it).
+- But grepping `lib/parser/parser.mly` for `PatAs` finds **zero** occurrences
+  (confirmed for this task). The `AS` token exists in the lexer (`("as",
+  AS)`, `lexer.mll:48`) and appears in the grammar exactly once, in
+  `soft_lower_name` (`parser.mly:1361`: `| AS { mk_name "as" $loc }`) — that
+  production lets `as` be used as an ordinary VARIABLE/BINDING name (so `let
+  as = 5` or a param named `as` parses), it does **not** build a `PatAs` node.
+  Neither `pattern` nor `simple_pattern` (parser.mly:1311–1341) has any
+  production shaped like `pattern AS lower_name` or similar. So `p as x` is
+  not parseable pattern syntax at all in March — attempting it either parses
+  `as` as a fresh `PatVar` (if `as` appears where a pattern is expected) or
+  is a plain parse error, never a `PatAs`.
+- `PatAs` is still constructed internally by the DESUGARER (three arms in
+  `desugar.ml`, per `core-march.md:899–900`) — but only by recursing into an
+  *already-constructed* `PatAs`, never by building a fresh one from surface
+  tokens; so even post-desugar, a user-written program can never introduce
+  one that wasn't already there (and none can already be there, since parsing
+  never produces one).
+- Consistent with this, `core-march.md` already treats `PatAs` as the
+  unreachable operational counterpart (`core-march.md:200,872–904,934–968`)
+  and notes the golden corpus uses guarded branches reading their own
+  pattern's bindings (`g27_guard_binding.march`) as "the reachable substitute
+  for the unparseable as-pattern" (`core-march.md:1247`) — this task's
+  `accept/t13_match_guard` and the pre-existing `g25`/`g27` goldens are that
+  same substitute on the type side: guards, not as-patterns, are how March
+  programs actually read a branch's own bindings in a condition.
+
+Per this document's methodology (§0), the `PatAs` arm above is shown ONLY to
+demonstrate `infer_pattern` really does handle it (fidelity — it is not
+silently omitted), exactly mirroring how `core-march.md` handles the same gap
+for its operational `match(PatAs …)` rule; no `(P-As)` rule number is minted,
+since inventing one would document a form no March source file can produce.
 
 `instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
 side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation
@@ -487,8 +686,13 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `reject/t09_record_update_missing_field` | reject | T-Update "no such field" (`ERecordUpdate` arm, concrete-`TRecord` base) | `` This record does not have a field called `z`. `` |
 | `accept/t11_atom_nullary_eq_match` | accept | T-Atom-0 + P-Atom — a nullary `:ok` returned, compared via `==`, and matched by a nullary `PatAtom` | typechecks |
 | `accept/t12_atom_payload_and_name_erasure` | accept | T-Atom-N + P-Atom — a payload atom `:count(n+1)` matched with its payload bound, AND two DIFFERENT-named nullary atoms (`:red`/`:blue`) returned from the two arms of one `if`, proving name-erasure (both branches synthesize the identical `Atom`) | typechecks |
+| `accept/t13_match_guard` | accept | (T-Guard) — three `when`-guarded `PatVar` arms (`n when n > 0`/`n when n < 0`/`_`), guard checked against `Bool` in the pattern-extended env | typechecks |
+| `accept/t14_nonexhaustive_match_still_typechecks` | accept | **(T-Match: Exhaustiveness) — the brittleness witness**: a 2-ctor ADT `match` covering only ONE ctor (`Rood`, no `Bloo`, no `_`) | typechecks — exit 0 WITH a rendered `-- WARNING --` ("Non-exhaustive pattern match — missing case: Bloo"); proves exhaustiveness is advisory, not enforced |
+| `accept/t15_econd_chain` | accept | (T-Cond) — a 3-arm `match do` boolean chain (`n > 0`/`n < 0`/`_`), all conditions `Bool`, all bodies `String` | typechecks |
+| `reject/t10_guard_not_bool` | reject | (T-Guard) non-Bool guard (`n when n + 1 -> …`, an `Int` guard) | `Match guards must be Bool.` |
+| `reject/t11_econd_condition_not_bool` | reject | (T-Cond) non-Bool condition (bare `n -> …` where `n : Int`) | `` Each condition in `match do` must be Bool. `` |
 
-**Result: 21 / 21 (12 accept typecheck, 9 reject with the declared error).**
+**Result: 26 / 26 (15 accept typecheck, 11 reject with the declared error).**
 
 **No atom-specific `reject/` program.** Every `EAtom`/`PatAtom` occurrence —
 nullary or payload-carrying, whatever the tag — synthesizes the single bare
@@ -570,6 +774,59 @@ pins that are easy to get wrong and are load-bearing:
    plain `Atom` from the two arms of one `if`); no dedicated `reject/`
    program exists because there is no atom-specific way to violate this —
    every atom, by construction, already has the one type this rule assigns.
+9. **Exhaustiveness and redundancy are Warnings, not typing errors — the
+   single most brittle fact in this document.** `check_exhaustiveness`
+   (typecheck.ml:3159–3185) and `check_redundant_arms` (typecheck.ml:3131–3155)
+   both construct their diagnostics with `severity = Warning` (typecheck.ml:
+   3143/3172/3179 — every branch of both functions), and `--check`'s exit code
+   (`bin/main.ml:819–821`, `has_user_errors`) filters strictly on `severity =
+   Error`. **A `match` that does not cover every constructor of its scrutinee's
+   type is WELL-TYPED — `--check` exits 0, emitting only a `-- WARNING --`
+   block.** This is easy to get backwards: it is tempting to assume a
+   "non-exhaustive match" program belongs in `reject/`, but doing so would
+   produce a `reject/` program that this corpus's own harness (`check_types.sh`,
+   §3, keyed on exit code) would immediately flag as wrong — the harness would
+   see exit 0 and mark it "should be rejected but typechecked." Compounding
+   this: exhaustiveness checking is SKIPPED OUTRIGHT (not run at all, not even
+   as a Warning) the moment ANY branch of the match has a guard
+   (typecheck.ml:3161–3164, "coverage becomes undecidable") — so a guarded
+   match gets no exhaustiveness signal whatsoever, Warning or Error.
+   `accept/t14_nonexhaustive_match_still_typechecks` is the witness: a 2-ctor
+   `Hue = Rood | Bloo` matched with only a `Rood` arm exits 0 with the exact
+   message "Non-exhaustive pattern match — missing case: Bloo".
+10. **Guards are ⇐-checked against `Bool` in the pattern-extended
+    environment, at both typing entry points.** `infer_match`
+    (typecheck.ml:4280–4284) and the `EMatch` arm of `check_expr`
+    (typecheck.ml:4192–4196) both check `br.branch_guard` (when present)
+    against `t_bool` in `env'` — Γ already extended with the SAME branch's own
+    pattern bindings — so a guard can read variables its own pattern just
+    bound (`P(a, b) when a == b -> …`, the reachable substitute for the
+    unparseable `PatAs`, per finding 11 below and `core-march.md:1247`). A
+    non-Bool guard is rejected with "Match guards must be Bool."
+    (`reject/t10_guard_not_bool` is the witness) — the exact same `RBuiltin`
+    reason-string shape `ECond`'s non-Bool-condition rejection uses (finding
+    12), just with different wording.
+11. **`PatAs` has a live, correct `infer_pattern` arm (typecheck.ml:2682–2685)
+    but is unreachable from surface grammar — confirmed fresh for this task,
+    zero `PatAs` occurrences in `parser.mly`.** The lexer's `AS` token is used
+    in exactly one grammar production, `soft_lower_name` (parser.mly:1361),
+    which lets `as` be spelled as an ordinary variable/binding name — it does
+    NOT build an as-pattern. This is the same disposition `core-march.md`
+    already gives `PatAs` operationally (§4.3.1) and the same shape as this
+    document's pre-existing `PatRecord` finding: real code, unreachable input.
+    No `(P-As)` rule is stated (§2.2).
+12. **`ECond` (`match do c -> b … end`) checks every condition against `Bool`
+    and unifies every body into ONE result type anchored at the FIRST arm**
+    (T-Cond, §2.1a, typecheck.ml:4020–4036) — but, unlike `EMatch`, never runs
+    exhaustiveness/redundancy checking at all (neither function is called from
+    the `ECond` arm). This matches the operational finding that `ECond` is NOT
+    statically total (`core-march.md:492–498`): an all-false chain typechecks
+    with no Warning and panics at runtime unless closed off with a final
+    `true ->`/`_ ->` arm. A non-Bool condition is rejected with "Each condition
+    in `match do` must be Bool." (`reject/t11_econd_condition_not_bool` is the
+    witness); a branch-body mismatch falls through to the same "All branches of
+    a match must have the same type." text `EMatch` uses (no `ECond`-specific
+    branch-mismatch message exists).
 
 ## 5. What this validated, and what's next
 
@@ -612,6 +869,38 @@ rather than folded into the atom's type. This is the same erasure
 compiled `Show(Atom)` bug. No `reject/` program was added: because every atom
 already has the one type this rule assigns, there is no atom-specific way to
 violate it (§3, §4 finding 8).
+
+**Task 4 (this slice) added:** the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` is
+now presented as COMPLETE (§2.2 preamble) — every `infer_pattern` arm is
+accounted for, with `PatAs` newly confirmed unreachable-from-surface-grammar
+(zero `parser.mly` occurrences, verified fresh; the `AS` token's one grammar
+use is in `soft_lower_name`, letting `as` be a variable name, not an
+as-pattern) and documented that way rather than given a `(P-As)` rule,
+mirroring `PatRecord`'s existing disposition. Also added: (T-Guard) — the
+`when g` clause is ⇐-checked against `Bool` in the pattern-extended
+environment, at both `infer_match` (typecheck.ml:4280–4284) and the `EMatch`
+arm of `check_expr` (typecheck.ml:4192–4196); (T-Cond) — the scrutinee-less
+`match do c -> b … end` boolean chain, transcribed from the `ECond` arm of
+`infer_expr` (typecheck.ml:4020–4036), each condition ⇐ `Bool`, every body
+unified into one result type anchored at the first arm. **The load-bearing
+finding this slice pins:** `check_exhaustiveness`/`check_redundant_arms`
+(typecheck.ml:3159–3185 / 3131–3155) both report at `severity = Warning`
+(never `Error`), and `--check`'s exit code (`bin/main.ml:819–821`) filters
+strictly on `Error` — so a non-exhaustive `match` (or a redundant arm)
+**typechecks**, exit 0, with only an advisory `-- WARNING --` block. This
+governs the conformance corpus directly:
+`accept/t14_nonexhaustive_match_still_typechecks` deliberately covers only one
+arm of a 2-ctor ADT and is CORRECT to sit in `accept/`, not `reject/` — a
+non-exhaustive match can never be used to construct a passing `reject/`
+program in this harness, since `check_types.sh` (§3) keys purely on the
+process exit code. Exhaustiveness checking is also skipped outright (not
+merely downgraded) whenever any branch carries a guard (typecheck.ml:
+3161–3164). Two new `reject/` programs exercise genuinely new-to-this-task
+error text: a non-Bool guard ("Match guards must be Bool.",
+`reject/t10_guard_not_bool`) and a non-Bool `ECond` condition ("Each condition
+in `match do` must be Bool.", `reject/t11_econd_condition_not_bool`) — neither
+restates an earlier task's reject message. `check_types.sh`: 26/26 (15 accept,
+11 reject), exit 0.
 
 **Next (widening slices, each like this one):** the interface/impl resolution
 that discharges the `Num`/`Eq` constraints (§2.1) — the richest and most
