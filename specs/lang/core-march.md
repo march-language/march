@@ -1,37 +1,52 @@
-# Core March — Walking Skeleton (v0)
+# Core March — Reference v1 (core fragment complete)
 
-**Date:** 2026-07-04
-**Status:** Walking skeleton — the FIRST vertical slice of the March language
-specification. Not the whole core; a deliberately tiny fragment taken end-to-end
-to validate the methodology before scaling.
-**Depends on:** `specs/2026-07-04-language-specification-roadmap-design.md`
-(this is that roadmap's Phase-1, §9 first artifact).
+**Date:** 2026-07-04 (v0 walking skeleton) → 2026-07-05 (v1 consolidation)
+**Status:** Reference v1 — the **complete CORE fragment** of the March language
+specification, assembled and versioned from the seven incremental slices
+(Tasks 1–7) that grew it end-to-end. This is the CORE, not the whole language:
+the deferred set (§6) is still real and is now exactly the roadmap's Phase-2/3
+queue.
+**Depends on:** the language-specification roadmap design
+(`specs/2026-07-04-language-specification-roadmap-design.md`, the point-in-time
+design doc that framed this as its Phase-1 first artifact; that dated design
+spec has since been superseded by `specs/plans/2026-07-05-core-march-phase1-plan.md`,
+the Phase-1 task plan Tasks 1–8 executed).
 
 ---
 
 ## 0. What this is (and is not)
 
-This document specifies a **small fragment** of March — `let`, lambda +
-application, `Int`/`Bool` with `+` and `==`, a two-constructor ADT with `match`,
-and `if` — across the *entire* spec stack:
+This document specifies the **complete core fragment** of March across the
+*entire* spec stack:
 
 1. the **core grammar** (§2),
 2. the **surface → core desugaring map** (§3),
 3. the **operational semantics** (§4), and
 4. a **golden conformance corpus** verified interpreter-vs-compiled (§5).
 
-Its purpose is to prove the *method* — that a normative spec can be extracted
-faithfully from the existing implementation and kept honest by the differential
-oracle — cheaply, before committing to the full Phase-1 plan. It is a walking
-skeleton: thin but end-to-end. **It is not** a complete semantics; everything
-outside the fragment (strings as first-class data, effects/IO ordering,
-actors, refinements, capabilities, the RC discipline, floats beyond their
-appearance in the value grammar) is explicitly **deferred** — see §6. (This
-paragraph describes the ORIGINAL v0 scope, dated 2026-07-04; tuples and
-records — listed here originally as deferred — were subsequently widened
-into the fragment by Task 2 and Task 3 respectively, and are now covered by
-§2–§5 below. Left as a historical marker of the starting scope rather than
-rewritten, per §6's "next steps" framing of each task as a widening slice.)
+The core covered here is: literals and the `Int`/`Bool`/`Float`/`String`/atom
+primitives with their full δ-rule table (`+`, `-`, `*`, `/`, `%`, comparisons,
+`&&`/`||`/`not`, `++`, unary `negate`); `let`, lambda + application, and
+higher-order functions; **tuples**, **records** (literals, field access,
+functional update), and **atoms** (nullary + payload-carrying); the **full
+pattern language** with guards and the exhaustiveness/`Match_failure` rule;
+**local recursive functions** (`ELetFn`, the env-ref recursive knot); and
+**conditionals** (`if`/`else` and the scrutinee-less `match do c -> b … end`
+boolean chain). Every one of these is grounded arm-for-arm in `eval.ml` (§4) and
+anchored by the golden corpus (§5).
+
+Its original purpose was to prove the *method* — that a normative spec can be
+extracted faithfully from the existing implementation and kept honest by the
+differential oracle. That method held across all seven widening slices, and this
+v1 is their consolidation into one coherent reference.
+
+**It is not** the whole language semantics. The CORE covers the pure,
+value-level reduction fragment; everything outside it — strings as first-class
+data (beyond their appearance in the value grammar), `to_string`/`show` and the
+interface-dispatch machinery, effects/IO ordering, actors, refinements,
+capabilities, the Perceus RC discipline, session types, sigils — is explicitly
+**deferred** to Phase 2/3 (see §6). Each deferred group becomes a widening slice
+like Tasks 1–7 did.
 
 Every rule below is grounded in a specific line of the implementation. Where a
 rule says "faithful to `eval.ml:N`", that citation *is* the correctness
@@ -181,7 +196,9 @@ are parse errors ("I got stuck here"). The evaluator's `match_pattern` arm for
 if a `PatRecord` value ever reached them — the gap is purely in the parser.
 This spec therefore states the `PatRecord` matching rule (§4.3) for
 completeness and fidelity to `eval.ml`, but no golden program in §5
-exercises it, because no March **source program** can construct one.
+exercises it, because no March **source program** can construct one. (This
+form is collected with the other implemented-but-unreachable pattern form,
+`PatAs`, in **§4.3.1**.)
 
 `LitFloat`/`VFloat` carry an OCaml `float` (IEEE-754 double); `LitString`/
 `VString` carry an OCaml `string`. `VAtom` likewise carries a `string` naming
@@ -403,6 +420,19 @@ Values do not reduce further; a lambda becomes a closure immediately
                absent field, it does NOT extend the record's shape
             -- a non-VRecord base ⇒ eval_error "record update on non-record
                value" (eval.ml:7037)
+            -- NOTE (backend quote-character difference in the error text): the
+               two backends emit the missing-field error with DIFFERENT quote
+               characters around the field name — the interpreter uses SINGLE
+               quotes (`no field 'z' in record`, from the `'%s'` format string
+               at eval.ml:7026–7029) while the compiled runtime uses DOUBLE
+               quotes (`no field "z" in record`, `march_record_update_dyn`,
+               runtime/march_extras.c:2206–2231). The message WORDING was
+               deliberately converged (§4.2.1) so both say "no field … in
+               record" and both exit nonzero; only the quote glyph differs. This
+               is disclosed but easy to miss — it is a diagnostic-text cosmetic
+               difference, NOT a semantic divergence, and (like every crashing
+               witness) is not golden-checkable since a nonzero interpreter exit
+               is an automatic INTERP FAIL under verify.sh.
 
 (E-Field)   ρ ⊢ e ⇓ VRecord [(f₁=v₁)…(f_k=v_k)]                    eval.ml:7039, 7067–7071
             f = fᵢ for some i  (first occurrence, List.assoc_opt)
@@ -875,7 +905,8 @@ completeness and fidelity to `eval.ml`, but **no golden program in §5 exercises
 it**, because no March *source program* can construct one — the golden
 substitute (g27) instead exercises a guard reading pattern-bound variables,
 which IS reachable and covers the adjacent "bindings visible to the arm"
-semantics.
+semantics. (This form is collected with the other implemented-but-unreachable
+pattern form, `PatRecord`, in **§4.3.1**.)
 
 `match(PatLit ℓ, v)` is one arm per literal kind, each requiring **both** the
 pattern and scrutinee to be the *same* value constructor with equal payload —
@@ -898,6 +929,52 @@ structural equality, no epsilon tolerance; this is the same primitive used by
 `bare(C)` strips a leading module qualifier (`eval.ml:786`); the constructor
 value's tag is stored already-stripped (`eval.ml:6981`), which is why
 `match(PatCon "Som" …, VCon "Som" …)` succeeds regardless of qualification.
+
+### 4.3.1 Implemented-but-unreachable pattern forms (`PatRecord`, `PatAs`)
+
+Two of the pattern constructors whose matching rules §4.3 states in full —
+**`PatRecord`** (`{ f, … }`, the record-destructuring pattern) and **`PatAs`**
+(`p as x`, the as-pattern) — are **implemented in the interpreter but have NO
+surface grammar**: no `parser.mly` production ever builds one from `.march`
+source, so both are *dead code* from the parser's perspective. They are
+reachable only by constructing the `Ast.pattern` node directly (e.g. inside an
+OCaml unit test), never by writing and running a March program.
+
+This spec documents their matching rules anyway, **for fidelity** — §4 is a
+faithful transcription of the interpreter's `match_pattern`, and
+`match_pattern` supports both (with fully-implemented arms that would work
+correctly if such a node ever reached them). Stating them keeps the spec an
+honest mirror of `eval.ml`. But **no golden program in §5 exercises either**,
+because no March *source program* can construct one.
+
+The evidence and the exact rule citations live at each form's own rule (kept in
+place — this subsection collects, it does not relocate the citations):
+
+- **`PatRecord`** — matching rule and its SUBSET-matching semantics: §4.3
+  (`match(PatRecord …)`, `eval.ml:810–822`, `eval.ml:824`). Dead-code evidence:
+  §2's "`PatRecord` has no surface production at all" note (zero `parser.mly`
+  occurrences; `lib/tir/lower_match.ml:132–138`'s `failwith` comment "PatRecord
+  has no `{...}` pattern production in the grammar today"; both `let { x, y } =
+  r` and `match r do { x, y } -> … end` are parse errors). The typechecker's
+  `infer_pattern` arm (`typecheck.ml:2666–2675`) and the interpreter's
+  `match_pattern` arm are both complete; the gap is purely in the parser.
+- **`PatAs`** — matching rule (binds the whole matched value AND the inner
+  pattern's bindings): §4.3 (`match(PatAs …)`, `eval.ml:826–829`). Dead-code
+  evidence: §4.3's "`PatAs` has no surface production at all" note (zero
+  `parser.mly` occurrences; the `AS` token is only a module-alias / soft
+  identifier; `Som(v) as whole -> …`, `n as whole -> …`, and `let (n as whole)
+  = 5` are all parse errors). `desugar.ml`'s three `PatAs` arms (`:296, 1000,
+  1980`) only ever recurse into an already-constructed `PatAs`, never build one.
+  The golden substitute is **g27** (a guard reading its branch's own
+  pattern-bound variables — the reachable analogue of the as-binding's
+  "bindings visible to the arm" semantics).
+
+(`LitAtom` inside `ELit`/`PatLit` is a THIRD, narrower implemented-but-parser-
+unreachable form — see §2's "`LitAtom` … is dead code from the parser's
+perspective" note — but it is a *literal* constructor, not a top-level pattern
+form, and the parser builds `EAtom`/`PatAtom` from `:ok` syntax instead; it is
+cross-referenced here for completeness but its rule stays at E-Lit / the
+`match(PatLit (LitAtom a), …)` arm.)
 
 ### 4.4 Primitive δ-rules
 
@@ -1081,21 +1158,25 @@ extension, and the δ-rules above — is **equivalent** to the big-step system h
 for closed `e`, `∅ ⊢ e ⇓ v` **iff** `e →* v`. The big-step rules are the faithful
 mirror of the interpreter (used to *validate* the model against `eval.ml`); the
 small-step form is the shape the proofs consume. Writing the full small-step
-apparatus (contexts + the substitution-vs-environment reconciliation) is Phase-1
-work, not skeleton work — but note it is a *refinement* of §4.2, not a different
-semantics.
+apparatus (contexts + the substitution-vs-environment reconciliation) is
+metatheory work (the Lean track), not part of this reference — but note it is a
+*refinement* of §4.2, not a different semantics.
 
 ### 4.6 Faithfulness (the honest caveat)
 
 The §4.2–4.4 rules were transcribed arm-for-arm from `eval.ml` at the cited
 lines. That transcription is **human-reviewed, not mechanically verified** —
-this is the roadmap's §7 faithfulness risk made concrete. What *is* mechanically
-checked is weaker but real: the golden corpus (§5) confirms that, on these
-programs, the interpreter these rules describe and the independently-written
-compiled backend produce identical output. A divergence there would mean either
-the interpreter or the compiler is wrong; agreement plus arm-for-arm review is
-the skeleton's correctness evidence. Scaling from "these 8 programs" to
-"the fragment" is what the golden corpus grows to cover.
+this is the roadmap's §7 faithfulness risk made concrete, and it remains true
+now that the core is complete: the rules are only as faithful as the review of
+each citation. What *is* mechanically checked is weaker but real: the golden
+corpus (§5) confirms that, on these 32 programs, the interpreter these rules
+describe and the independently-written compiled backend produce identical
+output. A divergence there would mean either the interpreter or the compiler is
+wrong; agreement plus arm-for-arm review is the reference's correctness
+evidence. This caveat does NOT weaken with completion — a complete core is a
+larger transcription surface, so the golden corpus (and the CI `@oracle` sweep
+it feeds) is what keeps the "spec matches the implementation" claim honest as
+the reference is relied on.
 
 ## 5. Golden conformance corpus
 
@@ -1295,43 +1376,56 @@ mismatch). These programs are exactly the shape the `@oracle` conformance sweep
 sweep's corpus — so the anchor runs in CI, not just on demand — is the natural
 next wiring (§6).
 
-## 6. What the skeleton validated, and what's next
+## 6. What Phase-1 validated, and the Phase-2/3 queue
 
-**Validated (the point of the exercise):**
+**Phase-1 core: COMPLETE.** The seven widening slices (Tasks 1–7) plus this
+consolidation (Task 8) cover every core `Ast.expr`/`pattern`/`literal`
+constructor the interpreter runs and the desugarer leaves in the core
+(cross-checked against `ast.ml:32–110`), minus the explicitly-deferred set
+below. The record `ERecordUpdate`-missing-field divergence was adjudicated and
+converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
+
+**Validated (the point of the exercise, now proven across the whole core):**
 
 - The "core = desugared AST, `eval.ml` = reference" decision holds and is
   grounded in the real pipeline (§1).
 - The four layers cohere: the grammar (§2), the desugaring map (§3), and the
   operational rules (§4) all describe one object, and the golden corpus (§5)
-  agrees 8/8 across both backends.
+  agrees 32/32 across both independently-written backends.
 - The doc format — grammar table, desugaring table, arm-cited big-step rules,
-  golden table — is a workable template to replicate per fragment.
+  golden table — proved a workable template, replicated cleanly across all
+  seven slices and assembled here into one reference.
 
-**Deferred (the widening queue — each becomes a slice like this one):**
-strings as data; `to_string`/`show` and the
-interface-dispatch machinery; effects/IO ordering; actors; refinements;
-capabilities; the Perceus RC discipline (its own Level-3 track). (Tuples were
-covered by Task 2; records — literals, field access, functional update,
-`PatRecord` matching, and the `ERecordUpdate` missing-field adjudication — by
-Task 3; atoms — `EAtom`/`PatAtom`, the `VAtom`↔`VCon` payload-arity split, and
-both `PatAtom` matching arms — by Task 4; the full pattern language's
-matching + guard + exhaustiveness slice by Task 5; local recursive functions
-(`ELetFn`, the env_ref recursive-knot fixpoint — §4.2's E-LetFn) by Task 6;
-boolean conditionals (`ECond`, the scrutinee-less `match do c -> b … end`
-chain — §4.2's E-Cond-Sel / E-Cond-Fail — grouped with the pre-existing `EIf`
-as the fragment's two "conditionals") by Task 7.
-This line was stale after Task 2 landed tuples without updating it — noted here
-so it doesn't happen again: keep this list in sync with §0/§2's actual fragment
-coverage as each task lands.)
+**Deferred — the Phase-2/3 queue (each group becomes a widening slice like the
+Phase-1 tasks did):**
 
-**Next steps:**
+- strings as first-class data (beyond their appearance in the value grammar);
+- `to_string`/`show` and the interface-dispatch machinery (the source of the
+  known container-`to_string`/`hash`/atom-`_show` divergences §5 routes around);
+- effects and IO ordering;
+- actors;
+- refinements;
+- capabilities;
+- the Perceus RC discipline (its own Level-3 track);
+- session types;
+- sigils.
+
+(This is the same deferred set §0 now names. Everything that was on the ORIGINAL
+v0 deferred line but is now *covered* — tuples (Task 2), records (Task 3), atoms
+(Task 4), the full pattern language + guards + exhaustiveness (Task 5), local
+recursive functions (Task 6), and conditionals (Task 7) — has been removed from
+this queue; keep this list and §0's in lockstep as Phase-2/3 slices land.)
+
+**Next steps (the Phase-1 closeout track):**
 
 1. ~~Fold `specs/lang/golden/` into `test/test_oracle.ml`'s corpus~~ **DONE** —
-   the `@oracle` sweep now enumerates `specs/lang/golden/` alongside
-   `bench/`+`examples/` (all 8 golden programs MATCH; sweep 22 MATCH / 0
-   un-triaged, exit 0), so the spec's golden anchor runs in CI, not only via the
+   the `@oracle` sweep enumerates `specs/lang/golden/` alongside
+   `bench/`+`examples/`, so the spec's golden anchor runs in CI, not only via the
    standalone `verify.sh`.
-2. If this skeleton reads well, write the **Phase-1 implementation plan**
-   (design-spec → plan → subagent execution, as the oracle used) to widen the
-   fragment across the full desugared-AST core, and land the `eval.ml` core-loop
-   refactor gated by the `@oracle` sweep (roadmap §4.2).
+2. Make the reference **normative-by-cross-reference**: annotate each core
+   `eval_expr` arm in `lib/eval/eval.ml` with its rule name and a pointer back
+   to this document's §4 (the oracle-gated legibility refactor — the remaining
+   Phase-1 code task).
+3. Then open Phase 2 with the first deferred group above, as its own widening
+   slice, following the same design-spec → plan → golden-anchored execution
+   loop this core fragment proved out.
