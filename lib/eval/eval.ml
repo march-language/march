@@ -7012,16 +7012,28 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (match base_val with
      | VRecord fields ->
        let updated = List.map (fun (n, ex) -> (n.txt, eval_expr env ex)) updates in
+       (* A functional update is only defined for fields that already exist
+          on the base record's actual (runtime) shape — matches the compiled
+          backend's march_record_update_dyn contract (runtime/march_extras.c),
+          which panics rather than silently fabricating a new field.  Most
+          call sites have a statically-known record type, so the typechecker
+          (typecheck.ml's ERecordUpdate case, expand_record on a concrete
+          TRecord) already rejects an unknown field name before this arm ever
+          runs; this eval_error only fires for an update through an
+          erased/generic base (record_from_list/record_put results, whose
+          type is a bare TVar), which is exactly the case the typechecker
+          cannot validate ahead of time. *)
+       List.iter (fun (k, _) ->
+           if not (List.mem_assoc k fields) then
+             eval_error "record update: no field '%s' in record" k
+         ) updated;
        (* Merge: updated fields override existing ones *)
        let new_fields = List.map (fun (k, v) ->
            match List.assoc_opt k updated with
            | Some v' -> (k, v')
            | None    -> (k, v)
          ) fields in
-       (* Add any fields in updated that weren't in the original *)
-       let extra = List.filter (fun (k, _) ->
-           not (List.mem_assoc k fields)) updated in
-       VRecord (new_fields @ extra)
+       VRecord new_fields
      | _ -> eval_error "record update on non-record value")
 
   | EField (ex, field, _) ->

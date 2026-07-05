@@ -6182,10 +6182,14 @@ let test_erased_update_single_dyn_call_ir () =
     from the update's own field names, never checking them against the
     base's actual fields — so `{ record_from_list([("a",1)]) with z: 99 }`
     typechecks.  march_record_put semantics (extend on new key) would
-    silently produce a 2-field record here.  NOTE: the interpreter currently
-    diverges — eval.ml's ERecordUpdate appends missing update fields as new
-    fields — so no interpreter-parity check is made; the compiled fail-loud
-    behavior is the safer contract (documented in the B5 report). *)
+    silently produce a 2-field record here.  NOTE: the interpreter's
+    ERecordUpdate (lib/eval/eval.ml) used to diverge here (silently appending
+    missing update fields instead of erroring); Core March spec Task 3
+    adjudicated the compiled fail-loud contract as normative and converged
+    eval.ml to match (see specs/lang/core-march.md §4, ERecordUpdate rule).
+    This test only asserts the compiled side; the converged interpreter
+    behavior is covered by
+    test_properties.ml's test_record_update_missing_field_on_erased_base_converged. *)
 let test_erased_update_missing_field_panics_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_miss"
     "mod ErasedUpdMiss do\n\

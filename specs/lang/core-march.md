@@ -24,9 +24,14 @@ Its purpose is to prove the *method* — that a normative spec can be extracted
 faithfully from the existing implementation and kept honest by the differential
 oracle — cheaply, before committing to the full Phase-1 plan. It is a walking
 skeleton: thin but end-to-end. **It is not** a complete semantics; everything
-outside the fragment (records, tuples, strings as first-class data, effects/IO
-ordering, actors, refinements, capabilities, the RC discipline, floats beyond
-their appearance in the value grammar) is explicitly **deferred** — see §6.
+outside the fragment (strings as first-class data, effects/IO ordering,
+actors, refinements, capabilities, the RC discipline, floats beyond their
+appearance in the value grammar) is explicitly **deferred** — see §6. (This
+paragraph describes the ORIGINAL v0 scope, dated 2026-07-04; tuples and
+records — listed here originally as deferred — were subsequently widened
+into the fragment by Task 2 and Task 3 respectively, and are now covered by
+§2–§5 below. Left as a historical marker of the starting scope rather than
+rewritten, per §6's "next steps" framing of each task as a widening slice.)
 
 Every rule below is grounded in a specific line of the implementation. Where a
 rule says "faithful to `eval.ml:N`", that citation *is* the correctness
@@ -40,7 +45,7 @@ exists **after the desugar pass**, and the tree-walking interpreter
 
 This is grounded, not invented. The compiler pipeline is
 parse → desugar → typecheck → eval (`bin/main.ml:772`–`807`): the interpreter's
-entry point `eval_module_env (m : module_)` (`eval.ml:8397`) consumes exactly
+entry point `eval_module_env (m : module_)` (`eval.ml:8409`) consumes exactly
 the `module_` value that `March_desugar.Desugar.desugar_module` produces — the
 same `Ast.expr` type, after sugar has been removed. The TIR → LLVM path
 (`Lower.lower_module`, the `--compile` branch) is a *separate* consumer of that
@@ -70,6 +75,9 @@ expr     e  ::= ELit ℓ                                      -- literal
              |  EApp e [e…]                                 -- application
              |  ECon C [e…]                                 -- constructor application
              |  ETuple [e…]                                 -- tuple construction (ast.ml:60)
+             |  ERecord [(f = e)…]                          -- record literal (ast.ml:61)
+             |  ERecordUpdate e [(f = e)…]                  -- functional record update (ast.ml:62–63)
+             |  EField e f                                  -- field access: e.f (ast.ml:64)
              |  EBlock [e…]                                 -- do … end sequence
              |  ELet (p = e)                                -- block-scoped binding
              |  EMatch e [ p when g? -> e … ]               -- pattern match
@@ -78,6 +86,7 @@ expr     e  ::= ELit ℓ                                      -- literal
 
 pattern  p  ::= PatWild | PatVar x | PatLit ℓ | PatCon C [p…]
              |  PatTuple [p…]                                -- tuple pattern: (p…) (ast.ml:45)
+             |  PatRecord [(f = p)…]                         -- record pattern: { f, … } (ast.ml:47)
                                                             (ast.ml:40–48)
 
 value    v  ::= VInt n | VFloat f | VString s | VBool b | VAtom a
@@ -85,6 +94,7 @@ value    v  ::= VInt n | VFloat f | VString s | VBool b | VAtom a
              |  VClosure ρ [x…] e                           -- closure: env + params + body
              |  VCon C [v…]                                 -- constructor value: tag + payload
              |  VTuple [v…]                                 -- tuple value: fixed-arity value list (eval.ml:39)
+             |  VRecord [(f = v)…]                          -- record value: field-name/value assoc list (eval.ml:40)
              |  VBuiltin name f                             -- primitive (e.g. +, ==)
 ```
 
@@ -95,6 +105,39 @@ rather than a genuine zero-arity `VTuple` — see the E-Tuple rule's note. There
 is no 1-tuple (`(e)` parses as a parenthesized `e`, not `ETuple [e]`). `PatTuple`
 mirrors this on the pattern side: `(p₁, …, p_k)` destructures a `VTuple` of the
 same arity componentwise (§4.3).
+
+**`ERecord`/`ERecordUpdate`'s surface form uses `:`, not `=`, despite what the
+AST doc comments say.** `lib/ast/ast.ml`'s comments for `ERecord`/
+`ERecordUpdate`/`PatRecord` (`ast.ml:47, 61–63`) show an aspirational
+`{ x = 1, y = 2 }` / `{ state with count = … }` surface form, but the actual
+grammar production is `record_field_expr: name = lower_name; COLON; e = expr`
+(`parser.mly:1267–1268`), used by both the literal (`parser.mly:1248–1250`)
+and the update (`:1251–1253`) productions. The real, working surface syntax is
+**`{ x: 1, y: 2 }`** and **`{ base with f: v, … }`** — confirmed against the
+committed regression fixture `test/imports/record_native/rn_entry.march`
+(e.g. `{ name: "Alice", age: 30 }`, `{ built with a: 99 }`) and by hand
+(`{ x = 1 }` is a parse error; `{ x: 1 }` is not). The doc comments' `=` is
+stale/never-implemented; this spec documents the grammar the parser actually
+accepts, per §0's "documenting an existing core, not designing a new one."
+
+**`PatRecord` has no surface production at all — it is dead code, reachable
+only by constructing the AST node directly (e.g. in a test), never by parsing
+March source.** Grepping `parser.mly` for `PatRecord` finds zero occurrences;
+`desugar.ml`'s three `PatRecord` arms (`:295, 997–998, 1978`) only ever
+recurse into an *already-constructed* `PatRecord`, never build one fresh from
+another surface form. The LLVM backend's own comment on this is the most
+direct evidence: `lib/tir/lower_match.ml:132–138`'s `pat_tag_and_subs` arm for
+`PatRecord` immediately `failwith`s with *"record patterns are not yet
+compilable (…) — PatRecord has no `{...}` pattern production in the grammar
+today, so this indicates a pattern constructed directly rather than parsed."*
+Confirmed by hand: both `let { x, y } = r` and `match r do { x, y } -> … end`
+are parse errors ("I got stuck here"). The evaluator's `match_pattern` arm for
+`PatRecord` (§4.3, `eval.ml:810`) and the typechecker's `infer_pattern` arm
+(`typecheck.ml:2666–2675`) are both fully implemented and would work correctly
+if a `PatRecord` value ever reached them — the gap is purely in the parser.
+This spec therefore states the `PatRecord` matching rule (§4.3) for
+completeness and fidelity to `eval.ml`, but no golden program in §5
+exercises it, because no March **source program** can construct one.
 
 `LitFloat`/`VFloat` carry an OCaml `float` (IEEE-754 double); `LitString`/
 `VString` carry an OCaml `string`; `LitAtom`/`VAtom` carry a `string` naming
@@ -133,6 +176,9 @@ the parser) and multi-clause functions.
 | `f(e…)` (`EApp`) | identity, plus a qualified-`ECon` fold for `Mod.Ctor(args)` | `desugar.ml:552–563` |
 | `C(e…)` (`ECon`) | identity (recurse args) | `desugar.ml:565–566` |
 | `(e…)` (`ETuple`) | identity (recurse elements) | `desugar.ml:602–603` |
+| `{ f: e, … }` (`ERecord`) | identity (recurse each field's value expr; field names untouched) | `desugar.ml:605–606` |
+| `{ base with f: e, … }` (`ERecordUpdate`) | identity (recurse base + each update value expr) | `desugar.ml:608–611` |
+| `e.f` (`EField`) | **not** pure identity — if `e` is a chain of `ECon`/`EField` that flattens to a dotted path (a module reference, e.g. `A.B.f`), rewrite to a single qualified `EVar "A.B.f"` (or `ECon` if `f` starts uppercase, i.e. a qualified constructor); otherwise identity (recurse into `e`, keep `EField`) | `desugar.ml:613–633` |
 | `match e do … end` (`EMatch`) | identity (recurse scrutinee, guards, bodies) | `desugar.ml:595–600` |
 | `if c do a else b end` (`EIf`) | **identity** — `EIf` is *not* rewritten to a match on the bool | `desugar.ml:635–636` |
 | `ELit`, `EVar` | identity | `desugar.ml:548` |
@@ -193,6 +239,50 @@ Values do not reduce further; a lambda becomes a closure immediately
             -- ETuple [] ⇓ VUnit instead (k = 0 is the `()` alias, not a genuine
                0-ary VTuple)                                      eval.ml:7003
 
+(E-Record)  ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, left-to-right, over the fields  eval.ml:7007–7008
+            as written in source order)
+            ────────────────────────────────────────────────────
+            ρ ⊢ ERecord [(f₁=e₁)…(f_k=e_k)] ⇓ VRecord [(f₁=v₁)…(f_k=v_k)]
+            -- field names are carried verbatim (no sorting, no dedup check);
+               a repeated field name produces a VRecord with a duplicate key,
+               and later lookups (EField, PatRecord) find the FIRST occurrence
+               (List.assoc_opt semantics) — the typechecker's ERecord case
+               does not reject duplicate names either (out of this fragment's
+               scope to adjudicate; noted here only as a fidelity caveat)
+
+(E-Update)  ρ ⊢ e_b ⇓ VRecord [(f₁=v₁)…(f_n=v_n)]                  eval.ml:7010–7037
+            ρ ⊢ eᵢ ⇓ uᵢ   (i = 1..m, left-to-right, over the updates
+            as written in source order)
+            ∀ (g, _) ∈ [(g₁=u₁)…(g_m=u_m)] . g ∈ {f₁,…,f_n}
+            ──────────────────────────────────────────────────────────
+            ρ ⊢ ERecordUpdate e_b [(g₁=e₁)…(g_m=e_m)] ⇓
+                VRecord [(f₁=v₁')…(f_n=v_n')]
+                where vᵢ' = uⱼ if fᵢ = gⱼ for some j (last-listed g wins on a
+                            repeated update name, via List.assoc_opt over the
+                            update list — same first-occurrence convention as
+                            E-Record, but note the MERGE direction: for the
+                            OUTPUT record it is the update side, not the base
+                            side, that is consulted per base field), else vᵢ
+            -- ADJUDICATED RULE (see prose below): if ANY update name g is
+               NOT among the base's actual field names {f₁,…,f_n}, evaluation
+               is an ERROR (`eval_error "record update: no field '%s' in
+               record" g`, eval.ml:7026–7029) — the update is UNDEFINED for an
+               absent field, it does NOT extend the record's shape
+            -- a non-VRecord base ⇒ eval_error "record update on non-record
+               value" (eval.ml:7037)
+
+(E-Field)   ρ ⊢ e ⇓ VRecord [(f₁=v₁)…(f_k=v_k)]                    eval.ml:7039, 7067–7071
+            f = fᵢ for some i  (first occurrence, List.assoc_opt)
+            ─────────────────────────────────────────────────
+            ρ ⊢ EField e f ⇓ vᵢ
+            -- f absent from every fᵢ ⇒ eval_error "record has no field '%s'"
+               (eval.ml:7071)
+            -- a non-VRecord, non-module-path e ⇒ eval_error "field access on
+               non-record value" (eval.ml:7083); EField ALSO doubles as
+               qualified module-member access (`Mod.member`) when its base
+               resolves to a module path rather than a record value — see the
+               prose note below the rule table
+
 (E-App-Clo) ρ ⊢ e_f ⇓ VClosure ρ' [x₁…x_k] e_b    ρ ⊢ eᵢ ⇓ vᵢ
             |x…| = |e…| = k    (x₁↦v₁,…,x_k↦v_k, ρ') ⊢ e_b ⇓ v     eval.ml:6957, 6889
             ─────────────────────────────────────────────────────
@@ -203,19 +293,120 @@ Values do not reduce further; a lambda becomes a closure immediately
             ─────────────────────────────────────
             ρ ⊢ EApp e_f [e₁…e_k] ⇓ f [v₁…v_k]
 
-(E-If-T)    ρ ⊢ e_c ⇓ VBool true    ρ ⊢ e_t ⇓ v                   eval.ml:7073
+(E-If-T)    ρ ⊢ e_c ⇓ VBool true    ρ ⊢ e_t ⇓ v                   eval.ml:7085
             ────────────────────────────────────
             ρ ⊢ EIf e_c e_t e_e ⇓ v
 
-(E-If-F)    ρ ⊢ e_c ⇓ VBool false   ρ ⊢ e_e ⇓ v                   eval.ml:7079
+(E-If-F)    ρ ⊢ e_c ⇓ VBool false   ρ ⊢ e_e ⇓ v                   eval.ml:7091
             ────────────────────────────────────
             ρ ⊢ EIf e_c e_t e_e ⇓ v
-            -- a non-Bool condition ⇒ eval_error "if condition must be a boolean" (eval.ml:7082)
+            -- a non-Bool condition ⇒ eval_error "if condition must be a boolean" (eval.ml:7095)
 
-(E-Match)   ρ ⊢ e_s ⇓ v    selectᵨ(v, branches) = v'              eval.ml:6998, 7303
+(E-Match)   ρ ⊢ e_s ⇓ v    selectᵨ(v, branches) = v'              eval.ml:6998, 7317
             ──────────────────────────────────────
             ρ ⊢ EMatch e_s branches ⇓ v'
 ```
+
+**`EField` also doubles as qualified module-member access, tried FIRST.**
+Before `EField`'s "look up a record field" behavior (E-Field above) is even
+attempted, `eval_expr`'s `EField` arm (`eval.ml:7039`–`7064`) tries to read
+`ex` as a **module path**: if `ex` flattens (via a nested `ECon`/`EField`
+walk, `eval.ml:7041`–`7048`) to a dotted name like `A.B`, it looks up
+`"A.B." ^ field` first in the local environment, then in the global
+`module_registry`, lazily loading the module from stdlib on a miss
+(`eval.ml:7049`–`7063`) — only if ALL of that fails does it fall through to
+evaluating `ex` as an ordinary expression and trying the record-field /
+`VCon`-module-member arms shown in E-Field (`eval.ml:7064`–`7083`). This
+mirrors the analogous, but separate, COMPILE-TIME rewrite the desugarer
+performs for the same surface form (§3's `EField` row) — the desugar-time
+rewrite handles the common case (a literal module path known at desugar
+time), while this runtime fallback handles paths the desugarer's simpler
+walk didn't resolve (e.g. one that ends in a `VCon`-shaped module reference
+established later, at eval time, via `ensure_module_loaded`). A record's
+`.field` access and a module's `.member` access therefore share ONE surface
+form (`e.f`) and one AST node (`EField`), disambiguated dynamically by what
+`e` evaluates to — this is a fidelity note about `EField`'s full behavior,
+not a new core construct: the fragment's E-Field rule (§4.2) states only the
+record-field case, which is this task's scope.
+
+### 4.2.1 `ERecordUpdate` on a missing field: the interpreter/compiled adjudication (resolved)
+
+**This is the semantic decision Task 3 exists to make.** `{ base with f: v
+}` is only a well-formed *program* when `base`'s type is a concrete,
+statically-known `TRecord` — in that case the typechecker's `ERecordUpdate`
+case (`typecheck.ml:3855`–`3892`) resolves `base`'s type via
+`expand_record`, and REJECTS the program at typecheck time if `f` is absent
+from the resolved fields (`typecheck.ml:3869`–`3875`, "This record does not
+have a field called...") — so E-Update's runtime behavior on an absent field
+is **unreachable** for a statically-typed base; both backends simply never
+run it, because the program never compiles/interprets past typechecking.
+
+The rule only becomes runtime-observable when `base`'s type is **erased** —
+a bare, unconstrained type variable that `expand_record` cannot resolve to a
+concrete `TRecord` (`typecheck.ml:3879`–`3886`). This happens for a base
+produced by a fully polymorphic stdlib builtin such as `record_from_list`
+(`("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string;
+a]), b)))`, `typecheck.ml:1297` — the return type `b` is a fresh, unrelated
+type variable) or `record_put`. In that `TVar` branch, the typechecker
+cannot check the update's field names against anything, so it instead
+BUILDS a partial `TRecord` constraint out of the update's OWN field names
+(`typecheck.ml:3881`–`3885`) and lets the program through — deferring the
+"does this field actually exist on the base" question to runtime, where the
+two backends used to disagree:
+
+- **Compiled** (`llvm_emit.ml:2803`, `runtime/march_extras.c`
+  `march_record_update_dyn`, `:2206`–`2231`): resolves every update name
+  against the base's runtime shape registry FIRST, and **panics** ("record
+  update: no field \"%s\" in record") before touching any reference counts
+  if any name is unresolved.
+- **Interpreter, BEFORE this task** (`eval.ml`'s old `ERecordUpdate` arm):
+  silently APPENDED any update field absent from the base — `{ base with z:
+  99 }` on a base without `z` produced a record with `z` added, no error.
+
+Concretely, `{ record_from_list([("a", 1)]) with z: 99 }` used to panic
+compiled (`no field "z" in record`, clean exit 1) while succeeding
+interpreted (`Some(99)` printed via `record_get`, exit 0) — confirmed by hand
+before this task's fix (see the golden-corpus verification note below).
+This was filed as an open bug (`specs/todos.md`, "Interpreter/compiled
+divergence: `ERecordUpdate` on a missing field") and pinned by a dedicated
+unit test (`test/test_properties.ml`,
+`test_record_update_missing_field_on_erased_base_...`) rather than generated
+by the QCheck property corpus, per that plan's "constrain each generator to
+the currently-working subset" rule.
+
+**Adjudicated rule (this task): the compiled contract is normative.** A
+functional record update is defined **only** for a field that already
+exists on the base record's actual (runtime) shape. Updating a field absent
+from that shape is a **runtime error**, full stop — it is not a shape
+extension, and the language does not have a separate "extend" operation
+spelled `{ base with … }` (field-adding is `record_put`'s job, a distinct
+builtin with genuinely different — and intentional — semantics; see the
+note below E-Update above). This is the safer contract: silently
+fabricating a field an author never declared masks a likely typo or a stale
+refactor, exactly the class of bug static field-name checking exists to
+catch, and the compiled backend was already enforcing it — the interpreter
+was the outlier.
+
+**Outcome: the interpreter was converged to match, and both backends now
+agree.** `eval.ml`'s `ERecordUpdate` arm now validates every update name
+against the base's actual fields BEFORE merging (`eval.ml:7026`–`7029`,
+shown as the ADJUDICATED RULE note under E-Update above) and raises
+`eval_error "record update: no field '%s' in record" k` — deliberately
+matching the compiled panic's wording ("no field ... in record") for
+diagnostic consistency across backends. All six standard test runners
+(`run_compiler`, `run_eval`, `run_codegen`, `run_stdlib`,
+`test_stdlib_march`, `run_snapshots`) and the `@oracle` conformance sweep
+stayed green after this change — no code in the compiler, stdlib, or test
+suite depended on the old fabricate-on-missing-field behavior, other than
+the one test built to pin the divergence itself, which was updated to
+assert convergence instead (see `test/test_properties.ml`,
+`test_record_update_missing_field_on_erased_base_converged`, and
+`test/test_codegen.ml`'s `test_erased_update_missing_field_panics_compiled`
+doc comment). The `specs/todos.md` open-divergence entry and the informal
+"known divergence" framing around this bug are both retired by this
+convergence; §5's golden corpus documents the now-agreeing behavior as a
+prose note (not a golden MATCH program — see §5's caveat on why this
+specific shape is deliberately NOT added as one).
 
 `EBlock` threads the environment through its statements; a block-`let` binds for
 the **rest** of the block, the last statement is the block's value, and a
@@ -245,7 +436,7 @@ continuation, which the block supplies.)
 `selectᵨ(v, branches)` tries branches **top-to-bottom, first match wins**; on a
 match it evaluates the body in the pattern-extended environment (after an
 optional boolean guard); if no branch matches it raises `Match_failure`
-(`eval.ml:7303`):
+(`eval.ml:7317`):
 
 ```
 select selection, in order:
@@ -253,7 +444,7 @@ select selection, in order:
      match(p, v) = σ   and   ( g absent, or  σ·ρ ⊢ g ⇓ VBool true )
         ⇒  result is  σ·ρ ⊢ e_b ⇓ v'
      otherwise ⇒ try next branch
-  no branch matches ⇒ raise Match_failure          (eval.ml:7307)
+  no branch matches ⇒ raise Match_failure          (eval.ml:7320)
 ```
 
 The matching relation `match(p, v) = σ | ⊥` returns bindings σ or failure
@@ -272,6 +463,18 @@ match(PatTuple [p…], VTuple [v…])  = ⋃ match(pᵢ, vᵢ)          eval.ml:
         provided  |p…| = |v…| (componentwise via match_list, eval.ml:832–840),
         else ⊥
 match(PatTuple …, non-VTuple/VUnit) = ⊥                        eval.ml:808
+
+match(PatRecord [(f₁=p₁)…(f_k=p_k)], VRecord fields)                eval.ml:810–822
+        = ⋃ match(pᵢ, vᵢ)  where vᵢ = fields[fᵢ] (List.assoc_opt),
+          provided EVERY fᵢ is present in fields — i.e. the pattern's field
+          set must be a SUBSET of the record's actual fields, not an exact
+          match: a pattern naming fewer fields than the value has still
+          succeeds (any fields present in the value but not named by the
+          pattern are simply not bound, not rejected); a pattern naming a
+          field ABSENT from the value fails the whole match (⊥) rather than
+          matching partially
+        else ⊥ if any named field is missing from the record
+match(PatRecord …, non-VRecord)     = ⊥                             eval.ml:824
 ```
 
 `match_list` (`eval.ml:832`–`840`) is the shared componentwise helper: a
@@ -284,6 +487,26 @@ counterpart of E-Tuple's `ETuple [] ⇓ VUnit` alias (§4.2): a 0-arity tuple
 *value* never actually exists at runtime (only `VUnit` does), so the empty
 tuple pattern is special-cased to accept `VUnit` directly rather than an
 (impossible) `VTuple []`.
+
+**`PatRecord` implements SUBSET matching, unlike every other structural
+pattern in this fragment.** `PatCon`/`PatTuple`/`PatAtom` all require the
+value to have EXACTLY the pattern's arity (`List.length pats <> List.length
+args/vs` ⇒ `⊥`, `eval.ml:792, 805`) — a 2-element `PatTuple` never matches a
+3-element `VTuple`. `PatRecord`'s implementation (`eval.ml:810–822`) is
+different by construction: it `List.fold_left`s over the PATTERN's field
+list only, looking each named field up in the value's field list via
+`List.assoc_opt` (`eval.ml:815`) — there is no arity check against the
+record's total field count anywhere in this arm. So `{ x }` (naming only
+`x`) successfully matches a value with fields `{x: 1, y: 2, z: 3}`, binding
+just `x`, and simply never inspects `y`/`z`. The failure mode is asymmetric:
+missing a field the PATTERN needs (`List.assoc_opt` returns `None`,
+`eval.ml:816`) fails the whole match, but the value having EXTRA fields the
+pattern doesn't mention is never even examined, let alone rejected. As documented in
+§2, however, this rule is presently unreachable from any parsed March
+program — `PatRecord` has no `{...}` pattern grammar production
+(`lib/tir/lower_match.ml:132–138`), so this subset-matching behavior can only
+be observed by constructing the AST node directly (e.g. from a test), not by
+writing and running a `.march` source file.
 
 `match(PatLit ℓ, v)` is one arm per literal kind, each requiring **both** the
 pattern and scrutinee to be the *same* value constructor with equal payload —
@@ -507,13 +730,15 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Sixteen programs in `specs/lang/golden/`, each exercising a slice of the
+Twenty programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
 corpus (`+`, `==`, lambdas, ADTs, match); `g09`–`g13` are Task 1's addition,
 covering the remaining literals and the full primitive δ-rule table; `g14`–`g16`
-are Task 2's addition, covering tuple construction, destructuring, and nesting:
+are Task 2's addition, covering tuple construction, destructuring, and nesting;
+`g17`–`g20` are Task 3's addition, covering record literals, field access, and
+functional update on the currently-working (non-divergent) subset:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -533,12 +758,30 @@ are Task 2's addition, covering tuple construction, destructuring, and nesting:
 | `g14_tuple_let.march` | `ETuple` construction, `PatTuple` destructuring in a block `let` (E-Tuple, match(PatTuple, VTuple)) | `7` |
 | `g15_tuple_match.march` | `PatTuple` destructuring as a `match` branch pattern, alongside a literal-tuple `PatTuple [PatLit 0; PatLit 0]` branch (first-match-wins over `select`) | `origin` / `3,5` |
 | `g16_tuple_nested.march` | nested `ETuple` construction (tuple-of-tuples) destructured by a nested `PatTuple` **in a `match`** (componentwise `match_list` recursion) | `10` |
+| `g17_record_literal_field.march` | `ERecord` construction + `EField` access, plus a `println`-traced witness that record-field values evaluate **left-to-right** in source order (E-Record, E-Field) | `eval-x`/`eval-y`/`1`/`2` |
+| `g18_record_update.march` | `ERecordUpdate` on an EXISTING field: the base record is unaffected (functional/persistent update) while the result reflects the new value (E-Update) | `1`/`2`/`100`/`2` |
+| `g19_record_update_multi_field.march` | `ERecordUpdate` naming MULTIPLE existing fields in one update expression, with a field left untouched, passed through a function that reads via `EField` (E-Update, E-Field) | `12`/`93` |
+| `g20_record_nested.march` | a record VALUE nested inside another record's field, accessed/updated through chained `EField`/`ERecordUpdate` (`outer.inner.a`, `{ outer with inner: {...} }`) | `12`/`39` |
 
-**Result: 16 / 16 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 20 / 20 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
 specified by §4.)
+
+**Two guardrails deliberately followed while drafting `g17`–`g20`, both
+confirmed by hand, not assumed:** (1) no golden program prints a whole
+`VRecord` via `to_string`/`println`/`hash` — confirmed by hand that
+`to_string({x: 1, y: 2})` prints `{ x: 1, y: 2 }` interpreted but `#<tag:0>`
+compiled (the same `to_string`-on-container class already in
+`specs/todos.md`'s P1 and `test/test_oracle.ml`'s `known_divergence` list),
+and that `hash({x: 1, y: 2})` differs across backends entirely by design
+(`specs/todos.md`, "Compiled and interpreted `hash()` use different,
+backend-specific algorithms ... for RECORD types") — every golden program
+here prints only extracted `Int` FIELD VALUES (via `int_to_string`), never a
+record value itself. (2) no golden program generates the missing-field
+`ERecordUpdate` shape (the divergence adjudicated in §4.2.1) — all four
+programs update only fields already present in the base's shape.
 
 **A real divergence found and routed around, not hidden:** while drafting
 `g10`, `float_to_string` on a *whole-number* `Float` (e.g. `1.0`) printed
@@ -578,6 +821,32 @@ nested tuple construction and componentwise matching. Flagged here for
 separate triage; not filed as a `specs/todos.md` entry by this task (spec-only
 scope) but should be by a follow-up.
 
+**A third divergence — this one ADJUDICATED and CONVERGED by this task, not
+merely routed around:** `{ base with f: v }` where `f` is absent from
+`base`'s actual (runtime) shape used to diverge — the interpreter silently
+fabricated the field, the compiled backend panicked (§4.2.1 has the full
+adjudication). This shape is **deliberately excluded from the golden
+corpus**: per §0's fragment scope and this task's brief, a golden entry must
+be a `MATCH` on the SAME observable output, but this divergence's *resolved*
+form is "both sides now reject the program with a nonzero exit" — the
+committed `verify.sh` harness (like the `@oracle` sweep) classifies any
+nonzero interpreter exit as an automatic `INTERP FAIL`, so a program that is
+supposed to error on both sides can never register as a golden `MATCH`
+regardless of backend agreement (the same harness limitation §4.4.1 notes
+for the strict-`&&`/`||` crashing witness). Instead, the convergence is
+pinned by a dedicated unit test,
+`test/test_properties.ml`'s
+`test_record_update_missing_field_on_erased_base_converged`, which asserts
+BOTH backends now exit nonzero (non-signal) with a "no field" message for
+`{ record_from_list([("a", 1)]) with z: 99 }`. Also note that this
+divergence was **only ever reachable through an erased base** —
+`record_from_list`/`record_put` results, whose static type is an
+unconstrained type variable (§4.2.1) — because a statically-typed record
+literal base makes an unknown-field update a **typecheck-time** error on
+both backends (`typecheck.ml:3869`–`3875`) before either backend's runtime
+`ERecordUpdate` path ever executes; none of `g17`–`g20` needed to route
+around this, since none of them update through an erased base.
+
 Run the check: `dune build bin/main.exe && specs/lang/golden/verify.sh`
 (the committed harness diffs both outputs per program and exits nonzero on any
 mismatch). These programs are exactly the shape the `@oracle` conformance sweep
@@ -598,10 +867,15 @@ next wiring (§6).
   golden table — is a workable template to replicate per fragment.
 
 **Deferred (the widening queue — each becomes a slice like this one):**
-records/tuples/strings as data; `if`-less boolean `match`/`ECond`; local
-recursive functions (`ELetFn`, already visible in `eval_block`); `to_string`/
-`show` and the interface-dispatch machinery; effects/IO ordering; actors;
-refinements; capabilities; the Perceus RC discipline (its own Level-3 track).
+strings as data; `if`-less boolean `match`/`ECond`; local recursive functions
+(`ELetFn`, already visible in `eval_block`); `to_string`/`show` and the
+interface-dispatch machinery; effects/IO ordering; actors; refinements;
+capabilities; the Perceus RC discipline (its own Level-3 track). (Tuples were
+covered by Task 2; records — literals, field access, functional update,
+`PatRecord` matching, and the `ERecordUpdate` missing-field adjudication — by
+this task, Task 3. This line was stale after Task 2 landed tuples without
+updating it — noted here so it doesn't happen again: keep this list in sync
+with §0/§2's actual fragment coverage as each task lands.)
 
 **Next steps:**
 

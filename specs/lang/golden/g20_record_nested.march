@@ -1,0 +1,9 @@
+mod Main do
+  fn main() do
+    let inner = { a: 1, b: 2 }
+    let outer = { tag: 9, inner: inner }
+    println(int_to_string(outer.inner.a + outer.inner.b + outer.tag))
+    let outer2 = { outer with inner: { a: 10, b: 20 } }
+    println(int_to_string(outer2.inner.a + outer2.inner.b + outer2.tag))
+  end
+end

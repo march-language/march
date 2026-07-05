@@ -1,0 +1,10 @@
+mod Main do
+  fn main() do
+    let base = { x: 1, y: 2 }
+    let updated = { base with x: 100 }
+    println(int_to_string(base.x))
+    println(int_to_string(base.y))
+    println(int_to_string(updated.x))
+    println(int_to_string(updated.y))
+  end
+end
