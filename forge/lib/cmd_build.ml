@@ -329,10 +329,17 @@ let ffi_flags_of ~root (proj : Project.project) =
     a --ffi-link to its staticlib archive.  Shared by [forge build] and
     [forge test] so both link the same native shims.  Returns [Error] if the
     Rust build fails or its archive is missing. *)
-let ffi_flags_full (proj : Project.project) : (string, string) result =
+let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, string) result =
   let rust_link_flags_result =
     match proj.Project.ffi_rust with
     | None -> Ok ""
+    | Some _ when target_is_cross ->
+      (* P1: the Rust crate is built for the host via `cargo build` (no --target),
+         so it cannot link into a cross Linux binary. Fail loudly rather than
+         silently producing a broken artifact. Cross Rust FFI (cargo-zigbuild)
+         is a follow-up. *)
+      Error "this project uses [ffi.rust]; cross-compilation of Rust bindings is \
+             not yet supported. Build on Linux, or use `forge deploy hot --so`."
     | Some frc ->
       let crate_dir =
         if Filename.is_relative frc.Project.frc_path then
@@ -518,8 +525,24 @@ let ensure_js_deps ~root (proj : Project.project) =
 
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
   let t0 = Unix.gettimeofday () in
+  (* Normalize cross-target aliases to the compiler's canonical form and derive
+     a per-target output subdir so a Linux build never clobbers the host binary. *)
+  let target = Option.map (fun t ->
+    match t with
+    | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
+    | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
+    | other -> other) target in
+  let target_subdir = match target with
+    | Some "linux/amd64" -> "linux-amd64"
+    | Some "linux/arm64" -> "linux-arm64"
+    | _ -> "" in
   match Project.load () with
   | Error msg -> Error msg
+  | Ok _ when target_subdir <> ""
+              && Sys.command "command -v zig >/dev/null 2>&1" <> 0 ->
+    Error (Printf.sprintf
+      "cross target %s requires `zig` (used as the C cross-compiler).\n  Install: brew install zig"
+      (Option.value ~default:"" target))
   | Ok proj ->
     (* --frozen: a lockfile out of date with forge.toml is an error, not a
        silent re-resolve (CI reproducibility). *)
@@ -560,8 +583,10 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
      | None   -> ());
     let mode = if release then "release" else "debug" in
     let build_dir =
-      Filename.concat proj.Project.root
-        (Filename.concat ".march" (Filename.concat "build" mode))
+      let base = Filename.concat proj.Project.root
+        (Filename.concat ".march" "build") in
+      let base = if target_subdir = "" then base else Filename.concat base target_subdir in
+      Filename.concat base mode
     in
     Project.mkdir_p build_dir;
     let lib_dir = Filename.concat proj.Project.root "lib" in
@@ -623,7 +648,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
-          match ffi_flags_full proj with
+          match ffi_flags_full ~target_is_cross:(target_subdir <> "") proj with
           | Error msg -> Error msg
           | Ok ffi_flags ->
           (* Install npm packages declared in [js_deps] before JS compilation. *)
