@@ -187,7 +187,9 @@ pattern's bindings):
 (P-Var)   β fresh                                   typecheck.ml:2572–2577
           ──────────────────────────────
           Γ ⊢ PatVar x : β ⊣ Γ, x:β
-          -- β is recorded in env.type_map at x's span (for LSP hover); the
+          -- β is recorded in env.type_map at x's span (so lower.ml can resolve
+          --   the pattern var's type via ty_of_span; type_map also feeds LSP hover
+          --   elsewhere — see the ELet recording at typecheck.ml:4309); the
           --   binding is Mono β here — generalization (if any) happens later,
           --   at the ELet/branch call site, exactly as for T-Let (§2).
 
