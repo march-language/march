@@ -767,21 +767,25 @@ let vault_shard_for (k : string) (shards : vault_shard array) : vault_shard =
 
 (** Try to match [v] against [pat].
     Returns [Some bindings] on success, [None] on failure.
-    Bindings are accumulated in reverse order (callers reverse or prepend). *)
+    Bindings are accumulated in reverse order (callers reverse or prepend).
+
+    This is the operational semantics of Core March's pattern-matching
+    relation `match(Pat…)` — see `specs/lang/core-march.md` §4.3. Each arm
+    below is annotated with the spec rule it implements. *)
 let rec match_pattern (v : value) (pat : pattern) : (string * value) list option =
   match pat, v with
-  | PatWild _, _ -> Some []
+  | PatWild _, _ -> Some []  (* match(PatWild) — §4.3 *)
 
-  | PatVar n, _ -> Some [(n.txt, v)]
+  | PatVar n, _ -> Some [(n.txt, v)]  (* match(PatVar) — §4.3 *)
 
-  | PatLit (LitInt i, _),    VInt j    when i = j   -> Some []
-  | PatLit (LitFloat f, _),  VFloat g  when f = g   -> Some []
-  | PatLit (LitString s, _), VString t when s = t   -> Some []
-  | PatLit (LitBool b, _),   VBool c   when b = c   -> Some []
-  | PatLit (LitAtom a, _),   VAtom b   when a = b   -> Some []
-  | PatLit _,                _                       -> None
+  | PatLit (LitInt i, _),    VInt j    when i = j   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitFloat f, _),  VFloat g  when f = g   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitString s, _), VString t when s = t   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitBool b, _),   VBool c   when b = c   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitAtom a, _),   VAtom b   when a = b   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit _,                _                       -> None    (* match(PatLit) — §4.3 *)
 
-  | PatCon (n, pats), VCon (tag, args) ->
+  | PatCon (n, pats), VCon (tag, args) ->  (* match(PatCon) — §4.3 *)
     (* Strip any type qualifier from the pattern name before comparing so that
        both Result.Ok(x) and Ok(x) match VCon("Ok", …) at runtime. *)
     let bare_pat = match String.rindex_opt n.txt '.' with
@@ -792,22 +796,22 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
     else if List.length pats <> List.length args then None
     else match_list pats args
 
-  | PatCon _, _ -> None
+  | PatCon _, _ -> None  (* match(PatCon) — §4.3 *)
 
-  | PatAtom (a, pats, _), VAtom b when a = b && pats = [] -> Some []
-  | PatAtom (a, pats, _), VCon (tag, args) when a = tag ->
+  | PatAtom (a, pats, _), VAtom b when a = b && pats = [] -> Some []  (* match(PatAtom) nullary — §4.3 *)
+  | PatAtom (a, pats, _), VCon (tag, args) when a = tag ->             (* match(PatAtom) payload — §4.3 *)
     if List.length pats <> List.length args then None
     else match_list pats args
-  | PatAtom _, _ -> None
+  | PatAtom _, _ -> None  (* match(PatAtom) — §4.3 *)
 
-  | PatTuple ([], _), VUnit -> Some []
-  | PatTuple (pats, _), VTuple vs ->
+  | PatTuple ([], _), VUnit -> Some []  (* match(PatTuple) k=0 alias to VUnit — §4.3 *)
+  | PatTuple (pats, _), VTuple vs ->    (* match(PatTuple) — §4.3 *)
     if List.length pats <> List.length vs then None
     else match_list pats vs
 
-  | PatTuple _, _ -> None
+  | PatTuple _, _ -> None  (* match(PatTuple) — §4.3 *)
 
-  | PatRecord (fields, _), VRecord record_fields ->
+  | PatRecord (fields, _), VRecord record_fields ->  (* match(PatRecord) — §4.3, unreachable from surface syntax per §4.3.1 *)
     let bindings = List.fold_left (fun acc (fname, fpat) ->
         match acc with
         | None -> None
@@ -821,9 +825,9 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
       ) (Some []) fields in
     bindings
 
-  | PatRecord _, _ -> None
+  | PatRecord _, _ -> None  (* match(PatRecord) — §4.3 *)
 
-  | PatAs (inner, alias, _), _ ->
+  | PatAs (inner, alias, _), _ ->  (* match(PatAs) — §4.3, unreachable from surface syntax per §4.3.1 *)
     (match match_pattern v inner with
      | None -> None
      | Some bs -> Some ((alias.txt, v) :: bs))
@@ -2758,11 +2762,15 @@ let show_dispatch (v : value) : string =
 (* ------------------------------------------------------------------ *)
 
 let base_env : env =
+  (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
+     surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
+     here, dispatched via E-App-Prim (§4.2) — there is no separate arithmetic
+     evaluation path. *)
   [ (* Integer arithmetic *)
-    ("+",  arith_num ( + ) ( +. ) "+")
-  ; ("-",  arith_num ( - ) ( -. ) "-")
-  ; ("*",  arith_num ( * ) ( *. ) "*")
-  ; ("/",  VBuiltin ("/", function
+    ("+",  arith_num ( + ) ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
+  ; ("-",  arith_num ( - ) ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
+  ; ("*",  arith_num ( * ) ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
+  ; ("/",  VBuiltin ("/", function       (* δ-Div-I / δ-Div-F / δ-Div-0 / δ-Div-0F — §4.4 *)
         | [VInt a;   VInt b]   when b <> 0   -> VInt (a / b)
         | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
         | [VInt _;   VInt 0]                 -> eval_error "division by zero"
@@ -2771,7 +2779,7 @@ let base_env : env =
            explicitly.  Same guard applies to the /. operator below. *)
         | [VFloat _; VFloat 0.0]             -> eval_error "division by zero"
         | _ -> eval_error "builtin /: expected two numbers"))
-  ; ("%",  VBuiltin ("%", function
+  ; ("%",  VBuiltin ("%", function       (* δ-Mod-I / δ-Mod-0 — §4.4 *)
         | [VInt a; VInt b] when b <> 0 -> VInt (a mod b)
         | [VInt _; VInt 0]             -> eval_error "modulo by zero"
         | _ -> eval_error "builtin %%: expected two integers"))
@@ -2801,14 +2809,14 @@ let base_env : env =
           eval_error "/.: arguments must be Float, not Int — use `/` for Int or `int_to_float` to convert"
         | _ -> eval_error "/.: expected two Floats, got %s"
             (String.concat " and " (List.map value_to_string args))))
-    (* Comparisons *)
+    (* Comparisons — δ-Eq-* / δ-Neq-* / δ-Lt-* / δ-Le-* / δ-Gt-* / δ-Ge-* — §4.4 *)
   ; ("==", cmp_op ( = )  ( = )  ( = )  ( = )  "==")
   ; ("!=", cmp_op ( <> ) ( <> ) ( <> ) ( <> ) "!=")
   ; ("<",  cmp_op ( < )  ( < )  ( < )  ( < )  "<")
   ; ("<=", cmp_op ( <= ) ( <= ) ( <= ) ( <= ) "<=")
   ; (">",  cmp_op ( > )  ( > )  ( > )  ( > )  ">")
   ; (">=", cmp_op ( >= ) ( >= ) ( >= ) ( >= ) ">=")
-    (* Boolean *)
+    (* Boolean — δ-rules — §4.4 *)
   ; ("&&", VBuiltin ("&&", function
         | [VBool a; VBool b] -> VBool (a && b)
         | _ -> eval_error "builtin &&: expected two bools"))
@@ -6857,12 +6865,16 @@ let span_of_expr (e : expr) : span =
   | EResultRef _ -> dummy_span
 
 (** Evaluate a block: return the value of the last expression.
-    [ELet] bindings extend the environment for subsequent expressions. *)
+    [ELet] bindings extend the environment for subsequent expressions.
+
+    This is the operational semantics of Core March's block rules — see
+    `specs/lang/core-march.md` §4.2 (E-Blk-Last, E-Blk-Let, E-LetFn,
+    E-Blk-Seq). Each arm below is annotated with the spec rule it implements. *)
 let rec eval_block (env : env) (es : expr list) : value =
   match es with
   | []      -> VUnit
-  | [e]     -> eval_expr env e
-  | ELet (b, _) :: rest ->
+  | [e]     -> eval_expr env e  (* E-Blk-Last — core-march.md §4.2 *)
+  | ELet (b, _) :: rest ->      (* E-Blk-Let — core-march.md §4.2 *)
     let v = eval_expr env b.bind_expr in
     let bindings = match match_pattern v b.bind_pat with
       | Some bs -> bs
@@ -6873,6 +6885,10 @@ let rec eval_block (env : env) (es : expr list) : value =
     eval_block (bindings @ env) rest
   (* Local named recursive function: fn go(params) do body end *)
   | ELetFn (name, params, _, body, _) :: rest ->
+    (* E-LetFn — core-march.md §4.2 — env_ref recursive knot: the closure's
+       body reads !env_ref at call time (deferred), and env_ref is
+       back-patched to env' (which contains name -> rec_v) below, so the
+       closure's own name resolves to itself once called. *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
     (* Use the env_ref trick so the function can call itself recursively. *)
     let env_ref = ref env in
@@ -6882,7 +6898,7 @@ let rec eval_block (env : env) (es : expr list) : value =
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     eval_block env' rest
-  | e :: rest ->
+  | e :: rest ->  (* E-Blk-Seq — core-march.md §4.2 *)
     let _ = eval_expr env e in
     eval_block env rest
 
@@ -6939,22 +6955,28 @@ and apply (fn_val : value) (args : value list) : value =
   | `Ok v    -> v
   | `Err exn -> raise exn
 
-(** Main expression evaluator (inner, no tracing). *)
+(** Main expression evaluator (inner, no tracing).
+
+    This is the operational semantics of Core March — see
+    `specs/lang/core-march.md` §4. Each core-construct arm below is annotated
+    with the spec rule it implements. *)
 and eval_expr_inner (env : env) (e : expr) : value =
   match e with
-  | ELit (LitInt n, _)    -> VInt n
-  | ELit (LitFloat f, _)  -> VFloat f
-  | ELit (LitString s, _) -> VString s
-  | ELit (LitBool b, _)   -> VBool b
-  | ELit (LitAtom a, _)   -> VAtom a
+  | ELit (LitInt n, _)    -> VInt n     (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitFloat f, _)  -> VFloat f   (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitString s, _) -> VString s  (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitBool b, _)   -> VBool b    (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitAtom a, _)   -> VAtom a    (* E-Lit — core-march.md §4.2 *)
 
-  | EVar n -> lookup n.txt env
+  | EVar n -> lookup n.txt env  (* E-Var — core-march.md §4.2 *)
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
   | EApp (f, args, sp) ->
+    (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
+       happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)
     check_reductions ();
     let fn_name = match f with
       | EVar n -> n.txt
@@ -6974,7 +6996,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
      | exception e -> march_stack_pop (); raise e)
 
-  | ECon (name, args, _) ->
+  | ECon (name, args, _) ->  (* E-Con — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     (* Strip any type qualifier from the constructor tag so that
        Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
@@ -6984,30 +7006,33 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     VCon (tag, arg_vals)
 
-  | ELam (params, body, _) ->
+  | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
     VClosure (env, param_names, body)
 
   | EBlock (es, _) -> eval_block env es
+    (* E-Blk-Last / E-Blk-Let / E-LetFn / E-Blk-Seq — core-march.md §4.2, see eval_block below *)
 
   | ELet (b, _) ->
     (* Standalone let (outside a block) — evaluate and ignore bindings.
-       This shouldn't appear after desugaring except inside EBlock. *)
+       This shouldn't appear after desugaring except inside EBlock.
+       (Not itself one of the block rules below — those apply to ELet
+       encountered *inside* an EBlock's statement list; see E-Blk-Let.) *)
     eval_expr env b.bind_expr
 
-  | EMatch (scrut, branches, sp) ->
+  | EMatch (scrut, branches, sp) ->  (* E-Match — core-march.md §4.2, branch selection §4.3 *)
     check_reductions ();
     let v = eval_expr env scrut in
     eval_match env sp v branches
 
-  | ETuple ([], _) -> VUnit
-  | ETuple (es, _) ->
+  | ETuple ([], _) -> VUnit           (* E-Tuple (k=0 alias to VUnit) — core-march.md §4.2 *)
+  | ETuple (es, _) ->                 (* E-Tuple — core-march.md §4.2 *)
     VTuple (List.map (eval_expr env) es)
 
-  | ERecord (fields, _) ->
+  | ERecord (fields, _) ->  (* E-Record — core-march.md §4.2 *)
     VRecord (List.map (fun (n, ex) -> (n.txt, eval_expr env ex)) fields)
 
-  | ERecordUpdate (base, updates, _) ->
+  | ERecordUpdate (base, updates, _) ->  (* E-Update — core-march.md §4.2 *)
     let base_val = eval_expr env base in
     (match base_val with
      | VRecord fields ->
@@ -7037,6 +7062,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | _ -> eval_error "record update on non-record value")
 
   | EField (ex, field, _) ->
+    (* E-Field — core-march.md §4.2 (the record-field case below; module-path
+       resolution here is a fidelity note in the spec prose, not a separate rule) *)
     (* First try to resolve as a module path (handles A.B.c chained access) *)
     let rec module_path_str = function
       | ECon (n, [], _) -> Some n.txt
@@ -7084,11 +7111,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with
-     | VBool true  ->
+     | VBool true  ->  (* E-If-T — core-march.md §4.2 *)
        (if !March_coverage.Coverage.coverage_enabled then
          March_coverage.Coverage.record_branch sp true);
        eval_expr env then_
-     | VBool false ->
+     | VBool false ->  (* E-If-F — core-march.md §4.2 *)
        (if !March_coverage.Coverage.coverage_enabled then
          March_coverage.Coverage.record_branch sp false);
        eval_expr env else_
@@ -7097,10 +7124,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | ECond (arms, _) ->
     let rec go = function
       | [] -> eval_error "non-exhaustive `match do` — no arm matched"
+        (* E-Cond-Fail — core-march.md §4.2 *)
       | (cond_e, body_e) :: rest ->
         (match eval_expr env cond_e with
-         | VBool true  -> eval_expr env body_e
-         | VBool false -> go rest
+         | VBool true  -> eval_expr env body_e  (* E-Cond-Sel — core-march.md §4.2 *)
+         | VBool false -> go rest                (* E-Cond-Sel — core-march.md §4.2 *)
          | _           -> eval_error "`match do` condition must be Bool")
     in
     go arms
@@ -7142,8 +7170,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EAnnot (ex, _, _) -> eval_expr env ex
 
-  | EAtom (a, [], _) -> VAtom a
-  | EAtom (a, args, _) ->
+  | EAtom (a, [], _) -> VAtom a  (* E-Atom-0 — core-march.md §4.2 *)
+  | EAtom (a, args, _) ->        (* E-Atom-N — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     VCon (a, arg_vals)
 
@@ -7313,31 +7341,37 @@ and eval_expr_inner (env : env) (e : expr) : value =
             "assert: expected Bool, got %s (at %s)" (value_to_string v) loc))))
 
 (** Evaluate a match expression: try each branch until one matches.
-    [match_span] is the span of the [EMatch] node, used for coverage arm tracking. *)
+    [match_span] is the span of the [EMatch] node, used for coverage arm tracking.
+
+    This is the operational semantics of Core March's branch selection —
+    see `specs/lang/core-march.md` §4.3. Branch selection: first-match-wins,
+    guard, Match_failure — §4.3. *)
 and eval_match (env : env) (match_span : span) (v : value) (branches : branch list) : value =
   let rec go arm_idx = function
     | [] ->
+      (* exhaustiveness / no-match: raises Match_failure — §4.3 *)
       raise (Match_failure
                (Printf.sprintf "Non-exhaustive pattern match: no branch matched the value %s.\nAdd a catch-all `_ -> ...` arm, or handle this case explicitly."
                   (value_to_string v)))
     | br :: rest ->
       (match match_pattern v br.branch_pat with
-       | None -> go (arm_idx + 1) rest
+       | None -> go (arm_idx + 1) rest  (* pattern failed to match: try next branch — §4.3 *)
        | Some bindings ->
-         let env' = bindings @ env in
+         let env' = bindings @ env in  (* pattern-extended environment — §4.3 *)
          (* Check guard if present *)
          let guard_ok = match br.branch_guard with
-           | None   -> true
+           | None   -> true  (* no guard: branch selected outright — §4.3 *)
            | Some g ->
              (match eval_expr env' g with
-              | VBool b -> b
+              | VBool b -> b  (* guard evaluated in pattern-extended env — §4.3 *)
               | _       -> eval_error "guard must evaluate to a boolean")
          in
          if guard_ok then begin
+           (* first-match-wins: this is the selected branch — §4.3 *)
            (if !March_coverage.Coverage.coverage_enabled then
              March_coverage.Coverage.record_arm match_span arm_idx);
            eval_expr env' br.branch_body
-         end else go (arm_idx + 1) rest)
+         end else go (arm_idx + 1) rest)  (* false guard: try next branch, does not fail the whole match — §4.3 *)
   in
   go 0 branches
 
