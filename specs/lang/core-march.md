@@ -332,9 +332,11 @@ refinements; capabilities; the Perceus RC discipline (its own Level-3 track).
 
 **Next steps:**
 
-1. Fold `specs/lang/golden/` into `test/test_oracle.ml`'s corpus (per §5) so the
-   golden anchor runs in the `@oracle` CI lane, not only via the standalone
-   `verify.sh`.
+1. ~~Fold `specs/lang/golden/` into `test/test_oracle.ml`'s corpus~~ **DONE** —
+   the `@oracle` sweep now enumerates `specs/lang/golden/` alongside
+   `bench/`+`examples/` (all 8 golden programs MATCH; sweep 22 MATCH / 0
+   un-triaged, exit 0), so the spec's golden anchor runs in CI, not only via the
+   standalone `verify.sh`.
 2. If this skeleton reads well, write the **Phase-1 implementation plan**
    (design-spec → plan → subagent execution, as the oracle used) to widen the
    fragment across the full desugared-AST core, and land the `eval.ml` core-loop

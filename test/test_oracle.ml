@@ -9,9 +9,12 @@
     1 if any un-triaged divergence is found.
 
     --- Corpus scope (deliberate, not an oversight) ---------------------
-    This sweep enumerates only the top-level `.march` files directly under
-    `bench/` and `examples/` — real, runnable, print-driven programs whose
-    stdout is a meaningful ground truth to diff. It deliberately does NOT
+    This sweep enumerates the top-level `.march` files directly under
+    `bench/`, `examples/`, and `specs/lang/golden/` — real, runnable,
+    print-driven programs whose stdout is a meaningful ground truth to diff.
+    (`specs/lang/golden/` is the Core March language-spec golden corpus,
+    `specs/lang/core-march.md` §5 — same criteria, so it rides the same
+    sweep and its spec anchor runs in CI.) It deliberately does NOT
     walk `test/` (189+ files there are compiler-internal fixtures: single-
     feature snippets, deliberately-erroring negative cases, and partial
     fragments never meant to run standalone — sweeping them would drown
@@ -366,8 +369,15 @@ let () =
 
   let bench_dir    = Filename.concat project_root "bench" in
   let examples_dir = Filename.concat project_root "examples" in
+  (* The Core March language-spec golden corpus (specs/lang/core-march.md §5):
+     small, curated, deterministic, print-driven programs that anchor the
+     operational-semantics rules. Same corpus criteria as bench/+examples/, so
+     they belong in the same both-ways sweep — this makes the spec's golden
+     anchor run in the @oracle CI lane, not only via specs/lang/golden/verify.sh. *)
+  let golden_dir   = Filename.concat project_root "specs/lang/golden" in
   let files =
     find_march_files bench_dir @ find_march_files examples_dir
+    @ find_march_files golden_dir
   in
 
   if files = [] then begin
@@ -475,7 +485,7 @@ let () =
   Printf.printf "\nNote: march currently emits typecheck warnings to stdout rather than stderr.\n";
   Printf.printf "      This may cause MISMATCH for programs with warnings.\n\n";
 
-  Printf.printf "Corpus scope: bench/ + examples/ top-level .march files only.\n";
+  Printf.printf "Corpus scope: bench/ + examples/ + specs/lang/golden/ top-level .march files.\n";
   Printf.printf "              test/ fixtures and stdlib doctests are NOT swept (see file header).\n\n";
 
   if n_failure > 0 then begin
