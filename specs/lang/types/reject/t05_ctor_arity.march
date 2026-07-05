@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: Constructor `Circle` expects 1 argument(s) but I got 2.
+mod M do
+  type Shape = Circle(Int) | Square(Int)
+
+  fn main() do
+    let s = Circle(1, 2)
+    println(int_to_string(1))
+  end
+end

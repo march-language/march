@@ -16,9 +16,10 @@ mean"). This document is "which programs are well-typed."
 `core-march.md` documented the interpreter's *operational* rules. This document
 documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the same
 kind of small fragment: literals, variables, `let` (with generalization), lambda,
-application, the `+`/`==` primitives, and `if`. Same discipline as the operational
-skeleton: **every rule is transcribed arm-for-arm from `lib/typecheck/typecheck.ml`
-and cited by line**, and a conformance corpus keeps it honest.
+application, the `+`/`==` primitives, `if`, and (as of Task 1) **ADT constructors
+and `match`**. Same discipline as the operational skeleton: **every rule is
+transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
+and a conformance corpus keeps it honest.
 
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is nothing to
@@ -29,9 +30,9 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-Deferred (later typing slices, matching `core-march.md`'s deferred set): ADT
-constructors + `match` typing, records/tuples/atoms typing, the interface/impl
-resolution machinery, refinements, linearity, capabilities, effects.
+Deferred (later typing slices, matching `core-march.md`'s deferred set):
+records/tuples/atoms typing, the interface/impl resolution machinery,
+refinements, linearity, capabilities, effects.
 
 ## 1. The typing judgment
 
@@ -107,6 +108,49 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           Γ ⊢ EIf c t e ⇒ τ
           -- non-Bool cond ⇒ "The condition of an if expression must be Bool."
           -- τ ≠ τ' ⇒ "Both branches of an if expression must return the same type."
+
+(T-Con)   ctor_info(C) = { ci_type = T; ci_params = ᾱ; ci_arg_tys = τ̄₀ }        typecheck.ml:410–415
+          β̄ fresh                        (one fresh var per αᵢ, at env.level)  typecheck.ml:2387–2395
+          τ̄ = τ̄₀[β̄ / ᾱ]                  (surface_ty substitutes ᾱ ↦ β̄ into each declared arg type)
+          |args| = |τ̄|                    Γ ⊢ aᵢ ⇐ τᵢ  (i = 1..|τ̄|, left-to-right)
+          ────────────────────────────────────────────────────────────────
+          Γ ⊢ ECon C [a₁…aₙ] ⇒ T(β̄)                     typecheck.ml:3737–3794 (ECon arm), 3777 (instantiate_ctor call)
+          -- C unresolved (not in env.ctors, not a qualified `Mod.C`) ⇒
+          --   "I don't know a constructor called `C`." (+ suggestion hint)      typecheck.ml:3746–3759
+          -- |args| ≠ |τ̄| ⇒ "Constructor `C` expects N argument(s) but I got M."  typecheck.ml:3780–3784
+          -- each aᵢ is CHECKED (⇐), not inferred, against the instantiated τᵢ    typecheck.ml:3788–3792
+          -- cf. operational (E-Con), core-march.md:366–368 — eval's ECon arm evaluates
+          --   args left-to-right into a VCon; this rule is its typing counterpart.
+
+          `instantiate_ctor` (typecheck.ml:2387–2395) is the shared instantiation
+          engine — the SAME function underlies both T-Con here and the PatCon rule
+          below (§2.2): one fresh unification variable per declared type parameter
+          `ci_params`, then `surface_ty` converts the constructor's declared surface
+          arg types with those fresh vars substituted in, and the result type is
+          `TCon(ci_type, β̄)`. A 2-ctor ADT `type Shape = Circle(Int) | Square(Int)`
+          has `ci_params = []` (no type params) so β̄ is empty and both `Circle`/
+          `Square` simply get `arg_tys = [Int]`, `result_ty = TCon("Shape",[])`; a
+          generic `type Box(a) = Full(a) | Vacant` gives `Full`'s `ci_params = ["a"]`
+          a fresh `β`, so `instantiate_ctor` yields `arg_tys=[β]`, `result_ty =
+          Box(β)` — a FRESH β per occurrence, which is what lets `Full(5)` and
+          `Full("hi")` coexist (cf. T-Var/`instantiate`, §1).
+
+(T-Match) Γ ⊢ e_s ⇒ τ_s                                                        typecheck.ml:3846–3848
+          ρ fresh                                                              typecheck.ml:4274
+          ∀(pᵢ → gᵢ? → bᵢ) ∈ branches:
+              Γ ⊢ pᵢ : τ_s ⊣ Γᵢ   (pattern-typing relation, §2.2; unified against τ_s)  typecheck.ml:4276–4277
+              Γ, Γᵢ ⊢ gᵢ ⇐ Bool   (if a guard is present)                       typecheck.ml:4280–4284
+              Γ, Γᵢ ⊢ bᵢ ⇐ ρ                                                   typecheck.ml:4285–4286
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ EMatch e_s [(p₁,g₁?,b₁) … (pₙ,gₙ?,bₙ)] ⇒ ρ         typecheck.ml:4273–4290 (infer_match)
+          -- one branch's body type disagreeing with another's ⇒ "All branches of
+          --   a match must have the same type." (RMatchArm, typecheck.ml:47,67)
+          -- non-exhaustive patterns ⇒ a separate WARNING (check_exhaustiveness,
+          --   typecheck.ml:4288), not a typing error — does not block accept/reject.
+          -- cf. operational (E-Match), core-march.md:504 — eval's EMatch arm selects
+          --   the first branch whose pattern matches the scrutinee value; this rule
+          --   is its typing counterpart (every branch must ⇐-check against ONE
+          --   shared fresh result type `ρ`, unified branch-by-branch via `check_expr`).
 ```
 
 ### 2.1 Primitive typing (δ-typing)
@@ -125,6 +169,51 @@ So `2 + 3` instantiates `a := Int` and discharges `Num Int`; `x == y` instantiat
 interfaces layered on HM*, not overloading resolved by the parser — a genuinely
 load-bearing fact (a program `1 + "x"` fails because `+`'s two args must share one
 `a`, and `Int`/`String` don't unify, **not** because `+` is "the Int operator").
+
+### 2.2 Pattern typing: `Γ ⊢ p : τ ⊣ Γ'`
+
+`infer_pattern` (typecheck.ml:2566, `?expected` optionally threads in the
+scrutinee/argument type so an ambiguous bare constructor name — one shared by
+two types — can be disambiguated by matching the expected type's head `TCon`,
+typecheck.ml:2593–2603) computes both the type a pattern *expects* to match
+AND the bindings (`(name, scheme) list`) it introduces into `Γ'` for the branch
+body / rest of the match. Written `Γ ⊢ p : τ ⊣ Γ'` (`Γ'` = `Γ` extended with the
+pattern's bindings):
+
+```
+(P-Wild)  ──────────────────────────────           typecheck.ml:2569–2570
+          Γ ⊢ PatWild : β ⊣ Γ                       (β fresh; matches anything, binds nothing)
+
+(P-Var)   β fresh                                   typecheck.ml:2572–2577
+          ──────────────────────────────
+          Γ ⊢ PatVar x : β ⊣ Γ, x:β
+          -- β is recorded in env.type_map at x's span (for LSP hover); the
+          --   binding is Mono β here — generalization (if any) happens later,
+          --   at the ELet/branch call site, exactly as for T-Let (§2).
+
+(P-Lit)   ──────────────────────────────           typecheck.ml:2579–2580
+          Γ ⊢ PatLit ℓ : 𝒯(ℓ) ⊣ Γ                   (𝒯 as in T-Lit, §2)
+
+(P-Con)   ctor_info(C) = ci   (resolved via `expected`'s head TCon if given,   typecheck.ml:2588–2612
+             else `lookup_ctor`, else qualified `Mod.C` lookup)
+          (τ̄, T(β̄)) = instantiate_ctor env ci                                 typecheck.ml:2642
+          |ps| = |τ̄|
+          ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ  (threading `~expected:τᵢ` into the recursive call)  typecheck.ml:2652–2662
+          unify(τᵢ, type_of(pᵢ))  for each i
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ PatCon(C, [p₁…pₙ]) : T(β̄) ⊣ Γ, Γ₁, …, Γₙ                        typecheck.ml:2588–2664
+          -- C unresolved ⇒ "I don't know a constructor called `C`."           typecheck.ml:2613–2629
+          -- |ps| ≠ |τ̄| ⇒ "Constructor `C` expects N argument(s) in a pattern
+          --   but I got M."                                                   typecheck.ml:2645–2651
+          -- ambiguous bare `C` (multiple types define it) ⇒ a HINT (not an
+          --   error) suggesting the qualified form `Type.C`                   typecheck.ml:2631–2641
+```
+
+`instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
+side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation
+underlies `Some(5)` (an `ECon`) and `Some(x) -> …` (a `PatCon`) alike, which is
+why a `match`'s scrutinee type and its constructor patterns unify cleanly: both
+sides go through `instantiate_ctor` against the same `ctor_info`.
 
 ## 3. Conformance corpus
 
@@ -147,14 +236,19 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `reject/t02_unbound_var` | reject | T-Var, `x ∉ Γ` | `I cannot find \`undefined_var\`` |
 | `reject/t03_arity` | reject | T-App arity (no partial application) | `expects 1 argument, but got 2` |
 | `reject/t04_if_branch_mismatch` | reject | T-If branch unification | `Both branches of an if expression must return the same type` |
+| `accept/t05_adt_construct_match` | accept | T-Con + T-Match — a 2-ctor ADT (`Hue = Rood \| Bloo`) constructed and matched exhaustively | typechecks |
+| `accept/t06_payload_ctor_branch` | accept | P-Con — a payload-carrying ctor (`Circle(Int)`) bound to a pattern var in a branch | typechecks |
+| `accept/t07_generic_option_two_types` | accept | T-Con/P-Con with a fresh instantiation per occurrence — a generic `Box(a) = Full(a) \| Vacant` used at both `Int` and `String` | typechecks |
+| `reject/t05_ctor_arity` | reject | T-Con arity (`ECon` arm) | `` Constructor `Circle` expects 1 argument(s) but I got 2. `` |
+| `reject/t06_match_branch_mismatch` | reject | T-Match branch-body unification | `All branches of a match must have the same type.` |
 
-**Result: 8 / 8 (4 accept typecheck, 4 reject with the declared error).**
+**Result: 13 / 13 (7 accept typecheck, 6 reject with the declared error).**
 
 ## 4. Faithfulness + the key findings
 
 The rules were transcribed arm-for-arm from `typecheck.ml` at the cited lines
 (human-reviewed, not mechanically verified — the roadmap §7 faithfulness risk);
-the `accept/reject` corpus is the executable anchor. Three findings this skeleton
+the `accept/reject` corpus is the executable anchor. Four findings this skeleton
 pins that are easy to get wrong and are load-bearing:
 
 1. **No value restriction.** `generalize` runs whenever the `let` binds a simple
@@ -165,6 +259,17 @@ pins that are easy to get wrong and are load-bearing:
    variables — not monomorphic, not parser-overloaded (§2.1).
 3. **No partial application.** A call site must saturate the function (`reject/t03`
    is the witness — the error explicitly says so).
+4. **One instantiation engine for both directions.** `instantiate_ctor`
+   (typecheck.ml:2387) is called from the `ECon` arm (expression side, T-Con)
+   AND from `PatCon`'s arm in `infer_pattern` (pattern side, P-Con) — a
+   constructor's `arg_tys → result_ty` shape (with fresh vars per type param)
+   is computed exactly once per occurrence and reused for both directions, which
+   is why `match`ing a freshly-constructed value type-checks without any special
+   ADT-specific unification logic (`t07_generic_option_two_types` is the witness
+   — `Full(5)` and `Full("hi")` each get their OWN fresh `β`, exactly like
+   `instantiate` for `T-Var`, §1). Non-exhaustive `match` is a WARNING
+   (`check_exhaustiveness`, typecheck.ml:4288), not a typing error — it does not
+   affect accept/reject in this corpus.
 
 ## 5. What this validated, and what's next
 
@@ -175,9 +280,16 @@ pinning), and the doc format (judgment → cited rules → accept/reject table) 
 replicable template. `check_types.sh` is the committed anchor; it belongs in a
 slow CI lane alongside `@oracle`.
 
-**Next (widening slices, each like this one):** ADT constructor + `match` typing
-(`infer_pattern` :2566, `instantiate_ctor` :2387); records/tuples/atoms typing;
-then the interface/impl resolution that discharges the `Num`/`Eq` constraints
-(§2.1) — the richest and most bug-prone part, and the type-side complement to the
+**Task 1 (this slice) added:** ADT constructor + `match` typing — (T-Con),
+(T-Match), and the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` for `PatCon`/
+`PatVar`/`PatWild`/`PatLit` (§2, §2.2), transcribed from `instantiate_ctor`
+(typecheck.ml:2387), the `ECon` arm of `infer_expr` (typecheck.ml:3737),
+`infer_match` (typecheck.ml:4273), and `infer_pattern` (typecheck.ml:2566).
+
+**Next (widening slices, each like this one):** records/tuples/atoms typing
+(`PatTuple`/`PatRecord`/`PatAtom`, `TTuple`/`TRecord`, already sketched in
+`infer_pattern` typecheck.ml:2582–2680 but not yet given rules here); then the
+interface/impl resolution that discharges the `Num`/`Eq` constraints (§2.1) —
+the richest and most bug-prone part, and the type-side complement to the
 operational core. Together, `core-march.md` (operational) + this document (typing)
 are **Level-1 for the Core March fragment**.

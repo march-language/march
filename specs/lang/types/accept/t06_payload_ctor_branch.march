@@ -1,0 +1,15 @@
+mod M do
+  type Shape = Circle(Int) | Square(Int)
+
+  fn area(s : Shape) : Int do
+    match s do
+      Circle(r) -> r * r * 3
+      Square(side) -> side * side
+    end
+  end
+
+  fn main() do
+    println(int_to_string(area(Circle(2))))
+    println(int_to_string(area(Square(3))))
+  end
+end
