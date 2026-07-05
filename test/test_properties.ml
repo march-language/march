@@ -636,29 +636,29 @@ let gen_println_list_of_options_module : string Gen.t =
    derived Ord/Hash DO look at payload (field-by-field) — see
    [gen_derived_method_record_module] below for why `hash` is excluded there.
 
-   NEWTYPE STRING-PAYLOAD `==` OPERATOR CARVE-OUT (real bug found while
-   scoping this generator, distinct from 6cc676fc — filed to
-   specs/todos.md): for `type WrapS = WrapS(String)` (Newtype repr, String
-   payload), the `==` OPERATOR gives the WRONG answer compiled (`false` for
-   two content-equal strings; interp correctly gives `true`) while named
-   `eq()` on the same value is correct. Root cause: `ensure_adt_eq_fn`
-   (`lib/tir/llvm_eq.ml`) special-cases the Niche (Option-shaped) repr but
-   never consults `Repr.repr_of_ty` for `Newtype` — a String-payload Newtype
-   value is a bare heap string pointer with no ctor-tag header, but
-   `ensure_adt_eq_fn`'s generic fallback unconditionally reads a "ctor tag"
-   at `payload_ptr + 8` (inside the string's own heap layout) as if it were
-   a Boxed ADT cell, comparing garbage between two distinct string
-   allocations. Verified by hand (`.oraclehome/scratch2*.march` probes,
-   `--emit-llvm` IR dump showing `__march_eq_WrapS` takes the ctor-tag-table
-   path with no `march_string_eq` call) — an Int-payload Newtype does NOT
-   hit this (tagged scalar, never enters `ensure_adt_eq_fn` at all: `ty_a`
-   is `i64` not `ptr` at the `==`-lowering call site, llvm_emit.ml:1051).
-   Per this plan's "constrain to the currently-working subset" rule, the
-   String-payload Newtype generator below (Step 1b) calls named `eq()`
-   ONLY — never `==` — on that shape; the `==`-vs-`eq` discriminator is
-   still exercised on the Int-payload Newtype (Step 1a), Boxed (Step 1c),
-   multi-ctor enum (Step 1d), and record (Step 1e) shapes, all of which are
-   green via `==`. *)
+   NEWTYPE HEAP-PAYLOAD `==` OPERATOR (real bug found while scoping this
+   generator, distinct from 6cc676fc — NOW FIXED): for `type WrapS =
+   WrapS(String)` (Newtype repr, String payload), the `==` OPERATOR used to
+   give the WRONG answer compiled (`false` for two content-equal strings;
+   interp correctly gives `true`) while named `eq()` on the same value was
+   correct. Root cause: `ensure_adt_eq_fn` (`lib/tir/llvm_eq.ml`)
+   special-cased the Niche (Option-shaped) repr but never consulted
+   `Repr.repr_of_ty` for `Newtype` — a String-payload Newtype value is a bare
+   heap string pointer with no ctor-tag header, but `ensure_adt_eq_fn`'s
+   generic fallback unconditionally read a "ctor tag" at `payload_ptr + 8`
+   (inside the string's own heap layout) as if it were a Boxed ADT cell,
+   comparing garbage between two distinct string allocations (likewise for any
+   heap payload: Boxed ADT / tuple / record). Fixed by adding a
+   `Repr.Newtype payload` arm to `ensure_adt_eq_fn` that compares the
+   unwrapped operands directly per the payload's repr (march_string_eq for
+   String, recursive `ensure_adt_eq_fn` for a nested heap ADT/tuple/record,
+   tagged-bits `icmp` for scalars) — no tag/field offset load. The
+   String-payload Newtype generator below (Step 1b) now exercises the `==`
+   OPERATOR alongside named `eq()`/`compare()`, matching the other shapes; an
+   Int-payload Newtype never routed through `ensure_adt_eq_fn` in the first
+   place (tagged scalar, `ty_a` is `i64` not `ptr` at the `==`-lowering call
+   site, llvm_emit.ml:1051). Compiled regression coverage in test_codegen.ml's
+   `newtype_derived_method_crash` suite (String, Int-control, Boxed-ADT). *)
 
 (** (a) Newtype-repr (single-ctor single-field), Int payload — the exact
     shape 6cc676fc fixed for named eq/compare/hash. Exercises `==` AND
@@ -685,11 +685,11 @@ let gen_derived_method_newtype_int_module : string Gen.t =
     Gen.bool
 
 (** (b) Newtype-repr, String payload — 6cc676fc's non-exhaustive-panic
-    variant for named methods (now fixed). Named `eq()`/`compare()` ONLY —
-    the `==` OPERATOR on this exact shape has a separate, real, STILL-OPEN
-    bug (see the file-level comment above and specs/todos.md); this
-    generator deliberately stays inside the working subset per this plan's
-    "constrain to currently-working subset" rule. *)
+    variant for named methods, AND the `==`-operator heap-payload bug (both
+    now fixed; see the file-level comment above and specs/todos.md). Exercises
+    the `==` OPERATOR alongside named `eq()`/`compare()` — the `==`-vs-`eq`
+    discriminator on a heap-payload Newtype, which regressed the operator
+    path specifically. *)
 let gen_derived_method_newtype_string_module : string Gen.t =
   let gen_word : string Gen.t =
     Gen.map
@@ -707,6 +707,7 @@ let gen_derived_method_newtype_string_module : string Gen.t =
          \  fn main() do\n\
          \    let a = WrapS(%S)\n\
          \    let b = WrapS(%S)\n\
+         \    println(bool_to_string(a == b))\n\
          \    println(bool_to_string(eq(a, b)))\n\
          \    println(int_to_string(compare(a, b)))\n\
          \  end\n\
@@ -2361,12 +2362,11 @@ let prop_oracle_derived_method_newtype_int =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
-(** Oracle (b): derived eq/compare named calls on a Newtype-repr
-    String-payload type — 6cc676fc's non-exhaustive-panic variant (now
-    fixed). Named-call only (see the file-level comment above the
-    generator: the `==` operator on this exact shape has its own, separate,
-    STILL-OPEN bug, filed to specs/todos.md, not this generator's job to
-    guard). *)
+(** Oracle (b): derived eq/compare/== on a Newtype-repr String-payload type
+    — 6cc676fc's non-exhaustive-panic variant for named methods AND the
+    `==`-operator heap-payload wrong-answer bug, both now fixed (see the
+    file-level comment above the generator). Exercises the `==` operator
+    alongside named `eq()`/`compare()`. *)
 let prop_oracle_derived_method_newtype_string =
   Test.make ~name:"oracle (gen): derived eq/compare on Newtype(String) — interp = compiled"
     ~count:50

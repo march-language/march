@@ -863,12 +863,7 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
     (* Hot-reload migration entry points: always include even when the body
        has a TVar (e.g. from an empty list literal []). The LLVM emitter
        exports them as @__migrate_<Actor> aliases for dlsym at deploy time. *)
-    let is_migrate_fn =
-      let n = fn.Tir.fn_name in
-      let suf = "_migrate_state" in
-      let ln = String.length n and ls = String.length suf in
-      ln >= ls && String.sub n (ln - ls) ls = suf
-    in
+    let is_migrate_fn = Tir_names.is_migrate_fn_name fn.Tir.fn_name in
     (* Only seed monomorphic exports; polymorphic ones are specialised on demand *)
     if is_mono || is_main || is_migrate_fn then
       Queue.add (fn.Tir.fn_name, fn, []) worklist

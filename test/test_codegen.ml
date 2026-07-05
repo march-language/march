@@ -6636,6 +6636,106 @@ let test_handwritten_impl_nested_match_newtype_compiled () =
     ~expected:"true\nfalse"
     ()
 
+(* ── Newtype-repr `==` OPERATOR with a heap payload (P1, distinct bug) ────
+   Sibling of the named-method crash above, but the reverse split: the NAMED
+   `eq()`/`compare()` path was fixed by `6cc676fc`; the `==` OPERATOR path
+   (`ensure_adt_eq_fn`, `lib/tir/llvm_eq.ml`) was STILL wrong — silently, not a
+   crash — on a Newtype-repr type whose payload is a HEAP pointer. That fn
+   special-cased the Niche (Option-shaped) repr but never consulted
+   `Repr.repr_of_ty` for `Newtype`, so for a single-ctor single-field type it
+   fell to the generic Boxed ctor-table strategy: it read a "ctor tag" at
+   `payload_ptr + 8` and a "field" at `payload_ptr + 16`. For a String-payload
+   Newtype the value IS the raw string pointer (no wrapper cell), so those
+   offsets land inside the string's own heap layout and the comparison is
+   garbage. An Int-payload Newtype is a tagged scalar (i64, not ptr) and never
+   reaches `ensure_adt_eq_fn` at all — the operator control below stays green
+   with or without the fix. Fixed by a `Repr.Newtype payload` arm in
+   `ensure_adt_eq_fn` that compares the unwrapped payloads directly
+   (march_string_eq for String, recursive `ensure_adt_eq_fn` for a nested
+   heap ADT/tuple/record, scalar `icmp`/`fcmp` otherwise). *)
+
+(** Core bug: `==`/`!=` on a String-payload Newtype. Pre-fix, compiled
+    `WrapS("a") == WrapS("a")` returned FALSE (garbage tag/field offsets into
+    the raw string cell); the interpreter was always correct. *)
+let test_newtype_eq_operator_string_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_string"
+    ~src:"mod NewtypeEqOpString do\n\
+         \  type WrapS = WrapS(String)\n\
+         \  derive Eq for WrapS\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(WrapS(\"a\") == WrapS(\"a\")))\n\
+         \    println(bool_to_string(WrapS(\"a\") == WrapS(\"b\")))\n\
+         \    println(bool_to_string(WrapS(\"a\") != WrapS(\"b\")))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\ntrue"
+    ()
+
+(** Control: an Int-payload Newtype is a tagged scalar, never routed through
+    `ensure_adt_eq_fn` — the `==` operator was always correct here. Guards
+    against a fix that would perturb the scalar path. *)
+let test_newtype_eq_operator_int_payload_control_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_int"
+    ~src:"mod NewtypeEqOpInt do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(2)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
+(** Heap-ADT payload: a Newtype wrapping a Boxed 2-field ctor. Exercises the
+    recursive arm — inside `__march_eq_WrapR` the operands ARE the raw `Inner`
+    heap pointers, so the fix must recurse into `Inner`'s own structural
+    equality (not read a tag off the unwrapped payload). Pre-fix, compiled
+    `WrapR(Inner(1,2)) == WrapR(Inner(1,3))` returned TRUE. *)
+let test_newtype_eq_operator_boxed_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_boxed"
+    ~src:"mod NewtypeEqOpBoxed do\n\
+         \  type Inner = Inner(Int, Int)\n\
+         \  type WrapR = WrapR(Inner)\n\
+         \  derive Eq for Inner\n\
+         \  derive Eq for WrapR\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 2))))\n\
+         \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 3))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
+(** Generic Newtype (`type Wrap(a) = Wrap(a)`) — exercises the `type_params`
+    substitution branch of the fix specifically: `repr_of_ty` returns
+    `Newtype (TVar a)` (the field type as written in the generic typedef, which
+    mono never concretises), so the arm must apply the `a -> <concrete>` subst
+    to recover the real payload type. The String instantiation must reach
+    `march_string_eq` (heap payload — the bug class; verified in `--emit-llvm`
+    that `__march_eq_Wrap_String` is a bare `march_string_eq` call), while the
+    Int instantiation stays a tagged scalar (never enters `ensure_adt_eq_fn`).
+    All three non-generic newtype tests above leave `type_params` empty, so this
+    is the only test that drives a NON-identity substitution. *)
+let test_newtype_eq_operator_generic_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_generic"
+    ~src:"mod NewtypeEqOpGeneric do\n\
+         \  type Wrap(a) = Wrap(a)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(Wrap(\"x\") == Wrap(\"x\")))\n\
+         \    println(bool_to_string(Wrap(\"x\") == Wrap(\"y\")))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(2)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\ntrue\nfalse"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -7668,6 +7768,14 @@ let codegen_suites =
             test_multi_ctor_derived_methods_unaffected_compiled;
           Alcotest.test_case "hand-written impl nested-destructure match on newtype (P1)" `Quick
             test_handwritten_impl_nested_match_newtype_compiled;
+          Alcotest.test_case "== operator on String-payload newtype (P1, distinct bug)" `Quick
+            test_newtype_eq_operator_string_payload_compiled;
+          Alcotest.test_case "control: == operator on Int-payload newtype (tagged scalar) (P1)" `Quick
+            test_newtype_eq_operator_int_payload_control_compiled;
+          Alcotest.test_case "== operator on Boxed-ADT-payload newtype (recursive) (P1)" `Quick
+            test_newtype_eq_operator_boxed_payload_compiled;
+          Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
+            test_newtype_eq_operator_generic_payload_compiled;
         ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick

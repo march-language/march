@@ -55,6 +55,34 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.Llvm_ctx.emitted_eq_fns fn_name then Some fn_name
     else begin
+      (* Newtype-repr types (exactly one ctor with exactly one non-Float field)
+         have NO wrapper cell: the value IS its raw payload — a heap pointer for
+         String/Boxed-ADT/tuple/record payloads, a tagged immediate for Int/Bool.
+         The generic Boxed strategy's tag load at [payload+8] and field load at
+         [payload+16] would read INTO the payload's own heap layout (garbage),
+         so [==] silently returned wrong answers (a String-payload Newtype
+         compared unequal to itself; a Boxed-ADT-payload Newtype compared two
+         distinct values equal).  Mirror the Niche arm: compare the operands
+         directly per the payload's own repr.  Checked before niche detection —
+         the shapes are mutually exclusive (Newtype = 1 ctor, Niche = 2 ctors) —
+         and [repr_of_ty] already routes Float-payload single-ctor types to
+         Boxed (float bits can't be tagged), so those still take the Boxed arm,
+         which is correct for them (they DO carry a real heap header). *)
+      let newtype_payload_opt =
+        match Repr.repr_of_ty ctx.Llvm_ctx.type_defs ty with
+        | Repr.Newtype raw_payload ->
+          (* [raw_payload] is the field type as written in the typedef — a
+             [TVar] for a generic newtype (e.g. [Wrap(a)] applied to [Int]).
+             Substitute the concrete type args, exactly as the Boxed arm does. *)
+          let subst =
+            match Hashtbl.find_opt ctx.Llvm_ctx.type_params type_name with
+            | Some ps when List.length ps = List.length ty_args ->
+              List.combine ps ty_args
+            | _ -> []
+          in
+          Some (apply_ty_subst subst raw_payload)
+        | _ -> None
+      in
       (* Niche-encoded Option types (None=null, Some(x)=x in a ptr slot) must NOT
          use the normal tag-at-offset-8 strategy — there is no heap header.
          Detect niche shape early and emit a null-check equality instead. *)
@@ -82,8 +110,65 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         ~payload:(match ty_args with
           | [] -> "?"
           | _ -> String.concat "," (List.map mangle_ty_for_eq ty_args))
-        ~family:(if niche_payload_opt <> None then "Niche" else "Boxed")
+        ~family:(if newtype_payload_opt <> None then "Newtype"
+                 else if niche_payload_opt <> None then "Niche" else "Boxed")
         ~site:("eq:" ^ fn_name);
+      match newtype_payload_opt with
+      | Some payload_ty ->
+        (* The operands ARE the raw payloads (no unwrapping cell).  Compare them
+           directly per the payload's repr — no tag/field offset loads. *)
+        Hashtbl.add ctx.Llvm_ctx.emitted_eq_fns fn_name ();
+        let buf = Buffer.create 256 in
+        let ctr = ref 0 in
+        let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
+        let e ln = Buffer.add_string buf ("  " ^ ln ^ "\n") in
+        Buffer.add_string buf
+          (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+        Buffer.add_string buf "entry:\n";
+        let ok = frsh "ok" in
+        (match payload_ty with
+         | Tir.TString ->
+           e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %%a, ptr %%b)" ok)
+         | Tir.TFloat ->
+           (* A Newtype-over-Float only reaches here via a generic newtype
+              instantiated at Float (non-generic Float newtypes are Boxed).  The
+              raw double bits live in the ptr slot — reinterpret and compare. *)
+           let pa = frsh "pa" in let pb = frsh "pb" in
+           e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
+           e (Printf.sprintf "%s = ptrtoint ptr %%b to i64" pb);
+           let da = frsh "da" in let db = frsh "db" in
+           e (Printf.sprintf "%s = bitcast i64 %s to double" da pa);
+           e (Printf.sprintf "%s = bitcast i64 %s to double" db pb);
+           let c = frsh "c" in
+           e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
+           e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+         | _ when Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload_ty ->
+           (* Tagged scalar (Int/Bool, or a newtype over one) in a ptr slot:
+              compare the raw tagged bits. *)
+           let pa = frsh "pa" in let pb = frsh "pb" in
+           e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
+           e (Printf.sprintf "%s = ptrtoint ptr %%b to i64" pb);
+           let c = frsh "c" in
+           e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+           e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+         | _ ->
+           (* Heap payload (Boxed ADT / tuple / record, or a nested Newtype):
+              the operands are the payload's own heap pointers, so recurse into
+              its structural equality and call it on them directly.  If no eq
+              fn is derivable (an erased [TVar] payload), fall back to
+              [march_poly_eq] — the runtime-shape-dispatched comparison the
+              top-level [==] site uses for polymorphic operands (strings by
+              content, immediates by value) — not a pointer-identity compare. *)
+           (match ensure_adt_eq_fn ctx payload_ty with
+            | Some fn ->
+              e (Printf.sprintf "%s = call i64 @%s(ptr %%a, ptr %%b)" ok fn)
+            | None ->
+              e (Printf.sprintf "%s = call i64 @march_poly_eq(ptr %%a, ptr %%b)" ok)));
+        e (Printf.sprintf "ret i64 %s" ok);
+        Buffer.add_string buf "}\n";
+        Buffer.add_buffer ctx.Llvm_ctx.extra_fns buf;
+        Some fn_name
+      | None ->
       match niche_payload_opt with
       | Some payload_ty ->
         Hashtbl.add ctx.Llvm_ctx.emitted_eq_fns fn_name ();
