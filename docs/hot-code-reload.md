@@ -100,9 +100,11 @@ No changes detected — server is already up to date.
 
 ## Capability-safe deploys
 
-A hot deploy ships **mobile code** — a freshly compiled function, content-addressed, shipped over the wire, `dlopen`'d on a live server, and run in your process. The ed25519 signature proves the patch is *authentic* ("this is from us"). It does **not** prove the patch is *authorized* ("this code is allowed to do what it does"). A correctly-signed patch could call `file_delete`, open a network socket, or spawn a process even if the running version never touched the filesystem or network.
+A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded with `dlopen`, and starts handling requests. The ed25519 signature on each patch answers one question — *is this really from us?* It says nothing about a second, equally important one: *is this code allowed to do what it does?*
 
-Capability-safe deploys close that gap. March already computes each function's IO capabilities at compile time (`needs` declarations plus inferred effects from the function body). Hot deploys carry that information and enforce two gates.
+That gap is real. A patch you signed could call `file_delete`, open a network connection, or spawn a process — even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
+
+Capability-safe deploys add the missing check. March already knows each function's IO capabilities from compile time — its `needs` declarations plus the effects inferred from its body. A hot deploy carries those capabilities with it, and **two gates** decide whether the new code may run: one on your machine when you deploy, and one on the server when it activates.
 
 ### The unit of enforcement: per-activated-function caps
 
