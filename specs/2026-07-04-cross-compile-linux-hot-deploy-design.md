@@ -140,21 +140,38 @@ lower = wider reach.
    cross variant, invoke `zig cc -target <zig-triple>` instead of `clang`; the
    runtime C sources, `.ll` file, and link flags pass through unchanged. Host and
    WASM paths keep their current compilers.
-3. **Target-aware link flags — the load-bearing fix.** The `--compile-so` link
-   step currently selects its "allow undefined, resolve at dlopen" flag by
-   probing the **build host**:
-   `if Sys.file_exists "/proc/version" then -Wl,--allow-shlib-undefined else
-   -undefined dynamic_lookup` (`bin/main.ml:2033`). Under cross-compile this is
-   wrong — a Mac building a Linux `.so` would pick the macOS flag. Switch this
-   (and any other host probes: OpenSSL path discovery `bin/main.ml:413`, dynamic
-   linker `-ldl`/`-rdynamic` vs `-export_dynamic`) to key off the **target
-   config**, not the host OS. Audit `bin/main.ml` for `Sys.file_exists
-   "/proc/..."`, `Sys.os_type`, and homebrew-path assumptions.
-4. **Runtime linking from source.** The host build reuses a precompiled
-   `libmarch_runtime.so` cache (`bin/main.ml:337`), which is host-only. For cross
-   targets, compile the runtime C sources **from source** with `zig cc` into the
-   artifact (the native path already links runtime sources directly), keyed per
-   target in the cache.
+3. **De-host-ify the build path — the load-bearing, and largest, workstream.**
+   The `march --compile` build path is riddled with assumptions that the build
+   host *is* the target. Each must key off the **target config**, not the host.
+   These are not a handful of one-liners; they are the dominant risk and effort
+   of this feature. Known instances (audit for more — grep `Sys.file_exists`,
+   `Sys.os_type`, `/opt/homebrew`, `-m`, `/proc/`):
+   - **Arch-specific codegen flags.** `-msse4.2` is passed unconditionally at
+     **two** sites (`bin/main.ml:500` runtime `.so` precompile, `bin/main.ml:2117`
+     final link). SSE4.2 is x86-only; on `linux/arm64` `zig cc` rejects it. Gate
+     `-m*` flags by **target arch** (SSE/AVX only on x86_64; arm64 gets NEON by
+     default, no flag). This breaks arm64 on the very first compile if missed.
+   - **`--compile-so` link flags.** Selected by probing the build host:
+     `if Sys.file_exists "/proc/version" then -Wl,--allow-shlib-undefined else
+     -undefined dynamic_lookup` (`bin/main.ml:2033`). A Mac building a Linux `.so`
+     picks the macOS flag. Key off target OS instead.
+   - **External-lib discovery embeds host paths.** OpenSSL (`bin/main.ml:413`) and
+     zstd/brotli (`bin/main.ml:470`) are found by probing the host filesystem and
+     then linked with **macOS lib paths** baked in (`-L/opt/homebrew/lib`). For a
+     cross target these must resolve against the *target* sysroot/vendored libs,
+     never `/opt/homebrew`. (See §5.)
+   - **Dynamic-linker flags.** `-ldl`/`-rdynamic` (Linux) vs `-export_dynamic`
+     (macOS) must follow the target.
+4. **Runtime linking from source (main binary only).** The host build reuses a
+   precompiled `libmarch_runtime.so` cache (`bin/main.ml:337`), which is host-only.
+   For a cross **main binary**, compile the runtime C sources **from source** with
+   `zig cc` into the artifact (the native path already links runtime sources
+   directly), keyed per target in the cache. The reload **`.so`** is the opposite:
+   it links **no** runtime and **no** external C libs — its runtime/OpenSSL/zlib
+   symbols are left undefined and resolved at `dlopen` time from the running main
+   binary's process image. So a cross reload `.so` needs only the correct target
+   triple, `zig cc -target`, and the target-OS undefined-symbol flag from §3.3 —
+   not a sysroot's worth of libraries.
 
 ### 4. Runtime C considerations (`runtime/*.c`)
 
@@ -173,24 +190,71 @@ no macOS-only path leaks into a Linux build:
   (e.g. recent `statx`, `pidfd_*`, `renameat2` usage) — if so, either raise the
   floor or add a fallback.
 
-### 5. OpenSSL / TLS
+### 5. External C link dependencies (OpenSSL, zlib, zstd, brotli)
 
-Only the **main binary** links OpenSSL; reload `.so`s resolve OpenSSL symbols
-from the already-loaded main binary at `dlopen` time (that is the whole point of
-`--allow-shlib-undefined`). So OpenSSL cross-support is a **main-binary-only,
-one-time** cost:
+The **main binary** dynamically links several external C libraries — OpenSSL
+(`libssl`/`libcrypto`), zlib (`-lz`, **always** linked, `bin/main.ml:484`), and
+optionally zstd/brotli. On the host these are found by probing the local
+filesystem and linked with homebrew paths; for a cross target that is wrong on
+two counts (host paths, host arch). Handling:
 
-- Cross-build (or vendor prebuilt) target OpenSSL 3.x with `zig cc` for each
-  arch, **dynamically** (`libssl.so.3` / `libcrypto.so.3` + headers), cached
-  under `~/.cache/march` keyed by arch + OpenSSL version. The dynamic droplet
-  provides the runtime `.so`; we need it only to satisfy the cross-linker.
-- Replace the homebrew-path OpenSSL discovery (`bin/main.ml:413`) with a
-  target-aware resolver: host → homebrew as today; cross → the cached target
-  OpenSSL.
-- Match the droplet's OpenSSL major (3). Record the assumption; a mismatch is a
+- The main **executable cannot defer undefined symbols** the way a `.so` can, so
+  the cross-linker genuinely needs a *target* copy of each library at link time
+  — not just at runtime. Provide them per arch, cached under `~/.cache/march`
+  keyed by arch + library versions, via either:
+  - **extracting `.so` + headers from the target distro package** (e.g. unpack
+    Ubuntu's `libssl3`/`zlib1g` `.deb`) — easiest, and guarantees the soname/ABI
+    matches the droplet; or
+  - **cross-building with `zig cc`** — more control, more fiddle. Recommend
+    extraction first; keep cross-build as the fallback for libs not packaged
+    conveniently.
+- Replace host-path discovery (OpenSSL `bin/main.ml:413`; zstd/brotli
+  `bin/main.ml:470`) with a target-aware resolver: host → homebrew/system as
+  today; cross → the vendored target libs. Never emit `-L/opt/homebrew/lib` on a
+  cross link.
+- **Simplest scoping for a first cut:** compression is optional
+  (`march_compress.c` guards zstd/brotli behind `-DMARCH_HAVE_*`, and zlib is the
+  only mandatory one). P1 may **disable zstd/brotli** for cross and provide only
+  target `libz` + OpenSSL, adding the optional codecs later.
+- **Reload `.so`s need none of this** — their `libssl`/`libz` symbols resolve at
+  `dlopen` from libraries already loaded into the process's **global scope** as
+  `NEEDED` dependencies of the main binary (not "from the main binary" itself,
+  unless a lib were statically embedded). This is why reload units cross-compile
+  with zero external libs.
+- Match the droplet's OpenSSL major (**3.x**) and zlib soname. Record the
+  assumption; a mismatch (e.g. a droplet still on OpenSSL 1.1, or LibreSSL) is a
   clear, early error, not a runtime surprise.
 
-### 6. forge changes
+### 6. FFI cross-compilation
+
+Projects with C shims (`[ffi]`) or a Rust binding crate (`[ffi.rust]`) currently
+build those deps **for the host**, unconditionally:
+
+- `[ffi.rust]` runs `cargo build --release` with **no `--target`**
+  (`forge/lib/cmd_build.ml:350`) → an `…-apple-darwin` staticlib that cannot link
+  into a Linux binary.
+- `[ffi]` C shims are compiled with the host compiler/flags.
+
+For a cross build these must target Linux too:
+
+- **C shims** → compile with `zig cc -target <triple>` (same driver as the main
+  build).
+- **Rust staticlib** → `cargo build --release --target <rust-linux-triple>` with
+  a cross-linker. The clean way is **`cargo-zigbuild`** (or setting
+  `CARGO_TARGET_*_LINKER="zig cc -target …"`), reusing the same `zig` we already
+  depend on, so no separate C cross-toolchain is introduced. The Rust target
+  (`x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu`) must be installed
+  via rustup — forge should detect and hint.
+
+**Scope decision (needs confirmation):** cross-building FFI deps — especially the
+Rust path — is real, separable work. Recommend **v1 supports FFI-less apps and C
+shims; `[ffi.rust]` cross-build lands in a follow-up (P2/P3)**, with a clear
+error ("this project uses [ffi.rust]; cross-compilation of Rust bindings is not
+yet supported — build on Linux or use `--so`") rather than a silent host-arch
+link failure. A full-server app may well use FFI, so this must be an explicit,
+visible limitation, not an omission.
+
+### 7. forge changes
 
 - **CLI/aliases** (`forge/bin/main.ml`, `forge/lib/cmd_build.ml`): accept
   `linux/amd64`|`linux/arm64` (+ `x86_64`/`aarch64` synonyms), normalize to the
@@ -202,7 +266,7 @@ one-time** cost:
 - **zig discovery + hint** with actionable error if absent.
 - **`forge.toml`** (`forge/lib/project.ml`): optional `[build]` (or
   `[target.<name>]`) block for default target(s), glibc floor, and per-target FFI
-  overrides. Keep it optional — flags work with zero config.
+  overrides (see §6). Keep it optional — flags work with zero config.
 - **`forge deploy hot` integration** (`cmd_deploy_hot.ml`): teach `build_so`
   (`cmd_deploy_hot.ml:803`) to pass the cross `--target` into
   `march --compile --compile-so`, so the deployed `.so` is Linux-native. The
@@ -210,7 +274,7 @@ one-time** cost:
   Ensure the main binary and reload `.so` are built with the **same** target
   config (the ABI invariant above).
 
-### 7. Cache
+### 8. Cache
 
 Confirm the CAS key already distinguishes the cross triple (it includes a target
 label + runtime digests + codegen flags). If the cross-toolchain identity (zig
@@ -225,8 +289,10 @@ proven before OpenSSL:
 
 1. **P1 — cross-build the dynamic main binary, compute/CLI + plain HTTP, no TLS.**
    Proves `zig cc` + glibc target + the compiler driver + forge plumbing
-   end-to-end; flushes out any host-probe leaks. Smoke-test the ELF under
-   Docker/QEMU.
+   end-to-end. This is where the §3.3 de-host-ify audit happens: gate `-msse4.2`
+   by arch (required for arm64 to build at all), fix the host-path lib discovery,
+   and provide target **zlib** (`-lz` is linked even for plain HTTP). Defer
+   zstd/brotli. Smoke-test the ELF under Docker/QEMU on both arches.
 2. **P2 — `--compile-so` cross + `forge deploy hot --target`.** The reload path;
    validates the ABI invariant and the target-aware `so_flag` fix against a live
    (or QEMU) droplet.
@@ -247,14 +313,22 @@ proven before OpenSSL:
 
 ## Risks & mitigations
 
-- **Host-probe leaks** (biggest correctness risk): logic keyed off the build
-  host instead of the target — `so_flag`, `-ldl`/`-rdynamic`, OpenSSL paths. →
-  Systematic audit (Design §3.3); the hot-reload gate catches the `so_flag` case.
+- **Host-probe leaks — the biggest correctness risk AND biggest effort.** The
+  build path assumes host == target in many places: `-msse4.2` (breaks arm64),
+  `so_flag` host probe, homebrew OpenSSL/zstd/brotli paths (`-L/opt/homebrew/lib`
+  into an ELF), `-ldl`/`-rdynamic` vs `-export_dynamic`, host `cargo` target. →
+  Systematic audit (Design §3.3) is the core of P1; the arch-flag one fails
+  immediately on arm64, the hot-reload gate catches `so_flag`, and a
+  wrong-arch-lib link fails loudly.
 - **ABI drift between main binary and reload `.so`** → single source of target
   config in forge, passed identically to both invocations; assert triple/flags
   match in the deploy manifest.
-- **OpenSSL cross-build friction** → isolated to P3; dynamic (not static) linking
-  is the easier case, and reload `.so`s sidestep it entirely.
+- **External-lib cross-linking (OpenSSL, zlib, zstd, brotli)** → prefer extracting
+  target `.so`+headers from the distro package over cross-building; P1 may ship
+  zlib+OpenSSL only and defer optional codecs. Reload `.so`s sidestep it entirely
+  (§4, §5).
+- **FFI cross (esp. Rust)** → host-pinned `cargo build` today; v1 limitation with
+  a clear error, `cargo-zigbuild` in a follow-up (§6).
 - **glibc floor too high** → configurable; default conservative (2.31); surfaced
   in `forge.toml`.
 - **zig version skew** (bundled clang/glibc changes across zig releases) →
