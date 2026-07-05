@@ -3,6 +3,14 @@
 
 mod TestCli do
 
+pfn sample_specs() do
+  [
+    Cli.flag_with("verbose", Some("v"), BoolFlag, None, false, "Verbose output"),
+    Cli.flag_with("port", Some("p"), ValueFlag, Some("4000"), false, "Port"),
+    Cli.flag_with("name", None, ValueFlag, None, true, "Required name")
+  ]
+end
+
 describe "Cli spec constructors" do
 
   test "flag builds a BoolFlag spec with no short form" do
@@ -34,6 +42,72 @@ describe "Cli spec constructors" do
     match spec.default do
     Some(d) -> assert (d == "4000")
     None -> assert false
+    end
+  end
+
+end
+
+describe "Cli.parse" do
+
+  test "parses long value flag and positional args" do
+    match Cli.parse(sample_specs(), ["--name", "alice", "--port", "8080", "serve"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "8080")
+      assert (Cli.get_string_or(parsed, "name", "") == "alice")
+      assert (List.length(Cli.positional(parsed)) == 1)
+      assert (List.nth(Cli.positional(parsed), 0) == "serve")
+    end
+  end
+
+  test "parses short flags and boolean flags" do
+    match Cli.parse(sample_specs(), ["-p", "9090", "-v", "--name", "bob"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "9090")
+      assert (Cli.get_bool(parsed, "verbose") == true)
+    end
+  end
+
+  test "unset value flag falls back to its spec default" do
+    match Cli.parse(sample_specs(), ["--name", "carol"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "4000")
+      assert (Cli.get_bool(parsed, "verbose") == false)
+    end
+  end
+
+  test "unknown flag is an error" do
+    match Cli.parse(sample_specs(), ["--name", "dave", "--bogus"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      UnknownFlag(f) -> assert (f == "bogus")
+      _ -> assert false
+      end
+    end
+  end
+
+  test "value flag with no following value is an error" do
+    match Cli.parse(sample_specs(), ["--name", "eve", "--port"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingValue(f) -> assert (f == "port")
+      _ -> assert false
+      end
+    end
+  end
+
+  test "missing required flag is an error" do
+    match Cli.parse(sample_specs(), ["--port", "8080"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingRequired(f) -> assert (f == "name")
+      _ -> assert false
+      end
     end
   end
 

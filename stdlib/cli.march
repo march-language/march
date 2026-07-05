@@ -76,4 +76,172 @@ mod Cli do
     { long: long, short: short, arity: arity, default: default, required: required, help: help }
   end
 
+  pfn find_by_long(specs : List(FlagSpec), long : String) : Option(FlagSpec) do
+    List.find(specs, fn s -> s.long == long)
+  end
+
+  pfn find_by_short(specs : List(FlagSpec), short : String) : Option(FlagSpec) do
+    List.find(specs, fn s ->
+      match s.short do
+      Some(sh) -> sh == short
+      None -> false
+      end)
+  end
+
+  -- Strip a leading "--" or "-" from a token, returning the bare name, or
+  -- None if the token isn't flag-shaped (used to detect positionals).
+  pfn flag_name(token : String) : Option(String) do
+    if String.starts_with(token, "--") do Some(String.slice(token, 2, String.byte_size(token) - 2))
+    else if String.starts_with(token, "-") do Some(String.slice(token, 1, String.byte_size(token) - 1))
+    else None end
+    end
+  end
+
+  pfn resolve_spec(specs : List(FlagSpec), token : String) : Option(FlagSpec) do
+    if String.starts_with(token, "--") do
+      find_by_long(specs, String.slice(token, 2, String.byte_size(token) - 2))
+    else
+      find_by_short(specs, String.slice(token, 1, String.byte_size(token) - 1))
+    end
+  end
+
+  pfn bare_flag_name(token : String) : String do
+    match flag_name(token) do
+    Some(n) -> n
+    None -> token
+    end
+  end
+
+  pfn find_missing_required(specs : List(FlagSpec), acc_values : List((String, String))) : Option(String) do
+    let missing = List.find(specs, fn s ->
+      let has_value = List.find(acc_values, fn pair ->
+        match pair do
+        (name, _) -> name == s.long
+        end)
+      match has_value do
+      Some(_) -> false
+      None -> s.required
+      end)
+    match missing do
+    Some(s) -> Some(s.long)
+    None -> None
+    end
+  end
+
+  -- Single left-to-right pass. acc_values/acc_positional accumulate in order;
+  -- reversed once at the end (append-heavy loops build up backwards cheaply).
+  pfn parse_loop(specs : List(FlagSpec), tokens : List(String), acc_values : List((String, String)), acc_positional : List(String)) : Result(ParsedArgs, CliError) do
+    match tokens do
+    Nil ->
+      match find_missing_required(specs, acc_values) do
+      Some(name) -> Err(MissingRequired(name))
+      None -> Ok({ values: List.reverse(acc_values), positional: List.reverse(acc_positional) })
+      end
+    Cons(token, rest) ->
+      match flag_name(token) do
+      None -> parse_loop(specs, rest, acc_values, Cons(token, acc_positional))
+      Some(_) ->
+        match resolve_spec(specs, token) do
+        None -> Err(UnknownFlag(bare_flag_name(token)))
+        Some(spec) ->
+          match spec.arity do
+          BoolFlag ->
+            parse_loop(specs, rest, Cons((spec.long, "true"), acc_values), acc_positional)
+          ValueFlag ->
+            match rest do
+            Cons(value, rest2) ->
+              parse_loop(specs, rest2, Cons((spec.long, value), acc_values), acc_positional)
+            Nil -> Err(MissingValue(spec.long))
+            end
+          end
+        end
+      end
+    end
+  end
+
+  doc """
+  Parse `argv` against `specs`. Long flags are `--name value` / `--flag`
+  (boolean); short flags are `-n value` / `-f` (boolean); anything not
+  flag-shaped is a positional argument. Unknown flags, a value flag missing
+  its value, and an unmet `required: true` spec all return `Err`.
+
+  ## Examples
+
+      march> Result.is_ok(Cli.parse([Cli.value_flag("name", "")], ["--name", "x"]))
+      true
+  """
+  fn parse(specs : List(FlagSpec), argv : List(String)) : Result(ParsedArgs, CliError) do
+    parse_loop(specs, argv, [], [])
+  end
+
+  doc """
+  Look up a flag's raw string value. Falls back to the spec's `default` list
+  entry if the caller passed one via `defaults`; use `get_string_or` for the
+  common "just give me a default" case.
+
+  ## Examples
+
+      march> let parsed = Cli.parse([Cli.value_flag("name", "")], ["--name", "x"])
+      march> match parsed do | Ok(p) -> Cli.get_string(p, "name") | Err(_) -> None end
+      Some("x")
+  """
+  fn get_string(parsed : ParsedArgs, long : String) : Option(String) do
+    let found = List.find(parsed.values, fn pair ->
+      match pair do
+      (name, _) -> name == long
+      end)
+    match found do
+    Some(pair) ->
+      match pair do
+      (_, value) -> Some(value)
+      end
+    None -> None
+    end
+  end
+
+  doc """
+  Look up a flag's raw string value, falling back to `default` if unset.
+
+  ## Examples
+
+      march> let parsed = Cli.parse([Cli.value_flag("name", "")], [])
+      march> match parsed do | Ok(p) -> Cli.get_string_or(p, "name", "anon") | Err(_) -> "?" end
+      "anon"
+  """
+  fn get_string_or(parsed : ParsedArgs, long : String, default : String) : String do
+    match get_string(parsed, long) do
+    Some(v) -> v
+    None -> default
+    end
+  end
+
+  doc """
+  Read a boolean flag's value. Absent means `false`.
+
+  ## Examples
+
+      march> let parsed = Cli.parse([Cli.flag("v", "")], [])
+      march> match parsed do | Ok(p) -> Cli.get_bool(p, "v") | Err(_) -> true end
+      false
+  """
+  fn get_bool(parsed : ParsedArgs, long : String) : Bool do
+    match get_string(parsed, long) do
+    Some(v) -> v == "true"
+    None -> false
+    end
+  end
+
+  doc """
+  Return the positional (non-flag) arguments, in the order given.
+
+  ## Examples
+
+      march> let parsed = Cli.parse([], ["a", "b"])
+      march> match parsed do | Ok(p) -> Cli.positional(p) | Err(_) -> [] end
+      ["a", "b"]
+  """
+  fn positional(parsed : ParsedArgs) : List(String) do
+    parsed.positional
+  end
+
 end
