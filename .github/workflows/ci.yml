@@ -65,6 +65,11 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      - name: Static-semantics conformance corpus (slow lane, not part of runtest)
+        run: |
+          eval $(opam env)
+          dune build @types-check
+
       - name: Check doc notebooks (.scrollmd) compile
         run: |
           eval $(opam env)

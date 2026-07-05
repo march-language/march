@@ -1,10 +1,11 @@
-# Core March — Static Semantics (typing walking skeleton, v0)
+# Core March — Static Semantics reference v1 (core fragment complete)
 
 **Date:** 2026-07-05
-**Status:** Walking skeleton — the FIRST vertical slice of Core March's **type
-system**, the companion to the operational semantics in `core-march.md`.
-Deliberately a tiny fragment taken end-to-end to prove the type-side methodology
-(and a new conformance-harness shape) before scaling.
+**Status:** Reference v1 — the Core March **type system**'s core fragment is
+now complete end-to-end, the companion to the operational semantics in
+`core-march.md`. Built incrementally as a walking skeleton (Tasks 1–6, see §5
+for the per-task provenance) and consolidated into this single reference by
+Task 7 — assembly + versioning only, no new typing rules were added in this pass.
 **Companion:** `specs/lang/core-march.md` (operational semantics — "what programs
 mean"). This document is "which programs are well-typed."
 **Depends on:** `specs/2026-07-04-language-specification-roadmap-design.md` §4.3.
@@ -14,17 +15,22 @@ mean"). This document is "which programs are well-typed."
 ## 0. What this is (and is not)
 
 `core-march.md` documented the interpreter's *operational* rules. This document
-documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the same
-kind of small fragment: literals, variables, `let` (with generalization), lambda,
-application, the `+`/`==` primitives, `if`, (as of Task 1) **ADT constructors
-and `match`**, (as of Task 2) **tuples and records**, (as of Task 3)
-**atoms**, (as of Task 4) **match guards and scrutinee-less `match do`
-(`ECond`)**, (as of Task 5) **local recursive functions (`ELetFn`)**, and (as
-of Task 6) **the interface-constraint model** (`Num`/`Eq`/`Ord`/`Show`
-discharge, §2.1/§2.1a/§2.1b) and the boolean primitives `&&`/`||`/`not`.
-Same discipline as the operational skeleton: **every rule is
-transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
-and a conformance corpus keeps it honest.
+documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the core
+fragment: literals, variables, `let` (with generalization), lambda,
+application, the `+`/`==` primitives, `if`, **ADT constructors and `match`**
+(Task 1), **tuples and records** (Task 2), **atoms** (Task 3), **match guards
+and scrutinee-less `match do` (`ECond`)** (Task 4), **local recursive
+functions (`ELetFn`)** (Task 5), and **the interface-constraint model**
+(`Num`/`Eq`/`Ord`/`Show` discharge, §2.1/§2.1a/§2.1b) and the boolean
+primitives `&&`/`||`/`not` (Task 6). Task 7 (this pass) added no new typing
+rules — it re-titled/re-scoped this document from "walking skeleton, first
+vertical slice" to "reference v1, core fragment complete," unified §2 into one
+rule set grouped by construct, collected the accumulated findings into a
+single §4 subsection, refreshed the deferred list against the roadmap's
+Phase-2b/3 queue, and wired `check_types.sh` into a CI lane (see
+`specs/lang/types/INDEX.md`). Same discipline as the operational skeleton:
+**every rule is transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and
+cited by line**, and a conformance corpus keeps it honest.
 
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is nothing to
@@ -35,12 +41,13 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-Deferred (later typing slices, matching `core-march.md`'s deferred set):
-user-defined `impl`/interface DECLARATION syntax and superclass/coherence
-rules beyond the four built-in interfaces (Task 6 documents how a
-`Num`/`Eq`/`Ord`/`Show` constraint is discharged, not the full generality of
-user-declared interfaces — see §2.1a's scope note), refinements, linearity,
-capabilities, effects.
+**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §5): user-defined
+`impl`/interface DECLARATION syntax and superclass/coherence rules beyond the
+four built-in interfaces (this document covers how a `Num`/`Eq`/`Ord`/`Show`
+constraint is DISCHARGED against the built-in seed table, not the full
+generality of user-declared interfaces — see §2.1a's scope note), refinements
+(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §5 for
+the full deferred-set breakdown and its roadmap citations.
 
 ## 1. The typing judgment
 
@@ -147,7 +154,17 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           ────────────────────────────────────────────────
           Γ ⊢ EBlock(ELet(x = e₁) :: rest) ⇒ τ₂
           -- generalization is gated on a SIMPLE-VARIABLE pattern, NOT on e₁ being
-          --   a syntactic value: March has NO value restriction (see §4).
+          --   a syntactic value: March has NO value restriction (see §4 finding 1).
+          -- ⚠ KNOWN TYPING DIVERGENCE — a `let`'s OWN type annotation
+          --   (`let x : T = e₁`, parsed into `Ast.bind_ty`) is never consulted
+          --   by this arm: `grep -c bind_ty lib/typecheck/typecheck.ml` = 0.
+          --   τ₁ is inferred from `e₁` alone and the annotation is silently
+          --   discarded — NOT a soundness hole (a later use of `x` at the
+          --   wrong type is still caught via ordinary unification), but
+          --   `let x : Int = "foo"` typechecks at exit 0 instead of being
+          --   checked against `Int` at the binding site. See §4.1 finding 16
+          --   and `specs/todos.md` ("Compiler: Type System") for the full
+          --   writeup and fix direction.
 
 (T-LetFn) β fresh (at env.level — NO enter_level bump, unlike T-Let)    typecheck.ml:4373
           Γ_self = Γ, f:β                                               typecheck.ml:4374
@@ -1154,8 +1171,17 @@ not add coverage as a *new* reject program here.
 
 The rules were transcribed arm-for-arm from `typecheck.ml` at the cited lines
 (human-reviewed, not mechanically verified — the roadmap §7 faithfulness risk);
-the `accept/reject` corpus is the executable anchor. Findings this skeleton
-pins that are easy to get wrong and are load-bearing:
+the `accept/reject` corpus is the executable anchor.
+
+### 4.1 Known typing divergences / findings (Tasks 1–6, consolidated)
+
+Every "the typechecker actually does X, which is easy to get wrong" discovery
+made while building this reference lives HERE, in this one subsection — collected
+by Task 7 from where each was originally pinned inline (Tasks 1–6). Two are
+genuine, filed, open gaps against the current implementation (findings 15 and
+16, both cross-referenced to their `specs/todos.md` entry under "Compiler:
+Type System"); the rest are faithful-but-surprising facts about the existing
+typechecker that this document exists to pin down, not defects:
 
 1. **No value restriction.** `generalize` runs whenever the `let` binds a simple
    `PatVar`, regardless of whether the RHS is a syntactic value (`infer_block`
@@ -1400,6 +1426,27 @@ pins that are easy to get wrong and are load-bearing:
     corpus's purpose — the corpus instead uses the primitive, always-correctly
     -enforced `Ord`/`Num` constraints for its `reject/` witnesses, findings
     above).
+16. **`let`-binding type annotations (`let x : T = e`) are parsed but never
+    enforced by the typechecker — the second filed, open gap.** Found while
+    building Task 2's tuple/record corpus. The parser accepts a type
+    annotation on a `let` binding and stores it as `Ast.bind_ty`, but
+    (T-Let)'s `infer_block` arm (§2, typecheck.ml:4293–4324) never consults it
+    (`grep -c bind_ty lib/typecheck/typecheck.ml` = 0): τ₁ is inferred from
+    the RHS alone and the annotation is silently discarded, so `let x : Int =
+    "foo"` and `let pair : (Int, Int) = (1, 2, 3)` both `--check` at exit 0.
+    **Not a soundness hole** — the inferred type still governs, so a LATER use
+    of `x` at the annotated-but-wrong type is still caught by ordinary
+    unification; the annotation is merely decorative rather than a checking
+    context. This corpus routes around it deliberately: the tuple-arity
+    reject witness (`reject/t08_tuple_arity_mismatch`) uses a
+    FUNCTION-PARAMETER annotation (enforced via ordinary T-App param-vs-arg
+    unification, §2) rather than a `let` annotation to elicit its mismatch,
+    specifically because a `let`-annotation mismatch would NOT be rejected.
+    Filed in `specs/todos.md` under "Compiler: Type System" with the fix
+    direction (check the RHS against `bind_ty` via `check_expr` at the `ELet`
+    arm, when present, instead of unconditionally inferring); not fixed here
+    (docs-only task). A `reject/let_annotation_mismatch`-style program should
+    be added to this corpus once the enforcement lands.
 
 ## 5. What this validated, and what's next
 
@@ -1407,8 +1454,11 @@ pins that are easy to get wrong and are load-bearing:
 judgment is transcribable arm-for-arm from `typecheck.ml`, the `--check`-based
 `accept/reject` harness is a workable conformance anchor (with exact-error-message
 pinning), and the doc format (judgment → cited rules → accept/reject table) is a
-replicable template. `check_types.sh` is the committed anchor; it belongs in a
-slow CI lane alongside `@oracle`.
+replicable template. `check_types.sh` is the committed anchor; Task 7 wired it
+into its own `types-check` dune alias — a separate slow CI lane, run alongside
+(not merged into) `@oracle`/`@runtest` — see `specs/lang/types/INDEX.md` for
+the harness model and why `reject/` programs cannot ride the operational
+side's both-ways `@oracle` sweep.
 
 **Task 1 added:** ADT constructor + `match` typing — (T-Con),
 (T-Match), and the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` for `PatCon`/
@@ -1563,11 +1613,70 @@ program) and three new `reject/` programs (the live-verified Num/Ord/Bool-
 coercion error text, §2.1a/§2.1b). `check_types.sh`: 35/35 (20 accept, 15
 reject), exit 0.
 
-**Next (widening slices, each like this one):** user-defined `impl` blocks
-and `when`-bounded generic functions beyond this fragment's built-in
-Num/Eq/Ord/Show — including, ideally, a proper fix + regression test for
-finding 15's constraint-survival gap; superclass/coherence rules for
-multi-interface bounds; and the refinement/linearity/capability/effect
-layers `core-march.md` already defers operationally. Together, `core-march.md`
-(operational) + this document (typing) are **Level-1 for the Core March
-fragment**.
+**Task 7 (this pass) added:** no new typing rules — pure consolidation.
+Re-titled/re-scoped the document header and §0 from "walking skeleton, first
+vertical slice" to "reference v1, core fragment complete"; confirmed every
+`typecheck.ml:` citation present before the restructure is still present after
+(the self-check is a strict superset, run via `grep -oE
+'typecheck\.ml:[0-9]+' specs/lang/core-march-types.md | sort -u` pre- vs
+post-restructure); refreshed the deferred list (§0, §6 below) against the
+roadmap's Phase-2b/3 queue instead of the original skeleton's placeholder set
+(records, which Task 2 completed, is no longer listed as deferred); added
+finding 16 (the `let`-annotation-ignored gap, previously only noted inline at
+(T-Let), §2) to the single consolidated §4.1 findings subsection alongside
+findings 1–15; and created `specs/lang/types/INDEX.md` (mirroring
+`specs/lang/golden/INDEX.md`'s shape) plus wired `check_types.sh` into its own
+`types-check` dune alias — a separate, slow, opt-in CI lane (`dune build
+@types-check`), deliberately NOT folded into the default `@runtest` (see
+`specs/lang/types/INDEX.md` for the harness model and CI-wiring rationale).
+`check_types.sh`: unchanged at 35/35 (20 accept, 15 reject), exit 0 — no
+corpus programs were added or modified by this task.
+
+## 6. Deferred — the roadmap's Phase-2b/3 queue
+
+This document is **Level-1 for the Core March fragment's type system**
+(`specs/2026-07-04-language-specification-roadmap-design.md` §2's "descriptive
+reference, kept honest by tests" — the level `core-march.md` already reached
+operationally). What is explicitly OUT of scope for this document, and where
+each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
+
+- **User-defined `impl`/interface DECLARATION syntax, beyond the four
+  built-ins.** §2.1a/§2.1b document how a `Num`/`Eq`/`Ord`/`Show` CONSTRAINT is
+  discharged against the seed table (`builtin_impls`, `builtin_interfaces`) —
+  not the general `impl Iface(T) do ... end` declaration-checking machinery
+  itself (method-signature validation, coherence/overlap rules), nor
+  superclass bounds across multiple interfaces. Roadmap: an extension of
+  Phase 2 (§4.3's "declarative typing rules... extracted from `typecheck.ml`'s
+  algorithm") — the natural next widening slice after this one (see the
+  now-superseded "Next" prose two paragraphs above, kept as historical
+  provenance).
+- **The constraint-survival soundness gap itself (finding 15, §4)** — a proper
+  fix (not just documentation) and a regression test belong with that Phase-2
+  widening, since fixing `typecheck.ml` is out of scope for a docs-only task.
+- **Refinement types (z3-discharged).** Roadmap Phase 3 (§4.5/§6): "the
+  refinement/capability soundness claims are machine-checked in Lean 4" is the
+  acceptance criterion; this document's bidirectional HM judgment (§1) is the
+  Level-1 substrate that Phase 3's refinement layer would extend, not
+  something this pass attempts.
+- **Linearity/capabilities.** The capability lattice (`lib/caps/`) is named
+  explicitly in the roadmap's Phase 3 scope (§4.5, "refinement/capability
+  soundness") — deferred here for the same reason as refinements.
+  Linear/uniqueness typing is not separately named in the roadmap and is
+  narrower still; grouped with capabilities as a Phase-3-or-later concern.
+- **Effects.** Named alongside refinements/capabilities in the roadmap's
+  problem statement (§4.3: "bidirectional HM inference + refinements + the
+  capability lattice + effects") as part of the ambitious claim set a full
+  spec needs — Phase 3 territory, not attempted here.
+- **NOT deferred (a correction against the original skeleton's placeholder
+  list):** records. The walking-skeleton v0 header listed "records" as a
+  deferred later slice; Task 2 completed tuples+records typing in full
+  (T-Tuple/T-Record/T-Field/T-Update, §2; P-Tuple, §2.2), so records are
+  fully in-scope and covered by this reference — they are removed from the
+  deferred set here.
+
+Together, `core-march.md` (operational) + this document (typing) are
+**Level-1 for the Core March fragment** per the roadmap's leveling (§2); the
+next phase of BOTH documents is the Level-2 conformance work already underway
+(the golden corpus + this document's `accept`/`reject` corpus) plus, per §4.4
+of the roadmap, adjudicating the operational side's `known_divergence` queue —
+this document's own analogous queue is the single open item, finding 15.

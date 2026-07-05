@@ -406,6 +406,22 @@
  (action (setenv MARCH_BIN %{exe:../bin/main.exe}
           (run ./test_oracle.exe))))
 
+; ── Core March static-semantics (typing) conformance check ────────────────
+; specs/lang/types/{accept,reject}/*.march + check_types.sh — the type-side
+; analog of the `oracle` alias above, but NOT the same shape: `reject/`
+; programs deliberately fail to typecheck, so they cannot ride `test_oracle`'s
+; both-ways interpret-vs-compile sweep (a reject program would just look like
+; an ordinary compile failure there). This corpus needs its own `--check`-only
+; harness instead (specs/lang/core-march-types.md §3, specs/lang/types/INDEX.md).
+; Own alias (`types-check`), NOT folded into `runtest` or `oracle` — run
+; directly with `dune build @types-check`.
+(rule
+ (alias types-check)
+ (deps (source_tree %{project_root}/specs/lang/types)
+       (file %{exe:../bin/main.exe}))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{project_root}/specs/lang/types/check_types.sh))))
+
 (test
  (name test_supervision)
  (modules test_supervision)
