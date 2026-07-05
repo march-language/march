@@ -506,19 +506,71 @@ continuation, which the block supplies.)
 
 ### 4.3 Branch selection and pattern matching
 
-`selectᵨ(v, branches)` tries branches **top-to-bottom, first match wins**; on a
-match it evaluates the body in the pattern-extended environment (after an
-optional boolean guard); if no branch matches it raises `Match_failure`
-(`eval.ml:7317`):
+`selectᵨ(v, branches)` is the whole `eval_match` function
+(`eval.ml:7317`–`7342`): a tail-recursive `go` loop over the branch list that
+tries branches **top-to-bottom, first success wins**. A branch *succeeds* iff
+its pattern matches AND (if it has a guard) that guard evaluates to `VBool
+true`; the FIRST succeeding branch is selected and its body runs in the
+pattern-extended environment. A pattern that fails to match, OR a guard that is
+false, falls through to the next branch. If the loop runs off the end of the
+list with no branch selected, it raises `Match_failure` (the **exhaustiveness**
+rule):
 
 ```
-select selection, in order:
-  branch (p when g -> e_b):
-     match(p, v) = σ   and   ( g absent, or  σ·ρ ⊢ g ⇓ VBool true )
-        ⇒  result is  σ·ρ ⊢ e_b ⇓ v'
-     otherwise ⇒ try next branch
-  no branch matches ⇒ raise Match_failure          (eval.ml:7320)
+select selection, over branches in order (eval.ml:7318 `go`):
+  branch (p when? g -> e_b):
+     match(p, v) = σ                                    (eval.ml:7324)
+        no  ⇒ σ = ⊥ ⇒ try next branch                   (eval.ml:7325)
+        yes ⇒ let ρ' = σ·ρ  (bindings @ env)            (eval.ml:7327)
+              guard_ok = ( g absent )                    (eval.ml:7330)
+                       ∨ ( ρ' ⊢ g ⇓ VBool true )         (eval.ml:7332–7333)
+              guard_ok = true  ⇒  result is ρ' ⊢ e_b ⇓ v' (eval.ml:7339)
+              guard_ok = false ⇒  try next branch          (eval.ml:7340)
+  no branch matches ⇒ raise Match_failure               (eval.ml:7320)
 ```
+
+**Branch-selection rule (cited to `eval_match`, `eval.ml:7317`–`7342`).**
+
+- **First-match-wins, top-to-bottom.** `go 0 branches` (`eval.ml:7342`) walks
+  the list head-first; the branch loop `br :: rest` (`eval.ml:7323`) tries the
+  head, and on any failure recurses `go (arm_idx + 1) rest` (`eval.ml:7325`,
+  `:7340`) — so an earlier branch always shadows a later one that would also
+  match.
+- **Pattern-extended environment.** On `match_pattern v br.branch_pat = Some
+  bindings` (`eval.ml:7324`, `:7326`), the body and guard both run in `env' =
+  bindings @ env` (`eval.ml:7327`) — the σ bindings are *prepended* to ρ, so by
+  the §4.1 first-occurrence lookup rule a pattern variable shadows any
+  same-named outer binding for the duration of the arm.
+- **Guard (`branch_guard`, the `when g` clause).** The guard is
+  `br.branch_guard : expr option` (`ast.ml:108`). When absent (`None`) the
+  branch is selected outright (`guard_ok = true`, `eval.ml:7330`). When present
+  (`Some g`), the guard `g` is evaluated **in the pattern-extended env `env'`**
+  (`eval.ml:7332`) — so it may read the variables the pattern just bound — and
+  its result **must be a `VBool`**: `VBool b ⇒ guard_ok = b` (`eval.ml:7333`),
+  and any non-`VBool` value ⇒ `eval_error "guard must evaluate to a boolean"`
+  (`eval.ml:7334`). A guard that yields `VBool false` does NOT fail the whole
+  match; it falls through to the next branch (`go (arm_idx + 1) rest`,
+  `eval.ml:7340`), exactly as a non-matching pattern does. (Surface syntax:
+  `p when g -> e_b`, `parser.mly:1280` builds the branch, `when_guard` =
+  `WHEN; e = expr`, `parser.mly:409`–`410`.)
+- **Exhaustiveness / no-match.** When `go` reaches the empty list `[]` — no
+  branch's pattern matched, or every matching branch had a false guard — it
+  raises `Match_failure` (`eval.ml:7320`–`7322`) with the message
+  *"Non-exhaustive pattern match: no branch matched the value …"*. `match` is
+  therefore **not** statically total in this reference semantics: a
+  non-exhaustive `match` typechecks (the typechecker emits only a *warning*,
+  not an error, for a missing case) and fails at **runtime** with
+  `Match_failure` if control actually reaches the uncovered value — confirmed
+  by hand (`match n do 0 -> … 1 -> … end` on `n = 5` prints the exhaustiveness
+  warning at compile time, then panics `match failure — Non-exhaustive pattern
+  match: no branch matched the value 5` at run time, exit nonzero). A
+  `PatWild` (`_`) catch-all arm (`eval.ml:773`, `match(PatWild, v) = ∅`, always
+  succeeds) is the idiomatic way to make a `match` total; this is why no golden
+  program can be a runtime-`Match_failure` witness (a nonzero interpreter exit
+  is an automatic `INTERP FAIL` under `verify.sh`, the same harness limitation
+  §4.4.1 notes for the crashing strict-`&&`/`||` witness — g26 instead exhibits
+  the *complementary* fact, that a `_` catch-all keeps a `match` total and
+  matching).
 
 The matching relation `match(p, v) = σ | ⊥` returns bindings σ or failure
 (`eval.ml:771`):
@@ -581,6 +633,12 @@ match(PatRecord [(f₁=p₁)…(f_k=p_k)], VRecord fields)                eval.m
           matching partially
         else ⊥ if any named field is missing from the record
 match(PatRecord …, non-VRecord)     = ⊥                             eval.ml:824
+
+match(PatAs (p, x), v)   = match(p, v) ∪ { x ↦ v }                  eval.ml:826–829
+        provided  match(p, v) = σ ≠ ⊥  (inner pattern matches first),
+        then bind x to the WHOLE matched value v in ADDITION to σ;
+        if match(p, v) = ⊥ then match(PatAs …) = ⊥ (the as-binding is
+        conditional on the inner pattern succeeding)
 ```
 
 `match_list` (`eval.ml:832`–`840`) is the shared componentwise helper: a
@@ -613,6 +671,45 @@ program — `PatRecord` has no `{...}` pattern grammar production
 (`lib/tir/lower_match.ml:132–138`), so this subset-matching behavior can only
 be observed by constructing the AST node directly (e.g. from a test), not by
 writing and running a `.march` source file.
+
+**`PatAs` (`p as x`) binds the whole matched value AND the inner pattern's
+bindings.** `match_pattern`'s `PatAs (inner, alias, _)` arm (`eval.ml:826`–
+`829`) first matches the value against the *inner* pattern (`match_pattern v
+inner`); if that fails (`None`), the whole `PatAs` fails (`eval.ml:828`); if it
+succeeds with bindings `bs`, the result is `(alias.txt, v) :: bs`
+(`eval.ml:829`) — i.e. σ extended with the alias `x` bound to the ENTIRE value
+`v` that was matched, in addition to whatever the inner pattern bound. So
+`match(PatCon "Som" [PatVar "v"] as "whole", VCon("Som",[VInt 7]))` binds both
+`v ↦ VInt 7` (from the inner `PatVar`) and `whole ↦ VCon("Som",[VInt 7])` (the
+whole value). Because the alias is **prepended** (`:: bs`, `eval.ml:829`), it
+takes lookup precedence over any inner binding of the same name (§4.1
+first-occurrence rule) — an edge case that cannot arise from well-typed source
+anyway. The inner `p` may be any pattern, so `PatAs` composes with nesting like
+every other structural pattern; the recursion is `match_pattern`'s own, not a
+special case.
+
+**`PatAs` has no surface production at all — it is dead code, exactly like
+`PatRecord`, reachable only by constructing the AST node directly.** Grepping
+`parser.mly` for `PatAs` finds **zero** occurrences: the `pattern` grammar
+(`parser.mly:1311`–`1341`) has productions for `PatCon`/`PatAtom`/`PatWild`/
+`PatVar`/`PatLit`/`PatTuple` (and the list-literal sugar), but **no `pattern
+AS name` rule** — the `AS` token is used only for module aliases (`alias P as
+Q`, `parser.mly:704`–`707`) and as a soft identifier (`parser.mly:1361`),
+never to build a `PatAs`. Confirmed by hand against the built compiler: `p as
+x` is a parse error in every position tried — as a `match` arm (`Som(v) as
+whole -> …` and `n as whole -> …` both report *"I was expecting `->` in the
+match arm here"* at the `as`) and as a `let` binding (`let (n as whole) = 5`
+reports *"I got stuck here"* at the `as`). `desugar.ml`'s three `PatAs` arms
+(`:296, 1000, 1980`) only ever recurse into an *already-constructed* `PatAs`
+(respanning / collecting bound vars), never build one fresh from another
+surface form — the same "implemented in `eval.ml`/`desugar.ml`/`typecheck.ml`
+but unreachable from any parsed program" situation §2 documents for
+`PatRecord`. This spec therefore states the `PatAs` matching rule (above) for
+completeness and fidelity to `eval.ml`, but **no golden program in §5 exercises
+it**, because no March *source program* can construct one — the golden
+substitute (g27) instead exercises a guard reading pattern-bound variables,
+which IS reachable and covers the adjacent "bindings visible to the arm"
+semantics.
 
 `match(PatLit ℓ, v)` is one arm per literal kind, each requiring **both** the
 pattern and scrutinee to be the *same* value constructor with equal payload —
@@ -836,7 +933,7 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Twenty-three programs in `specs/lang/golden/`, each exercising a slice of the
+Twenty-seven programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -846,7 +943,13 @@ are Task 2's addition, covering tuple construction, destructuring, and nesting;
 `g17`–`g20` are Task 3's addition, covering record literals, field access, and
 functional update on the currently-working (non-divergent) subset; `g21`–`g23`
 are Task 4's addition, covering nullary-atom matching, payload-atom matching
-with binding, and an atom-returning function used in both `==` and `match`:
+with binding, and an atom-returning function used in both `==` and `match`;
+`g24`–`g27` are Task 5's addition, covering the full pattern language's
+matching + guard + exhaustiveness slice — a deeply nested pattern (con → tuple
+→ con), a guarded branch that FALLS THROUGH to a later branch, a deliberate
+`_` catch-all after specific patterns, and a guard reading its branch's own
+pattern-bound variables (the reachable substitute for the unparseable `PatAs`
+as-pattern — see the `PatAs` note in §4.3):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -873,8 +976,12 @@ with binding, and an atom-returning function used in both `==` and `match`:
 | `g21_atom_match.march` | nullary `EAtom`/`VAtom` matched against a nullary `PatAtom` in a `match` (E-Atom-0, match(PatAtom, VAtom)) | `matched ok` |
 | `g22_atom_payload_match.march` | payload `EAtom`/`VCon` matched against a payload `PatAtom`, binding the payload (E-Atom-N, match(PatAtom, VCon)) | `error: disk full` |
 | `g23_atom_returning_fn.march` | a function returning `:zero`/`:nonzero`, its result compared with atom `==` and separately dispatched over in a `match` | `true`/`was nonzero` |
+| `g24_nested_con_tuple.march` | deeply nested pattern — `PatCon (Wrap) [PatTuple [PatVar; PatCon (Som/Non)]]`, matched componentwise via `match_list` recursion at three depths (con → tuple → con → var) | `7` / `9` |
+| `g25_guard_fallthrough.march` | a `PatVar` branch whose guard `when n > 10` is FALSE for `n = 5`, so it falls through (`eval.ml:7340`) to a later branch that matches — the guard-fall-through witness | `big`/`small`/`nonpositive` |
+| `g26_catchall.march` | specific `PatCon` branches (`Red`/`Green`) then a deliberate `PatWild` (`_`) catch-all, which selects for every other value (`Blue`, `Other(7)`) and keeps the `match` total | `1`/`2`/`0`/`0` |
+| `g27_guard_binding.march` | a guard `when a == b` reading variables bound by its OWN branch pattern `P(a, b)` (guard evaluated in the pattern-extended env, `eval.ml:7327,7332`); false for `P(3, 10)` ⇒ falls through — the reachable substitute for the unparseable as-pattern | `0`/`7` |
 
-**Result: 23 / 23 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 27 / 27 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not

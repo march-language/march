@@ -1,0 +1,17 @@
+mod Main do
+  type Pair = P(Int, Int)
+  -- A guard that reads variables bound by the branch's OWN pattern: `a` and
+  -- `b` are bound by PatCon P(a, b), then the guard `when a == b` is evaluated
+  -- in that pattern-extended env (eval.ml:7327,7332). First branch's guard is
+  -- false for P(3, 4) ⇒ falls through to the second (also binding a, b).
+  fn diff(p) do
+    match p do
+      P(a, b) when a == b -> 0
+      P(a, b) -> b - a
+    end
+  end
+  fn main() do
+    println(int_to_string(diff(P(4, 4))))
+    println(int_to_string(diff(P(3, 10))))
+  end
+end
