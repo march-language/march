@@ -607,8 +607,12 @@ let parse_target s =
   | "wasm32-wasi" | "wasm32" -> March_tir.Llvm_emit.Wasm32Wasi
   | "wasm32-unknown-unknown" | "wasm-browser" | "browser" -> March_tir.Llvm_emit.Wasm32Unknown
   | "js" | "javascript" -> March_tir.Llvm_emit.Js
+  | "linux/amd64" | "linux/x86_64" | "linux-x86_64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; glibc_min = "2.31" })
+  | "linux/arm64" | "linux/aarch64" | "linux-arm64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; glibc_min = "2.31" })
   | other ->
-    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
+    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, linux/amd64, linux/arm64, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
     exit 1
 
 (* ------------------------------------------------------------------ *)
@@ -1203,6 +1207,10 @@ let compile filename =
         let target_parsed = parse_target !target_str in
         let target_label  = match target_parsed with
           | March_tir.Llvm_emit.Native          -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
@@ -1804,6 +1812,10 @@ let compile filename =
         (* CAS: check for a cached binary before running clang *)
         let target_label = match target with
           | March_tir.Llvm_emit.Native -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"

@@ -69,8 +69,10 @@
     [Llvm_emit.target_config] / [Llvm_emit.Native] / etc. unchanged. See
     [Llvm_toplevel]'s module doc for the promotion rationale (same
     criterion Task 6 used for [llvm_ret_ty]/[emit_reduction_check]). *)
+type arch = Llvm_toplevel.arch = X86_64 | Arm64
 type target_config = Llvm_toplevel.target_config =
   | Native
+  | LinuxGnu of { arch : arch; glibc_min : string }
   | Wasm64Wasi
   | Wasm32Wasi
   | Wasm32Unknown
@@ -79,6 +81,9 @@ type target_config = Llvm_toplevel.target_config =
 let is_wasm_target = Llvm_toplevel.is_wasm_target
 let is_wasm32 = Llvm_toplevel.is_wasm32
 let target_triple = Llvm_toplevel.target_triple
+let target_arch = Llvm_toplevel.target_arch
+let target_is_linux = Llvm_toplevel.target_is_linux
+let zig_target = Llvm_toplevel.zig_target
 let target_ptr_size = Llvm_toplevel.target_ptr_size
 let target_ptr_ty = Llvm_toplevel.target_ptr_ty
 let target_int_ty = Llvm_toplevel.target_int_ty
