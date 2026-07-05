@@ -1,0 +1,42 @@
+-- Tests for the Cli stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_cli.march
+
+mod TestCli do
+
+describe "Cli spec constructors" do
+
+  test "flag builds a BoolFlag spec with no short form" do
+    let spec = Cli.flag("verbose", "Enable verbose output")
+    assert (spec.long == "verbose")
+    assert (spec.arity == BoolFlag)
+    assert (spec.required == false)
+    match spec.short do
+    None -> assert true
+    Some(_) -> assert false
+    end
+  end
+
+  test "value_flag builds a ValueFlag spec" do
+    let spec = Cli.value_flag("output", "Output file path")
+    assert (spec.long == "output")
+    assert (spec.arity == ValueFlag)
+    assert (spec.required == false)
+  end
+
+  test "flag_with builds a fully custom spec" do
+    let spec = Cli.flag_with("port", Some("p"), ValueFlag, Some("4000"), true, "Port to listen on")
+    assert (spec.long == "port")
+    match spec.short do
+    Some(s) -> assert (s == "p")
+    None -> assert false
+    end
+    assert (spec.required == true)
+    match spec.default do
+    Some(d) -> assert (d == "4000")
+    None -> assert false
+    end
+  end
+
+end
+
+end

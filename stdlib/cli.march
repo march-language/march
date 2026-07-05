@@ -1,0 +1,79 @@
+-- Cli module: parse argv-style command-line arguments into typed values.
+--
+-- Public API:
+--   Cli.flag(long, help)                    : FlagSpec  (boolean, optional)
+--   Cli.value_flag(long, help)               : FlagSpec  (value-taking, optional)
+--   Cli.flag_with(long, short, arity, default, required, help) : FlagSpec
+--   Cli.parse(specs, argv)                   : Result(ParsedArgs, CliError)
+--   Cli.get_string(parsed, long)              : Option(String)
+--   Cli.get_string_or(parsed, long, default)  : String
+--   Cli.get_int(parsed, long)                 : Option(Int)
+--   Cli.get_bool(parsed, long)                : Bool
+--   Cli.positional(parsed)                    : List(String)
+--   Cli.error_message(err)                    : String
+--   Cli.help_text(program_name, specs)        : String
+
+mod Cli do
+
+  type FlagArity = BoolFlag | ValueFlag
+
+  type FlagSpec = {
+    long:     String,
+    short:    Option(String),
+    arity:    FlagArity,
+    default:  Option(String),
+    required: Bool,
+    help:     String
+  }
+
+  type CliError
+    = UnknownFlag(String)
+    | MissingValue(String)
+    | MissingRequired(String)
+    | InvalidValue(String, String)
+
+  type ParsedArgs = {
+    values:     List((String, String)),
+    positional: List(String)
+  }
+
+  doc """
+  Build a boolean flag spec (no short form, optional, defaults to unset/false).
+
+  ## Examples
+
+      march> let spec = Cli.flag("verbose", "Enable verbose output")
+      march> spec.long
+      "verbose"
+  """
+  fn flag(long : String, help : String) : FlagSpec do
+    { long: long, short: None, arity: BoolFlag, default: None, required: false, help: help }
+  end
+
+  doc """
+  Build a value-taking flag spec (no short form, optional, no default).
+
+  ## Examples
+
+      march> let spec = Cli.value_flag("output", "Output file path")
+      march> spec.long
+      "output"
+  """
+  fn value_flag(long : String, help : String) : FlagSpec do
+    { long: long, short: None, arity: ValueFlag, default: None, required: false, help: help }
+  end
+
+  doc """
+  Build a fully custom flag spec.
+
+  ## Examples
+
+      march> let spec = Cli.flag_with("port", Some("p"), ValueFlag, Some("4000"), true, "Port to listen on")
+      march> spec.required
+      true
+  """
+  fn flag_with(long : String, short : Option(String), arity : FlagArity, default : Option(String), required : Bool, help : String) : FlagSpec do
+    { long: long, short: short, arity: arity, default: default, required: required, help: help }
+  end
+
+end

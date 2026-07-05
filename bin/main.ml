@@ -210,6 +210,7 @@ let stdlib_file_list = [
   "presence.march";
   "env.march";
   "config.march";
+  "cli.march";
   "test.march";
   "tuple.march";
   "char.march";
