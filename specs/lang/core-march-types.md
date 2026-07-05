@@ -16,10 +16,11 @@ mean"). This document is "which programs are well-typed."
 `core-march.md` documented the interpreter's *operational* rules. This document
 documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the same
 kind of small fragment: literals, variables, `let` (with generalization), lambda,
-application, the `+`/`==` primitives, `if`, and (as of Task 1) **ADT constructors
-and `match`**. Same discipline as the operational skeleton: **every rule is
-transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
-and a conformance corpus keeps it honest.
+application, the `+`/`==` primitives, `if`, (as of Task 1) **ADT constructors
+and `match`**, and (as of Task 2) **tuples and records**. Same discipline as
+the operational skeleton: **every rule is transcribed arm-for-arm from
+`lib/typecheck/typecheck.ml` and cited by line**, and a conformance corpus
+keeps it honest.
 
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is nothing to
@@ -31,8 +32,8 @@ error message*). This catches both a spec that misdescribes the typechecker and 
 typechecker regression.
 
 Deferred (later typing slices, matching `core-march.md`'s deferred set):
-records/tuples/atoms typing, the interface/impl resolution machinery,
-refinements, linearity, capabilities, effects.
+atoms typing, the interface/impl resolution machinery, refinements, linearity,
+capabilities, effects.
 
 ## 1. The typing judgment
 
@@ -49,7 +50,7 @@ Types `τ`, schemes `σ`, and environment `Γ`:
 τ ::= Int | Float | Bool | String | Atom      -- TCon(name,[])          typecheck.ml:943–948
     | τ → τ                                    -- TArrow
     | α                                        -- TVar (unification var, carries a level)
-    | C(τ…) | (τ,…) | { l:τ,… }                -- TCon(C,args) / TTuple / TRecord (later slices)
+    | C(τ…) | (τ,…) | { l:τ,… }                -- TCon(C,args) / TTuple (§2, T-Tuple) / TRecord (§2, T-Record)
 
 σ ::= τ | ∀ᾱ [C̄]. τ                            -- Mono τ | Poly(ids, constraints, τ)
 ```
@@ -209,13 +210,155 @@ pattern's bindings):
           --   but I got M."                                                   typecheck.ml:2645–2651
           -- ambiguous bare `C` (multiple types define it) ⇒ a HINT (not an
           --   error) suggesting the qualified form `Type.C`                   typecheck.ml:2631–2641
+
+(P-Tuple) ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, componentwise recursion)  typecheck.ml:2582–2586
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ PatTuple [p₁…pₖ] : TTuple [τ₁…τₖ] ⊣ Γ, Γ₁, …, Γₖ
+          -- unlike P-Con, there is no separate arity check IN this arm —
+          --   PatTuple's result type TTuple [τ₁…τₖ] has exactly |ps|
+          --   components by construction, so an arity mismatch against the
+          --   scrutinee/expected type is caught later, at the unify call
+          --   site that relates this pattern's type to the scrutinee (e.g.
+          --   T-Let's `unify env_rhs rhs_ty pat_ty`, typecheck.ml:4308, or
+          --   T-Match's per-branch pattern unification, typecheck.ml:4277)
+          --   — same "no dedicated arity message, falls to the generic
+          --   report_mismatch" shape as T-Tuple (§2) above
+          -- cf. operational match(PatTuple, VTuple), core-march.md (the
+          --   E-Tuple neighborhood) — componentwise recursion mirrors
+          --   `infer_pattern`'s recursive structure exactly: each element
+          --   pattern is typed independently (no `~expected` threading here,
+          --   unlike P-Con, since a tuple has no declared per-slot type to
+          --   thread in)
 ```
+
+**No `(P-Record)` rule: `PatRecord` is unreachable from surface syntax**, exactly
+as `core-march.md` already documents for the operational side (`core-march.md:181–196`,
+"`PatRecord` has no surface production at all — it is dead code, reachable
+only by constructing the AST node directly"). Grepping `lib/parser/parser.mly`
+for `PatRecord` finds zero occurrences; the typechecker's own `infer_pattern`
+arm for it (typecheck.ml:2671–2680 — componentwise field recursion into a
+sorted `TRecord`, structurally the record-analog of P-Tuple above) can
+therefore never fire on a program a user actually wrote. Per this document's
+own methodology (§0: "every rule is transcribed... and cited"), no `(P-Record)`
+rule is stated here — inventing one would document code the parser can never
+reach, mirroring exactly how `core-march.md` handled the same gap for its
+`match(PatRecord …)` rule.
 
 `instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
 side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation
 underlies `Some(5)` (an `ECon`) and `Some(x) -> …` (a `PatCon`) alike, which is
 why a `match`'s scrutinee type and its constructor patterns unify cleanly: both
 sides go through `instantiate_ctor` against the same `ctor_info`.
+
+```
+(T-Tuple) Γ ⊢ eᵢ ⇒ τᵢ   (i = 1..k, k ≥ 1)                     typecheck.ml:3851–3852
+          ────────────────────────────────────────────────
+          Γ ⊢ ETuple [e₁…e_k] ⇒ TTuple [τ₁…τ_k]
+          -- ETuple [] ⇒ t_unit (the same `()`-as-VUnit alias the operational
+          --   side documents, NOT a genuine 0-ary TTuple)                    typecheck.ml:3851
+          -- cf. operational (E-Tuple), core-march.md:383–389 — eval's ETuple
+          --   arm builds a VTuple from the same left-to-right element order;
+          --   this rule is its typing counterpart. No arity check is needed
+          --   here (unlike T-Con): a tuple "constructor" has no declared
+          --   shape to check arity against — TTuple's arity is simply
+          --   |elements|. Two TTuples of DIFFERENT lengths are still
+          --   rejected, but at unify time (see the T-Tuple mismatch note
+          --   below), not in this arm.
+          -- a length mismatch between a TTuple and its expected/annotated
+          --   type is NOT one of unify's *guarded* structural cases — unify
+          --   only iterates componentwise `when List.length ts1 = List.length
+          --   ts2` (typecheck.ml:2122–2123); a length MISMATCH instead falls
+          --   through to the catch-all `report_mismatch` (typecheck.ml:2172–
+          --   2173), which renders the generic "expected `(τ…)` but got
+          --   `(τ…)`." headline — there is no tuple-specific arity message
+          --   the way T-Con/P-Con have their own "expects N argument(s)"
+          --   text.
+
+(T-Record) Γ ⊢ eᵢ ⇒ τᵢ   (i = 1..k, over the fields as written    typecheck.ml:3855–3857
+           in source order)
+           ────────────────────────────────────────────────────────
+           Γ ⊢ ERecord [(f₁=e₁)…(f_k=e_k)] ⇒ TRecord (sort_by_name [(f₁,τ₁)…(f_k,τ_k)])
+           -- the field list is SORTED BY NAME before becoming a TRecord
+           --   (`List.sort (fun (a,_)(b,_) -> String.compare a b)`,
+           --   typecheck.ml:3857) — TRecord's internal representation is
+           --   order-independent by construction, which is exactly why
+           --   `unify`'s TRecord case (typecheck.ml:2125–2137) can compare
+           --   two TRecords' field-name lists with plain `<>` instead of a
+           --   set comparison: both sides are always pre-sorted.
+           -- NO duplicate-field-name check — a repeated field name (e.g.
+           --   `{ x: 1, x: 2 }`) is not rejected at this arm; `List.sort` is
+           --   stable but does not dedup, so the TRecord can carry a
+           --   duplicate key, mirroring the operational side's identical gap
+           --   (core-march.md:395–400, "the typechecker's ERecord case does
+           --   not reject duplicate names either")
+           -- surface syntax uses `:` for field bindings (`{ x: 1 }`), NOT
+           --   `=`, despite what `ast.ml`'s doc comments show — the same
+           --   fidelity note the operational spec already recorded
+           --   (core-march.md:167–169)
+           -- cf. operational (E-Record), core-march.md:391–400
+
+(T-Field) Γ ⊢ e ⇒ τ                                                typecheck.ml:3900, 3939
+          expand_record env τ = Some (TRecord flds)                typecheck.ml:2401–2435, 3940
+          (l : τ_l) ∈ flds                                         typecheck.ml:3942–3943
+          ────────────────────────────────────────────────────────
+          Γ ⊢ EField e l ⇒ τ_l
+          -- `expand_record` (typecheck.ml:2401) is what lets this rule apply
+          --   not just to a literal `TRecord` but also to a NAMED record type
+          --   (`TCon("Point",[])` for a `type Point = { x: Int, y: Int }`
+          --   declaration) — it resolves the constructor to its structural
+          --   field list (from `env.records`, or the cross-module registry
+          --   for a lazily-loaded record type) before the field lookup
+          -- l ∉ flds ⇒ "This record does not have a field called `l`.\nThe
+          --   fields I see are: <comma-joined flds>"                         typecheck.ml:3980–3987
+          -- τ resolves to neither TRecord-like nor an unbound TVar (i.e. is
+          --   some OTHER concrete type, e.g. Int) ⇒ "I cannot access field
+          --   `l` because this expression has type `<τ>`, which is not a
+          --   record."                                                       typecheck.ml:3989–3998
+          -- τ is an unbound TVar (erased/still-unknown base) ⇒ NOT an error:
+          --   returns a FRESH unification variable instead, deferring the
+          --   check (a row-polymorphism gap noted in-line as a TODO)         typecheck.ml:3990–3993
+          -- EField ALSO doubles as qualified module-member access
+          --   (`Mod.member`), tried FIRST via a dotted-path reconstruction
+          --   over ECon/EField chains, before this record-field rule is even
+          --   attempted                                                      typecheck.ml:3900–3935
+          -- cf. operational (E-Field), core-march.md:438–449 — same
+          --   first-occurrence-lookup / module-path-doubling shape
+
+(T-Update) Γ ⊢ e_b ⇒ τ_b     Γ ⊢ eᵢ ⇒ υᵢ  (i=1..m, over updates    typecheck.ml:3860–3864
+           as written in source order)
+           expand_record env τ_b = Some (TRecord flds)             typecheck.ml:3865–3866
+           ∀ (gᵢ, υᵢ): (gᵢ : φᵢ) ∈ flds   unify(φᵢ, υᵢ)             typecheck.ml:3867–3873
+           ────────────────────────────────────────────────────────
+           Γ ⊢ ERecordUpdate e_b [(g₁=e₁)…(g_m=e_m)] ⇒ τ_b
+           -- gᵢ ∉ flds (for a base whose type IS a resolvable TRecord) ⇒
+           --   "This record does not have a field called `gᵢ`.\nThe fields I
+           --   know about are: <comma-joined flds>" — REJECTED AT TYPECHECK
+           --   TIME                                                          typecheck.ml:3874–3880
+           -- this is the static counterpart of the operational missing-field
+           --   adjudication (core-march.md §4.2.1): for a base with a
+           --   concrete, statically-known TRecord type, `ERecordUpdate` on an
+           --   absent field NEVER reaches eval/codegen at all — it is
+           --   rejected here, at typecheck.ml:3865–3892, exactly as
+           --   core-march.md:559–567 already documents ("so E-Update's
+           --   runtime behavior on an absent field is unreachable for a
+           --   statically-typed base"). The runtime missing-field error
+           --   (`eval_error "record update: no field '%s' in record"`,
+           --   the compiled panic, etc.) is ONLY observable when `τ_b` is an
+           --   erased/unconstrained TVar that `expand_record` cannot resolve
+           --   (the `TVar _` branch just below, next bullet) — e.g. a base
+           --   produced by a fully polymorphic stdlib builtin like
+           --   `record_from_list`.
+           -- τ_b is an unbound TVar (erased base, expand_record returns
+           --   None) ⇒ NOT an error here: builds a PARTIAL TRecord constraint
+           --   out of the update list's OWN field names and unifies τ_b
+           --   against it, deferring the "does this field actually exist"
+           --   question to runtime (see core-march.md §4.2.1 for the
+           --   interpreter/compiled convergence on that runtime check)        typecheck.ml:3883–3891
+           -- τ_b resolves to neither a TRecord-like type nor a TVar (some
+           --   other concrete non-record type) ⇒ "I can only use `{ … with
+           --   … }` on a record, but this expression has type `<τ_b>`."       typecheck.ml:3892–3897
+           -- cf. operational (E-Update), core-march.md:402–436
+```
 
 ## 3. Conformance corpus
 
@@ -243,14 +386,20 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `accept/t07_generic_option_two_types` | accept | T-Con/P-Con with a fresh instantiation per occurrence — a generic `Box(a) = Full(a) \| Vacant` used at both `Int` and `String` | typechecks |
 | `reject/t05_ctor_arity` | reject | T-Con arity (`ECon` arm) | `` Constructor `Circle` expects 1 argument(s) but I got 2. `` |
 | `reject/t06_match_branch_mismatch` | reject | T-Match branch-body unification | `All branches of a match must have the same type.` |
+| `accept/t08_tuple_construct_destructure` | accept | T-Tuple + P-Tuple — a tuple built and destructured both by a `match` and by a function-arg `PatTuple` | typechecks |
+| `accept/t09_record_literal_field` | accept | T-Record + T-Field — a record literal built (`{ x: 1, y: 2 }`) and both fields read via `EField` | typechecks |
+| `accept/t10_record_update_existing_field` | accept | T-Update — `{ p with x: 100 }` on an existing field, result type unchanged | typechecks |
+| `reject/t07_field_missing` | reject | T-Field "no such field" (`EField` arm) | `` This record does not have a field called `z`. `` |
+| `reject/t08_tuple_arity_mismatch` | reject | T-Tuple/unify length mismatch, via T-App checking a `(Int,Int)`-annotated param against a 3-tuple argument | `` expected `(Int, Int)` but got `(Int, Int, Int)`. `` |
+| `reject/t09_record_update_missing_field` | reject | T-Update "no such field" (`ERecordUpdate` arm, concrete-`TRecord` base) | `` This record does not have a field called `z`. `` |
 
-**Result: 13 / 13 (7 accept typecheck, 6 reject with the declared error).**
+**Result: 19 / 19 (10 accept typecheck, 9 reject with the declared error).**
 
 ## 4. Faithfulness + the key findings
 
 The rules were transcribed arm-for-arm from `typecheck.ml` at the cited lines
 (human-reviewed, not mechanically verified — the roadmap §7 faithfulness risk);
-the `accept/reject` corpus is the executable anchor. Four findings this skeleton
+the `accept/reject` corpus is the executable anchor. Findings this skeleton
 pins that are easy to get wrong and are load-bearing:
 
 1. **No value restriction.** `generalize` runs whenever the `let` binds a simple
@@ -272,6 +421,30 @@ pins that are easy to get wrong and are load-bearing:
    `instantiate` for `T-Var`, §1). Non-exhaustive `match` is a WARNING
    (`check_exhaustiveness`, typecheck.ml:4288), not a typing error — it does not
    affect accept/reject in this corpus.
+5. **Structural, order-independent records.** `ERecord` sorts its field list by
+   name at construction (typecheck.ml:3857) and `PatRecord` does likewise
+   (typecheck.ml:2679), so two `TRecord`s are compared fieldwise by plain list
+   equality (`unify`'s `TRecord` case, typecheck.ml:2125–2137) rather than a
+   set/row comparison — `{ y: 2, x: 1 }` and `{ x: 1, y: 2 }` are the identical
+   type. There is no row-polymorphism: a record's exact field set must be known
+   (or the base type is an unconstrained `TVar`, in which case field checks are
+   deferred entirely — the `EField`/`ERecordUpdate` `TVar` branches, §2 above).
+6. **`ERecordUpdate` rejects an absent field STATICALLY, for a concrete base
+   type** — this is the type-side half of `core-march.md` §4.2.1's
+   interpreter/compiled divergence adjudication. The runtime "no field ... in
+   record" error the operational spec discusses is only reachable when the
+   base's type is an erased `TVar` (e.g. flowing through a fully polymorphic
+   stdlib builtin like `record_from_list`); for any program whose record base
+   has a concrete, resolvable `TRecord` shape, a missing-field update is a
+   typecheck-time rejection and never reaches eval/codegen at all
+   (`reject/t09_record_update_missing_field` is the witness).
+7. **No tuple/record arity error text — mismatches fall through to the generic
+   unify diagnostic.** Unlike `T-Con`/`P-Con` ("Constructor `C` expects N
+   argument(s)..."), a `TTuple` length mismatch has no dedicated message: the
+   guarded `unify` case only fires `when List.length ts1 = List.length ts2`
+   (typecheck.ml:2122), so a length mismatch instead falls to the catch-all
+   `report_mismatch` and renders as a generic `expected \`(τ…)\` but got
+   \`(τ…)\`.` (`reject/t08_tuple_arity_mismatch` is the witness).
 
 ## 5. What this validated, and what's next
 
@@ -282,16 +455,30 @@ pinning), and the doc format (judgment → cited rules → accept/reject table) 
 replicable template. `check_types.sh` is the committed anchor; it belongs in a
 slow CI lane alongside `@oracle`.
 
-**Task 1 (this slice) added:** ADT constructor + `match` typing — (T-Con),
+**Task 1 added:** ADT constructor + `match` typing — (T-Con),
 (T-Match), and the pattern-typing relation `Γ ⊢ p : τ ⊣ Γ'` for `PatCon`/
 `PatVar`/`PatWild`/`PatLit` (§2, §2.2), transcribed from `instantiate_ctor`
 (typecheck.ml:2387), the `ECon` arm of `infer_expr` (typecheck.ml:3737),
 `infer_match` (typecheck.ml:4273), and `infer_pattern` (typecheck.ml:2566).
 
-**Next (widening slices, each like this one):** records/tuples/atoms typing
-(`PatTuple`/`PatRecord`/`PatAtom`, `TTuple`/`TRecord`, already sketched in
-`infer_pattern` typecheck.ml:2582–2680 but not yet given rules here); then the
-interface/impl resolution that discharges the `Num`/`Eq` constraints (§2.1) —
-the richest and most bug-prone part, and the type-side complement to the
-operational core. Together, `core-march.md` (operational) + this document (typing)
-are **Level-1 for the Core March fragment**.
+**Task 2 (this slice) added:** tuples + records typing — (T-Tuple), (T-Record),
+(T-Field), (T-Update), and the pattern-typing relation extended with
+`(P-Tuple)` (§2, §2.2), transcribed from the `ETuple`/`ERecord`/`EField`/
+`ERecordUpdate` arms of `infer_expr` (typecheck.ml:3851, 3855, 3900, 3860) and
+the `PatTuple` arm of `infer_pattern` (typecheck.ml:2582). `PatRecord` was
+confirmed unreachable from surface syntax (zero `parser.mly` occurrences,
+matching `core-march.md`'s prior finding for the operational side), so no
+`(P-Record)` rule was invented — only a one-line note pointing at its
+(unreachable) `infer_pattern` arm (typecheck.ml:2671). The static/runtime
+missing-field-on-update divergence adjudicated operationally in
+`core-march.md` §4.2.1 is now also pinned on the type side: a concrete-base
+missing-field update is a typecheck-time rejection (T-Update, §2), and the
+runtime error path is only live for an erased `TVar` base.
+
+**Next (widening slices, each like this one):** atoms typing (`PatAtom`,
+`EAtom`/`t_atom`, already sketched in `infer_pattern` typecheck.ml:2666–2669
+but not yet given a rule here); then the interface/impl resolution that
+discharges the `Num`/`Eq` constraints (§2.1) — the richest and most bug-prone
+part, and the type-side complement to the operational core. Together,
+`core-march.md` (operational) + this document (typing) are **Level-1 for the
+Core March fragment**.
