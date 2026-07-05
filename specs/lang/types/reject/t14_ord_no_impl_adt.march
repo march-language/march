@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: `Hue` does not implement interface `Ord`
+mod M do
+  type Hue = Rood | Bloo
+
+  fn main() do
+    let a = Rood
+    let b = Bloo
+    println(if a < b do "y" else "n" end)
+  end
+end

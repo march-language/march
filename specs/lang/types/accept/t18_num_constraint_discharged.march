@@ -1,0 +1,6 @@
+mod M do
+  fn main() do
+    println(int_to_string(1 + 2))
+    println(float_to_string(1.0 +. 2.0))
+  end
+end

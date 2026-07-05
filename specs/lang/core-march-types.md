@@ -19,7 +19,9 @@ kind of small fragment: literals, variables, `let` (with generalization), lambda
 application, the `+`/`==` primitives, `if`, (as of Task 1) **ADT constructors
 and `match`**, (as of Task 2) **tuples and records**, (as of Task 3)
 **atoms**, (as of Task 4) **match guards and scrutinee-less `match do`
-(`ECond`)**, and (as of Task 5) **local recursive functions (`ELetFn`)**.
+(`ECond`)**, (as of Task 5) **local recursive functions (`ELetFn`)**, and (as
+of Task 6) **the interface-constraint model** (`Num`/`Eq`/`Ord`/`Show`
+discharge, §2.1/§2.1a/§2.1b) and the boolean primitives `&&`/`||`/`not`.
 Same discipline as the operational skeleton: **every rule is
 transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
 and a conformance corpus keeps it honest.
@@ -33,9 +35,12 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-Deferred (later typing slices, matching `core-march.md`'s deferred set): the
-interface/impl resolution machinery, refinements, linearity, capabilities,
-effects.
+Deferred (later typing slices, matching `core-march.md`'s deferred set):
+user-defined `impl`/interface DECLARATION syntax and superclass/coherence
+rules beyond the four built-in interfaces (Task 6 documents how a
+`Num`/`Eq`/`Ord`/`Show` constraint is discharged, not the full generality of
+user-declared interfaces — see §2.1a's scope note), refinements, linearity,
+capabilities, effects.
 
 ## 1. The typing judgment
 
@@ -58,15 +63,53 @@ Types `τ`, schemes `σ`, and environment `Γ`:
 ```
 
 A scheme `σ` may carry **interface constraints** `C̄` (e.g. `Num a`, `Eq a`) —
-discharged separately from unification. Two HM operations move between `τ` and `σ`:
+discharged separately from unification. The constraint type itself
+(`typecheck.ml:128–133`):
 
-- **`instantiate` (:897)** — `∀ᾱ[C̄].τ` → a monotype by replacing each quantified
-  `αᵢ` with a *fresh unification variable at the current level*; the constraints
-  are instantiated onto `env.pending_constraints`.
-- **`generalize level τ` (:845)** — quantify every unbound unification variable in
-  `τ` whose level `> level` (the ones "born inside" the current `let`), yielding a
-  `Poly` scheme. Uses a **level** discipline (each `let` RHS is typed at a bumped
-  level via `enter_level`) instead of a global free-variable scan.
+```
+type constraint_ =
+  | CNum of ty                  -- t must be Int or Float (arithmetic)
+  | COrd of ty                  -- t must be Int, Float, or String (LEGACY — see §2.1b, dead)
+  | CInterface of string * ty   -- t must implement the named interface (via env.impls)
+  | CADTBound of string * ty    -- t must be a constructor of the named ADT (bounded type params, §2.1b)
+  | CTNatBound of ty            -- t must be a type-level Nat (bounded type params, §2.1b)
+```
+
+and the scheme type (`typecheck.ml:139–141`): `Poly of int list * constraint_
+list * ty` — the quantified variable ids, the constraint list `C̄`, and the
+body type. `env.pending_constraints : constraint_ list ref`
+(`typecheck.ml:445`) is the accumulator every constraint is pushed onto as it
+arises; it is drained (and reset to `[]`) by `discharge_constraints` (§2.1a)
+at each declaration boundary.
+
+Two HM operations move between `τ` and `σ`, and are where a constraint
+respectively **arises** and is **quantified away**:
+
+- **`instantiate level env sch` (:866–902)** — `∀ᾱ[C̄].τ` → a monotype by
+  replacing each quantified `αᵢ` with a *fresh unification variable at the
+  current level* (:869, `subst`); each constraint in `C̄` has its own type
+  argument substituted the same way (:894–899, `inst_cs`) and the resulting,
+  freshly-instantiated constraints are prepended onto
+  `env.pending_constraints` (:901) — **this is the CREATION site**: every
+  occurrence of a constraint-carrying variable (`+`, `==`, `<`, `show`, …,
+  §2.1) pushes a fresh obligation here, exactly like `EVar`'s ordinary T-Var
+  instantiation (§1 above) — constraint creation is not a special case of
+  `EVar`/T-Var, it is a side effect woven into the SAME function.
+- **`generalize level τ` (:810–860)** — quantify every unbound unification
+  variable in `τ` whose level `> level` (the ones "born inside" the current
+  `let`), yielding a `Poly` scheme. Uses a **level** discipline (each `let`
+  RHS is typed at a bumped level via `enter_level`) instead of a global
+  free-variable scan. **Load-bearing subtlety:** `generalize` ALWAYS returns
+  `Poly (ids, [], copy ty)` — an EMPTY constraint list (:859) — regardless of
+  what constraints are pending; it also allocates **fresh, isolated `TVar`
+  refs** for each quantified id (:831–834, "so a later function body can
+  unify the original TVar" without corrupting an already-stored scheme) that
+  share only the *integer id*, not the ref cell, with whatever `TVar` a
+  constraint elsewhere still points at. `generalize` itself never attaches a
+  constraint to the scheme it builds — callers that want a constraint to
+  survive generalization must re-attach it explicitly afterward (this is
+  exactly what `check_fn`'s `when`-clause handling does, and where it can go
+  wrong — see the §4 finding on `when`-bound constraints below).
 
 ## 2. Typing rules (the fragment)
 
@@ -396,22 +439,269 @@ is advisory, not enforced.
 
 ### 2.1 Primitive typing (δ-typing)
 
-`+` and `==` are **not** magic — they are ordinary variables bound in the base
-environment to **interface-constrained polymorphic schemes** (`typecheck.ml:1206–1249`),
-resolved and instantiated exactly like any `EVar` (T-Var):
+`+`, `-`, `*`, `/`, `negate`, `<`, `>`, `<=`, `>=`, `==`, `!=` are **not**
+magic — they are ordinary variables bound in the base environment
+(`builtin_bindings`, `typecheck.ml:1189–1283`) to **interface-constrained
+polymorphic schemes**, resolved and instantiated exactly like any `EVar`
+(T-Var, §1):
 
 ```
-(δT-Add)  + : ∀a [Num a]. a → a → a            typecheck.ml:1229   (poly1_num)
-(δT-Eq)   == : ∀a [Eq a]. a → a → Bool          typecheck.ml:1248   (poly1_iface "Eq")
+(δT-Add)  +, -, *, / : ∀a [Num a]. a → a → a       typecheck.ml:1223–1226  (poly1_num)
+(δT-Neg)  negate      : ∀a [Num a]. a → a          typecheck.ml:1228       (poly1_num)
+(δT-Ord)  <, >, <=, >= : ∀a [Ord a]. a → a → Bool  typecheck.ml:1235–1238  (poly1_iface "Ord")
+(δT-Eq)   ==, !=      : ∀a [Eq a]. a → a → Bool    typecheck.ml:1242–1243  (poly1_iface "Eq")
 ```
 
-So `2 + 3` instantiates `a := Int` and discharges `Num Int`; `x == y` instantiates
-`a` to the operand type and discharges `Eq a`. This is *ad-hoc polymorphism via
-interfaces layered on HM*, not overloading resolved by the parser — a genuinely
-load-bearing fact (a program `1 + "x"` fails because `+`'s two args must share one
-`a`, and `Int`/`String` don't unify, **not** because `+` is "the Int operator").
+So `2 + 3` instantiates `a := Int` and pushes a pending `CNum Int` obligation;
+`x == y` instantiates `a` to the operand type and pushes `CInterface("Eq",
+a)`. This is *ad-hoc polymorphism via interfaces layered on HM*, not
+overloading resolved by the parser — a genuinely load-bearing fact (a program
+`1 + "x"` fails because `+`'s two args must share one `a`, and `Int`/`String`
+don't unify, **not** because `+` is "the Int operator"). `%` (Int-only
+modulo), `+.`/`-.`/`*.`/`/.` (the Float-only dotted arithmetic operators) are
+**not** constrained at all — `Mono` schemes over concrete `Int`/`Float`
+(`typecheck.ml:1227, 1230–1233`), exactly like ordinary monomorphic
+functions; only the OVERLOADED (works-on-either-Int-or-Float, or
+works-on-any-Ord/Eq-type) forms carry a constraint.
 
-### 2.1a Conditionals without a scrutinee: `ECond` (`match do c -> b … end`)
+`show`, `eq`, `compare`, `hash` (and their qualified forms `Show.show`,
+`Eq.eq`, `Ord.compare`, `Hash.hash`) are the same shape, one level up: each is
+built by `mk_iface_method_scheme` (`typecheck.ml:1163–1167`,
+`Poly([a], [CInterface(iface,a)], mk_ty a)`) and registered in
+`builtin_interface_bindings` (`typecheck.ml:1174–1184`):
+
+```
+(δT-Show) show : ∀a [Show a]. a → String           typecheck.ml:1177, 1182
+```
+
+`println(x)`'s stdlib-level polymorphism over `Show` (`stdlib/prelude.march`,
+outside this fragment) ultimately bottoms out at this same `show` binding.
+
+**Two constraint kinds, two different discharge strategies — the load-bearing
+distinction of this task.** Despite both being written `∀a [Iface a]. …` in
+the rules above, `Num` and `Ord`/`Eq`/`Show` are checked by GENUINELY
+DIFFERENT code paths inside `discharge_constraints` (§2.1a below):
+
+- **`CNum`** (`+`/`-`/`*`/`/`/`negate`) is checked by a HARDCODED match on the
+  concrete type's `TCon` name — `"Int"` or `"Float"`, nothing else, ever
+  (`typecheck.ml:4936–4937`). There is no `env.impls` lookup, no user-facing
+  `impl Num(T)` declaration form exists, and `Num` is not even a member of
+  `env.interfaces` (confirmed live: `fn f(a,b) when Num(a) do a + b end`
+  rejects with `` I don't know a constructor called `Num`. `` — `Num` cannot
+  be named in a `when`-clause at all). `Num` is a CLOSED, compiler-builtin
+  set of exactly two types.
+- **`Ord`/`Eq`/`Show`/`Hash`** (`<`/`>`/`<=`/`>=`, `==`/`!=`, `show`, `hash`)
+  are checked via `CInterface(iface_name, t)` against `env.impls` — an
+  OPEN, extensible table seeded with built-ins (§2.1b) but extensible by any
+  user `impl Ord(MyType) do ... end` block (`typecheck.ml:6713–6848`, the
+  `DImpl` arm, which calls `register_impl_shape`-style insertion into
+  `env.impls` — see §2.1b for the exact seed list).
+
+**A THIRD constraint kind, `COrd`, exists in the type but is DEAD — not used
+by any live scheme.** `constraint_`'s `COrd` variant (`typecheck.ml:130`) and
+its constructor helper `_poly1_ord` (`typecheck.ml:1205–1208`, underscore-
+prefixed to suppress the unused-value warning) are fully implemented —
+`discharge_constraints` has real logic for `COrd` (`typecheck.ml:4933,
+4939–4940, 4947`, "String is Ord" / "COrd unresolved — leave polymorphic") —
+but `_poly1_ord` is never called anywhere in `builtin_bindings`: `<`/`>`/`<=`/
+`>=` all use `poly1_iface "Ord"` → `CInterface("Ord", a)` (confirmed above),
+NOT `COrd`. This is a real, if harmless, piece of dead code in the live
+compiler: the comment at `typecheck.ml:1205` ("legacy COrd path") documents
+the fact — `Ord` migrated from a `CNum`-style hardcoded-type-name check to
+the general `CInterface`/`env.impls` mechanism at some point, and the old
+path was left in place rather than deleted. No March program can ever
+exercise a live `COrd` constraint.
+
+### 2.1a Constraint discharge: `(T-Discharge)`
+
+`discharge_constraints env span` (`typecheck.ml:4913–5030`) drains
+`env.pending_constraints`, resetting it to `[]` when done (:5030), and is
+called at every **declaration boundary** — NOT after every expression or
+every call to `+`/`==`/etc.:
+
+```
+discharge_constraints env sp   -- Ast.DFn arm of check_decl     typecheck.ml:6271
+discharge_constraints env sp   -- Ast.DLet arm of check_decl     typecheck.ml:6280
+discharge_constraints env_with_impl _sp  -- Ast.DImpl arm (both branches)  typecheck.ml:6843, 6846
+```
+
+So a constraint created while typing a `DFn`'s body (via `instantiate`, §1)
+sits on `env.pending_constraints` until that WHOLE function's `check_fn` call
+returns, then is resolved all at once by the single `discharge_constraints`
+call following it. This is why the "String does not implement Num" error
+(below) is reported at the `fn`'s own span, not at the `+` call site's span —
+the constraint is bound to a span only at the discharge call, which uses the
+DECLARATION's span (`sp`/`fn_span`), not the constraint's point of origin.
+
+```
+(T-Discharge)  ∀ c ∈ !(env.pending_constraints):                         typecheck.ml:4913–5030 (discharge_constraints)
+               match c with
+               | CNum t | COrd t                                          typecheck.ml:4933–4950
+                 → repr t = TCon("Int"|"Float", [])         ⇒ OK (both kinds)
+                 → repr t = TCon("String", [])               ⇒ OK if COrd, ERROR if CNum:
+                     "String does not implement Num (only Int and Float do)."
+                 → repr t = TVar _ (still unresolved)         ⇒ CNum DEFAULTS the var
+                     to Int (`r := Link (TCon ("Int", []))`, :4946); COrd
+                     leaves it polymorphic (no-op, :4947)
+                 → repr t = anything else concrete            ⇒ ERROR:
+                     "`<τ>` does not implement <Num|Ord>."
+               | CInterface (iface, t)                                    typecheck.ml:4951–4991
+                 → repr t = TVar _ (still unresolved)         ⇒ skip ("cannot check yet")
+                 → repr t = concrete τ, ∃ impl_ty ∈ env.impls[iface]
+                     with impl_matches_ty impl_ty τ            ⇒ OK
+                 → else, if τ is an anonymous TRecord and iface has EXACTLY
+                     ONE method shaped `a → T` matching one of τ's fields
+                     by name+type                              ⇒ OK (record
+                     field auto-satisfy, :4962–4990 — a NAMED TCon type
+                     never auto-satisfies this way, only a bare TRecord)
+                 → else                                        ⇒ ERROR:
+                     "`<τ>` does not implement interface `<iface>`.
+                      Add `impl <iface>(<τ>) do ... end` to provide an
+                      implementation."
+               | CADTBound/CTNatBound (out of §2.1's Num/Eq/Ord/Show scope —
+                 these back `fn f[s : Bound](...)` explicit type-parameter
+                 bounds, a separate feature; see typecheck.ml:4992–5028)
+               ────────────────────────────────────────────────────────────
+               each satisfied constraint is silently dropped; each violated
+               one calls Err.error at `span` (the DECLARATION's span, not the
+               constraint's origin site) and the constraint is otherwise
+               DISCARDED either way (there is no "sticky" re-check later)
+               -- Deduplication: `CInterface` constraints on the SAME
+               --   (iface, pp_ty τ) pair are checked only ONCE per
+               --   `discharge_constraints` call — a `seen` Hashtbl keyed on
+               --   `iface ^ ":" ^ pp_ty τ` skips repeats (:4914–4929,
+               --   "10 calls to Storage.get on the same storage variable").
+               --   `CNum`/`COrd` are NOT deduplicated this way (the
+               --   `dominated` check only special-cases `CInterface`,
+               --   :4920–4929) — harmless, since re-checking `CNum Int`
+               --   twice is idempotent, just slightly redundant work.
+               -- An UNRESOLVED constraint on a still-unbound type variable
+               --   is NOT an error — it is either (a) silently DEFAULTED
+               --   (CNum → Int, unconditionally, with no user control) or
+               --   (b) left polymorphic and simply DROPPED once
+               --   `pending_constraints` is reset to `[]` (:5030) — for
+               --   CInterface and COrd, "cannot check yet" (:4954, :4995,
+               --   :5022) means the constraint is skipped, not deferred:
+               --   nothing carries it forward to a LATER discharge point.
+               --   Whether that variable's eventual concrete type actually
+               --   satisfies the constraint is never re-verified UNLESS the
+               --   variable is later specifically re-constrained by another
+               --   instantiate call before its own enclosing declaration's
+               --   discharge point — see the §4 finding on `when`-bound
+               --   constraints silently not propagating to callers, which is
+               --   the direct consequence of this "check once, at THIS
+               --   declaration's boundary, then discard" design.
+```
+
+**Live-verified messages** (re-run for this task, `march --check`, exact text):
+
+- `1 + "x"` (direct): actually does **NOT** produce the Num message — `+`'s
+  T-App argument unification (`a := Int` pinned by the first arg) conflicts
+  with `"x" : String` in argument position #2 BEFORE `discharge_constraints`
+  ever runs, giving the ordinary unify-mismatch headline `` expected `Int`
+  but got `String`. `` (same shape as `reject/t01`). To reach the
+  **CNum-specific** message, BOTH operands must already unify to one
+  non-Num type with no earlier unify conflict — e.g. `let x = "a"; let y =
+  "b"; x + y` (both `String`, agree with each other, only `+`'s OWN `Num`
+  constraint is violated) gives, verbatim:
+  ```
+  String does not implement Num (only Int and Float do).
+  ```
+  reported at the enclosing `fn`'s span (per the discharge-at-declaration-
+  boundary rule above), not at the `x + y` sub-expression's span.
+- `Bool < Bool` (an `Ord` violation — `Bool` has no `Ord` impl, §2.1b) or a
+  bare 0-arg ADT value compared with `<` (`type Hue = Rood | Bloo; Rood <
+  Bloo`) both give the `CInterface` no-impl shape, verbatim (ADT case):
+  ```
+  `Hue` does not implement interface `Ord`.
+  Add `impl Ord(Hue) do ... end` to provide an implementation.
+  ```
+- `show(f)` where `f : Int -> Int` (a function value — no `Show` impl for
+  `TArrow`, §2.1b) gives, verbatim:
+  ```
+  `Int -> Int` does not implement interface `Show`.
+  Add `impl Show(Int -> Int) do ... end` to provide an implementation.
+  ```
+
+### 2.1b Built-in instances, and the boolean primitives `&&`/`||`/`not`
+
+**Which concrete types satisfy which built-in interface** — the seed table
+`builtin_impls : (string * ty) list` (`typecheck.ml:1149–1161`), folded into
+`env.impls` by `base_env` (`typecheck.ml:1854–1865`, every module starts with
+this table pre-loaded):
+
+| Interface | Built-in instances | cite |
+|---|---|---|
+| `Num` (via `CNum`, hardcoded — not in `env.impls`, no `impl Num` form exists) | **Int, Float only** | `typecheck.ml:4936–4937` |
+| `Eq` | Int, Float, String, Bool, Unit, Atom | `typecheck.ml:1151–1152` |
+| `Ord` | Int, Float, String | `typecheck.ml:1154` |
+| `Show` | Int, Float, String, Bool, Unit | `typecheck.ml:1156–1157` |
+| `Hash` | Int, Float, String, Bool | `typecheck.ml:1159–1160` |
+
+Notably: `Eq` covers **strictly more** types than `Ord` (Bool/Unit/Atom are
+equality-comparable but not ordered — there is no built-in `Bool < Bool`, no
+`impl Ord(Bool)` shipped, confirmed live above), and `Ord` covers **strictly
+fewer** than `Num` overlaps with (`Ord` ⊃ `{Int,Float}` ∩ `Num`, plus
+`String`, which `Num` never includes — `String` is Ord but never Num, the
+asymmetry the live `1+"x"`-shaped probes above exploit). None of the four
+built-in interfaces cover function types (`TArrow`), tuples, records, or
+user-defined ADTs out of the box — those all require an explicit `impl …
+do … end` (or, for a single-method interface over an anonymous record only,
+the field-auto-satisfy path in (T-Discharge) above).
+
+`builtin_interfaces` (`typecheck.ml:1126–1144`) is the companion table
+declaring `Eq`/`Ord`/`Show`/`Hash`'s single-method SHAPE (`eq : a → a → Bool`,
+`compare : a → a → Int`, `show : a → String`, `hash : a → Int`) so that a
+user `impl Eq(MyType) do fn eq(a, b) do ... end end` block has something to
+validate its method signature against (`typecheck.ml:6743–6828`, the `DImpl`
+arm's per-method check) — `Num` has NO entry in `builtin_interfaces` (it is
+not a `CInterface`-based check at all, per §2.1's `Num`-vs-`Ord/Eq/Show`
+split), which is exactly why `when Num(a)` cannot be written in a
+`when`-clause (§2.1's live-verified finding).
+
+**`&&`, `||`, `not` are NOT interface-constrained — plain monomorphic `Mono`
+schemes**, the ordinary (unconstrained) case of T-Var/`instantiate` (§1):
+
+```
+(δT-And)  && : Bool → Bool → Bool              typecheck.ml:1239  (Mono, base_env)
+(δT-Or)   || : Bool → Bool → Bool              typecheck.ml:1240  (Mono, base_env)
+(δT-Not)  not : Bool → Bool                     typecheck.ml:1282  (Mono, base_env)
+```
+
+Since these are plain `Mono` bindings, a non-Bool operand is rejected by the
+SAME ordinary T-App/unify machinery as any other monomorphic function call
+(§2, T-App) — no constraint is ever pushed for them, and
+`discharge_constraints` is never involved. There IS a distinctive wrinkle in
+the ERROR TEXT, though: `report_mismatch`'s `common_hint` table
+(`typecheck.ml:1933–1958`) special-cases the `(provided = Int, required =
+Bool)` pairing with a dedicated remediation note (`typecheck.ml:1943–1946`):
+
+```
+"March does not coerce Int to Bool.
+ Try an explicit comparison, e.g. `x != 0`."
+```
+
+so `1 && true` (verified live) reports the ordinary mismatch headline
+`expected \`Bool\` but got \`Int\`.` WITH this hint appended — a general
+common-mistake decoration on `report_mismatch`, not anything `&&`-specific
+(the identical hint fires for `if 1 do … end` or any other Int-where-Bool-
+expected site). `&&`/`||` are BINARY, so a non-Bool SECOND argument is
+reported independently too (both arg positions are checked against `Bool`
+via ordinary T-App per-argument checking, §2) — verified live for `1 || 2`:
+two separate diagnostics, one per argument.
+
+**Cross-reference to the operational side:** `core-march.md` §4.4.1
+documents `&&`/`||` as **strict, not short-circuiting** at the value level
+(both operands are always evaluated) — that is a RUNTIME/evaluation fact
+about `δ-And`/`δ-Or`, orthogonal to this section: on the TYPE side `&&`/`||`
+are simply fixed `Bool → Bool → Bool` functions like any other binary
+builtin, and nothing about their strict evaluation order affects how they
+are typed (both operands are ⇐-checked against `Bool` via ordinary left-to-
+right T-App argument checking, §2, exactly as strictness evaluates them
+left-to-right at runtime — the two properties happen to agree in direction
+but are independently-stated facts, one operational and one static).
+
+### 2.1c Conditionals without a scrutinee: `ECond` (`match do c -> b … end`)
 
 ```
 (T-Cond)  arms = (c₁,b₁) … (c_n,b_n),  n ≥ 1                                    typecheck.ml:4020–4036 (ECond arm of infer_expr)
@@ -841,8 +1131,14 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `accept/t16_letfn_factorial` | accept | (T-LetFn) — a local self-recursive `fn go(k, acc)` (factorial via an accumulator), `go` monomorphic inside its own body, called after the block | typechecks — runs to `120` for `compute(5)` |
 | `accept/t17_letfn_generalized_after_block` | accept | **(T-LetFn) generalization** — a local `fn id_rec(x)` used at both `Int` and `String` in the REST of the block (after the `ELetFn`, not inside its own body) | typechecks (proves `ELetFn`'s post-body `generalize(env.level - 1, …)` fires, mirroring `t03_let_poly` for local recursive fns) |
 | `reject/t12_letfn_ret_annot_conflict` | reject | (T-LetFn) declared return-type annotation (`fn go(k) : Int`) conflicts with the body's actual (self-recursion-consistent) inferred type `String` | `expected \`Int\` but got \`String\`` |
+| `accept/t18_num_constraint_discharged` | accept | (δT-Add, T-Discharge) — `1 + 2` (Int) and `1.0 +. 2.0` (Float, the monomorphic dotted form) both discharge/typecheck cleanly | typechecks |
+| `accept/t19_eq_ord_constraint_discharged` | accept | (δT-Eq, δT-Ord, T-Discharge) — `x == y` and `x < y` on two `Int`s discharge `Eq Int`/`Ord Int` against the built-in instances (§2.1b) | typechecks |
+| `accept/t20_bool_ops` | accept | (δT-And, δT-Or, δT-Not) — `&&`/`||`/`not` combined over `Bool`-typed comparisons (`>`/`<`/`<=`/`>=`), all monomorphic `Bool → Bool → Bool` / `Bool → Bool` | typechecks |
+| `reject/t13_num_no_impl_string` | reject | (T-Discharge, `CNum`) — `x + y` on two `String`s (agree with each other, so no earlier unify conflict; the `CNum` obligation itself is violated at the enclosing `fn`'s discharge point) | `String does not implement Num (only Int and Float do)` |
+| `reject/t14_ord_no_impl_adt` | reject | (T-Discharge, `CInterface "Ord"`) — `a < b` on a bare 2-ctor ADT (`Hue = Rood \| Bloo`, no built-in or user `impl Ord(Hue)`) | `` `Hue` does not implement interface `Ord` `` |
+| `reject/t15_and_non_bool_operand` | reject | (δT-And) — `1 && true`, an `Int` first operand against `&&`'s fixed `Mono Bool → Bool → Bool` — an ordinary T-App/unify rejection (no constraint machinery involved), decorated with the `report_mismatch` common-hint text | `March does not coerce Int to Bool` |
 
-**Result: 29 / 29 (17 accept typecheck, 12 reject with the declared error).**
+**Result: 35 / 35 (20 accept typecheck, 15 reject with the declared error).**
 
 **No atom-specific `reject/` program.** Every `EAtom`/`PatAtom` occurrence —
 nullary or payload-carrying, whatever the tag — synthesizes the single bare
@@ -967,7 +1263,7 @@ pins that are easy to get wrong and are load-bearing:
     No `(P-As)` rule is stated (§2.2).
 12. **`ECond` (`match do c -> b … end`) checks every condition against `Bool`
     and unifies every body into ONE result type anchored at the FIRST arm**
-    (T-Cond, §2.1a, typecheck.ml:4020–4036) — but, unlike `EMatch`, never runs
+    (T-Cond, §2.1c, typecheck.ml:4020–4036) — but, unlike `EMatch`, never runs
     exhaustiveness/redundancy checking at all (neither function is called from
     the `ECond` arm). This matches the operational finding that `ECond` is NOT
     statically total (`core-march.md:492–498`): an all-false chain typechecks
@@ -1011,6 +1307,99 @@ pins that are easy to get wrong and are load-bearing:
     §2, and the `specs/todos.md` entry) because the annotation-unify and the
     final self-type/arrow-type reconciliation unify independently
     rediscover the same conflict once it flows through the self-reference.
+14. **An unresolved `CNum` constraint silently DEFAULTS to `Int` at its
+    enclosing declaration's discharge point — but this defaulting is
+    effectively INVISIBLE to a fully generic function, because `generalize`
+    already quantified the type variable away with a fresh, isolated ref
+    before discharge ever runs.** Verified live: `fn add_poly(a, b) do a + b
+    end` (no annotations, no `when`-clause) typechecks with `--check` exit 0
+    even though `add_poly` is never called anywhere — and, more
+    surprisingly, remains callable at BOTH `Int` and `Float` afterward
+    (`add_poly(1.0, 2.0)` also typechecks). The mechanism: `check_fn`
+    generalizes `add_poly`'s inferred type (`typecheck.ml:4732`,
+    `generalize env.level fn_ty`) BEFORE `check_decl`'s `discharge_constraints`
+    call ever runs (`typecheck.ml:6271`, strictly after `check_fn` returns) —
+    and `generalize` (§1) always allocates a brand-new, isolated `TVar` ref
+    for each quantified id (`typecheck.ml:831–834`), sharing only the
+    integer id with whatever ref the pending `CNum` constraint still points
+    at. So when `discharge_constraints` later finds that `CNum`'s type
+    variable still `Unbound` and defaults it — `r := Link (TCon ("Int", []))`
+    (`typecheck.ml:4946`) — it mutates the OLD, already-superseded ref; the
+    function's actual stored scheme (`Poly([a_new], [], a_new → a_new →
+    a_new)`, fully UNCONSTRAINED — `check_fn`'s `all_constraints` is empty
+    here since there is no explicit `when`-clause, so `generalize`'s own
+    `Poly(ids, [], t)` output passes through unchanged, `typecheck.ml:4733–
+    4734`) is untouched by that mutation and instantiates a genuinely fresh
+    variable, unconstrained, at every call site. The net, surprising result:
+    **a `Num`-constrained primitive used inside a fully generic local/
+    top-level function elides the constraint entirely** — there is no way,
+    short of an explicit type annotation, to make such a function reject a
+    non-Num instantiation, because `Num` cannot even be spelled in a
+    `when`-clause to force it to survive generalization (§2.1: `when
+    Num(a)` itself errors, "I don't know a constructor called `Num`" — `Num`
+    is not in `env.interfaces`). This is DIFFERENT from, and easy to
+    conflate with, the ordinary "generic function, constraint resolved per
+    call site" story that works correctly for `CInterface`-based constraints
+    with an explicit `when`-clause on a MONOMORPHIC-at-the-constrained-
+    position function (see finding 15) — here there is no `when`-clause at
+    all, `a`/`b` are simply unannotated params, and the `Num` obligation
+    both arises AND evaporates within `add_poly`'s own declaration, never
+    reaching a call site to be re-checked.
+15. **A `when Interface(a)` constraint on an explicit function bound is
+    correctly enforced when it can be discharged AT THE FUNCTION'S OWN
+    DECLARATION (a concretely-annotated parameter), but is SILENTLY NOT
+    RE-CHECKED at call sites when the bound type variable is left generic —
+    a genuine, reproducible typechecker gap, distinct from finding 14's
+    `Num`-specific defaulting.** Verified live, three ways:
+    (a) `fn same(a : Hue, b : Hue) when Eq(a) do a == b end` (param
+    concretely annotated to a no-`Eq`-impl ADT `Hue`) correctly rejects at
+    `same`'s OWN declaration with `` `Hue` does not implement interface
+    `Eq`. `` — the constraint IS enforced when it can be checked immediately.
+    (b) `fn same(a, b) when Eq(a) do a == b end` (UNANNOTATED — `a`'s type
+    stays a generic type variable at `same`'s own declaration, so
+    `discharge_constraints` sees `CInterface("Eq", TVar _)` and skips it,
+    "still polymorphic — cannot check yet", `typecheck.ml:4954`) then
+    `same(Rood, Rood)` — where `Rood` is a variant of the SAME no-`Eq`-impl
+    `Hue` ADT from (a) — **typechecks with exit 0**, even though a direct
+    `Rood == Rood` (bypassing the `same` wrapper) correctly rejects with the
+    identical `` `Hue` does not implement interface `Eq`. `` message. The
+    constraint is silently lost, not merely deferred: `same`'s scheme is
+    genuinely `Poly([a_id], [CInterface("Eq", a_tv)], a → a → Bool)`
+    (`check_fn`'s `all_constraints` non-empty branch, `typecheck.ml:4733–
+    4737`, DOES attach the `when`-clause's constraint here, unlike finding
+    14's unconstrained case) — but calling `same(Rood, Rood)` should
+    `instantiate` that `Poly` scheme (§1), substitute `a := Hue`, and push a
+    FRESH `CInterface("Eq", Hue)` onto `main`'s own `pending_constraints`,
+    which `main`'s own `discharge_constraints` call should then reject. It
+    does not. (c) Ruled out `TArrow`-specific behavior in `impl_matches_ty`
+    by reproducing the identical gap with a plain ADT value instead of a
+    function value, and ruled out "the constraint never gets attached to
+    the scheme at all" by confirming (a) DOES enforce it when the violation
+    is visible at `same`'s own declaration. **Root cause not fully
+    pinned down in this task** (this is a docs-only task; `typecheck.ml` was
+    not modified) — the most likely candidate, given `instantiate`'s
+    id-keyed substitution (§1) and `generalize`'s fresh-ref-per-id copy
+    (`typecheck.ml:831–834`, the same mechanism implicated in finding 14),
+    is some interaction between the ORIGINAL constraint-bearing `TVar` ref
+    (captured once, while processing the `when`-clause, `typecheck.ml:4673–
+    4693`, BEFORE `generalize` runs) and the COPIED ref `generalize` installs
+    into the returned type — both share the integer id, which is what
+    `instantiate`'s `List.assoc_opt id subst` keys on (§1), so in principle
+    the constraint's stale `TVar` SHOULD still resolve to the same fresh
+    substitution var when `instantiate` walks `inst_cs` (`typecheck.ml:894–
+    899`) at a later call site; something about the ORDER those two events
+    happen in, or a difference between the immediate-declaration path (a)
+    and the deferred generic-call path (b)/(c), breaks that expectation.
+    **This is a real typechecker soundness gap** (an explicit `when
+    Iface(a)` bound on a generic parameter is not actually enforced
+    polymorphically) — filed in `specs/todos.md` under "Compiler: Type
+    System" (2026-07-05) with this exact repro, since fixing it is out of
+    scope for this docs-only task. Not exercised by this corpus's `reject/`
+    programs (a `reject/` program built on it would need to codify a
+    behavior this document identifies as WRONG, which would defeat the
+    corpus's purpose — the corpus instead uses the primitive, always-correctly
+    -enforced `Ord`/`Num` constraints for its `reject/` witnesses, findings
+    above).
 
 ## 5. What this validated, and what's next
 
@@ -1130,8 +1519,55 @@ pass/fail, and does not reproduce for the equivalent top-level `fn`, which
 reports once with a better message). `check_types.sh`: 29/29 (17 accept, 12
 reject), exit 0.
 
-**Next (widening slices, each like this one):** the interface/impl resolution
-that discharges the `Num`/`Eq` constraints (§2.1) — the richest and most
-bug-prone part, and the type-side complement to the operational core.
-Together, `core-march.md` (operational) + this document (typing) are
-**Level-1 for the Core March fragment**.
+**Task 6 (this slice) added:** the interface-constraint MODEL itself — how a
+`Num`/`Eq`/`Ord`/`Show` obligation is represented (`constraint_`,
+`typecheck.ml:128–133`), CREATED (`instantiate`, §1, pushing onto
+`env.pending_constraints`), and DISCHARGED (**T-Discharge**, §2.1a,
+transcribed from `discharge_constraints`, `typecheck.ml:4913–5030`, called at
+every `DFn`/`DLet`/`DImpl` declaration boundary — `typecheck.ml:6271, 6280,
+6843, 6846`) — plus the trivial, unconstrained **(δT-And)**/**(δT-Or)**/
+**(δT-Not)** `Bool`-primitive typings (§2.1b). Pinned the built-in-instance
+table (§2.1b): `Num` = {Int, Float} only, hardcoded (not `env.impls`-based,
+no user `impl Num` form exists); `Eq` = {Int, Float, String, Bool, Unit,
+Atom}; `Ord` = {Int, Float, String}; `Show` = {Int, Float, String, Bool,
+Unit} (`builtin_impls`, `typecheck.ml:1149–1161`, seeded into every module's
+`env.impls` by `base_env`, `typecheck.ml:1854–1865`). Live-verified (not
+trusted from the plan) the no-impl error shapes: a `Num` violation only
+surfaces its OWN distinct message
+(`` String does not implement Num (only Int and Float do). ``) when both
+operands already agree with each other (no earlier T-App unify conflict
+masks it first) — `1 + "x"` directly instead falls through the ordinary
+unify-mismatch path, a finding worth pinning since the plan's own text
+assumed the direct form reaches the Num-specific message and it does not; an
+`Ord`/`Eq`/`Show` violation on a type with no impl (a bare ADT, or a function
+value) gives the `CInterface`-shaped `` `<τ>` does not implement interface
+`<iface>`. `` + remediation hint. Also discovered that `COrd` (§2.1, a
+constraint kind with real, working `discharge_constraints` logic) is DEAD —
+`<`/`>`/`<=`/`>=` all resolve via `CInterface "Ord"`, never `COrd`; its only
+constructor helper is underscore-prefixed and uncalled. Two further findings,
+both about constraint SURVIVAL through `generalize`: (14) a `Num` constraint
+on a fully generic, un-annotated function (no `when`-clause — impossible to
+write one for `Num`, since `Num` is not in `env.interfaces`) is silently
+defaulted-then-discarded, leaving the function's stored scheme genuinely
+UNCONSTRAINED at every call site (verified: `add_poly(a,b) = a+b` typechecks
+called at both `Int` and `Float`); (15) a REAL typechecker bug — an explicit
+`when Eq(a)` (or `Ord`/`Show`) bound is correctly enforced when violated at
+its OWN declaration (a concretely-annotated param) but is silently NOT
+re-discharged at a call site when the bound variable is left generic
+(`same(a,b) when Eq(a) do a==b end; same(Rood, Rood)` typechecks even though
+`Hue` has no `Eq` impl and a direct `Rood == Rood` correctly rejects) — filed
+in `specs/todos.md` under "Compiler: Type System" with the exact repro, not
+fixed (docs-only task). Three new `accept/` programs (Num/Eq/Ord discharge
+succeeding on built-in instances, and a `&&`/`||`/`not` boolean-logic
+program) and three new `reject/` programs (the live-verified Num/Ord/Bool-
+coercion error text, §2.1a/§2.1b). `check_types.sh`: 35/35 (20 accept, 15
+reject), exit 0.
+
+**Next (widening slices, each like this one):** user-defined `impl` blocks
+and `when`-bounded generic functions beyond this fragment's built-in
+Num/Eq/Ord/Show — including, ideally, a proper fix + regression test for
+finding 15's constraint-survival gap; superclass/coherence rules for
+multi-interface bounds; and the refinement/linearity/capability/effect
+layers `core-march.md` already defers operationally. Together, `core-march.md`
+(operational) + this document (typing) are **Level-1 for the Core March
+fragment**.
