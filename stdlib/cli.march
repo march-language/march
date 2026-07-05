@@ -279,4 +279,39 @@ mod Cli do
     end
   end
 
+  pfn short_suffix(spec : FlagSpec) : String do
+    match spec.short do
+    Some(s) -> ", -" ++ s
+    None -> ""
+    end
+  end
+
+  pfn annotation(spec : FlagSpec) : String do
+    if spec.required do " (required)"
+    else
+      match spec.default do
+      Some(d) -> " (default: " ++ d ++ ")"
+      None -> ""
+      end
+    end
+  end
+
+  pfn flag_line(spec : FlagSpec) : String do
+    "  --" ++ spec.long ++ short_suffix(spec) ++ "\n    " ++ spec.help ++ annotation(spec) ++ "\n"
+  end
+
+  doc """
+  Render `--help`-style usage text: a `Usage:` line followed by one block
+  per flag (long/short forms, help text, and required/default annotation).
+
+  ## Examples
+
+      march> String.contains(Cli.help_text("myapp", [Cli.flag("v", "verbose")]), "Usage: myapp [OPTIONS]")
+      true
+  """
+  fn help_text(program_name : String, specs : List(FlagSpec)) : String do
+    let header = "Usage: " ++ program_name ++ " [OPTIONS]\n\n"
+    List.fold_left(specs, header, fn (acc, spec) -> acc ++ flag_line(spec))
+  end
+
 end

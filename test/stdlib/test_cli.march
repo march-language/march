@@ -146,4 +146,29 @@ describe "Cli typed accessors and error messages" do
 
 end
 
+describe "Cli.help_text" do
+
+  test "renders program name, usage line, and one line per flag" do
+    let specs = [
+      Cli.flag_with("verbose", Some("v"), BoolFlag, None, false, "Enable verbose output"),
+      Cli.flag_with("port", None, ValueFlag, Some("4000"), false, "Port to listen on")
+    ]
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "Usage: myapp [OPTIONS]"))
+    assert (String.contains(text, "--verbose, -v"))
+    assert (String.contains(text, "Enable verbose output"))
+    assert (String.contains(text, "--port"))
+    assert (String.contains(text, "Port to listen on"))
+    assert (String.contains(text, "(default: 4000)"))
+  end
+
+  test "marks required flags" do
+    let specs = [Cli.flag_with("name", None, ValueFlag, None, true, "Your name")]
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "--name"))
+    assert (String.contains(text, "(required)"))
+  end
+
+end
+
 end
