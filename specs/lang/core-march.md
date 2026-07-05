@@ -69,20 +69,32 @@ expr     e  ::= ELit ℓ                                      -- literal
              |  ELam [x…] e                                 -- lambda (n params)
              |  EApp e [e…]                                 -- application
              |  ECon C [e…]                                 -- constructor application
+             |  ETuple [e…]                                 -- tuple construction (ast.ml:60)
              |  EBlock [e…]                                 -- do … end sequence
              |  ELet (p = e)                                -- block-scoped binding
              |  EMatch e [ p when g? -> e … ]               -- pattern match
              |  EIf e e e                                   -- if c do … else … end
                                                             (ast.ml:51–91)
 
-pattern  p  ::= PatWild | PatVar x | PatLit ℓ | PatCon C [p…]   (ast.ml:40–48)
+pattern  p  ::= PatWild | PatVar x | PatLit ℓ | PatCon C [p…]
+             |  PatTuple [p…]                                -- tuple pattern: (p…) (ast.ml:45)
+                                                            (ast.ml:40–48)
 
 value    v  ::= VInt n | VFloat f | VString s | VBool b | VAtom a
                                                             (eval.ml:32–37)
              |  VClosure ρ [x…] e                           -- closure: env + params + body
              |  VCon C [v…]                                 -- constructor value: tag + payload
+             |  VTuple [v…]                                 -- tuple value: fixed-arity value list (eval.ml:39)
              |  VBuiltin name f                             -- primitive (e.g. +, ==)
 ```
+
+`ETuple`'s surface form is `(e₁, …, e_k)` — parenthesized, comma-separated
+expressions, `k ≥ 2` for an actual tuple; the parser also accepts `k = 0`
+(`()`), which the evaluator (§4.2, E-Tuple) treats as an alias for `VUnit`
+rather than a genuine zero-arity `VTuple` — see the E-Tuple rule's note. There
+is no 1-tuple (`(e)` parses as a parenthesized `e`, not `ETuple [e]`). `PatTuple`
+mirrors this on the pattern side: `(p₁, …, p_k)` destructures a `VTuple` of the
+same arity componentwise (§4.3).
 
 `LitFloat`/`VFloat` carry an OCaml `float` (IEEE-754 double); `LitString`/
 `VString` carry an OCaml `string`; `LitAtom`/`VAtom` carry a `string` naming
@@ -120,6 +132,7 @@ the parser) and multi-clause functions.
 | `fn x -> e` (`ELam`) | identity (recurse body) | `desugar.ml:568–571` |
 | `f(e…)` (`EApp`) | identity, plus a qualified-`ECon` fold for `Mod.Ctor(args)` | `desugar.ml:552–563` |
 | `C(e…)` (`ECon`) | identity (recurse args) | `desugar.ml:565–566` |
+| `(e…)` (`ETuple`) | identity (recurse elements) | `desugar.ml:602–603` |
 | `match e do … end` (`EMatch`) | identity (recurse scrutinee, guards, bodies) | `desugar.ml:595–600` |
 | `if c do a else b end` (`EIf`) | **identity** — `EIf` is *not* rewritten to a match on the bool | `desugar.ml:635–636` |
 | `ELit`, `EVar` | identity | `desugar.ml:548` |
@@ -171,6 +184,14 @@ Values do not reduce further; a lambda becomes a closure immediately
 (E-Con)     ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, left-to-right)               eval.ml:6977
             ──────────────────────────────────────
             ρ ⊢ ECon C [e₁…e_k] ⇓ VCon C [v₁…v_k]
+
+(E-Tuple)   ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, left-to-right)                eval.ml:7004–7005
+            ──────────────────────────────────────
+            ρ ⊢ ETuple [e₁…e_k] ⇓ VTuple [v₁…v_k]
+            -- this arm matches any non-empty list (k ≥ 1); the parser only ever
+               constructs k ≥ 2 (§2), so k = 1 is unreachable from surface syntax
+            -- ETuple [] ⇓ VUnit instead (k = 0 is the `()` alias, not a genuine
+               0-ary VTuple)                                      eval.ml:7003
 
 (E-App-Clo) ρ ⊢ e_f ⇓ VClosure ρ' [x₁…x_k] e_b    ρ ⊢ eᵢ ⇓ vᵢ
             |x…| = |e…| = k    (x₁↦v₁,…,x_k↦v_k, ρ') ⊢ e_b ⇓ v     eval.ml:6957, 6889
@@ -245,7 +266,24 @@ match(PatLit ℓ, v)             = ∅    if 𝓋(ℓ) = v, else ⊥     eval.ml
 match(PatCon C [p…], VCon C' [v…]) = ⋃ match(pᵢ, vᵢ)          eval.ml:784
         provided  bare(C) = C'  and  |p…| = |v…|,  else ⊥
 match(PatCon …, non-VCon)       = ⊥                            eval.ml:795
+
+match(PatTuple [], VUnit)          = ∅                          eval.ml:803
+match(PatTuple [p…], VTuple [v…])  = ⋃ match(pᵢ, vᵢ)          eval.ml:804–806
+        provided  |p…| = |v…| (componentwise via match_list, eval.ml:832–840),
+        else ⊥
+match(PatTuple …, non-VTuple/VUnit) = ⊥                        eval.ml:808
 ```
+
+`match_list` (`eval.ml:832`–`840`) is the shared componentwise helper: a
+`List.fold_left2` over the pattern/value pairs that threads `match_pattern`
+across each position and short-circuits to `⊥` (`None`) the moment any one
+component fails, otherwise unioning the accumulated bindings — the same
+combinator `PatCon`'s arm (above) already relies on for its own `⋃`.
+`PatTuple ([], _)` matching `VUnit` (`eval.ml:803`) is the pattern-side
+counterpart of E-Tuple's `ETuple [] ⇓ VUnit` alias (§4.2): a 0-arity tuple
+*value* never actually exists at runtime (only `VUnit` does), so the empty
+tuple pattern is special-cased to accept `VUnit` directly rather than an
+(impossible) `VTuple []`.
 
 `match(PatLit ℓ, v)` is one arm per literal kind, each requiring **both** the
 pattern and scrutinee to be the *same* value constructor with equal payload —
@@ -469,12 +507,13 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Thirteen programs in `specs/lang/golden/`, each exercising a slice of the
+Sixteen programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
 corpus (`+`, `==`, lambdas, ADTs, match); `g09`–`g13` are Task 1's addition,
-covering the remaining literals and the full primitive δ-rule table:
+covering the remaining literals and the full primitive δ-rule table; `g14`–`g16`
+are Task 2's addition, covering tuple construction, destructuring, and nesting:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -491,8 +530,11 @@ covering the remaining literals and the full primitive δ-rule table:
 | `g11_comparison.march` | `!=`,`<`,`<=`,`>`,`>=` on `Int`, plus one `Float` and one `String` case (δ-Neq/Lt/Le/Gt/Ge-*) | `true`/`false` × 12 |
 | `g12_bool_ops.march` | `&&`,`\|\|`,`!`/`not`, `++` (δ-And, δ-Or, δ-Not, δ-Concat) | `true`/`false` × 6, `ab` |
 | `g13_strict_bool.march` | `&&`/`\|\|` **strictness** witness (§4.4.1) — a `println` inside the operand a short-circuiting evaluator would skip fires anyway | `or-rhs-evaluated`/`and-rhs-evaluated`/`true`/`false` |
+| `g14_tuple_let.march` | `ETuple` construction, `PatTuple` destructuring in a block `let` (E-Tuple, match(PatTuple, VTuple)) | `7` |
+| `g15_tuple_match.march` | `PatTuple` destructuring as a `match` branch pattern, alongside a literal-tuple `PatTuple [PatLit 0; PatLit 0]` branch (first-match-wins over `select`) | `origin` / `3,5` |
+| `g16_tuple_nested.march` | nested `ETuple` construction (tuple-of-tuples) destructured by a nested `PatTuple` **in a `match`** (componentwise `match_list` recursion) | `10` |
 
-**Result: 13 / 13 matched, 0 divergences.** (These print via `println` /
+**Result: 16 / 16 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
@@ -512,6 +554,29 @@ results (`1.5`, `7.5`) where both formatters agree, rather than silently
 special-casing or hiding the bug. It is flagged here and via a background
 task for separate triage into a `known_divergence` entry once that mechanism
 exists.
+
+**A second, new real divergence found and routed around, not hidden:** while
+drafting `g16`, a **nested** `PatTuple` (a tuple pattern containing another
+tuple pattern, e.g. `let ((a, b), (c, d)) = ((1, 2), (3, 4))`) destructured via
+a block-level `ELet` evaluates correctly interpreted (`10`) but **fails to
+compile**: `clang` rejects the emitted IR with `use of undefined value '@a'`
+(the LLVM backend's `let`-pattern lowering appears to treat a nested tuple
+sub-binding's name as an undefined global/function reference rather than a
+local variable — a compiled-backend codegen bug, not an interpreter bug). A
+*flat* (non-nested) `PatTuple` in a `let` compiles and runs correctly
+(confirmed: `let (a, b) = t` compiles, links, and matches interpreted output —
+this is exactly `g14`), and a *nested* `PatTuple` used as a **`match`** branch
+pattern (rather than a block `let`) also compiles and runs correctly
+(confirmed — this is `g16` as committed). So the bug's precise trigger is
+`nested PatTuple` × `ELet` specifically, not `PatTuple` or `nesting` or `ELet`
+in isolation. This is outside this task's scope (documenting the interpreter
+faithfully, not fixing the compiler) and is a **new** divergence, not the
+already-filed whole-tuple-`Show` bug (`specs/todos.md`, "Tuples have no `Show`
+impl") — `g16` was rewritten to destructure the nested tuple in a `match`
+instead of a `let` specifically to route around it while still exercising
+nested tuple construction and componentwise matching. Flagged here for
+separate triage; not filed as a `specs/todos.md` entry by this task (spec-only
+scope) but should be by a follow-up.
 
 Run the check: `dune build bin/main.exe && specs/lang/golden/verify.sh`
 (the committed harness diffs both outputs per program and exits nonzero on any

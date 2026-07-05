@@ -1,0 +1,7 @@
+mod Main do
+  fn main() do
+    let t = (3, 4)
+    let (a, b) = t
+    println(int_to_string(a + b))
+  end
+end
