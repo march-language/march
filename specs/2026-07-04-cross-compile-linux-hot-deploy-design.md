@@ -160,8 +160,17 @@ lower = wider reach.
      then linked with **macOS lib paths** baked in (`-L/opt/homebrew/lib`). For a
      cross target these must resolve against the *target* sysroot/vendored libs,
      never `/opt/homebrew`. (See §5.)
-   - **Dynamic-linker flags.** `-ldl`/`-rdynamic` (Linux) vs `-export_dynamic`
-     (macOS) must follow the target.
+   - **Dynamic-linker flags.** `-rdynamic`/`-export_dynamic` must follow the
+     target, and `-ldl` (needed on Linux for `dlopen`, absent on macOS libc) is
+     *also* gated on a host probe today: `... && Sys.file_exists "/proc/version"`
+     (`bin/main.ml:2041`) — so a cross Linux main binary would **omit `-ldl` and
+     fail to link `dlopen`**. Gate on target OS.
+
+   Enforcement: these host probes are scattered `if`s, not a single switch. When
+   the `target_config` gains the Linux variants, thread the target through to
+   each site and prefer making the OS/arch decision a **total function over
+   `target_config`** so OCaml's exhaustiveness warning flags any site that still
+   silently assumes the host.
 4. **Runtime linking from source (main binary only).** The host build reuses a
    precompiled `libmarch_runtime.so` cache (`bin/main.ml:337`), which is host-only.
    For a cross **main binary**, compile the runtime C sources **from source** with
@@ -216,14 +225,23 @@ two counts (host paths, host arch). Handling:
   (`march_compress.c` guards zstd/brotli behind `-DMARCH_HAVE_*`, and zlib is the
   only mandatory one). P1 may **disable zstd/brotli** for cross and provide only
   target `libz` + OpenSSL, adding the optional codecs later.
-- **Reload `.so`s need none of this** — their `libssl`/`libz` symbols resolve at
-  `dlopen` from libraries already loaded into the process's **global scope** as
-  `NEEDED` dependencies of the main binary (not "from the main binary" itself,
-  unless a lib were statically embedded). This is why reload units cross-compile
-  with zero external libs.
+- **Reload `.so`s need none of this at link time** — the runtime opens them with
+  `dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND)` (`runtime/march_reload.c:293`),
+  so their undefined `libssl`/`libz`/runtime symbols resolve against the
+  process-wide dynamic symbol table — i.e. libraries already loaded as `NEEDED`
+  dependencies of the main binary (not "from the main binary" itself, unless a
+  lib were statically embedded). This is why reload units cross-compile with zero
+  external libs. **Caveat:** because resolution is by *symbol name*, the reload
+  `.so` must be built against the **same OpenSSL/zlib major (soname + version)**
+  as the main binary — an OpenSSL 1.1-vs-3.x mismatch surfaces as a cryptic
+  `dlopen` "undefined symbol" at activation, not a link error. The main binary
+  and reload `.so` sharing one target config (the ABI invariant) already enforces
+  this; state it so nobody builds a reload `.so` against different headers.
 - Match the droplet's OpenSSL major (**3.x**) and zlib soname. Record the
   assumption; a mismatch (e.g. a droplet still on OpenSSL 1.1, or LibreSSL) is a
-  clear, early error, not a runtime surprise.
+  clear, early error, not a runtime surprise. Post-P1, record the linked
+  OpenSSL/zlib sonames in the deploy manifest and verify them before activating a
+  reload — turning the cryptic `dlopen` failure into an actionable message.
 
 ### 6. FFI cross-compilation
 
@@ -276,11 +294,17 @@ visible limitation, not an omission.
 
 ### 8. Cache
 
-Confirm the CAS key already distinguishes the cross triple (it includes a target
-label + runtime digests + codegen flags). If the cross-toolchain identity (zig
-version, glibc floor, target OpenSSL) is *not* in the key, add it — otherwise a
-host artifact and a cross artifact with the same source could alias. Verify with
-a value-revealing program across two targets, not a parity check.
+The CAS key already folds in a `target_label` (`bin/main.ml:1152-1166`,
+`compilation_hash ... ~target:target_label ~flags:cas_flags`), but that label
+today enumerates only `native`/`wasm*`/`js` — the new Linux variants must extend
+it, and **must be distinct per arch + glibc floor** (a `linux/amd64` and
+`linux/arm64` build of the same source must not alias, nor alias `native`). Make
+the label a total function over `target_config` so OCaml's exhaustiveness warning
+forces the new cases in. Additionally fold the **cross-toolchain identity** — zig
+version, glibc floor, and the target OpenSSL/zlib versions — into `cas_flags`,
+since two builds identical except for the bundled toolchain are not
+interchangeable. Verify with a value-revealing program across two targets (e.g.
+one that prints `sizeof`/arch-dependent output), not a parity check.
 
 ## Phasing
 
@@ -290,26 +314,60 @@ proven before OpenSSL:
 1. **P1 — cross-build the dynamic main binary, compute/CLI + plain HTTP, no TLS.**
    Proves `zig cc` + glibc target + the compiler driver + forge plumbing
    end-to-end. This is where the §3.3 de-host-ify audit happens: gate `-msse4.2`
-   by arch (required for arm64 to build at all), fix the host-path lib discovery,
-   and provide target **zlib** (`-lz` is linked even for plain HTTP). Defer
-   zstd/brotli. Smoke-test the ELF under Docker/QEMU on both arches.
-2. **P2 — `--compile-so` cross + `forge deploy hot --target`.** The reload path;
-   validates the ABI invariant and the target-aware `so_flag` fix against a live
-   (or QEMU) droplet.
+   by arch (required for arm64 to build at all), fix the `so_flag`/`-ldl` host
+   probes, fix host-path lib discovery, and provide target **zlib** (`-lz` is
+   linked even for plain HTTP). Defer zstd/brotli. **P1 also lands the compiler's
+   `--target` acceptance for *both* `--compile` and `--compile-so`** (they share
+   the driver) and the forge threading — including the `[ffi.rust]` **guard error**
+   (§6), so an FFI project fails loudly instead of silently linking a host-arch
+   staticlib. Smoke-test the ELF under Docker/QEMU on both arches.
+2. **P2 — `forge deploy hot --target` end-to-end (the reload path).** With the
+   `--compile-so` cross support already in from P1, P2 wires it into `build_so`
+   (`cmd_deploy_hot.ml:803`, which today drops `--target`) and proves a live
+   Mac→(QEMU/Docker droplet) hot swap: validates the ABI invariant and the
+   target-aware `so_flag` fix against a running server.
 3. **P3 — OpenSSL/TLS.** Cross-linked target OpenSSL for the main binary; full
-   HTTPS server on the target.
+   HTTPS server on the target; optional zstd/brotli codecs; soname-manifest and
+   glibc-floor runtime checks (§5, Risks) for clear deploy-time errors.
 
 ## Testing
 
-- **Link/shape gate**: assert cross-built output is a valid Linux ELF of the
-  right arch (`file`/`readelf`) — catches toolchain regressions cheaply on macOS.
-- **Run gate**: execute cross-built binaries under a Linux container (amd64
-  native, arm64 via QEMU or an arm64 runner) — compute, HTTP, then HTTPS.
-- **Hot-reload gate**: end-to-end `forge deploy hot --target` against a
-  container "droplet": deploy, activate, hit the swapped function, assert new
-  behavior — the real proof the ABI invariant holds cross-target.
-- **CI**: add a Linux job; keep the macOS→Linux cross job on macOS runners so the
-  actual cross path is exercised, not just a native Linux build.
+The strongest correctness lever is **already on main**: the differential oracle
+(`test/test_oracle.ml`, `test/test_properties.ml:703` `oracle_check`) runs every
+`.march` in `bench/`, `examples/`, and the curated golden corpus
+(`specs/lang/golden/`, spec'd by `specs/lang/core-march.md`) through the
+**interpreter vs native-compiled** backends and diffs stdout, with a skip
+allowlist for actors/servers/nondeterminism. Comparison is backend-agnostic
+(string equality); executor invocation is a plain subprocess. We extend it rather
+than inventing ad-hoc smoke tests.
+
+- **Differential cross-compile gate (primary).** Add a **third executor**:
+  `march --compile --target linux/<arch> … && run under Docker/QEMU`, diffed
+  against the interpreter oracle exactly as the native path is. This turns the
+  entire deterministic corpus into a cross-arch codegen conformance suite — it is
+  precisely what catches datalayout/endianness/arch-flag/ABI divergences on the
+  target (e.g. a wrong `-m` flag, a struct-layout or integer/float-printing bug
+  that only manifests on aarch64). The comparison layer is unchanged; only the
+  executor invocation is new, and the existing skip allowlist already excludes
+  the categories a cross binary can't run headless (actors, networking). This is
+  the highest-value, lowest-effort test win and should land with P1.
+  - Formalize the currently-hardcoded interp/native invocations into a small
+    `executor` abstraction (the oracle has no such interface yet) so a third
+    backend drops in cleanly and a fourth (WASM/JS) is free later.
+  - Deterministic-output normalization is already the corpus's job — reuse it;
+    do not build a parallel normalization path.
+- **Link/shape gate.** Assert cross output is a valid Linux ELF of the right arch
+  (`file`/`readelf`) — a cheap pre-filter on macOS before paying for QEMU.
+- **Hot-reload gate.** End-to-end `forge deploy hot --target` against a container
+  "droplet": deploy, activate, hit the swapped function, assert new behavior — the
+  real proof the ABI invariant (and the `so_flag`/soname story) holds cross-target.
+  Not expressible in the oracle (it needs a running server + control plane), so it
+  stays a dedicated integration test.
+- **TLS/HTTP integration gate (P3).** HTTPS round-trip on the cross binary under a
+  container — also outside the oracle's pure-stdout model.
+- **CI.** Run the differential cross gate on **macOS runners** (so the actual
+  macOS→Linux cross path is exercised, not a native-Linux build) with QEMU for
+  arm64; keep a native-Linux job as a control.
 
 ## Risks & mitigations
 
@@ -330,11 +388,30 @@ proven before OpenSSL:
 - **FFI cross (esp. Rust)** → host-pinned `cargo build` today; v1 limitation with
   a clear error, `cargo-zigbuild` in a follow-up (§6).
 - **glibc floor too high** → configurable; default conservative (2.31); surfaced
-  in `forge.toml`.
+  in `forge.toml`. Deploying to an *older* target than the floor fails with a
+  cryptic `dlopen`/loader "version `GLIBC_2.xx' not found". Post-P1, add a
+  `march_check_glibc_version()` at runtime init (compare `gnu_get_libc_version`
+  against the built floor) for an actionable startup error.
+- **Soname/version mismatch of OpenSSL/zlib** between build and droplet →
+  cryptic `dlopen` "undefined symbol" at reload activation. Record linked sonames
+  in the deploy manifest and verify pre-activation (§5).
 - **zig version skew** (bundled clang/glibc changes across zig releases) →
   pin/record a known-good floor; test against it in CI.
+- **Runtime C regressions leaking macOS-only APIs** (unguarded `sysctlbyname`,
+  `mach_*`, `CommonCrypto`) → current code is correctly `#ifdef __APPLE__`-guarded;
+  add a CI lint that greps cross builds for unguarded macOS symbols to prevent
+  future regressions.
 - **Testing without native arm64 Linux** → QEMU for arm64; document the slower
   path.
+
+## Related work / dependencies
+
+Builds directly on the **differential oracle + executable language spec** landed
+on main (`specs/2026-07-04-differential-oracle-design.md`,
+`specs/2026-07-04-language-specification-roadmap-design.md`, `test/test_oracle.ml`,
+`specs/lang/`). This feature's primary test gate is a third oracle executor (see
+Testing); conversely, extending the oracle to cross-compiled binaries stresses the
+corpus on real arch diversity and feeds the language-spec conformance effort.
 
 ## Future work (explicitly out of scope now)
 
