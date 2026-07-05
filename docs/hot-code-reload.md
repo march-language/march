@@ -116,7 +116,12 @@ The trust boundary follows from this: the **base server binary is trusted** — 
 
 ### Two gates
 
-1. **Monotonicity gate (deploy-time, on the client).** A hot deploy may *narrow* a function's authority freely, but *widening* it — adding a capability the running version of that function did not have — aborts the deploy unless you explicitly authorize it with `--grant-cap`.
+1. **The "authority can only shrink" gate (deploy-time, on your machine).** The rule is simple: across deploys, a function's set of capabilities may get *smaller* on its own, but it may not get *bigger* without your say-so.
+
+   - **Dropping** a capability is always allowed — a function that used to write files and no longer does is strictly safer, so it deploys without ceremony.
+   - **Adding** a capability is called a **widening** — for example, a function that gains the ability to write files, open a socket, or spawn a process that its running version didn't have. A widening **stops the deploy** and asks you to confirm it explicitly with `--grant-cap`.
+
+   This one-directional rule — authority only ever moves *down* unless you deliberately push it up — is what makes the gate a *monotonicity* gate. The point is that a routine code push can't quietly grant your running system new powers; the moment a patch reaches for more, you have to sign off on it by name.
 
 2. **Node policy gate (activation-time, on the server).** If the node sets `MARCH_DEPLOY_POLICY`, the server refuses to activate any function whose capabilities exceed the node's policy — regardless of who signed it. This is enforced independently of the deploy tooling, so it holds even if the deploy pipeline is bypassed or compromised.
 
