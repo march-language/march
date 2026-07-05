@@ -196,6 +196,56 @@ let run_oracle src_path =
             else Mismatch (interp_out, out)))
   end
 
+(* Cross-compile the program for [arch] (amd64|arm64), run it under Docker, and
+   diff its stdout against the NATIVE-compiled output — NOT the interpreter.
+   Native-compiled is the reference because it isolates cross-arch codegen bugs
+   (datalayout / arch-flag / ABI) from the pre-existing interpreter-vs-compiled
+   divergences (e.g. println-of-list showing `#<tag:1>`) that this change does
+   not touch.  A MISMATCH here means the cross backend computed a different
+   answer than the trusted native backend for the same source. *)
+let run_oracle_cross ~arch src_path =
+  if should_skip src_path then
+    Skipped (Filename.basename (Filename.remove_extension src_path))
+  else begin
+    let q = Filename.quote in
+    let bin_dir = Filename.concat (Filename.get_temp_dir_name ()) "march_oracle_xc" in
+    (try Unix.mkdir bin_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let src_base = Filename.basename (Filename.remove_extension src_path) in
+    (* --- reference: native compile + run --- *)
+    let nat_bin = Filename.concat bin_dir ("native_" ^ src_base) in
+    let nat_compile =
+      Printf.sprintf "cd %s && %s --compile %s -o %s"
+        (q project_root) (q march_abs) (q src_path) (q nat_bin) in
+    match run_shell_capture ~timeout_s:60.0 nat_compile with
+    | `Timeout    -> CompileTimeout
+    | `Error code -> CompileFail code
+    | `Ok _       ->
+      (match run_shell_capture ~timeout_s:30.0 (q nat_bin) with
+       | `Timeout    -> RunTimeout
+       | `Error code -> RunFail code   (* native itself failed — not a cross signal *)
+       | `Ok native_out ->
+         (* --- cross compile + run under docker --- *)
+         let x_bin = Filename.concat bin_dir (arch ^ "_" ^ src_base) in
+         let target = if arch = "arm64" then "linux/arm64" else "linux/amd64" in
+         let x_compile =
+           Printf.sprintf "cd %s && %s --compile --target %s %s -o %s"
+             (q project_root) (q march_abs) target (q src_path) (q x_bin) in
+         (match run_shell_capture ~timeout_s:60.0 x_compile with
+          | `Timeout    -> CompileTimeout
+          | `Error code -> CompileFail code
+          | `Ok _       ->
+            let run_cmd =
+              Printf.sprintf "sh %s %s %s"
+                (q (Filename.concat project_root "test/xc/run_under_docker.sh"))
+                (q arch) (q x_bin) in
+            (match run_shell_capture ~timeout_s:30.0 run_cmd with
+             | `Timeout    -> RunTimeout
+             | `Error code -> RunFail code
+             | `Ok cross_out ->
+               if cross_out = native_out then Match cross_out
+               else Mismatch (native_out, cross_out))))
+  end
+
 (* ------------------------------------------------------------------ *)
 (* Discover .march files                                              *)
 (* ------------------------------------------------------------------ *)
@@ -241,12 +291,26 @@ let () =
   Random.self_init ();
   Printf.printf "=== March Oracle Test ===\n";
   Printf.printf "march binary  : %s\n" march_abs;
-  Printf.printf "project root  : %s\n\n" project_root;
+  Printf.printf "project root  : %s\n" project_root;
+  (* MARCH_ORACLE_CROSS=amd64|arm64 → diff interpreter vs cross-compiled-in-docker
+     instead of interpreter vs native-compiled. *)
+  let cross_arch = Sys.getenv_opt "MARCH_ORACLE_CROSS" in
+  (match cross_arch with
+   | Some a -> Printf.printf "cross target  : linux/%s (via zig cc + docker)\n" a
+   | None   -> ());
+  Printf.printf "\n";
 
   let bench_dir    = Filename.concat project_root "bench" in
   let examples_dir = Filename.concat project_root "examples" in
   let files =
-    find_march_files bench_dir @ find_march_files examples_dir
+    match cross_arch with
+    | Some _ ->
+      (* Cross mode: only the deterministic examples corpus.  bench/ prints
+         wall-clock timings (non-deterministic → spurious MISMATCH) and its
+         fib-shaped programs INTERP_TIMEOUT; neither is a codegen signal. *)
+      find_march_files examples_dir
+    | None ->
+      find_march_files bench_dir @ find_march_files examples_dir
   in
 
   if files = [] then begin
@@ -264,9 +328,12 @@ let () =
       | f :: _      -> f
       | []          -> path
     in
-    Printf.printf "[%d/%d] %-50s " (i + 1) n_total rel;
+    let cross_prefix = match cross_arch with Some a -> Printf.sprintf "CROSS(%s) " a | None -> "" in
+    Printf.printf "[%d/%d] %s%-50s " (i + 1) n_total cross_prefix rel;
     flush stdout;
-    let verdict = run_oracle path in
+    let verdict = match cross_arch with
+      | Some a -> run_oracle_cross ~arch:a path
+      | None   -> run_oracle path in
     Printf.printf "%s\n" (verdict_label verdict);
     flush stdout;
     results := (rel, verdict) :: !results
@@ -280,9 +347,12 @@ let () =
   List.iter (fun (name, v) ->
     Printf.printf "%-50s  %s\n" name (verdict_label v);
     (match v with
-     | Mismatch (interp_out, compiled_out) ->
-       Printf.printf "  interp   : %s\n" (truncate_output interp_out);
-       Printf.printf "  compiled : %s\n" (truncate_output compiled_out)
+     | Mismatch (ref_out, got_out) ->
+       let l_ref, l_got = match cross_arch with
+         | Some _ -> "native  ", "cross   "
+         | None   -> "interp  ", "compiled" in
+       Printf.printf "  %s : %s\n" l_ref (truncate_output ref_out);
+       Printf.printf "  %s : %s\n" l_got (truncate_output got_out)
      | _ -> ())
   ) results;
 
