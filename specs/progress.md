@@ -282,6 +282,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-05, `Cli` stdlib module — Task 1: types + spec constructors)
+
+New `stdlib/cli.march` (108th stdlib module): `FlagArity`/`FlagSpec`/`CliError`/`ParsedArgs` types plus three spec constructors — `Cli.flag(long, help)` (boolean flag), `Cli.value_flag(long, help)` (value-taking flag), `Cli.flag_with(long, short, arity, default, required, help)` (full constructor). Registered in `bin/main.ml`'s `stdlib_file_list` so `Cli` resolves via eager stdlib loading. 3 tests in `test/stdlib/test_cli.march`, all green. This is Task 1 of a multi-task plan to add argument parsing (`Cli.parse`, `Cli.get_*` accessors, `Cli.help_text`, etc. land in later tasks). See `specs/todos.md` Done section for the doctest-parser-limitation note (call-then-field-access doesn't parse; worked around with `let`-then-field doctests, which in turn hit a pre-existing doctest-runner gap shared with `RRB.fold`/`RRB.chunk`).
+
 ## Current State (as of 2026-07-05, compiled `show(:atom)` / `println(:atom)` fixed — `Show(Atom)`)
 
 Atoms are now Showable in the compiled backend, closing the atom variant of the `_show` link-failure class (siblings — tuples, bare `None` — remain open, see `specs/todos.md` P1). Previously `println(:ok)` ran interpreted (`:ok`) but failed to LINK compiled (`Undefined symbols: "_show"`), because `Atom` was in neither `lib/typecheck/typecheck.ml`'s `builtin_impls` nor `lib/tir/lower.ml`'s `show_specs`, so `show(atom)` fell through to a bare undefined `show`. A direct `show(a)` on an `Atom`-typed `a` also failed *typecheck* in BOTH modes ("Atom does not implement interface Show").
