@@ -293,6 +293,50 @@ Atoms are now Showable in the compiled backend, closing the atom variant of the 
 
 **Test counts:** 400 compiler / 230 eval / 387 codegen (+2) / 804 stdlib (+1) / 53 stdlib_march / 29 snapshots — all runners exit 0. Pre-existing Slow failures unchanged (see below).
 
+## Current State (as of 2026-07-05, nested-tuple destructure in block-`let` fixed)
+
+Found by the Core March golden corpus (Phase 1 Task 2, tuples): a nested tuple
+destructured in a block-level `let` — `let ((a, b), (c, d)) = ((1, 2), (3, 4))` —
+ran correctly interpreted and via the equivalent `match`, but failed to compile
+(`--compile` emitted `call ptr @a()` for each leaf var → clang `use of undefined
+value '@a'`, exit 1).
+
+- **Root cause (`lib/tir/lower.ml`):** the block-`let` `PatTuple` lowering bound
+  only *direct* `PatVar` tuple elements; its inner fold dropped every non-var
+  element (`| _ -> inner`), so a NESTED `PatTuple` (`(a,b)` inside `((a,b),(c,d))`)
+  was silently skipped and its leaf vars never bound. Later uses resolved through
+  `resolve_use_alias` to nonexistent global functions (`@a`). `collect_pat_names`
+  already recursed (names typechecked), so the divergence surfaced only at codegen.
+- **Fix:** a recursive `bind_subpat scrut scrut_ty pat inner` helper mirroring the
+  match path's `compile_matrix` decomposition — handles `PatWild`/`PatVar`/`PatAs`
+  and recurses into nested `PatTuple`, threading each element's concrete type from
+  the parent tuple type so nested scalar fields untag correctly. Flat-tuple and
+  direct-`PatVar` lowering is byte-identical (29 TIR snapshots unchanged); the
+  interpreter path is untouched.
+- **Coverage:** new `nested_tuple_let_codegen` group in `test/test_codegen.ml`
+  (repro → `10`; 3-level-nesting + wildcard + interior tuple → `15`), both
+  RED→GREEN; new golden `specs/lang/golden/g10_nested_tuple_let.march` (`10`) —
+  the corpus's 10th program (`specs/lang/core-march.md` §5; `g09_float_show` was
+  the concurrently-added float golden merged from main).
+- **Gates:** 400 compiler / 230 eval / 387 codegen (+2) / 773 stdlib-quick /
+  53 stdlib_march / 29 snapshots — all exit 0; golden `verify.sh` 10/10 MATCH; the
+  `@oracle` sweep (solo, isolated HOME) exits 0 at **24 MATCH / 9 KNOWN_DIVERGENCE
+  / 0 un-triaged** (g10 is a +1 MATCH). Full-stdlib-with-Slow's 15
+  `adversarial-regressions` failures and codegen `llvm_ir_validity_gate #3`
+  are **pre-existing** — identical failure sets with the fix reverted to base
+  (file-copy swap, no stash): distributed-program `non-pointer scrutinee` ICEs,
+  `Unknown module IO/Process`, and `cannot find runtime` CWD/env artifacts, none
+  reachable by a TIR-lowering change.
+
+## Current State (as of 2026-07-05, Core March golden corpus — `float_to_string` backend unification)
+
+While writing golden conformance programs for `specs/lang/core-march.md`, the golden oracle caught a real, pre-existing, three-way divergence in whole-number `Float` formatting: `float_to_string(1.0)` printed `1.` interpreted (the `eval.ml` `string_of_float` reference), `1` compiled (C `%g`), and `1.0` under the wasm runtime — with JS giving `1` — plus a latent 6-vs-12-significant-digit precision gap for fractional values.
+
+- **New capability: all four `float_to_string` backends agree, byte-for-byte with the reference.** `runtime/march_runtime.c` now reproduces OCaml `string_of_float` exactly (`snprintf("%.12g")` + a trailing `.` on bare-integer results), fixing both the whole-number and the precision divergence; `runtime/march_runtime_wasm.c` trims trailing fractional zeros to the bare `.` (`1.0`→`1.`); `runtime/march_runtime.mjs` mirrors via `toPrecision(12)` + the same trailing-dot rule. The decision was to match the reference (`eval.ml` is normative per core-march.md §0/§1) rather than change the interpreter to a conventional `1.0`.
+- **Golden corpus 8 → 9.** New `specs/lang/golden/g09_float_show.march` pins whole-number float display; auto-discovered by both `specs/lang/golden/verify.sh` (**9/9 match**) and the `@oracle` sweep (`test/test_oracle.ml`, `g09` MATCH, **0 un-triaged failures**). `specs/lang/core-march.md` §5 updated.
+- **Known limitation (deferred, documented):** the REPL/JIT interactive value-display (`repl_jit.ml`'s `%g`) is a separate inspector surface (not the `float_to_string` builtin) and still renders `4.0` as `4`; freestanding-wasm keeps its 6-decimal fractional-precision cap; JS extreme-exponent fixed-vs-exponential notation is unaddressed. All out of scope for the whole-number-agreement fix.
+- **Suite:** 400 compiler / 230 eval / 385 codegen / 803 stdlib pass; oracle 0 un-triaged failures.
+
 ## Current State (as of 2026-07-04, Differential Oracle EXPANSION COMPLETE — Phase 5 / eval.ml refactor gate + closeout)
 
 The differential-oracle expansion (`specs/2026-07-04-differential-oracle-design.md`, plan `specs/plans/2026-07-04-differential-oracle-plan.md`) is **COMPLETE** — all 8 tasks / 5 phases landed on branch `claude/hopeful-kapitsa-9f49f3`, each independently reviewed:
