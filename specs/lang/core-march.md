@@ -6,11 +6,10 @@ specification, assembled and versioned from the seven incremental slices
 (Tasks 1–7) that grew it end-to-end. This is the CORE, not the whole language:
 the deferred set (§6) is still real and is now exactly the roadmap's Phase-2/3
 queue.
-**Depends on:** the language-specification roadmap design
-(`specs/2026-07-04-language-specification-roadmap-design.md`, the point-in-time
-design doc that framed this as its Phase-1 first artifact; that dated design
-spec has since been superseded by `specs/plans/2026-07-05-core-march-phase1-plan.md`,
-the Phase-1 task plan Tasks 1–8 executed).
+**Depends on:** the language-specification roadmap design spec
+(`specs/2026-07-04-language-specification-roadmap-design.md`), which framed this
+document as its Phase-1 first artifact, and the Phase-1 task plan
+(`specs/plans/2026-07-05-core-march-phase1-plan.md`) that Tasks 1–9 executed.
 
 ---
 
@@ -1182,7 +1181,7 @@ the reference is relied on.
 
 ## 5. Golden conformance corpus
 
-Thirty-two programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty-three programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -1251,6 +1250,7 @@ same harness limitation §4.4.1 / §4.3 note for the crashing strict-`&&` and
 | `g30_letfn_sum_result.march` | a recursive `fn go` (sum-to-n) whose RESULT is bound by a following `let` and used by the rest of the block — proves the `ELetFn` binding is visible to the block continuation (`eval.ml:6884`), like `let` | `55`/`110` |
 | `g31_cond_middle_arm.march` | `ECond` boolean chain where the FIRST condition is false and the SECOND (middle) is the first `VBool true`, so the MIDDLE arm is selected — top-to-bottom, first-true-wins, earlier false arms skipped and later arms (incl. the `true` catch-all) never consulted (E-Cond-Sel, `eval.ml:7097–7106`) | `A`/`B`/`C`/`F` |
 | `g32_cond_all_false_catchall.march` | `ECond` where every SPECIFIC condition (`n > 0`, `n < 0`) is false for `n = 0`, so control reaches the terminal `_ ->` catch-all — the non-crashing witness of the all-false path (a genuinely all-false chain raises at runtime, E-Cond-Fail `eval.ml:7099`; `_ ->` is parser sugar for a `true ->` arm, `parser.mly:1295–1296`, keeping the chain total) | `positive`/`negative`/`zero` |
+| `g33_float_show.march` | whole-number `Float` **display** via the `float_to_string` observation primitive — added after the concurrent `float_to_string` backend-unification fix (`0a2d3f53`) that the golden corpus's Task-1 float program had surfaced. Pins only the display format (four backends agree a whole-number `Float` prints OCaml-style `1.`, matching the `eval.ml` `string_of_float` reference); it does NOT lift the float deferral of §0/§6 — float arithmetic and ordering remain deferred | `1.`/`42.`/`100.`/`0.`/`-3.`/`1.5` |
 
 **Result: 32 / 32 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
@@ -1393,7 +1393,7 @@ converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
   grounded in the real pipeline (§1).
 - The four layers cohere: the grammar (§2), the desugaring map (§3), and the
   operational rules (§4) all describe one object, and the golden corpus (§5)
-  agrees 32/32 across both independently-written backends.
+  agrees 33/33 across both independently-written backends.
 - The doc format — grammar table, desugaring table, arm-cited big-step rules,
   golden table — proved a workable template, replicated cleanly across all
   seven slices and assembled here into one reference.

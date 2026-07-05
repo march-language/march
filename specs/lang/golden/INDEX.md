@@ -1,16 +1,17 @@
-# Golden corpus index (g01–g32)
+# Golden corpus index (g01–g33)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (32/32 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (33/33 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
 Provenance: `g01`–`g08` are the walking-skeleton's original corpus; `g09`–`g13`
 Task 1; `g14`–`g16` Task 2; `g17`–`g20` Task 3; `g21`–`g23` Task 4; `g24`–`g27`
-Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7.
+Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7; `g33` post-Phase-1 corpus
+widening after the concurrent `float_to_string` backend-unification fix landed.
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -46,6 +47,7 @@ Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7.
 | `g30_letfn_sum_result` | recursive `fn go` whose result is bound by a following `let`, used by rest of block | E-LetFn: binding visible to block continuation (§4.2) |
 | `g31_cond_middle_arm` | `ECond` chain where a MIDDLE arm is the first `VBool true` | E-Cond-Sel (§4.2) |
 | `g32_cond_all_false_catchall` | `ECond` all-specific-false ⇒ terminal `_ ->`/`true ->` catch-all | E-Cond-Sel with `_`-sugar catch-all; E-Cond-Fail (all-false raises) (§4.2) |
+| `g33_float_show` | whole-number `Float` display via `float_to_string` (observation primitive) — pins the cross-backend format after the `0a2d3f53` fix | §5 observation-primitive note (not a §4 core rule; float arithmetic/ordering deferred) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
