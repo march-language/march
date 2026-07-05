@@ -113,4 +113,37 @@ describe "Cli.parse" do
 
 end
 
+describe "Cli typed accessors and error messages" do
+
+  test "get_int parses a valid integer value" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "8080"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      match Cli.get_int(parsed, "port") do
+      Some(n) -> assert (n == 8080)
+      None -> assert false
+      end
+    end
+  end
+
+  test "get_int returns None for a non-integer value" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "not-a-number"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      match Cli.get_int(parsed, "port") do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+  end
+
+  test "error_message renders each CliError case readably" do
+    assert (Cli.error_message(UnknownFlag("bogus")) == "unknown flag: --bogus")
+    assert (Cli.error_message(MissingValue("port")) == "flag --port requires a value")
+    assert (Cli.error_message(MissingRequired("name")) == "missing required flag: --name")
+    assert (Cli.error_message(InvalidValue("port", "abc")) == "invalid value for --port: abc")
+  end
+
+end
+
 end

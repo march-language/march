@@ -244,4 +244,39 @@ mod Cli do
     parsed.positional
   end
 
+  doc """
+  Read a flag's value parsed as `Int`. `None` if unset OR if set but not a
+  valid integer (mirrors `Env.get_int`'s "fail safely" behavior) — this does
+  not consult `FlagSpec.default`, same as `get_string`.
+
+  ## Examples
+
+      march> let parsed = Cli.parse([Cli.value_flag("port", "")], ["--port", "8080"])
+      march> match parsed do | Ok(p) -> Cli.get_int(p, "port") | Err(_) -> None end
+      Some(8080)
+  """
+  fn get_int(parsed : ParsedArgs, long : String) : Option(Int) do
+    match get_string(parsed, long) do
+    Some(s) -> Result.to_option(String.to_int(s))
+    None -> None
+    end
+  end
+
+  doc """
+  Render a `CliError` as a one-line, user-facing message.
+
+  ## Examples
+
+      march> Cli.error_message(UnknownFlag("bogus"))
+      "unknown flag: --bogus"
+  """
+  fn error_message(err : CliError) : String do
+    match err do
+    UnknownFlag(f) -> "unknown flag: --" ++ f
+    MissingValue(f) -> "flag --" ++ f ++ " requires a value"
+    MissingRequired(f) -> "missing required flag: --" ++ f
+    InvalidValue(f, v) -> "invalid value for --" ++ f ++ ": " ++ v
+    end
+  end
+
 end
