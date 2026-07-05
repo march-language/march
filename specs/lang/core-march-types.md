@@ -17,8 +17,10 @@ mean"). This document is "which programs are well-typed."
 documents the *typechecker's* rules — the `Γ ⊢ e : τ` judgment — for the same
 kind of small fragment: literals, variables, `let` (with generalization), lambda,
 application, the `+`/`==` primitives, `if`, (as of Task 1) **ADT constructors
-and `match`**, (as of Task 2) **tuples and records**, and (as of Task 3)
-**atoms**. Same discipline as the operational skeleton: **every rule is
+and `match`**, (as of Task 2) **tuples and records**, (as of Task 3)
+**atoms**, (as of Task 4) **match guards and scrutinee-less `match do`
+(`ECond`)**, and (as of Task 5) **local recursive functions (`ELetFn`)**.
+Same discipline as the operational skeleton: **every rule is
 transcribed arm-for-arm from `lib/typecheck/typecheck.ml` and cited by line**,
 and a conformance corpus keeps it honest.
 
@@ -103,6 +105,145 @@ Each rule cites the `typecheck.ml` arm it is transcribed from.
           Γ ⊢ EBlock(ELet(x = e₁) :: rest) ⇒ τ₂
           -- generalization is gated on a SIMPLE-VARIABLE pattern, NOT on e₁ being
           --   a syntactic value: March has NO value restriction (see §4).
+
+(T-LetFn) β fresh (at env.level — NO enter_level bump, unlike T-Let)    typecheck.ml:4373
+          Γ_self = Γ, f:β                                               typecheck.ml:4374
+          Γ_inner, τ̄ = bind_lam_params(Γ_self, params)                  typecheck.ml:4375 (§2 T-Abs machinery)
+          Γ_inner ⊢ e_b ⇒ τ_b                                           typecheck.ml:4386
+          τ_ret = if no return annotation then τ_b                      typecheck.ml:4387–4394
+                  else (ann = surface_ty(annotation);
+                        unify(τ_b, ann); ann)
+          τ_arrow = τ̄ → τ_ret                                           typecheck.ml:4395
+          unify(β, τ_arrow)                                             typecheck.ml:4396
+          σ_f = generalize(env.level - 1, τ_arrow)                      typecheck.ml:4397
+          Γ, f:σ_f ⊢ (rest of block) ⇒ τ₂                                typecheck.ml:4398–4399
+          ────────────────────────────────────────────────────────────────
+          Γ ⊢ EBlock(ELetFn(f, params, ret_ann?, e_b) :: rest) ⇒ τ₂      typecheck.ml:4371–4399 (infer_block arm)
+          -- THE RECURSION KNOT: `f` is bound in Γ_self to a bare, fresh
+          --   unification variable `β` (`Mono β`, NOT generalized) BEFORE
+          --   `e_b` is typed (typecheck.ml:4373–4374). Any occurrence of
+          --   `f(...)` inside `e_b` resolves via T-Var/`instantiate` on a
+          --   `Mono` scheme — `instantiate` returns a `Mono` type UNCHANGED,
+          --   no fresh copy — so every recursive call inside the body shares
+          --   the SAME `β`/`τ_arrow` as the function itself: `f` is
+          --   MONOMORPHIC inside its own body, exactly like ML `let rec`
+          --   (standard HM — this is what makes polymorphic recursion a type
+          --   error rather than silently unsound; witness below).
+          -- `f`'s param types `τ̄` come from `bind_lam_params` — THE SAME
+          --   helper T-Abs uses (§2) for an ordinary lambda: one fresh
+          --   unification variable per param, upgraded to the param's own
+          --   annotation (if present) by `bind_lam_param`'s `p.param_ty,
+          --   ann_ty` match (typecheck.ml:4413–4420) — `ELetFn` params
+          --   support the identical `x : T` annotation syntax T-Abs params
+          --   do, checked the identical way; no ELetFn-specific param logic
+          --   exists beyond re-recording each param's span in `env.type_map`
+          --   (typecheck.ml:4383–4385, a bookkeeping fix so `lower.ml`'s
+          --   monomorphizer sees each param's real type instead of a shared
+          --   dummy-span placeholder — noted in-line as fixing a real
+          --   `Map.from_list`-inner-`go` monomorphization bug).
+          -- GENERALIZATION HAPPENS, BUT ONLY *AFTER* THE BODY IS FULLY
+          --   TYPED, and BEFORE the block's `rest` is typed — never inside
+          --   `e_b` itself. `generalize (env.level - 1) arrow_ty`
+          --   (typecheck.ml:4397) quantifies every unbound TVar whose level
+          --   is `> env.level - 1`. Because the `ELetFn` arm does **not**
+          --   call `enter_level` (contrast T-Let's `env_rhs = enter_level
+          --   env`, typecheck.ml:4305, which bumps to `env.level + 1` before
+          --   typing the RHS) — `β`, every param TVar, and every TVar born
+          --   while typing `e_b` are all created at the SAME level,
+          --   `env.level` — the threshold is shifted down by one
+          --   (`env.level - 1` rather than T-Let's plain `env.level`) to
+          --   land on exactly that generation. This is a DIFFERENT mechanism
+          --   from T-Let's (a shifted threshold instead of a level bump) that
+          --   arrives at the same generalize-after-the-binding-completes
+          --   shape; `t17_letfn_generalized_after_block` is the witness that
+          --   it actually fires (`id_rec` used at both `Int` and `String` in
+          --   the rest of the block).
+          -- the visible-name/visible-type split, precisely: inside `e_b`,
+          --   `f` resolves to `Mono β` (monomorphic, pre-generalization);
+          --   in `rest` (the block continuation) and everywhere after,
+          --   `f` resolves to `σ_f = generalize(env.level - 1, τ_arrow)` — a
+          --   `Poly` scheme if `τ_arrow` contains any level-`env.level`
+          --   TVars still unbound after the body was checked, else the same
+          --   `Mono τ_arrow` unchanged (`generalize` returns `Mono ty` when
+          --   its `ids` accumulator is empty, typecheck.ml:864).
+          -- shares its "bind self at a fresh monotype, generalize after"
+          --   SHAPE with `check_fn`'s handling of a top-level recursive `fn`
+          --   (typecheck.ml:4553–4574, the `self_ty`/`env_rec` setup) — but
+          --   NOT its level mechanics: `check_fn` DOES call `enter_level`
+          --   (typecheck.ml:4545, `env' = enter_level env`) before binding
+          --   the self-reference, so a top-level recursive fn is generalized
+          --   via the ordinary `generalize env.level` shape once its clause
+          --   is fully checked; `ELetFn` gets the same end result via the
+          --   `env.level - 1` compensation instead, because it deliberately
+          --   skips the level bump (no comment in the code states why the
+          --   two diverge here; both converge on "generalize the completed
+          --   arrow type before the caller's continuation sees it").
+          -- POLYMORPHIC RECURSION IS REJECTED, as standard HM predicts: a
+          --   local `fn go(x) do let a = go(1); let b = go("s"); x end`
+          --   (two recursive self-calls at DIFFERENT argument types inside
+          --   `go`'s own body) fails to typecheck — `go("s")`'s `String`
+          --   argument conflicts with the `Int` already unified onto `β`'s
+          --   param slot by `go(1)`, reported as an ordinary T-App argument
+          --   mismatch (`expected `Int` but got `String`.`) — captured live
+          --   for this task, not committed as a corpus program (it would
+          --   duplicate `reject/t01`'s mismatch shape rather than add new
+          --   coverage; see §3 note on `t12_letfn_ret_annot_conflict` for the
+          --   reject program that WAS added).
+          -- a declared return-type annotation is CHECKED (⇐, via `unify`),
+          --   not just recorded — `t_b`'s inferred type must unify with the
+          --   annotation (typecheck.ml:4392) — so a local recursive fn's
+          --   return annotation is exactly as load-bearing as a top-level
+          --   fn's; `reject/t12_letfn_ret_annot_conflict` is the witness (a
+          --   `fn go(k) : Int` whose body — self-consistent across the
+          --   recursive call, inferring `String` throughout — conflicts with
+          --   the declared `Int`).
+          -- ⚠ MINOR DIAGNOSTIC-QUALITY QUIRK found while building the reject
+          --   witness above (not a false accept/reject, does not affect this
+          --   corpus's pass/fail): the SAME mismatch is reported TWICE with
+          --   IDENTICAL text when a return annotation conflicts with a
+          --   self-recursive body. The `unify body_ty expected`
+          --   (typecheck.ml:4392) reports it once directly; separately, the
+          --   in-body recursive call `go(...)` already unified `β` (via
+          --   T-App's `TVar _` case, typecheck.ml:4253–4259) to
+          --   `τ̄ → body_ty`, so the LATER `unify β arrow_ty`
+          --   (typecheck.ml:4396, `arrow_ty`'s return slot = the annotation)
+          --   independently re-discovers the identical conflict through
+          --   `β`'s already-bound arrow. `--check-json` on
+          --   `t12_letfn_ret_annot_conflict` shows two byte-identical
+          --   `"message":"expected \`Int\` but got \`String\`."` diagnostics
+          --   at the same span. Cosmetic (both `check_types.sh`'s
+          --   substring-containment test and a human reading `--check`'s
+          --   text output see the right message either way), and does NOT
+          --   reproduce for a top-level `fn go(n) : Int` with the identical
+          --   shape (`check_fn`'s single `unify` against `fn_ret_ty` reports
+          --   once, with a BETTER message pointing at the specific offending
+          --   branch — "This is the declared return type of `go`.") — so
+          --   this is `ELetFn`-arm-specific: its two independent `unify`
+          --   calls (the ret-annotation check, and the final self/arrow
+          --   reconciliation) can both observe the same already-manifested
+          --   conflict when the conflict flows through the self-reference.
+          --   Not fixed here (docs-only task); noted in `specs/todos.md`.
+          -- cf. operational (E-LetFn), core-march.md:650–663 — eval's
+          --   `ELetFn` arm ties the SAME recursive knot at the VALUE level,
+          --   with a mutable `env_ref` back-patched AFTER the closure is
+          --   built so the closure's deferred environment read sees itself
+          --   (core-march.md:679–702's "why ELetFn needs a mutable ref");
+          --   this rule is the type-level analog — no mutation is needed
+          --   here because a unification variable `β` can be bound (not
+          --   read-then-fixed) after the fact: `f`'s TYPE is established by
+          --   binding a placeholder `β` first and unifying it once `e_b` is
+          --   fully typed, the same "placeholder now, resolve later" shape
+          --   the operational side needs a `ref` for, but achieved here via
+          --   ordinary unification instead of environment mutation.
+          -- like T-Let (and unlike a bare, block-final `ELetFn` — see the
+          --   `EBlock [ELetFn ...]` case at typecheck.ml:4101, a distinct
+          --   arm reachable when the local fn is the LAST/ONLY statement of
+          --   a block, which types the SAME way but simply returns
+          --   `arrow_ty` as the block's value instead of binding `f` into an
+          --   env for further statements to see — mirroring
+          --   core-march.md:672–677's identical operational split), the
+          --   binding here is visible to `rest`, i.e. the REST of the
+          --   enclosing block, not just `e_b`.
 
 (T-If)    Γ ⊢ c ⇐ Bool    Γ ⊢ t ⇒ τ    Γ ⊢ e ⇒ τ'   unify τ' = τ   typecheck.ml:4004–4017
           ────────────────────────────────────────────────
@@ -697,8 +838,11 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 | `accept/t15_econd_chain` | accept | (T-Cond) — a 3-arm `match do` boolean chain (`n > 0`/`n < 0`/`_`), all conditions `Bool`, all bodies `String` | typechecks |
 | `reject/t10_guard_not_bool` | reject | (T-Guard) non-Bool guard (`n when n + 1 -> …`, an `Int` guard) | `Match guards must be Bool.` |
 | `reject/t11_econd_condition_not_bool` | reject | (T-Cond) non-Bool condition (bare `n -> …` where `n : Int`) | `` Each condition in `match do` must be Bool. `` |
+| `accept/t16_letfn_factorial` | accept | (T-LetFn) — a local self-recursive `fn go(k, acc)` (factorial via an accumulator), `go` monomorphic inside its own body, called after the block | typechecks — runs to `120` for `compute(5)` |
+| `accept/t17_letfn_generalized_after_block` | accept | **(T-LetFn) generalization** — a local `fn id_rec(x)` used at both `Int` and `String` in the REST of the block (after the `ELetFn`, not inside its own body) | typechecks (proves `ELetFn`'s post-body `generalize(env.level - 1, …)` fires, mirroring `t03_let_poly` for local recursive fns) |
+| `reject/t12_letfn_ret_annot_conflict` | reject | (T-LetFn) declared return-type annotation (`fn go(k) : Int`) conflicts with the body's actual (self-recursion-consistent) inferred type `String` | `expected \`Int\` but got \`String\`` |
 
-**Result: 26 / 26 (15 accept typecheck, 11 reject with the declared error).**
+**Result: 29 / 29 (17 accept typecheck, 12 reject with the declared error).**
 
 **No atom-specific `reject/` program.** Every `EAtom`/`PatAtom` occurrence —
 nullary or payload-carrying, whatever the tag — synthesizes the single bare
@@ -833,6 +977,40 @@ pins that are easy to get wrong and are load-bearing:
     witness); a branch-body mismatch falls through to the same "All branches of
     a match must have the same type." text `EMatch` uses (no `ECond`-specific
     branch-mismatch message exists).
+13. **A local recursive function (`ELetFn`) is monomorphic inside its own body
+    and generalized only afterward — but via a DIFFERENT mechanism than
+    `T-Let`'s.** `infer_block`'s `ELetFn` arm (T-LetFn, typecheck.ml:4371–4399)
+    binds the function's own name to a bare `Mono β` (fresh, ungeneralized)
+    BEFORE typing the body, so a recursive call inside the body resolves via
+    `instantiate` on a `Mono` scheme (a no-op — same `β`, not a fresh copy):
+    every recursive call shares one monomorphic type, so **polymorphic
+    recursion is rejected** exactly as standard HM predicts (verified live: a
+    local `go` with two same-body recursive calls at `Int` then `String`
+    fails with an ordinary T-App argument-mismatch). Unlike T-Let's RHS,
+    which is typed under a bumped level (`enter_level`, typecheck.ml:4305)
+    and then generalized via `generalize env.level`, the `ELetFn` arm never
+    bumps the level at all — it types `β`, the params, and the body all at
+    the SAME `env.level`, then compensates by generalizing with a
+    **shifted-down threshold**, `generalize (env.level - 1) arrow_ty`
+    (typecheck.ml:4397), which is what actually quantifies those
+    same-level TVars. The net effect matches T-Let (monomorphic during its
+    own definition, polymorphic afterward — `accept/t17_letfn_generalized_
+    after_block` is the witness, `id_rec` used at `Int` then `String` in the
+    rest of the block) via a mechanically different route. `ELetFn` also
+    shares the "bind a fresh self-type, generalize once the body is fully
+    checked" SHAPE with `check_fn`'s handling of a top-level recursive `fn`
+    (typecheck.ml:4544–4574) — but `check_fn` DOES call `enter_level`
+    (typecheck.ml:4545), so it reaches the ordinary `generalize env.level`
+    form; `ELetFn`'s omission of that bump, and its compensating
+    `env.level - 1`, is unique to the local/block-scoped construct. A
+    declared return-type annotation on a local recursive fn is enforced
+    exactly as strictly as a top-level one's (`unify body_ty expected`,
+    typecheck.ml:4392) — `reject/t12_letfn_ret_annot_conflict` is the
+    witness, and also surfaces a minor, non-blocking diagnostic-quality
+    quirk: the identical mismatch is reported TWICE (see (T-LetFn)'s note,
+    §2, and the `specs/todos.md` entry) because the annotation-unify and the
+    final self-type/arrow-type reconciliation unify independently
+    rediscover the same conflict once it flows through the self-reference.
 
 ## 5. What this validated, and what's next
 
@@ -907,6 +1085,50 @@ error text: a non-Bool guard ("Match guards must be Bool.",
 in `match do` must be Bool.", `reject/t11_econd_condition_not_bool`) — neither
 restates an earlier task's reject message. `check_types.sh`: 26/26 (15 accept,
 11 reject), exit 0.
+
+**Task 5 (this slice) added:** local recursive functions typing — (T-LetFn)
+(§2), transcribed from the `ELetFn` arm of `infer_block` (typecheck.ml:
+4371–4399; the singleton/standalone counterpart at typecheck.ml:4101–4119 is
+cited alongside as the same shape, reached only when the local fn is the
+last/only statement of a block). **The load-bearing finding this slice
+pins:** the function's own name is bound to a bare, fresh, UNGENERALIZED
+`Mono β` before its body is typed (typecheck.ml:4373–4374), so every
+recursive call inside the body shares one monomorphic type — polymorphic
+recursion is REJECTED, standard HM (verified live, not committed as a
+separate reject program since it would restate `reject/t01`'s mismatch
+shape). Generalization does happen, but only once the body is fully checked
+and only for the REST of the enclosing block (never inside the function's
+own body) — via `generalize (env.level - 1) arrow_ty` (typecheck.ml:4397), a
+mechanically different route from T-Let's (T-Let bumps the level with
+`enter_level` before typing the RHS then generalizes at the ordinary
+`env.level`; `ELetFn` never bumps the level at all, instead shifting the
+generalization threshold down by one to compensate) that reaches the same
+observable result. `ELetFn` shares its "bind a fresh self-type, generalize
+after the body is checked" shape with `check_fn`'s top-level recursive `fn`
+handling (typecheck.ml:4544–4574) but not that function's `enter_level` call
+— a genuine, uncommented divergence between the two recursive-binding paths,
+pinned here for the first time. Two new `accept/` programs: a self-recursive
+local `fn go(k, acc)` computing factorial (`accept/t16_letfn_factorial`,
+monomorphic-in-body recursion) and a local `fn id_rec` used at both `Int` and
+`String` in the block's continuation (`accept/t17_letfn_generalized_
+after_block`, proving the post-body generalization actually fires — the
+`ELetFn` analog of `t03_let_poly`). One new `reject/` program,
+`reject/t12_letfn_ret_annot_conflict`: a declared return-type annotation
+(`fn go(k) : Int`) on a local recursive fn conflicts with the body's actual,
+internally-self-consistent inferred type (`String`, consistent across the
+recursive call) — genuinely new coverage (neither a T-App arity restatement
+nor a T-Match branch-mismatch restatement: both match branches agree with
+each other; only the annotation disagrees with what they agree on).
+Discovered in the course of building that witness: a minor, non-blocking
+diagnostic-quality quirk where the identical mismatch is reported TWICE
+(same span, same text) because the annotation-conflict unify
+(typecheck.ml:4392) and the final self-type/arrow-type unify
+(typecheck.ml:4396) each independently rediscover the same conflict once it
+flows through the self-reference `β` — noted in (T-LetFn)'s rule (§2), §4
+finding 13, and `specs/todos.md` (cosmetic; does not affect this corpus's
+pass/fail, and does not reproduce for the equivalent top-level `fn`, which
+reports once with a better message). `check_types.sh`: 29/29 (17 accept, 12
+reject), exit 0.
 
 **Next (widening slices, each like this one):** the interface/impl resolution
 that discharges the `Num`/`Eq` constraints (§2.1) — the richest and most
