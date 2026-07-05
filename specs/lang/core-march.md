@@ -82,11 +82,13 @@ expr     e  ::= ELit ℓ                                      -- literal
              |  ELet (p = e)                                -- block-scoped binding
              |  EMatch e [ p when g? -> e … ]               -- pattern match
              |  EIf e e e                                   -- if c do … else … end
+             |  EAtom a [e…]                                -- atom expression: :ok, :error(x) (ast.ml:70)
                                                             (ast.ml:51–91)
 
 pattern  p  ::= PatWild | PatVar x | PatLit ℓ | PatCon C [p…]
              |  PatTuple [p…]                                -- tuple pattern: (p…) (ast.ml:45)
              |  PatRecord [(f = p)…]                         -- record pattern: { f, … } (ast.ml:47)
+             |  PatAtom a [p…]                                -- atom pattern: :ok, :error(x) (ast.ml:44)
                                                             (ast.ml:40–48)
 
 value    v  ::= VInt n | VFloat f | VString s | VBool b | VAtom a
@@ -97,6 +99,46 @@ value    v  ::= VInt n | VFloat f | VString s | VBool b | VAtom a
              |  VRecord [(f = v)…]                          -- record value: field-name/value assoc list (eval.ml:40)
              |  VBuiltin name f                             -- primitive (e.g. +, ==)
 ```
+
+**`EAtom`/`PatAtom` are a single AST node parameterized by an optional
+payload, not two separate nullary/payload constructors.** `Ast.expr`'s
+`EAtom of string * expr list * span` (`ast.ml:70`) and `Ast.pattern`'s
+`PatAtom of string * pattern list * span` (`ast.ml:44`) both carry a `string`
+tag plus an **argument/sub-pattern list** that is empty for a nullary atom
+(`:ok` ⇒ `EAtom("ok", [], _)`) and non-empty for a payload-carrying one
+(`:error(x)` ⇒ `EAtom("error", [x], _)`) — confirmed by the parser
+productions that build them: `parser.mly:1211–1212` (`ATOM LPAREN args RPAREN`
+⇒ `EAtom(a, args, …)`) and `:1213–1214` (bare `ATOM` ⇒ `EAtom(a, [], …)`) on
+the expression side; `parser.mly:1316–1317` and `:1318–1319` mirror this for
+`PatAtom` on the pattern side. The lexer produces the `ATOM` token directly
+from a `:`-prefixed identifier (`lexer.mll:122`, `':' (atom_name as a) {
+ATOM a }`) — there is no separate token for "atom-with-payload" vs.
+"nullary atom"; the distinction is made entirely by which grammar production
+matches (whether a `(` follows).
+
+**`LitAtom` (inside `ELit`/`PatLit`) is a *different*, narrower construct
+than `EAtom`/`PatAtom`, and — like `PatRecord` (§2 above) — is dead code from
+the parser's perspective at this AST level.** `Ast.literal`'s `LitAtom of
+string` (`ast.ml:37`) has its own `eval_expr` arm (`ELit (LitAtom a, _) ->
+VAtom a`, `eval.ml:6949`) and its own `match_pattern` arm (`PatLit (LitAtom
+a, _), VAtom b when a = b -> Some []`, `eval.ml:781`, already stated in
+§4.3's literal-match table) — so the interpreter is fully prepared to
+evaluate/match an `ELit(LitAtom _)`/`PatLit(LitAtom _)` node if one exists.
+But grepping `parser.mly` for `LitAtom` finds **zero** occurrences: nothing
+in the grammar ever constructs one from surface `:ok` syntax — both the
+expression and pattern productions for the `ATOM` token build `EAtom`/
+`PatAtom` (above), never `ELit`/`PatLit`. A `LitAtom` node can only arise by
+constructing the AST directly (e.g. a test), not by parsing a `.march`
+source file — the same "implemented but unreachable from any parsed
+program" situation §2 already documents for `PatRecord`. (One further
+subtlety, out of this fragment's scope but worth flagging for the reader who
+greps `lower.ml`: the separate TIR lowering stage, `lib/tir/lower.ml:615`,
+*does* rewrite a nullary `Ast.EAtom(a, [], _)` into a `Tir.EAtom(Tir.ALit
+(Ast.LitAtom a))` shape — but that rewrite happens downstream of the
+desugared-AST/`eval.ml` layer this spec specifies (§1), inside the TIR pass,
+so it does not contradict "`LitAtom` is dead at the parser/`eval.ml` level"
+above; it is simply a different representation the compiled backend chooses
+for its own IR, invisible to the interpreter.)
 
 `ETuple`'s surface form is `(e₁, …, e_k)` — parenthesized, comma-separated
 expressions, `k ≥ 2` for an actual tuple; the parser also accepts `k = 0`
@@ -140,12 +182,29 @@ completeness and fidelity to `eval.ml`, but no golden program in §5
 exercises it, because no March **source program** can construct one.
 
 `LitFloat`/`VFloat` carry an OCaml `float` (IEEE-754 double); `LitString`/
-`VString` carry an OCaml `string`; `LitAtom`/`VAtom` carry a `string` naming
-the atom (surface `:ok`, `:error`, … — an interned-looking but here just
-string-valued tag distinct from a 0-ary constructor value `VCon`). All three
-are produced by the parser as direct literal tokens — `FLOAT`, `STRING`,
-`ATOM` (`parser.mly:1198`–`1199`, `:1213`) — with **no desugaring**, exactly
-like `LitInt`/`LitBool` (§3's `ELit` row).
+`VString` carry an OCaml `string`. `VAtom` likewise carries a `string` naming
+the atom (surface `:ok`, `:error`, … — an interned-looking but here just a
+string-valued tag). `LitFloat`/`LitString` are produced by the parser as
+direct literal tokens — `FLOAT`, `STRING` (`parser.mly:1198`–`1199`) — with
+**no desugaring**, exactly like `LitInt`/`LitBool` (§3's `ELit` row).
+`LitAtom` is spelled with the same `ATOM` token (`parser.mly:1213`) but, as
+just noted above, the parser never actually builds an `ELit(LitAtom …)` from
+it — it builds `EAtom`/`PatAtom` instead (see the `EAtom`/`PatAtom` note
+above `LitAtom` is included in the literal/value grammars above only because
+`eval.ml` has match arms ready for it, for fidelity, not because surface
+syntax reaches it).
+
+**`VAtom` (nullary) vs. a payload atom's `VCon` representation.** A bare
+`:ok` evaluates to `VAtom "ok"` — a distinct value former, *not* a `VCon`.
+But `:error(x)` evaluates to `VCon("error", [v])` — the **same** value
+former a 0-argument-vs-N-argument *constructor* application (`ECon`) would
+produce, not a variant of `VAtom` extended with a payload slot. In other
+words: **whether an atom expression's value is a `VAtom` or a `VCon` is
+decided purely by arity** (zero args ⇒ `VAtom`, one-or-more args ⇒ `VCon`
+tagged with the atom's name) — there is no `VAtom`-with-payload value shape
+in the grammar at all. This is the single most load-bearing, non-obvious
+fact about atoms (see the `EAtom` evaluation rule and the `PatAtom` matching
+rules below, both cited against `eval.ml`).
 
 Two facts that a reader coming from surface syntax must know, because they are
 load-bearing for every rule below:
@@ -175,6 +234,7 @@ the parser) and multi-clause functions.
 | `fn x -> e` (`ELam`) | identity (recurse body) | `desugar.ml:568–571` |
 | `f(e…)` (`EApp`) | identity, plus a qualified-`ECon` fold for `Mod.Ctor(args)` | `desugar.ml:552–563` |
 | `C(e…)` (`ECon`) | identity (recurse args) | `desugar.ml:565–566` |
+| `:ok`, `:error(e…)` (`EAtom`) | identity (recurse args; `[]` for a nullary atom) | `desugar.ml:644–645` |
 | `(e…)` (`ETuple`) | identity (recurse elements) | `desugar.ml:602–603` |
 | `{ f: e, … }` (`ERecord`) | identity (recurse each field's value expr; field names untouched) | `desugar.ml:605–606` |
 | `{ base with f: e, … }` (`ERecordUpdate`) | identity (recurse base + each update value expr) | `desugar.ml:608–611` |
@@ -230,6 +290,19 @@ Values do not reduce further; a lambda becomes a closure immediately
 (E-Con)     ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, left-to-right)               eval.ml:6977
             ──────────────────────────────────────
             ρ ⊢ ECon C [e₁…e_k] ⇓ VCon C [v₁…v_k]
+
+(E-Atom-0)  ─────────────────────────                              eval.ml:7145
+            ρ ⊢ EAtom a [] ⇓ VAtom a
+
+(E-Atom-N)  ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, k ≥ 1, left-to-right)         eval.ml:7146–7148
+            ──────────────────────────────────────
+            ρ ⊢ EAtom a [e₁…e_k] ⇓ VCon a [v₁…v_k]
+            -- a payload atom's value is a VCon tagged with the atom's own
+               name `a`, exactly like ECon's value shape (E-Con above) —
+               there is no separate "atom-with-payload" value former; see
+               §2's "VAtom (nullary) vs. a payload atom's VCon
+               representation" note for why this is the fragment's single
+               most load-bearing atom fact
 
 (E-Tuple)   ρ ⊢ eᵢ ⇓ vᵢ   (i = 1..k, left-to-right)                eval.ml:7004–7005
             ──────────────────────────────────────
@@ -458,6 +531,39 @@ match(PatCon C [p…], VCon C' [v…]) = ⋃ match(pᵢ, vᵢ)          eval.ml:
         provided  bare(C) = C'  and  |p…| = |v…|,  else ⊥
 match(PatCon …, non-VCon)       = ⊥                            eval.ml:795
 
+match(PatAtom a [], VAtom b)        = ∅  if a = b                  eval.ml:797
+        provided  p… = []  (nullary pattern)
+match(PatAtom a [p…], VCon a' [v…]) = ⋃ match(pᵢ, vᵢ)             eval.ml:798–800
+        provided  a = a'  and  |p…| = |v…|,  else ⊥
+match(PatAtom …, _)                 = ⊥  (all other cases)         eval.ml:801
+```
+
+**This dual-arm rule is the key documented fact about atoms — a
+payload-carrying `PatAtom` matches a `VCon`, not a `VAtom`.** `match_pattern`'s
+two `PatAtom` cases (`eval.ml:797`–`798`, shown as the two rules above) are
+tried in order: the FIRST requires the scrutinee to be a nullary `VAtom` with
+an equal tag AND the pattern itself to be nullary (`pats = []`, guarded in
+the OCaml `when` clause) — `match(PatAtom "ok" [], VAtom "ok") = ∅`. The
+SECOND requires the scrutinee to be a `VCon` whose tag equals the pattern's
+atom name — `match(PatAtom "error" [p], VCon("error", [v])) = match(p, v)`,
+componentwise via the same `match_list` helper `PatCon`/`PatTuple` share
+(§4.3 below). A `PatAtom` therefore matches **two structurally different
+value shapes** depending on whether it (and the value) carries a payload —
+this is the pattern-side mirror of E-Atom-0/E-Atom-N's value-shape split
+above (§4.2), and it is why `:error(msg)` (a `PatAtom` with one sub-pattern)
+can successfully destructure a value that was built as a `VCon`, never a
+`VAtom`, at construction time (`eval.ml:7146–7148`). Unlike `PatCon`, there is
+no separate arity-mismatch clause spelled out for `PatAtom`/`VCon` beyond the
+`List.length pats <> List.length args` check inside the second arm
+(`eval.ml:799`) — a nullary `PatAtom` (`pats = []`) can never match a `VCon`
+through this second arm either, because `List.length [] <> List.length args`
+is true whenever `args` is non-empty, so `:ok` (nullary pattern) correctly
+fails against a `VCon("ok", [x])` value (which cannot arise from `:ok`
+construction anyway, since E-Atom-0/E-Atom-N tie payload-presence at
+construction time to the same value-shape choice a matching `PatAtom` must
+make) — the two sides stay in lockstep by construction, not by coincidence.
+
+```
 match(PatTuple [], VUnit)          = ∅                          eval.ml:803
 match(PatTuple [p…], VTuple [v…])  = ⋃ match(pᵢ, vᵢ)          eval.ml:804–806
         provided  |p…| = |v…| (componentwise via match_list, eval.ml:832–840),
@@ -730,7 +836,7 @@ the skeleton's correctness evidence. Scaling from "these 8 programs" to
 
 ## 5. Golden conformance corpus
 
-Twenty programs in `specs/lang/golden/`, each exercising a slice of the
+Twenty-three programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -738,7 +844,9 @@ corpus (`+`, `==`, lambdas, ADTs, match); `g09`–`g13` are Task 1's addition,
 covering the remaining literals and the full primitive δ-rule table; `g14`–`g16`
 are Task 2's addition, covering tuple construction, destructuring, and nesting;
 `g17`–`g20` are Task 3's addition, covering record literals, field access, and
-functional update on the currently-working (non-divergent) subset:
+functional update on the currently-working (non-divergent) subset; `g21`–`g23`
+are Task 4's addition, covering nullary-atom matching, payload-atom matching
+with binding, and an atom-returning function used in both `==` and `match`:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -762,8 +870,11 @@ functional update on the currently-working (non-divergent) subset:
 | `g18_record_update.march` | `ERecordUpdate` on an EXISTING field: the base record is unaffected (functional/persistent update) while the result reflects the new value (E-Update) | `1`/`2`/`100`/`2` |
 | `g19_record_update_multi_field.march` | `ERecordUpdate` naming MULTIPLE existing fields in one update expression, with a field left untouched, passed through a function that reads via `EField` (E-Update, E-Field) | `12`/`93` |
 | `g20_record_nested.march` | a record VALUE nested inside another record's field, accessed/updated through chained `EField`/`ERecordUpdate` (`outer.inner.a`, `{ outer with inner: {...} }`) | `12`/`39` |
+| `g21_atom_match.march` | nullary `EAtom`/`VAtom` matched against a nullary `PatAtom` in a `match` (E-Atom-0, match(PatAtom, VAtom)) | `matched ok` |
+| `g22_atom_payload_match.march` | payload `EAtom`/`VCon` matched against a payload `PatAtom`, binding the payload (E-Atom-N, match(PatAtom, VCon)) | `error: disk full` |
+| `g23_atom_returning_fn.march` | a function returning `:zero`/`:nonzero`, its result compared with atom `==` and separately dispatched over in a `match` | `true`/`was nonzero` |
 
-**Result: 20 / 20 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 23 / 23 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
@@ -847,6 +958,41 @@ both backends (`typecheck.ml:3869`–`3875`) before either backend's runtime
 `ERecordUpdate` path ever executes; none of `g17`–`g20` needed to route
 around this, since none of them update through an erased base.
 
+**A known, already-filed divergence encountered again while drafting `g22`,
+reached through a second path — routed around, not hidden.** `println` on a
+bare atom value (e.g. `println(:ok)`) is a known, filed compiler bug: it
+interprets fine (`VAtom` prints as `:ok`, exit 0) but fails to **compile** —
+the linker rejects the emitted object with `Undefined symbols … "_show" …
+_println$Atom`, i.e. `Atom` has no compiled `_show` implementation (this bug
+is being fixed in a separate session, tracked as chip `task_6bee4d07`, and is
+explicitly out of this task's scope per its brief's guardrail). Confirmed by
+hand before drafting `g22`: `println(:ok)` prints `:ok` interpreted (exit 0)
+but fails to link compiled with exactly that `_show`/`Atom` error. The FIRST
+draft of `g22` did not print a bare atom directly, but hit the *same* bug via
+a second, less obvious path: `match result do :error(msg) -> println(msg) …
+end` — printing `msg`, a `String` value bound out of a payload atom's
+`PatAtom` match — **also** failed to link with the identical `_show`/`Atom`
+error. The root cause traces back to the typechecker, not the pattern-match
+mechanics: `EAtom`'s inferred type is unconditionally `t_atom` regardless of
+payload (`typecheck.ml:4045`–`4047`, `ignore (infer_expr env a)` on each
+argument — the argument's own inferred type is discarded, only used for its
+unification side effects), and `PatAtom`'s inferred pattern type mirrors this
+(`typecheck.ml:2661`–`2664`: the OVERALL pattern type is `t_atom`, while each
+sub-pattern — e.g. `msg` — gets its own type from a fresh, otherwise
+unconstrained `infer_pattern` call). Nothing unifies `msg`'s type to a
+concrete `String`, so it stays an erased type variable at the print site —
+the same "erased base" situation §4.2.1 already documents for
+`record_from_list`'s return type — and `println` on an erased-type value
+falls through to the generic/dynamic show path, which needs a per-type
+`_show`, and `Atom`'s is the missing one. This is **the same filed bug**
+reached by a second route (an atom payload's erased binding type), not a new
+divergence: `g22` was rewritten to route the payload through `describe(msg) =
+"error: " ++ msg` first — `++`'s `VString`-restricted δ-rule (δ-Concat, §4.4)
+forces `msg`'s type to unify concretely with `String`, so the `println` call
+prints a genuine `VString` rather than an erased-type value, sidestepping the
+bug while still exercising the intended semantics (atom construction with a
+payload, `PatAtom` matching with binding) end to end.
+
 Run the check: `dune build bin/main.exe && specs/lang/golden/verify.sh`
 (the committed harness diffs both outputs per program and exits nonzero on any
 mismatch). These programs are exactly the shape the `@oracle` conformance sweep
@@ -873,9 +1019,11 @@ interface-dispatch machinery; effects/IO ordering; actors; refinements;
 capabilities; the Perceus RC discipline (its own Level-3 track). (Tuples were
 covered by Task 2; records — literals, field access, functional update,
 `PatRecord` matching, and the `ERecordUpdate` missing-field adjudication — by
-this task, Task 3. This line was stale after Task 2 landed tuples without
-updating it — noted here so it doesn't happen again: keep this list in sync
-with §0/§2's actual fragment coverage as each task lands.)
+Task 3; atoms — `EAtom`/`PatAtom`, the `VAtom`↔`VCon` payload-arity split, and
+both `PatAtom` matching arms — by this task, Task 4. This line was stale
+after Task 2 landed tuples without updating it — noted here so it doesn't
+happen again: keep this list in sync with §0/§2's actual fragment coverage as
+each task lands.)
 
 **Next steps:**
 
