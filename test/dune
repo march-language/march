@@ -224,7 +224,7 @@
       ../runtime/march_scheduler.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c \
-      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread")))
+      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm")))
 
 (rule
  (alias runtest)
