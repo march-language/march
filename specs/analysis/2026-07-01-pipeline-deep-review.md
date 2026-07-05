@@ -441,6 +441,18 @@ Ordering: extract the shared modules first (they shrink all three files and kill
 
 ## 8. Testing recommendations (priority order)
 
+> **Status (2026-07-04):** items **1, 3, 4, 5 (partial), 7** landed.
+> #1 (oracle crash-as-failure) + #7 (weak-spot generators) shipped as the
+> differential-oracle expansion (`specs/2026-07-04-differential-oracle-design.md`,
+> 8 tasks) — plus the opt-matrix, exit-code parity, and the full-corpus
+> conformance sweep (`test/test_oracle.ml`) that now also treats a compiled
+> signal-crash / internal-compiler-error as a divergence. #3 (LLVM IR validity
+> gate) and #4 (TIR snapshot infrastructure) landed in Wave 2. #5 is partial —
+> the oracle now catches crash-shaped RC bugs automatically, but the dedicated
+> gc-trace inc==dec+free balance harness and the standing ASAN job are still
+> open. #2 (the two confirmed repros) landed as generators `a5dad194`. Remaining
+> open: #5 (RC-balance harness / ASAN lane), #6 (codegen twin-path), #8–#10.
+
 1. **Fix the differential oracle** (test_properties.ml:730): interpreter-succeeds + compiled binary signal-killed (`WIFSIGNALED` / exit ≥128) = **failure**, not skip. Single highest-leverage change; would have caught both runtime-confirmed criticals.
 2. **Land the confirmed repros as compiled regression tests**: (a) `both(s, s, 1)` owned+borrowed dead-after; (b) dead multi-param-ADT binding followed by a wider allocation (FBIP reuse). Assert output parity **and** exit code 0.
 3. **IR validity gate**: run `llvm-as` / `opt -passes=verify` over emitted IR for the whole `test/native/` corpus (~35 fixtures). Catches the coerce-catch-all / string-case ill-typed-IR class cheaply.

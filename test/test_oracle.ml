@@ -5,7 +5,36 @@
       dune build @test/oracle          # run and print results matrix
       MARCH_BIN=... MARCH_ROOT=... dune exec test/test_oracle.exe --root .
 
-    Exit code: 0 if all active programs match, 1 if any mismatch. *)
+    Exit code: 0 if all active un-triaged programs match/are accounted for,
+    1 if any un-triaged divergence is found.
+
+    --- Corpus scope (deliberate, not an oversight) ---------------------
+    This sweep enumerates only the top-level `.march` files directly under
+    `bench/` and `examples/` — real, runnable, print-driven programs whose
+    stdout is a meaningful ground truth to diff. It deliberately does NOT
+    walk `test/` (189+ files there are compiler-internal fixtures: single-
+    feature snippets, deliberately-erroring negative cases, and partial
+    fragments never meant to run standalone — sweeping them would drown
+    the signal in triage noise, not raise it) and does NOT extract stdlib
+    doctests (the `march>` REPL-transcript comments embedded in stdlib
+    modules need a dedicated extractor, since they are not whole `.march`
+    programs). See `specs/todos.md` for the tracked follow-up to extend
+    the corpus to a triaged `test/` subset plus a doctest extractor.
+
+    --- Divergence classification (the core contract) -------------------
+    A DIVERGENCE is any of: Mismatch, RunFail(signal-crash), or
+    CompileFail(3) (exit 3 = internal compiler error / ICE, the Phase-1
+    ICE signal) — i.e. any case where the interpreter produced ground
+    truth (exited 0) but the compiled backend disagrees or dies badly.
+    A divergence is a FAILURE unless the program is listed in
+    [known_divergence] below, in which case it is reported loudly as
+    KNOWN_DIVERGENCE but does not fail the sweep. Everything else
+    (InterpFail, InterpTimeout, CompileTimeout, CompileFail(non-3),
+    RunFail(clean nonzero), RunTimeout, Skipped) is a non-failure: either
+    there is no interpreter ground truth to compare against, or the
+    program is an explicitly triaged, legitimately-skipped case. Nothing
+    is silently dropped — every bucket is counted and printed in the
+    results matrix (loud-skip doctrine). *)
 
 (* ------------------------------------------------------------------ *)
 (* Locate march binary and project root                               *)
@@ -59,15 +88,17 @@ let project_root =
      | None   -> Sys.getcwd ())
 
 (* ------------------------------------------------------------------ *)
-(* Programs to skip (network servers, interactive, long-running)      *)
+(* Nondeterministic allowlist: programs that are legitimately          *)
+(* non-comparable (network I/O, actor scheduling, wall-clock,          *)
+(* interactive input) — SKIPPED, not failures, one-line reason each.   *)
 (* ------------------------------------------------------------------ *)
 
-let skip_set =
+let nondeterministic_allowlist =
   let s = [
     (* HTTP clients that connect to external servers *)
     "http_get"; "http_get_close"; "http_get_keepalive";
     "http_requests"; "http_stream"; "http_stream_large"; "http_streaming";
-    (* HTTP / TCP servers (don't exit) *)
+    (* HTTP / TCP servers (don't exit on their own) *)
     "http_hello"; "counter_server"; "csv_server"; "csv_example";
     (* Actor programs that may block on message receive *)
     "actors";
@@ -75,10 +106,15 @@ let skip_set =
     "par_fib"; "par_map"; "par_worksteal"; "parallel";
     (* Interactive or needs real files *)
     "debugger"; "read_file";
-    (* Supervision trees (start actors / servers) *)
+    (* Supervision trees (start actors / servers; scheduler-order-dependent) *)
     "supervision_basic"; "app_basic";
+    (* Supervision/actor demo: pids and restart ordering vary across runs *)
+    "supervision_strategies";
     (* IOList template outputs variable content *)
     "iolist_template";
+    (* HTTP client requiring a WASM-only fetch shim; compiled link fails
+       cleanly (unsupported outside the browser target), not comparable *)
+    "http_test";
   ] in
   let tbl = Hashtbl.create 32 in
   List.iter (fun k -> Hashtbl.replace tbl k true) s;
@@ -86,7 +122,61 @@ let skip_set =
 
 let should_skip path =
   let base = Filename.basename (Filename.remove_extension path) in
-  Hashtbl.mem skip_set base
+  Hashtbl.mem nondeterministic_allowlist base
+
+(* ------------------------------------------------------------------ *)
+(* Known divergence list: currently-open compiler bugs this sweep      *)
+(* reproduces. A program here that diverges is reported as             *)
+(* KNOWN_DIVERGENCE (visible, not a failure). A program here that      *)
+(* UNEXPECTEDLY matches is reported as a [WARN] (stale entry — prune   *)
+(* it once the underlying bug is confirmed fixed).                     *)
+(* ------------------------------------------------------------------ *)
+
+let known_divergence =
+  [
+    (* to_string()/println() on a container falls through to the runtime's
+       generic "#<tag:N>" fallback when compiled instead of dispatching
+       through the Show interface like the interpreter does.
+       specs/todos.md P1: "`to_string` on any non-primitive type (`List`,
+       `Option`, `Result`, tuples, custom ADTs) is broken compiled". *)
+    "hello", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\")";
+    "list_lib", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\")";
+
+    (* Sort family: compiled-only RC-underflow/misclassification crash
+       family in the Sort module's merge/heap internals. Pre-existing,
+       independent of every wave that has re-checked it.
+       specs/progress.md: "heapsort RC underflow". *)
+    "alphadev_sort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+    "heapsort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+    "mergesort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+    "sort_nearly_sorted", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+    "timsort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+
+    (* DataFrame groupby+agg: a DISTINCT compiled-only RC-misclassification
+       crash (EXC_BAD_ACCESS in march_incrc, called from Stats.mean via
+       DataFrame.eval_agg/apply_group_by) — same bug CLASS as the sort
+       family (a corrupted/tagged-immediate value dereferenced as a heap
+       pointer) but a different call site; newly filed by this sweep.
+       specs/todos.md P0: "DataFrame.group_by + Stats.mean: compiled-only
+       RC-misclassification SIGSEGV". *)
+    "dataframe_bench", "DataFrame group_by/Stats.mean RC-misclassification SIGSEGV (specs/todos.md, filed by this sweep)";
+
+    (* Monomorphization-limit ICE: compiling hits mono.ml's polymorphic-
+       recursion specialization-count guard on a shape that is not
+       actually polymorphic-recursive in the source.
+       specs/todos.md P0: "Monomorphization limit reached compiling a
+       self-recursive nested closure". *)
+    "stats_basic", "Monomorphization limit reached ICE, exit 3 (specs/todos.md: \"Monomorphization limit reached compiling a self-recursive nested closure\"; stats_basic is a newly-confirmed trigger of the same P0)";
+  ]
+
+let known_divergence_tbl =
+  let tbl = Hashtbl.create 16 in
+  List.iter (fun (k, reason) -> Hashtbl.replace tbl k reason) known_divergence;
+  tbl
+
+let known_divergence_reason path =
+  let base = Filename.basename (Filename.remove_extension path) in
+  Hashtbl.find_opt known_divergence_tbl base
 
 (* ------------------------------------------------------------------ *)
 (* Subprocess runner with timeout                                      *)
@@ -229,9 +319,40 @@ let verdict_label = function
   | RunTimeout       -> "RUN_TIMEOUT"
   | Skipped _        -> "SKIPPED"
 
-let is_failure = function
-  | Mismatch _ -> true
-  | _          -> false
+(* ------------------------------------------------------------------ *)
+(* Divergence classification (the core gap this restructure closes)   *)
+(*                                                                     *)
+(* BEFORE (Phase <4): [is_failure] returned true ONLY for [Mismatch]. *)
+(*   A compiled binary that SIGSEGV'd/SIGABRT'd (RunFail(signal)) or  *)
+(*   an internal-compiler-error exit-3 (CompileFail 3) while the      *)
+(*   interpreter succeeded passed the sweep silently — the core gap   *)
+(*   this task fixes (see the file-header comment and the task brief: *)
+(*   "RunFail(crashed) signal deaths currently pass silently").       *)
+(*                                                                     *)
+(* AFTER: [is_divergence] additionally treats a signal-killed compiled *)
+(*   run and an ICE (exit 3) compile as divergences. [is_failure]     *)
+(*   narrows [is_divergence] to only the UN-TRIAGED ones — a          *)
+(*   divergence on a program in [known_divergence] is reported but    *)
+(*   does not fail the sweep (the "un-triaged gate" doctrine below).  *)
+(* ------------------------------------------------------------------ *)
+
+(** A divergence: the interpreter produced ground truth (ran) but the
+    compiled backend disagrees or dies badly. Does NOT yet account for
+    [known_divergence] triage — see [is_failure]. *)
+let is_divergence = function
+  | Mismatch _                              -> true
+  | RunFail n when n = exit_signal_killed   -> true  (* compiled binary crashed *)
+  | CompileFail 3                            -> true  (* internal compiler error / ICE *)
+  | _                                        -> false
+
+(** Un-triaged gate: a divergence FAILS the sweep unless [path] is listed
+    in [known_divergence] (an already-open, cited compiler bug), in which
+    case it is reported as KNOWN_DIVERGENCE instead. This is the whole
+    point of the sweep: a newly-added or newly-regressed divergent
+    program reddens `@oracle` until it is triaged into one of the two
+    named lists above. *)
+let is_failure (path, verdict) =
+  is_divergence verdict && known_divergence_reason path = None
 
 (* ------------------------------------------------------------------ *)
 (* Main                                                               *)
@@ -278,7 +399,18 @@ let () =
   Printf.printf "\n%-50s  %s\n" "Program" "Verdict";
   Printf.printf "%s\n" (String.make 70 '-');
   List.iter (fun (name, v) ->
-    Printf.printf "%-50s  %s\n" name (verdict_label v);
+    let known = known_divergence_reason name in
+    let label =
+      if is_divergence v then
+        match known with
+        | Some _ -> verdict_label v ^ "  [KNOWN_DIVERGENCE]"
+        | None   -> verdict_label v ^ "  <-- UN-TRIAGED FAILURE"
+      else verdict_label v
+    in
+    Printf.printf "%-50s  %s\n" name label;
+    (match known, is_divergence v with
+     | Some reason, true -> Printf.printf "  known divergence: %s\n" reason
+     | _ -> ());
     (match v with
      | Mismatch (interp_out, compiled_out) ->
        Printf.printf "  interp   : %s\n" (truncate_output interp_out);
@@ -286,38 +418,75 @@ let () =
      | _ -> ())
   ) results;
 
+  (* Stale known_divergence entries: listed as an open bug but this run
+     did NOT reproduce a divergence for it (verdict is Match, or some
+     other non-divergent outcome). Loud [WARN], not a hard failure — the
+     entry should be pruned once the underlying bug is confirmed fixed. *)
+  let stale_known_divergences =
+    List.filter_map (fun (base, reason) ->
+      let matching =
+        List.filter (fun (name, _) ->
+          Filename.basename (Filename.remove_extension name) = base
+        ) results
+      in
+      match matching with
+      | [] -> None (* program not found in this corpus run at all *)
+      | (name, v) :: _ when not (is_divergence v) -> Some (name, base, reason, v)
+      | _ -> None
+    ) known_divergence
+  in
+
   let count pred = List.length (List.filter (fun (_, v) -> pred v) results) in
-  let n_match   = count (function Match _ -> true | _ -> false) in
-  let n_mismatch= count is_failure in
-  let n_cfail   = count (function CompileFail _ | CompileTimeout -> true | _ -> false) in
-  let n_itimeout= count (function InterpTimeout -> true | _ -> false) in
-  let n_ifail   = count (function InterpFail _ -> true | _ -> false) in
-  let _n_rfail  = count (function RunFail _ | RunTimeout -> true | _ -> false) in
-  let n_skip    = count (function Skipped _ -> true | _ -> false) in
+  let n_match      = count (function Match _ -> true | _ -> false) in
+  let n_divergence = count is_divergence in
+  let n_known_div  = List.length (List.filter (fun (name, v) -> is_divergence v && known_divergence_reason name <> None) results) in
+  let n_failure    = List.length (List.filter is_failure results) in
+  (* Only clean "unsupported feature" compile exits (nonzero, ≠3) + compile
+     timeouts belong here. A CompileFail 3 (internal compiler error) is a
+     DIVERGENCE (see [is_divergence]) already counted under KNOWN_DIVERGENCE or
+     UN-TRIAGED FAILURE — counting it here too would double-count it (the row
+     label says "!=3") and break the buckets-reconcile-to-total invariant. *)
+  let n_cfail      = count (function CompileFail n when n <> 3 -> true | CompileTimeout -> true | _ -> false) in
+  let n_itimeout   = count (function InterpTimeout -> true | _ -> false) in
+  let n_ifail      = count (function InterpFail _ -> true | _ -> false) in
+  let n_skip       = count (function Skipped _ -> true | _ -> false) in
 
   Printf.printf "\n=== RESULTS MATRIX ===\n";
-  Printf.printf "  MATCH            : %d   interpreter == compiled ✓\n" n_match;
-  Printf.printf "  MISMATCH         : %d   <-- oracle failures\n" n_mismatch;
-  Printf.printf "  SKIPPED          : %d   network/server/interactive programs\n" n_skip;
-  Printf.printf "  INTERP_TIMEOUT   : %d   too slow for tree-walking interpreter\n" n_itimeout;
-  Printf.printf "  INTERP_FAIL      : %d   interpreter error\n" n_ifail;
-  Printf.printf "  COMPILE_FAIL     : %d   compiler error\n" n_cfail;
-  Printf.printf "  RUN_FAIL(crashed): %d   compiled binary crashes (signal)\n"
-    (count (function RunFail n -> n = exit_signal_killed | _ -> false));
-  Printf.printf "  RUN_FAIL(other)  : %d   compiled binary exits non-zero\n"
+  Printf.printf "  MATCH             : %d   interpreter == compiled\n" n_match;
+  Printf.printf "  KNOWN_DIVERGENCE  : %d   open compiler bug, triaged (see known_divergence list) — not a failure\n" n_known_div;
+  Printf.printf "  UN-TRIAGED FAILURE: %d   <-- oracle failures (divergence not in known_divergence)\n" n_failure;
+  Printf.printf "  SKIPPED           : %d   nondeterministic_allowlist (network/actor/server/interactive)\n" n_skip;
+  Printf.printf "  INTERP_TIMEOUT    : %d   too slow for tree-walking interpreter (no ground truth)\n" n_itimeout;
+  Printf.printf "  INTERP_FAIL       : %d   interpreter error (no ground truth)\n" n_ifail;
+  Printf.printf "  COMPILE_FAIL(!=3) : %d   clean \"unsupported feature\" compile exit (no ground-truth conflict)\n" n_cfail;
+  Printf.printf "  RUN_FAIL(other)   : %d   compiled binary exits clean nonzero (no ground-truth conflict)\n"
     (count (function RunFail n -> n <> exit_signal_killed | RunTimeout -> true | _ -> false));
-  Printf.printf "  TOTAL            : %d\n\n" n_total;
+  Printf.printf "  TOTAL DIVERGENCES : %d   (= KNOWN_DIVERGENCE + UN-TRIAGED FAILURE; Mismatch/signal-crash/ICE-exit-3)\n" n_divergence;
+  Printf.printf "  TOTAL PROGRAMS    : %d\n\n" n_total;
 
-  Printf.printf "Note: march currently emits typecheck warnings to stdout rather than stderr.\n";
+  if stale_known_divergences <> [] then begin
+    List.iter (fun (name, _base, reason, v) ->
+      Printf.printf "[WARN] known_divergence entry no longer reproduces (consider pruning): %s\n" name;
+      Printf.printf "       listed reason: %s\n" reason;
+      Printf.printf "       actual verdict this run: %s\n" (verdict_label v)
+    ) stale_known_divergences
+  end;
+
+  Printf.printf "\nNote: march currently emits typecheck warnings to stdout rather than stderr.\n";
   Printf.printf "      This may cause MISMATCH for programs with warnings.\n\n";
 
-  if n_mismatch > 0 then begin
-    Printf.printf "FAIL: %d program(s) produced different output between interpreter and compiler.\n" n_mismatch;
+  Printf.printf "Corpus scope: bench/ + examples/ top-level .march files only.\n";
+  Printf.printf "              test/ fixtures and stdlib doctests are NOT swept (see file header).\n\n";
+
+  if n_failure > 0 then begin
+    Printf.printf "FAIL: %d un-triaged divergence(s) between interpreter and compiler.\n" n_failure;
+    Printf.printf "      Triage each into known_divergence (open bug) or nondeterministic_allowlist\n";
+    Printf.printf "      (legitimately non-comparable) in test/test_oracle.ml, or fix the regression.\n";
     exit 1
   end else if n_match = 0 then begin
     Printf.printf "WARN: No programs successfully matched (all compile failures or skipped).\n";
     exit 0
   end else begin
-    Printf.printf "PASS: All %d active programs match between interpreter and compiler.\n" n_match;
+    Printf.printf "PASS: %d matched, %d known-divergence (triaged), 0 un-triaged failures.\n" n_match n_known_div;
     exit 0
   end
