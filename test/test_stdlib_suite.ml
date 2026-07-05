@@ -5179,6 +5179,25 @@ let test_parity_string_interp () =
       {|int_to_string(42)|};
     ]
 
+(* `show(:atom)` through the JIT/REPL path specifically: the generated
+   @march_atom_to_string reverse-lookup switch (Show$Atom.show's backing) must
+   be emitted into the fragment by the REPL finalizers, not only by the AOT
+   emit_module — a JIT fragment referencing it with no in-module definition is
+   a clang error.  Directly pins the path that regressed (undefined symbol)
+   during the Show(Atom) fix; interpreter renders atoms as ":name", so the JIT
+   must agree. *)
+let test_parity_atom_show () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun src ->
+      check_parity ~ctx:"atom_show" ~runtime_so src
+    ) [
+      {|show(:ok)|};
+      {|show(:hello_world)|};
+      {|show(:ok) ++ show(:err)|};
+    ]
+
 let test_parity_closures () =
   match setup_jit_runtime () with
   | None -> ()
@@ -11634,6 +11653,7 @@ let stdlib_suites =
           Alcotest.test_case "basic arithmetic"  `Slow test_parity_basic_arith;
           Alcotest.test_case "bool ops"          `Slow test_parity_bool_ops;
           Alcotest.test_case "string interp"     `Slow test_parity_string_interp;
+          Alcotest.test_case "atom show"         `Slow test_parity_atom_show;
           Alcotest.test_case "closures"          `Slow test_parity_closures;
           Alcotest.test_case "if/else"           `Slow test_parity_if_else;
           Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;

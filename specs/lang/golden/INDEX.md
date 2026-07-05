@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g33)
+# Golden corpus index (g01–g34)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (33/33 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (34/34 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -48,6 +48,7 @@ widening after the concurrent `float_to_string` backend-unification fix landed.
 | `g31_cond_middle_arm` | `ECond` chain where a MIDDLE arm is the first `VBool true` | E-Cond-Sel (§4.2) |
 | `g32_cond_all_false_catchall` | `ECond` all-specific-false ⇒ terminal `_ ->`/`true ->` catch-all | E-Cond-Sel with `_`-sugar catch-all; E-Cond-Fail (all-false raises) (§4.2) |
 | `g33_float_show` | whole-number `Float` display via `float_to_string` (observation primitive) — pins the cross-backend format after the `0a2d3f53` fix | §5 observation-primitive note (not a §4 core rule; float arithmetic/ordering deferred) |
+| `g34_nested_tuple_let` | nested `PatTuple` destructured in a block `let` — added after the `3f719a8e` lowering fix the corpus surfaced | E-Blk-Let + `match(PatTuple)` componentwise `match_list` (§4.2/§4.3) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 

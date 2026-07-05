@@ -121,6 +121,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_float_to_string(double %f)" };
   { march_name = "bool_to_string"; c_name = Some "march_bool_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_bool_to_string(i64 %b)" };
+  (* `atom_to_string` (the Show$Atom.show delegate) has NO preamble declare:
+     unlike the other *_to_string builtins it is not a C runtime symbol but a
+     compile-time-generated function emitted per-module by
+     [Llvm_toplevel.emit_atom_show_table] (a switch over ctx.atom_names, run by
+     both the AOT and JIT/REPL finalizers).  Emitting a `declare` here as well
+     as that `define` would be an LLVM redefinition, so
+     declare_sig is None; the call site still mangles to @march_atom_to_string
+     via c_name and resolves to the in-module definition. *)
+  { march_name = "atom_to_string"; c_name = Some "march_atom_to_string"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "++"; c_name = Some "march_string_concat"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat(ptr %a, ptr %b)" };
   { march_name = "string_concat"; c_name = Some "march_string_concat"; ret_ty = Some Tir.TString;

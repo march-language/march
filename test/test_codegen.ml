@@ -6142,6 +6142,76 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
+   `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
+   referenced a/b/c/d as undefined global functions (`call ptr @a()`), so clang
+   rejected the module.  Root cause: the block-`let` PatTuple lowering in
+   lib/tir/lower.ml bound only *direct* PatVar tuple elements and silently
+   dropped any nested sub-pattern (`| _ -> inner`), so a nested tuple's leaf
+   vars were never bound and later resolved to global fn references.  The
+   interpreter and the equivalent `match ((1,2),(3,4)) do ((a,b),(c,d)) -> ..`
+   form always got this right; only the compiled block-`let` path diverged.
+   Compile-and-run because the symptom is a codegen failure / wrong value, not
+   an IR shape (same rationale as the float-literal tests above). *)
+let test_nested_tuple_let_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let"
+    "mod NestedTupleLet do\n\
+    \  fn main() do\n\
+    \    let ((a, b), (c, d)) = ((1, 2), (3, 4))\n\
+    \    println(int_to_string(a + b + c + d))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: destructures nested tuple correctly --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter destructures nested tuple in let" "10" interp_out;
+  (* --- compiled: must bind all four leaf vars and produce the same value --- *)
+  let bin = Filename.concat tmp "nestedtupleletbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled nested-tuple `let` binds every leaf var (a/b/c/d), producing \
+       the SAME value as the interpreter (not `use of undefined value @a`)"
+      "10" run_out
+
+(** Deeper coverage of the same recursion: 3-level nesting, a wildcard element,
+    and a nested-tuple element, all in one block-`let`.  Locks down that
+    [bind_subpat] recurses through interior tuples and skips wildcards, rather
+    than only handling the flat two-element repro above. *)
+let test_nested_tuple_let_deep_wildcard_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let_deep"
+    "mod NestedTupleLetDeep do\n\
+    \  fn main() do\n\
+    \    let ((a, (b, c)), _, (d, e)) = ((1, (2, 3)), 99, (4, 5))\n\
+    \    println(int_to_string(a + b + c + d + e))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter: deep nested tuple let with wildcard element"
+    "15" interp_out;
+  (* --- compiled: must match --- *)
+  let bin = Filename.concat tmp "nestedtupledeepbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled deep nested-tuple `let` (3-level nesting, wildcard element, \
+       interior nested tuple) matches the interpreter"
+      "15" run_out
+
 (* ── EUpdate on type-erased records (B5) ─────────────────────────────────
    `{ base with f: v }` where the base's static shape is unknown
    (get_record_fields = [], e.g. a record_from_list/record_put result) used
@@ -6366,6 +6436,41 @@ let test_compiled_println_nested_list_parity () =
          \  end\n\
           end\n"
     ~expected:"[[1, 2], [3]]"
+    ()
+
+(** Compiled `println(:atom)` / `show(:atom)` parity.  Pre-fix symptom was a
+    LINK failure (not a runtime crash): `Show$Atom.show` was never registered
+    — [Atom] was absent from lower.ml's builtin Show injection ([show_specs]),
+    so `show(atom)` resolved to a bare, undefined `show` symbol.  `println$Atom`
+    and `march_main` both referenced `_show`, and ld failed with "Undefined
+    symbols … _show".  The interpreter rendered `:ok` fine (VAtom a -> ":" ^ a),
+    so this was a compiled-backend-only divergence.  Atoms compile to nameless
+    FNV-1a i64 hashes, so the fix also emits a compile-time hash→name reverse
+    table (`march_atom_to_string`) that the generated `Show$Atom.show` calls. *)
+let test_compiled_println_atom_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow"
+    ~src:"mod AtomShow do\n\
+         \  fn main() do\n\
+         \    println(:ok)\n\
+         \  end\n\
+          end\n"
+    ~expected:":ok"
+    ()
+
+(** Variant: multiple atoms (including one with digits/underscores) shown via
+    the explicit `show` builtin and concatenated — exercises the reverse
+    table with more than one entry and confirms each hash maps back to its
+    own name. *)
+let test_compiled_show_atom_multi_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow_multi"
+    ~src:"mod AtomShowMulti do\n\
+         \  fn main() do\n\
+         \    println(show(:hello) ++ \" \" ++ show(:world_123))\n\
+         \  end\n\
+          end\n"
+    ~expected:":hello :world_123"
     ()
 
 (* ── Guard liveness (Wave 2 final review): positive control for
@@ -7731,6 +7836,12 @@ let codegen_suites =
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
         ] );
+      ( "nested_tuple_let_codegen", [
+          Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
+            test_nested_tuple_let_destructure_compiled;
+          Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
+            test_nested_tuple_let_deep_wildcard_compiled;
+        ] );
       ( "erased_record_update_codegen", [
           Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick
             test_erased_update_single_dyn_call_ir;
@@ -7748,6 +7859,10 @@ let codegen_suites =
             test_compiled_println_option_list_parity;
           Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
             test_compiled_println_nested_list_parity;
+          Alcotest.test_case "compiled println(:atom) parity (Show$Atom)" `Quick
+            test_compiled_println_atom_parity;
+          Alcotest.test_case "compiled show(:atom) multi-atom parity (Show$Atom)" `Quick
+            test_compiled_show_atom_multi_parity;
           Alcotest.test_case "unresolved-iface-method guard fires: EApp path (Wave2 review)" `Quick
             test_iface_guard_fires_eapp;
           Alcotest.test_case "unresolved-iface-method guard fires: ECallPtr path (Wave2 review)" `Quick
