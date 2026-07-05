@@ -41,12 +41,12 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §5): user-defined
+**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): user-defined
 `impl`/interface DECLARATION syntax and superclass/coherence rules beyond the
 four built-in interfaces (this document covers how a `Num`/`Eq`/`Ord`/`Show`
 constraint is DISCHARGED against the built-in seed table, not the full
 generality of user-declared interfaces — see §2.1a's scope note), refinements
-(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §5 for
+(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6 for
 the full deferred-set breakdown and its roadmap citations.
 
 ## 1. The typing judgment
@@ -652,7 +652,7 @@ this table pre-loaded):
 | `Num` (via `CNum`, hardcoded — not in `env.impls`, no `impl Num` form exists) | **Int, Float only** | `typecheck.ml:4952–4956` |
 | `Eq` | Int, Float, String, Bool, Unit, Atom | `typecheck.ml:1152–1153` |
 | `Ord` | Int, Float, String | `typecheck.ml:1155` |
-| `Show` | Int, Float, String, Bool, Unit | `typecheck.ml:1162–1163` |
+| `Show` | Int, Float, String, Bool, Unit, Atom | `typecheck.ml:1162–1163` |
 | `Hash` | Int, Float, String, Bool | `typecheck.ml:1165–1166` |
 
 Notably: `Eq` covers **strictly more** types than `Ord` (Bool/Unit/Atom are
@@ -1580,7 +1580,7 @@ every `DFn`/`DLet`/`DImpl` declaration boundary — `typecheck.ml:6468, 6477,
 table (§2.1b): `Num` = {Int, Float} only, hardcoded (not `env.impls`-based,
 no user `impl Num` form exists); `Eq` = {Int, Float, String, Bool, Unit,
 Atom}; `Ord` = {Int, Float, String}; `Show` = {Int, Float, String, Bool,
-Unit} (`builtin_impls`, `typecheck.ml:1150–1167`, seeded into every module's
+Unit, Atom} (`builtin_impls`, `typecheck.ml:1150–1167`, seeded into every module's
 `env.impls` by `base_env`, `typecheck.ml:1857–1867`). Live-verified (not
 trusted from the plan) the no-impl error shapes: a `Num` violation only
 surfaces its OWN distinct message
