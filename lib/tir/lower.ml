@@ -878,6 +878,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     ("Int",    Tir.TInt,    "int_to_string");
     ("Float",  Tir.TFloat,  "float_to_string");
     ("Bool",   Tir.TBool,   "bool_to_string");
+    (* Atoms compile to nameless FNV-1a i64 hashes; `atom_to_string` is
+       backed by a compile-time-generated hash->name switch that llvm_emit
+       emits at end-of-module (see ctx.atom_names / @march_atom_to_string). *)
+    ("Atom",   Tir.TCon ("Atom", []), "atom_to_string");
   ] in
   List.iter (fun (ty_name, tir_ty, to_str_fn) ->
       let mangled = Printf.sprintf "Show$%s.show" ty_name in

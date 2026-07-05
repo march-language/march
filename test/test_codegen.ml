@@ -6364,6 +6364,41 @@ let test_compiled_println_nested_list_parity () =
     ~expected:"[[1, 2], [3]]"
     ()
 
+(** Compiled `println(:atom)` / `show(:atom)` parity.  Pre-fix symptom was a
+    LINK failure (not a runtime crash): `Show$Atom.show` was never registered
+    — [Atom] was absent from lower.ml's builtin Show injection ([show_specs]),
+    so `show(atom)` resolved to a bare, undefined `show` symbol.  `println$Atom`
+    and `march_main` both referenced `_show`, and ld failed with "Undefined
+    symbols … _show".  The interpreter rendered `:ok` fine (VAtom a -> ":" ^ a),
+    so this was a compiled-backend-only divergence.  Atoms compile to nameless
+    FNV-1a i64 hashes, so the fix also emits a compile-time hash→name reverse
+    table (`march_atom_to_string`) that the generated `Show$Atom.show` calls. *)
+let test_compiled_println_atom_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow"
+    ~src:"mod AtomShow do\n\
+         \  fn main() do\n\
+         \    println(:ok)\n\
+         \  end\n\
+          end\n"
+    ~expected:":ok"
+    ()
+
+(** Variant: multiple atoms (including one with digits/underscores) shown via
+    the explicit `show` builtin and concatenated — exercises the reverse
+    table with more than one entry and confirms each hash maps back to its
+    own name. *)
+let test_compiled_show_atom_multi_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow_multi"
+    ~src:"mod AtomShowMulti do\n\
+         \  fn main() do\n\
+         \    println(show(:hello) ++ \" \" ++ show(:world_123))\n\
+         \  end\n\
+          end\n"
+    ~expected:":hello :world_123"
+    ()
+
 (* ── Guard liveness (Wave 2 final review): positive control for
    [fail_if_unresolved_iface_method] ─────────────────────────────────────
    The four parity tests above prove the FIXED pipeline resolves nested
@@ -7744,6 +7779,10 @@ let codegen_suites =
             test_compiled_println_option_list_parity;
           Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
             test_compiled_println_nested_list_parity;
+          Alcotest.test_case "compiled println(:atom) parity (Show$Atom)" `Quick
+            test_compiled_println_atom_parity;
+          Alcotest.test_case "compiled show(:atom) multi-atom parity (Show$Atom)" `Quick
+            test_compiled_show_atom_multi_parity;
           Alcotest.test_case "unresolved-iface-method guard fires: EApp path (Wave2 review)" `Quick
             test_iface_guard_fires_eapp;
           Alcotest.test_case "unresolved-iface-method guard fires: ECallPtr path (Wave2 review)" `Quick

@@ -178,6 +178,16 @@ type ctx = {
      loaded first).  On Linux this combines with RTLD_DEEPBIND; on macOS it is
      the only mechanism because RTLD_DEEPBIND is unavailable. *)
   compile_so : bool;
+  (* Reverse table for showing atoms: interned FNV-1a hash -> the atom's
+     source name (WITHOUT the leading ':').  Atoms compile to nameless i64
+     hashes (see [atom_hash]), so `Show$Atom.show` cannot reconstruct `:name`
+     from the runtime value alone.  Every atom literal seen during codegen
+     (emit_atom's LitAtom arm and emit_case's atom-tag arm) records its
+     (hash, name) here; at module finalization [emit_atom_show_table] emits a
+     generated `@march_atom_to_string` switch over this table.  Keyed by hash so
+     a repeated atom is registered once and colliding hashes can't produce a
+     duplicate LLVM switch case. *)
+  atom_names : (int64, string) Hashtbl.t;
 }
 
 let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
@@ -230,6 +240,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   remote_impl_hashes = Hashtbl.create 0;
   remote_sig_hashes  = Hashtbl.create 0;
   compile_so = false;
+  atom_names = Hashtbl.create 16;
 }
 
 (* Shared with the inliner; single source of truth in Hot_reload. *)

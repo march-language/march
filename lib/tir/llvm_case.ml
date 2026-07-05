@@ -557,7 +557,13 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
                 if is_atom_case then begin
                   (* Atom tags are ":NAME" — must match emit_atom's interning. *)
                   let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
-                  Llvm_ctx.atom_hash name
+                  let h = Llvm_ctx.atom_hash name in
+                  (* Also register match-arm atoms in the show reverse table:
+                     an atom named only as a pattern tag (e.g. a `:get` from
+                     Http.method matched but never written as a value literal)
+                     must still render as `:get` if later shown. *)
+                  Hashtbl.replace ctx.Llvm_ctx.atom_names h name;
+                  h
                 end else
                   match Int64.of_string_opt br.Tir.br_tag with
                   | Some n -> n
