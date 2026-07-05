@@ -282,6 +282,15 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-05, Core March golden corpus — `float_to_string` backend unification)
+
+While writing golden conformance programs for `specs/lang/core-march.md`, the golden oracle caught a real, pre-existing, three-way divergence in whole-number `Float` formatting: `float_to_string(1.0)` printed `1.` interpreted (the `eval.ml` `string_of_float` reference), `1` compiled (C `%g`), and `1.0` under the wasm runtime — with JS giving `1` — plus a latent 6-vs-12-significant-digit precision gap for fractional values.
+
+- **New capability: all four `float_to_string` backends agree, byte-for-byte with the reference.** `runtime/march_runtime.c` now reproduces OCaml `string_of_float` exactly (`snprintf("%.12g")` + a trailing `.` on bare-integer results), fixing both the whole-number and the precision divergence; `runtime/march_runtime_wasm.c` trims trailing fractional zeros to the bare `.` (`1.0`→`1.`); `runtime/march_runtime.mjs` mirrors via `toPrecision(12)` + the same trailing-dot rule. The decision was to match the reference (`eval.ml` is normative per core-march.md §0/§1) rather than change the interpreter to a conventional `1.0`.
+- **Golden corpus 8 → 9.** New `specs/lang/golden/g09_float_show.march` pins whole-number float display; auto-discovered by both `specs/lang/golden/verify.sh` (**9/9 match**) and the `@oracle` sweep (`test/test_oracle.ml`, `g09` MATCH, **0 un-triaged failures**). `specs/lang/core-march.md` §5 updated.
+- **Known limitation (deferred, documented):** the REPL/JIT interactive value-display (`repl_jit.ml`'s `%g`) is a separate inspector surface (not the `float_to_string` builtin) and still renders `4.0` as `4`; freestanding-wasm keeps its 6-decimal fractional-precision cap; JS extreme-exponent fixed-vs-exponential notation is unaddressed. All out of scope for the whole-number-agreement fix.
+- **Suite:** 400 compiler / 230 eval / 385 codegen / 803 stdlib pass; oracle 0 un-triaged failures.
+
 ## Current State (as of 2026-07-04, Differential Oracle EXPANSION COMPLETE — Phase 5 / eval.ml refactor gate + closeout)
 
 The differential-oracle expansion (`specs/2026-07-04-differential-oracle-design.md`, plan `specs/plans/2026-07-04-differential-oracle-plan.md`) is **COMPLETE** — all 8 tasks / 5 phases landed on branch `claude/hopeful-kapitsa-9f49f3`, each independently reviewed:
