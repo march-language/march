@@ -407,10 +407,12 @@ Values do not reduce further; a lambda becomes a closure immediately
             ──────────────────────────────────────────────────────────
             ρ ⊢ ERecordUpdate e_b [(g₁=e₁)…(g_m=e_m)] ⇓
                 VRecord [(f₁=v₁')…(f_n=v_n')]
-                where vᵢ' = uⱼ if fᵢ = gⱼ for some j (last-listed g wins on a
-                            repeated update name, via List.assoc_opt over the
-                            update list — same first-occurrence convention as
-                            E-Record, but note the MERGE direction: for the
+                where vᵢ' = uⱼ if fᵢ = gⱼ for some j (FIRST-listed g wins on a
+                            repeated update name — `List.assoc_opt` over the
+                            update list returns the first match; `{ r with x: 10,
+                            x: 20 }` yields `x = 10`, eval.ml:7031–7035 — the same
+                            first-occurrence convention as E-Record; note the MERGE
+                            direction: for the
                             OUTPUT record it is the update side, not the base
                             side, that is consulted per base field), else vᵢ
             -- ADJUDICATED RULE (see prose below): if ANY update name g is
