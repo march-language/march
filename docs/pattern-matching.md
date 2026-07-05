@@ -137,6 +137,7 @@ fn describe_point(p : Point) : String do
   else
     "at " ++ float_to_string(p.x) ++ ", " ++ float_to_string(p.y)
   end
+  end
 end
 ```
 
