@@ -1921,6 +1921,24 @@ default) and should be corrected to match the verified current behavior
 marking is not actually enforced against qualified construction, per the
 gap just filed).
 
+**Cross-reference — `use`/`import`'s selective-name rejection is the SAME
+`pub_set` gate, one layer up (widening slice 2, Task 4).** `core-march.md`
+§4.7.1 documents `use X.{name}`/`import X, only: […]` — the surface forms
+that rebind an already-exported qualified name (`"X.name"`) as a bare name in
+the CURRENT scope. Their selective-name lookup (`typecheck.ml`'s `DUse`
+`UseNames`/`UseExcept` arms) reads the identical `env.vars` entries this
+subsection's `pub_set` gate populates — so a selective `use` of a private
+member (`use Array.{lst_rev}`, `lst_rev` a real `pfn`) is rejected for
+exactly the reason a bare qualified reference to it is (`reject/t26` above):
+the key was never written. The message text differs (`` Module `Array` does
+not export `lst_rev`. `` vs. `reject/t26`'s `` … is private to module
+`Array`. ``, since `UseNames`'s lookup cannot distinguish "absent" from
+"private" the way `qualified_error_msg` can — but the OUTCOME is identically
+a hard reject), confirmed live and pinned as
+`reject/t27_use_selector_private_name`. This is not a second, independent
+enforcement mechanism — it is the same `pub_set` absence surfacing through a
+second syntactic front door.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the

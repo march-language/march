@@ -1769,6 +1769,246 @@ precedent of this reference's corpus doubling as an operational witness):
   calls a `pfn` bare, from a module nested directly inside its declaring
   module; prints `42`. Witnesses the lexical-scoping nuance above.
 
+### 4.7.1 `use` / `import` / `alias` — surface selectors and the file-based resolver pre-pass
+
+**Widening slice 2, Task 4.** §4.7 above describes how a module *already
+present in the same compilation unit* (a same-file nested `mod`, or a
+stdlib/`MARCH_LIB_PATH` file the compiler auto-splices as a real `DMod`)
+exports its names as qualified `"Name.member"` keys. This subsection covers
+the surface machinery that either (a) rebinds some of those already-exported
+qualified keys as bare unqualified names inside the CURRENT module's own
+scope (`use`/`import`/`alias`, a typecheck-time-only rebinding — see below),
+or (b) is the reason a name got spliced in as a real `DMod` at all in the
+first place, when it lives in a SEPARATE FILE the entry file references by
+name (the resolver pre-pass). These are two different mechanisms living at
+two different pipeline stages, and the distinction is exactly where the
+surprising behavior below comes from.
+
+**Surface forms and their AST (`lib/ast/ast.ml:203–217`):**
+
+```ocaml
+and use_decl = { use_path : name list; use_sel : use_selector }
+and alias_decl = { alias_path : name list; alias_name : name }
+and use_selector =
+  | UseAll               (* .*  *)
+  | UseNames of name list (* .{f, g}  or  a single lowercase .foo *)
+  | UseSingle             (* bare `use A` — path only, no new bindings *)
+  | UseExcept of name list (* Elixir-only: except: [f, g] *)
+```
+
+Both March-native `use` (`parser.mly:647–672`) and Elixir-style `import`
+(`parser.mly:679–700`) parse to the **same `DUse` AST node** — `import` is
+pure surface sugar over `use`'s selector shapes, plus its own `only:`/
+`except:` keyword-argument syntax (re-grepped live, current lines):
+
+| Surface form | Grammar production | `use_sel` | Re-verified live |
+|---|---|---|---|
+| `use A` (bare) | `use_decl` → `use_path_tail` empty (`parser.mly:660`) | `UseSingle` | no-op — makes `A`'s path syntactically known, binds nothing new (`typecheck.ml:7272–7274`) |
+| `use A.*` | `use_selector` → `STAR` (`parser.mly:668–670`) | `UseAll` | rebinds every `"A.x"` in scope as bare `x` |
+| `use A.{f, g}` | `use_selector` → `LBRACE … RBRACE` (`parser.mly:671–672`) | `UseNames [f; g]` | rebinds only the LISTED names |
+| `use A.foo` (single lowercase segment) | `use_path_tail` → `DOT; lower_name` (`parser.mly:665–666`) | `UseNames [foo]` | same as the one-element brace form — confirmed live, `accept/t38`-adjacent probe |
+| `import A` (bare) | `import_decl` → `import_path_tail` empty (`parser.mly:692`) | `UseAll` | **differs from bare `use A`** — Elixir's bare `import` bulk-imports everything; March's bare `use` imports nothing. Confirmed live. |
+| `import A, only: [f, g]` | `COMMA; ONLY; COLON; LBRACKET … RBRACKET` (`parser.mly:693–694`) | `UseNames [f; g]` | same semantics as `use A.{f, g}` |
+| `import A, except: [f, g]` | `COMMA; EXCEPT; COLON; LBRACKET … RBRACKET` (`parser.mly:695–696`) | `UseExcept [f; g]` | rebinds every public name EXCEPT the listed ones |
+| `import A.{B, C}` | `DOT; LBRACE … RBRACE` (`parser.mly:697–698`) | `UseNames [B; C]` | dotted-path selector form, mixed with Elixir sugar |
+| `alias A.B, as: C` / `alias A.B as C` / bare `alias A.B` | `alias_decl_rule` (`parser.mly:703–710`) | (separate `DAlias` node) | bare form defaults the short name to the LAST path segment (`parser.mly:708–710`) |
+
+**Note the one real semantic asymmetry the table above flags:** bare `use A`
+and bare `import A` are NOT equivalent — `use A` is `UseSingle` (a no-op;
+`A`'s members stay qualified-only unless individually `use`d), while bare
+`import A` is `UseAll` (bulk-imports every public name unqualified). This
+mirrors Elixir's own `import`/`alias` distinction (`import` pulls names in
+by default; `alias` — and March's plain `use` — only makes the PATH known).
+
+**What each selector brings into scope (`typecheck.ml:7268–7370`, the `DUse`
+arm of `check_decl`; re-grepped live, current lines):**
+
+- **`UseSingle`** (`typecheck.ml:7272–7274`) — no-op. The module's qualified
+  names were already reachable via `Mod.name` (they were spliced in as a real
+  `DMod` — either same-file or via the resolver pre-pass below); `use A` adds
+  nothing beyond making the bare path `A` textually acknowledged.
+- **`UseAll`** (`typecheck.ml:7275–7319`) — scans `env.vars`/`env.interfaces`
+  for every key prefixed `"A."`, strips the prefix, and rebinds the SHORT
+  name in the current scope — **skipping any short name the current module
+  already defines itself** (`env.local_fns`, `typecheck.ml:7287`; a local
+  definition always shadows a bulk import rather than being clobbered by it).
+  Also registers an "unused import" warning (`import_tracker`) that counts
+  BOTH the rebound short names AND any qualified (`A.x`) reference to the
+  same module, so a module used only via full qualification does not
+  false-positive as unused (`typecheck.ml:7300–7318`).
+- **`UseNames names`** (`typecheck.ml:7320–7337`) — for each requested name,
+  looks up `"A." ^ name"` in `env.vars`; if present, binds it bare; **if
+  absent — because the name doesn't exist OR because it was never exported
+  (private) — hard error**: `` Module `%s` does not export `%s`. `` This is
+  the rejection path a selective `use`/`import` of a private or nonexistent
+  member takes (see the reject-corpus discussion below).
+- **`UseExcept excluded`** (`typecheck.ml:7338–7370`) — same scan as
+  `UseAll`, but drops any short name appearing in the exclusion list before
+  rebinding the rest.
+- **`DAlias`** (`typecheck.ml:7372` onward) — re-exports every `"Orig.x"` key
+  additionally as `"Short.x"`; `alias` does **not** hide or remove the
+  original qualified path — both `A.B.f` and `C.f` remain live simultaneously
+  after `alias A.B as C`.
+
+Value-witnessed live against `List` (a real stdlib module,
+`stdlib/list.march`), using `append` — a genuinely `List`-only public fn, not
+one of the handful of names (`length`, `reverse`, `filter`, `map`) that
+`stdlib/prelude.march` ALSO defines bare at global scope (so those would
+misleadingly "work" even without any `use` at all):
+
+```march
+mod Main do
+  use List.*                                   -- or: use List.{append}
+                                                -- or: import List
+                                                -- or: import List, only: [append]
+  fn main() do
+    println(int_to_string(length(append([1, 2], [3]))))
+  end
+end
+```
+
+Without a `use`/`import` of `List`, a bare `append(...)` call rejects with
+`` I cannot find `append`. `` (confirmed live); with any of the four forms
+above, it typechecks and, run interpreted, prints `3` — pinned as
+`accept/t37_use_all_stdlib_module` (`use List.*`) and
+`accept/t38_use_selector_named_import` (`use List.{append}`), below.
+
+**The file-based resolver pre-pass (`lib/resolver/resolver.ml`) — a SEPARATE
+mechanism from typecheck's `DUse` handling above, and the source of the
+file-vs-in-file distinction.** Before typecheck ever sees the program,
+`bin/main.ml`'s `resolve_imports` (`bin/main.ml:786` and its call site at
+`:795–798`, delegating to `Resolver.resolve_imports`) walks every `DUse`/
+`DAlias` node in the entry file (`resolver.ml:56–69`, `import_refs`,
+recursing into nested `DMod`s too), extracts the FIRST path segment of each
+(`"List"`, `"Array"`, …) as a module name, and tries to locate that name as
+an actual **file on disk**:
+
+```
+module_name_to_filename "MyApp.Router"  =  "my_app/router.march"          resolver.ml:29–32
+find_file mod_name = search_path                                          resolver.ml:184–190
+                       |> List.find_map (fun dir ->
+                            let p = dir / module_name_to_filename mod_name
+                            if Sys.file_exists p then Some p else None)
+search_path = source_dir :: extra_lib_paths @ MARCH_LIB_PATH-dirs         resolver.ml:149–156
+```
+
+If found, the file is parsed, desugared, and wrapped in a real `DMod`
+(`resolver.ml:239–244`), then spliced into the entry file's own
+`mod_decls` as `extra_decls` (`bin/main.ml:786–798`) — at which point it is
+typechecked through the exact same `DMod`/`pub_set` export gate §4.7
+describes, and `use A.*`'s `UseAll` rebinding (above) has real `"A.x"` keys
+to draw from. Stdlib modules (`List`, `Array`, …) are ALSO pre-spliced this
+same way, just via a separate `load_stdlib` call (`bin/main.ml:284–323`, the
+`stdlib_module_names` allowlist in `resolver.ml:38–51` additionally
+SUPPRESSES the "not found" error for these specific names since they are
+known to be provided by the bundled stdlib rather than the project's own
+source tree) — which is why `use List.*`/`use Array.{…}` above work with no
+extra setup: `List`/`Array` are real files (`stdlib/list.march`,
+`stdlib/array.march`) the compiler always loads.
+
+**The critical, surprising consequence: `use`/`import`/`alias` are a
+file-resolution mechanism — they do NOT reach a same-file nested `mod` at
+all.** A same-file nested module (§4.7's `mod Main do mod A do … end end`) is
+not a file; the resolver's `find_file` looks for `a.march` on disk, does not
+find one (there IS no such file — `A` only exists as an in-memory `DMod`
+already nested inside `Main`), and rejects. Confirmed live:
+
+```march
+mod Main do
+  mod A do
+    fn f() : Int do 1 end
+  end
+  use A.*
+  fn main() : Int do f() end
+end
+```
+
+rejects with the EXACT message
+`` Module `A` not found (looked for `a.march` in the source directory) ``
+(`resolver.ml:206–211`, exit 1) — even though `A` is plainly present, right
+there in the same file, and its public `f` is perfectly reachable via
+ordinary qualification (`A.f()`, §4.7) without any `use` at all. The
+resolver's notion of "module A" (a FILE named `a.march`) and typecheck's
+notion of "module A" (an in-memory `DMod` node already sitting in the AST)
+are simply disjoint concepts that happen to share a name — `use`/`import`
+only ever operates on the FIRST kind. This is not a bug to fix in a
+docs-only task; it is documented here precisely because it is real and
+easy to trip over: reaching for `mod`/nesting + qualification (§4.7) for a
+same-file module, and reaching for `use`/`import` only when the module
+genuinely lives in its own `.march` file, are two different, non-overlapping
+tools. The same rejection shape covers `import A` (bare Elixir sugar),
+`import A, only: [f]`, `import A, except: [g]`, and `alias A.B as C` against
+the same in-file `A` — all five forms funnel through the identical
+`resolver.ml` pre-pass and produce the identical "not found" message,
+confirmed live for each.
+
+**Selective `use` of a non-exported (private) name — consistent with the
+cross-module visibility fix.** `use`/`import`'s `UseNames`/`UseExcept` arms
+(above) look up `"Mod.name"` in `env.vars` — the SAME `env.vars` that the
+`DMod` export step (§4.7, and `core-march-types.md` §2.5's `pub_set` gate)
+populates only for PUBLIC members. So a selective `use` of a private stdlib
+function fails for exactly the same underlying reason a plain qualified
+reference to it does (`core-march-types.md` §2.5's `reject/t26`): the key
+was never written into `env.vars` in the first place. Confirmed live against
+`Array.lst_rev`, a real `pfn` (`stdlib/array.march:39`, the same function
+`reject/t26_cross_module_private_fn` exercises via plain qualification):
+
+```march
+mod Main do
+  use Array.{lst_rev}
+  fn main() : Int do 0 end
+end
+```
+
+rejects with `` Module `Array` does not export `lst_rev`. `` (exit 1) —
+pinned as `reject/t27_use_selector_private_name`, below. Note the message
+text differs from `reject/t26`'s `` … is private to module `Array`. `` even
+though both trace back to the identical `pub_set` absence: `UseNames`'s
+lookup (`typecheck.ml:7333–7336`) only ever sees "found" or "not found" in
+`env.vars` and cannot distinguish "genuinely doesn't exist" from "exists but
+is private" the way `resolve_qualified_var`'s dedicated
+`qualified_error_msg` (which DOES draw that distinction, `typecheck.ml:750–
+779`) can — but the OUTCOME (reject, exit 1) is the same, so selective `use`
+of a private member is exactly as rejected as bare qualified access to it,
+consistent with the visibility fix landed earlier in this widening slice.
+A selective `use` of a nonexistent (never-defined) member of a real module
+produces the identical "does not export" message and is indistinguishable
+from the private case by text alone — both are, correctly, hard rejections.
+
+**Scope boundary: `MARCH_LIB_PATH` multi-file discovery is build-tooling, out
+of this reference's scope.** The resolver's `search_path` (`source_dir ::
+extra_lib_paths @ MARCH_LIB_PATH`-dirs, `resolver.ml:149–156`) and its
+auto-discovery walk (`resolver.ml:105–129`'s `collect_lib_files`, plus the
+two-phase parse-then-depth-sort auto-splice step in `resolve_imports`,
+`resolver.ml:287–349`, which loads every `.march` file reachable from the
+library search path even WITHOUT an explicit `use`, so that qualified
+cross-module calls to a file whose declared module name doesn't match its
+filename still resolve) are project/build-tooling mechanics — how multiple
+files become one compilation unit — not language-level typing or evaluation
+semantics. `CLAUDE.md`'s "Multi-file compilation (MARCH_LIB_PATH)" section
+and `resolver.ml`'s own doc comment (`resolver.ml:1–10`) are the canonical
+description of the discovery walk itself; this reference only documents what
+happens to a name ONCE its module has been resolved into a real `DMod` (the
+`use`/`import`/`alias` rebinding rules above, and §4.7's export/resolution
+rules) — not the directory-walking/filename-convention mechanics that get it
+there.
+
+**Corpus** (`specs/lang/types/accept|reject/`, run interpreted where noted to
+confirm the printed value, not just `--check`ed):
+
+- **`accept/t37_use_all_stdlib_module`** — `use List.*` brings `List`'s
+  public names (including `append`, not shadowed by `prelude.march`) into
+  bare scope; prints `3`. Witnesses `UseAll`'s rebinding rule and the
+  resolver pre-pass successfully locating a real stdlib file.
+- **`accept/t38_use_selector_named_import`** — `use List.{append}` imports
+  exactly the one named public function; prints `3`. Witnesses `UseNames`'s
+  narrower, per-name rebinding rule.
+- **`reject/t27_use_selector_private_name`** — `use Array.{lst_rev}`, a
+  selective import of a real PRIVATE `pfn`; rejects with `` Module `Array`
+  does not export `lst_rev`. `` Witnesses that selective `use` is exactly as
+  gated by the cross-module visibility fix as plain qualified access
+  (`reject/t26`).
+
 ### 4.8 Relationship to the small-step form (the metatheory target)
 
 `specs/lean4-metatheory-plan.md` will state the semantics as a **small-step**

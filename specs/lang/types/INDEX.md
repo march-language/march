@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t36 accept, t01–t26 reject)
+# Typing corpus index (t01–t38 accept, t01–t27 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -38,6 +38,18 @@ qualified-record re-verification (`t36`). Same dual-purpose pattern as
 `t27`–`t28`: ordinary well-typed `--check` programs, each also run
 interpreted to confirm its printed value.
 
+**Note (`t37`–`t38`, `reject/t27`):** these anchor **operational**
+(`core-march.md` §4.7.1, widening slice 2 Task 4) `use`/`import`/`alias`
+selector rules and the file-based resolver pre-pass (`lib/resolver/
+resolver.ml`) — not typing rules in `core-march-types.md`, though
+`core-march-types.md` §2.5 gained a short cross-reference paragraph noting
+that `reject/t27`'s selective-`use`-of-a-private-name rejection is the same
+`pub_set` gate `reject/t26` exercises, one syntactic layer up. Same
+dual-purpose pattern as `t27`(types)–`t28`(types) above: `t37`/`t38` are
+ordinary well-typed `--check` programs, each also run interpreted to confirm
+its printed value; `reject/t27` follows the usual pinned-substring reject
+convention.
+
 ## The `--check` accept/reject harness model
 
 Unlike the operational golden corpus (`specs/lang/golden/`, which runs each
@@ -62,7 +74,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 61/61 — 36 accept, 25
+Exit 0 iff every program behaves as declared (currently 65/65 — 38 accept, 27
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -100,6 +112,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t31`, `reject/t26` | Widening slice 2, Task 1 (2026-07-06) | cross-module **visibility fix** — `load_module_into_env`'s `ex_public` gate for `ExFn`/`ExValue` (a private `pfn`/value is no longer callable cross-module: `reject/t26` pins `is private to module \`Array\``); the ACCEPT side proves the gate is narrow — a PUBLIC cross-module call still resolves and the OPAQUE-TYPE pattern (a private `ptype`'s bare name usable in a cross-module annotation, `ExType`/`ExRecord` left ungated) still holds (`accept/t31`) |
 | `accept/t32`–`t33` | Widening slice 2, Task 2 (2026-07-06) | module declaration/nesting/name-resolution OPERATIONAL rules (`core-march.md` §4.7, not `core-march-types.md`): the `DMod` export mechanism (`own_names`, `"Name.member"` re-prefixing into the enclosing scope and the global `module_registry`), the bare-fails/qualified-works asymmetry, and the lexical-scoping nuance (a `pfn` nested inside `A` callable bare from a module nested inside `A`) |
 | `accept/t34`–`t36` | Widening slice 2, Task 3 (2026-07-06) | module visibility as a TYPING concept (§2.5): the opaque-type asymmetry re-verified with a second stdlib witness (`t34`, `ConsistentHash.HashRing`), the no-per-module-type-namespace design point value-witnessed (`t35`, `A.Foo`/`B.Foo` collision), and the A10 qualified-record case re-confirmed still green (`t36`, `Cfg.Site`); also files a real, precisely-traced gap found while probing live — `opaque type`'s constructor-hiding is not actually enforced against qualified construction (`prebind_mod_members`, `typecheck.ml:8032–8087`, registers the qualified ctor key ungated on `var_vis`) |
+| `accept/t37`–`t38`, `reject/t27` | Widening slice 2, Task 4 (2026-07-06) | `use`/`import`/`alias` selector rules and the file-based resolver pre-pass (`core-march.md` §4.7.1, not `core-march-types.md`): both `use A.*` (`t37`) and the selector form `use A.{name}` (`t38`) value-witnessed against a real stdlib module (`List`); the file-vs-in-file resolver distinction (`use A.*` against an in-file nested `mod A` rejects `` Module `A` not found ``, since the resolver looks for an actual `a.march` FILE); selective `use X.{name}` of a private stdlib fn (`reject/t27`, `Array.lst_rev`) rejects `` Module `Array` does not export `lst_rev`. `` — the same `pub_set` gate `reject/t26` exercises, confirmed consistent with Task 1's cross-module visibility fix |
 
 ## `accept/` — must typecheck
 
@@ -141,6 +154,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t34_opaque_ptype_qualified_annotation` | **module visibility — the opaque-type asymmetry, second witness (§2.5, slice 2 Task 3)** — `ConsistentHash.HashRing(a)` (a private `ptype`) used as a cross-module param annotation (`ring_arity(_ring : ConsistentHash.HashRing(String))`); independent of `t31`'s `Array` witness, exercising the annotation directly rather than an otherwise-unused param | run-witnessed: prints `1` |
 | `t35_no_per_module_type_namespace` | **the no-per-module-type-namespace DESIGN POINT (§2.5)** — sibling modules `A`/`B` each declare their own `type Foo`; `take_a(x : A.Foo)` silently accepts a `B.Foo` value (`B.make()`) because types resolve by bare name only — no per-module type identity exists to keep them apart | run-witnessed: prints `7` |
 | `t36_qualified_record_type_still_green` | **A10 re-verification (§2.5)** — the survey's flagged-not-confirmed qualified-record case (`Cfg.Site`), same-file nested-module form; re-checked live after both `9001e4c0` and Task 1's visibility fix — no regression found | run-witnessed: prints `Site` |
+| `t37_use_all_stdlib_module` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — bulk `use A.*`** — `use List.*` rebinds `List`'s public names (including `append`, genuinely `List`-only, not shadowed by `prelude.march`) bare in `Main`'s scope; witnesses `UseAll`'s rebinding rule (`typecheck.ml:7275–7319`) and the resolver pre-pass locating a real stdlib file | run-witnessed: prints `3` |
+| `t38_use_selector_named_import` | **`use`/`import` operational rules (§4.7.1) — the selector form `use A.{name}`** — `use List.{append}` imports exactly the one named public fn; witnesses `UseNames`'s narrower, per-name rebinding rule (`typecheck.ml:7320–7337`) | run-witnessed: prints `3` |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -172,8 +187,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t24_satisfy_missing_function` | (§2.4) `satisfy` all-or-nothing — `satisfy Named for Person` where no top-level `fn name` exists anywhere in the module | `` satisfy Named for Person: no function `name` found in scope. `` |
 | `t25_private_nested_member` | same-file qualified reference to a PRIVATE nested-module member — `mod A do pfn secret() … end` referenced as `A.secret()` from a sibling in the same file; the private member is never exported, but the diagnostic must name the real cause, not report the plainly-present module as absent | `` Function `secret` is private to module `A`. `` |
 | `t26_cross_module_private_fn` | **module visibility — the REJECT side (slice 2, Task 1)** — `Array.lst_rev(...)`, a real private `pfn` (stdlib/array.march:39), is no longer callable by qualification from unrelated code; `load_module_into_env`'s new `ex_public` gate for `ExFn`/`ExValue` makes the qualified lookup miss, so `qualified_error_msg` reports the private-access message (the same shape the `ExCtor` gate already produced for private constructors) | `` is private to module `Array` `` |
+| `t27_use_selector_private_name` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — selective `use` of a PRIVATE name** — `use Array.{lst_rev}`, a selective import of the same real private `pfn` `t26` exercises via plain qualification; `DUse`'s `UseNames` arm looks up `"Array.lst_rev"` in `env.vars`, misses (the SAME `pub_set` absence `t26` hits), and raises the "does not export" message rather than `t26`'s "is private to" message — different text, identical underlying gate, consistent with Task 1's fix | `` Module `Array` does not export `lst_rev`. `` |
 
-**Result: 62 / 62 (36 accept, 26 reject).**
+**Result: 65 / 65 (38 accept, 27 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

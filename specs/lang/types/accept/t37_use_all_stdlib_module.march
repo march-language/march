@@ -1,0 +1,20 @@
+mod Main do
+  -- Widening slice 2, Task 4 (`use`/`import`/`alias`): `use List.*` runs the
+  -- file-based resolver pre-pass (`lib/resolver/resolver.ml`) BEFORE
+  -- typecheck, which finds `List` among the stdlib files the compiler
+  -- auto-splices as a real `DMod` (`bin/main.ml`'s `load_stdlib`), so `use`
+  -- here only needs `typecheck.ml`'s `DUse`/`UseAll` arm (~typecheck.ml:7275)
+  -- to rebind every "List.x" key in scope as a bare "x" -- it does not need
+  -- to locate a NEW file itself (List is already loaded). `append` is a
+  -- genuinely `List`-only public fn (stdlib/list.march) -- NOT one of the
+  -- names `prelude.march` re-defines bare at global scope (prelude has its
+  -- own `length`/`reverse`/`filter`/`map`, so those would pass even WITHOUT
+  -- this `use`); calling bare `append` without a `use`/qualification first
+  -- rejects with "I cannot find `append`." Confirms `use Mod.*` is what
+  -- actually brings a stdlib module's public names into unqualified scope.
+  use List.*
+
+  fn main() do
+    println(int_to_string(length(append([1, 2], [3]))))
+  end
+end
