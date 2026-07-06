@@ -2792,6 +2792,56 @@ let test_qualified_show_call () =
   end|} in
   Alcotest.(check bool) "Show.show(x) resolves: no errors" false (has_errors ctx)
 
+(* Regression (modules widening slice 2, Task 1): cross-module visibility for
+   private FUNCTIONS. `Array.lst_rev` is a real private `pfn`
+   (stdlib/array.march). It must NOT be callable by qualification from another
+   module. The bug: `load_module_into_env` loaded `ExFn`/`ExValue` entries
+   UNCONDITIONALLY (never consulting `ex_public`), unlike the adjacent `ExCtor`
+   arm which correctly gates on it — so a private `pfn` from any
+   registry-loadable module (any stdlib module) was silently callable from
+   unrelated code, typecheck AND runtime, both backends. The fix adds the
+   `ex_public` gate to the `ExFn`/`ExValue` arm: the qualified lookup now misses,
+   and `qualified_error_msg` reports "… is private to module `Array`.".
+   This exercises the `Module_registry.ensure_loaded` fallback path (the buggy
+   one) — the module is discovered on disk by the registry, not spliced in as a
+   `DMod`, so it does NOT go through the same-file `pub_set` gate that was
+   already correct. *)
+let has_message_containing ctx needle =
+  List.exists (fun d ->
+    let m = d.March_errors.Errors.message in
+    let nl = String.length needle and ml = String.length m in
+    let rec scan i = i + nl <= ml && (String.sub m i nl = needle || scan (i + 1)) in
+    scan 0)
+    ctx.March_errors.Errors.diagnostics
+
+let test_cross_module_private_fn_rejected () =
+  let ctx = typecheck {|mod Main do
+    fn main() : Int do
+      let r = Array.lst_rev(Cons(1, Cons(2, Cons(3, Nil))))
+      match r do
+        Nil -> 0
+        Cons(h, _) -> h
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "private cross-module pfn call is rejected"
+    true (has_errors ctx);
+  Alcotest.(check bool) "rejection cites 'is private to module `Array`'"
+    true (has_message_containing ctx "is private to module `Array`")
+
+(* Companion: the gate is NARROW — a PUBLIC cross-module call still resolves.
+   `Array.empty`/`Array.length` are public `fn`s reached through the same
+   registry fallback; they must remain callable (no visibility error). *)
+let test_cross_module_public_fn_accepted () =
+  let ctx = typecheck {|mod Main do
+    fn main() : Int do
+      let v = Array.empty()
+      Array.length(v)
+    end
+  end|} in
+  Alcotest.(check bool) "public cross-module fn call: no errors"
+    false (has_errors ctx)
+
 (* Regression: a module-qualified type reference (`Token.Token`) from OUTSIDE a
    module must be the SAME nominal type as the bare `Token` the module's own
    constructor/accessor produce.  `surface_ty` used to resolve the qualified
@@ -5959,6 +6009,9 @@ let compiler_suites =
           (* F2: qualified method calls Eq.eq, Show.show *)
           Alcotest.test_case "qualified Eq.eq call"          `Quick test_qualified_method_call;
           Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
+          (* Modules widening slice 2, Task 1: cross-module visibility gate *)
+          Alcotest.test_case "cross-module private pfn rejected" `Quick test_cross_module_private_fn_rejected;
+          Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
           Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;

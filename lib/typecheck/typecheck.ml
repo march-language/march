@@ -660,7 +660,18 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
     let qname = mod_name ^ "." ^ entry.ex_name in
     match entry.ex_kind with
     | ExFn | ExValue ->
-      if StrMap.mem qname env.vars then env
+      (* Visibility gate (mirrors the [ExCtor] arm below): a private [pfn] /
+         private [let] is NOT importable across modules. Skipping the binding
+         here (rather than adding it) lets the later [lookup_var] miss fall
+         through to [qualified_error_msg], which detects [not e.ex_public] and
+         reports "<name> is private to module `<mod>`." — the same message the
+         [ExCtor] path already produces for private constructors.
+         [ExType]/[ExRecord] stay UNGATED on purpose: March uses the opaque-type
+         pattern, where a private [ptype]'s bare NAME stays referenceable across
+         modules (e.g. `ConsistentHash.HashRing(String)` on a public param) while
+         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below. *)
+      if not entry.ex_public then env
+      else if StrMap.mem qname env.vars then env
       else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
     | ExType arity ->
       if StrMap.mem qname env.types then env
