@@ -33,10 +33,10 @@ structure, organized by altitude:
 
 For **compiler internals** (value representation, Perceus/RC, TIR, the
 scheduler, the content-addressed build cache, the C runtime, the compiler
-pipeline), see the implementation reference `specs/impl/index.md` — **pending
-(Task 5)**. That reference is a sibling, not a merge: compiler-internal
-material is referenced from language chapters where relevant, not duplicated
-into them.
+pipeline), see the implementation reference
+[`specs/impl/index.md`](../impl/index.md). That reference is a sibling, not a
+merge: compiler-internal material is referenced from language chapters where
+relevant, not duplicated into them.
 
 For a gentler, narrative introduction to the language, see README's
 ["Language tour"](../../README.md) section — it stays in README by design
@@ -83,8 +83,8 @@ consolidation location until the named task lands.
 | Supervision | [`supervision.md`](supervision.md) | canonical |
 | Parallelism | [`parallelism.md`](parallelism.md) | canonical |
 | Clustering | [`clustering.md`](clustering.md) | canonical |
-| Standard library (overview/pointer chapter) | `standard-library.md` | pending (Task 5) |
-| Implementation reference (compiler internals, sibling) | `specs/impl/index.md` | pending (Task 5) |
+| Standard library (overview/pointer chapter) | [`standard-library.md`](standard-library.md) | canonical |
+| Implementation reference (compiler internals, sibling) | [`specs/impl/index.md`](../impl/index.md) | external (sibling) |
 
 ---
 
