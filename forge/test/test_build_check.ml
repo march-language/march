@@ -107,6 +107,43 @@ let test_check_reports_warnings_from_combined_module () =
       | Error m -> Alcotest.fail ("expected Ok despite warning, got Error: " ^ m)
       | Ok _    -> ())
 
+(** Regression test for a duplicate-declaration bug in [run_check_cmd]
+    (bin/main.ml): each input file's auto-discovered/imported modules used
+    to be nested inside that file's OWN wrapper DMod instead of emitted as
+    flat top-level siblings, which (a) gave them the wrong qualified name
+    and (b) hid cross-file duplicates from dedup — when N files were
+    checked together, EACH file's independent [resolve_imports] call
+    re-auto-discovers the whole search path, so any module visible to more
+    than one input file got typechecked (and its diagnostics counted)
+    once per file that saw it. Confirmed live against a real ~85-file
+    project: checking 5 files together took 24x longer than checking 1,
+    and a shared dependency's warning/error was counted once per file.
+    Here: two clean files plus one file with a real warning must yield a
+    total warning count of exactly 1, not once per other file in the
+    batch (calls [Cmd_build.check_all] directly to inspect its returned
+    warning count rather than relying on stderr text). *)
+let test_check_does_not_duplicate_shared_module_diagnostics () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      let extra1 = Filename.concat root (Filename.concat "lib" "helper1.march") in
+      let extra2 = Filename.concat root (Filename.concat "lib" "helper2.march") in
+      let warns  = Filename.concat root (Filename.concat "lib" "warns.march") in
+      write_file extra1 (good_module_source ~mod_name:"Helper1");
+      write_file extra2 (good_module_source ~mod_name:"Helper2");
+      write_file warns (warning_module_source ~mod_name:"Warns");
+      match Project.load () with
+      | Error msg -> Alcotest.fail ("project load failed: " ^ msg)
+      | Ok proj ->
+        let lib_dir = Filename.concat proj.Project.root "lib" in
+        let files = Cmd_build.find_march_files lib_dir in
+        let lib_path_env = Cmd_build.lib_path_env proj in
+        let cache_dir = Filename.concat proj.Project.root (Filename.concat ".forge" "check-cache") in
+        let (failed, _errors, warnings) = Cmd_build.check_all ~lib_path_env ~cache_dir files in
+        Alcotest.(check int) "check succeeds (warnings don't fail a build)" 0 failed;
+        Alcotest.(check int)
+          "Warns.march's single unused-param warning is counted exactly once, \
+           not once per other file checked alongside it"
+          1 warnings)
+
 (** Rather than breaking PATH/MARCH_HOME to prove `march` isn't re-invoked
     (tried first — but that also perturbs `lib_path_env`, since
     `Toolchain.path_prefix ()` bakes the resolved toolchain's bin/ directly
@@ -196,6 +233,8 @@ let () =
         test_check_reports_warnings_from_combined_module;
       Alcotest.test_case "check cache short-circuits unchanged rebuild" `Quick
         test_check_cache_short_circuits_unchanged_rebuild;
+      Alcotest.test_case "check does not duplicate shared-module diagnostics" `Quick
+        test_check_does_not_duplicate_shared_module_diagnostics;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
