@@ -3452,20 +3452,63 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       end else
         emit ctx (Printf.sprintf
           "%s = call ptr @march_dispatch_enter(i32 %d, ptr %s)" fp name_id vslot);
-      let result =
+      (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
+         slot has not been published yet (or the publish is not yet visible to
+         this thread) — e.g. an HTTP worker thread serving a request during the
+         first few seconds while the dispatch table is still being filled in.
+         In that window fall back to a DIRECT static call to the baseline symbol
+         (the exact fn we would have published), rather than jumping through a
+         NULL fn_ptr.  No leave is issued on this path: enter did not pin a
+         version when it returned NULL. *)
+      let is_null = fresh ctx "hrnull" in
+      emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" is_null fp);
+      let blk_direct = fresh_block ctx "hr_direct" in
+      let blk_disp   = fresh_block ctx "hr_disp" in
+      let blk_cont   = fresh_block ctx "hr_cont" in
+      emit ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                  is_null blk_direct blk_disp);
+      (* Direct (baseline) path — table not ready. *)
+      emit_label ctx blk_direct;
+      let direct_r =
+        if ret_ty = "void" then begin
+          emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+          None
+        end else begin
+          let r = fresh ctx "crd" in
+          emit ctx (Printf.sprintf "%s = call %s @%s(%s)"
+                      r ret_ty fname args_str);
+          Some r
+        end
+      in
+      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      (* Dispatched path — pinned to a published version; must leave after. *)
+      emit_label ctx blk_disp;
+      let disp_r =
         if ret_ty = "void" then begin
           emit ctx (Printf.sprintf "call void %s(%s)" fp args_str);
-          ("i64", "0")
+          None
         end else begin
           let r = fresh ctx "cr" in
           emit ctx (Printf.sprintf "%s = call %s %s(%s)" r ret_ty fp args_str);
-          (ret_ty, r)
+          Some r
         end
       in
       let v = fresh ctx "hrv" in
       emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
       emit ctx (Printf.sprintf
         "call void @march_dispatch_leave(i32 %d, i32 %s)" name_id v);
+      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      (* Continuation — merge the two call results. *)
+      emit_label ctx blk_cont;
+      let result =
+        match direct_r, disp_r with
+        | Some rd, Some rs ->
+          let phi = fresh ctx "hrphi" in
+          emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+                      phi ret_ty rd blk_direct rs blk_disp);
+          (ret_ty, phi)
+        | _ -> ("i64", "0")
+      in
       result
     end
     else if ret_ty = "void" then begin

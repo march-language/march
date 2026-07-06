@@ -28,7 +28,12 @@ typedef struct {
     char               impl_hash[65];   /* 64 hex chars + NUL */
     char               sig_hash[65];    /* 64 hex chars + NUL (Phase 4) */
     uint8_t            kind;            /* MARCH_NATIVE | MARCH_TRAMPOLINE */
-    uint8_t            live;            /* 1 once this ring slot holds a version */
+    _Atomic(uint8_t)   live;            /* 1 once this ring slot holds a version.
+                                           Publication gate: publish release-stores
+                                           this LAST (after fn_ptr etc.); enter
+                                           acquire-loads it before trusting the slot,
+                                           so a concurrent reader never observes a
+                                           zeroed/half-written slot. */
     uint32_t           epoch;           /* Phase 9: deploy epoch; 0 = pre-Phase-9 */
     void              *handle;          /* dlopen handle for this .so; NULL for baseline */
 } MarchFnVersion;
@@ -42,9 +47,26 @@ typedef struct {
     char             *callers_str;                     /* Phase 8: comma-separated caller names, or NULL */
 } MarchDispatchSlot;
 
-static MarchDispatchSlot  *g_slots      = NULL;
-static uint32_t            g_n_slots    = 0;
+/* g_slots / g_n_slots are written once by march_dispatch_init (startup, main
+ * thread) and read by every boundary call on every worker thread.  They are
+ * atomic so the one-time publication is a proper release/acquire handoff:
+ * march_dispatch_init release-stores g_slots THEN g_n_slots (the gate); a hot
+ * reader acquire-loads g_n_slots first and, on a non-zero result, is guaranteed
+ * to see the fully-written g_slots pointer.  Cold accessors (reload-server
+ * thread, post-startup) use relaxed loads — correctness there rests on the
+ * startup happens-before, and this keeps the change to the hot path minimal. */
+static _Atomic(MarchDispatchSlot *) g_slots      = NULL;
+static _Atomic(uint32_t)            g_n_slots    = 0;
 static const char        **g_id_to_name = NULL;  /* Phase 4: dense id→name array */
+
+/* Relaxed accessors for cold (single-threaded, post-startup) call sites so the
+ * bulk of this file reads exactly as before. */
+static inline uint32_t n_slots_relaxed(void) {
+    return atomic_load_explicit(&g_n_slots, memory_order_relaxed);
+}
+static inline MarchDispatchSlot *slots_relaxed(void) {
+    return atomic_load_explicit(&g_slots, memory_order_relaxed);
+}
 
 /* ── Name registry ──────────────────────────────────────────────────────── */
 
@@ -93,28 +115,44 @@ int march_dispatch_name_to_id(const char *name, uint32_t *out_id) {
 
 void march_dispatch_init(uint32_t n_slots) {
     march_dispatch_shutdown();
-    g_slots      = (MarchDispatchSlot *)calloc(n_slots, sizeof(MarchDispatchSlot));
-    g_id_to_name = (const char **)calloc(n_slots, sizeof(const char *));
-    g_n_slots    = (g_slots && g_id_to_name) ? n_slots : 0;
-    if (!g_slots || !g_id_to_name) {
-        free(g_slots);      g_slots      = NULL;
-        free(g_id_to_name); g_id_to_name = NULL;
+    MarchDispatchSlot *slots = (MarchDispatchSlot *)calloc(n_slots, sizeof(MarchDispatchSlot));
+    const char       **names = (const char **)calloc(n_slots, sizeof(const char *));
+    g_id_to_name = names;
+    /* Store the slot array (relaxed) BEFORE the gate. */
+    atomic_store_explicit(&g_slots, slots, memory_order_relaxed);
+    if (!slots || !names) {
+        free(slots);
+        free(names);
+        atomic_store_explicit(&g_slots, NULL, memory_order_relaxed);
+        g_id_to_name = NULL;
+        atomic_store_explicit(&g_n_slots, 0, memory_order_release);
+        return;
     }
+    /* Publish the table with a release store on g_n_slots: this is the gate.
+     * A worker's first boundary call acquire-loads g_n_slots (in enter/enter_gen)
+     * and, seeing a non-zero count, is guaranteed to also see the g_slots pointer
+     * and the calloc-zeroed slot contents written above. */
+    atomic_store_explicit(&g_n_slots, n_slots, memory_order_release);
 }
 
 void march_dispatch_shutdown(void) {
-    for (uint32_t i = 0; i < g_n_slots; i++) {
-        free(g_slots[i].callers_str);
-        g_slots[i].callers_str = NULL;
+    /* Close the gate first so no reader indexes a slot array we are about to
+     * free.  (Shutdown runs at process teardown, single-threaded in practice.) */
+    uint32_t n = n_slots_relaxed();
+    MarchDispatchSlot *slots = slots_relaxed();
+    atomic_store_explicit(&g_n_slots, 0, memory_order_release);
+    for (uint32_t i = 0; i < n; i++) {
+        free(slots[i].callers_str);
+        slots[i].callers_str = NULL;
         /* Release any live .so handles (server shutdown path). */
         for (uint32_t v = 0; v < MARCH_MAX_LIVE_VERSIONS; v++) {
-            slot_dlclose(g_slots[i].ring[v].handle);
-            g_slots[i].ring[v].handle = NULL;
+            slot_dlclose(slots[i].ring[v].handle);
+            slots[i].ring[v].handle = NULL;
         }
     }
-    free(g_slots);      g_slots      = NULL;
+    free(slots);
+    atomic_store_explicit(&g_slots, NULL, memory_order_relaxed);
     free(g_id_to_name); g_id_to_name = NULL;
-    g_n_slots = 0;
     for (int i = 0; i < MARCH_NAME_BUCKETS; i++) {
         NameEntry *e = g_name_buckets[i];
         while (e) { NameEntry *nx = e->next; free(e); e = nx; }
@@ -131,7 +169,8 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
 
     int any_live = 0;
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++)
-        if (s->ring[i].live) { any_live = 1; break; }
+        if (atomic_load_explicit(&s->ring[i].live, memory_order_relaxed))
+            { any_live = 1; break; }
 
     int idx;
     if (!any_live) {
@@ -167,10 +206,13 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     }
 
     MarchFnVersion *v = &s->ring[idx];
+    /* Reclaim case: if this ring slot was previously live, retire it FIRST so a
+       concurrent enter_gen (which scans every live slot) cannot select it while
+       we are mid-overwrite.  On a fresh slot this is already 0. */
+    atomic_store_explicit(&v->live, 0, memory_order_release);
     v->fn_ptr = fn_ptr;
     atomic_store_explicit(&v->refs, 0, memory_order_relaxed);
     v->kind = kind;
-    v->live = 1;
     if (impl_hash) {
         strncpy(v->impl_hash, impl_hash, 64);
         v->impl_hash[64] = '\0';
@@ -183,6 +225,11 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
     } else {
         v->sig_hash[0] = '\0';
     }
+    /* Mark the slot live with a release store AFTER every field (fn_ptr, kind,
+       hashes) is written.  This is the slot-level publication point: enter/
+       enter_gen acquire-load `live` and only trust the slot once they observe
+       this store, so they can never read a zeroed or half-initialised slot. */
+    atomic_store_explicit(&v->live, 1, memory_order_release);
     /* Publish with release so a reader that acquires `current` sees the fully
        initialised version. */
     atomic_store_explicit(&s->current, (uint32_t)idx, memory_order_release);
@@ -190,17 +237,40 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
 }
 
 void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
-    if (name_id >= g_n_slots) {
+    /* Acquire-load the gate: a non-zero count synchronises-with the release
+       store in march_dispatch_init, so g_slots below is guaranteed published. */
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)) {
         if (out_version) *out_version = 0;
         return NULL;
     }
-    MarchDispatchSlot *s = &g_slots[name_id];
+    MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
+    MarchDispatchSlot *s = &slots[name_id];
     uint32_t v = atomic_load_explicit(&s->current, memory_order_acquire);
+    /* Publication gate.  During the startup warmup window a worker thread can
+       reach this slot before its first march_dispatch_publish has run (or before
+       that publish is visible to this thread): `current` and ring[0] are still
+       calloc-zero, so a naive read returns fn_ptr == NULL and the generated call
+       site jumps to address 0.  Acquire-load `live`; if the slot is not yet
+       published, report version 0 and return NULL WITHOUT pinning — the caller's
+       generated code falls back to a direct static call to the baseline symbol.
+       The acquire here pairs with the release store of `live` in publish, so a
+       live==1 observation guarantees fn_ptr and all fields are fully visible. */
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_acquire)) {
+        if (out_version) *out_version = 0;
+        return NULL;
+    }
     /* Pin before use. The publish path only reclaims a slot with refs == 0, so
        a fully-safe reclaim against this read needs epoch/grace reclamation
        (a later phase); single-version steady state and the test path are
        correct as-is. */
     atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
+    /* Re-validate after pinning: if a concurrent reclaim retired this slot
+       between the live check and the pin, back out and fall back. */
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
+        if (out_version) *out_version = 0;
+        return NULL;
+    }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
 }
@@ -311,18 +381,23 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
                                uint32_t *out_version) {
     if (caller_epoch == 0)
         return march_dispatch_enter(name_id, out_version);
-    if (name_id >= g_n_slots) {
+    /* Acquire the publication gate (see march_dispatch_enter). */
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)) {
         if (out_version) *out_version = 0;
         return NULL;
     }
-    MarchDispatchSlot *s = &g_slots[name_id];
+    MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
+    MarchDispatchSlot *s = &slots[name_id];
 
     /* Scan the 2-slot ring for the best match: live, epoch <= caller_epoch,
      * maximum epoch value.  This is 2 iterations, no lock needed. */
     int    best_idx   = -1;
     uint32_t best_ep = 0;
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) {
-        if (!s->ring[i].live) continue;
+        /* Acquire-load `live`: same publication gate as march_dispatch_enter, so
+           a slot's epoch/fn_ptr are only read once the publishing release-store
+           of `live` is visible. */
+        if (!atomic_load_explicit(&s->ring[i].live, memory_order_acquire)) continue;
         uint32_t ep = s->ring[i].epoch;
         if (ep <= caller_epoch && (best_idx < 0 || ep > best_ep)) {
             best_idx = (int)i;
@@ -334,6 +409,13 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
 
     uint32_t v = (uint32_t)best_idx;
     atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
+    /* Re-validate after pinning (mirror of march_dispatch_enter): a concurrent
+       reclaim that retired this slot means we must back out and fall back. */
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
+        if (out_version) *out_version = 0;
+        return NULL;
+    }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
 }
