@@ -175,6 +175,75 @@ react  = "^18.3.0"
 
 The generated `package.json` sets `"type": "module"` so your `.mjs` output loads cleanly. For Deno or Bun, use their native specifiers (`npm:lodash`, `jsr:@std/path`) directly in the `extern` lib name — no `[js_deps]` needed since those runtimes fetch packages on demand.
 
+### Cross-compiling to Linux
+
+March can build a **Linux** binary from any host — including macOS — the way Go's
+`GOOS=linux go build` does. Pass a `linux/*` target and you get a native Linux
+ELF without a Linux box, VM, or Docker build step:
+
+```sh
+march --compile --target linux/amd64 app.march -o app   # x86-64 Linux
+march --compile --target linux/arm64 app.march -o app   # aarch64 Linux
+
+forge build --target linux/amd64                          # via forge
+forge build --target linux/arm64
+```
+
+Accepted aliases: `linux/amd64` (= `linux/x86_64`) and `linux/arm64`
+(= `linux/aarch64`).
+
+**Prerequisite — `zig`.** Cross-compilation uses [`zig cc`](https://ziglang.org)
+as the C cross-compiler (it bundles a clang plus the Linux sysroots, so there's
+nothing else to install). Put `zig` on your `PATH`:
+
+```sh
+brew install zig          # macOS
+# or download from https://ziglang.org/download/
+```
+
+`forge build --target linux/…` checks for `zig` up front and tells you if it's
+missing; a bare `march --compile --target linux/…` will fail at the link step
+without it.
+
+**Output.** `forge` writes cross builds to a per-target directory so they never
+clobber your host binary:
+
+```
+.march/build/linux-amd64/debug/<name>
+.march/build/linux-arm64/release/<name>
+```
+
+**What you get.** A **dynamically-linked glibc** binary (minimum glibc 2.31 —
+Ubuntu 20.04 / Debian 11 and newer). It runs on mainstream distributions and in
+glibc-based containers (`debian:*-slim`, `ubuntu:*`, distroless-cc), e.g.:
+
+```dockerfile
+FROM debian:bookworm-slim
+COPY app /usr/local/bin/app
+CMD ["app"]
+```
+
+```sh
+# Smoke-test a cross build locally, without deploying:
+march --compile --target linux/amd64 app.march -o app
+docker run --rm --platform linux/amd64 -v "$PWD/app":/app:ro debian:bookworm-slim /app
+```
+
+**Scope (current).** Cross-compilation currently targets **compute and CLI
+workloads**. Not yet included in a cross build:
+
+- **TLS/HTTPS** and **compression** (zstd/brotli/zlib) — these runtime modules are
+  omitted from cross builds for now.
+- **Hot code reload** — the reload `.so` path is host-only today; deploy a
+  pre-built artifact instead (see [Hot Code Reload](hot-code-reload.md)).
+- **Rust FFI** (`[ffi.rust]`) — `forge build --target linux/…` fails with a clear
+  message rather than mislinking a host-architecture static library.
+- **Concurrency/actor programs** are not yet validated on cross targets.
+
+Correctness is guarded by a differential test that cross-compiles a corpus and
+checks each program's output against the native build byte-for-byte, so a
+codegen regression on a cross target is caught in CI.
+
 ### Checking Types
 
 `forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
