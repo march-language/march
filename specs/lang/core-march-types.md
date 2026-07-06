@@ -1663,7 +1663,7 @@ OPERATIONAL side — how a module's declared names get re-exported as
 `"Name.member"` at eval time, gated on `own_names` (everything declared,
 public or private). This subsection is the TYPING counterpart: what
 `typecheck.ml`'s `DMod` arm (`Ast.DMod (name, _vis, decls, _sp)`,
-`typecheck.ml:6804`) and its cross-file sibling `load_module_into_env`
+`typecheck.ml:6823`) and its cross-file sibling `load_module_into_env`
 (`typecheck.ml:657–692`) actually gate on, and — the load-bearing content of
 this subsection — the precise, INTENTIONAL asymmetry between how a private
 FUNCTION/VALUE is hidden and how a private TYPE stays nominally visible.
@@ -1677,7 +1677,7 @@ siblings are spliced in as real `DMod`s before typecheck ever runs) case:
 
 ```
 pub_set = { n | DFn(n, Public) ∈ decls } ∪ { n | DLet(Public, n, …) ∈ decls }
-          ∪ { n | DType(Public, n, …) ∈ decls } ∪ …                          typecheck.ml:6822–6842
+          ∪ { n | DType(Public, n, …) ∈ decls } ∪ …                          typecheck.ml:6841–6862
 is_pub_key k  = ∃ n ∈ pub_set. k = n ∨ k starts-with (n ^ ".")               typecheck.ml:6895–6901
 new_names     = { (Name^"."^k, σ) | (k, σ) ∈ inner_env.vars, is_pub_key k }  typecheck.ml:6904–6908
 new_types     = { (k, arity) | (k, arity) ∈ inner_env.types, k ∈ pub_set }   typecheck.ml:6915–6917
@@ -1775,7 +1775,7 @@ either of those two docs claims:**
   `OqToken.Token("direct-bypass")` from unrelated code typechecks (exit 0)
   AND runs, constructing a real value that matches its own pattern and prints
   `"direct-bypass"`. Root cause traced precisely: a Pass-1 forward-reference
-  pass, `prebind_mod_members` (`typecheck.ml:8032–8087`, called for every
+  pass, `prebind_mod_members` (`typecheck.ml:8067–8110`, called for every
   sibling `DMod` at `:8105`; the entry module's own top-level types get the
   same treatment at `:8110–8129`), registers each variant's qualified
   constructor key (`"Mod.CtorName"`) via `add_ctor qctor ci acc.ctors`
@@ -1908,7 +1908,7 @@ are all public here), and the record path canonicalizes through the same
 
 **Filed, not fixed (out of this task's docs-only scope):** the `opaque
 type` constructor-hiding gap found above (`prebind_mod_members`'s ungated
-qualified-ctor registration at `typecheck.ml:8056`, surviving the later,
+qualified-ctor registration at `typecheck.ml:8091`, surviving the later,
 correctly-filtered `DMod` export step's merge) — a real enforcement hole
 structurally identical to the bug Task 1 fixed for `ExFn`/`ExValue`, but on
 the same-compilation-unit path rather than the `Module_registry` path, and
