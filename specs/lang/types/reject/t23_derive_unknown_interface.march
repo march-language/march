@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: Unknown derive target `Frobnicate` for type `Color`.
+mod M do
+  -- `derive` targets a CLOSED, hardcoded set of five interfaces: Eq, Show,
+  -- Hash, Ord, Json (desugar.ml's `derive_impl`, flat `match iface with
+  -- | "Eq" -> ... | "Show" -> ... | "Hash" -> ... | "Ord" -> ... | "Json" ->
+  -- ... | _ -> error`). Not extensible by declaring your own `interface` and
+  -- hoping `derive` picks it up. NOTE the contrast with an UNKNOWN TYPE
+  -- (`derive Eq for Ghost` where `Ghost` is undefined), which silently NO-OPs
+  -- instead of erroring here -- see specs/todos.md's filed gap.
+  type Color = Red | Green | Blue
+
+  derive Frobnicate for Color
+
+  fn main() do
+    println("unreachable")
+  end
+end

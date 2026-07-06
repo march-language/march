@@ -1514,6 +1514,62 @@ harness. This documentation slice therefore pins the divergence in prose
 (this subsection) and in `specs/todos.md` (the filed bug, with the repro and
 both outputs), not as a new corpus file.
 
+### 4.4.4 `derive`/`satisfy`-generated impls run through the SAME dispatch rules as hand-written ones
+
+`core-march-types.md` §2.4 documents `derive`/`satisfy` as DESUGAR-time
+generators of ordinary `DImpl` blocks — this subsection is the one-sentence
+operational consequence, kept short because there is genuinely nothing new
+to specify here: **once desugar has expanded a `derive`/`satisfy` node,
+`(E-Dispatch-Builtin)`/`(E-DImpl)` above cannot tell the difference between a
+generated impl and a hand-written one.** A `derive Eq, Show for Color`
+produces `impl Eq(Color)`/`impl Show(Color)` blocks targeting the REAL
+interface names, so — being `Eq`/`Show` — they register into `impl_tbl`
+exactly as `t28_derive_impl_tbl_dispatch` already witnesses (§4.4.2); a
+`satisfy Named for Person` produces an `impl Named(Person)` block for a
+user-defined interface, so — `Named` not being on the four-name allowlist —
+it takes the ordinary lexical `env`-binding path, exactly like any
+hand-written `impl Named(Person)` would (`accept/t30_satisfy_wiring`,
+`specs/lang/types/accept/`, run-witnessed: `name(Person("Ada"))` prints
+`Ada`). This is precisely WHY §4.4.3's coherence divergence explicitly
+includes a derive-vs-manual-impl overlap probe as a THIRD confirmed instance
+of the same root cause, not a separate mechanism: `derive`'s generated
+`DImpl` and a hand-written `impl` of the same `(interface, type)` pair are
+indistinguishable by the time either backend's `DImpl` eval/lowering handler
+sees them, so they collide, and get resolved (differently, per backend), by
+the identical last-registered-wins / first-registered-wins split already
+documented there — nothing about being `derive`-generated makes an impl
+"more special" or exempt from the overlap story.
+
+The one operationally-relevant special case is `Json`'s pseudo-interfaces,
+and it does NOT fit either of the two clean patterns above — it is a genuine
+third case. `derive Json for T` generates impls under `"JsonTo"`/`"JsonFrom"`,
+names that are on neither the `is_type_dispatched_method` nor
+`is_type_dispatched_iface` allowlists (`eval.ml:270–273`, `:287–289`), yet
+`DImpl`'s eval handler special-cases them by NAME anyway via its own
+`is_json_iface` check (`eval.ml:8288–8290`, `String.sub … 0 4 = "Json"` —
+the identical string-prefix test as `core-march-types.md` §2.4's
+`is_json_derive` on the typecheck side, independently duplicated rather than
+shared): the `to_json` method (under pseudo-interface `JsonTo`) registers
+into `impl_tbl` — same as a type-dispatched method would — but is
+DELIBERATELY NOT ALSO bound as a bare name in the returned `env`
+(`eval.ml:8335`: `if (is_json_iface && mname.txt = "to_json") || is_dispatched
+then env else new_env` — the bare-binding step is skipped), specifically so
+a second `derive Json` for a different type doesn't shadow the first type's
+`to_json` closure in lexical scope; the polymorphic `to_json`/`from_json`
+BUILTINS (`eval.ml:3383–3391`, `:3392–3453`) are what ordinary call sites
+actually invoke, and they read `impl_tbl` directly by the argument's dynamic
+type (cross-referenced from `core-march-types.md` §2.4's `is_json_derive`
+note). The `from_json` method (under pseudo-interface `JsonFrom`), by
+contrast, DOES get bound as a bare name in `env` in addition to `impl_tbl` —
+the comment at `eval.ml:8329–8331` explains why the two methods are treated
+asymmetrically: `from_json` cannot be dispatched by `impl_tbl` at the
+BUILTIN's own call site, because the builtin only has a `JsonValue` argument
+in hand, not yet a value of the TARGET type to look up `impl_tbl` by — so
+the standalone `from_json` builtin (`eval.ml:3392–3453`) instead inspects the
+JSON payload's own embedded type-tag structurally, and the bare `env`
+binding exists as a secondary, lexically-scoped path for direct
+`from_json(v)` calls that already know their target type from context.
+
 ### 4.5 Relationship to the small-step form (the metatheory target)
 
 `specs/lean4-metatheory-plan.md` will state the semantics as a **small-step**

@@ -1,0 +1,18 @@
+mod M do
+  -- `derive` (core-march-types.md §2.3 / core-march.md §4.4.4): `derive Eq,
+  -- Show for Color` expands at DESUGAR time (desugar.ml's `expand_derive`,
+  -- BEFORE typecheck ever sees a DDeriving node) into two ordinary `DImpl`
+  -- blocks -- `impl Eq(Color)` and `impl Show(Color)` -- targeting the REAL
+  -- interface names, indistinguishable from hand-written impls once
+  -- desugared. Both are on the four-name `impl_tbl` dispatch allowlist
+  -- (core-march.md §4.4.2), so `show`/`==` dispatch by Color's dynamic tag.
+  type Color = Red | Green | Blue
+
+  derive Eq, Show for Color
+
+  fn main() do
+    println(show(Red))
+    println(Red == Red)
+    println(Red == Blue)
+  end
+end

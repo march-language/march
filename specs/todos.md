@@ -124,6 +124,37 @@ This file tracks everything that still needs to get done. Organized by priority 
 
   **This is an OPEN divergence, deliberately left unfixed by the documentation slice that found it** — unlike `core-march.md` §4.2.1's `ERecordUpdate` case (investigated, adjudicated, and CONVERGED; its todos entry is closed), there is no clearly-normative backend to converge on here. Fixing this requires an actual language-design decision: add a coherence/overlap-rejection check at `impl` declaration time (Rust-style), define one deterministic selection policy shared by both backends (e.g. always-first or always-last, formalized rather than incidental), or embrace intentionally-overlapping instances with an explicit specificity order (Haskell `OverlappingInstances`-style) — each a real design trade-off (e.g. backward compatibility with any code, such as test-mocking patterns, that happens to rely on the interpreter's current last-wins behavior). Filed here in the same spirit as the existing open `hash()`/`to_string` cross-backend entries above and `test/test_oracle.ml`'s `known_divergence` list (`test/test_oracle.ml:138`–`174`) — pinned and tracked, not silently fixed or hidden. Deliberately NOT added to `specs/lang/types/{accept,reject}/` (`check_types.sh`'s single-`--check`-invocation harness can't witness a runtime interp/compiled split — both backends accept the program at typecheck time; the divergence only appears once the program is actually RUN on each backend).
 
+### Compiler (found during Core March widening slice — interfaces/impls declaration checking, Task 5, 2026-07-06)
+
+- [ ] **`derive X for UnknownType` silently no-ops: exit 0, no diagnostic of any kind, on both `--check` and RUN.** Found and pinned by `specs/lang/core-march-types.md` §2.4 (the `derive`/`satisfy` widening section) and §4.1 finding 17, widening the interface/impl declaration-checking reference (`.superpowers/sdd/interface-impl-survey.md` §5, finding S1). `expand_derive`'s `None` branch (`lib/desugar/desugar.ml:1659`) is a bare `[]` when the derive TARGET TYPE isn't found in the module's own collected `type_defs` — no `Err.error` call, unlike the very same function's own unknown-derive-TARGET-INTERFACE case just a few lines away (`derive_impl`'s `_ -> Err.error …` catch-all, `desugar.ml:1641`–`1647`), and unlike `expand_satisfy`'s unknown-interface and missing-function checks (`desugar.ml:1687`–`1690`, `:1694`–`1699`), both of which DO reject.
+
+  **Minimal repro** (confirmed live this task, both `--check` and RUN):
+  ```march
+  mod M do
+    derive Eq for Ghost           -- `Ghost` is never defined anywhere
+
+    fn main() do
+      println("no error, no Ghost type defined")
+    end
+  end
+  ```
+  ```
+  $ march --check file.march   # exit 0, no diagnostic
+  $ march file.march           # exit 0, prints: no error, no Ghost type defined
+  ```
+  The `derive Eq for Ghost` line has zero observable effect — the program behaves exactly as if it were deleted. Confirmed reproducible; not test flakiness (re-run, same result).
+
+  **Cited derive-expansion site:** `expand_derive` (`lib/desugar/desugar.ml:1651`–`1664`):
+  ```ocaml
+  match List.assoc_opt type_name.txt type_defs with
+  | None -> []   (* type not found — silently skip *)          (* desugar.ml:1659 *)
+  | Some (tparams, td) -> List.concat_map (fun iface_name -> …) ifaces
+  ```
+
+  **Why this is a real gap, not intentional leniency:** every OTHER "the target of a declaration doesn't exist" case documented in this widening slice IS rejected — `impl` of an undeclared interface (`core-march-types.md` §2.3 item 2, `` Unknown interface `NotDeclared` — is it declared above this impl? ``), `derive` of an undeclared INTERFACE (this same function, `` Unknown derive target `Frobnicate` for type `Color`. `` — confirmed live, `reject/t23_derive_unknown_interface`), and `satisfy` of an undeclared interface (`` Unknown interface `Bogus` in satisfy declaration. ``, confirmed live). The derive-unknown-TYPE case is the one asymmetric exception, and it fails silently rather than loudly — the worst direction for a typo (a misspelled type name in a `derive` line is currently indistinguishable from a no-op comment).
+
+  Filed here in the same spirit as the impl-coherence entry immediately above (a real, pinned gap, deliberately left unfixed by this documentation-only slice) — fixing it (rejecting an unknown derive TARGET TYPE the same way an unknown derive target INTERFACE already is, i.e. an `Err.error` call in `expand_derive`'s `None` branch instead of `[]`) is a small, well-scoped compiler change, but out of scope here. Deliberately NOT added to `specs/lang/types/{accept,reject}/` as a `reject/` program — a `reject/` witness would assert behavior this finding identifies as WRONG (the program currently, incorrectly, `--check`s clean); once fixed, a `reject/derive_unknown_type`-style program should be added per `core-march-types.md` §4.1 finding 17's note.
+
 ### Compiler (found during Differential Oracle Task 4 generator scoping, 2026-07-04)
 
 - [ ] **Compiled and interpreted `hash()` use different, backend-specific algorithms with no cross-backend value equality for RECORD types — expected, but undocumented.** For `TDRecord`, derived `Hash`'s body (`expand_derive`, `lib/desugar/desugar.ml` "Hash" case) calls the polymorphic `hash()` builtin per field and combines the results. That builtin is genuinely backend-specific: interpreter uses OCaml's `Hashtbl.hash` (`lib/eval/eval.ml`); compiled uses a custom splitmix-style hash (`march_hash_int`/`march_hash_string`/etc., `runtime/march_runtime.c`). Confirmed by hand: `hash({x:1,y:2})` prints `28043382405` interpreted vs `6305855436935449413` compiled for the identical value — not a bug, just two independent hash implementations that were never meant to agree. (Derived `Hash` on a VARIANT type is NOT affected — its body is the bare constructor index as an integer literal, `ELit (LitInt i)`, no call to the `hash()` builtin at all, so it's trivially portable.) `syntax_reference.md`'s derived-Ord/Hash section documents the payload-ignoring semantics but doesn't mention the record-Hash cross-backend non-portability; worth a one-line addition so a future test author doesn't file it as a divergence. Differential-oracle Task 4's record derived-method generator (`gen_derived_method_record_module`, `test/test_properties.ml`) deliberately never prints `hash()`'s result for this reason (only `==`/`eq`/`compare`, all pure Int-field comparisons); the Newtype/Boxed/enum generators DO print `hash()` since those are all variant types (portable by construction, not by luck — verified by hand).

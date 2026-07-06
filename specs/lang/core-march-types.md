@@ -1446,6 +1446,188 @@ not a value from the impl (which never defined `greeting` at all).
   in scope — the superclass bound UNSATISFIED (mandatory rejection, not a
   conditional gap).
 
+### 2.4 `derive` and `satisfy`: two ways to get a `DImpl` without writing one
+
+§2.3 documented `(T-Interface)`/`(T-Impl)` as they apply to a hand-written
+`interface`/`impl` pair. This subsection covers March's two *generators* of
+`DImpl` blocks — `derive Iface1, Iface2 for Type` and
+`satisfy Iface1, Iface2 for Type1, Type2` — both expanded entirely at
+**DESUGAR time**, strictly before typecheck ever runs. `typecheck.ml`'s own
+`check_decl` confirms this structurally: its `DDeriving`/`DSatisfy` arms
+(`typecheck.ml:7393–7395`, `:7519–7521`) are bare no-ops — by the time
+`check_decl` walks the declaration list, `desugar_module` has already
+replaced every `DDeriving`/`DSatisfy` node with the `DImpl` block(s) it
+expands to (or with nothing, per the no-op gap documented below). Both
+generators live in `lib/desugar/desugar.ml`, re-grepped live in this
+worktree.
+
+**`derive` — a CLOSED set of five hardcoded interfaces, dispatched by a flat
+string match.** `derive Iface1, Iface2 for TypeName` (`DDeriving`,
+`ast.ml:178–181`) is expanded by `expand_derive` (`desugar.ml:1651–1664`):
+
+```
+expand_derive(type_name, ifaces) =
+    match List.assoc_opt type_name type_defs with
+    | None            -> []                              -- desugar.ml:1659 (see gap, below)
+    | Some(tparams,td) -> concat_map derive_impl(iface, sp, tparams, td) ifaces
+```
+
+For each interface name, `derive_impl` (`desugar.ml:1108–1647`) dispatches on
+the bare string via `match iface with | "Eq" -> … | "Show" -> … | "Hash" ->
+… | "Ord" -> … | "Json" -> … | _ -> error` (branch line numbers re-grepped
+live: `"Eq"` at `:1128`, `"Show"` at `:1200`, `"Hash"` at `:1260`, `"Ord"` at
+`:1303`, `"Json"` at `:1398`, the catch-all error at `:1641–1647`). This is a
+**closed, hardcoded set of exactly five derivable interfaces** — not a
+general mechanism a user can extend by declaring their own `interface` and
+hoping `derive` notices it. An interface name outside the five is rejected,
+live-captured (`reject/t23_derive_unknown_interface`):
+
+```
+Unknown derive target `Frobnicate` for type `Color`.
+Supported interfaces: Eq, Show, Hash, Ord, Json
+```
+
+- **`Eq`/`Show`/`Hash`/`Ord`** each produce exactly ONE `DImpl` via the local
+  `impl_one` helper (`desugar.ml:1116–1126`), targeting the REAL interface
+  name (`impl_iface = mk_name iface`) — these desugar to `DImpl` blocks that
+  `(T-Impl)` (§2.3) cannot distinguish from a hand-written `impl Eq(Color) do
+  … end`. That indistinguishability is exactly why a `derive`-generated impl
+  can collide with a hand-written one for the same `(interface, type)` pair —
+  cross-referenced, not restated, at `core-march.md` §4.4.3's derive-vs-manual
+  overlap probe. Each generator walks the type's own definition
+  structurally: a `TDVariant` produces a match over pairs of constructors
+  (`Eq`'s body, `desugar.ml:1134–…`, matching each constructor against
+  itself and folding `&&` over payload-wise `==`; a mismatched pair of
+  constructors falls to a wildcard `false`), a `TDRecord` compares/derives
+  field-by-field, and a `TDAlias` DELEGATES directly to the aliased type's
+  own operators (e.g. `desugar.ml:1194–1196` for `Eq`) rather than
+  regenerating logic for the alias itself.
+- **`Json` is special-cased: it produces TWO `DImpl` blocks under PSEUDO-
+  interface names `"JsonTo"`/`"JsonFrom"`**, not the real interface name
+  (`desugar.ml:1623–1639`, `mk_json_impl` building `impl_iface = mk_name
+  "JsonTo"` / `"JsonFrom"`). These two names are deliberately never entries
+  in `env.interfaces` — `(T-Impl)`'s interface-existence check (§2.3, item 2)
+  has an explicit escape hatch for exactly this: `` idef.impl_iface.txt ``
+  starting with the 4-character prefix `"Json"` skips the "unknown
+  interface" rejection AND the normal method-signature validation entirely
+  (`typecheck.ml:7105–7117`'s `is_json_derive` guard, mirrored again at
+  `typecheck.ml:7196–7210` for the "don't rebind the polymorphic
+  `to_json`/`from_json` builtin" step) — method bodies are still
+  type-checked standalone via `check_fn`/`check_expr` for local correctness
+  (`typecheck.ml:7202–7204`), but never unified against a declared interface
+  signature the way an ordinary impl's methods are (§2.3 item 5). `Json`
+  derive is thus architecturally a special case bolted onto the general impl
+  machinery — worth naming explicitly as an exception to `(T-Impl)`, not
+  folded silently into its general rule.
+
+**FILED GAP — `derive X for UnknownType` silently no-ops: exit 0, no
+diagnostic of any kind.** `expand_derive`'s `None` branch
+(`desugar.ml:1659`, quoted above) is a bare `[]` — if `type_name` is not a
+key of `type_defs` (the module's own collected type definitions,
+`desugar.ml:2110`), the ENTIRE `derive` declaration silently vanishes: no
+`DImpl` is ever generated, and — critically — **no error is ever raised**,
+unlike every other "the target doesn't exist" case in this document (`impl`
+of an undeclared interface IS rejected, §2.3 item 2; `satisfy` of an
+undeclared interface IS rejected, below). Re-verified live for this task:
+
+```
+mod M do
+  derive Eq for Ghost           -- `Ghost` is never defined anywhere
+
+  fn main() do
+    println("no error, no Ghost type defined")
+  end
+end
+```
+
+`--check` on this program exits **0** — no diagnostic, no warning. Running it
+also exits **0** and prints `no error, no Ghost type defined` — the program
+behaves exactly as if the `derive Eq for Ghost` line were not present at all.
+This is filed as an open gap in `specs/todos.md` ("Compiler: Type System",
+finding 17 in this document's §4.1), with this exact repro and the
+`desugar.ml:1659` citation — fixing it (making an unknown derive TARGET TYPE
+an error, symmetric with the unknown derive TARGET INTERFACE case already
+handled above) is a compiler change, out of scope for this documentation
+slice.
+
+**`satisfy` — wires EXISTING top-level functions to an interface by NAME
+MATCH, all-or-nothing per `(interface, type)` pair.**
+`satisfy Iface1, Iface2 for Type1, Type2` (`DSatisfy`, `ast.ml:182–185`) is
+expanded by `expand_satisfy` (`desugar.ml:1676–1716`) for every
+`(interface, type)` pair in the cartesian product of its two name lists:
+
+```
+expand_satisfy(iface_n, type_n) =
+    match List.assoc_opt iface_n interfaces with
+    | None       -> error "Unknown interface `Iface` in satisfy declaration."; []
+    | Some iface ->
+        methods = filter_map (fun md ->
+            match List.assoc_opt md.md_name fns with
+            | None    -> error "satisfy Iface for Type: no function `md_name` found in scope."; None
+            | Some fn -> Some(md.md_name, fn)
+          ) iface.iface_methods
+        if length methods < length iface.iface_methods then []      -- desugar.ml:1703
+        else [ DImpl { impl_iface = iface_n; impl_ty = TyCon(type_n, []); impl_methods = methods; … } ]
+```
+
+Unlike `derive`, `satisfy` looks up the interface in a REAL,
+`env.interfaces`-sourced list (`interfaces : (string * interface_def) list`,
+collected from the module's own `DInterface`s before expansion,
+`desugar.ml:2111`) — so `satisfy` can target ANY user-declared interface, not
+a closed set of five. Two failure modes, both rejected, both re-captured
+live this task:
+
+- **Unknown interface** (verified live this task; not separately committed
+  as its own corpus program since `reject/t24_satisfy_missing_function`
+  already exercises `expand_satisfy`'s rejection path and a second
+  `satisfy`-rejects-unknown-interface program would restate the same
+  mechanism as `reject/t21_impl_unknown_interface`'s `impl`-side analog):
+  ```
+  Unknown interface `Bogus` in satisfy declaration.
+  ```
+- **Missing function for a required method** (this task's
+  `reject/t24_satisfy_missing_function`):
+  ```
+  satisfy Named for Person: no function `name` found in scope.
+  ```
+
+**All-or-nothing: satisfy never emits a partial impl.** If even ONE method
+required by the interface has no matching same-named top-level function, the
+ENTIRE `(iface, type)` pair's expansion is abandoned (`if List.length methods
+< List.length iface.iface_methods then []`, `desugar.ml:1703`) — no `DImpl`
+is emitted at all for that pair, not a partial one missing just the
+unresolved method. This is a clean design choice, not a corner case: it
+avoids a "missing method" diagnostic being reported TWICE for the same
+underlying problem — once as `expand_satisfy`'s own "no function found"
+error, and again from `(T-Impl)`'s missing-method check (§2.3, item 3) if a
+partial `DImpl` had been emitted and handed to `check_decl` anyway.
+
+**Corpus:**
+
+- `accept/t29_derive_eq_show` — `derive Eq, Show for Color` on a 3-constructor
+  variant type, used via `show(Red)`/`Red == Red`/`Red == Blue`; typechecks
+  and (run) prints `Red` / `true` / `false`.
+- `accept/t30_satisfy_wiring` — `satisfy Named for Person` wiring an existing
+  top-level `fn name` to `interface Named(a)`'s one method; typechecks and
+  (run) prints `Ada`.
+- `reject/t23_derive_unknown_interface` — `derive Frobnicate for Color`, an
+  interface name outside the closed five-name set.
+- `reject/t24_satisfy_missing_function` — `satisfy Named for Person` where no
+  top-level `fn name` exists anywhere in the module.
+
+**Note — dead AST surface: associated types are not a real feature.**
+`interface_def.iface_assoc_types : assoc_type_decl list` and
+`impl_def.impl_assoc_types : (name * ty) list` (`ast.ml:302`, `:324`) are
+populated with `[]` UNCONDITIONALLY by the parser (`parser.mly:779`, `:809`)
+— there is no grammar production anywhere that fills either field with
+anything else (no `type Output = …` associated-type syntax exists inside an
+`interface`/`impl` block), and neither `typecheck.ml` nor `eval.ml` ever
+reads either field (confirmed by grep: the only other occurrence is the same
+`[]` literal at `typecheck.ml:1120`, in `mk_builtin_iface`). **Associated
+types are AST scaffolding for a future extension, not a currently-working
+feature** — worth this one-line note so a reader who spots the fields in
+`ast.ml` doesn't assume otherwise.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -1817,6 +1999,36 @@ typechecker that this document exists to pin down, not defects:
     arm, when present, instead of unconditionally inferring); not fixed here
     (docs-only task). A `reject/let_annotation_mismatch`-style program should
     be added to this corpus once the enforcement lands.
+17. **[OPEN — filed, not fixed] `derive X for UnknownType` silently no-ops: no
+    diagnostic, exit 0, program runs as if the `derive` line were absent.**
+    Found while building §2.4's `derive`/`satisfy` widening. `expand_derive`'s
+    `None` branch (`desugar.ml:1659`) returns a bare `[]` when the target type
+    name isn't found in the module's collected `type_defs` — no `Err.error`
+    call, unlike the symmetric "unknown INTERFACE" case in the very same
+    function (the `_ -> Err.error …` catch-all in `derive_impl`,
+    `desugar.ml:1641–1647`) and unlike `satisfy`'s own unknown-interface and
+    missing-function checks (§2.4), both of which DO reject. Minimal repro,
+    re-verified live for this task:
+    ```
+    mod M do
+      derive Eq for Ghost           -- `Ghost` is never defined anywhere
+
+      fn main() do
+        println("no error, no Ghost type defined")
+      end
+    end
+    ```
+    `--check` exits **0** (no diagnostic); running it also exits **0** and
+    prints `no error, no Ghost type defined` — the `derive` line has zero
+    observable effect, silently. Filed in `specs/todos.md` under "Compiler:
+    Type System" with this repro and the `desugar.ml:1659` citation; fixing it
+    (rejecting an unknown derive TARGET TYPE the same way an unknown derive
+    target INTERFACE already is) is a compiler change, deliberately out of
+    scope for this documentation slice. Not encoded as a `reject/` corpus
+    program for the same reason findings 15–16 aren't: a `reject/` witness
+    would assert behavior this finding identifies as WRONG (the program
+    currently, incorrectly, `--check`s clean) — once fixed, a
+    `reject/derive_unknown_type`-style program should be added here.
 
 ## 5. What this validated, and what's next
 

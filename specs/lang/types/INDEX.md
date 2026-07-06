@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t28 accept, t01–t22 reject)
+# Typing corpus index (t01–t30 accept, t01–t24 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -15,6 +15,12 @@ corpus model still applies), and the harness has no separate "run and check
 the printed value" lane of its own. Their expected VALUE (not just exit code)
 is documented in their own table row below and re-verified by running them
 interpreted, not only `--check`ing them.
+
+**Note (`t29`–`t30`):** these anchor `core-march-types.md` §2.4 (`derive`/
+`satisfy` as `DImpl` GENERATORS, a typing/desugar-time concern) — `t29` is
+also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls
+dispatch through the identical rules as hand-written ones), same
+dual-purpose pattern as `t27`–`t28` above.
 
 ## The `--check` accept/reject harness model
 
@@ -72,6 +78,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t23`–`t25`, `reject/t18`–`t21` | Widening slice 1, Task 1 (2026-07-06) | user-defined `interface`/`impl` DECLARATION checking (§2.3: `(T-Interface)` registration, `(T-Impl)`'s ordered checks — missing/extra-method, signature-match, unknown-interface — and default methods) |
 | `accept/t26`, `reject/t22` | Widening slice 1, Task 2 (2026-07-06) | superclass/`requires` and `when`-clause discharge (mandatory enforcement, §2.3), the `impl_matches_ty` structural-match judgment named as its own rule, `(T-ImplMatch)` |
 | `accept/t27`–`t28` | Widening slice 1, Task 3 (2026-07-06) | method-DISPATCH operational rules (`core-march.md` §4.4.2, not `core-march-types.md`): the four-name `impl_tbl` type-directed lookup for `Show`/`Eq`/`Ord`/`Hash`, and ordinary lexical `env`-binding dispatch for user-defined interfaces |
+| — | Widening slice 1, Task 4 (2026-07-06) | no new programs — coherence/overlap is a runtime interp-vs-compiled DIVERGENCE (`core-march.md` §4.4.3), which a single-`--check`-invocation harness cannot witness; documented in prose + filed in `specs/todos.md` instead |
+| `accept/t29`–`t30`, `reject/t23`–`t24` | Widening slice 1, Task 5 (2026-07-06) | `derive`/`satisfy` as `DImpl` GENERATORS (§2.4): the closed five-interface `derive` set + `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case, `satisfy`'s name-matching all-or-nothing wiring, and the filed `derive X for UnknownType` silent-no-op gap (§4.1 finding 17) |
 
 ## `accept/` — must typecheck
 
@@ -105,6 +113,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t26_impl_superclass_satisfied` | **(T-Impl) superclass discharge** — `interface Greet(a) requires Speak(a)`, with `impl Speak(Dog)` declared before `impl Greet(Dog)` | run-witnessed: prints `"Hello, Rex"` — the bound SATISFIED |
 | `t27_user_iface_lexical_dispatch` | **operational (`core-march.md` §4.4.2, E-DImpl)** — a user `interface Speak(a)` + one `impl Speak(Dog)`; `speak(Dog("Rex"))` resolves via ORDINARY lexical `env` binding, not a type-directed table | run-witnessed: prints `"Rex says Woof"` |
 | `t28_derive_impl_tbl_dispatch` | **operational (`core-march.md` §4.4.2, E-Dispatch-Builtin)** — `derive Show, Eq for Color`; `show(Red)`/`Green == Green`/`Red == Blue` all dispatch through the runtime `impl_tbl` hashtable keyed `(iface, type_name)` on the argument's dynamic type | run-witnessed: prints `Red` / `true` / `false` |
+| `t29_derive_eq_show` | **(§2.4) `derive` as a `DImpl` generator** — `derive Eq, Show for Color` expands (desugar-time) into ordinary `impl Eq(Color)`/`impl Show(Color)` blocks, indistinguishable from hand-written ones; also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls dispatch through the SAME `impl_tbl` rule as §4.4.2) | run-witnessed: prints `Red` / `true` / `false` |
+| `t30_satisfy_wiring` | **(§2.4) `satisfy` as a `DImpl` generator** — `satisfy Named for Person` wires an EXISTING top-level `fn name` to `interface Named(a)`'s one method purely by name match, no `impl` block written | run-witnessed: prints `"Ada"` |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -132,8 +142,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t20_impl_signature_mismatch` | (T-Impl) signature-match — a provided method's inferred body type disagrees with the interface's declared signature | `` `speak` in `impl Speak` must match the interface signature `` |
 | `t21_impl_unknown_interface` | (T-Impl) interface-existence — `impl` of an interface name never declared with `interface` | `` Unknown interface `NotDeclared` — is it declared above this impl? `` |
 | `t22_impl_superclass_unsatisfied` | **(T-Impl) superclass discharge, unsatisfied** — `interface Greet(a) requires Speak(a)`, `impl Greet(Dog)` declared with no `impl Speak(Dog)` anywhere in scope — mandatory rejection, not a conditional gap | `` Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. `` |
+| `t23_derive_unknown_interface` | (§2.4) `derive` targets a CLOSED five-interface set — `derive Frobnicate for Color`, an interface name outside `{Eq, Show, Hash, Ord, Json}` | `` Unknown derive target `Frobnicate` for type `Color`. `` |
+| `t24_satisfy_missing_function` | (§2.4) `satisfy` all-or-nothing — `satisfy Named for Person` where no top-level `fn name` exists anywhere in the module | `` satisfy Named for Person: no function `name` found in scope. `` |
 
-**Result: 50 / 50 (28 accept, 22 reject).**
+**Result: 54 / 54 (30 accept, 24 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
@@ -190,6 +202,15 @@ from the repo root) or as part of the CI workflow's dedicated step.
   (`parser.mly:769-786`), so no `interface`/`impl`/`requires`/`when` surface
   syntax the parser accepts can actually produce a multi-argument constraint
   today — the branch is very likely dead code, not a live, reachable gap.
+- **No `reject/` program for `derive X for UnknownType`.** A real, filed gap
+  (`specs/todos.md`, "Compiler: Type System"; `core-march-types.md` §4.1
+  finding 17): `derive Eq for Ghost`, where `Ghost` is never defined, silently
+  no-ops (exit 0, no diagnostic) instead of rejecting — `expand_derive`'s
+  `None` branch (`desugar.ml:1659`) returns `[]` with no `Err.error` call. Not
+  committed as a `reject/` program for the same reason findings 15–16 aren't:
+  it would assert behavior this document identifies as WRONG. See
+  `core-march-types.md` §2.4 and §4.1 finding 17 for the exact repro to
+  convert once fixed.
 
 ## Why not `@oracle`? (the harness-model difference from the golden corpus)
 
