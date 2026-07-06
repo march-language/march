@@ -254,6 +254,88 @@ let test_parse_underscore_param () =
     Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
   | _ -> Alcotest.fail "expected single DFn with underscore param"
 
+(* ── `with ... else` multi-arm parsing (token-filter arm separators) ────── *)
+
+(* Parse a module whose single fn body is a `with ... else ... end` and return
+   the number of branches in the desugared EMatch. `with pat <- e do body else
+   arms... end` builds `EMatch(e, ok_branch :: arms)`, so the branch count is
+   [1 + number of else-arms]. Multi-arm else forms used to fail to parse at all
+   because the token filter swallowed the newlines separating the arms. *)
+let with_else_match_branches src =
+  let lexbuf = Lexing.from_string src in
+  let m =
+    March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.March_ast.Ast.fn_clauses with
+     | [clause] ->
+       (match clause.March_ast.Ast.fc_body with
+        | March_ast.Ast.EMatch (_, branches, _) -> List.length branches
+        | _ -> Alcotest.fail "expected `with` body to desugar to EMatch")
+     | _ -> Alcotest.fail "expected single fn clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_with_else_single_arm () =
+  (* Regression guard: the single-arm form already worked and must keep doing so. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- lookup() do
+        Ok(user)
+      else
+        Err(e) -> Err(e)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 1 else arm" 2 (with_else_match_branches src)
+
+let test_parse_with_else_two_nullary_arms () =
+  (* The bug: two nullary-constructor else arms failed to parse entirely, with
+     the caret landing on the second arm's `->`. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- lookup() do
+        Ok(user)
+      else
+        ErrA -> Err(ErrA)
+        ErrC -> Err(ErrC)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 2 else arms" 3 (with_else_match_branches src)
+
+let test_parse_with_else_three_payload_arms () =
+  (* Three arms mixing nullary, payload, and nested-payload constructor
+     patterns — mirrors the 3-arm example in docs/pattern-matching.md. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- authenticate() do
+        Ok(user)
+      else
+        Err(AuthFailed) -> Err(AuthFailed)
+        Err(NotFound(kind)) -> Err(NotFound(kind))
+        Err(Timeout) -> Err(Timeout)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 3 else arms" 4 (with_else_match_branches src)
+
+let test_parse_with_else_infix_bodies () =
+  (* Arm bodies containing infix operators must not confuse arm-boundary
+     detection: each arm still terminates at its trailing newline. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(name) <- fetch() do
+        Ok(name)
+      else
+        Err(a) -> Err("bad: " ++ a)
+        Err(b) -> Err("worse: " ++ b)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 2 infix-body else arms" 3 (with_else_match_branches src)
+
 (* ── Helpers for desugar + typecheck tests ─────────────────────────────── *)
 
 let test_desugar_pipe () =
@@ -5795,6 +5877,10 @@ let compiler_suites =
           Alcotest.test_case "refinement node present" `Quick test_parse_refinement_node_present;
           Alcotest.test_case "refined param typechecks as base" `Quick test_refined_param_typechecks_as_base;
           Alcotest.test_case "record type still parses" `Quick test_record_type_still_parses;
+          Alcotest.test_case "with-else single arm" `Quick test_parse_with_else_single_arm;
+          Alcotest.test_case "with-else two nullary arms" `Quick test_parse_with_else_two_nullary_arms;
+          Alcotest.test_case "with-else three payload arms" `Quick test_parse_with_else_three_payload_arms;
+          Alcotest.test_case "with-else infix arm bodies" `Quick test_parse_with_else_infix_bodies;
         ] );
       ( "module",
         [

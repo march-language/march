@@ -13,7 +13,11 @@
     - NL immediately before END is suppressed
     This gives the parser a clean stream: [DO NL branch NL branch END]. *)
 
-type context = Match | Block | Paren
+(* [With] marks the block opened by a monadic `with pat <- e do ... end`.
+   It behaves like [Block] inside the body (newlines swallowed), but its
+   [else] arms are match-style: at the [else] keyword the context is promoted
+   to [Match] so newlines separate the arms (see the ELSE handler). *)
+type context = Match | Block | Paren | With
 
 (* Per-match state for tracking whether we're inside an arm body *)
 type match_state = {
@@ -81,6 +85,10 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      form (`match do`, no scrutinee). Pushed at MATCH, popped by the matching
      DO in lockstep with pending_match_depths so they stay aligned. *)
   let pending_match_conds : bool Stack.t = Stack.create () in
+  (* Paren-depths at which a monadic `with` is awaiting its opening [DO], so
+     that [DO] pushes a [With] context rather than a plain [Block]. Recorded on
+     the [<-] (GETS) token, which appears only in with-bindings. *)
+  let pending_with_depths : int Stack.t = Stack.create () in
   let paren_depth = ref 0 in
   (* Buffer stores tokens with their original lexbuf positions so
      that re-queued tokens restore the correct span information. *)
@@ -272,6 +280,17 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       push_buf peeked lexbuf;
       tok
 
+    (* `<-` (GETS) appears only in monadic with-bindings. Record the with's
+       paren-depth so the following [DO] opens a [With] block whose [else]
+       arms are newline-separated. Multiple bindings of one `with` share a
+       paren-depth; dedup them to a single pending entry so exactly one [DO]
+       consumes it. *)
+    | Parser.GETS ->
+      if Stack.is_empty pending_with_depths
+         || Stack.top pending_with_depths <> !paren_depth
+      then Stack.push !paren_depth pending_with_depths;
+      tok
+
     (* CHOOSE BY chooser: ... END has END without DO — peek ahead
        for BY to distinguish from Chan.choose(...) expressions. *)
     | Parser.CHOOSE ->
@@ -300,6 +319,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         in
         Stack.push Match stack;
         Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = is_cond } match_states
+      end
+      else if not (Stack.is_empty pending_with_depths)
+         && Stack.top pending_with_depths = !paren_depth
+      then begin
+        (* This is a monadic `with`'s DO. The body is block-style (like a
+           plain Block); the ELSE handler promotes it to Match for the arms. *)
+        ignore (Stack.pop pending_with_depths);
+        Stack.push With stack
       end else
         Stack.push Block stack;
       tok
@@ -329,6 +356,17 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          ms.ms_suppress_nl <- true;
          ms.ms_in_arm_body <- false
        | None -> ());
+      tok
+
+    | Parser.ELSE
+      when (not (Stack.is_empty stack)) && Stack.top stack = With ->
+      (* Entering the else-arms of a monadic `with`. Promote the With block to
+         a Match context so newlines separate the arms exactly like a `match`
+         body; the single matching END pops this Match context. The arms are
+         ordinary pattern arms (not the cond form), so ms_is_cond = false. *)
+      ignore (Stack.pop stack);
+      Stack.push Match stack;
+      Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = false } match_states;
       tok
 
     | Parser.NL ->
