@@ -85,7 +85,7 @@ end
 
 -- Return (status, body) as a tuple, not a record — a record double-projection
 -- (resp.status then resp.body) trips a compiled RC-underflow on the success path.
-pfn finalize(raw) do (parse_status(raw), response_body(raw)) end
+fn finalize(raw) do (parse_status(raw), response_body(raw)) end
 
 pfn send_over(conn, fd, method, full_path, host, headers, body) do
   match Tls.write(conn, build_request(method, full_path, host, headers, body)) do
@@ -175,7 +175,7 @@ end
 
 -- ── Multipart body ────────────────────────────────────────────────────────
 
-pfn multipart(boundary, tarball, filename, checksum) do
+fn multipart(boundary, tarball, filename, checksum) do
   let dash = "--" ++ boundary
   let p1 = dash ++ "\r\nContent-Disposition: form-data; name=\"tarball\"; filename=\"" ++ filename ++ "\"\r\nContent-Type: application/octet-stream\r\n\r\n" ++ tarball ++ "\r\n"
   let p2 = dash ++ "\r\nContent-Disposition: form-data; name=\"checksum\"\r\n\r\n" ++ checksum ++ "\r\n"
@@ -188,8 +188,8 @@ pfn no_trailing_slash(s) do
   if String.ends_with(s, "/") do String.slice_bytes(s, 0, String.byte_size(s) - 1) else s end
 end
 
-pfn publish_url(registry, name) do no_trailing_slash(registry) ++ "/api/v1/packages/" ++ name ++ "/releases" end
-pfn retire_url(registry, name, vsn) do publish_url(registry, name) ++ "/" ++ vsn end
+fn publish_url(registry, name) do no_trailing_slash(registry) ++ "/api/v1/packages/" ++ name ++ "/releases" end
+fn retire_url(registry, name, vsn) do publish_url(registry, name) ++ "/" ++ vsn end
 
 pfn json_str(body, key) do
   match String.split_first(body, "\"" ++ key ++ "\":\"") do
@@ -202,7 +202,7 @@ pfn json_str(body, key) do
   end
 end
 
-pfn friendly(code, server_msg, status) do
+fn friendly(code, server_msg, status) do
   match code do
   "2fa_required"             -> "enable 2FA in your account settings before publishing"
   "account_not_approved"     -> "your account is awaiting admin approval to publish"
@@ -221,7 +221,7 @@ pfn friendly(code, server_msg, status) do
   end
 end
 
-pfn classify(status, body) do
+fn classify(status, body) do
   if status >= 200 && status < 300 do
     Published(json_str(body, "name"), json_str(body, "version"), json_str(body, "checksum"))
   else
@@ -239,7 +239,7 @@ end
 
 -- ── Manifest (forge.toml -> name, version) ────────────────────────────────
 
-pfn read_name_version(toml_str) do
+fn read_name_version(toml_str) do
   match Toml.parse(toml_str) do
   Err(_)   -> Err("forge.toml: could not parse TOML")
   Ok(root) ->
