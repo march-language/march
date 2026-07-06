@@ -103,7 +103,7 @@ FBIP fires automatically on any function that:
 
 This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
 
-For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see `specs/design.md` § Perceus Reference Counting and FBIP.
+For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see the language reference umbrella `specs/lang/index.md` (compiler-internals pointer: `specs/impl/index.md`, landing in Task 5 of the spec-consolidation plan).
 
 ## Quick start
 
