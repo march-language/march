@@ -5790,12 +5790,51 @@ end|} in
   Alcotest.(check int) "outer fn + nested mod parse" 2
     (List.length m.March_ast.Ast.mod_decls)
 
+(* ── Diagnostic dedup: a broken ctor field type is reported once, not once
+   per instantiation ──────────────────────────────────────────────────── *)
+
+(* [instantiate_ctor] (typecheck.ml) re-resolves a constructor's stored
+   surface argument types via [surface_ty] on EVERY instantiation (needed
+   since polymorphic ctors need fresh type variables per use site) — but
+   when one of those argument types fails to resolve, [surface_ty] used to
+   re-emit the identical (span, message) diagnostic on every instantiation,
+   not just once. `Wrap` below is instantiated 3 times (two pattern
+   matches + one constructor call); its bogus `Bogus` field type must be
+   reported exactly once, not 3 times. *)
+let test_broken_ctor_field_type_reported_once () =
+  let ctx = typecheck {|mod M do
+    type Wrap = Wrap(Bogus)
+
+    fn f1(w : Wrap) : Int do
+      match w do
+        Wrap(_) -> 1
+      end
+    end
+
+    fn f2(w : Wrap) : Int do
+      match w do
+        Wrap(_) -> 2
+      end
+    end
+
+    fn f3() : Wrap do
+      Wrap(1)
+    end
+  end|} in
+  Alcotest.(check int) "`Bogus` unresolved-type error reported exactly once" 1
+    (count_errors_matching ctx "I cannot find `Bogus`.")
+
 let compiler_suites =
   [
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
             test_resolver_skips_dangling_symlink;
+        ] );
+      ( "diagnostic dedup",
+        [
+          Alcotest.test_case "broken ctor field type reported once, not once per instantiation" `Quick
+            test_broken_ctor_field_type_reported_once;
         ] );
       ( "app",
         [
