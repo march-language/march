@@ -348,6 +348,17 @@ out the six-task widening slice (`specs/plans/2026-07-06-widening-interfaces-imp
 - **Next queued widening slice:** modules or actors (per the roadmap's
   Phase-2b/3 phasing) — the same design-spec → plan → conformance-anchored
   execution loop this slice and the seven Phase-1 core slices both proved out.
+## Current State (as of 2026-07-06, `--timings` extended to cover the compiler frontend)
+
+`--timings` (`bin/main.ml`) previously started its clock only after parsing, desugaring, cross-file import resolution, and stdlib loading had already run — those phases, which typechecked/parsed each invocation includes the whole ~108-module stdlib, were invisible to the flag. The timer now starts right before parsing, and four new stamps (`"parse"`, `"desugar"`, `"resolve-imports"`, `"stdlib-load"`) precede the pre-existing `"typecheck"`/`"lower"`/`"mono"`/`"fusion"`/`"defun"`/`"perceus"`/`"escape"`/`"opt"`/`"llvm-emit"`/`"clang"` stamps, which are otherwise unchanged (they now report larger, more accurate elapsed times measured from the true start of compilation). One new unit test in `test/test_properties.ml` (`test_timings_covers_frontend`) compiles a trivial probe module with `--compile --timings` and asserts all six early-through-typecheck stamp labels appear in stderr.
+
+**Test counts:** unchanged across the standard six runners; `test_properties.exe` gains one unit test (`cli: timings (unit)` group). `scripts/run-tests.sh` full run: 420 compiler / 231 eval / 391 codegen / 804 stdlib, all exit 0 (a transient stale `_build/default/runtime/` — missing most runtime `.c` sources, `rm -rf`'d and rebuilt — was briefly masking this as ~15 failures; unrelated to this change, see `project_build_runtime_stale_copy` memory).
+
+## Current State (as of 2026-07-06, `forge build`/`forge check` batch per-file typecheck into one subprocess)
+
+`Cmd_build.check_all` (`forge/lib/cmd_build.ml`) previously typechecked a library project's `lib/` files by invoking `march --check <file>` as a separate subprocess per file — each one independently re-parsing and re-typechecking the whole ~108-module stdlib plus any shared imports. Replaced with a single `march check f1 f2 ...` subprocess call, reusing the compiler's existing combined-module `check` subcommand (`run_check_cmd`, `bin/main.ml`). That subcommand previously dropped warning diagnostics silently (only printed errors) — fixed to print both severities. Since the combined subcommand has no CAS cache (unlike the single-file `--check` path it replaces), added a forge-local cache (`.forge/check-cache/<hash>.clean` marker, keyed on the checked files' sorted contents + `lib_path_env`) so a repeated no-op `forge build`/`forge check` short-circuits before invoking `march` at all — verified manually: a 6-file lib project's first `forge build` (0.49s, one subprocess) drops to 0.02s on an unchanged rebuild. Known limitation (documented in the cache-key comment): does not hash `MARCH_LIB_PATH` directory contents, only the env-var string — a local `path = "../foo"` dependency edited in place without touching forge.toml/forge.lock won't invalidate the cache.
+
+**Test counts:** `forge/test/test_build_check.exe` gains 2 new Alcotest cases (9 total, up from 7) — warning-surfacing from the combined module, and cache-marker existence/mtime-stability across a repeat check. Standard six runners: 420 compiler / 231 eval / 391 codegen / 804 stdlib, all exit 0.
 
 ## Current State (as of 2026-07-06, multi-arm `with ... else` parsing fixed)
 

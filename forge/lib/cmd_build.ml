@@ -294,26 +294,61 @@ let print_build_summary ~t0 ~errors ~warnings =
   else
     Printf.printf "  %s \xe2\x80\x94 %s\n%!" (String.concat ", " parts) time_str
 
-(** Typecheck [file] via [march --check].
-    Returns [(ok, n_errors, n_warnings)]; the compiler's stderr is re-emitted
-    to forge's own stderr. *)
-let check_file ~lib_path_env file =
-  let cmd =
-    Printf.sprintf "%smarch --check %s"
-      lib_path_env (Filename.quote file)
-  in
-  let (rc, content) = run_capturing_stderr cmd in
-  let (e, w) = count_diagnostics content in
-  (rc = 0, e, w)
+(** Digest [files]' sorted paths + contents + [lib_path_env], so any edit to
+    a checked file or a change to MARCH_LIB_PATH invalidates the cache below.
 
-(** Typecheck every .march file in [files] individually.
-    Returns [(n_failed, total_errors, total_warnings)]. *)
-let check_all ~lib_path_env files =
-  List.fold_left (fun (failed, te, tw) f ->
-    let (ok, e, w) = check_file ~lib_path_env f in
-    if ok then (failed, te + e, tw + w)
-    else (failed + 1, te + e, tw + w)
-  ) (0, 0, 0) files
+    Known limitation: this does NOT hash the *contents* of directories on
+    MARCH_LIB_PATH, only the env-var string itself.  Editing a local
+    `path = "../foo"` dependency's source in place, without touching
+    forge.toml/forge.lock (and thus without changing MARCH_LIB_PATH), will
+    not invalidate this cache.  Delete `.forge/check-cache/` if that bites. *)
+let check_all_cache_key ~lib_path_env files =
+  let buf = Buffer.create 4096 in
+  List.iter (fun f ->
+      Buffer.add_string buf f;
+      (try
+         let ic = open_in_bin f in
+         let n = in_channel_length ic in
+         let b = Bytes.create n in
+         really_input ic b 0 n;
+         close_in ic;
+         Buffer.add_bytes buf b
+       with Sys_error _ -> ())
+    ) (List.sort String.compare files);
+  Buffer.add_string buf lib_path_env;
+  Digest.to_hex (Digest.string (Buffer.contents buf))
+
+(** Typecheck every file in [files] together in a single [march check]
+    subprocess, so the stdlib and any shared imports are parsed and
+    typechecked once instead of once per file (previously: one subprocess
+    per file, each re-parsing the whole stdlib).  On a fully-clean repeat
+    call (no errors, no warnings, nothing changed) short-circuits via
+    [cache_dir] instead of invoking [march] at all, so a repeated no-op
+    `forge build`/`forge check` doesn't regress relative to the old
+    per-file behavior (which benefited from the compiler's own CAS cache).
+    Returns [(n_failed, total_errors, total_warnings)]; n_failed is 0 or 1
+    since all files are checked as one combined module. *)
+let check_all ~lib_path_env ~cache_dir files =
+  if files = [] then (0, 0, 0)
+  else begin
+    let key = check_all_cache_key ~lib_path_env files in
+    let marker = Filename.concat cache_dir (key ^ ".clean") in
+    if Sys.file_exists marker then (0, 0, 0)
+    else begin
+      let quoted = String.concat " " (List.map Filename.quote files) in
+      let cmd = Printf.sprintf "%smarch check %s" lib_path_env quoted in
+      let (rc, content) = run_capturing_stderr cmd in
+      let (e, w) = count_diagnostics content in
+      if rc = 0 && e = 0 && w = 0 then begin
+        (try Project.mkdir_p cache_dir with Sys_error _ -> ());
+        (try
+           let oc = open_out marker in
+           close_out oc
+         with Sys_error _ -> ())
+      end;
+      ((if rc = 0 then 0 else 1), e, w)
+    end
+  end
 
 (** FFI shim flags from forge.toml [[ffi]]: --ffi-c per source (resolved to an
     absolute path under [root]) and --ffi-link per linker flag. *)
@@ -615,7 +650,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
       in
       match proj.Project.project_type with
       | Project.Lib ->
-        let (failed, errors, warnings) = check_all ~lib_path_env files in
+        let cache_dir = Filename.concat proj.Project.root (Filename.concat ".forge" "check-cache") in
+        let (failed, errors, warnings) = check_all ~lib_path_env ~cache_dir files in
         print_build_summary ~t0 ~errors ~warnings;
         if failed > 0 then
           Error "typecheck failed"
@@ -635,7 +671,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
             abs_f <> abs_entry
           ) files
         in
-        let (orphan_failed, te, tw) = check_all ~lib_path_env orphan_files in
+        let cache_dir = Filename.concat proj.Project.root (Filename.concat ".forge" "check-cache") in
+        let (orphan_failed, te, tw) = check_all ~lib_path_env ~cache_dir orphan_files in
         if orphan_failed > 0 then begin
           print_build_summary ~t0 ~errors:te ~warnings:tw;
           Error "typecheck failed"

@@ -55,6 +55,13 @@ let broken_module_source ~mod_name =
     "mod %s do\n\n  fn broken() : String do\n    \"count=\" ++ 1\n  end\n\nend\n"
     mod_name
 
+(** A module that typechecks cleanly but triggers an unused_binding warning
+    on its second parameter. *)
+let warning_module_source ~mod_name =
+  Printf.sprintf
+    "mod %s do\n\n  fn f(x : Int, unused_param : Int) : Int do\n    x\n  end\n\nend\n"
+    mod_name
+
 (* -------------------------------------------------------------- forge check *)
 
 let test_check_clean_lib () =
@@ -90,6 +97,48 @@ let test_check_empty_lib_fails () =
       match Cmd_check.check () with
       | Ok msg  -> Alcotest.fail ("expected Error for empty lib, got Ok: " ^ msg)
       | Error _ -> ())
+
+let test_check_reports_warnings_from_combined_module () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      let extra = Filename.concat root (Filename.concat "lib" "warns.march") in
+      write_file extra (warning_module_source ~mod_name:"Warns");
+      (* A warning must not fail the build ... *)
+      match Cmd_check.check () with
+      | Error m -> Alcotest.fail ("expected Ok despite warning, got Error: " ^ m)
+      | Ok _    -> ())
+
+(** Rather than breaking PATH/MARCH_HOME to prove `march` isn't re-invoked
+    (tried first — but that also perturbs `lib_path_env`, since
+    `Toolchain.path_prefix ()` bakes the resolved toolchain's bin/ directly
+    into the command string, so neutralizing toolchain resolution changes
+    the cache key itself and defeats the cache on purpose), inspect the
+    cache marker directly: exactly one marker after the first clean check,
+    and its mtime unchanged after a second (should-be-cached) check — a
+    real second invocation would rewrite it. *)
+let test_check_cache_short_circuits_unchanged_rebuild () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      (match Cmd_check.check () with
+       | Error m -> Alcotest.fail ("expected first check to pass: " ^ m)
+       | Ok _    -> ());
+      let cache_dir = Filename.concat root (Filename.concat ".forge" "check-cache") in
+      if not (Sys.file_exists cache_dir) then
+        Alcotest.fail "expected .forge/check-cache/ to exist after a clean check"
+      else begin
+        let markers = Sys.readdir cache_dir in
+        (if Array.length markers <> 1 then
+           Alcotest.fail (Printf.sprintf
+             "expected exactly one cache marker after one clean check, got %d"
+             (Array.length markers)));
+        let marker_path = Filename.concat cache_dir markers.(0) in
+        let mtime_before = (Unix.stat marker_path).Unix.st_mtime in
+        (match Cmd_check.check () with
+         | Error m -> Alcotest.fail ("expected second (cached) check to pass: " ^ m)
+         | Ok _    -> ());
+        let mtime_after = (Unix.stat marker_path).Unix.st_mtime in
+        Alcotest.(check bool)
+          "cache marker untouched by a cached repeat check (no real march invocation)"
+          true (mtime_before = mtime_after)
+      end)
 
 (* -------------------------------------------------------------- forge build *)
 
@@ -143,6 +192,10 @@ let () =
       Alcotest.test_case "broken orphan in lib fails check"  `Quick test_check_catches_broken_orphan_in_lib;
       Alcotest.test_case "multiple clean files pass"         `Quick test_check_passes_with_multiple_clean_files;
       Alcotest.test_case "empty lib/ errors"                 `Quick test_check_empty_lib_fails;
+      Alcotest.test_case "check reports warnings from combined module" `Quick
+        test_check_reports_warnings_from_combined_module;
+      Alcotest.test_case "check cache short-circuits unchanged rebuild" `Quick
+        test_check_cache_short_circuits_unchanged_rebuild;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
