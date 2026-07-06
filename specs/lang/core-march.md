@@ -2031,7 +2031,7 @@ mechanically verified** —
 this is the roadmap's §7 faithfulness risk made concrete, and it remains true
 now that the core is complete: the rules are only as faithful as the review of
 each citation. What *is* mechanically checked is weaker but real: the golden
-corpus (§5) confirms that, on these 32 programs, the interpreter these rules
+corpus (§5) confirms that, on these 36 programs, the interpreter these rules
 describe and the independently-written compiled backend produce identical
 output. A divergence there would mean either the interpreter or the compiler is
 wrong; agreement plus arm-for-arm review is the reference's correctness
@@ -2040,9 +2040,146 @@ larger transcription surface, so the golden corpus (and the CI `@oracle` sweep
 it feeds) is what keeps the "spec matches the implementation" claim honest as
 the reference is relied on.
 
+### 4.10 Actors: spawn / send / receive / `run_until_idle` (operational)
+
+The typing reference pins **what an actor declaration checks** and **what
+`spawn(Name)` produces as a type** (`core-march-types.md` §2.6 — the state type
+is checked, but the `Pid` parameter does not propagate to a `spawn` site). This
+subsection pins the **runtime** side: how `spawn`, `send`, `receive`, and the
+scheduler-drain builtin `run_until_idle` actually reduce in `eval.ml`, and — the
+point of putting actor programs in the golden corpus at all — that a program
+whose observable output does not depend on scheduler interleaving is
+**byte-identical interpreted vs compiled**.
+
+The actor runtime is *not* part of the pure reduction fragment of §4.2–4.4: it
+is stateful (a global `actor_registry`, per-actor mailboxes) and its message
+dispatch is driven by an explicit scheduler pass, not by β-reduction. The rules
+below are stated operationally against `eval.ml`, in the same arm-for-arm style
+as §4.2, but they describe side-effecting builtins over mutable actor state, so
+they sit alongside the §4 core rather than inside the δ-table.
+
+#### 4.10.1 `spawn` — register an `actor_inst`, return a `VPid`
+
+`spawn(Name)` is evaluated by the `ESpawn` arm (`eval.ml:7194`). It resolves the
+argument to a **literal actor name** (only `EVar` or `ECon(_, [], _)` — anything
+else is `spawn: expected actor name`, mirroring the compile-time rejection of a
+computed actor expression in typing §2.6.2), looks the name up in
+`actor_defs_tbl`, allocates a fresh integer pid from the `next_pid` counter, and
+evaluates the actor's `init { … }` expression to obtain the initial state
+record. It then builds an `actor_inst` record — `{ ai_name; ai_def; ai_state =
+init_state; ai_alive = true; ai_mailbox = Queue.create (); … }` — inserts it
+into the global `actor_registry` hashtable keyed by the pid, and **returns
+`VPid pid`**. (For a `supervise`-declared actor the arm first spawns each child,
+injects their pids into the init state, and records `ai_supervisor`; that
+supervision path is out of scope for the golden witnesses here.)
+
+Observation discipline (a filed finding, honored by the witnesses): actor state
+is observed ONLY through a handler that `println`s, never through an external
+`get_actor_field(pid, …)` or `pid_of_int`-from-outside — `march_get_actor_field`
+is a hard stub returning `None` in the compiled runtime and `march_pid_of_int`
+does an unsafe int→ptr cast, so a compiled program using either **SIGSEGVs**.
+Every golden witness keeps every observation on the handler-`println` /
+`is_alive` path, which is why the pid returned by `spawn` is used only as the
+target of `send` and never inspected.
+
+#### 4.10.2 `send(pid, msg)` — async, non-blocking mailbox enqueue
+
+`send(cap, msg)` is evaluated by the `ESend` arm (`eval.ml:7265`). It evaluates
+the target (a `VPid` or, for capability sends, a `VCap`) and the message, and —
+this is the operational fact — **pushes the message onto the target's
+`ai_mailbox` (`Queue.push`) and returns immediately** with `Some(())`; it does
+**not** dispatch the handler inline. Send is therefore a *pure async enqueue*:
+non-blocking, fire-and-forget. A send to a dead or unknown pid silently drops
+(returns `None`). Only constructor/atom values (`VCon`/`VAtom`) are valid
+messages; anything else is a `send: message must be a constructor value` error.
+Because dispatch is deferred, the message ORDERING a program observes is exactly
+the order of `send` calls into a single actor's mailbox (a FIFO `Queue.t`), not
+an interleaving — which is what makes a single-actor, strictly-ordered send
+sequence deterministic (§4.10.5).
+
+The compiled backend implements the same async-mailbox semantics over green
+threads rather than an OCaml `Queue.t` (see `runtime/march_scheduler.c` for the
+scheduler context); the golden witnesses assert that, for interleaving-free
+programs, the two implementations agree byte-for-byte.
+
+#### 4.10.3 `receive()` — pop the mailbox, or `BlockedOnReceive`
+
+`receive()` is the builtin at `eval.ml:3076`. Called inside a handler (it errors
+`receive: called outside an actor handler` otherwise), it pops the **next**
+message from the *current* actor's `ai_mailbox` and returns it. If the mailbox
+is empty it `raise`s the internal `BlockedOnReceive` exception rather than
+returning — the scheduler catches this, re-queues the message that triggered the
+current handler at the front of the mailbox, and retries the handler on a later
+pass once more messages have arrived (see §4.10.4). A handler that consumes an
+already-queued follow-up message (one delivered by an earlier `send` in the same
+ordered sequence) therefore finds the mailbox non-empty and pops it directly.
+
+**Documented limitation (`eval.ml` `run_scheduler`, ~:7576–7590):** only the
+FIRST `receive()` call in a handler body is safe to block on. If a handler calls
+`receive()` twice and the *second* one blocks (empty mailbox), the message
+popped by the first `receive()` has already been consumed and is lost — the
+scheduler's re-queue only restores the outer triggering message, not the
+mid-handler pop. Handlers needing multiple messages should use a recursive
+pattern where each `receive()` is the first operation in its own handler body.
+The `receive()` golden witness (`g36`) calls `receive()` exactly once and on a
+mailbox that is already non-empty, so it neither blocks nor trips this
+limitation.
+
+#### 4.10.4 `run_until_idle()` — drain the scheduler to a fixed point
+
+`run_until_idle()` is the builtin at `eval.ml:3067`: `[] -> !run_scheduler_hook
+(); VUnit`. The hook target is `run_scheduler` (`eval.ml:7523`). It runs a
+**cooperative drain loop**: repeatedly, until a full pass produces no work, it
+iterates over a snapshot of every live actor and — for each with a non-empty
+mailbox — pops one message, finds the `on Msg(…)` handler whose message tag
+matches, binds `state` to the actor's current `ai_state` plus the message
+payload as handler params, evaluates the handler body, and **replaces the
+actor's state with the handler's return value** (the new state record). A
+handler that raises `BlockedOnReceive` has its triggering message re-queued (no
+forward progress marked); a handler that raises any other exception crashes the
+actor (supervision path). The loop terminates when a whole pass over all actors
+finds every mailbox empty — the *idle* fixed point.
+
+Because a message with no matching handler is silently dropped and an
+arity-mismatched handler consumes-without-crashing, the observable output of a
+drained program is a pure function of (the initial states, the ordered messages
+each mailbox received). For a program that sends a fixed, strictly-ordered
+sequence into a single actor and then calls `run_until_idle()` exactly once,
+that function is deterministic and independent of any scheduling choice.
+
+#### 4.10.5 The determinism property, and the golden witnesses
+
+**Verified property.** For an actor program whose observable output does not
+depend on scheduler interleaving — concretely: a single observable actor (or a
+set of actors with no cross-actor ordering dependence), fed a strictly-ordered
+`send` sequence and drained by one `run_until_idle()`, printing its result from
+a handler — the `println` output is DETERMINISTIC and **byte-identical
+interpreted vs compiled**. This is not a claim about arbitrary concurrent actor
+programs (whose interleaving-dependent output is deliberately excluded from the
+golden corpus); it is the narrow, mechanically-checked property that the two
+independently-written backends agree on the interleaving-free slice.
+
+Two golden programs witness it (both `MATCH` under `verify.sh`; see §5):
+
+- **`g35_actor_spawn_send`** — the spawn + async-send + `run_until_idle`
+  witness. A single `Counter` actor is spawned; `Inc(1)`, `Inc(3)`, `Inc(4)` are
+  sent in order (each handler returns the new `{ count: … }` state), then a
+  `Report()` handler prints the accumulated count; one `run_until_idle()` drains
+  all four in FIFO order. Output: `count=8` then `done`.
+- **`g36_actor_receive`** — the `receive()`-mediated follow-up witness. An
+  `Inbox` actor's `on Start()` handler calls `receive()` once to pop the
+  already-queued `Follow(99)` (sent immediately after `Start()`, so it is in the
+  mailbox before dispatch) and prints its payload. Output: `got=99` then `done`.
+  This exercises the pop-or-`BlockedOnReceive` rule (§4.10.3) on the non-blocking
+  path and honors the once-per-handler limitation.
+
+Both programs keep every observation on the handler-`println` path (never
+`get_actor_field` / `pid_of_int`), so neither SIGSEGVs compiled — the
+precondition for being a golden `MATCH` at all.
+
 ## 5. Golden conformance corpus
 
-Thirty-four programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty-six programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2075,7 +2212,14 @@ condition is false"; the genuinely-all-false chain that would raise
 `non-exhaustive match do` at runtime is deliberately NOT a golden program, since
 a nonzero interpreter exit is an automatic `INTERP FAIL` under `verify.sh` — the
 same harness limitation §4.4.1 / §4.3 note for the crashing strict-`&&` and
-`Match_failure` witnesses):
+`Match_failure` witnesses); `g35`–`g36` are the actor-operational addition,
+covering the interleaving-free actor slice of §4.10 (spawn + async `send` +
+`run_until_idle` draining a single actor to a fixed point in `g35`, and a
+`receive()`-mediated follow-up on the non-blocking pop path in `g36`) — the two
+witnesses named in §4.10.5's determinism property (interp==compiled
+byte-identical for actor programs whose output does not depend on scheduler
+interleaving), observing state only through handler `println`s so neither
+SIGSEGVs compiled:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -2113,8 +2257,10 @@ same harness limitation §4.4.1 / §4.3 note for the crashing strict-`&&` and
 | `g32_cond_all_false_catchall.march` | `ECond` where every SPECIFIC condition (`n > 0`, `n < 0`) is false for `n = 0`, so control reaches the terminal `_ ->` catch-all — the non-crashing witness of the all-false path (a genuinely all-false chain raises at runtime, E-Cond-Fail `eval.ml:7099`; `_ ->` is parser sugar for a `true ->` arm, `parser.mly:1295–1296`, keeping the chain total) | `positive`/`negative`/`zero` |
 | `g33_float_show.march` | whole-number `Float` **display** via the `float_to_string` observation primitive — added after the concurrent `float_to_string` backend-unification fix (`0a2d3f53`) that the golden corpus's Task-1 float program had surfaced. Pins only the display format (four backends agree a whole-number `Float` prints OCaml-style `1.`, matching the `eval.ml` `string_of_float` reference); it does NOT lift the float deferral of §0/§6 — float arithmetic and ordering remain deferred | `1.`/`42.`/`100.`/`0.`/`-3.`/`1.5` |
 | `g34_nested_tuple_let.march` | nested `PatTuple` destructured in a block `let` (`let ((a,b),(c,d)) = …`) — componentwise `match_list` recursion under E-Blk-Let. Added after the concurrent fix (`3f719a8e`) to `lib/tir/lower.ml`'s block-`let` nested-pattern lowering that the golden corpus's Task-2 tuple work had surfaced (it emitted invalid LLVM before); the `match`-form equivalent (g16) always compiled | `10` |
+| `g35_actor_spawn_send.march` | operational actor slice (§4.10): `spawn` a single `Counter` actor (`ESpawn` → `actor_inst` in `actor_registry`, returns `VPid`), three async `send(c, Inc(n))` (FIFO mailbox enqueue, non-blocking) each returning the new `{count:…}` state, a `Report()` handler that `println`s the accumulated count, drained by one `run_until_idle()` (scheduler-drain to fixed point) — the interleaving-free determinism witness of §4.10.5 | `count=8` / `done` |
+| `g36_actor_receive.march` | operational actor slice (§4.10): an `Inbox` actor whose `on Start()` handler calls `receive()` ONCE to pop the already-queued `Follow(99)` (sent immediately after `Start()`, so present before dispatch — the non-blocking pop-or-`BlockedOnReceive` path, `eval.ml:3076`) and `println`s its payload; honors the once-per-handler `receive()` limitation (§4.10.3) | `got=99` / `done` |
 
-**Result: 32 / 32 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 36 / 36 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not

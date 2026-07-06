@@ -1,17 +1,19 @@
-# Golden corpus index (g01–g34)
+# Golden corpus index (g01–g36)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (34/34 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (36/36 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
 Provenance: `g01`–`g08` are the walking-skeleton's original corpus; `g09`–`g13`
 Task 1; `g14`–`g16` Task 2; `g17`–`g20` Task 3; `g21`–`g23` Task 4; `g24`–`g27`
-Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7; `g33` post-Phase-1 corpus
-widening after the concurrent `float_to_string` backend-unification fix landed.
+Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7; `g33`–`g34` post-Phase-1 corpus
+widening after the concurrent `float_to_string` (`g33`) and block-`let`
+nested-`PatTuple` lowering (`g34`) backend fixes landed; `g35`–`g36` the
+actor-operational addition (§4.10 spawn/send/receive/run_until_idle).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -49,6 +51,8 @@ widening after the concurrent `float_to_string` backend-unification fix landed.
 | `g32_cond_all_false_catchall` | `ECond` all-specific-false ⇒ terminal `_ ->`/`true ->` catch-all | E-Cond-Sel with `_`-sugar catch-all; E-Cond-Fail (all-false raises) (§4.2) |
 | `g33_float_show` | whole-number `Float` display via `float_to_string` (observation primitive) — pins the cross-backend format after the `0a2d3f53` fix | §5 observation-primitive note (not a §4 core rule; float arithmetic/ordering deferred) |
 | `g34_nested_tuple_let` | nested `PatTuple` destructured in a block `let` — added after the `3f719a8e` lowering fix the corpus surfaced | E-Blk-Let + `match(PatTuple)` componentwise `match_list` (§4.2/§4.3) |
+| `g35_actor_spawn_send` | `spawn` a single `Counter` actor + three async `send(Inc(n))` + `Report()` handler `println` + one `run_until_idle()` drain (interleaving-free determinism witness) | E-Spawn/E-Send/run_until_idle (§4.10.1–.5, `eval.ml:7194/7265/3067→7523`) |
+| `g36_actor_receive` | `on Start()` handler calls `receive()` once to pop an already-queued `Follow(99)` and `println`s its payload (non-blocking pop path) | receive pop-or-`BlockedOnReceive` (§4.10.3, `eval.ml:3076`) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
