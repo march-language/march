@@ -437,6 +437,31 @@ let test_tc_dotted_sibling_module_order () =
   Alcotest.(check bool) "dotted sibling ordered before callers: no errors"
     false (has_errors ctx)
 
+let test_tc_private_nested_member_diagnostic () =
+  (* A same-file qualified reference to a PRIVATE nested-module member (`A.secret`
+     where `secret` is a `pfn`) is rejected — but must be diagnosed as "private to
+     module `A`", NOT the misleading "Unknown module `A`".  The private member is
+     never exported into env.vars, so the registry-based qualified_error_msg saw
+     no in-file module `A` at all and misreported it as absent; env.local_mods now
+     records each nested module's private members to recover the accurate message. *)
+  let ctx = typecheck {|mod Main do
+    mod A do
+      pfn secret() : Int do 42 end
+      fn pub_fn() : Int do 1 end
+    end
+    fn main() : Int do A.secret() end
+  end|} in
+  Alcotest.(check bool) "private nested member: rejected" true (has_errors ctx);
+  let says_private =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "is private to module `A`") d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool)
+    "diagnostic names the private member, not 'Unknown module'" true says_private
+
 let test_tc_if_bad_cond () =
   (* Condition must be Bool — using Int + 1 should produce an error. *)
   let ctx = typecheck {|mod Test do
@@ -5908,6 +5933,7 @@ let compiler_suites =
           Alcotest.test_case "identity fn"         `Quick test_tc_fn_identity;
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
+          Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
           Alcotest.test_case "match expression"    `Quick test_tc_match;

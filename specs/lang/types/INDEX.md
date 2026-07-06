@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t30 accept, t01–t24 reject)
+# Typing corpus index (t01–t30 accept, t01–t25 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -80,6 +80,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t27`–`t28` | Widening slice 1, Task 3 (2026-07-06) | method-DISPATCH operational rules (`core-march.md` §4.4.2, not `core-march-types.md`): the four-name `impl_tbl` type-directed lookup for `Show`/`Eq`/`Ord`/`Hash`, and ordinary lexical `env`-binding dispatch for user-defined interfaces |
 | — | Widening slice 1, Task 4 (2026-07-06) | no new programs — coherence/overlap is a runtime interp-vs-compiled DIVERGENCE (`core-march.md` §4.4.3), which a single-`--check`-invocation harness cannot witness; documented in prose + filed in `specs/todos.md` instead |
 | `accept/t29`–`t30`, `reject/t23`–`t24` | Widening slice 1, Task 5 (2026-07-06) | `derive`/`satisfy` as `DImpl` GENERATORS (§2.4): the closed five-interface `derive` set + `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case, `satisfy`'s name-matching all-or-nothing wiring, and the filed `derive X for UnknownType` silent-no-op gap (§4.1 finding 17) |
+| `reject/t25` | Modules widening — same-file private-member diagnostic (2026-07-06) | a same-file qualified reference to a PRIVATE nested-module member (`A.secret` where `secret` is `pfn`) is diagnosed as `` Function `secret` is private to module `A`. `` instead of the misleading `` Unknown module `A` `` (private members are never exported into `env.vars`; `env.local_mods` records them so `qualified_error_msg` recognizes the in-file module) |
 
 ## `accept/` — must typecheck
 
@@ -144,8 +145,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t22_impl_superclass_unsatisfied` | **(T-Impl) superclass discharge, unsatisfied** — `interface Greet(a) requires Speak(a)`, `impl Greet(Dog)` declared with no `impl Speak(Dog)` anywhere in scope — mandatory rejection, not a conditional gap | `` Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. `` |
 | `t23_derive_unknown_interface` | (§2.4) `derive` targets a CLOSED five-interface set — `derive Frobnicate for Color`, an interface name outside `{Eq, Show, Hash, Ord, Json}` | `` Unknown derive target `Frobnicate` for type `Color`. `` |
 | `t24_satisfy_missing_function` | (§2.4) `satisfy` all-or-nothing — `satisfy Named for Person` where no top-level `fn name` exists anywhere in the module | `` satisfy Named for Person: no function `name` found in scope. `` |
+| `t25_private_nested_member` | same-file qualified reference to a PRIVATE nested-module member — `mod A do pfn secret() … end` referenced as `A.secret()` from a sibling in the same file; the private member is never exported, but the diagnostic must name the real cause, not report the plainly-present module as absent | `` Function `secret` is private to module `A`. `` |
 
-**Result: 54 / 54 (30 accept, 24 reject).**
+**Result: 55 / 55 (30 accept, 25 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

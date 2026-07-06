@@ -282,6 +282,33 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, same-file private nested-module member diagnostic fixed)
+
+A same-file qualified reference to a PRIVATE nested-module member now reports
+the accurate cause instead of a misleading one. `mod Main do  mod A do  pfn
+secret()… ; fn pub_fn()…  end  fn main() do A.secret() end  end` was already
+correctly REJECTED, but with `` Unknown module `A`. Did you mean `Io`? `` —
+misleading, since `A` plainly exists in-file and `secret` is merely private.
+Root cause: an in-file `mod A` gives only its PUBLIC members an `"A.member"`
+key in the outer `env.vars` (the `pub_set` export gate in the `DMod`
+typecheck case), so the `EVar` lookup for `A.secret` missed, fell through
+`resolve_qualified_var → Module_registry.ensure_loaded "A"` (no `a.march` on
+disk), and `qualified_error_msg` hit its "Unknown module" branch — the
+registry has no notion of the in-file module. Fixed by recording each nested
+module's private value/function member names (`pfn` + private `let`) in a new
+`env.local_mods` during the `DMod` export step; `qualified_error_msg` (now
+threaded `env`) consults it first and emits the existing `` Function `secret`
+is private to module `A`. `` phrasing — the same wording the already-fixed
+cross-FILE private-member gate uses. Genuine unknown-module typos and public
+nested-member access are unchanged. This is the deferred same-file
+diagnostic-quality item from the modules widening slice (the cross-file gate,
+`load_module_into_env`'s `ex_public` guard, was fixed earlier and scoped this
+as secondary). Corpus: `specs/lang/types/reject/t25_private_nested_member.march`
+(reject corpus 24→25, total 54→**55**; `check_types.sh` 55/55). Test:
+`test_tc_private_nested_member_diagnostic` in `test/test_compiler.ml`. Full
+suite green: **421 compiler / 231 eval / 391 codegen / 804 stdlib**;
+`check-docs.sh` passes.
+
 ## Current State (as of 2026-07-06, Core March widening slice 1 — interfaces/impls declaration checking, CLOSEOUT)
 
 `specs/lang/core-march-types.md` and `specs/lang/core-march.md` — the two
