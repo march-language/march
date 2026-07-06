@@ -96,6 +96,33 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
   (* Stack of match states, one per nested match level *)
   let match_states : match_state Stack.t = Stack.create () in
 
+  (* Curried-call juxtaposition guard (grammar §7.3).
+     March functions are uncurried, so `f(1)(2)` is not a chained call; the
+     old parser silently split it into two statements and DISCARDED `(2)`.
+     We reject it as a newline-sensitive parse error instead, while still
+     accepting an IIFE `(fn x -> x)(5)` (the `)` closes a GROUP, not a call)
+     and a two-line `f(1)⏎(g(2))` (the newline signals two statements).
+
+     [paren_kinds] classifies each emitted [LPAREN]: [true] = a CALL's arg
+     list (the preceding significant token is value-ending), [false] = a
+     grouping/tuple/lambda paren. Popped on the matching [RPAREN].
+     [last_closed_call] records whether the most-recently-closed paren was a
+     call, so the guard can tell `f(1)(` (reject) from `(expr)(` (allow).
+     [prev_significant] is the last non-NL token emitted to the parser;
+     [saw_nl_since_significant] is set whenever an NL passes through the
+     stream (even one that is later swallowed) and cleared on any non-NL
+     token — this is the ONLY place the newline survives, since the parser
+     never sees these NLs. *)
+  let paren_kinds : bool Stack.t = Stack.create () in
+  let last_closed_call = ref false in
+  let prev_significant : Parser.token option ref = ref None in
+  let saw_nl_since_significant = ref false in
+  let is_value_ending = function
+    | Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _
+    | Parser.RPAREN | Parser.RBRACKET -> true
+    | _ -> false
+  in
+
   let in_match () =
     not (Stack.is_empty stack) && Stack.top stack = Match
   in
@@ -265,6 +292,10 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     dispatch tok lexbuf
 
   and dispatch tok lexbuf =
+    (* Record every newline that passes through the emit stream — even ones
+       swallowed below — so the LPAREN guard in [emit] can tell `f(1)(2)`
+       (reject) from `f(1)⏎(g(2))` (two statements, allow). *)
+    (match tok with Parser.NL -> saw_nl_since_significant := true | _ -> ());
     check_arm_body_transition tok;
     match tok with
     | Parser.MATCH ->
@@ -433,4 +464,47 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     | _ ->
       tok
   in
-  next
+
+  (* Single outermost boundary for the curried-call guard. [next] produces the
+     token actually handed to the parser; here — and ONLY here, so swallowed
+     NLs and lookahead re-queues can never double-count — we maintain the
+     paren-kind stack, remember the previous significant token, and reject a
+     [LPAREN] that immediately follows a call's closing [RPAREN] with no
+     intervening newline. *)
+  let emit lexbuf =
+    let tok = next lexbuf in
+    (match tok with
+     | Parser.LPAREN ->
+       (* Guard: `<call>)( ...` on one line is a curried-call juxtaposition. *)
+       if !prev_significant = Some Parser.RPAREN
+          && not !saw_nl_since_significant
+          && !last_closed_call
+       then
+         raise (March_errors.Errors.ParseError
+           ("`f(...)(...)` is not a chained call — March functions are not \
+             curried.",
+            Some "Write `f(a, b)` for a multi-argument call, or put the second \
+                  call on its own line if you meant two separate statements.",
+            lexbuf.Lexing.lex_start_p));
+       (* Classify this paren: a CALL's arg list iff the preceding significant
+          token is value-ending (`f(`/`Con(`/`g()(`/`xs[i](`), else a group.
+          [prev_significant] still holds the token before this LPAREN — it is
+          not updated until the bottom of [emit]. *)
+       let is_call =
+         match !prev_significant with
+         | Some t -> is_value_ending t
+         | None -> false
+       in
+       Stack.push is_call paren_kinds
+     | Parser.RPAREN ->
+       last_closed_call :=
+         (if Stack.is_empty paren_kinds then false else Stack.pop paren_kinds)
+     | _ -> ());
+    (match tok with
+     | Parser.NL -> ()  (* keep saw_nl set; prev_significant unchanged *)
+     | _ ->
+       prev_significant := Some tok;
+       saw_nl_since_significant := false);
+    tok
+  in
+  emit

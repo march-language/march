@@ -481,30 +481,33 @@ let test_tc_hole () =
    which is how a conduit test typo — fake_workflow_storage_new() with 0 args —
    became a non-deterministic hang. *)
 let test_tc_arity_under_application () =
+  (* The arity error is on the call itself; no trailing `()` — a `<call>)(`
+     juxtaposition like `add(1) ()` is now a parse error (curried-call guard,
+     token_filter.ml), so the direct call carries the arity mismatch. *)
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1) () end
+    fn main() : Unit do let _ = add(1) end
   end|} in
   Alcotest.(check bool) "under-application is an error" true (has_errors ctx)
 
 let test_tc_arity_zero_args () =
   let ctx = typecheck {|mod Test do
     fn mk(name : String) : Int do string_byte_length(name) end
-    fn main() : Unit do let _ = mk() () end
+    fn main() : Unit do let _ = mk() end
   end|} in
   Alcotest.(check bool) "0-arg call of 1-arg fn is an error" true (has_errors ctx)
 
 let test_tc_arity_over_application () =
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1, 2, 3) () end
+    fn main() : Unit do let _ = add(1, 2, 3) end
   end|} in
   Alcotest.(check bool) "over-application is an error" true (has_errors ctx)
 
 let test_tc_arity_correct_ok () =
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1, 2) () end
+    fn main() : Unit do let _ = add(1, 2) end
   end|} in
   Alcotest.(check bool) "correct-arity call: no error" false (has_errors ctx)
 
