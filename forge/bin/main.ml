@@ -532,9 +532,18 @@ let publish_cmd =
     Arg.(value & flag & info ["dry-run"]
            ~doc:"Validate only; do not submit to registry")
   in
-  let run o d = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ()) in
+  let registry =
+    Arg.(value & opt (some string) None &
+         info ["registry"] ~docv:"URL"
+           ~doc:"Registry base URL (default: $(b,FORGE_REGISTRY) env var, or https://forgepm.org)")
+  in
+  let insecure =
+    Arg.(value & flag & info ["insecure"]
+           ~doc:"Allow a http:// registry (local dev only)")
+  in
+  let run o d r ins = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ~registry:r ~insecure:ins ()) in
   Cmd.v (Cmd.info "publish" ~doc:"Validate and publish the current package")
-    Term.(const run $ old_source $ dry_run)
+    Term.(const run $ old_source $ dry_run $ registry $ insecure)
 
 (* -------------------------------------------------------------- forge install *)
 
