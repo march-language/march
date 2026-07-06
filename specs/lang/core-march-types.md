@@ -1726,7 +1726,7 @@ unconditionally and `reject/t25`'s `Array.lst_rev(...)` (a real `pfn`,
 `stdlib/array.march:39`) typechecked, compiled, and ran cross-module. Now:
 
 ```
-reject/t25_cross_module_private_fn.march  →  "Function `lst_rev` is private to module `Array`."
+reject/t26_cross_module_private_fn.march  →  "Function `lst_rev` is private to module `Array`."
 ```
 
 re-confirmed live at this exact text (`typecheck.ml`'s `qualified_error_msg`,
@@ -1901,7 +1901,7 @@ are all public here), and the record path canonicalizes through the same
 - `accept/t36_qualified_record_type_still_green` — the A10 record case,
   same-file nested-module form; value-witnessed (prints `Site`), confirming
   no regression from either `9001e4c0` or Task 1's visibility fix.
-- The private-FUNCTION reject (`reject/t25_cross_module_private_fn`) and the
+- The private-FUNCTION reject (`reject/t26_cross_module_private_fn`) and the
   narrow-gate accept witness (`accept/t31_cross_module_public_and_opaque_
   ptype`) both already live in Task 1's corpus — cross-referenced above, not
   duplicated here.
