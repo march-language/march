@@ -69,6 +69,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Operational semantics (core fragment) | [`core-march.md`](core-march.md) | canonical |
 | Static semantics / typing (core fragment) | [`core-march-types.md`](core-march-types.md) | canonical |
 | Surface syntax (grammar quick-reference) | [`surface-syntax.md`](surface-syntax.md) | canonical |
+| Grammar (resolved, normative) | [`grammar.md`](grammar.md) | canonical |
 | Modules, visibility, imports | [`modules.md`](modules.md) | canonical |
 | `let?` / Result propagation | [`let-propagation.md`](let-propagation.md) | canonical |
 | Pattern matching | [`pattern-matching.md`](pattern-matching.md) | canonical |
@@ -95,6 +96,10 @@ document outside `specs/lang/` and linked from here rather than duplicated.
   backing `core-march.md`.
 - [`types/`](types/) — `accept/`/`reject`-split typechecking programs backing
   `core-march-types.md`.
+- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs backing
+  `grammar.md` (in progress — Task 1 seeds the preprocessing-layer corpus;
+  later tasks extend it to expressions, blocks, patterns, types, and
+  declarations).
 
 Future chapters that make specific, checkable claims should grow their own
 corpus directory alongside them, following this same pattern.

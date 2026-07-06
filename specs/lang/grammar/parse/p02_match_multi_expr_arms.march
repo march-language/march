@@ -1,0 +1,21 @@
+mod P02MatchMultiExprArms do
+  type Shape =
+    Circle(Int)
+  | Square(Int)
+
+  fn area(s) do
+    match s do
+      Circle(r) ->
+        let doubled = r * 2
+        let squared = doubled * doubled
+        squared
+      Square(side) ->
+        side * side
+    end
+  end
+
+  fn main() do
+    println(area(Circle(3)))
+    println(area(Square(4)))
+  end
+end

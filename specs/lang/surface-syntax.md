@@ -2,7 +2,7 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md)
 
-A terse example of every construct. See `lib/parser/parser.mly` for authoritative grammar.
+A terse example of every construct. See `lib/parser/parser.mly` for authoritative grammar, or [`grammar.md`](grammar.md) for the normative, resolved grammar reference (precedence/associativity made explicit, the lexer + `token_filter` preprocessing layers formalized, backed by a parse/reject conformance corpus).
 
 ---
 
