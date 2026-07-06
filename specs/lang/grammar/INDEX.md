@@ -86,6 +86,8 @@ the third, promoted to primary status in §6.3). Task 5 (§8 Declarations, §9
 DSL appendix) added p15–p17/r09–r10: the multi-head-`fn`-merge value-witness,
 an `interface`/`impl` pair, a generic record+self-referential-variant `type`
 declaration, and the obsolete-`pub`-keyword and one-`mod`-per-file rejection
-findings — 27 programs total (17 `parse/`, 10 `reject/`) as of this pass.
-See `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task
-breakdown; Task 6 (consolidation + CI-wiring) remains.
+findings — 27 programs total (17 `parse/`, 10 `reject/`), the corpus's
+final count for this pass. See `specs/plans/2026-07-06-resolved-grammar-plan.md`
+for the task-by-task breakdown that built it. CI-wired as the `grammar-check`
+dune alias (`test/dune`), mirroring `specs/lang/types/`'s `types-check` —
+run directly with `dune build @grammar-check`, not part of `runtest`/`oracle`.

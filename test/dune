@@ -422,6 +422,21 @@
  (action (setenv MARCH_BIN %{exe:../bin/main.exe}
           (run bash %{project_root}/specs/lang/types/check_types.sh))))
 
+; ── Resolved-grammar surface-syntax conformance check ─────────────────────
+; specs/lang/grammar/{parse,reject}/*.march + check_grammar.sh — the grammar-side
+; analog of the `types-check` alias above, same shape: `reject/` programs
+; deliberately fail to PARSE, so they cannot ride `test_oracle`'s both-ways
+; interpret-vs-compile sweep either. This corpus needs its own `--check`-only
+; harness instead (specs/lang/grammar.md "Conformance corpus", specs/lang/grammar/INDEX.md).
+; Own alias (`grammar-check`), NOT folded into `runtest` or `oracle` — run
+; directly with `dune build @grammar-check`.
+(rule
+ (alias grammar-check)
+ (deps (source_tree %{project_root}/specs/lang/grammar)
+       (file %{exe:../bin/main.exe}))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{project_root}/specs/lang/grammar/check_grammar.sh))))
+
 (test
  (name test_supervision)
  (modules test_supervision)

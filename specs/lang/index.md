@@ -96,10 +96,11 @@ document outside `specs/lang/` and linked from here rather than duplicated.
   backing `core-march.md`.
 - [`types/`](types/) — `accept/`/`reject`-split typechecking programs backing
   `core-march-types.md`.
-- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs backing
-  `grammar.md` (in progress — Task 1 seeds the preprocessing-layer corpus;
-  later tasks extend it to expressions, blocks, patterns, types, and
-  declarations).
+- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs (27
+  total) backing `grammar.md`'s core-grammar chapters (§2–§8: preprocessing
+  layers, expressions, blocks, patterns, types, declarations), wired into CI
+  as its own `grammar-check` dune alias (`dune build @grammar-check`,
+  mirroring `types/`'s `types-check`).
 
 Future chapters that make specific, checkable claims should grow their own
 corpus directory alongside them, following this same pattern.

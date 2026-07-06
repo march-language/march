@@ -2169,4 +2169,66 @@ doc-correctness bugs fixed en route: `module-system`'s obsolete `pub`/`then`,
 `let-propagation`'s false "not yet implemented" (`let?` shipped), `refinement-types`'
 wrong `List.nth |> Option.unwrap`, the actor-system compiled-scheduler self-contradiction,
 and the CAS doc's phantom `driver.ml` pointer. Satisfies roadmap §4.6 (consolidate/version
-the reference). NEXT spec step: the resolved surface grammar.
+the reference).
+
+## Resolved surface grammar reference v1 (2026-07-06)
+
+**`specs/lang/grammar.md` — Resolved Surface Grammar v1 (core grammar resolved,
+DSL forms sketched)** is the normative counterpart to the terse
+`surface-syntax.md` cheatsheet: it reconciles the three-layer parse pipeline
+(lexer → `token_filter` → menhir) that `lib/parser/parser.mly` leaves
+implicit into one resolved reference, built task-by-task over six tasks
+(`specs/plans/2026-07-06-resolved-grammar-plan.md`) and cited by line against
+`lib/lexer/lexer.mll`, `lib/parser/token_filter.ml`, and `lib/parser/parser.mly`
+throughout. Coverage: §2 the lexical layer (token classes, significant vs.
+insignificant whitespace, string-interpolation brace-depth tracking — the
+one non-context-free lexer behavior); §3 the `token_filter` pre-pass (soft-keyword
+demotion, `choose…by` disambiguation, and the core non-context-free mechanism —
+the newline-glom/match-arm-boundary lookahead — plus the `is_pattern_start`
+hand-maintained-shadow-of-the-pattern-grammar hazard); §4 the expression
+precedence ladder (10 strata, associativity witnessed by value-producing
+programs, not just transcribed); §5 blocks/statements/significant-newline
+semantics (`if`/`else if` stacking, `match`/`cond` arm grammar, the `let?`
+last-in-block constraint); §6 patterns (including the `PatRecord`/`PatAs`
+unreachable-from-surface-syntax finding, cross-referenced with `core-march.md`
+and `core-march-types.md`'s operational/typing-side notes of the same fact);
+§7 types (the arrow-right-associative ladder, refinement/record/tuple types);
+§8 core declaration forms (`mod`/one-per-file, `fn`/`pfn` incl. the
+`group_fn_clauses` multi-head-merge mechanism, `type`/`ptype`, `use`/`import`/
+`alias`, `interface`/`impl`, `derive`/`satisfy`, and the no-`pub`-keyword
+visibility convention); §9 a lighter DSL appendix (actors, `app`, supervision,
+protocols, transitions, capability directives) — sketched at shape+citation
+depth, deliberately not fully resolved, and named as such.
+
+- **Conformance corpus: 27 programs** (`specs/lang/grammar/{parse,reject}/`,
+  17 parse + 10 reject, `INDEX.md` maps every program to the rule(s) it
+  anchors), same `--check`-exit-code-plus-pinned-substring harness shape as
+  `types/check_types.sh` (intentionally named `parse/`/`reject/` rather than
+  `accept/`/`reject/` — a grammar corpus is about what parses, not what
+  typechecks). `bash specs/lang/grammar/check_grammar.sh` reports **27
+  passed, 0 failed**.
+- **Wired into CI as its own `grammar-check` dune alias** (`test/dune`),
+  mirroring the static-semantics corpus's `types-check` exactly — a separate,
+  opt-in slow lane (`dune build @grammar-check`), not folded into
+  `runtest`/`oracle` since `reject/` programs are supposed to fail to parse.
+  Verified green locally (27/27, exit 0) via the exact command CI runs.
+- **Satisfies roadmap §6's "surface grammar (resolved)" Level-1/2 acceptance
+  criterion for the core grammar.** The DSL-heavy declaration forms (§9) are
+  intentionally left at a lighter, shape-plus-citation level — full
+  resolution of those (per-form EBNF, every error-recovery message captured
+  live, dedicated corpus programs) is filed as follow-up, not implied done.
+- **Two findings surfaced by the corpus work, collected in the chapter's own
+  new "Known parser findings" section** (cross-referenced from `specs/todos.md`):
+  (i) `f(1)(2)`-shaped chained calls are rejected only in operand/argument
+  position — in bare block-statement position the trailing `(2)` silently
+  mis-splits into an independent, value-discarding statement with no parse
+  error at all (a documentation-precision gap in §4.7's phrasing, not a
+  parser bug — filed as an open follow-up); (ii) `token_filter.ml`'s
+  `is_pattern_start` predicate is a hand-maintained shadow of the pattern
+  grammar's first-token set, found back in sync as of this pass but with no
+  automated guard against future drift (a standing hazard, documented as
+  such, not fixed here).
+
+NEXT spec step (roadmap): DSL-forms full resolution (§9 deepening) and any
+follow-up from the `f(1)(2)` documentation-precision finding, both tracked in
+`specs/todos.md`.

@@ -2,16 +2,22 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 (in progress) · 2026-07-06 · Tasks 1–5: preprocessing layers (lexer +
-`token_filter`), the expression precedence ladder (§4), blocks/
-statements/significant-newline semantics (§5), patterns/types (§6–§7,
-including the `PatRecord`/`PatAs` reachability finding), and declaration
-forms + a lighter DSL appendix (§8–§9, including the multi-head-`fn`-merge
-mechanism and the one-`mod`-per-file rule) formalized. Task 6 (consolidation
-+ CI-wiring) remains.**
+**v1 · 2026-07-06 · core grammar resolved (DSL forms sketched).** The
+three-layer parse pipeline (lexer → `token_filter` → menhir, §1–§3), the
+expression precedence ladder (§4), blocks/statements/significant-newline
+semantics (§5), patterns/types — including the `PatRecord`/`PatAs`
+reachability finding — (§6–§7), and the core declaration forms — including
+the multi-head-`fn`-merge mechanism and the one-`mod`-per-file rule — (§8)
+are fully resolved and backed by a 27-program parse/reject conformance
+corpus wired into CI (`grammar-check`, see "Conformance corpus" below). The
+DSL-heavy declaration forms (actors, `app`, supervision, protocols,
+transitions, capability directives) are documented at a lighter,
+shape-plus-citation level in §9 — deliberately not fully resolved in this
+pass; see §9's own scope note. See "Known parser findings" below for the
+issues this chapter's corpus work surfaced along the way.
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
-implementation plan this chapter is built task-by-task from).
+implementation plan this chapter was built task-by-task from).
 **Companions:** [`core-march.md`](core-march.md) (operational semantics),
 [`core-march-types.md`](core-march-types.md) (static semantics),
 [`surface-syntax.md`](surface-syntax.md) (the friendly grammar
@@ -49,7 +55,7 @@ note at the end of §1).
   three source files leave implicit: which of menhir's shift/reduce
   resolutions is actually taken, why a token exists but can never appear in
   a valid program (`THEN`, §4), which AST constructors have no surface
-  syntax that reaches them (`PatRecord`/`PatAs`, deferred to Task 4), and —
+  syntax that reaches them (`PatRecord`/`PatAs`, §6.3), and —
   the hardest part — the exact algorithm `token_filter.ml` uses to decide
   where a block expression ends. A line-by-line copy of `parser.mly`'s
   productions would not be worth a separate chapter; this is not that.
@@ -550,8 +556,8 @@ correct only by discipline.
 Every token class the grammar's pattern productions can start with is
 present in the predicate, with the same 13-keyword soft set, and nothing
 extra is listed (`LBRACE` is correctly absent — there is no record-pattern
-production for it to start, see the reachability note in §6, to be written
-in Task 4). This chapter documents that finding as of this pass rather than
+production for it to start, see the reachability note in §6.3). This
+chapter documents that finding as of this pass rather than
 asserting it as a timeless property: **the predicate is maintained by hand
 and can drift again the next time `pattern`/`simple_pattern`/
 `soft_lower_name` changes without a matching edit here.** Anyone changing
@@ -642,14 +648,14 @@ alternative whose first token matches. Two of note:
   (`build_with`, `parser.mly:161–167`) into nested `EMatch` on each binding
   in turn, so `with Ok(a) <- e1, Ok(b) <- e2 do body else h end` becomes
   `match e1 do Ok(a) -> match e2 do Ok(b) -> body | <else arms> end | <else
-  arms> end` — a different desugaring from `let?` (§5, Task 3), which is a
+  arms> end` — a different desugaring from `let?` (§5.4), which is a
   **block-level** (not `expr`-level) construct: `let? p = e` only appears
   as a `block_expr`/`lambda_stmts` production (`parser.mly:1003–1004,
   1119–1120`), never as a standalone `expr`, and is right-folded into
   nested `ELetQ` continuations by `fold_letq` (`parser.mly:147–156`) rather
   than parsed as a ladder-level operator. Full detail on `let?`'s placement
-  constraints (it cannot be the last expression in a block) is Task 3's
-  §5, not this section — it is noted here only to distinguish it from
+  constraints (it cannot be the last expression in a block) is §5.4,
+  not this section — it is noted here only to distinguish it from
   `with`, which *is* an `expr`-level production.
 
 ### 4.2 `expr_pipe` — pipe, loosest-binding, left-associative
@@ -920,7 +926,7 @@ explicitly:
   list_comp ::= "[" expr "for" pattern "in" expr "]"
               | "[" expr "for" pattern "in" expr "," expr "]"
   ```
-  binding a full `pattern` (§6, Task 4 — not just `simple_pattern`, so
+  binding a full `pattern` (§6 — not just `simple_pattern`, so
   constructor/tuple/list patterns are legal comprehension binders too) and
   desugaring **in-parser** (`desugar_list_comp`, `parser.mly:131–140`,
   called from the two comprehension actions at `parser.mly:1233–1238`) —
@@ -2159,3 +2165,52 @@ placement rules; Task 4 added five more (`p12`–`p14`, `r07`–`r08`) anchoring
 `interface`/`impl`, and generic-type/record-variant claims, plus the
 obsolete-`pub`-keyword and one-`mod`-per-file reachability/rejection
 findings — 27 programs total (17 `parse/`, 10 `reject/`) as of this pass.
+
+**CI-wired** as a separate slow lane, `grammar-check` (`test/dune`), mirroring
+the `types-check` alias `specs/lang/types/` already uses — not part of
+`runtest`/`oracle`, run directly with `dune build @grammar-check`.
+
+## Known parser findings
+
+Building this chapter's conformance corpus surfaced two categories of fact
+about the live parser that are worth collecting in one place rather than
+leaving scattered across the sections that happened to surface them —
+neither is a bug to fix (both are the grammar behaving exactly as its own
+stated rules predict), but both are easy to get wrong from reading only one
+section in isolation:
+
+- **`f(1)(2)`-shaped chained calls are rejected only in operand/argument
+  position — in bare block-statement position they silently mis-split into
+  two unrelated statements with no diagnostic at all.** Full detail and the
+  live-confirmed repro (including a side-effecting variant proving the
+  second call really executes as its own statement) is in §7.3, surfaced
+  while building §7's type-annotation corpus program (Task 4, patterns/
+  types). §4.7 states the operand-position rejection correctly but its
+  blanket "does not parse" phrasing does not itself call out the
+  position-dependence — §7.3 is the consolidated correction; this is a
+  **documentation-precision gap in §4.7's phrasing**, not a parser bug, and
+  is filed as an open doc-precision follow-up in `specs/todos.md` (under
+  "Grammar / lint contradictions") rather than fixed by editing §4.7 itself
+  (this chapter's per-task scoping rule: no drive-by edits to an earlier
+  task's already-committed section).
+- **`token_filter.ml`'s `is_pattern_start` predicate (§3.4) is a
+  hand-maintained shadow of `parser.mly`'s `pattern`/`simple_pattern`/
+  `soft_lower_name` first-token set, not a derived table** — a prior review
+  on an earlier checkout found it already drifted out of sync (missing the
+  `FLOAT` case and some soft-keyword cases). The live three-way cross-check
+  performed while writing §3.4 found the predicate back **in sync** as of
+  this pass, but the mechanism for keeping it that way is entirely manual
+  discipline (grep `is_pattern_start` whenever `pattern`/`simple_pattern`/
+  `soft_lower_name` changes) — there is no test or generator tying the two
+  together, so this is a standing hazard, not a one-time fact. This is the
+  chapter's own namesake finding: "resolved, not transcribed" applies to
+  `token_filter.ml` itself having an informal, driftable copy of part of
+  the grammar living outside `parser.mly`.
+
+Both `PatRecord`/`PatAs` unreachability (§6.3) and `then`'s
+no-accepting-production status (§4.10) are reachability *claims this
+chapter makes and witnesses live*, not open findings requiring follow-up —
+they are listed here only for completeness of cross-reference, not because
+either is unresolved. See `specs/todos.md`'s "Grammar / lint contradictions
+(2026-07-03)" section for the `f(1)(2)` entry's tracked disposition and any
+future updates.
