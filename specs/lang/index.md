@@ -68,11 +68,11 @@ consolidation location until the named task lands.
 | Operational semantics (core fragment) | [`core-march.md`](core-march.md) | canonical |
 | Static semantics / typing (core fragment) | [`core-march-types.md`](core-march-types.md) | canonical |
 | Surface syntax (grammar quick-reference) | [`surface-syntax.md`](surface-syntax.md) | canonical |
-| Modules, visibility, imports | `modules.md` | pending (Task 2) |
-| `let?` / Result propagation | `let-propagation.md` | pending (Task 2) |
-| Pattern matching | `pattern-matching.md` | pending (Task 2) |
-| Interfaces (typeclasses) | `interfaces.md` | pending (Task 2) |
-| Type system (tutorial companion to core-march-types.md) | `type-system.md` | pending (Task 2) |
+| Modules, visibility, imports | [`modules.md`](modules.md) | canonical |
+| `let?` / Result propagation | [`let-propagation.md`](let-propagation.md) | canonical |
+| Pattern matching | [`pattern-matching.md`](pattern-matching.md) | canonical |
+| Interfaces (typeclasses) | [`interfaces.md`](interfaces.md) | canonical |
+| Type system (tutorial companion to core-march-types.md) | [`type-system.md`](type-system.md) | canonical |
 | Linear types | `linear-types.md` | pending (Task 3) |
 | Refinement types | `refinement-types.md` | pending (Task 3) |
 | Session types | `session-types.md` | pending (Task 3) |
