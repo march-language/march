@@ -2,9 +2,10 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 (in progress) · 2026-07-06 · Tasks 1–2: preprocessing layers (lexer +
-`token_filter`) and the expression precedence ladder (§4) formalized;
-statement/pattern/type/declaration grammar (§5–§9) not yet written.**
+**v1 (in progress) · 2026-07-06 · Tasks 1–3: preprocessing layers (lexer +
+`token_filter`), the expression precedence ladder (§4), and blocks/
+statements/significant-newline semantics (§5) formalized; pattern/type/
+declaration grammar (§6–§9) not yet written.**
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter is built task-by-task from).
@@ -952,6 +953,234 @@ a successfully-shifted `THEN` token to a value; every derivation containing
 [`reject/r01_then_keyword_rejected.march`](grammar/reject/r01_then_keyword_rejected.march)
 (`if true then 1 else 2 end`, captured message matches exactly).
 
+## 5. Blocks & statements
+
+Source: `lib/parser/parser.mly` (`block_body`/`block_expr` at
+`parser.mly:992–1033`; `expr`'s `IF`/`MATCH`/`WITH` alternatives at
+`parser.mly:1051–1093`; `branch`/`cond_branch`/`arm_sep` at
+`parser.mly:1275–1296`). Like §4, everything here takes the **filtered**
+token stream (§2–§3) as input — this section is in fact where the filter's
+newline-glom (§3.3) does the most load-bearing work, since `block_body` and
+match-arm bodies are exactly the two places a raw `NL` could plausibly mean
+either "end this expression" or "just formatting."
+
+### 5.1 `block_body` / `block_expr` — sequencing, no separator token
+
+```ebnf
+block_body ::= block_expr+                          (* nonempty_list *)
+
+block_expr ::= "let" simple_pattern type_annot? "=" expr
+             | "linear" "let" simple_pattern type_annot? "=" expr
+             | "let" "?" simple_pattern "=" expr
+             | "fn" lower_name "(" fn_param,* ")" ret_annot? "do" block_body "end"
+             | expr
+```
+
+(`parser.mly:992–1033`.) Two things worth stating explicitly because
+`parser.mly` leaves them implicit:
+
+- **There is no separator token between successive `block_expr`s at all** —
+  `block_body` is `nonempty_list(block_expr)` (`parser.mly:992–994`), i.e.
+  "keep parsing another `block_expr` until the next token can't start one."
+  This is only well-defined because, by the time menhir sees the stream,
+  §3.3's baseline rule has already deleted every `NL` that separated one
+  `block_expr` from the next inside an ordinary `do…end` (`Block` context)
+  — the grammar doesn't encode "expressions separated by newlines" as a
+  production, because there is nothing left in the filtered stream *to*
+  encode; sequencing is achieved purely by each `block_expr` alternative's
+  own leading-token shape (`LET`, `LINEAR LET`, `FN`, or "falls through to
+  `expr`") being enough for menhir to tell where one ends and the next
+  begins with no lookahead past that. §3.3's own example (a three-`let`
+  function body) is the direct witness of this rule as filtered token
+  output; [`parse/p09_block_let_sequencing.march`](grammar/parse/p09_block_let_sequencing.march)
+  is this chapter's value-witness: three chained `let`s (`a = 2`,
+  `b = a * 3`, `c = b + 4`) followed by the bare final expression `c`,
+  printing `10` — the only possible result if all three `let`s bound in
+  sequence into one flat block rather than, say, the parser mis-parsing
+  a `let` as continuing a previous expression.
+- **A `block_expr`'s `let`/`let?`/`fn` alternatives are only reachable at
+  block-statement position, never as a general `expr`.** `ELet`, `ELetQ`,
+  and `ELetFn` (the local-function-definition form) are productions of
+  `block_expr`, not of `expr` (§4.1) — so `let x = 1` cannot appear, say, as
+  the then-branch of an `if` written on one line, or as a pipe operand;
+  it only parses in a position `block_body` (or `lambda_body`/
+  `lambda_stmts`, `parser.mly:1101–1120`, the arrow-lambda equivalent
+  described in §4.1's cross-reference) governs. `fn name(...) do … end`
+  as a `block_expr` (`parser.mly:1015–1027`) is March's local/nested named
+  function definition — distinct from the anonymous `fn ... -> expr`
+  lambda form, which is an `expr`-level production (§4.1) reachable
+  anywhere an expression is.
+
+### 5.2 `if` / `else` — mandatory `else`, no `then`, and how "`else if`" actually works
+
+```ebnf
+if_expr ::= "if" expr "do" block_body "else" block_body "end"
+```
+
+(`parser.mly:1051–1052`, action `EIf (cond, t, f, sp)`.) This is the
+**only** accepting production for `if` in the entire grammar — there is no
+bare `if cond do … end` with no `else` at all. Four dedicated menhir `error`
+alternatives exist purely to turn common malformed attempts into specific
+diagnostics rather than menhir's generic fallback (all still terminate in
+`error_raise`, i.e. none of them accept — every one is a rejection with a
+better message, not a second way to parse `if`):
+
+- `IF; _c=expr; DO; _t=block_body; ELSE; _f=block_body; error`
+  (`parser.mly:1053–1057`) — missing the closing `end`:
+  `` I was expecting `end` to close the if expression here: ``.
+- `IF; _c=expr; DO; _t=block_body; error` (`parser.mly:1058–1062`) — no
+  `else` branch at all: `` March `if` expressions always need an `else`
+  branch: ``. Confirmed live by
+  [`reject/r06_if_missing_else.march`](grammar/reject/r06_if_missing_else.march)
+  (`if x > 0 do 1 end`, no `else`) — captured message matches exactly, and
+  this is a genuine **parse**-stage rejection (the `error` token fires
+  inside the `expr` production itself, before typechecking is ever
+  reached), unlike §5.4's `let?`-last case below.
+- `IF; _c=expr; THEN; _t=expr; error` (`parser.mly:1063–1067`) — `then` used
+  after the condition: `` I don't recognize `then` here — March uses
+  do/end blocks instead. `` This is §4.10's `THEN`-has-no-production fact
+  restated at the point it's actually reached; `then` is unreachable from
+  *any* position, not just this one, but this is the alternative that
+  produces the diagnostic when a user writes `if cond then …`. Already
+  witnessed by [`reject/r01_then_keyword_rejected.march`](grammar/reject/r01_then_keyword_rejected.march)
+  (§4.10; not re-added here).
+- `IF; _c=expr; error` (`parser.mly:1068–1072`) — no `do` at all after the
+  condition: `` I was expecting `do` after the condition here: ``.
+
+**"`else if`" is not a grammar production — it is just `else` followed by a
+nested `if…end` as that block's sole `block_expr`, and every nesting level
+needs its own `end`.** There is no `ELSIF`/`ELSE IF` token
+(`grep -n "ELSIF\|ELSE IF" lib/parser/parser.mly` and
+`lib/parser/token_filter.ml` both come back empty) and no alternative
+production shaped like `"else" "if" expr "do" …` — `f` in the `EIf`
+production above is an ordinary `block_body`, and `block_body`'s `expr`
+fallthrough (`block_expr ::= expr`) happily accepts another `if…end` as that
+`block_body`'s one expression. Consequently, a chain that *looks* flat in
+source:
+
+```march
+if n < 0 do
+  "negative"
+else if n == 0 do
+  "zero"
+else
+  "large"
+end
+end
+```
+
+is really `if n < 0 do "negative" else (if n == 0 do "zero" else "large"
+end) end` — two independent `EIf` nodes, the outer's `else`-branch
+`block_body` consisting of exactly one `block_expr`, which is the inner
+`if`. Each `if` token opened must be closed by its own `end`; there is no
+elision of `end`s for chained `else if`s the way some languages allow.
+Value-witnessed by
+[`parse/p11_if_else_if_chain.march`](grammar/parse/p11_if_else_if_chain.march):
+a 4-way classification (`"negative"`/`"zero"`/`"small"`/`"large"`) written
+as three visually-chained `if … do … else if … do … else if … do … else …
+end end end` — note the **three** trailing `end`s, one per nested `if` —
+printing all four branches correctly for `-5`, `0`, `3`, `100`. Omitting any
+of the stacked `end`s (writing only one, as if `else if` were a single
+construct) reproduces the same `` I was expecting `end` to close the if
+expression here: `` / generic-fallback family of errors as an ordinarily
+unclosed `if`, since the parser genuinely sees an unterminated nested `if`,
+not a special "else-if" form missing its terminator.
+
+### 5.3 `match` (with scrutinee) and `cond` (scrutinee-less `match do`)
+
+```ebnf
+match_expr ::= "match" expr "do" arm_sep? branch (arm_sep branch)* "end"
+cond_expr  ::= "match" "do" arm_sep? cond_branch (arm_sep cond_branch)* "end"
+
+arm_sep    ::= NL | "|"                              (* %inline, parser.mly:1275–1277 *)
+
+branch      ::= pattern when_guard? "->" block_body
+cond_branch ::= expr "->" block_body
+              | "_" "->" block_body                  (* sugar for `true -> block_body` *)
+```
+
+(`parser.mly:1073–1076` for the two `expr` alternatives; `branch` at
+`parser.mly:1279–1281`; `cond_branch` at `parser.mly:1292–1296`.) There is
+no separate `COND` keyword — both forms share the `MATCH` token, disambiguated
+purely by whether an `expr` scrutinee appears before `DO` (§4.1 already
+makes this point for the precedence table; this section is where the arm
+grammar itself is stated). A bare `_ -> body` cond-arm desugars in-parser to
+`ELit (LitBool true) -> body` (`parser.mly:1295–1296`) — i.e. `_` in a
+`cond` arm is sugar for an always-true guard, not a distinct AST shape.
+
+**Arm separator (`arm_sep`) is `NL` or `PIPE`, and by the time menhir sees
+either, it has already survived §3.3's suppression machinery** — every
+`arm_sep` NL that reaches this production is one `token_filter`'s
+`lookahead_is_new_arm` (§3.3) has already positively identified as a real
+arm boundary; menhir's grammar itself just sees "some separator, then
+another arm," with no burden of distinguishing "the multi-expression arm
+body just ended" from "there's more of this arm's body to come" — that
+distinction has already been resolved one layer down. This is why `branch`
+and `cond_branch` can both use the same simple `X -> block_body` shape
+regardless of how many `block_expr`s the body has: `block_body` is already
+`block_expr+` (§5.1), so a multi-statement arm body ("`let`, `let`, final
+expr") is just an ordinary `block_body`, no special multi-line-arm
+production needed — **the entire "does this arm have one expression or
+five?" question is invisible to `parser.mly`**; it is only visible to
+`token_filter`, whose job is precisely to have already turned "however many
+lines this arm's body spans" into "one contiguous run of `block_expr`s with
+no interior `NL`, followed by exactly one `arm_sep` `NL`/`PIPE` that
+`branch`/`cond_branch` can trivially consume."
+
+Value-witnessed end-to-end (parse-and-run, not just parse) by
+[`parse/p10_match_multi_expr_arms_three_way.march`](grammar/parse/p10_match_multi_expr_arms_three_way.march) —
+a three-constructor `match` (`Circle(r)`/`Square(side)`/`Triangle(base,
+height)`), where the **first two** arms are multi-expression bodies (two
+`let`s then a final expr) and the **third** is a single-expression body,
+deliberately mixing both shapes to prove the arm-boundary lookahead handles
+the transition *into* a multi-expression arm, *between* two multi-expression
+arms, and *out of* a multi-expression arm into a single-expression one, all
+in the same program. Printed output `36`, `16`, `30` — `(3*2)²`, `4²`,
+`5*6` — is only obtainable if every arm boundary in the whole match landed
+exactly where §3.3 says it does; this strictly extends §3.3's own
+[`p02_match_multi_expr_arms.march`](grammar/parse/p02_match_multi_expr_arms.march)
+witness (two arms, both multi-expression) to a three-arm, mixed-shape case.
+
+### 5.4 `let?` position constraint — cannot be the last expression in a block
+
+`let? p = e` is **not** an `expr`-level production (contrast with `with…do…
+end`, §4.1) — it is one specific alternative of `block_expr`
+(`parser.mly:1003–1004`) and of `lambda_stmts` (`parser.mly:1119–1120`),
+never reachable as a standalone expression, a pipe operand, or an `if`
+branch written inline. Both call sites fold a flat list of `block_expr`s
+into right-nested `ELetQ` continuations via `fold_letq`
+(`parser.mly:147–156`, doc comment `142–146`): `[let? p = e; rest…]`
+becomes `ELetQ(p, e, fold_letq rest sp, sp)`, i.e. everything *after* a
+`let?` in the same block becomes that `ELetQ`'s continuation, recursively.
+
+**The grammar happily parses `let?` as the last `block_expr` — this
+restriction is enforced by the *typechecker*, not the parser.** When
+`fold_letq` reaches a `let?` with nothing following it (the `[e]`/`[]` base
+cases never apply to a trailing `ELetQ` the way they do to an ordinary
+expression), it produces `ELetQ (p, e, EBlock ([], sp), sp)`
+(`parser.mly:1004`, and identically at `parser.mly:1120` for the
+lambda-body call site) — an empty `EBlock` as the continuation. This parses
+completely successfully; menhir never rejects it. The rejection happens
+later, in `Typecheck.infer_expr`'s `ELetQ` case
+(`lib/typecheck/typecheck.ml:4174–4188`): it pattern-matches the
+continuation, and specifically when it sees `Ast.EBlock ([], _)` — the
+empty-continuation shape `fold_letq` produces exactly when `let?` was last —
+it raises `` `let?` cannot be the last expression in a block. `` (full
+message includes a suggested fix, `typecheck.ml:4181–4187`) and returns
+`TError` rather than unifying a result type. So `march --check` still exits
+1 for this program (typecheck failure, not codegen/eval failure), but the
+diagnostic is a **type** error, not a **parse** error — worth stating
+explicitly since every other `reject/` program in this corpus so far pins a
+parse-stage diagnostic. Confirmed live by
+[`reject/r05_letq_last_in_block.march`](grammar/reject/r05_letq_last_in_block.march)
+(`fn f() do let? x = Ok(1) end`) — `march --check` exits 1 with exactly the
+message above; the same source parses fine standalone (verified by removing
+the outer `fn`/checking the token stream is well-formed — the failure
+surfaces only once type inference visits the `ELetQ` node). This is a
+deliberate, documented design choice (the `fold_letq` doc comment says so
+outright: "the typechecker flags the empty continuation with a clear
+error"), not a parser gap to file.
+
 ## Conformance corpus
 
 This chapter is backed by a runnable parse/reject corpus at
@@ -979,15 +1208,15 @@ See [`grammar/INDEX.md`](grammar/INDEX.md) for the full program-to-rule map.
 Task 1 seeded the corpus with four programs anchoring §2–§3 (the
 preprocessing layers); Task 2 added six more (`p03`–`p08`, `r03`–`r04`)
 anchoring §4's precedence/associativity claims and the list-comprehension
-grammar — 12 programs total (8 `parse/`, 4 `reject/`) as of this pass.
-Tasks 3–5 grow it further alongside §5–§9.
+grammar; Task 3 added five more (`p09`–`p11`, `r05`–`r06`) anchoring §5's
+block-sequencing, `if`/`else if`, `match`/`cond` arm-boundary, and `let?`
+placement rules — 17 programs total (11 `parse/`, 6 `reject/`) as of this
+pass. Tasks 4–5 grow it further alongside §6–§9.
 
 ---
 
 ## Coming in later tasks (not yet written)
 
-- **§5 Blocks & statements** — `block_body`, `if`/`match`/`cond`, `let?`
-  placement (Task 3).
 - **§6 Patterns** — `simple_pattern`/`pattern`, reachability
   (`PatRecord`/`PatAs`) (Task 4).
 - **§7 Types** — the type-expression grammar (Task 4).

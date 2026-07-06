@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: `let?` cannot be the last expression in a block.
+mod R05LetqLastInBlock do
+  fn f() do
+    let? x = Ok(1)
+  end
+
+  fn main() do
+    println(f())
+  end
+end

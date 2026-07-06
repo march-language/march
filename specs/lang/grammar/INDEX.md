@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p08 parse, r01–r04 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04)
+# Grammar corpus index (p01–p11 parse, r01–r06 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 12/12 — 8 parse, 4
+Exit 0 iff every program behaves as declared (currently 17/17 — 11 parse, 6
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -57,8 +57,17 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p08_comparison_binds_tighter_than_bool.march`](parse/p08_comparison_binds_tighter_than_bool.march) | §4.3/§4.4 — `expr_cmp` binds tighter than `expr_and`/`expr_or` | `1 < 2 && 3 > 2` prints `true`, only well-typed if `&&`'s operands are the two `Bool` comparison results, not `Int`s captured by a tighter-binding `&&`. |
 | [`reject/r03_chained_comparison_nonassoc.march`](reject/r03_chained_comparison_nonassoc.march) | §4.4 `expr_cmp` — non-associativity (`%nonassoc EQEQ NEQ LT GT LEQ GEQ`, `parser.mly:217`) | `1 < 2 < 3` — both operands of a comparison are `expr_add`, one level down, not `expr_cmp` again, so chained comparisons have no derivation. Captured live: `I got stuck here`. |
 | [`reject/r04_malformed_comprehension_missing_in.march`](reject/r04_malformed_comprehension_missing_in.march) | §4.9 list comprehensions — malformed form (missing `in <expr>`) | `[x * 2 for x]` — `for pattern` with no following `in expr`. Captured live: `I got stuck here` (menhir's generic fallback; no bespoke comprehension diagnostic exists). |
+| [`parse/p09_block_let_sequencing.march`](parse/p09_block_let_sequencing.march) | §5.1 `block_body`/`block_expr` — sequencing with no separator token | Three chained `let`s (`a = 2`, `b = a * 3`, `c = b + 4`) then the bare final expression `c`, all separated only by source newlines already deleted by `token_filter` (§3.3) before menhir sees them. Prints `10` — proves the three `let`s bound in sequence, not nested/misparsed. |
+| [`parse/p10_match_multi_expr_arms_three_way.march`](parse/p10_match_multi_expr_arms_three_way.march) | §5.3 `match` arm grammar — arm-boundary lookahead across mixed single-/multi-expression arms | A three-constructor `match` (`Circle`/`Square`/`Triangle`) where the first two arms are multi-expression bodies and the third is single-expression, deliberately mixing shapes to exercise the arm-boundary transition into, between, and out of multi-expression arms in one program. Prints `36`, `16`, `30` — extends §3.3's two-arm `p02` witness to three arms with a shape change. |
+| [`parse/p11_if_else_if_chain.march`](parse/p11_if_else_if_chain.march) | §5.2 `if`/`else` — "`else if`" is `else` + a nested `if…end`, not a dedicated production | A 4-way `if … else if … else if … else … end end end` classification chain — note the three stacked trailing `end`s, one per nested `if`, since there is no `ELSIF` token/production eliding them. Prints `negative`/`zero`/`small`/`large` for `-5`/`0`/`3`/`100`. |
+| [`reject/r05_letq_last_in_block.march`](reject/r05_letq_last_in_block.march) | §5.4 `let?` position constraint | `fn f() do let? x = Ok(1) end` — `let?` as the last `block_expr`. Parses fine (`fold_letq` produces `ELetQ(p, e, EBlock([], sp), sp)`); rejected at **typecheck**, not parse (`Typecheck.infer_expr`'s `ELetQ` case matches the empty-`EBlock` continuation). `march --check` still exits 1. Captured live: `` `let?` cannot be the last expression in a block. ``. |
+| [`reject/r06_if_missing_else.march`](reject/r06_if_missing_else.march) | §5.2 `if` requires `else` — no bare `if` | `if x > 0 do 1 end` with no `else` branch — a genuine **parse**-stage rejection (`parser.mly:1058–1062`'s dedicated `error` alternative fires before typechecking). Captured live: `` March `if` expressions always need an `else` branch: ``. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
-Later tasks (3–5) will extend this table with the block/statement,
-pattern/type, and declaration-form corpora; see
+Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
+the `if`/`else if` stacking rule, the three-way `match` arm-boundary
+witness, and the `let?`-last-in-block constraint (a typecheck-stage
+rejection, called out explicitly since every other `reject/` program here
+pins a parse-stage diagnostic). Later tasks (4–5) will extend this table
+with the pattern/type and declaration-form corpora; see
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task breakdown.
