@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p17 parse, r01–r10 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10)
+# Grammar corpus index (p01–p22 parse, r01–r13 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 27/27 — 17 parse, 10
+Exit 0 iff every program behaves as declared (currently 35/35 — 22 parse, 13
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -72,6 +72,14 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p17_generic_type_record_variant.march`](parse/p17_generic_type_record_variant.march) | §8.4 `type_decl` — generic parameters + record body + self-referential variant | `type Box(a) = { value: a, label: String }` (one-parameter generic record type) and `type Tree(a) = Leaf \| Node(Tree(a), a, Tree(a))` (a self-referential generic variant, `Tree(a)` appearing in its own constructor's argument types) in one program, alongside a `pfn` (private function) computing tree depth. Prints `42`, `answer`, `2` — the record-field values and the recursive depth computation only come out right if both generic type declarations parsed with their type parameter correctly threaded through. |
 | [`reject/r09_pub_fn_keyword_rejected.march`](reject/r09_pub_fn_keyword_rejected.march) | §8.8 visibility — no `pub` keyword | `pub fn add(a, b) do … end` — `pub` is not a keyword at all (absent from the lexer's keyword table), so it lexes as an ordinary `LOWER_IDENT` and `decl_list_r`'s only fallback for an unrecognized declaration shape (`decl_list_r; error`) fires. Captured live: `` Parse error in declaration ``, menhir's generic message, matching the plan's own prediction that this would not have a bespoke diagnostic. |
 | [`reject/r10_second_top_level_mod_rejected.march`](reject/r10_second_top_level_mod_rejected.march) | §8.1 `module_` — the one-`mod`-per-file rule | Two complete top-level `mod … do … end` blocks in one file. `module_`'s second alternative (`MOD; …; END; error`) fires once the first `mod` closes and a second `MOD` token appears where only `EOF` is expected. Captured live: `` A file may have only one top-level `mod`; everything else must live inside it. ``, the compiler's dedicated diagnostic (not menhir's generic fallback). |
+| [`parse/p18_actor_handler_supervise.march`](parse/p18_actor_handler_supervise.march) | §9.1 `actor_decl`/`actor_handler`, §9.3 `supervise_block`/`supervise_child`/`restart_strategy_tok` | A `Worker` actor (`state`/`init`/one `on Inc() do … end` handler) supervised by a `Supervisor` actor's nested `supervise do strategy one_for_one; max_restarts 3 within 5; Worker worker end` block. Run (non-`--check`), `spawn(Supervisor)` + `run_until_idle()` + `println(mailbox_size(sup))` prints `0` — only obtainable if the supervisor's own mailbox actually drained, i.e. the nested `supervise_block`/`supervise_child` grammar wired the child spec correctly. |
+| [`parse/p19_app_on_start_supervisor_spec.march`](parse/p19_app_on_start_supervisor_spec.march) | §9.2 `app_decl`/`on_start_block` | An `app HookApp do on_start do … end; Supervisor.spec(:one_for_one, [worker(Counter)]) end` — the optional `on_start_block` followed by an ordinary `block_body` wiring a supervision tree. `--check` exit 0 confirms the optional-hook-then-block_body shape parses and typechecks; the companion `main()`-exclusion finding (an `app` and a `main()` cannot coexist in one module) is noted in §9.2's prose. |
+| [`parse/p20_protocol_choose_session_type.march`](parse/p20_protocol_choose_session_type.march) | §9.4 `protocol_decl`/`protocol_step`/`choose_branch` | A two-step `protocol Decision` (`Client -> Server : Int`) followed by a `choose by Server: ok -> … \| err -> … end` branch point — exercises `choose_branch`'s optional leading `PIPE` and the `arm_sep`-governed `NL`/`PIPE` separator between branches (§3.2's `token_filter`-level half of this same disambiguation). `--check` exit 0 and the program still runs and prints `1`. |
+| [`parse/p21_transitions_state_machine.march`](parse/p21_transitions_state_machine.march) | §9.5 `transitions_decl`/`transition_arm` | A linear `Handle(s)` type with `tag Open`/`tag Closed` states, a `via` function `open_conn`, and a `transitions Handle do ConnTag: Closed -> Open via open_conn end` declaration. Prints `1` — the `via` function's own body (`match h do Handle(n) -> Handle(n + 1) end`) only produces that value if the transition's from/to states and via-function wiring parsed and typechecked as declared. |
+| [`parse/p22_capability_directives.march`](parse/p22_capability_directives.march) | §9.6 `needs_decl`/`cap_path`, `proof_cap_decl`, `cap_no_panic_decl` | `needs IO.Network, IO.Clock` (a two-segment `cap_path` list), `proof cap Trusted`, and `cap no_panic` in one module, guarding a division-free `add`. Prints `5` — proves all three capability-directive forms coexist and the guarded function still typechecks under `no_panic`. |
+| [`reject/r11_supervise_missing_strategy.march`](reject/r11_supervise_missing_strategy.march) | §9.3 `supervise_block` — `strategy`/`STRATEGY` is mandatory, not optional | A `supervise do … end` block that opens straight on `max_restarts` with no leading `strategy one_for_one` (`STRATEGY` is not `option()`-wrapped in `supervise_block`, so skipping it is a genuine parse-stage rejection, not a typecheck one). Captured live: `I got stuck here`. |
+| [`reject/r12_cap_unknown_directive.march`](reject/r12_cap_unknown_directive.march) | §9.6 — the five `cap …` forms are fixed lexer strings, not a `cap` keyword plus an arbitrary argument | `cap no_such_thing` — `"no_such_thing"` is not one of the five words the lexer's two-word `cap …` patterns match (`lexer.mll:176–180`), so `cap` lexes as a bare `LOWER_IDENT` and the whole line falls through every `decl` alternative to `decl_list_r`'s generic error-recovery rule. Captured live: `` Parse error in declaration ``. |
+| [`reject/r13_protocol_step_missing_payload_type.march`](reject/r13_protocol_step_missing_payload_type.march) | §9.4 `protocol_step` — the `: ty` payload annotation is mandatory | `Client -> Server` with no trailing `: PayloadType` — `protocol_step`'s message-step alternative requires `COLON; t = ty` after the `sender ARROW receiver`, so the step ends prematurely and the following `END` cannot be shifted where a payload type was expected. Captured live: `I got stuck here`. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -86,8 +94,13 @@ the third, promoted to primary status in §6.3). Task 5 (§8 Declarations, §9
 DSL appendix) added p15–p17/r09–r10: the multi-head-`fn`-merge value-witness,
 an `interface`/`impl` pair, a generic record+self-referential-variant `type`
 declaration, and the obsolete-`pub`-keyword and one-`mod`-per-file rejection
-findings — 27 programs total (17 `parse/`, 10 `reject/`), the corpus's
-final count for this pass. See `specs/plans/2026-07-06-resolved-grammar-plan.md`
-for the task-by-task breakdown that built it. CI-wired as the `grammar-check`
-dune alias (`test/dune`), mirroring `specs/lang/types/`'s `types-check` —
-run directly with `dune build @grammar-check`, not part of `runtest`/`oracle`.
+findings. A later pass fully resolving §9's DSL declaration forms added
+p18–p22/r11–r13: `actor`+`supervise`, `app`/`on_start`/`Supervisor.spec`,
+`protocol`/`choose`, `transitions`, and the capability-directive forms —
+35 programs total (22 `parse/`, 13 `reject/`), the corpus's final count for
+this pass. See `specs/plans/2026-07-06-resolved-grammar-plan.md` for the
+task-by-task breakdown that built the first 27; the DSL-resolution pass is
+tracked in its own commit rather than a numbered plan task. CI-wired as the
+`grammar-check` dune alias (`test/dune`), mirroring `specs/lang/types/`'s
+`types-check` — run directly with `dune build @grammar-check`, not part of
+`runtest`/`oracle`.

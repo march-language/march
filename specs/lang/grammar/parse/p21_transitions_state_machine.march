@@ -1,0 +1,23 @@
+mod P21TransitionsStateMachine do
+  type Handle(s) = Handle(Int)
+  tag Open
+  tag Closed
+
+  fn open_conn(h: Handle(Closed)): Handle(Open) do
+    match h do
+      Handle(n) -> Handle(n + 1)
+    end
+  end
+
+  transitions Handle do
+    ConnTag: Closed -> Open via open_conn
+  end
+
+  fn main() do
+    let h = Handle(0)
+    let h2 = open_conn(h)
+    match h2 do
+      Handle(n) -> println(n)
+    end
+  end
+end

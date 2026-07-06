@@ -1,0 +1,23 @@
+mod P18ActorHandlerSupervise do
+  actor Worker do
+    state { count : Int }
+    init { count: 0 }
+    on Inc() do { count: state.count + 1 } end
+  end
+
+  actor Supervisor do
+    state { worker : Int }
+    init { worker: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 3 within 5
+      Worker worker
+    end
+  end
+
+  fn main() do
+    let sup = spawn(Supervisor)
+    run_until_idle()
+    println(mailbox_size(sup))
+  end
+end

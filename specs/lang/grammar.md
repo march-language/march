@@ -2,19 +2,20 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 · 2026-07-06 · core grammar resolved (DSL forms sketched).** The
+**v2 · 2026-07-06 · core grammar AND DSL declaration forms resolved.** The
 three-layer parse pipeline (lexer → `token_filter` → menhir, §1–§3), the
 expression precedence ladder (§4), blocks/statements/significant-newline
 semantics (§5), patterns/types — including the `PatRecord`/`PatAs`
-reachability finding — (§6–§7), and the core declaration forms — including
-the multi-head-`fn`-merge mechanism and the one-`mod`-per-file rule — (§8)
-are fully resolved and backed by a 27-program parse/reject conformance
-corpus wired into CI (`grammar-check`, see "Conformance corpus" below). The
-DSL-heavy declaration forms (actors, `app`, supervision, protocols,
-transitions, capability directives) are documented at a lighter,
-shape-plus-citation level in §9 — deliberately not fully resolved in this
-pass; see §9's own scope note. See "Known parser findings" below for the
-issues this chapter's corpus work surfaced along the way.
+reachability finding — (§6–§7), the core declaration forms — including
+the multi-head-`fn`-merge mechanism and the one-`mod`-per-file rule — (§8),
+and the DSL-heavy declaration forms (actors and their message handlers,
+`app`/`on_start`/`on_stop`, `supervise` trees, `protocol`/`choose` binary
+session types, `transitions`, and the capability directives `needs`/
+`proof cap`/the five `cap …` forms) in §9 are all fully resolved and backed
+by a 35-program parse/reject conformance corpus wired into CI
+(`grammar-check`, see "Conformance corpus" below). See "Known parser
+findings" below for the issues this chapter's corpus work surfaced along
+the way.
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter was built task-by-task from).
@@ -1978,28 +1979,26 @@ Parse error in declaration ``, pointing at the `pub` token, matching the
 plan's own prediction that this would be a generic rather than bespoke
 message.
 
-## 9. DSL appendix (lighter treatment)
+## 9. DSL declarations (actors, applications, supervision, protocols, transitions, capabilities)
 
-The remaining declaration forms are all **domain-specific sub-languages**
-layered on top of the same `decl`/token_filter machinery §1–§8 already
-describe in full — actors, applications, supervision trees, session-type
-protocols, capability manifests, and state-machine transitions. This
-section sketches each form's **shape** and cites its `parser.mly` rule so a
-reader can locate it, but — as the plan's Task 5 scope states explicitly —
-**does not** resolve every alternative, every error-recovery production, or
-every disambiguation rule the way §4–§8 do for the expression/pattern/type/
-core-declaration grammar. Treat this section as a map, not a full
-resolution: **`parser.mly` remains the authority for the exact grammar of
-every form below**, and fully resolving each one (in the same depth as
-§3.2's `choose…by` token_filter treatment, or §8.2's `group_fn_clauses`
-treatment) is explicitly out of scope for this pass — noted here as
-future-deepening work, not a gap being silently passed over.
+The declaration forms in this section are all **domain-specific
+sub-languages** layered on top of the same `decl`/token_filter machinery
+§1–§8 already describe in full — actors, applications, supervision trees,
+session-type protocols, capability manifests, and state-machine
+transitions. Each of §9.1–§9.6 below is resolved to the same depth §4–§8
+use for the expression/pattern/type/core-declaration grammar: every
+production, every soft-keyword/lookahead subtlety worth calling out, and a
+live `parser.mly` citation, backed by the parse/reject corpus programs
+listed under each subsection (see "Conformance corpus" below for the full
+index). **`parser.mly` remains the ultimate authority** — as with every
+earlier section, if a citation and the live source ever disagree, the
+source wins — but nothing below is left as a shape-only sketch.
 
 ### 9.1 `actor` — actor declarations and message handlers
 
 ```ebnf
 actor_decl ::= "actor" upper_name "do"
-                 "state" "{" field,* "}"
+                 "state" "{" field ("," field)* "}"
                  "init" expr
                  supervise_block?
                  actor_handler*
@@ -2009,12 +2008,51 @@ actor_handler ::= "on" upper_name "(" param,* ")" "do" block_body "end"
 ```
 
 (`actor_decl` at `parser.mly:490–505`; `actor_handler` at
-`parser.mly:601–604`.) An actor bundles a `state { field: Type, … }` shape,
-an `init` expression producing the initial state, an optional nested
-`supervise do … end` block (§9.3), and zero or more `on Msg(params) do …
-end` message handlers — each handler pattern-matches on one message
-constructor. `actor_decl` also has its own missing-`do` error alternative
-(`parser.mly:491–495`).
+`parser.mly:601–604`; `field` — shared with record-type bodies — at
+`parser.mly:974–978`; `param` at `parser.mly:980–989`.) An actor bundles a
+`state { field: Type, … }` shape and an `init` expression producing the
+initial state — **both are mandatory, not optional**: neither `STATE` nor
+`INIT` is wrapped in `option(...)` in `actor_decl`'s single success
+alternative, so an actor body that opens straight on an `on` handler with
+no `state`/`init` at all is a genuine parse-stage rejection (the `on`
+handler's leading `ON` token, itself only a keyword when not demoted —
+`ON` is one of the 13 soft keywords in `soft_lower_name`,
+`parser.mly:1353–1367`, §3.4 — cannot be shifted where `STATE` is
+expected, so menhir's generic fallback fires). Following the mandatory
+`state`/`init` pair comes an *optional* nested `supervise do … end` block
+(§9.3, `option(supervise_block)`) and zero or more `on Msg(params) do …
+end` message handlers, each pattern-matching on one message constructor
+via `param,*`'s reuse of `soft_lower_name` for parameter names — so a
+handler parameter may legally be named `state`, `on`, `loop`, etc. (the
+same soft-keyword set patterns/`let`-bindings elsewhere in the grammar
+already draw from). `actor_decl` also has its own missing-`do` error
+alternative (`parser.mly:491–495`): `` I was expecting `do` after the
+actor name here: ``.
+
+**Decorators are layered on at the `decl` level, not inside `actor_decl`
+itself.** `actor_decl`'s own rule has no production for `@compat:...`
+attributes or an `@invariant(...)` clause; those are separate `decl`
+alternatives that each parse a prefix (`nonempty_list(fn_attr)` and/or `AT;
+INVARIANT; LPAREN; expr; RPAREN`) before delegating to `d = actor_decl` and
+then post-processing the resulting `DActor` to fold the attribute/invariant
+in (`parser.mly:284–305`) — mirroring how `fn_attr`-prefixed `fn_decl`s work
+(`parser.mly:280–283`). This is a case where the grammar's own structure —
+decoration as a wrapper *around* a plain declaration, not a parameter *of*
+it — is only visible by reading `decl` itself, not `actor_decl` in
+isolation.
+
+Value-witnessed by
+[`parse/p18_actor_handler_supervise.march`](grammar/parse/p18_actor_handler_supervise.march):
+a `Worker` actor with one handler, supervised by a `Supervisor` actor's
+nested `supervise do … end` (§9.3). Running it (`spawn(Supervisor)` +
+`run_until_idle()` + `println(mailbox_size(sup))`) prints `0` — the
+supervisor's mailbox only drains if the nested child-spec grammar wired the
+`Worker worker` child through correctly. The missing-`state`/`init`
+rejection is confirmed live (not committed as a separate corpus program,
+since this pass's corpus adds one dedicated reject witness per DSL family
+rather than every error-recovery alternative): `actor NoState do on
+Ping() do 1 end end` is rejected with menhir's generic `I got stuck here`
+at the `on` token.
 
 ### 9.2 `app` / `on_start` / `on_stop` — application entry points
 
@@ -2027,10 +2065,40 @@ on_stop_block  ::= "on_stop"  "do" block_body "end"
 
 (`app_decl` at `parser.mly:513–526`; `on_start_block`/`on_stop_block` at
 `parser.mly:528–534`.) `app` is the OTP-style application root: an optional
-`on_start`/`on_stop` lifecycle-hook block, each guarded by its own
-`option(...)`, followed by an ordinary `block_body` (typically a
-`Supervisor.spec(...)` call wiring up the supervision tree, §9.3). Its own
-missing-`do` error alternative is at `parser.mly:514–518`.
+`on_start`/`on_stop` lifecycle-hook block, each independently guarded by
+its own `option(...)` (so `on_start` alone, `on_stop` alone, both, or
+neither are all valid — there is no requirement that one imply the other),
+followed by an ordinary `block_body` (typically a `Supervisor.spec(...)`
+call wiring up the supervision tree, §9.3). `ON_START`/`ON_STOP` are each
+their own fixed lexer keyword (`lexer.mll:75–76`) — unlike the DSL
+keywords covered by `soft_lower_name` (§3.4), neither demotes back to an
+ordinary identifier in any context, so `on_start`/`on_stop` cannot be used
+as variable or parameter names anywhere in a March program. `app_decl`'s
+own missing-`do` error alternative is at `parser.mly:514–518`: `` I was
+expecting `do` after the app name here: ``.
+
+**An `app` and a top-level `main()` cannot coexist in one module.** This is
+not a grammar-level restriction — both `app_decl` and `fn_decl` parse fine
+standalone and `decl` admits either — but a dedicated post-parse check
+(surfaced live as `` A module cannot define both `main()` and an `app`
+declaration. ``, naming both declarations' source lines) rejects a module
+declaring both, confirmed live while building this section's corpus
+program. This is a **typecheck-stage** rejection, not a parse-stage one
+(`march --check` still exits 1, but for the same reason `let?`-last-in-block
+is typecheck-stage per §5.4's `r05` — the grammar accepts the token
+sequence, a later pass rejects the combination), which is why it is noted
+here in prose rather than pinned as a `reject/` corpus program (this
+corpus isolates the *parser*, per the harness model in "Conformance
+corpus" below; a typecheck-stage rejection belongs to `specs/lang/types/`'s
+corpus instead, not this one).
+
+Value-witnessed by
+[`parse/p19_app_on_start_supervisor_spec.march`](grammar/parse/p19_app_on_start_supervisor_spec.march):
+an `on_start do 42 end` hook followed by a `Supervisor.spec(:one_for_one,
+[worker(Counter)])` body, with no `main()` in the same module. `--check`
+exits 0, and running it (non-`--check`) drains and exits cleanly rather
+than hanging, confirming the optional-hook-then-`block_body` shape both
+parses and evaluates as an application root.
 
 ### 9.3 `supervise` — supervision trees
 
@@ -2046,12 +2114,33 @@ supervise_child  ::= upper_name lower_name
 ```
 
 (`supervise_block` at `parser.mly:577–590`; `restart_strategy_tok` at
-`parser.mly:596–599`; `supervise_child` at `parser.mly:592–594`.) Nested
-inside an `actor_decl` (§9.1, as its optional `supervise_block?`), this
-names a fixed restart strategy, a restart-budget window
-(`max_restarts N within SECONDS`), and a list of `ChildActorType
-field_name` children supervised in that declared order (`sc_order`,
-`parser.mly:583, 587`).
+`parser.mly:596–599`; `supervise_child` at `parser.mly:592–594`.) Reachable
+in the grammar from exactly one place — `actor_decl`'s optional
+`supervise_block?` (§9.1) — this names a fixed restart strategy, a
+restart-budget window (`max_restarts N within SECONDS`), and a list of
+`ChildActorType field_name` children supervised in that declared order
+(`sc_order`, `parser.mly:583, 587`). **`strategy`/`STRATEGY` and
+`max_restarts`/`within` are mandatory, not optional**: none of `STRATEGY`,
+`MAX_RESTARTS`, or `WITHIN` is wrapped in `option(...)` in
+`supervise_block`'s single production, so a `supervise do … end` that
+opens straight on `max_restarts` (skipping `strategy`) has no valid
+derivation — `MAX_RESTARTS` cannot be shifted where `STRATEGY` is
+expected — and is a genuine parse-stage rejection. `restart_strategy_tok`
+is a closed enumeration of three fixed lexer keywords
+(`ONE_FOR_ONE`/`ONE_FOR_ALL`/`REST_FOR_ONE`, `lexer.mll:57–59`); there is
+no fourth strategy and no way to spell a custom one. `supervise_child` is
+just `upper_name lower_name` juxtaposition — no comma, no `:` — so
+`Worker worker` (child actor type, then the state-field name it is stored
+under) is the entire per-child syntax, with as many repeated as needed
+(`list(supervise_child)`, zero or more).
+
+Value-witnessed (jointly with §9.1) by
+[`parse/p18_actor_handler_supervise.march`](grammar/parse/p18_actor_handler_supervise.march).
+The missing-`strategy` rejection is the corpus's own dedicated witness:
+[`reject/r11_supervise_missing_strategy.march`](grammar/reject/r11_supervise_missing_strategy.march)
+— a `supervise do max_restarts 3 within 5 \n Worker worker end` with no
+leading `strategy one_for_one`. Captured live: `I got stuck here`, menhir's
+generic fallback (no bespoke "you forgot `strategy`" diagnostic exists).
 
 ### 9.4 `protocol` / `choose` — binary session types
 
@@ -2066,14 +2155,53 @@ choose_branch ::= "|"? lower_name "->" protocol_step*
 ```
 
 (`protocol_decl` at `parser.mly:615–617`; `protocol_step` at
-`parser.mly:619–625`; `choose_branch` at `parser.mly:627–629`.) A `protocol`
-declares a binary session type as a sequence of directed message steps
-(`Sender -> Receiver : PayloadType`), an optional `loop do … end` repeating
-sub-sequence, and a `choose by Chooser: label -> steps… | label -> steps…
-end` branch point (§3.2 already covers the `token_filter`-level half of
-disambiguating this `CHOOSE` from `Chan.choose(...)` application syntax;
-this is the corresponding grammar-level production, using the same
-`arm_sep` — `NL`/`PIPE` — §5.3 defines for `match`).
+`parser.mly:619–625`; `choose_branch` at `parser.mly:627–629`; `arm_sep` —
+shared verbatim with `match`'s arm separator, §5.3 — at
+`parser.mly:1275–1277`.) A `protocol` declares a binary session type as a
+sequence of directed message steps (`Sender -> Receiver : PayloadType`, the
+`: ty` payload annotation is **mandatory** — `protocol_step`'s first
+alternative has no `option(...)` around `COLON; t = ty`, so `Client ->
+Server` with nothing after it cannot complete the step and the following
+`END` is unexpected), an optional `loop do … end` repeating sub-sequence
+(itself recursing through zero or more `protocol_step`s, so a `loop` may
+be empty — `list(...)` permits zero — though the typechecker separately
+errors on an empty loop body per `test_compiler.ml`'s
+`test_protocol_empty_loop_error` case, a typecheck-stage concern outside
+this section's scope), and a `choose by Chooser: label -> steps… | label ->
+steps… end` branch point. `LOOP` — like `STATE`/`INIT`/`ON`/`PROTOCOL`/`APP`
+— is one of the 13 soft keywords in `soft_lower_name` (§3.4,
+`parser.mly:1353–1367`): outside a position where `protocol_step` is
+expected, `loop` demotes back to an ordinary identifier and may be used as
+a variable/parameter/field name, exactly as `state`/`init`/etc. can.
+
+
+
+**`choose`'s `CHOOSE`/`BY` tokens and its `arm_sep`-governed branch
+separator are exactly the grammar-level half of the disambiguation §3.2
+already documents at the `token_filter` level.** §3.2 explains how
+`token_filter` decides, one token of lookahead past `CHOOSE`, whether to
+push a `Match` context (the protocol-DSL `choose by …` form, no `DO`) or
+leave `CHOOSE` to flow through as an ordinary `expr_field`-chained
+application (`Chan.choose(...)`) — this section's `protocol_step`'s third
+alternative and `choose_branch` are the menhir productions that consume
+the token stream §3.2 sets up: the `Match` context pushed at `CHOOSE`
+(not at a `DO` — this form has none) is exactly what makes `arm_sep` (`NL`
+`|` `PIPE`, §3.3/§5.3) a legal separator between `choose_branch`es despite
+there being no enclosing `match`/`DO` pair. Each `choose_branch` optionally
+leads with a `PIPE` (`option(PIPE)`) — so the first branch may write
+either `label -> steps…` or `| label -> steps…`, both accepted identically
+(the same convention `match`'s own arm list already uses via
+`option(arm_sep)` before the first arm, §4.1).
+
+Value-witnessed by
+[`parse/p20_protocol_choose_session_type.march`](grammar/parse/p20_protocol_choose_session_type.march):
+a `Client -> Server : Int` step followed by a `choose by Server: ok -> …
+| err -> … end` branch point. `--check` exits 0 and the program still runs
+to completion. The missing-payload-type rejection is its own dedicated
+witness:
+[`reject/r13_protocol_step_missing_payload_type.march`](grammar/reject/r13_protocol_step_missing_payload_type.march)
+— `Client -> Server` with no `: PayloadType`. Captured live: `I got stuck
+here`.
 
 ### 9.5 `transitions` — compiler-enforced state-machine transitions
 
@@ -2085,15 +2213,36 @@ transition_arm ::= upper_name ":" upper_name "->" upper_name "via" lower_name
 
 (`transitions_decl` at `parser.mly:760–762`; `transition_arm` at
 `parser.mly:764–767`.) Each arm names a resource/handle type, a `From ->
-To` state pair, and the function (`via fn_name`) that performs that
-transition — used by March's linear-resource state-machine enforcement to
-check that a handle's state transitions only happen through the declared
-functions.
+To` state-tag pair, and the function (`via fn_name`) that performs that
+transition — grammar-wise a flat five-token sequence
+(`upper_name COLON upper_name ARROW upper_name VIA lower_name`) with no
+internal optionality or nesting at all; every one of `transitions_decl`'s
+and `transition_arm`'s tokens (`TRANSITIONS`, `VIA`) is a fixed hard
+keyword (`lexer.mll:87–88`), neither participating in `soft_lower_name`
+(§3.4) the way `STATE`/`INIT`/`ON`/`PROTOCOL`/`APP` do — so `via` and
+`transitions` are reserved everywhere in a March program, unlike those five
+DSL leaders. `transition_arm*` (`list(...)`) permits zero arms, same as
+`protocol_step*`'s `loop`; the typechecker (not this grammar) separately
+warns when a `transitions Handle do end` names a handle type that has
+`via`-eligible functions in scope but no declared arm covering them
+(`test_transitions_warn_undeclared` in `test_compiler.ml`), again a
+typecheck-stage concern.
+
+Value-witnessed by
+[`parse/p21_transitions_state_machine.march`](grammar/parse/p21_transitions_state_machine.march):
+a linear `Handle(s)` type with `tag Open`/`tag Closed` phantom states, a
+`via` function `open_conn : Handle(Closed) -> Handle(Open)`, and a
+`transitions Handle do ConnTag: Closed -> Open via open_conn end`
+declaration. Running it prints `1` — `open_conn`'s body only produces that
+value if the arm's `From`/`To`/`via` triple parsed in the order this
+section's production states (`resource : from -> to via fn`), matching
+`tr_resource`/`tr_from`/`tr_to`/`tr_via` field order in the constructed
+`transition` record.
 
 ### 9.6 Capability directives: `needs`, `proof cap`, and the five `cap …` forms
 
 ```ebnf
-needs_decl     ::= "needs" cap_path,+
+needs_decl     ::= "needs" cap_path ("," cap_path)*
 proof_cap_decl ::= "proof cap" upper_name
 cap_no_panic_decl      ::= "cap no_panic"
 cap_pure_decl          ::= "cap pure"
@@ -2108,26 +2257,52 @@ cap_path ::= upper_name ("." upper_name)*
 `proof_cap_decl` at `parser.mly:731–733`; the five `cap_*_decl` rules at
 `parser.mly:735–753`.) `needs IO.Network, IO.Clock` declares a module's
 required capability manifest as a comma-separated list of dotted
-capability paths. The five `cap …` forms and `proof cap` are each a
-**single fixed multi-word token** at the lexer level (§2.1 already notes
-`CAP_NO_PANIC`/`CAP_PURE`/`CAP_NO_EXTERN`/`CAP_DETERMINISTIC`/
-`CAP_NO_ALLOC` are matched as one lexer pattern each, whitespace baked in,
-`lexer.mll:175–180`) — so at the grammar level each is a trivial
-zero-argument declaration (`DOpts (["no_panic"], …)` etc., or `DProofCap
-(name, …)` for `proof cap SomeName`) that exists purely to record a
-module-level compiler-enforced option or a proof obligation; the
-interesting disambiguation work (telling `cap pure` the two-word directive
-apart from an identifier `cap` followed by an identifier `pure`) happens
-entirely in the lexer, not here.
+capability paths (`cap_path`, itself right-recursive on `DOT`, mirroring
+`upper_dot_path`'s shape used elsewhere for module paths, §8.1). `needs`,
+`proof`, and `cap` are each their own grammar-level declaration
+alternatives inside `decl` (`parser.mly:320–326`) — a module may combine
+any number of `needs`/`proof cap`/`cap …` directives with ordinary
+declarations, in any order, since each is just one more `decl`.
 
-**This section is intentionally not exhaustive.** None of §9.1–§9.6 states
-every error-recovery alternative, resolves every menhir precedence
-interaction, or value-witnesses every corpus claim the way §4–§8 do —
-sketching shape + citation is the deliberate scope boundary for this pass.
-Deepening any of these to §4–§8's resolution level (full EBNF, every
-error-recovery message captured live, dedicated parse/reject corpus
-programs per form) is future work, not implied to be already done by this
-appendix's existence.
+**The five `cap …` forms and `proof cap` are each a single fixed
+multi-word *lexer* token, not a `cap`/`proof` keyword followed by an
+ordinary argument identifier — the entire disambiguation happens before
+menhir ever sees a token.** §2.1 already notes
+`CAP_NO_PANIC`/`CAP_PURE`/`CAP_NO_EXTERN`/`CAP_DETERMINISTIC`/
+`CAP_NO_ALLOC`/`PROOFCAP` are matched as one fixed-string lexer pattern
+each, with the inter-word whitespace baked directly into the `.mll` rule
+(`lexer.mll:175–180`: `"cap" [' ' '\t']+ "no_panic"`, etc., and `"proof"
+[' ' '\t']+ "cap"`). The grammar-level consequence is that **`cap` is not
+itself a reserved word**: `cap` followed by anything other than one of
+those five exact trailing words does not match any of these lexer rules at
+all, so the ocamllex fallthrough (`lexer.mll:181–188`) classifies bare
+`cap` as an ordinary `LOWER_IDENT "cap"` — meaning `cap` remains usable as
+a variable/function/parameter name everywhere except immediately before
+one of the five fixed trailing words with only spaces/tabs between them. A
+module-level line reading `cap no_such_thing` therefore lexes as two
+unrelated `LOWER_IDENT`s (`cap`, `no_such_thing`), matches no `decl`
+alternative, and falls through to `decl_list_r`'s generic error-recovery
+rule (`parser.mly:265–267`) — a **parse-stage** rejection, not a "you
+misspelled the capability name" diagnostic, because as far as the grammar
+is concerned no capability-directive production was ever entered at all.
+
+At the grammar level, once lexed, each of the five `cap …` tokens and
+`proof cap NAME` is a trivial zero-argument (or single-`upper_name`-argument,
+for `proof cap`) declaration (`DOpts (["no_panic"], …)` etc., or `DProofCap
+(name, …)` for `proof cap SomeName`) that exists purely to record a
+module-level compiler-enforced option or a proof obligation; there is no
+further internal structure for menhir to resolve.
+
+Value-witnessed by
+[`parse/p22_capability_directives.march`](grammar/parse/p22_capability_directives.march):
+`needs IO.Network, IO.Clock` (a two-segment `cap_path` list), `proof cap
+Trusted`, and `cap no_panic` combined in one module guarding a
+division-free `add` function. `--check` exits 0 and the program prints
+`5`. The "`cap` is not a reserved word, so an unrecognized trailing word
+falls through to the generic declaration-error path" claim is its own
+dedicated witness:
+[`reject/r12_cap_unknown_directive.march`](grammar/reject/r12_cap_unknown_directive.march)
+— `cap no_such_thing`. Captured live: `` Parse error in declaration ``.
 
 ## Conformance corpus
 
@@ -2164,7 +2339,11 @@ placement rules; Task 4 added five more (`p12`–`p14`, `r07`–`r08`) anchoring
 (`p15`–`p17`, `r09`–`r10`) anchoring §8's multi-head-`fn`-merge,
 `interface`/`impl`, and generic-type/record-variant claims, plus the
 obsolete-`pub`-keyword and one-`mod`-per-file reachability/rejection
-findings — 27 programs total (17 `parse/`, 10 `reject/`) as of this pass.
+findings. A later pass (fully resolving §9's DSL declaration forms) added
+eight more (`p18`–`p22`, `r11`–`r13`) anchoring `actor`/`supervise`,
+`app`/`on_start`/`Supervisor.spec`, `protocol`/`choose`, `transitions`, and
+the capability-directive forms — 35 programs total (22 `parse/`, 13
+`reject/`) as of this pass.
 
 **CI-wired** as a separate slow lane, `grammar-check` (`test/dune`), mirroring
 the `types-check` alias `specs/lang/types/` already uses — not part of
