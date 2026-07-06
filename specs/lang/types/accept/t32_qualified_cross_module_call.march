@@ -1,0 +1,16 @@
+mod Main do
+  -- Operational witness (core-march.md §4.7, E-DMod): a nested module's
+  -- declared names are exported into the enclosing scope ONLY under the
+  -- qualified "Name.member" key -- never as a bare unqualified name. `A.double`
+  -- resolves because `A`'s own DMod export step re-prefixes its `own_names`
+  -- ("double") to "A.double" in Main's scope. A bare `double(21)` call site
+  -- (no qualification) would instead reject with "I cannot find `double`" --
+  -- see t33 below and core-march.md §4.7 for the paired bare-fails contrast.
+  mod A do
+    fn double(n : Int) : Int do n * 2 end
+  end
+
+  fn main() do
+    println(int_to_string(A.double(21)))
+  end
+end

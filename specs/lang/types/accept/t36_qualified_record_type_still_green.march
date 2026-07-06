@@ -1,0 +1,29 @@
+-- Re-verification (widening slice 2, Task 3) of the survey's A10 case: a
+-- module-qualified RECORD type (`Cfg.Site`) used in a cross-module annotation
+-- and a cross-module field-returning fn. The survey flagged this as "verify
+-- still green, don't assume a gap" after the `9001e4c0` qualified-type-path
+-- fix and, separately, after Task 1's `ex_public` gate for `ExFn`/`ExValue` --
+-- re-checked LIVE for this task: still exit 0, unaffected by either change
+-- (records flow through the SAME `surface_ty` canonicalization as ordinary
+-- named types, and `Site`/`default`/`site_title` are all PUBLIC here, so
+-- Task 1's gate does not apply). See also `test/whole_program/{cfg,app}.march`
+-- (the pre-existing MARCH_LIB_PATH cross-FILE variant of this exact case,
+-- `test/dune`'s "must not leak named-type placeholders" rule) -- this program
+-- pins the same behavior same-file, in this corpus, for `check_types.sh`.
+--
+-- Value-witnessed: prints `Site` (the record's `title` field, read back
+-- through a cross-module qualified annotation `s : Cfg.Site`).
+mod Main do
+  mod Cfg do
+    type Site = { title : String, url : String }
+    fn default() : Site do { title: "Site", url: "" } end
+    fn site_title(s : Site) : String do s.title end
+  end
+
+  fn use_site(s : Cfg.Site) : String do Cfg.site_title(s) end
+
+  fn main() do
+    let s = Cfg.default()
+    println(use_site(s))
+  end
+end

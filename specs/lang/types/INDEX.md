@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t30 accept, t01–t24 reject)
+# Typing corpus index (t01–t38 accept, t01–t27 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -21,6 +21,34 @@ interpreted, not only `--check`ing them.
 also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls
 dispatch through the identical rules as hand-written ones), same
 dual-purpose pattern as `t27`–`t28` above.
+
+**Note (`t32`–`t33`):** these anchor **operational** (module declaration,
+nesting, and name-resolution) rules in `core-march.md` §4.7, widening slice 2
+Task 2 — not typing rules in `core-march-types.md` (module VISIBILITY, the
+`core-march-types.md` counterpart, is Task 3's subject and rides `reject/t25`
++ `accept/t31` instead, from Task 1). Same dual-purpose pattern as `t27`–`t28`:
+ordinary well-typed programs for the `--check` half, with their expected
+printed VALUE re-verified by running them interpreted.
+
+**Note (`t34`–`t36`):** these anchor `core-march-types.md` §2.5 (widening
+slice 2, Task 3) — module visibility as a TYPING concept: the opaque-type
+asymmetry (`t34`, a second independent witness after Task 1's `t31`), the
+no-per-module-type-namespace design point (`t35`), and the A10
+qualified-record re-verification (`t36`). Same dual-purpose pattern as
+`t27`–`t28`: ordinary well-typed `--check` programs, each also run
+interpreted to confirm its printed value.
+
+**Note (`t37`–`t38`, `reject/t27`):** these anchor **operational**
+(`core-march.md` §4.7.1, widening slice 2 Task 4) `use`/`import`/`alias`
+selector rules and the file-based resolver pre-pass (`lib/resolver/
+resolver.ml`) — not typing rules in `core-march-types.md`, though
+`core-march-types.md` §2.5 gained a short cross-reference paragraph noting
+that `reject/t27`'s selective-`use`-of-a-private-name rejection is the same
+`pub_set` gate `reject/t26` exercises, one syntactic layer up. Same
+dual-purpose pattern as `t27`(types)–`t28`(types) above: `t37`/`t38` are
+ordinary well-typed `--check` programs, each also run interpreted to confirm
+its printed value; `reject/t27` follows the usual pinned-substring reject
+convention.
 
 ## The `--check` accept/reject harness model
 
@@ -46,7 +74,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 48/48 — 26 accept, 22
+Exit 0 iff every program behaves as declared (currently 65/65 — 38 accept, 27
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -80,6 +108,11 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t27`–`t28` | Widening slice 1, Task 3 (2026-07-06) | method-DISPATCH operational rules (`core-march.md` §4.4.2, not `core-march-types.md`): the four-name `impl_tbl` type-directed lookup for `Show`/`Eq`/`Ord`/`Hash`, and ordinary lexical `env`-binding dispatch for user-defined interfaces |
 | — | Widening slice 1, Task 4 (2026-07-06) | no new programs — coherence/overlap is a runtime interp-vs-compiled DIVERGENCE (`core-march.md` §4.4.3), which a single-`--check`-invocation harness cannot witness; documented in prose + filed in `specs/todos.md` instead |
 | `accept/t29`–`t30`, `reject/t23`–`t24` | Widening slice 1, Task 5 (2026-07-06) | `derive`/`satisfy` as `DImpl` GENERATORS (§2.4): the closed five-interface `derive` set + `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case, `satisfy`'s name-matching all-or-nothing wiring, and the filed `derive X for UnknownType` silent-no-op gap (§4.1 finding 17) |
+| `reject/t25` | Modules widening — same-file private-member diagnostic (2026-07-06, concurrent) | a same-file qualified reference to a PRIVATE nested-module member (`A.secret` where `secret` is `pfn`) is diagnosed as `` Function `secret` is private to module `A`. `` instead of the misleading `` Unknown module `A` `` (private members are never exported into `env.vars`; `env.local_mods` records them so `qualified_error_msg` recognizes the in-file module) |
+| `accept/t31`, `reject/t26` | Widening slice 2, Task 1 (2026-07-06) | cross-module **visibility fix** — `load_module_into_env`'s `ex_public` gate for `ExFn`/`ExValue` (a private `pfn`/value is no longer callable cross-module: `reject/t26` pins `is private to module \`Array\``); the ACCEPT side proves the gate is narrow — a PUBLIC cross-module call still resolves and the OPAQUE-TYPE pattern (a private `ptype`'s bare name usable in a cross-module annotation, `ExType`/`ExRecord` left ungated) still holds (`accept/t31`) |
+| `accept/t32`–`t33` | Widening slice 2, Task 2 (2026-07-06) | module declaration/nesting/name-resolution OPERATIONAL rules (`core-march.md` §4.7, not `core-march-types.md`): the `DMod` export mechanism (`own_names`, `"Name.member"` re-prefixing into the enclosing scope and the global `module_registry`), the bare-fails/qualified-works asymmetry, and the lexical-scoping nuance (a `pfn` nested inside `A` callable bare from a module nested inside `A`) |
+| `accept/t34`–`t36` | Widening slice 2, Task 3 (2026-07-06) | module visibility as a TYPING concept (§2.5): the opaque-type asymmetry re-verified with a second stdlib witness (`t34`, `ConsistentHash.HashRing`), the no-per-module-type-namespace design point value-witnessed (`t35`, `A.Foo`/`B.Foo` collision), and the A10 qualified-record case re-confirmed still green (`t36`, `Cfg.Site`); also files a real, precisely-traced gap found while probing live — `opaque type`'s constructor-hiding is not actually enforced against qualified construction (`prebind_mod_members`, `typecheck.ml:8032–8087`, registers the qualified ctor key ungated on `var_vis`) |
+| `accept/t37`–`t38`, `reject/t27` | Widening slice 2, Task 4 (2026-07-06) | `use`/`import`/`alias` selector rules and the file-based resolver pre-pass (`core-march.md` §4.7.1, not `core-march-types.md`): both `use A.*` (`t37`) and the selector form `use A.{name}` (`t38`) value-witnessed against a real stdlib module (`List`); the file-vs-in-file resolver distinction (`use A.*` against an in-file nested `mod A` rejects `` Module `A` not found ``, since the resolver looks for an actual `a.march` FILE); selective `use X.{name}` of a private stdlib fn (`reject/t27`, `Array.lst_rev`) rejects `` Module `Array` does not export `lst_rev`. `` — the same `pub_set` gate `reject/t26` exercises, confirmed consistent with Task 1's cross-module visibility fix |
 
 ## `accept/` — must typecheck
 
@@ -115,6 +148,14 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t28_derive_impl_tbl_dispatch` | **operational (`core-march.md` §4.4.2, E-Dispatch-Builtin)** — `derive Show, Eq for Color`; `show(Red)`/`Green == Green`/`Red == Blue` all dispatch through the runtime `impl_tbl` hashtable keyed `(iface, type_name)` on the argument's dynamic type | run-witnessed: prints `Red` / `true` / `false` |
 | `t29_derive_eq_show` | **(§2.4) `derive` as a `DImpl` generator** — `derive Eq, Show for Color` expands (desugar-time) into ordinary `impl Eq(Color)`/`impl Show(Color)` blocks, indistinguishable from hand-written ones; also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls dispatch through the SAME `impl_tbl` rule as §4.4.2) | run-witnessed: prints `Red` / `true` / `false` |
 | `t30_satisfy_wiring` | **(§2.4) `satisfy` as a `DImpl` generator** — `satisfy Named for Person` wires an EXISTING top-level `fn name` to `interface Named(a)`'s one method purely by name match, no `impl` block written | run-witnessed: prints `"Ada"` |
+| `t31_cross_module_public_and_opaque_ptype` | **module visibility — the ACCEPT side (slice 2, Task 1)** — a PUBLIC cross-module call (`Array.length(Array.empty())`) still resolves, AND a private `ptype`'s bare type NAME (`ConsistentHash.HashRing(String)`) is still usable as a cross-module param annotation (the opaque-type pattern; `ExType`/`ExRecord` left ungated). Witnesses the narrowness of the `ExFn`/`ExValue` gate that `reject/t25` exercises | run-witnessed: exit 0, `length(empty()) == 0` |
+| `t32_qualified_cross_module_call` | **module operational rules (`core-march.md` §4.7, E-DMod) — qualified cross-module resolution** — `A.double(21)`, a nested module's declared `fn` reached by full qualification from its sibling `Main`; witnesses the `own_names` export step (`eval.ml:8228–8271`) that re-prefixes `A`'s own names to `"A.member"` in the enclosing scope | run-witnessed: prints `42` |
+| `t33_nested_module_lexical_resolution` | **module operational rules (§4.7) — the lexical-scoping nuance** — `secret`, a `pfn` (private) declared inside `A`, is called BARE (unqualified) from `Inner`, a module nested directly inside `A`; privacy only gates cross-module qualified access (a typecheck-time concern), not lexical access from a directly-nested module | run-witnessed: prints `42` |
+| `t34_opaque_ptype_qualified_annotation` | **module visibility — the opaque-type asymmetry, second witness (§2.5, slice 2 Task 3)** — `ConsistentHash.HashRing(a)` (a private `ptype`) used as a cross-module param annotation (`ring_arity(_ring : ConsistentHash.HashRing(String))`); independent of `t31`'s `Array` witness, exercising the annotation directly rather than an otherwise-unused param | run-witnessed: prints `1` |
+| `t35_no_per_module_type_namespace` | **the no-per-module-type-namespace DESIGN POINT (§2.5)** — sibling modules `A`/`B` each declare their own `type Foo`; `take_a(x : A.Foo)` silently accepts a `B.Foo` value (`B.make()`) because types resolve by bare name only — no per-module type identity exists to keep them apart | run-witnessed: prints `7` |
+| `t36_qualified_record_type_still_green` | **A10 re-verification (§2.5)** — the survey's flagged-not-confirmed qualified-record case (`Cfg.Site`), same-file nested-module form; re-checked live after both `9001e4c0` and Task 1's visibility fix — no regression found | run-witnessed: prints `Site` |
+| `t37_use_all_stdlib_module` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — bulk `use A.*`** — `use List.*` rebinds `List`'s public names (including `append`, genuinely `List`-only, not shadowed by `prelude.march`) bare in `Main`'s scope; witnesses `UseAll`'s rebinding rule (`typecheck.ml:7275–7319`) and the resolver pre-pass locating a real stdlib file | run-witnessed: prints `3` |
+| `t38_use_selector_named_import` | **`use`/`import` operational rules (§4.7.1) — the selector form `use A.{name}`** — `use List.{append}` imports exactly the one named public fn; witnesses `UseNames`'s narrower, per-name rebinding rule (`typecheck.ml:7320–7337`) | run-witnessed: prints `3` |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -144,8 +185,11 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t22_impl_superclass_unsatisfied` | **(T-Impl) superclass discharge, unsatisfied** — `interface Greet(a) requires Speak(a)`, `impl Greet(Dog)` declared with no `impl Speak(Dog)` anywhere in scope — mandatory rejection, not a conditional gap | `` Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. `` |
 | `t23_derive_unknown_interface` | (§2.4) `derive` targets a CLOSED five-interface set — `derive Frobnicate for Color`, an interface name outside `{Eq, Show, Hash, Ord, Json}` | `` Unknown derive target `Frobnicate` for type `Color`. `` |
 | `t24_satisfy_missing_function` | (§2.4) `satisfy` all-or-nothing — `satisfy Named for Person` where no top-level `fn name` exists anywhere in the module | `` satisfy Named for Person: no function `name` found in scope. `` |
+| `t25_private_nested_member` | same-file qualified reference to a PRIVATE nested-module member — `mod A do pfn secret() … end` referenced as `A.secret()` from a sibling in the same file; the private member is never exported, but the diagnostic must name the real cause, not report the plainly-present module as absent | `` Function `secret` is private to module `A`. `` |
+| `t26_cross_module_private_fn` | **module visibility — the REJECT side (slice 2, Task 1)** — `Array.lst_rev(...)`, a real private `pfn` (stdlib/array.march:39), is no longer callable by qualification from unrelated code; `load_module_into_env`'s new `ex_public` gate for `ExFn`/`ExValue` makes the qualified lookup miss, so `qualified_error_msg` reports the private-access message (the same shape the `ExCtor` gate already produced for private constructors) | `` is private to module `Array` `` |
+| `t27_use_selector_private_name` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — selective `use` of a PRIVATE name** — `use Array.{lst_rev}`, a selective import of the same real private `pfn` `t26` exercises via plain qualification; `DUse`'s `UseNames` arm looks up `"Array.lst_rev"` in `env.vars`, misses (the SAME `pub_set` absence `t26` hits), and raises the "does not export" message rather than `t26`'s "is private to" message — different text, identical underlying gate, consistent with Task 1's fix | `` Module `Array` does not export `lst_rev`. `` |
 
-**Result: 54 / 54 (30 accept, 24 reject).**
+**Result: 65 / 65 (38 accept, 27 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

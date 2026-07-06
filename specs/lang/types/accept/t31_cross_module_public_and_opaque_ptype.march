@@ -1,0 +1,27 @@
+-- The ACCEPT side of the visibility fix (2026-07-06). Two things the
+-- `load_module_into_env` `ex_public` gate deliberately keeps working, proving
+-- the gate is narrow (private FUNCTIONS/VALUES only), not a blanket module wall:
+--
+--   1. A PUBLIC cross-module call still resolves. `Array.empty` / `Array.length`
+--      are public `fn`s — reaching them by qualification from unrelated code is
+--      correct and stays exit 0. (Value-witnessed: `length(empty()) == 0`.)
+--
+--   2. The OPAQUE-TYPE pattern still holds: a private `ptype`'s bare TYPE NAME
+--      stays nominally referenceable across modules even though its CONSTRUCTOR
+--      and its private functions are hidden. `ConsistentHash.HashRing(a)` is a
+--      private `ptype` (stdlib/consistent_hash.march:19), yet it is legitimately
+--      usable as a param annotation here — exactly as `stdlib/work_dispatch.march`
+--      annotates a public param with it. This is why `ExType`/`ExRecord` stay
+--      UNGATED by the fix (only `ExFn`/`ExValue` are gated). See reject/t25 for
+--      the REJECT side (a private `pfn` is not callable cross-module).
+mod Main do
+  -- Opaque-ptype cross-module annotation: the bare type NAME resolves even
+  -- though the type is private in its declaring module (constructor hidden).
+  fn ring_arity(_ring : ConsistentHash.HashRing(String)) : Int do 1 end
+
+  fn main() : Int do
+    let v = Array.empty()
+    let n = Array.length(v)   -- public cross-module call, resolves to 0
+    n
+  end
+end

@@ -528,6 +528,15 @@ type env = {
       [needs IO.Console] for its *handlers* must not be falsely flagged just
       because the module-wide merge would attribute that cap to it too.
       Read via [fn_own_capability_closures]. *)
+  local_mods : string list StrMap.t;
+  (** In-file nested modules → their PRIVATE value/function member names.
+      Populated by the [Ast.DMod] export step.  A same-file qualified reference
+      to a private member (e.g. `A.secret` where `secret` is a [pfn]) never gets
+      an "A.secret" key in [vars] (only public members are exported), so the
+      registry-based [qualified_error_msg] would misreport "Unknown module `A`"
+      for a module that plainly exists in this file.  This lets that path
+      recognize the member is merely private and emit the accurate
+      "Function `secret` is private to module `A`." instead. *)
 }
 
 let make_env errors type_map = {
@@ -550,6 +559,7 @@ let make_env errors type_map = {
   deterministic_mod = false;
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
+  local_mods = StrMap.empty;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -660,7 +670,18 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
     let qname = mod_name ^ "." ^ entry.ex_name in
     match entry.ex_kind with
     | ExFn | ExValue ->
-      if StrMap.mem qname env.vars then env
+      (* Visibility gate (mirrors the [ExCtor] arm below): a private [pfn] /
+         private [let] is NOT importable across modules. Skipping the binding
+         here (rather than adding it) lets the later [lookup_var] miss fall
+         through to [qualified_error_msg], which detects [not e.ex_public] and
+         reports "<name> is private to module `<mod>`." — the same message the
+         [ExCtor] path already produces for private constructors.
+         [ExType]/[ExRecord] stay UNGATED on purpose: March uses the opaque-type
+         pattern, where a private [ptype]'s bare NAME stays referenceable across
+         modules (e.g. `ConsistentHash.HashRing(String)` on a public param) while
+         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below. *)
+      if not entry.ex_public then env
+      else if StrMap.mem qname env.vars then env
       else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
     | ExType arity ->
       if StrMap.mem qname env.types then env
@@ -747,9 +768,18 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   !best
 
 (** Produce an error message for a qualified name that failed to resolve. *)
-let qualified_error_msg (name : string) : string =
+let qualified_error_msg (name : string) (env : env) : string =
   match split_qualified name with
   | None -> Printf.sprintf "I cannot find `%s`." name
+  | Some (mod_name, member)
+    when (match StrMap.find_opt mod_name env.local_mods with
+          | Some priv -> List.mem member priv
+          | None -> false) ->
+    (* An in-file nested module `mod_name` declares `member` privately (`pfn` /
+       private `let`).  Private members are never exported into [env.vars], so
+       the registry lookup below would misreport "Unknown module" for a module
+       that plainly exists in this file.  Report the real cause instead. *)
+    Printf.sprintf "Function `%s` is private to module `%s`." member mod_name
   | Some (mod_name, member) ->
     match March_modules.Module_registry.ensure_loaded mod_name with
     | None ->
@@ -2289,7 +2319,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | _, Some a -> a
         | _ ->
           Err.error env.errors ~span:name.span
-            (qualified_error_msg name.txt);
+            (qualified_error_msg name.txt env);
           0
     in
     (* March uses a single global type namespace: a type declared inside a
@@ -2705,7 +2735,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let candidates = suggest_ctors name.txt env in
        let hint =
          if candidates = [] then
-           qualified_error_msg name.txt
+           qualified_error_msg name.txt env
          else
            let lines = List.map (fun (k, ty) ->
                Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -3358,7 +3388,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             | None ->
               let msg =
                 if String.contains name.txt '.' then
-                  qualified_error_msg name.txt
+                  qualified_error_msg name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
                   match suggest_var_in_scope name.txt env with
@@ -3837,7 +3867,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          let candidates = suggest_ctors name.txt env in
          let hint =
            if candidates = [] then
-             qualified_error_msg name.txt
+             qualified_error_msg name.txt env
            else
              let lines = List.map (fun (k, ty) ->
                  Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -6830,6 +6860,19 @@ let rec check_decl env (d : Ast.decl) : env =
         | _ -> None
       ) decls
     in
+    (* Private value/function members of this module (declared but not exported).
+       Recorded in [env.local_mods] under the module's name so a same-file
+       qualified reference to one (e.g. `A.secret` where `secret` is a `pfn`)
+       is diagnosed as "private to module `A`" instead of the misleading
+       "Unknown module `A`" (see [qualified_error_msg]). *)
+    let priv_members =
+      List.filter_map (function
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Private -> Some def.fn_name.txt
+        | Ast.DLet (Ast.Private, b, _) ->
+          (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+        | _ -> None
+      ) decls
+    in
     (* Check conformance against any matching sig declaration (Phase 2) *)
     let opaque_types =
       match List.assoc_opt name.txt env.sigs with
@@ -6963,7 +7006,10 @@ let rec check_decl env (d : Ast.decl) : env =
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
       proof_caps = inner_env.proof_caps;
       always_linear_types = inner_env.always_linear_types;
-      no_panic_modules = no_panic_modules' }
+      no_panic_modules = no_panic_modules';
+      local_mods =
+        (if priv_members = [] then env'.local_mods
+         else StrMap.add name.txt priv_members env'.local_mods) }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
