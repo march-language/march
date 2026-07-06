@@ -1,0 +1,22 @@
+mod M do
+  -- (T-Impl) baseline: a user-declared interface with one method, and an
+  -- impl for a concrete type providing exactly that method. `speak(Dog(...))`
+  -- resolves through the bare-name scheme `DInterface` bound in env.vars.
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(name) -> name
+      end
+    end
+  end
+
+  fn main() do
+    println(speak(Dog("Rex")))
+  end
+end

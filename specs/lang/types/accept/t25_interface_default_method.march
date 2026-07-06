@@ -1,0 +1,29 @@
+mod M do
+  -- Default methods (`md_default`): an interface method may carry a default
+  -- body. An impl that OMITS such a method is NOT a missing-method error —
+  -- desugar's `inject_defaults` (desugar.ml:897) synthesises a zero-param
+  -- clause wrapping the default expression and splices it into the impl
+  -- BEFORE typecheck ever sees it, so `check_decl`'s missing-method check
+  -- (typecheck.ml:7150) never fires for `greeting`. The default expression's
+  -- type is the METHOD'S FULL ARROW TYPE (`a -> Int`, not just `Int`), so the
+  -- default body itself must be a lambda over the interface's self parameter.
+  -- `greeting(Cat("Tom"))` witnesses the default (42) actually running.
+  interface Greeter(a) do
+    fn name : a -> String
+    fn greeting : a -> Int do fn self -> 42 end
+  end
+
+  type Cat = Cat(String)
+
+  impl Greeter(Cat) do
+    fn name(self) do
+      match self do
+        Cat(n) -> n
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(greeting(Cat("Tom"))))
+  end
+end

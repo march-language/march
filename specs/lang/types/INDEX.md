@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t22 accept, t01–t17 reject)
+# Typing corpus index (t01–t25 accept, t01–t21 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -31,7 +31,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 39/39 — 22 accept, 17
+Exit 0 iff every program behaves as declared (currently 46/46 — 25 accept, 21
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -60,6 +60,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t18`–`t20`, `reject/t13`–`t15` | Task 6 | interface-constraint model (T-Discharge, §2.1/§2.1a/§2.1b), boolean primitives |
 | — | Task 7 | no new programs — consolidation + this INDEX + CI wiring only |
 | `accept/t21`–`t22`, `reject/t16`–`t17` | Typechecker fixes (2026-07-05) | witnesses for findings 16 (`f0f5299c`, let-annotation enforcement), 15 (`8cbd6dd2`, generic `when`-constraint re-check), and 13 (`7e40dc5b`, ELetFn diagnostic dedup — pins `reject/t12` at one diagnostic, no new program) |
+| `accept/t23`–`t25`, `reject/t18`–`t21` | Widening slice 1, Task 1 (2026-07-06) | user-defined `interface`/`impl` DECLARATION checking (§2.3: `(T-Interface)` registration, `(T-Impl)`'s ordered checks — missing/extra-method, signature-match, unknown-interface — and default methods) |
 
 ## `accept/` — must typecheck
 
@@ -87,6 +88,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t20_bool_ops` | (δT-And, δT-Or, δT-Not) — `&&`/`\|\|`/`not` over `Bool`-typed comparisons | |
 | `t21_let_annot_ok` | **(T-Let annotation, finding 16 fix)** — a correct `let x : Int = 5` and a polymorphic RHS bound at a more specific instance (`let f : (Int) -> Int = fn n -> n`) both typecheck | |
 | `t22_generic_when_constraint_satisfied` | **(T-Discharge via instantiate, finding 15 fix)** — a generic `when Ord(a)`/`when Eq(a)` bound SATISFIED at the call site (Int/String) still typechecks | |
+| `t23_interface_impl_basic` | (T-Interface), (T-Impl) — a minimal user-declared `interface Speak(a) do fn speak : a -> String end` + `impl Speak(Dog)` providing exactly `speak` | run-witnessed: prints `"Rex"` |
+| `t24_interface_impl_generic_head` | (T-Impl), `impl_matches_ty` wildcard semantics — a generic/parameterized impl head `impl Describe(Box(a))`, used at both `Box(Int)` and `Box(String)` | |
+| `t25_interface_default_method` | **(T-Impl) default methods** — an interface method with a default body, omitted by the impl; `inject_defaults` (desugar) splices the default in before typecheck ever sees the impl, so no missing-method error fires | run-witnessed: `greeting(Cat("Tom"))` prints `42` (the default, not a value the impl ever defined) |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -109,8 +113,12 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t15_and_non_bool_operand` | (δT-And) — `1 && true`, an `Int` operand against `&&`'s fixed `Bool → Bool → Bool` | `March does not coerce Int to Bool` |
 | `t16_let_annot_mismatch` | **(T-Let annotation, finding 16 fix)** — `let x : Int = "foo"` now rejects (the annotation is a checking context for the RHS) | `` expected `Int` but got `String`. `` |
 | `t17_generic_when_constraint_unsatisfied` | **(T-Discharge via instantiate, finding 15 fix)** — `same(Rood, Rood)` with `fn same(a, b) when Eq(a)` on a no-`Eq` ADT now rejects | `` `Hue` does not implement interface `Eq`. `` |
+| `t18_impl_missing_method` | (T-Impl) missing required method — an interface with two methods, an impl providing only one (no default on the omitted one) | `` Missing method `greet` in `impl Speak(Dog)`. `` |
+| `t19_impl_extra_method` | (T-Impl) extra undeclared method — an impl provides a method the interface never listed | `` Interface `Speak` does not declare a method `bark`. `` |
+| `t20_impl_signature_mismatch` | (T-Impl) signature-match — a provided method's inferred body type disagrees with the interface's declared signature | `` `speak` in `impl Speak` must match the interface signature `` |
+| `t21_impl_unknown_interface` | (T-Impl) interface-existence — `impl` of an interface name never declared with `interface` | `` Unknown interface `NotDeclared` — is it declared above this impl? `` |
 
-**Result: 39 / 39 (22 accept, 17 reject).**
+**Result: 46 / 46 (25 accept, 21 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
@@ -139,6 +147,25 @@ from the repo root) or as part of the CI workflow's dedicated step.
   program under this harness — `accept/t14_nonexhaustive_match_still_
   typechecks` is the (correct) witness that this is so. See
   `core-march-types.md` §2 "Exhaustiveness and redundancy" and §4.1 finding 9.
+- **No `reject/` program for a duplicate `interface` declaration or an
+  interface method that never mentions its own type parameter.** Both are
+  real gaps in the `(T-Interface)` arm (§2.3): a second `interface Speak(a)`
+  in the same module silently replaces the first in `env.interfaces`
+  (ordinary `StrMap.add`, no "already declared" check), and a method signature
+  like `fn bar : Int -> Int` inside `interface Foo(a) do ... end` — which never
+  uses `a` at all — still typechecks with `CInterface(Foo, a)` attached to an
+  otherwise-free variable. Neither is committed as a corpus program: both are
+  narrow, low-value-to-pin edge cases (flagged, not fixed, in this task) rather
+  than confirmed regressions worth a dedicated `reject/` witness. See
+  `core-march-types.md` §2.3.
+- **No coherence/overlap corpus entry here.** Two impls of the same interface
+  for the same type both typecheck with no diagnostic (`env.impls`'s
+  "insert-only, search by structural match" registration shape, §2.3 item 1) —
+  this is a genuine divergence between the interpreter and compiled backends
+  at RUNTIME, not a `--check`-time accept/reject distinction, so it cannot be
+  encoded in this harness at all (a `--check` program cannot witness an
+  interp-vs-compiled split). Documented and filed as its own task's subject
+  (`core-march.md`'s dispatch/coherence section, `specs/todos.md`).
 
 ## Why not `@oracle`? (the harness-model difference from the golden corpus)
 

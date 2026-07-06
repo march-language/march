@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: Interface `Speak` does not declare a method `bark`.
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(name) -> name
+      end
+    end
+    fn bark(self) do
+      "Woof"
+    end
+  end
+
+  fn main() do
+    println(speak(Dog("Rex")))
+  end
+end

@@ -41,11 +41,19 @@ diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
 
-**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): user-defined
-`impl`/interface DECLARATION syntax and superclass/coherence rules beyond the
-four built-in interfaces (this document covers how a `Num`/`Eq`/`Ord`/`Show`
-constraint is DISCHARGED against the built-in seed table, not the full
-generality of user-declared interfaces — see §2.1a's scope note), refinements
+**Widening slice (2026-07-06):** §2.3 extends the built-in-only constraint
+material above with user-defined **`interface`/`impl` DECLARATION checking**
+itself — what makes an `interface Iface(a) do ... end` or `impl Iface(T) do
+... end` well-formed, as opposed to how a `Num`/`Eq`/`Ord`/`Show` constraint is
+*discharged* against the built-in seed table (§2.1a, unchanged). Superclass/
+`when`-clause discharge, the `impl_matches_ty` structural-match judgment named
+in its own right, and the coherence/overlap story are a separate, later task
+in the same widening effort — cross-referenced from §2.3, not detailed there.
+
+**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): coherence/
+overlap resolution between impls (no rejection of overlapping impls exists;
+§2.3 notes the registration shape that causes this but the interpreter/
+compiled-backend divergence itself is a separate task's subject), refinements
 (z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6 for
 the full deferred-set breakdown and its roadmap citations.
 
@@ -1106,6 +1114,200 @@ sides go through `instantiate_ctor` against the same `ctor_info`.
            --   whatever the branch body later does with it.
 ```
 
+### 2.3 Interface & impl declarations: `(T-Interface)` and `(T-Impl)`
+
+§2.1a documented how a `Num`/`Eq`/`Ord`/`Show` **constraint is discharged**
+against a seed table of built-in instances. This subsection documents the
+other half: what the typechecker validates when a program itself **declares**
+a user-defined `interface Iface(a) do ... end` and writes an
+`impl Iface(T) do ... end` for it. Cited to `typecheck.ml`'s `DInterface` and
+`DImpl` arms of `check_decl`, re-grepped live against this worktree.
+
+**`(T-Interface)` — interface declaration is pure registration.**
+
+```
+(T-Interface)  Γ' = Γ[interfaces := interfaces[iface_name ↦ idef]]        typecheck.ml:7045–7050
+               ∀ m ∈ idef.iface_methods:
+                 a fresh (at level+1)                                    typecheck.ml:7053
+                 τ_m = surface_ty(m.md_ty)  with iface_param ↦ a         typecheck.ml:7054–7055
+                 σ_m = generalize(level, τ_m), THEN prepend
+                       CInterface(iface_name, a) to its constraint list   typecheck.ml:7060–7067
+                 Γ'' = Γ'[m.md_name ↦ σ_m][iface_name^"."^m.md_name ↦ σ_m]  typecheck.ml:7068–7072
+               ──────────────────────────────────────────────────────────
+               Γ ⊢ DInterface(idef) ⇒ Γ''                                  typecheck.ml:7045–7073
+```
+
+Every interface method is bound as a scheme `∀a [CInterface(iface,a)]. τ`
+**twice**: once under its bare name (`speak`) and once under the
+interface-qualified name (`Speak.speak`) — the qualified binding is what makes
+`Iface.method(x)` call syntax resolve (the `EField`-as-module-path lookup
+path). Occurrences of either name later push a fresh `CInterface(iface, τ)`
+obligation onto `env.pending_constraints` at the ordinary T-Var/`instantiate`
+site (§1) — a `DInterface`'s own method schemes are constructed exactly like
+`show`/`eq`/`compare`/`hash`'s built-in schemes (§2.1's `mk_iface_method_scheme`
+shape), just built per-declaration instead of once at `base_env` time.
+
+**Almost nothing is rejectable at the interface declaration itself.** There is
+no check that a method's declared type actually mentions the interface's own
+type parameter `a` (an interface method signature that never uses `a` still
+typechecks, with the `CInterface` constraint simply attached to a fresh,
+otherwise-unconstrained variable) and no rejection of a duplicate interface
+name in the same module (a second `interface Speak(a) do ... end` just calls
+`StrMap.add` again, silently replacing the first entry in `env.interfaces` —
+consistent with `env.impls`'s "insert, never check" registration shape,
+confirmed for impls below). `DInterface` is registration, not validation.
+
+**Two pre-pass duplicates exist for cross-module declaration ordering.**
+`prebind_interface_decl` (typecheck.ml:5050–5087) reconstructs the identical
+scheme-building logic as a pass-1 walk (called from `check_module_core`/
+`check_module_with_env`'s first pass, typecheck.ml:8072, 8272, and from
+`check_decl`'s own `DMod`/top-level pass-1 prebind, :8146–8147, 8337–8338) so
+that a **sibling module checked before the interface's own defining module**
+can still see `Iface`, `Iface.method`, and the bare `method` name — the doc
+comment at typecheck.ml:5042–5049 ties this directly to a real, previously-
+fixed LSP bug (per-file analysis hiding sibling-module interfaces). It is not
+shared code with the full `DInterface` arm (a deliberate duplication, not a
+refactor gap) for the same reason `register_impl_shape` (below) duplicates
+`DImpl`'s registration step: pass-1 must run with a still-incomplete
+environment, so it cannot simply call the pass-2 function.
+
+**`(T-Impl)` — the ordered checks of an impl declaration.** `Ast.DImpl`'s arm
+(typecheck.ml:7075–7210) runs, in order:
+
+```
+(T-Impl)  τ_impl = surface_ty(idef.impl_ty)  sharing tvars with `when` clause   typecheck.ml:7078–7079
+          Γ₁ = Γ[impls := impls[iface ↦ τ_impl :: impls[iface]]]                typecheck.ml:7081–7084
+          -- (2) each `when C(T)` clause discharged against Γ₁.impls           typecheck.ml:7086–7103  (Task 2)
+          -- (3) each `requires Super(T)` superclass discharged against Γ₁.impls  typecheck.ml:7118–7143 (Task 2)
+          idef.impl_iface ∈ dom(Γ.interfaces)  (or a "Json*"-prefixed pseudo-iface)  typecheck.ml:7105–7117
+          ∀ iface_m ∈ interface.iface_methods:
+            iface_m.md_name ∈ names(idef.impl_methods)  ∨  iface_m.md_default ≠ None  typecheck.ml:7144–7157
+          ∀ (mname, def) ∈ idef.impl_methods:
+            mname ∈ names(interface.iface_methods)                             typecheck.ml:7158–7165
+          ∀ (mname, def) ∈ idef.impl_methods:
+            expected_τ = surface_ty(iface_method.md_ty)  with iface_param ↦ τ_impl  typecheck.ml:7168–7172
+            actual_τ   = instantiate(check_fn(def))     (or check_expr directly
+                          for an injected zero-param default body)              typecheck.ml:7176–7189
+            unify(actual_τ, expected_τ)
+          discharge_constraints(Γ₁)                                             typecheck.ml:7205, 7208
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ DImpl(idef) ⇒ Γ₁
+```
+
+Steps (2) superclass/`when` discharge are Task 2's subject (forward-referenced
+here, not detailed); this section covers steps (1) and (4)–(7): impl-head
+instantiation and registration, interface existence, missing-method, extra-
+method, and signature-match — plus the final `discharge_constraints` call
+every declaration arm makes (§2.1a).
+
+1. **Instantiate the impl head, then register — unconditionally, no dedup, no
+   uniqueness check.** `env.impls : ty list StrMap.t` is keyed only by
+   interface name; the value is a **list** of impl head types, and
+   registration is always `inst_ty :: existing_list` (typecheck.ml:7081–7084).
+   There is no "is this type already present" lookup anywhere in this step —
+   `env.impls` is built to be *searched* (via `impl_matches_ty`, a structural,
+   non-unifying, wildcard-tolerant shape match — its own named rule,
+   `(T-ImplMatch)`, is Task 2's subject) rather than *inserted into with a
+   conflict check*. This is why two impls of the same interface for the same
+   type both typecheck with no diagnostic at all (a genuine coherence gap;
+   Task 4 documents and files it as a divergence, not fixed here).
+2. **Interface existence** (typecheck.ml:7105–7117): `idef.impl_iface` must be
+   a key of `env.interfaces`, UNLESS its name starts with `"Json"` — `derive`'s
+   `JsonTo`/`JsonFrom` pseudo-interfaces are deliberately never registered in
+   `env.interfaces` and take a separate, lighter validation path (method
+   bodies are still typechecked, but not against a declared signature; see
+   the `derive`/`satisfy` task for the full story). Live-captured message
+   (`reject/t21_impl_unknown_interface`):
+   ```
+   Unknown interface `NotDeclared` — is it declared above this impl?
+   ```
+3. **No missing required method** (typecheck.ml:7144–7157): every
+   `interface.iface_methods` entry must be either present by name in
+   `idef.impl_methods`, or carry `md_default <> None` (see below). Live
+   message (`reject/t18_impl_missing_method`):
+   ```
+   Missing method `greet` in `impl Speak(Dog)`.
+   Interface `Speak` requires this method to be implemented.
+   ```
+4. **No extra undeclared method** (typecheck.ml:7158–7165): every method the
+   impl provides must match some `iface_m.md_name` — an impl cannot add
+   methods the interface never declared. Live message
+   (`reject/t19_impl_extra_method`):
+   ```
+   Interface `Speak` does not declare a method `bark`.
+   ```
+   This check applies even to the four built-in dispatched interfaces: a
+   hand-written `impl Eq(T) do ... end` with an extra `neq` method is rejected
+   here too, since `Eq`'s `builtin_interfaces` shape only declares `eq`
+   (cross-referenced by the dispatch-operational task — this static rejection
+   is what makes a defensive dispatch-key-collision guard on the `eval.ml`
+   side unreachable for the four built-ins today).
+5. **Signature match — `impl_matches_ty` for the impl HEAD, ordinary `unify`
+   for each METHOD** (typecheck.ml:7166–7189): for each provided method, the
+   interface's declared signature is instantiated by substituting the
+   interface's type parameter with the impl's own concrete head type
+   (`expected_ty`, :7168–7172), then the method body's actual type — from
+   `check_fn` + `instantiate`, or from `check_expr` directly for an
+   already-zero-param default body (see below) — is `unify`'d against it. Live
+   message (`reject/t20_impl_signature_mismatch`):
+   ```
+   `speak` in `impl Speak` must match the interface signature
+   ```
+   (the full diagnostic also carries the ordinary `expected \`String\` but got
+   \`Int\`.` unify-mismatch headline above this note, per `report_mismatch`'s
+   usual shape, §2.1a).
+
+**Default methods (`md_default`) — an impl that omits one is not an error.**
+An interface method may carry a default body:
+`interface Foo(a) do fn bar : a -> Int do fn self -> 42 end end`. If an impl
+of `Foo` omits `bar`, step 3 above is a no-op for it (`md_default <> None`), so
+no "missing method" diagnostic fires. Mechanically, this is NOT a fallback
+inside `check_decl`'s own missing-method check — desugar's `inject_defaults`
+(`lib/desugar/desugar.ml:897–931`) runs BEFORE typecheck ever sees the `DImpl`
+and **splices a synthesized method into `idef.impl_methods`** for every
+interface method the impl omits that has a default: it wraps the default
+expression in a single zero-parameter `fn_clauses` clause
+(`fc_params = []`, desugar.ml:918–923) and appends it to the impl's method
+list. By the time `check_decl`'s `DImpl` arm runs, the impl already "has" the
+method — the missing-method check simply never sees it as absent, and the
+signature-match step (item 5 above) type-checks the injected zero-param clause
+directly via `check_expr` against `expected_ty` (typecheck.ml:7176–7182), the
+same branch a hand-provided method would only take if it, too, happened to be
+a zero-param clause.
+
+One consequence worth calling out because it is easy to get wrong writing a
+default body: **the default expression's type is the method's FULL ARROW
+TYPE** (`a -> Int` in the example above), not the return type after applying
+`self` — because the zero-param clause's body IS the default expression
+verbatim (desugar.ml:921, `fc_body = desugar_expr default_expr`), so
+`expected_ty` (the whole instantiated method type) is checked directly against
+it. A default body that is just a bare value (`do 42 end`) fails to typecheck
+with an arrow-vs-concrete-type mismatch; the default body must itself be a
+value of the arrow type — ordinarily a lambda over the interface's own
+parameter (`fn self -> 42`). Confirmed live: `accept/t25_interface_default_method`
+declares `fn greeting : a -> Int do fn self -> 42 end`, an impl that provides
+only `name` (omitting `greeting`), and `println(int_to_string(greeting(Cat("Tom"))))`
+both typechecks (`--check` exit 0) and RUNS to print `42` — the default,
+not a value from the impl (which never defined `greeting` at all).
+
+**Corpus:**
+
+- `accept/t23_interface_impl_basic` — a minimal `interface Speak(a) do fn
+  speak : a -> String end` + `impl Speak(Dog)` providing exactly `speak`;
+  typechecks and (run) prints `"Rex"`.
+- `accept/t24_interface_impl_generic_head` — `impl Describe(Box(a))`, a
+  parameterized/generic impl head, used at both `Box(Int)` and `Box(String)`
+  (witnesses `impl_matches_ty`'s wildcard treatment of the impl's own free
+  type variable, named as `(T-ImplMatch)` and detailed in Task 2).
+- `accept/t25_interface_default_method` — the default-method witness above.
+- `reject/t18_impl_missing_method` — a required, non-default method omitted.
+- `reject/t19_impl_extra_method` — an impl method the interface never
+  declared.
+- `reject/t20_impl_signature_mismatch` — a provided method whose inferred
+  body type disagrees with the interface's declared signature.
+- `reject/t21_impl_unknown_interface` — `impl` of an interface name that was
+  never declared.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -1671,15 +1873,18 @@ operationally). What is explicitly OUT of scope for this document, and where
 each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
 
 - **User-defined `impl`/interface DECLARATION syntax, beyond the four
-  built-ins.** §2.1a/§2.1b document how a `Num`/`Eq`/`Ord`/`Show` CONSTRAINT is
-  discharged against the seed table (`builtin_impls`, `builtin_interfaces`) —
-  not the general `impl Iface(T) do ... end` declaration-checking machinery
-  itself (method-signature validation, coherence/overlap rules), nor
-  superclass bounds across multiple interfaces. Roadmap: an extension of
-  Phase 2 (§4.3's "declarative typing rules... extracted from `typecheck.ml`'s
-  algorithm") — the natural next widening slice after this one (see the
-  now-superseded "Next" prose two paragraphs above, kept as historical
-  provenance).
+  built-ins — PARTIALLY LANDED (§2.3, 2026-07-06).** §2.1a/§2.1b document how a
+  `Num`/`Eq`/`Ord`/`Show` CONSTRAINT is discharged against the seed table
+  (`builtin_impls`, `builtin_interfaces`); §2.3 now covers the general
+  `interface`/`impl` declaration-checking machinery itself — registration,
+  missing/extra-method rejection, signature-match, and default methods. NOT
+  yet covered by this document: superclass/`when`-clause discharge as its own
+  named rule, the `impl_matches_ty` structural-match judgment `(T-ImplMatch)`,
+  and coherence/overlap rules (no rejection of overlapping impls exists at
+  all) — these are later tasks in the same widening effort, landing in this
+  document and its operational companion `core-march.md` respectively.
+  Roadmap: an extension of Phase 2 (§4.3's "declarative typing rules...
+  extracted from `typecheck.ml`'s algorithm").
 - **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
   2026-07-05 (commit `8cbd6dd2`): the `when`-clause now attaches the constraint
   to the value parameter's own type variable, so it survives generalization and

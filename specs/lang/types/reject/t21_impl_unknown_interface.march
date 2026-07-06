@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: Unknown interface `NotDeclared` — is it declared above this impl?
+mod M do
+  type Dog = Dog(String)
+
+  impl NotDeclared(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(name) -> name
+      end
+    end
+  end
+
+  fn main() do
+    println("hi")
+  end
+end
