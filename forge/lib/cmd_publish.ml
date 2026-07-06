@@ -5,15 +5,19 @@
       2. If --old-source is supplied, extract the old and new API surfaces
          and check the semver bump.  Print a SEMVER VIOLATION error and
          exit 1 if the declared version bump is too small.
-      3. Otherwise, print a success notice.  Actual network push to a
-         registry server is Phase 6 work.
+      3. Otherwise, print a success notice.
+      4. Unless --dry-run, package + submit to the registry via the embedded
+         registry.march client (Registry_client.run_action).
 
     --old-source PATH   Path to a directory containing the previous
                         version's source tree (must have forge.toml).
     --dry-run           Validate only; do not submit to registry.
+    --registry URL      Registry base URL (default: FORGE_REGISTRY env var,
+                        or https://forgepm.org if unset).
+    --insecure          Allow a http:// registry (local dev only).
 *)
 
-let run ~old_source_dir ~dry_run () =
+let run ~old_source_dir ~dry_run ~registry ~insecure () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -71,9 +75,26 @@ let run ~old_source_dir ~dry_run () =
         "dry-run: package validated, not submitted to registry\n%!";
       Ok ()
     end else begin
-      (* Actual registry push is Phase 6 work (registry server not yet built) *)
-      Printf.printf
-        "note: registry push not yet implemented — package validated locally\n%!";
-      Printf.printf "ok: %s %s is ready to publish\n%!" name version;
-      Ok ()
+      let registry_url =
+        match registry with
+        | Some r -> r
+        | None ->
+          (match Sys.getenv_opt "FORGE_REGISTRY" with
+           | Some r -> r
+           | None -> "https://forgepm.org")
+      in
+      match Registry_client.validate_registry_url ~registry:registry_url ~insecure with
+      | Error msg -> Error msg
+      | Ok () ->
+        let token = match Sys.getenv_opt "FORGE_TOKEN" with Some t -> t | None -> "" in
+        if token = "" then
+          Error "FORGE_TOKEN is required (an API key with the 'publish' permission) — set it in your environment, never pass it as a flag"
+        else begin
+          let rc =
+            Registry_client.run_action ~action:"publish" ~token
+              ~registry:registry_url ~pkg_dir:proj.Project.root ~extra_env:[]
+          in
+          if rc = 0 then Ok ()
+          else Error (Printf.sprintf "publish failed (exit %d) — see output above" rc)
+        end
     end
