@@ -5458,6 +5458,143 @@ end|} in
   Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
     (List.length m.March_ast.Ast.mod_decls >= 1)
 
+(* ── Cond-form / when-guard newline-led arms with comparison operators ────────
+
+   The contextual newline filter (token_filter.ml lookahead_is_new_arm) decides
+   whether the tokens after an arm body's NL start a NEW arm or continue the
+   current arm body by scanning to the first depth-0 ARROW (=new arm) or NL
+   (=continuation). It used to bail out early — declaring "body continuation" —
+   the moment it saw one of a set of binary operators (LEQ/GEQ/EQEQ/NEQ/AND/OR/
+   PLUSPLUS/…). That is correct for a plain `Pattern -> body` arm (a bare pattern
+   can never be followed by `>=`), but WRONG in two positions where the thing
+   before `->` is a full boolean expression rather than a plain pattern:
+
+     (A) the cond form `match do BoolExpr -> body end` (no scrutinee), and
+     (B) a guard's expression `Pattern when GuardExpr -> body`.
+
+   In both, a second consecutive arm whose expression begins `ident OP …` (e.g.
+   `score >= 80 -> …`, `x == 0 -> …`) was glued onto the previous arm's body,
+   producing a parse error. Strict `<`/`>` (LT/GT, never in the bail set) always
+   worked, which is why only the *other* comparison operators regressed. The
+   helper below digs the ECond / EMatch out of a single-expression fn body so we
+   can assert the arms are kept SEPARATE (correct count), not merely that the
+   module parsed. *)
+
+let cond_branches_of_module m =
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DFn (def, _) :: _ ->
+    (match def.March_ast.Ast.fn_clauses with
+     | { March_ast.Ast.fc_body = March_ast.Ast.ECond (branches, _); _ } :: _ -> branches
+     | { March_ast.Ast.fc_body; _ } :: _ ->
+       Alcotest.failf "expected ECond fn body, got %s"
+         (March_ast.Ast.show_expr fc_body)
+     | [] -> Alcotest.fail "expected at least one fn clause")
+  | _ -> Alcotest.fail "expected a leading DFn declaration"
+
+let match_branches_of_module m =
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DFn (def, _) :: _ ->
+    (match def.March_ast.Ast.fn_clauses with
+     | { March_ast.Ast.fc_body = March_ast.Ast.EMatch (_, branches, _); _ } :: _ -> branches
+     | { March_ast.Ast.fc_body; _ } :: _ ->
+       Alcotest.failf "expected EMatch fn body, got %s"
+         (March_ast.Ast.show_expr fc_body)
+     | [] -> Alcotest.fail "expected at least one fn clause")
+  | _ -> Alcotest.fail "expected a leading DFn declaration"
+
+(* (A) Cond form with two consecutive `>=` arms — verbatim from the
+   pattern-matching.md "Cond" section grade example. Before the fix this failed
+   with "I got stuck here" at the second `>=`. *)
+let test_cond_ge_arms_parse () =
+  let src = {|mod Test do
+  fn grade(score : Int) : String do
+    match do
+      score >= 90 -> "A"
+      score >= 80 -> "B"
+      _ -> "F"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three >= cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (A) Cond form with two consecutive `==` arms. *)
+let test_cond_eqeq_arms_parse () =
+  let src = {|mod Test do
+  fn classify(n : Int) : String do
+    match do
+      n == 0 -> "zero"
+      n == 1 -> "one"
+      _ -> "many"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three == cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (A) Cond form with two consecutive `<=` arms. *)
+let test_cond_le_arms_parse () =
+  let src = {|mod Test do
+  fn band(n : Int) : String do
+    match do
+      n <= 10 -> "low"
+      n <= 20 -> "mid"
+      _ -> "high"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three <= cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (B) Match-arm guards with two consecutive `==` guards — verbatim guard style
+   from the pattern-matching.md "Guards" section. Before the fix this failed
+   with "I was expecting `end` to close the match here" at the second guard. *)
+let test_guard_eqeq_arms_parse () =
+  let src = {|mod Test do
+  fn label(n : Int) : String do
+    match n do
+      x when x == 1 -> "one"
+      x when x == 0 -> "zero"
+      _ -> "other"
+    end
+  end
+end|} in
+  let branches = match_branches_of_module (parse_module src) in
+  Alcotest.(check int) "three guarded == arms stay separate" 3
+    (List.length branches);
+  let guarded =
+    List.filter (fun (b : March_ast.Ast.branch) -> b.branch_guard <> None) branches
+  in
+  Alcotest.(check int) "first two arms carry a when-guard" 2 (List.length guarded)
+
+(* (B) Match-arm guards with two consecutive `>=` guards. *)
+let test_guard_ge_arms_parse () =
+  let src = {|mod Test do
+  fn size(n : Int) : String do
+    match n do
+      x when x >= 100 -> "big"
+      x when x >= 10 -> "medium"
+      _ -> "small"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three guarded >= arms stay separate" 3
+    (List.length (match_branches_of_module (parse_module src)))
+
+(* (B) Match-arm guards with two consecutive `<=` guards. *)
+let test_guard_le_arms_parse () =
+  let src = {|mod Test do
+  fn size(n : Int) : String do
+    match n do
+      x when x <= 0 -> "nonpos"
+      x when x <= 10 -> "small"
+      _ -> "large"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three guarded <= arms stay separate" 3
+    (List.length (match_branches_of_module (parse_module src)))
+
 (* B14: group_fn_clauses merges only ADJACENT same-name fn clauses; a
    same-name group appearing again later at the same level (interleaved
    with another decl) used to compile with the earlier group silently
@@ -6029,6 +6166,14 @@ let compiler_suites =
           Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
           Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
           Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
+        ] );
+      ( "token_filter_cond_guard_operators", [
+          Alcotest.test_case "cond form: 2+ >= arms parse without parens"          `Quick test_cond_ge_arms_parse;
+          Alcotest.test_case "cond form: 2+ == arms parse without parens"          `Quick test_cond_eqeq_arms_parse;
+          Alcotest.test_case "cond form: 2+ <= arms parse without parens"          `Quick test_cond_le_arms_parse;
+          Alcotest.test_case "when-guard: 2+ == guards parse without parens"       `Quick test_guard_eqeq_arms_parse;
+          Alcotest.test_case "when-guard: 2+ >= guards parse without parens"       `Quick test_guard_ge_arms_parse;
+          Alcotest.test_case "when-guard: 2+ <= guards parse without parens"       `Quick test_guard_le_arms_parse;
         ] );
       ( "pipe_into_match", [
           Alcotest.test_case "B6: pipe into match reports desugar error"           `Quick test_pipe_into_match_reports_error;
