@@ -4756,11 +4756,22 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 let ty = match List.assoc_opt v.txt !fn_tvars with
                   | Some t -> t
                   | None   ->
-                    (* Type var not yet in fn_tvars (e.g. declared only in constraint).
-                       Create a fresh var and register it. *)
-                    let fv = fresh_var env'.level in
-                    fn_tvars := (v.txt, fv) :: !fn_tvars;
-                    fv
+                    (* Not a signature type-variable name (e.g. the annotation
+                       type-var `a` in `fn f(x : a) when Eq(a)`, or a bound
+                       `[s : I]`).  In `fn same(a, b) when Eq(a)` the `a` names
+                       a VALUE PARAMETER whose type is a fresh var bound in
+                       body_env — resolve to THAT type so the constraint rides
+                       on the parameter's own type variable and is re-checked at
+                       call sites (finding 15).  Only if the name is neither a
+                       signature type var nor a bound value do we fall back to a
+                       fresh, registered placeholder. *)
+                    (match lookup_var v.txt body_env with
+                     | Some (Mono t) -> t
+                     | Some (Poly (_, _, t)) -> t
+                     | None ->
+                       let fv = fresh_var env'.level in
+                       fn_tvars := (v.txt, fv) :: !fn_tvars;
+                       fv)
                 in
                 Some (CInterface (iface_name.txt, ty))
               | _ -> None

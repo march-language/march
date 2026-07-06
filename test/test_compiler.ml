@@ -1522,6 +1522,51 @@ let test_letfn_two_distinct_errors_both_report () =
   Alcotest.(check int) "distinct Bool/Int error still reported"
     1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
 
+(* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
+
+(* An explicit `when Eq(a)` bound on an UNANNOTATED generic parameter must be
+   re-checked at call sites: `same(Rood, Rood)` on an ADT with no `Eq` impl is
+   rejected, just as a direct `Rood == Rood` would be. *)
+let test_generic_when_constraint_unsatisfied_rejects () =
+  let ctx = typecheck {|mod M do
+    type Hue = Rood | Bloo
+    fn same(a, b) when Eq(a) do a == b end
+    fn main() do
+      if same(Rood, Rood) do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "unsatisfied generic when-constraint rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "names Hue/Eq" true
+    (count_errors_matching ctx "`Hue` does not implement interface `Eq`." >= 1)
+
+(* Safety valve: a generic `when Ord(a)` / `when Eq(a)` bound that IS satisfied
+   at the call site (Int implements both) must still typecheck — the re-check
+   must not reject discharged constraints. *)
+let test_generic_when_constraint_satisfied_accepts () =
+  let ctx = typecheck {|mod M do
+    fn max(a, b) when Ord(a) do if a > b do a else b end end
+    fn same(a, b) when Eq(a) do a == b end
+    fn main() do
+      println(int_to_string(max(1, 2)))
+      if same(1, 1) do println("eq") else println("neq") end
+      if same("x", "y") do println("eq") else println("neq") end
+    end
+  end|} in
+  Alcotest.(check bool) "satisfied generic when-constraint accepted" false
+    (has_errors ctx)
+
+(* Safety valve: an ordinary unconstrained generic function is unaffected. *)
+let test_generic_no_constraint_accepts () =
+  let ctx = typecheck {|mod M do
+    fn id(a) do a end
+    fn main() do
+      println(int_to_string(id(5)))
+      println(id("hi"))
+    end
+  end|} in
+  Alcotest.(check bool) "unconstrained generic accepted" false (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5964,6 +6009,11 @@ let compiler_suites =
       ( "letfn_ret_annot", [
           Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
           Alcotest.test_case "finding 13: two distinct errors both report"   `Quick test_letfn_two_distinct_errors_both_report;
+        ] );
+      ( "generic_when_constraints", [
+          Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
+          Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
+          Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
         ] );
       ( "return_refine_guard", [
           Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;
