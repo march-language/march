@@ -1,0 +1,30 @@
+-- The no-per-module-type-namespace DESIGN POINT (widening slice 2, Task 3) --
+-- documented as an intentional design fact, NOT a bug (see core-march-types.md
+-- §2.5). Two sibling modules `A` and `B` each declare their OWN type named
+-- `Foo`. Because types export/resolve by BARE name only (`typecheck.ml:6899-
+-- 6900`'s "referred to by their bare name" design, and the `9001e4c0`
+-- bare/qualified canonicalization it motivates), `A.Foo` and `B.Foo` are
+-- literally the SAME nominal `TCon("Foo", [])` -- there is no per-module type
+-- identity to keep them apart. `take_a` is annotated with the QUALIFIED
+-- `A.Foo`, yet a `B.Foo` value (`B.make()`, a totally different constructor
+-- with a different payload shape) is silently accepted with no diagnostic.
+--
+-- Value-witnessed: prints `7` -- proving the call actually typechecks AND
+-- runs (not merely `--check`-clean), passing a `B.Foo`-shaped value where an
+-- `A.Foo` annotation was written.
+mod Main do
+  mod A do
+    type Foo = Mk(Int)
+    fn make() : Foo do Mk(1) end
+  end
+  mod B do
+    type Foo = Mk(String)
+    fn make() : Foo do Mk("x") end
+  end
+
+  fn take_a(_x : A.Foo) : Int do 7 end
+
+  fn main() do
+    println(int_to_string(take_a(B.make())))
+  end
+end

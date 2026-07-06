@@ -68,6 +68,28 @@ in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
 resolving the divergence itself (a language-design decision — add a coherence
 check, or pick a shared deterministic selection policy) is what's deferred.
 
+**Widening slice 2 (2026-07-06, modules):** §2.5 adds **module visibility as
+a typecheck concept** — `pub_set`-filtered export, the cross-file
+`load_module_into_env` gate (`ExFn`/`ExValue`, fixed by this slice's Task 1),
+and the **opaque-type asymmetry** it deliberately preserves (`ExType`/
+`ExRecord` stay ungated, so a private `ptype`'s bare NAME is nominally
+referenceable cross-module even though its declaring module never marked it
+public) — together with the **no-per-module-type-namespace design point**
+(types resolve by bare name only, so two sibling modules' same-named types
+are literally one nominal type, not merely visually similar) and the
+`9001e4c0` qualified-type-path unification that is the flip side of the same
+design. §2.5 also files a real, precisely-traced enforcement gap found while
+verifying the asymmetry live: `opaque type`'s constructor-hiding is NOT
+actually enforced against qualified construction (a `prebind_mod_members`
+forward-reference pass registers the qualified ctor key ungated on
+`var_vis`, before the later, correctly-filtered `DMod` export step's result
+is merged in) — structurally the same class of bug Task 1 fixed for
+`ExFn`/`ExValue`, but on a different registration path; filed, not fixed
+(out of this docs-only task's scope). `core-march.md` §4.7 (this slice's
+Task 2) is the operational companion — `own_names`-gated export, bare-fails/
+qualified-works name resolution, and the lexical-scoping nuance for a
+directly-nested module.
+
 ## 1. The typing judgment
 
 March's typechecker is **bidirectional Hindley–Milner**: two mutually-recursive
@@ -1633,6 +1655,271 @@ reads either field (confirmed by grep: the only other occurrence is the same
 types are AST scaffolding for a future extension, not a currently-working
 feature** — worth this one-line note so a reader who spots the fields in
 `ast.ml` doesn't assume otherwise.
+
+### 2.5 Module visibility, the opaque-type asymmetry, and the no-per-module-type-namespace design point
+
+**Widening slice 2, Task 3.** `core-march.md` §4.7 documented `DMod`'s
+OPERATIONAL side — how a module's declared names get re-exported as
+`"Name.member"` at eval time, gated on `own_names` (everything declared,
+public or private). This subsection is the TYPING counterpart: what
+`typecheck.ml`'s `DMod` arm (`Ast.DMod (name, _vis, decls, _sp)`,
+`typecheck.ml:6804`) and its cross-file sibling `load_module_into_env`
+(`typecheck.ml:657–692`) actually gate on, and — the load-bearing content of
+this subsection — the precise, INTENTIONAL asymmetry between how a private
+FUNCTION/VALUE is hidden and how a private TYPE stays nominally visible.
+Every claim below was re-run live against this worktree's
+`_build/default/bin/main.exe --check` (and, where noted, run to a printed
+value), not inferred from reading the source alone.
+
+**`pub_set` — visibility is a `DMod`-local, typecheck-only export filter.**
+The same-file (or same-compilation-unit, since `use`/`MARCH_LIB_PATH`-resolved
+siblings are spliced in as real `DMod`s before typecheck ever runs) case:
+
+```
+pub_set = { n | DFn(n, Public) ∈ decls } ∪ { n | DLet(Public, n, …) ∈ decls }
+          ∪ { n | DType(Public, n, …) ∈ decls } ∪ …                          typecheck.ml:6822–6842
+is_pub_key k  = ∃ n ∈ pub_set. k = n ∨ k starts-with (n ^ ".")               typecheck.ml:6895–6901
+new_names     = { (Name^"."^k, σ) | (k, σ) ∈ inner_env.vars, is_pub_key k }  typecheck.ml:6904–6908
+new_types     = { (k, arity) | (k, arity) ∈ inner_env.types, k ∈ pub_set }   typecheck.ml:6915–6917
+new_ctors     = filter each ci: ci.ci_type ∈ pub_set ∧ ci.ci_vis = Public    typecheck.ml:6918–6927
+```
+
+A name never in `pub_set` (a `pfn`, a private `let`, a `ptype`) simply never
+gets a `"Name.member"` key written into the outer scope's `vars`/`ctors` —
+the SAME absence-not-rejection shape `core-march.md` §4.7 describes for
+`own_names`, just filtered one predicate narrower (`pub_set` ⊆ `own_names`,
+strictly narrower for any module with at least one private member). This is
+why a same-file private access surfaces as "Unknown module `A`" rather than a
+dedicated "is private" diagnostic when `A` has no public surface at all — the
+qualified lookup falls through to the registry fallback below, which reports
+based on what a DIFFERENT, independently-loaded copy of "module A" contains
+(see the cross-file case next).
+
+**The cross-file/registry gate — `load_module_into_env`, Task 1's fix.**
+A qualified reference that misses the primary `env.vars`/`env.types`/
+`env.ctors` lookup (e.g. any qualified name from a module that was never
+spliced in as a sibling `DMod` in THIS compilation, which in practice is any
+stdlib module reached only via the registry fallback rather than `use`) falls
+to `resolve_qualified_var`/`resolve_qualified_type`/`resolve_qualified_ctor`
+(`typecheck.ml:707–739`), which call `Module_registry.ensure_loaded` — an
+INDEPENDENT re-parse of the module's `.march` file from disk — and then
+`load_module_into_env` (`typecheck.ml:657–692`) to populate a **fresh**
+environment slice from its exports:
+
+```
+| ExFn | ExValue ->                                                          typecheck.ml:662–675
+    if not entry.ex_public then env                 (* SKIP — Task 1's gate *)
+    else bind qname ↦ Mono(fresh_var 0)
+| ExType arity ->                                                            typecheck.ml:676–678
+    bind qname ↦ arity                               (* UNGATED, always *)
+| ExRecord (arity, fields) ->                                                typecheck.ml:679–683
+    bind qname ↦ arity; bind qname ↦ (params, fields) (* UNGATED, always *)
+| ExCtor (parent_type, arity) ->                                             typecheck.ml:684–701
+    ci_vis = if entry.ex_public then Public else Private;  add_ctor qname ci
+```
+
+`ExFn`/`ExValue` are the ONLY two export kinds this loader actually skips
+when private (the comment at `typecheck.ml:663–672` states the design
+in-line: "`ExType`/`ExRecord` stay UNGATED on purpose"). This is Task 1's
+fix, landed earlier in this widening slice — before it, ALL four kinds loaded
+unconditionally and `reject/t25`'s `Array.lst_rev(...)` (a real `pfn`,
+`stdlib/array.march:39`) typechecked, compiled, and ran cross-module. Now:
+
+```
+reject/t25_cross_module_private_fn.march  →  "Function `lst_rev` is private to module `Array`."
+```
+
+re-confirmed live at this exact text (`typecheck.ml`'s `qualified_error_msg`,
+line 778) — exit 1, both the same shape the `ExCtor` arm already produced for
+a private constructor.
+
+**The opaque-type asymmetry, stated precisely (and re-verified — not as
+assumed).** `ExType`/`ExRecord` staying ungated means a private `ptype`'s
+BARE TYPE NAME is nominally referenceable in a cross-module annotation even
+though the type was never added to its module's `pub_set`. `accept/t34`
+witnesses this directly: `ConsistentHash.HashRing(a)` is declared
+`ptype HashRing(a) = HashRing(…)` (`stdlib/consistent_hash.march:19` —
+private), yet `fn ring_arity(_ring : ConsistentHash.HashRing(String)) : Int`
+typechecks and, called on a real ring built through the module's own public
+`new`/`add` API, runs and prints `1`. `accept/t31` (Task 1's corpus) already
+pins the same pattern; `t34` is an independent second witness that exercises
+the annotation specifically (not merely an otherwise-unused param) and a
+different stdlib module.
+
+The design intent (`specs/lang/modules.md`'s "Visibility" section) is: `ptype`
+hides everything (name AND constructor); a separate `opaque type` form hides
+ONLY the constructor while keeping the type name public. **Live re-probing
+for this task found the CURRENT implementation does not draw the line where
+either of those two docs claims:**
+
+- A plain `ptype`'s single (or multi-variant) constructor is **NOT hidden
+  at all** — every stdlib `ptype` surveyed (`ConsistentHash.HashRing`,
+  `Decimal.Decimal`, `Array.TrieEmpty`/`TrieLeaf`/`TrieBranch`) constructs and
+  RUNS cross-module (e.g. `ConsistentHash.HashRing(Nil, Map.empty(), 3)` and
+  `Decimal.Decimal(3, 2)`, both value-witnessed: exit 0, construct a real
+  value). The grammar is the direct cause: every `variant` production
+  defaults `var_vis = Public` (`parser.mly:964–972`); `ptype`'s own grammar
+  rule (`parser.mly:453–460`, `DType (Private, …)`) sets the TYPE's `vis` to
+  `Private` but never touches `var_vis` on its variants — only the SEPARATE
+  `opaque type` rule (`parser.mly:436–440`) does
+  (`List.map (fun v -> { v with var_vis = Private }) variants`). So
+  `specs/lang/modules.md`'s "`ptype` makes both the type name and its
+  constructors private" is not accurate against the current implementation —
+  filed below.
+- Even `opaque type` itself, whose grammar DOES force `var_vis = Private`
+  (hence `ci_vis = Private`, since `ci_vis = v.var_vis` is copied verbatim at
+  every registration site, e.g. `typecheck.ml:6686`), does **not** actually
+  reject cross-module construction of its constructor either — probed live
+  against `test/imports/opaque_qual/{oq_token,oq_entry}.march` (a genuine
+  `MARCH_LIB_PATH`-discovered `opaque type Token = Token(String)`):
+  `OqToken.Token("direct-bypass")` from unrelated code typechecks (exit 0)
+  AND runs, constructing a real value that matches its own pattern and prints
+  `"direct-bypass"`. Root cause traced precisely: a Pass-1 forward-reference
+  pass, `prebind_mod_members` (`typecheck.ml:8032–8087`, called for every
+  sibling `DMod` at `:8105`; the entry module's own top-level types get the
+  same treatment at `:8110–8129`), registers each variant's qualified
+  constructor key (`"Mod.CtorName"`) via `add_ctor qctor ci acc.ctors`
+  (`:8056`) **unconditionally on `v.var_vis`** — only the SEPARATE
+  disambiguated `"Mod.TypeName.CtorName"` key a few lines later checks
+  `v.var_vis <> Ast.Public` before registering (`:8065–8070`). This Pass-1
+  registration runs BEFORE `check_decl`'s `DMod` arm computes its own,
+  correctly-`ci_vis`-filtered `new_ctors`/`qual_ctors` (§2.5 above), and the
+  two results are MERGED (`typecheck.ml:6963–6969`, `StrMap.union` prepending
+  the later pass's entries onto the earlier one's) rather than the later
+  pass's filtering replacing the earlier, so the Pass-1 ungated entry for the
+  bare qualified key survives into the final environment regardless. **This
+  is the exact same shape as the pre-Task-1 `ExFn`/`ExValue` bug** (an
+  earlier, ungated registration site shadows a later, correctly-gated one) —
+  but for `opaque type`'s constructor, reached via the SAME-COMPILATION-UNIT
+  `DMod` prebind path rather than the cross-file `Module_registry` path Task
+  1 fixed. **This is a real, confirmed compiler gap, filed (not fixed —
+  out of Task 3's docs-only scope and beyond Task 1's `load_module_into_env`
+  fix), in `specs/todos.md`.** The PatCon (pattern-matching) side is
+  differently, and also incorrectly, affected: matching `Mod.Ctor(…)`
+  against a value produced by the module's own public API hits the
+  UNRELATED, separately-filed qualified-type-unification gap for match
+  scrutinees (`expected `Mod.Type` but got `Type`` — the pattern-typing
+  analog of the `9001e4c0` fix below, which only covers type ANNOTATIONS, not
+  match-arm scrutinee unification) rather than a visibility diagnostic,
+  live-probed but not committed as corpus (it would conflate two different
+  filed gaps in one program).
+- The one piece that DOES work as documented: a `ptype`'s bare type NAME
+  (not its constructor) is opaque-referenceable cross-module, exactly as
+  `accept/t31`/`t34` witness, because `ExType` is genuinely, deliberately
+  ungated in `load_module_into_env` — this half of the asymmetry is real and
+  intentional, not a gap.
+
+**The no-per-module-type-namespace design point (a design fact, not a
+bug).** Types are exported and resolved by their BARE name only — the `DMod`
+export step never qualifies a type name beyond the `pub_set` gate itself
+("Types defined in a module … are referred to by their bare name throughout
+user code, not prefixed", the comment at `typecheck.ml:6909–6911`
+immediately above `new_types`'s definition). One direct, silent consequence:
+**two sibling modules declaring a same-named type do not collide, because
+they are not merely similarly-named — they are typechecked as the identical
+nominal `TCon`.** `accept/t35` witnesses this precisely:
+
+```march
+mod A do type Foo = Mk(Int) fn make() : Foo do Mk(1) end end
+mod B do type Foo = Mk(String) fn make() : Foo do Mk("x") end end
+fn take_a(_x : A.Foo) : Int do 7 end
+fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo where A.Foo is annotated
+```
+
+`--check` exits 0 with no diagnostic at all (re-confirmed live, exactly as
+the survey found), and running it prints `7` — proving the substitution is
+not merely un-flagged at check time but genuinely accepted end-to-end.
+**This is documented here as ONE deliberate design point, not filed as a
+bug:** March has no per-module type namespace; a module boundary partitions
+FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
+Qualified type syntax (`A.Foo`) is sugar that always unifies with the bare
+name `Foo` — there is no way to write two distinct, module-scoped types that
+happen to share a bare name. (Cross-ref: this is the same underlying fact
+the memory-flagged "app types collide with stdlib" note describes at the
+application level — a user type bare-named the same as a stdlib type
+collides with it for the identical reason.)
+
+**Qualified-type-path unification (`9001e4c0`) — the mechanism that makes
+the above possible, verified live in both directions.** Before this fix
+(same-day as the modules survey), a qualified type annotation like
+`Token.Token` resolved to a DISTINCT nominal `TCon("Token.Token", [])`,
+different from the bare `TCon("Token", [])` every constructor/value actually
+carries — so a value produced inside a module failed to unify against its
+own qualified annotation from outside ("expected `Token.Token` but got
+`Token`"). The fix canonicalizes a dotted type reference to its bare suffix
+whenever that suffix denotes a same-arity type already in scope:
+
+```
+canon_name = match rindex_opt name '.' with                                 typecheck.ml:2317–2326
+             | Some i -> let bare = suffix-after i in
+                         (match lookup_type bare env with
+                          | Some a when a = arity -> bare
+                          | _ -> name)               (* not a valid canon target — no-op *)
+             | None -> name                            (* non-dotted — no-op *)
+```
+
+using `String.rindex_opt` (the LAST `.`) rather than `split_qualified`'s
+first-dot split, so it also canonicalizes arbitrarily-nested references like
+`A.B.Type` (`typecheck.ml:2317–2327`, comment). Re-verified live, BOTH
+directions, same-file nested module:
+
+```march
+mod Token do
+  opaque type Token = Token(String)
+  fn make(raw : String) : Token do Token(raw) end
+end
+fn process(t : Token.Token) : String do "ok" end
+fn main() : String do process(Token.make("hi")) end   -- bare value -> qualified param, exit 0
+```
+
+and, reversed (a fn returning the qualified `Token.Token` consumed by a
+bare-`Token`-annotated param) — also exit 0. Both directions produce only an
+unused-variable warning, no type-mismatch diagnostic. **The qualified-record
+case (`Cfg.Site`) — the survey's A10, flagged as "verify still green, don't
+assume a gap" rather than a confirmed open item — was re-verified live for
+this task and remains fully green**, both as a same-file nested-module
+program (`accept/t36`) and via the pre-existing `test/whole_program/{cfg,
+app}.march` MARCH_LIB_PATH fixture (`test/dune:614–626`'s dedicated
+regression rule): `MARCH_LIB_PATH=test/whole_program ./_build/default/bin/
+main.exe --check test/whole_program/{cfg,app}.march` both exit 0, re-run for
+this task. `accept/t36` pins the identical shape same-file, in this corpus,
+value-witnessed (prints `Site`, the record's own field, read back through
+the cross-module qualified annotation `s : Cfg.Site`) — no gap found; Task 1's
+`ExFn`/`ExValue` gate does not touch this case (`Site`/`default`/`site_title`
+are all public here), and the record path canonicalizes through the same
+`surface_ty` machinery as the ordinary named-type case above.
+
+**Corpus (this task):**
+
+- `accept/t34_opaque_ptype_qualified_annotation` — `ConsistentHash.HashRing`
+  (a private `ptype`) used as a cross-module param annotation; value-witnessed
+  (prints `1`). Second, independent witness for the opaque-type-NAME half of
+  the asymmetry (`accept/t31` is the first, for `Array`).
+- `accept/t35_no_per_module_type_namespace` — the `A.Foo`/`B.Foo` collision;
+  value-witnessed (prints `7`), pinning the design point as a tested behavior
+  rather than a discoverable surprise.
+- `accept/t36_qualified_record_type_still_green` — the A10 record case,
+  same-file nested-module form; value-witnessed (prints `Site`), confirming
+  no regression from either `9001e4c0` or Task 1's visibility fix.
+- The private-FUNCTION reject (`reject/t25_cross_module_private_fn`) and the
+  narrow-gate accept witness (`accept/t31_cross_module_public_and_opaque_
+  ptype`) both already live in Task 1's corpus — cross-referenced above, not
+  duplicated here.
+
+**Filed, not fixed (out of this task's docs-only scope):** the `opaque
+type` constructor-hiding gap found above (`prebind_mod_members`'s ungated
+qualified-ctor registration at `typecheck.ml:8056`, surviving the later,
+correctly-filtered `DMod` export step's merge) — a real enforcement hole
+structurally identical to the bug Task 1 fixed for `ExFn`/`ExValue`, but on
+the same-compilation-unit path rather than the `Module_registry` path, and
+for the `ExCtor`/`ci_vis` gate rather than the `ExFn`/`ExValue` gate. Also
+filed: `specs/lang/modules.md`'s "Visibility" section overclaims `ptype`
+constructor-hiding (says `ptype` hides "both the type name and its
+constructors" — live-verified false, the constructor is public by grammar
+default) and should be corrected to match the verified current behavior
+(only `opaque type`'s constructor is EVER marked private, and even that
+marking is not actually enforced against qualified construction, per the
+gap just filed).
 
 ## 3. Conformance corpus
 

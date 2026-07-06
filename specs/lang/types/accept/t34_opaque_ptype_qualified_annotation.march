@@ -1,0 +1,24 @@
+-- The opaque-type asymmetry, TYPING side (widening slice 2, Task 3):
+-- `ConsistentHash.HashRing(a)` is a private `ptype` (stdlib/consistent_hash.march:19)
+-- — the TYPE is declared `ptype`, so it is never added to its module's `pub_set`
+-- via a `Public`-vis `DType`. Yet its bare NAME still resolves cross-module in a
+-- type annotation, because `load_module_into_env`'s visibility gate (Task 1,
+-- `typecheck.ml:657-692`) is scoped to `ExFn`/`ExValue` ONLY -- `ExType`/`ExRecord`
+-- stay deliberately ungated (the opaque-type pattern documented in
+-- `specs/lang/modules.md`). This is the mirror image of reject/t25 (a private
+-- FUNCTION rejects) and the same pattern accept/t31 already pins for `Array` --
+-- this program adds `ConsistentHash` as an independent second witness and
+-- exercises the type ANNOTATION specifically (not just an unused param).
+--
+-- Value-witnessed: `ring_arity` is called on a real `HashRing` built via the
+-- module's own public `new`/`add` API (never via a bare/direct constructor
+-- call) and prints `1`.
+mod Main do
+  fn ring_arity(_ring : ConsistentHash.HashRing(String)) : Int do 1 end
+
+  fn main() do
+    let ring = ConsistentHash.new(3)
+    let ring2 = ConsistentHash.add(ring, "node-a", "node-a")
+    println(int_to_string(ring_arity(ring2)))
+  end
+end
