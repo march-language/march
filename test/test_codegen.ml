@@ -5066,6 +5066,141 @@ let test_opt_without_perceus () =
   in
   Alcotest.(check bool) "Opt on RC-free TIR produces no RC nodes" false any_rc
 
+(* ── Hot Code Reload: leaf change does not drag the caller chain ──────────
+   Regression for the `forge deploy hot` crash: changing one leaf function used
+   to change the TRANSITIVE Merkle impl_hash of every caller up to `main`, so a
+   hot deploy flagged the whole chain — including the running entry point — for
+   swap, which OOM/corrupts the runtime.  Two fixes are exercised here:
+     1. HCR reload-identity hashes are non-transitive (Hash.hash_fn_def), so a
+        leaf-body change only changes the leaf's hash, not its callers'.
+     2. The entry point (`main`/`ModName.main`) is excluded from the reloadable
+        boundary, so it is never a dispatch slot / swap candidate. *)
+
+(* Lower March source to a post-Perceus TIR module, the same shape the compiler
+   feeds to Llvm_emit / Pipeline.hash_module. *)
+let hcr_lower (src : string) : March_tir.Tir.tir_module =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~hot_reload:true m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  March_tir.Perceus.perceus tir
+
+(* The NON-transitive HCR reload-identity hash per function name — this mirrors
+   how bin/main.ml now populates hr_impl_hashes (Hash.hash_fn_def, sig+body,
+   no callee/type fold). *)
+let hcr_reload_hashes (m : March_tir.Tir.tir_module) : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter (fun (fd : March_tir.Tir.fn_def) ->
+    let h = March_cas.Hash.hash_fn_def fd in
+    Hashtbl.replace tbl fd.March_tir.Tir.fn_name h.March_cas.Hash.impl_hash)
+    m.March_tir.Tir.tm_fns;
+  tbl
+
+(* The TRANSITIVE Merkle impl_hash per function name — the CAS compilation key
+   (unchanged by this fix; still used for incremental-build correctness). *)
+let hcr_transitive_hashes (m : March_tir.Tir.tir_module) : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  let add (hd : March_cas.Cas.hashed_def) =
+    match hd.March_cas.Cas.hd_def with
+    | March_cas.Cas.FnDef fd ->
+      Hashtbl.replace tbl fd.March_tir.Tir.fn_name hd.March_cas.Cas.hd_impl_hash
+    | March_cas.Cas.TypeDef _ -> ()
+  in
+  List.iter (function
+    | March_cas.Pipeline.HSingle { hs_hdef } -> add hs_hdef
+    | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add hg_hdefs)
+    (March_cas.Pipeline.hash_module m);
+  tbl
+
+(* A 3-deep caller chain: main → mid → leaf.  In lowered TIR the entry file's
+   top module name is stripped, so the names are bare `leaf`/`mid`/`main` — the
+   same shape the compiler hashes.  [leaf_body] is spliced into `leaf` so we can
+   produce a leaf-only change. *)
+let hcr_chain_src (leaf_body : string) : string =
+  Printf.sprintf {|mod App do
+    fn leaf(n : Int) : Int do %s end
+    fn mid(n : Int) : Int do leaf(n) + 1 end
+    fn main() : Unit do println(int_to_string(mid(3))) end
+  end|} leaf_body
+
+let hget tbl k = Hashtbl.find_opt tbl k
+
+let test_hcr_leaf_change_only_changes_leaf_reload_hash () =
+  let m0 = hcr_lower (hcr_chain_src "n * 2") in
+  let m1 = hcr_lower (hcr_chain_src "n * 3") in  (* leaf body changed *)
+  let r0 = hcr_reload_hashes m0 and r1 = hcr_reload_hashes m1 in
+  (* Leaf's non-transitive reload hash DOES change. *)
+  Alcotest.(check bool) "leaf reload hash changes" true
+    (hget r0 "leaf" <> hget r1 "leaf" && hget r0 "leaf" <> None);
+  (* Its callers' reload hashes are UNCHANGED (bodies are byte-identical).
+     THIS is the crux of the fix: pre-fix these were transitive Merkle roots
+     that folded in the leaf's hash, so they changed too and dragged the whole
+     chain (up to main) into the hot-swap set. *)
+  Alcotest.(check bool) "mid reload hash unchanged" true
+    (hget r0 "mid" = hget r1 "mid" && hget r0 "mid" <> None);
+  Alcotest.(check bool) "main reload hash unchanged" true
+    (hget r0 "main" = hget r1 "main" && hget r0 "main" <> None)
+
+let test_hcr_transitive_hash_still_propagates_for_cas () =
+  (* Sanity: the CAS/compilation key IS still transitive — a leaf change DOES
+     propagate to callers there — so incremental-build cache correctness is
+     preserved.  Only the HCR reload identity is non-transitive. *)
+  let m0 = hcr_lower (hcr_chain_src "n * 2") in
+  let m1 = hcr_lower (hcr_chain_src "n * 3") in
+  let t0 = hcr_transitive_hashes m0 and t1 = hcr_transitive_hashes m1 in
+  Alcotest.(check bool) "transitive leaf hash changes" true
+    (hget t0 "leaf" <> hget t1 "leaf");
+  Alcotest.(check bool) "transitive caller (mid) hash ALSO changes" true
+    (hget t0 "mid" <> hget t1 "mid" && hget t0 "mid" <> None)
+
+(* Build a TIR module directly, mirroring the forgepm multi-file layout where
+   `Blog.main` (the app entry point) IS under the `--hot-reload Blog` boundary
+   because it comes from a library file (its module prefix is retained, unlike a
+   single-file entry). Chain: Blog.main → Blog.handle → Blog.hero. *)
+let hcr_boundary_module () : March_tir.Tir.tir_module =
+  let open March_tir.Tir in
+  let vref name = { v_name = name; v_ty = TFn ([TInt], TInt); v_lin = Unr } in
+  let hero : fn_def =
+    { fn_name = "Blog.hero";
+      fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
+      fn_ret_ty = TInt;
+      fn_body = EAtom (ALit (March_ast.Ast.LitInt 1)) } in
+  let handle : fn_def =
+    { fn_name = "Blog.handle";
+      fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
+      fn_ret_ty = TInt;
+      fn_body = EApp (vref "Blog.hero",
+                      [AVar { v_name = "n"; v_ty = TInt; v_lin = Unr }]) } in
+  let main : fn_def =
+    { fn_name = "Blog.main"; fn_params = []; fn_ret_ty = TInt;
+      fn_body = EApp (vref "Blog.handle",
+                      [ALit (March_ast.Ast.LitInt 3)]) } in
+  { tm_name = "Blog"; tm_fns = [main; handle; hero]; tm_types = [];
+    tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+let test_hcr_entry_point_not_a_reloadable_slot () =
+  (* Blog.main is under the "Blog" boundary but must NOT be published as a slot,
+     because it is the running entry point.  Its callees remain reloadable. *)
+  let m = hcr_boundary_module () in
+  let ir = March_tir.Llvm_emit.emit_module
+             ~hot_reload:(Some (March_tir.Hot_reload.default_config "Blog")) m in
+  (* No baseline publish nor name registration for the entry point. *)
+  Alcotest.(check bool) "entry point Blog.main NOT published as a slot" false
+    (ir_contains ir "ptr @Blog.main,");
+  Alcotest.(check bool) "entry point Blog.main NOT registered as a name" false
+    (ir_contains ir "call void @march_dispatch_register_name" &&
+     ir_contains ir "Blog.main\\00");
+  (* Its callees ARE published as reloadable slots. *)
+  Alcotest.(check bool) "Blog.handle IS published as a slot" true
+    (ir_contains ir "ptr @Blog.handle,");
+  Alcotest.(check bool) "Blog.hero IS published as a slot" true
+    (ir_contains ir "ptr @Blog.hero,");
+  (* Boundary→boundary calls still route through the versioned dispatch table,
+     including from main's body — proving main still calls swappable versions. *)
+  Alcotest.(check bool) "boundary callees still dispatch-routed" true
+    (ir_contains ir "@march_dispatch_enter")
+
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
 let codegen_suites =
@@ -5495,6 +5630,11 @@ let codegen_suites =
         ] );
       ( "js_backend_opt", [
           Alcotest.test_case "Opt safe without Perceus" `Quick test_opt_without_perceus;
+        ] );
+      ( "hot_reload_leaf_change", [
+          Alcotest.test_case "leaf change: only leaf reload hash changes" `Quick test_hcr_leaf_change_only_changes_leaf_reload_hash;
+          Alcotest.test_case "transitive CAS hash still propagates"       `Quick test_hcr_transitive_hash_still_propagates_for_cas;
+          Alcotest.test_case "entry point excluded from reloadable slots" `Quick test_hcr_entry_point_not_a_reloadable_slot;
         ] );
   ]
 

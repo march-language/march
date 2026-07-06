@@ -1762,13 +1762,25 @@ let compile filename =
         let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
         (* L4 remote registry: sig_hash map for remote_ref_hashes constant folding. *)
         let remote_sig_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (* HCR reload-identity hash is NON-TRANSITIVE, unlike the CAS key.
+           hd.hd_impl_hash is the transitive Merkle root (folds in callees' and
+           types' hashes) used to key the compilation cache — correct for
+           incremental builds.  But it is WRONG as a hot-reload slot identity:
+           changing one leaf function changes the transitive hash of every
+           caller up to `main`, so a leaf-only hot deploy would flag (and try to
+           swap) the whole caller chain, including the running entry point.
+           For the reloadable-slot baseline we instead publish the per-function
+           hash (sig+body only, via Hash.hash_fn_def) so a leaf change touches
+           only that leaf's slot.  This matches the fallback passes below, which
+           already hash leftover functions non-transitively. *)
         let add_hdef (hd : March_cas.Cas.hashed_def) =
           match hd.March_cas.Cas.hd_def with
           | March_cas.Cas.FnDef fd ->
+            let h = March_cas.Hash.hash_fn_def fd in
             Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
-              hd.March_cas.Cas.hd_impl_hash;
+              h.March_cas.Hash.impl_hash;
             Hashtbl.replace remote_sig_hashes fd.March_tir.Tir.fn_name
-              hd.March_cas.Cas.hd_sig_hash
+              h.March_cas.Hash.sig_hash
           | March_cas.Cas.TypeDef _ -> ()
         in
         List.iter (function
@@ -2224,13 +2236,16 @@ let compile filename =
            when --hot-reload is active). *)
         let hr_impl_hashes : (string, string) Hashtbl.t = Hashtbl.create 16 in
         let remote_sig_hashes2 : (string, string) Hashtbl.t = Hashtbl.create 16 in
+        (* Non-transitive reload-identity hash — see the compile path above for
+           why HCR slots must NOT use the transitive Merkle root. *)
         (let add_hdef (hd : March_cas.Cas.hashed_def) =
            match hd.March_cas.Cas.hd_def with
            | March_cas.Cas.FnDef fd ->
+             let h = March_cas.Hash.hash_fn_def fd in
              Hashtbl.replace hr_impl_hashes fd.March_tir.Tir.fn_name
-               hd.March_cas.Cas.hd_impl_hash;
+               h.March_cas.Hash.impl_hash;
              Hashtbl.replace remote_sig_hashes2 fd.March_tir.Tir.fn_name
-               hd.March_cas.Cas.hd_sig_hash
+               h.March_cas.Hash.sig_hash
            | March_cas.Cas.TypeDef _ -> ()
          in
          List.iter (function

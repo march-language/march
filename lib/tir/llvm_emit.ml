@@ -6264,6 +6264,22 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
     let ln = String.length n and ls = String.length sfx in
     ln > ls && String.sub n (ln - ls) ls = sfx
   in
+  (* Program-entry functions must NEVER be reloadable slots.  The running green
+     thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
+     @march_main); swapping it while live corrupts the runtime allocator (OOM).
+     But in the standard hot-reload layout the real entry is a shim
+     (HotEntry.main → App.main), so App.main — the app's own `main` that runs the
+     never-returning accept loop — is permanently on the call stack too.  Both
+     are named `main` (bare or `.main`-suffixed), so we exclude EVERY such
+     function from the boundary, not just the single compiler-chosen entry.
+     This is the generalization of "never hot-swap a function on the call stack":
+     an app's main sits on the stack for the whole process lifetime.  A leaf hot
+     deploy therefore never drags any `main` into the swap set. *)
+  let is_entry_fn (n : string) =
+    String.equal n "main"
+    || (String.length n > 5
+        && String.equal (String.sub n (String.length n - 5) 5) ".main")
+  in
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
@@ -6271,7 +6287,8 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
       m.Tir.tm_fns
       |> List.filter_map (fun fn ->
            let n = fn.Tir.fn_name in
-           if Hot_reload.is_reloadable cfg (module_of_name n)
+           if is_entry_fn n then None
+           else if Hot_reload.is_reloadable cfg (module_of_name n)
               || is_actor_dispatch_fn n
            then Some n else None)
       |> Hot_reload.Name_table.build
