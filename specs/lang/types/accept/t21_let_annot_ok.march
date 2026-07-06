@@ -1,0 +1,10 @@
+mod M do
+  fn main() do
+    -- A correct let-annotation typechecks.
+    let x : Int = 5
+    -- A polymorphic RHS bound at a more specific annotated type also works —
+    -- the annotation is an instance of the RHS's general type.
+    let f : (Int) -> Int = fn n -> n
+    println(int_to_string(x + f(37)))
+  end
+end

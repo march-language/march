@@ -1427,6 +1427,53 @@ let test_spawn_plain_actor_name_ok () =
   end|} in
   Alcotest.(check bool) "plain actor spawn: no errors" false (has_errors ctx)
 
+(* ── Finding 16: let-binding type annotations are enforced ──────────────── *)
+
+(* Count the Error diagnostics whose message contains [needle]. *)
+let count_errors_matching ctx needle =
+  List.fold_left (fun acc (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && (try ignore (Str.search_forward (Str.regexp_string needle)
+                           d.March_errors.Errors.message 0); true
+             with Not_found -> false)
+      then acc + 1 else acc)
+    0 (March_errors.Errors.sorted ctx)
+
+(* `let x : Int = "foo"` must now be rejected — the annotation is a checking
+   context for the RHS (finding 16). *)
+let test_let_annot_mismatch_rejects () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let x : Int = "foo"
+      println(int_to_string(x))
+    end
+  end|} in
+  Alcotest.(check bool) "let : Int = String rejected" true (has_errors ctx);
+  Alcotest.(check bool) "mismatch names Int vs String" true
+    (count_errors_matching ctx "expected `Int` but got `String`." >= 1)
+
+(* A correct annotation still typechecks. *)
+let test_let_annot_correct_accepts () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let x : Int = 5
+      println(int_to_string(x))
+    end
+  end|} in
+  Alcotest.(check bool) "let : Int = 5 accepted" false (has_errors ctx)
+
+(* A polymorphic RHS bound at a more specific annotated type still works — the
+   annotation must be a checking context, not a monomorphizing constraint on
+   the RHS's own general type. *)
+let test_let_annot_poly_instance_accepts () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let f : (Int) -> Int = fn n -> n
+      println(int_to_string(f(5)))
+    end
+  end|} in
+  Alcotest.(check bool) "let : (Int)->Int = fn n -> n accepted" false (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5860,6 +5907,11 @@ let compiler_suites =
           Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;
           Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
+        ] );
+      ( "let_annotations", [
+          Alcotest.test_case "finding 16: let : Int = String rejected"       `Quick test_let_annot_mismatch_rejects;
+          Alcotest.test_case "finding 16: let : Int = 5 accepted"            `Quick test_let_annot_correct_accepts;
+          Alcotest.test_case "finding 16: let : (Int)->Int = fn n->n accept" `Quick test_let_annot_poly_instance_accepts;
         ] );
       ( "return_refine_guard", [
           Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;

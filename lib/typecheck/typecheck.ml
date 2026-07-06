@@ -3830,8 +3830,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── let binding (block-scoped) ───────────────────────────────── *)
     | Ast.ELet (b, sp) ->
       (* When ELet appears as the last expression in a block it's a
-         programmer error, but we give it type Unit and move on. *)
-      let rhs_ty = infer_expr env b.bind_expr in
+         programmer error, but we give it type Unit and move on.  Still honour
+         a type annotation on the binding (`let x : T = e`) so the RHS is
+         checked against it, mirroring the normal infer_block ELet arm. *)
+      let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
       let bindings, pat_ty = infer_pattern env b.bind_pat in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
@@ -4289,6 +4291,35 @@ and infer_match env span scrut scrut_ty branches =
   check_redundant_arms env scrut_ty branches;
   result_ty
 
+(** Compute the type of a `let`-binding RHS, honouring an optional type
+    annotation (`let x : T = e`, finding 16).  When [bind_ty] is present the
+    annotation becomes a CHECKING context for the RHS (via [check_expr]) — a
+    mismatch like `let x : Int = "foo"` is rejected, while a polymorphic RHS
+    bound at a more specific instance (`let f : (Int) -> Int = fn x -> x`)
+    still typechecks.
+
+    The annotation is resolved into a scratch error context first: if
+    [surface_ty] cannot resolve it (e.g. a phantom/typestate tag used in type
+    position, `let h : Handle(Open) = …`, which is a data constructor, not a
+    type name), we discard the scratch errors and fall back to plain inference
+    — exactly the pre-finding-16 behaviour for annotations the type grammar
+    can't express, so no legitimate program starts being rejected. *)
+and infer_let_annotated env sp bind_ty bind_expr =
+  match bind_ty with
+  | None -> infer_expr env bind_expr
+  | Some ann ->
+    let scratch = March_errors.Errors.create () in
+    let tvars = ref [] in
+    let ann_ty = surface_ty { env with errors = scratch } ~tvars ann in
+    if March_errors.Errors.has_errors scratch then
+      (* Annotation not expressible as a resolvable type — ignore it (legacy
+         behaviour) and infer from the RHS alone. *)
+      infer_expr env bind_expr
+    else begin
+      check_expr env bind_expr ann_ty ~reason:(Some (RAnnotation sp));
+      ann_ty
+    end
+
 (** Infer types of all expressions in a block, threading [ELet] bindings. *)
 and infer_block env exprs =
   match exprs with
@@ -4303,7 +4334,13 @@ and infer_block env exprs =
        `let f1 = f(acc); f1(k)` to instantiate a fresh TVar for f1 rather than
        unifying the original t_r1 that links f's curried return chain. *)
     let env_rhs = enter_level env in
-    let rhs_ty  = infer_expr env_rhs b.bind_expr in
+    (* If the binding carries a type annotation (`let x : T = e`), CHECK the
+       RHS against the annotated type rather than inferring it bare.  Using
+       check_expr (not just a post-hoc unify) gives a legitimately polymorphic
+       RHS a checking context, so `let f : (Int) -> Int = fn x -> x` still
+       works while `let x : Int = "foo"` is rejected.  The annotated type then
+       becomes the binding's type, so the pattern unifies against it. *)
+    let rhs_ty = infer_let_annotated env_rhs sp b.bind_ty b.bind_expr in
     let bindings, pat_ty = infer_pattern env_rhs b.bind_pat in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
