@@ -21,6 +21,37 @@
 #include <signal.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <execinfo.h>
+#include <pthread.h>
+
+/* Optional OOM forensics: set MARCH_DEBUG_OOM=1 to print the requested size
+ * and a backtrace when march_alloc/march_string_alloc fail.  A failure with a
+ * huge/bogus size is the signature of a corrupted heap value's length header
+ * being read as pointer garbage rather than real memory pressure; the
+ * backtrace pinpoints which allocation call site observed the corruption.
+ * Off by default (no-op, no overhead) so this never affects production
+ * behavior unless explicitly enabled for debugging. */
+static int march_debug_oom_enabled(void) {
+    static int v = -1;
+    if (v == -1) {
+        const char *e = getenv("MARCH_DEBUG_OOM");
+        v = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return v;
+}
+static void march_debug_report_oom(const char *where, int64_t requested) {
+    if (!march_debug_oom_enabled()) return;
+    fprintf(stderr, "\n=== march DEBUG OOM in %s ===\n", where);
+    fprintf(stderr, "  requested size: %lld (0x%llx)\n",
+            (long long)requested, (unsigned long long)requested);
+    fprintf(stderr, "  pthread_self:   %p\n", (void *)pthread_self());
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    fprintf(stderr, "  backtrace (%d frames):\n", n);
+    backtrace_symbols_fd(bt, n, 2 /* stderr */);
+    fprintf(stderr, "=== end DEBUG OOM ===\n\n");
+    fflush(stderr);
+}
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -108,7 +139,10 @@ static inline void march_run_resource_dtor(void *p) {
 
 void *march_alloc(int64_t sz) {
     void *p = calloc(1, (size_t)sz);
-    if (!p) { fputs("march: out of memory\n", stderr); exit(1); }
+    if (!p) {
+        march_debug_report_oom("march_alloc", sz);
+        fputs("march: out of memory\n", stderr); exit(1);
+    }
     /* Initialize rc=1, tag=0, pad=0 */
     march_hdr *h = (march_hdr *)p;
     h->rc  = 1;
@@ -324,7 +358,10 @@ void *march_iolist_hash_fnv1a(void *iol) {
  * march_value_to_string path. */
 void *march_string_alloc(int64_t len) {
     march_string *s = malloc(sizeof(march_string) + (size_t)len + 1);
-    if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
+    if (!s) {
+        march_debug_report_oom("march_string_alloc", len);
+        fputs("march: out of memory\n", stderr); exit(1);
+    }
     s->rc  = 1;
     s->tag = MARCH_STRING_TAG;
     s->pad = 0;
