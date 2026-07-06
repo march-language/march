@@ -2692,17 +2692,21 @@ let run_check_cmd files =
     d.span.March_ast.Ast.file = "" ||
     d.span.March_ast.Ast.file = "<unknown>"
   in
-  let user_errors = List.filter (fun d ->
-    is_user_file d &&
-    d.March_errors.Errors.severity = March_errors.Errors.Error
+  let user_diags severity = List.filter (fun d ->
+    is_user_file d && d.March_errors.Errors.severity = severity
   ) diags in
-  List.iter (fun (d : March_errors.Errors.diagnostic) ->
-    Printf.eprintf "%s:%d:%d: error: %s\n"
+  let user_errors   = user_diags March_errors.Errors.Error in
+  let user_warnings = user_diags March_errors.Errors.Warning in
+  let print_diag label (d : March_errors.Errors.diagnostic) =
+    Printf.eprintf "%s:%d:%d: %s: %s\n"
       d.span.March_ast.Ast.file
       d.span.March_ast.Ast.start_line
       d.span.March_ast.Ast.start_col
+      label
       d.message
-  ) user_errors;
+  in
+  List.iter (print_diag "warning") user_warnings;
+  List.iter (print_diag "error") user_errors;
   if user_errors <> [] then exit 1
   else exit 0
 
