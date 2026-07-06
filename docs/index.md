@@ -132,7 +132,7 @@ actor Room do
 
   on Say(from, text) do
     let line = from ++ ": " ++ text
-    state.members |> List.iter(fn m -> println(m ++ " sees: " ++ line))
+    state.members |> List.each(fn m -> println(m ++ " sees: " ++ line))
     state
   end
 

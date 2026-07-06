@@ -113,7 +113,7 @@ List.find([1, 2, 3], fn x -> x > 1)      -- Some(2)
 List.find_index([10, 20, 30], fn x -> x == 20)  -- Some(1)
 
 -- Iteration (side effects)
-List.iter([1, 2, 3], fn x -> println(int_to_string(x)))
+List.each([1, 2, 3], fn x -> println(int_to_string(x)))
 
 -- Sorting
 List.sort_by([3, 1, 2], fn (a, b) -> a < b)   -- [1, 2, 3]

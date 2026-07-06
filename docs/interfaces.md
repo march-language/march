@@ -127,7 +127,7 @@ Constrain type parameters with `when`:
 
 ```march
 fn print_all(xs : List(a)) : () when Show(a) do
-  List.iter(xs, fn x -> println(show(x)))
+  List.each(xs, fn x -> println(show(x)))
 end
 
 fn sort(xs : List(a)) : List(a) when Ord(a) do
