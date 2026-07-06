@@ -1,0 +1,26 @@
+mod M do
+  -- Operational dispatch witness (core-march.md §4.2.2): a user-defined
+  -- interface's method call resolves through ORDINARY LEXICAL `env` binding,
+  -- not a runtime type-directed table. `speak(Dog(...))` finds `speak` bound
+  -- in the block's environment by the single `impl Speak(Dog)` below (there is
+  -- only one impl in scope for this call, so lexical shadowing never becomes
+  -- observable here — see the reject/divergence note in core-march.md for what
+  -- happens when a SECOND impl of the same interface shadows this binding).
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(name) -> name ++ " says Woof"
+      end
+    end
+  end
+
+  fn main() do
+    println(speak(Dog("Rex")))
+  end
+end

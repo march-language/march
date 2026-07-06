@@ -39,6 +39,20 @@ extracted faithfully from the existing implementation and kept honest by the
 differential oracle. That method held across all seven widening slices, and this
 v1 is their consolidation into one coherent reference.
 
+**Widening slice (2026-07-06):** §4.4.2 extends the primitive-dispatch material
+above with **method dispatch** — how a call like `speak(d)` or `show(v)`
+resolves to a specific `impl`'s method body at runtime, as opposed to how the
+typechecker decides a suitable `impl` exists at all (`core-march-types.md`
+§2.1a/§2.3, unchanged by this addition). The built-in type-directed interfaces
+(`Show`/`Eq`/`Ord`/`Hash`) dispatch through a genuine runtime hashtable
+(`impl_tbl`, keyed `(iface, type_name)`); user-defined interfaces get no such
+table at all and resolve through the same ordinary lexical `env` binding §4.1
+already specifies for every other name — which is exactly why overlapping
+user-interface impls are "just shadowing," not a designed policy. The
+coherence/overlap divergence this causes (and how the COMPILED backend
+resolves the same overlap differently) is a separate, later task in the same
+widening effort — cross-referenced from §4.4.2, not detailed there.
+
 **It is not** the whole language semantics. The CORE covers the pure,
 value-level reduction fragment; everything outside it — strings as first-class
 data (beyond their appearance in the value grammar), `to_string`/`show` and the
@@ -1149,6 +1163,176 @@ the harness-compatibility reason just given.
 `not(e)` evaluate the single argument then apply `eval.ml:2818`–`2820`, same
 generic path.)
 
+### 4.4.2 Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding
+
+§4.4's comparison family flagged, and deferred, exactly this question: the
+`Eq`/`Ord`-impl-or-structural-equality fallback arms of `==`/`<` "exist for
+types outside this fragment ... and are explicitly out of scope here"
+(§4.4, `eval.ml:881`–`914`). This subsection is that deferral discharged for
+`interface`/`impl` method calls specifically — how a call like `speak(d)` or
+`show(v)` picks WHICH method body actually runs, at RUNTIME, once the
+typechecker (`core-march-types.md` §2.1a/§2.3) has already decided a suitable
+`impl` statically **exists**. That is the crucial division of labor to keep
+straight: **typing decides an impl exists; this subsection is how the right
+one's method body gets invoked.** The mechanism is not what a reader coming
+from Rust/Haskell/Swift might expect — March has **two entirely different
+runtime dispatch strategies**, depending on which interface is being called,
+and the split is a hard **four-name allowlist**, not a general property of
+"is this a built-in vs. user interface" in the abstract (it happens to
+coincide with that distinction today only because no user-declared interface
+is on the allowlist).
+
+**Built-in type-directed interfaces (`Show`, `Eq`, `Ord`, `Hash`) dispatch
+through `impl_tbl`, a genuine runtime hashtable keyed `(iface, type_name)`.**
+
+```
+impl_tbl : (string * string, value) Hashtbl.t                      eval.ml:257
+
+is_type_dispatched_method(iface, meth) =                           eval.ml:270–273
+    true   iff (iface,meth) ∈ {("Show","show"),("Eq","eq"),
+                                ("Ord","compare"),("Hash","hash")}
+    false  otherwise
+
+is_type_dispatched_iface(iface) =                                  eval.ml:287–289
+    true   iff iface ∈ {"Show","Eq","Ord","Hash"}
+    false  otherwise
+
+(E-Dispatch-Builtin)
+    ρ ⊢ e ⇓ v            type_name_of_value(v) = Some τ            eval.ml:877–888
+    Hashtbl.find_opt impl_tbl (iface, τ) = Some f_impl
+    ──────────────────────────────────────────────────────────────
+    a call to the builtin `show`/`==`/`<`/`hash` on v invokes f_impl
+    -- reached via: show_dispatch (eval.ml:2756–2774, called by both the
+       `show` builtin at eval.ml:3362–3364 AND `println`'s value-formatting,
+       eval.ml:2853–2856), the `==`/`!=` and `<`/`<=`/`>`/`>=` arms of
+       cmp_op (eval.ml:901–915, 916–934), the standalone `eq`/`compare`/
+       `hash` builtins (eval.ml:3336–3348, 3349–3361, 3365–3378) — every one
+       of these looks up impl_tbl BY THE ARGUMENT'S OWN DYNAMIC TYPE, via
+       type_name_of_value (eval.ml:877–888: ctor_type_tbl for an ADT value,
+       record_type_tbl for a record value's field-name signature).
+    -- fallback (no impl_tbl entry): structural OCaml equality/comparison
+       for ==/</hash (eval.ml:915, "no `Ord` implementation" eval_error for
+       <, etc.), value_to_string for show (eval.ml:2773–2774) — the "types
+       outside this fragment" escape hatch §4.4 already named.
+```
+
+This is a real, type-directed runtime lookup: which method body runs depends
+on `v`'s dynamic type tag at the CALL site, not on which `impl` happened to
+be declared last or where in the source the call appears lexically. Two
+`derive(Show)`s for two different types populate two different `impl_tbl`
+entries (`("Show","Color")`, `("Show","Shape")`, say) that coexist without
+interfering — this is exactly what makes the built-in interfaces behave the
+way a reader familiar with single-dispatch runtime polymorphism would expect.
+
+**`t28_derive_impl_tbl_dispatch.march` (`specs/lang/types/accept/`) witnesses
+this concretely:** `derive Show, Eq for Color` (on `type Color = Red | Green
+| Blue`) expands, at DESUGAR time, to ordinary `DImpl` blocks (`derive`'s
+own machinery, `desugar.ml`, out of this document's scope — see
+`core-march-types.md` §2.3/`interface-impl-survey.md` §5); those `DImpl`
+blocks are evaluated by the SAME `DImpl` handler documented below, and
+because `Show`/`Eq` are on the four-name allowlist, they register into
+`impl_tbl` under `("Show","Color")`/`("Eq","Color")` rather than binding
+`show`/`eq` as bare names. Running it (interpreted, confirmed live):
+
+```
+println(show(Red))       -- Red    (impl_tbl lookup on Red's dynamic tag)
+println(Green == Green)  -- true   (impl_tbl "Eq" lookup, structural payload compare)
+println(Red == Blue)     -- false
+```
+
+Without `derive Eq for Color`, `Red == Blue` is rejected at typecheck time
+(`` `Color` does not implement interface `Eq`. `` — `core-march-types.md`
+§2.1a), confirming the program above is genuinely exercising the derived
+`impl_tbl` entry, not an incidental structural-equality fallback that would
+apply regardless.
+
+**User-defined interfaces get NO runtime dispatch table at all — a call
+resolves through ordinary lexical `env` binding, exactly the §4.1 mechanism
+already specified for every other name in the language.** `DImpl`'s eval
+handler (there are two copies, kept in lockstep — the top-level/module path
+at `eval.ml:8278`–`8337` and the `make_recursive_env` / letrec-style path at
+`eval.ml:8599`–`8654`; both share the identical `is_dispatched` guard) does:
+
+```
+(E-DImpl)
+    is_dispatched = is_type_dispatched_method(iface, meth)          eval.ml:8296–8298 (8613–8615)
+    case is_dispatched of
+    | true  → build a PLAIN, non-self-referential closure for the method
+              value, bind it ONLY in impl_tbl (NOT in the returned env)   eval.ml:8303–8308, 8335 (8620–8624, 8650)
+    | false → eval the method as an ordinary DFn, PREPEND (meth ↦ v) onto
+              the returned env — ordinary env-binding, same shape as any
+              `let`/top-level `fn`                                       eval.ml:8309–8311, 8336 (8625–8627, 8651)
+    ────────────────────────────────────────────────────────────────
+    a later `impl` of the SAME (iface, method) name simply prepends a NEW
+    (meth ↦ v') binding in front of the OLD one — ordinary §4.1 shadowing,
+    not a designed dispatch policy
+```
+
+Concretely: `interface Speak(a) do fn speak : a -> String end` is not on the
+`is_type_dispatched_method` allowlist, so `impl Speak(Dog) do fn speak(self)
+do ... end end`'s eval arm takes the `false` branch — it evaluates `speak`'s
+body as an ordinary function value and PREPENDS `("speak", v)` onto the
+environment threading through the rest of module evaluation, precisely like
+a bare top-level `fn speak(self) do ... end` would. A later call to
+`speak(d)` anywhere in scope is an ordinary `EVar "speak"` lookup
+(§4.1: "lookup returns the **first** binding") — it finds whichever `impl
+Speak(...)`'s method was registered LAST (closest to the front of `ρ`), with
+**no reference at all to `d`'s dynamic type**. If only one `impl Speak(T)`
+is ever in scope for a given type, this is invisible — the single binding IS
+the right one, and `t27_user_iface_lexical_dispatch.march`
+(`specs/lang/types/accept/`) witnesses exactly that unambiguous case: one
+`interface Speak(a)`, one `impl Speak(Dog)`, `speak(Dog("Rex"))` finds the
+one `speak` binding in `ρ` and evaluates to `"Rex says Woof"` (confirmed live,
+interpreted, exit 0).
+
+**This is precisely why interface-method-call overlap for user interfaces is
+"just shadowing," not a designed coherence policy** (the full divergence
+story — including how the COMPILED backend's TIR lowering resolves the same
+overlap differently, first-registered-wins instead of last-registered-wins —
+is Task 4's subject, `core-march.md`'s coherence subsection; this document
+forward-references it and does not restate or duplicate its analysis here).
+The mechanism demonstrated live while drafting this section: extending
+`t27`'s program with a SECOND `impl Speak(Cat) do fn speak(self) do ... end
+end` block (same interface, different type) makes `speak(Dog("Rex"))` PANIC
+at runtime — `Non-exhaustive pattern match: no branch matched the value
+Dog("Rex")` — because the second impl's `fn speak(self)` clause (matching
+only `Cat(...)`) shadows the first impl's `speak` binding in `ρ`, and the
+lexically-nearest `speak` is now Cat's, regardless of the argument's actual
+type. This is not a hypothetical: it is the direct, mechanical consequence
+of §4.1's "lookup returns the first binding" rule applied to two `DImpl`
+blocks that both bind the same bare name — there is no special-casing
+anywhere in the `false`-branch of (E-DImpl) that would make it behave
+otherwise. (This two-impl shape is deliberately NOT committed as a corpus
+program here — an interpreter-only PANIC is exactly the coherence
+divergence Task 4 documents formally with both backends' outputs side by
+side, so it belongs there, not duplicated as a bare crash in this section.)
+
+**Context, not a rule: the `is_type_dispatched_iface` guard defends against a
+same-key collision that today never actually fires.** The doc comment at
+`eval.ml:259`–`269` and `eval.ml:275`–`286` explains the guard's motivation —
+`if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched
+then Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val`
+(`eval.ml:8323`–`8324`, mirrored `:8639`–`8640`) ensures that only a type-
+dispatched interface's OWN canonical method (`Eq`'s `eq`, not a hypothetical
+extra `neq`) is allowed to claim the shared `(iface, type)` `impl_tbl` key;
+any other method under the same built-in interface name is left out of
+`impl_tbl` entirely, specifically so it cannot clobber the dispatch entry and
+cause `neq → eq → neq`-shaped infinite recursion (a real historical bug this
+guard fixed). Re-grepped live and confirmed present, unchanged, and correctly
+shaped at the cited lines in this worktree. It is **currently unreachable for
+the four built-in interfaces**, though — reproduced live for this task:
+hand-writing `impl Eq(Dog) do fn eq(a,b) do ... end fn neq(a,b) do
+not(eq(a,b)) end end` is REJECTED at TYPECHECK time, `` Interface `Eq` does
+not declare a method `neq`. `` (`core-march-types.md` §2.3's extra-method
+check, `typecheck.ml:7158`–`7165` — the built-in `Eq` interface's own
+`iface_methods` list contains only `eq`, so `neq` is an "extra undeclared
+method" like any other). The eval.ml guard is therefore belt-and-suspenders:
+correct and still load-bearing for a HYPOTHETICAL future built-in interface
+with multiple methods (or if `is_type_dispatched_method`'s allowlist is ever
+widened), but the specific `Eq`/`neq` collision its comment narrates cannot
+occur today, because the typechecker's own extra-method rejection forecloses
+it first.
+
 ### 4.5 Relationship to the small-step form (the metatheory target)
 
 `specs/lean4-metatheory-plan.md` will state the semantics as a **small-step**
@@ -1403,8 +1587,20 @@ converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
 Phase-1 tasks did):**
 
 - strings as first-class data (beyond their appearance in the value grammar);
-- `to_string`/`show` and the interface-dispatch machinery (the source of the
-  known container-`to_string`/`hash`/atom-`_show` divergences §5 routes around);
+- `to_string`/`show` and the interface-dispatch machinery — **PARTIALLY
+  LANDED (§4.4.2, 2026-07-06).** §4.4.2 now documents the runtime METHOD
+  DISPATCH mechanism itself: the four-name `impl_tbl` type-directed lookup for
+  `Show`/`Eq`/`Ord`/`Hash`, and the ordinary lexical `env`-binding path every
+  user-defined interface takes instead. NOT yet covered here: the coherence/
+  overlap divergence between the two backends when the SAME (iface, type) has
+  more than one impl in scope (forward-referenced from §4.4.2, landing as its
+  own subsection — the widening effort's next task in this same slice), and
+  `derive`/`satisfy`'s own generation rules (`core-march-types.md` §2.3 covers
+  their typing side; a later task covers `derive`'s five-interface closed set
+  operationally). The known container-`to_string`/`hash`/atom-`_show`
+  divergences §5 routes around are UNCHANGED by this landing — those are
+  bugs in the fallback arms §4.4.2 explicitly does not re-litigate, not in
+  the dispatch mechanism §4.4.2 newly specifies;
 - effects and IO ordering;
 - actors;
 - refinements;

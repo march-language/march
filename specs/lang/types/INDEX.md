@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t26 accept, t01–t22 reject)
+# Typing corpus index (t01–t28 accept, t01–t22 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -6,6 +6,15 @@ program in this directory (`specs/lang/types/accept/*.march`,
 `specs/lang/core-march-types.md`. See that document's §3 for the full
 per-program prose and §4 for the accumulated findings each `reject/` witness
 sometimes doubles as evidence for.
+
+**Note (`t27`–`t28`):** these two `accept/` programs anchor **operational**
+(runtime method-DISPATCH) rules in `core-march.md` §4.4.2, not typing rules in
+`core-march-types.md` — they ride this same `--check`-plus-run harness because
+they are, first, ordinary well-typed programs (the `--check` half of the
+corpus model still applies), and the harness has no separate "run and check
+the printed value" lane of its own. Their expected VALUE (not just exit code)
+is documented in their own table row below and re-verified by running them
+interpreted, not only `--check`ing them.
 
 ## The `--check` accept/reject harness model
 
@@ -62,6 +71,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t21`–`t22`, `reject/t16`–`t17` | Typechecker fixes (2026-07-05) | witnesses for findings 16 (`f0f5299c`, let-annotation enforcement), 15 (`8cbd6dd2`, generic `when`-constraint re-check), and 13 (`7e40dc5b`, ELetFn diagnostic dedup — pins `reject/t12` at one diagnostic, no new program) |
 | `accept/t23`–`t25`, `reject/t18`–`t21` | Widening slice 1, Task 1 (2026-07-06) | user-defined `interface`/`impl` DECLARATION checking (§2.3: `(T-Interface)` registration, `(T-Impl)`'s ordered checks — missing/extra-method, signature-match, unknown-interface — and default methods) |
 | `accept/t26`, `reject/t22` | Widening slice 1, Task 2 (2026-07-06) | superclass/`requires` and `when`-clause discharge (mandatory enforcement, §2.3), the `impl_matches_ty` structural-match judgment named as its own rule, `(T-ImplMatch)` |
+| `accept/t27`–`t28` | Widening slice 1, Task 3 (2026-07-06) | method-DISPATCH operational rules (`core-march.md` §4.4.2, not `core-march-types.md`): the four-name `impl_tbl` type-directed lookup for `Show`/`Eq`/`Ord`/`Hash`, and ordinary lexical `env`-binding dispatch for user-defined interfaces |
 
 ## `accept/` — must typecheck
 
@@ -93,6 +103,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t24_interface_impl_generic_head` | (T-Impl), `impl_matches_ty` wildcard semantics — a generic/parameterized impl head `impl Describe(Box(a))`, used at both `Box(Int)` and `Box(String)` | |
 | `t25_interface_default_method` | **(T-Impl) default methods** — an interface method with a default body, omitted by the impl; `inject_defaults` (desugar) splices the default in before typecheck ever sees the impl, so no missing-method error fires | run-witnessed: `greeting(Cat("Tom"))` prints `42` (the default, not a value the impl ever defined) |
 | `t26_impl_superclass_satisfied` | **(T-Impl) superclass discharge** — `interface Greet(a) requires Speak(a)`, with `impl Speak(Dog)` declared before `impl Greet(Dog)` | run-witnessed: prints `"Hello, Rex"` — the bound SATISFIED |
+| `t27_user_iface_lexical_dispatch` | **operational (`core-march.md` §4.4.2, E-DImpl)** — a user `interface Speak(a)` + one `impl Speak(Dog)`; `speak(Dog("Rex"))` resolves via ORDINARY lexical `env` binding, not a type-directed table | run-witnessed: prints `"Rex says Woof"` |
+| `t28_derive_impl_tbl_dispatch` | **operational (`core-march.md` §4.4.2, E-Dispatch-Builtin)** — `derive Show, Eq for Color`; `show(Red)`/`Green == Green`/`Red == Blue` all dispatch through the runtime `impl_tbl` hashtable keyed `(iface, type_name)` on the argument's dynamic type | run-witnessed: prints `Red` / `true` / `false` |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -121,7 +133,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t21_impl_unknown_interface` | (T-Impl) interface-existence — `impl` of an interface name never declared with `interface` | `` Unknown interface `NotDeclared` — is it declared above this impl? `` |
 | `t22_impl_superclass_unsatisfied` | **(T-Impl) superclass discharge, unsatisfied** — `interface Greet(a) requires Speak(a)`, `impl Greet(Dog)` declared with no `impl Speak(Dog)` anywhere in scope — mandatory rejection, not a conditional gap | `` Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. `` |
 
-**Result: 48 / 48 (26 accept, 22 reject).**
+**Result: 50 / 50 (28 accept, 22 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
