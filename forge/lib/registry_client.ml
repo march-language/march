@@ -39,7 +39,19 @@ let validate_registry_url ~registry ~insecure =
     given env vars. Returns the subprocess's exit code (0/1/2/3/4/5 per
     registry.march's own convention — see this plan's Global Constraints).
     `token` and every value in `extra_env` are passed ONLY via the child's
-    environment array, never via argv or a shell string. *)
+    environment array, never via argv or a shell string.
+
+    Runs INTERPRETED (`march <tmp>.march`), not `--compile`d. forge_registry.march's
+    own header comment claims native TLS "only works compiled" — verified FALSE and
+    actively worse: compiling and running it against a real remote HTTPS server
+    (forgepm.org) SIGSEGVs (a known class of compiled-TLS bug — see marathon's
+    README) and a minimal compiled repro of the plain-HTTP path (`tcp_recv_http`)
+    panics with "non-exhaustive pattern match" — neither is this plan's bug to fix.
+    Interpreted mode is verified reliable end-to-end for local dev-registry
+    publish/retire; a live production-registry (real TLS) publish additionally hit
+    an interpreted `Tls.read` bug (returns `Ok("")` immediately against a real
+    remote server instead of blocking for data) — also out of scope here, filed as
+    a follow-up. *)
 let run_action ~action ~token ~registry ~pkg_dir ~extra_env =
   let tmp = write_temp Registry_march_src.content ".march" in
   let march = find_march () in
