@@ -266,8 +266,9 @@ march/
     │   ├── resolver_cas_package.ml   # canonical archive, SHA-256 CAS store/verify
     │   ├── resolver_api_surface.ml   # pub fn/type extraction, diff, semver check
     │   ├── cmd_deps.ml               # forge deps (install all dep types + [patch])
-    │   ├── cmd_publish.ml            # forge publish with semver enforcement
-    │   └── cmd_publish.ml            # forge publish with semver enforcement
+    │   ├── cmd_publish.ml            # forge publish: semver check + registry submit
+    │   ├── cmd_retire.ml             # forge retire: retire a published version
+    │   └── registry_client.ml        # secret-safe registry.march subprocess runner + HTTPS gate
     │   # NOTE: cmd_bastion_*.ml, scaffold_bastion.ml, gen_auth.ml, cmd_assets.ml
     │   #       moved to bastion repo; cmd_depot.ml moved to depot repo
     └── test/
@@ -281,6 +282,10 @@ march/
         ├── test_regression.exe       # 8 tests (Cargo/Hex/npm regressions)
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
+
+## Current State (as of 2026-07-06, `forge publish`/`forge retire` wired to a real registry)
+
+`forge publish`/`forge retire` submit/retire packages against a running forgepm registry over native HTTP/TLS (Bearer auth, multipart tarball upload, HTTPS-by-default with an explicit `--insecure` escape hatch); see `forge/tasks/forge_registry.march` + `forge/tasks/test_registry.march`. Previously `forge publish` only validated locally and printed "registry push not yet implemented" — this closes that gap. New: `Registry_client.run_action`/`validate_registry_url` (`forge/lib/registry_client.ml`) spawn the embedded March client via `Unix.create_process_env` (token passed only through the child's environment block, never argv/a shell string, no pipes); `forge retire <VERSION> [--reason TEXT] [--registry URL] [--insecure]` (`forge/lib/cmd_retire.ml`); `--registry`/`--insecure` flags on `forge publish`. 13 new unit tests for the client's pure logic (multipart framing, response classification, endpoint URLs, manifest parsing). Live-verified end-to-end against a real local forgepm dev server: publish, retire, and the HTTPS gate all behaved correctly against a fixture package. Exit codes: 0 success, 1 client/config error, 2 local validation failure, 3 network/transport error, 4 server 4xx, 5 server 5xx.
 
 ## Current State (as of 2026-07-05, `Cli` stdlib module — final-review fixes)
 
