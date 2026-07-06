@@ -78,6 +78,13 @@ forge deploy hot
 forge deploy hot --so /path/to/my_app.so
 ```
 
+> **Cross-host note.** `forge deploy hot` (no `--so`) builds the reload
+> `.so` for your **host** platform, so deploying from macOS to a Linux server
+> needs a Linux-built artifact passed via `--so`. Native cross-compilation of
+> reload units (`--compile-so --target linux/…`) is planned; today, cross builds
+> cover the initial binary — see
+> [Cross-compiling to Linux](tooling.md#cross-compiling-to-linux).
+
 On a successful deploy you see:
 
 ```

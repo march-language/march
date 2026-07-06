@@ -132,7 +132,7 @@ actor Room do
 
   on Say(from, text) do
     let line = from ++ ": " ++ text
-    state.members |> List.iter(fn m -> println(m ++ " sees: " ++ line))
+    state.members |> List.each(fn m -> println(m ++ " sees: " ++ line))
     state
   end
 
@@ -168,6 +168,7 @@ end
 - **LLVM backend** — whole-program monomorphization, defunctionalization, native binaries
 - **Work-stealing scheduler** — cooperative + preemptive, scales across cores
 - **WebAssembly target** — compile to `.wasm` via `--target wasm64-wasi`
+- **Linux cross-compilation** — build `linux/amd64` + `linux/arm64` binaries from any host via `zig cc`, Go's `GOOS=linux` style ([guide](tooling.md#cross-compiling-to-linux))
 
 ### Language
 - **Algebraic data types** — `type Shape = Circle(Float) | Rect(Float, Float)`
