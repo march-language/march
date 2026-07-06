@@ -79,10 +79,10 @@ consolidation location until the named task lands.
 | Capabilities | [`capabilities.md`](capabilities.md) | canonical |
 | Memory model (Perceus/FBIP, user-facing) | [`memory-model.md`](memory-model.md) | canonical |
 | Safety by construction | [`safety-by-construction.md`](safety-by-construction.md) | canonical |
-| Actors | `actors.md` | pending (Task 4) |
-| Supervision | `supervision.md` | pending (Task 4) |
-| Parallelism | `parallelism.md` | pending (Task 4) |
-| Clustering | `clustering.md` | pending (Task 4) |
+| Actors | [`actors.md`](actors.md) | canonical |
+| Supervision | [`supervision.md`](supervision.md) | canonical |
+| Parallelism | [`parallelism.md`](parallelism.md) | canonical |
+| Clustering | [`clustering.md`](clustering.md) | canonical |
 | Standard library (overview/pointer chapter) | `standard-library.md` | pending (Task 5) |
 | Implementation reference (compiler internals, sibling) | `specs/impl/index.md` | pending (Task 5) |
 
