@@ -1286,9 +1286,10 @@ March's impl system:
   match a `Dog` target simultaneously, and nothing in `(T-ImplMatch)` itself
   (or the discharge sites that call it) picks the more specific one — which
   one actually runs is decided entirely by registration order in the
-  interpreter/codegen backends respectively, not by matching logic. A later
-  task documents this overlap/coherence divergence in full (the two-backend
-  runtime disagreement over which of several matching impls is selected);
+  interpreter/codegen backends respectively, not by matching logic.
+  `core-march.md` §4.4.3 documents this overlap/coherence divergence in full
+  (the two-backend runtime disagreement over which of several matching impls is
+  selected);
   this section's job is only to name and pin the matching judgment itself,
   since it is the single mechanism both stories flow from.
 - **Linearity qualifiers are ignored for matching purposes**
