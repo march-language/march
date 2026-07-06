@@ -167,6 +167,44 @@ This file tracks everything that still needs to get done. Organized by priority 
 
   **Net effect:** the state type IS checked inside the actor decl (`init` + each handler body checked to return the state record, `typecheck.ml:6785–6820`), but it does not propagate to any observable `Pid` at a `spawn` site — the `Pid` parameter stays a free var that unifies opportunistically with whatever surrounding builtins demand (`is_alive`, `kill`, `send`, …). Tightening `spawn`'s result to `Pid[state]` (or making the actor name resolve to its `:6821` binding rather than the `:6769` nullary ctor) is a compiler change, out of scope for this documentation-only slice. Deliberately NOT added to `specs/lang/types/{accept,reject}/` as a `reject/` program — there is no *incorrect* program to pin (the current fresh-var behavior is what it is, and `accept/t39_actor_spawn_pid` witnesses it); this is a faithfulness/expectation-gap note, not a rejectable typo.
 
+### Compiler (found during Core March widening slice — actors: message payload typing + actor affinity, Task 3, 2026-07-06)
+
+- [ ] **`send(target, Msg(args))` does NOT check the message against the target actor's accepted-message set — a wrong-actor send typechecks (exit 0), then is silently DROPPED interpreted but MISROUTED (memory-unsafe) compiled.** Found and pinned by `specs/lang/core-march-types.md` §2.6.4 and §4.1 finding 19. **Distinct from finding 18** (the `Pid`-is-unparameterized-after-`spawn` gap above): finding 18 is about the *type the Pid carries*; THIS is about the `send` typing arm ignoring the target regardless of what the Pid carries. The `ESend` arm (`lib/typecheck/typecheck.ml:4177`) infers the target Pid's type and immediately discards it — `ignore (infer_expr env cap)` (`:4178`) — so `send` never consults *which actor* `cap` is. The only send-side check is `check_sendable` (`typecheck.ml:3335`), which walks the message type and errors solely on a `RingBuf`-family constructor (`let non_sendable_types = ["RingBuf"]`, `:3331`) — NOT a message-acceptance check. The message payload *shape* IS checked (ordinary `ECon` constructor typing via `let msg_ty = infer_expr env msg`, `:4179`, witnessed by `reject/t29_actor_send_wrong_payload`: `send(counter, Inc("x"))` where `Inc` expects `Int` rejects `` expected `Int` but got `String`. ``), but *which handler the target actually has* is not.
+
+  **Live repro (confirmed this task, BOTH backends).** `Counter` handles only `Inc(Int)`; `Logger` handles `Log(String)`. Send `Log("stray")` — a `Logger` message — to the `Counter` Pid:
+  ```
+  mod Main do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do
+        println("Counter.Inc -> " ++ int_to_string(state.count + x))
+        { count: state.count + x }
+      end
+    end
+    actor Logger do
+      state { seen : Int }
+      init  { seen: 0 }
+      on Log(m : String) do
+        println("Logger.Log -> " ++ m)
+        { seen: state.seen + 1 }
+      end
+    end
+    fn main() do
+      let counter = spawn(Counter)
+      send(counter, Inc(3))
+      send(counter, Log("stray"))   -- Log is a Logger message, not Counter's
+      run_until_idle()
+      println("done")
+    end
+  end
+  ```
+  - `--check` exits **0** (accepts).
+  - **Interpreted** (`main.exe file.march`) prints `Counter.Inc -> 3` then `done` — the stray `Log` matched no `Counter` handler NAME (`h.ah_msg.txt = msg_tag` string equality, `lib/eval/eval.ml:7545`) and was **silently dropped** (`None -> ()`, `eval.ml:7547-7549`).
+  - **Compiled** (`--compile --opt 2`) prints `Counter.Inc -> 3`, then `Counter.Inc -> <garbage int, e.g. 2796564219>`, then `done` — the stray message was **MISROUTED** into `Counter`'s first handler slot. The compiled dispatch lowers each message to a per-actor `<Actor>_Msg` variant in handler-declaration order (`lib/tir/lower_actor.ml:17`) and dispatches by an `ECase` on that variant's discriminant with **no default arm** (`ECase(msg, branches, None)`, `lower_actor.ml:256`); a foreign message's discriminant indexes into the *target* actor's branch table, so `Log`'s slot hits `Counter.Inc`, whose body reinterprets the `String` payload pointer as an `Int` (non-deterministic, memory-unsafe).
+
+  **Why filed separately from finding 18:** finding 18 = "the Pid is unparameterized / a `Pid(T)` annotation is impossible." This finding = "`send` does not gate the message by the target actor" — and it would remain true EVEN IF the Pid carried its state type, because `send` discards `τ_cap` entirely (`:4178`). Fixing it (typing Pids by their accepted-message set so `send` can gate the message) is a significant type-system design decision — deferred, out of scope for this docs-only slice. Deliberately NOT a `reject/` corpus program (it typechecks; a `reject/` witness would codify the WRONG behavior); the correctly-typed accept path is `accept/t40_actor_send_typed_payload`. The message-name flat global namespace that underlies the compiled misroute is a DESIGN POINT (analogous to `core-march-types.md` §2.5's no-per-module-type-namespace point), documented in §2.6.4 — NOT filed as a gap.
+
 ### Compiler (found during Core March widening slice — interfaces/impls declaration checking, Task 6 closeout / `interfaces.md` reconciliation, 2026-07-06)
 
 - [ ] **A user-interface default method whose body calls a sibling interface method compiled ALWAYS returns the same result, regardless of the actual call arguments — a real, previously-undocumented compiled-only wrong-answer bug (NOT a hang).** Found while reproducing `specs/lang/interfaces.md`'s stale "Known issue" callout (which claimed a default `neq` calling `eq` "hangs/stack-overflows at runtime"). That claim is FALSE — reproduced live, interpreted AND compiled, and neither backend hangs or overflows the stack; the interpreted backend is fully correct. But the compiled backend has a different, real bug in the same area: the default method's body (compiled to a lambda closure over the interface's own type parameter, evaluated at `impl`-application time) does not correctly re-evaluate per call — it appears to always take the same branch/answer as whichever call is compiled/inlined first, ignoring the actual arguments on subsequent (or all) calls.

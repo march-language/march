@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t39 accept, t01–t28 reject)
+# Typing corpus index (t01–t40 accept, t01–t29 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -74,7 +74,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 67/67 — 39 accept, 28
+Exit 0 iff every program behaves as declared (currently 69/69 — 40 accept, 29
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -114,6 +114,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t34`–`t36` | Widening slice 2, Task 3 (2026-07-06) | module visibility as a TYPING concept (§2.5): the opaque-type asymmetry re-verified with a second stdlib witness (`t34`, `ConsistentHash.HashRing`), the no-per-module-type-namespace design point value-witnessed (`t35`, `A.Foo`/`B.Foo` collision), and the A10 qualified-record case re-confirmed still green (`t36`, `Cfg.Site`); also files a real, precisely-traced gap found while probing live — `opaque type`'s constructor-hiding is not actually enforced against qualified construction (`prebind_mod_members`, `typecheck.ml:8032–8087`, registers the qualified ctor key ungated on `var_vis`) |
 | `accept/t37`–`t38`, `reject/t27` | Widening slice 2, Task 4 (2026-07-06) | `use`/`import`/`alias` selector rules and the file-based resolver pre-pass (`core-march.md` §4.7.1, not `core-march-types.md`): both `use A.*` (`t37`) and the selector form `use A.{name}` (`t38`) value-witnessed against a real stdlib module (`List`); the file-vs-in-file resolver distinction (`use A.*` against an in-file nested `mod A` rejects `` Module `A` not found ``, since the resolver looks for an actual `a.march` FILE); selective `use X.{name}` of a private stdlib fn (`reject/t27`, `Array.lst_rev`) rejects `` Module `Array` does not export `lst_rev`. `` — the same `pub_set` gate `reject/t26` exercises, confirmed consistent with Task 1's cross-module visibility fix |
 | `accept/t39`, `reject/t28` | Widening actors slice, Task 1 (2026-07-06) | actor DECLARATION + `spawn` typing (`core-march-types.md` §2.6): the `DActor` arm's checks (state record type, `init` checked against it, each handler body checked to RETURN the state type; `typecheck.ml:6742–6821`), `spawn`'s compile-time literal-actor-name resolution (only `ECon(_,[],_)`/`EVar` accepted, computed actor expressions rejected; `:4185–4203`, `reject/t28` = `spawn(pick())`), and the truthful `Pid`-parameter account — `spawn` yields `Pid[fresh var]` NOT `Pid[state]` (§4.1 finding 18); `accept/t39` witnesses the fresh-var accept path (`is_alive` on a `spawn` result) |
+| `accept/t40`, `reject/t29` | Widening actors slice, Task 3 (2026-07-06) | actor MESSAGE-PAYLOAD typing + the affinity non-guarantee (`core-march-types.md` §2.6.4): a message ctor's payload IS checked via the ordinary `ECon` path (`infer_expr env msg`, `typecheck.ml:4179`) — `accept/t40` = `send(counter, Inc(3))` accepts, `reject/t29` = `send(counter, Inc("x"))` rejects `` expected `Int` but got `String`. ``; but message ACCEPTANCE by the target actor is NOT checked — `send` discards the target Pid's type (`:4178`) and the only send-side check is `check_sendable`'s `RingBuf` denylist (`:3331`/`:3335`), so a wrong-actor send typechecks (silently DROPPED interpreted, MISROUTED compiled — §4.1 finding 19, documented in prose, not corpus-encoded) |
 
 ## `accept/` — must typecheck
 
@@ -158,6 +159,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t37_use_all_stdlib_module` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — bulk `use A.*`** — `use List.*` rebinds `List`'s public names (including `append`, genuinely `List`-only, not shadowed by `prelude.march`) bare in `Main`'s scope; witnesses `UseAll`'s rebinding rule (`typecheck.ml:7275–7319`) and the resolver pre-pass locating a real stdlib file | run-witnessed: prints `3` |
 | `t38_use_selector_named_import` | **`use`/`import` operational rules (§4.7.1) — the selector form `use A.{name}`** — `use List.{append}` imports exactly the one named public fn; witnesses `UseNames`'s narrower, per-name rebinding rule (`typecheck.ml:7320–7337`) | run-witnessed: prints `3` |
 | `t39_actor_spawn_pid` | **actor declaration + `spawn` typing (§2.6, actors slice Task 1)** — a valid `actor Counter do state {count:Int} init {…} on Inc() do … end end` (the `DActor` arm checks state type + `init` + handler-returns-state, `typecheck.ml:6742–6821`) and `spawn(Counter)` yielding a `Pid` consumed by `is_alive : Pid(a) -> Bool`; also the ACCEPT witness for §4.1 finding 18 — the yielded `Pid` parameter is a FRESH VAR, not the state type (`:4203`), so `is_alive`'s `a` unifies with it freely | `--check` exit 0 |
+| `t40_actor_send_typed_payload` | **actor message-payload typing (§2.6.4, actors slice Task 3) — the accept path** — `send(counter, Inc(3))` where the handler is `on Inc(x : Int)`; the `ESend` arm (`typecheck.ml:4177`) types the message via ordinary `ECon` constructor typing (`let msg_ty = infer_expr env msg`, `:4179`), so a correctly-typed payload passes, and `check_sendable` (`:4180`, `:3335`) finds no `RingBuf` and raises nothing. Also the accept-side witness for §4.1 finding 19 (the affinity non-guarantee): `send` discards the target Pid's type (`:4178`) and checks only the payload shape | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -191,8 +193,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t26_cross_module_private_fn` | **module visibility — the REJECT side (slice 2, Task 1)** — `Array.lst_rev(...)`, a real private `pfn` (stdlib/array.march:39), is no longer callable by qualification from unrelated code; `load_module_into_env`'s new `ex_public` gate for `ExFn`/`ExValue` makes the qualified lookup miss, so `qualified_error_msg` reports the private-access message (the same shape the `ExCtor` gate already produced for private constructors) | `` is private to module `Array` `` |
 | `t27_use_selector_private_name` | **`use`/`import` operational rules (§4.7.1, slice 2 Task 4) — selective `use` of a PRIVATE name** — `use Array.{lst_rev}`, a selective import of the same real private `pfn` `t26` exercises via plain qualification; `DUse`'s `UseNames` arm looks up `"Array.lst_rev"` in `env.vars`, misses (the SAME `pub_set` absence `t26` hits), and raises the "does not export" message rather than `t26`'s "is private to" message — different text, identical underlying gate, consistent with Task 1's fix | `` Module `Array` does not export `lst_rev`. `` |
 | `t28_spawn_computed_actor` | **actor `spawn` typing (§2.6, actors slice Task 1) — computed actor expression rejected** — `spawn(pick())`, a FUNCTION-CALL actor argument rather than a literal name; the `ESpawn` arm (`typecheck.ml:4185`) accepts only the bare-name shapes `ECon(_,[],_)`/`EVar` (`:4194–4202`) and rejects everything else at `:4197–4202`, because `spawn` is resolved to a static `<Actor>_spawn` at compile time (no runtime actor value). `spawn(if … end)` / `spawn(A(x))` reject identically | `` `spawn` needs a plain actor name written directly, like `spawn(Counter)`. `` |
+| `t29_actor_send_wrong_payload` | **actor message-payload typing (§2.6.4, actors slice Task 3) — wrong-payload-shape send rejected** — `send(counter, Inc("not an int"))` where the handler is `on Inc(x : Int)`; the `ESend` arm types the message via ordinary `ECon` constructor typing (`infer_expr env msg`, `typecheck.ml:4179`), so the `String` argument fails to unify with the `Inc` constructor's `Int` payload type. Proves message-payload SHAPE is statically checked (the complement of §4.1 finding 19: message ACCEPTANCE by the target actor is NOT — `send` discards the target Pid's type at `:4178`) | `` expected `Int` but got `String`. `` |
 
-**Result: 67 / 67 (39 accept, 28 reject).**
+**Result: 69 / 69 (40 accept, 29 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
