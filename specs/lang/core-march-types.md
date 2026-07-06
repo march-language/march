@@ -1219,9 +1219,14 @@ item 1.
    `env.impls` is built to be *searched* (via `impl_matches_ty`, a structural,
    non-unifying, wildcard-tolerant shape match — its own named rule,
    `(T-ImplMatch)`, detailed just below) rather than *inserted into with a
-   conflict check*. This is why two impls of the same interface for the same
-   type both typecheck with no diagnostic at all (a genuine coherence gap;
-   a later task documents and files it as a divergence, not fixed here).
+   conflict check*. **Overlapping impls of the same interface for the same
+   type are NOT rejected at typecheck** — a second `impl Speak(Dog)` typechecks
+   exactly like the first, with no duplicate/coherence diagnostic of any kind;
+   `core-march.md` §4.4.3 documents this fully as an open, filed divergence
+   (the interpreter and compiled backend disagree at RUNTIME on which
+   overlapping impl's method body actually runs — last-registered vs.
+   first-registered, respectively), cross-referenced here rather than
+   restated.
 
 **`(T-ImplMatch)` — the impl-head-matching judgment (typecheck.ml:4964–4984).**
 Both the `when`-clause check and the superclass check above (and, at the use

@@ -1333,6 +1333,187 @@ widened), but the specific `Eq`/`neq` collision its comment narrates cannot
 occur today, because the typechecker's own extra-method rejection forecloses
 it first.
 
+### 4.4.3 Known divergence: impl coherence — overlapping impls, and the interp/compiled selection split
+
+§4.4.2 ended by noting that overlap for a user interface is "just shadowing,
+not a designed coherence policy," and `core-march-types.md` §2.3's
+`(T-ImplMatch)` discussion independently arrived at the same conclusion from
+the typing side: `impl_matches_ty` only ever answers "does this impl cover
+that target," never "which of several covering impls is most specific." This
+subsection is where those two threads meet and get pinned with live-captured
+runtime evidence: **March has no impl-coherence check anywhere in the
+pipeline, and the two backends disagree — deterministically, but
+differently — about which of several overlapping impls actually runs.**
+
+**The fact: two impls of the same interface for the same type both
+typecheck, with no diagnostic of any kind.** `env.impls : ty list
+StrMap.t` (`typecheck.ml:455`) is a **list**, and registration
+(`typecheck.ml:7081`–`7084`, `(T-Impl)` step 1, `core-march-types.md` §2.3) is
+always `inst_ty :: existing_list` — an unconditional prepend, never a
+lookup-before-insert. There is no step anywhere in `(T-Impl)`'s ordered
+checks that asks "is a covering impl already registered for this type" — the
+existing checks (interface-existence, missing-method, extra-method,
+signature-match) are all about validating ONE impl declaration in isolation;
+none of them looks sideways at sibling impls of the same `(iface, type)`
+pair. Confirmed live, re-grepped in this worktree at the cited line, and
+reproduced concretely below.
+
+**Reproduction (live, this task).** The minimal repro is two `impl
+Speak(Dog)` blocks for the same interface and the same concrete type, whose
+`speak` bodies return different literals:
+
+```march
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      "FIRST"
+    end
+  end
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      "SECOND"
+    end
+  end
+
+  fn main() do
+    println(speak(Dog("Rex")))
+  end
+end
+```
+
+`--check` on this program exits **0** on both backends' shared typechecker —
+only two "unused variable `self`" warnings, no error, no hint that a second
+`impl Speak(Dog)` even collided with the first. Running it:
+
+```
+$ march file.march                         # interpreted
+SECOND
+
+$ march --compile --opt 2 -o /tmp/ovl file.march && /tmp/ovl   # compiled
+FIRST
+```
+
+Both outputs are **deterministic** across repeated runs (confirmed 2x each,
+this task) — this is not flakiness or an uninitialized-memory artifact, it is
+two different, reproducible, principled selection rules:
+
+- **The interpreter selects the LAST-registered impl.** `DImpl`'s eval
+  handler (`eval.ml:8324`, mirrored at the letrec-style path `eval.ml:8640`)
+  does `Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val` —
+  but per §4.4.2, `Speak` is not one of the four type-dispatched interfaces
+  (`Show`/`Eq`/`Ord`/`Hash`), so a user-interface method never actually
+  touches `impl_tbl` at the call site; the real mechanism is the ordinary
+  `env`-binding branch immediately beside it (`eval.ml:8309`–`8311`,
+  `:8625`–`8627`, `core-march.md` §4.4.2's `(E-DImpl)` `false` case): each
+  `impl Speak(Dog)` PREPENDS a fresh `("speak", v)` binding onto the
+  environment threading through the rest of module evaluation. The SECOND
+  impl's binding ends up closer to the front of `ρ`, so ordinary §4.1
+  "lookup returns the first binding" lexical scoping resolves `speak` to it
+  — last-registered wins, but only as an artifact of shadowing, exactly as
+  §4.4.2 already flagged.
+- **The compiled backend selects the FIRST-registered impl.** TIR lowering's
+  `collect_iface_impls` (`lib/tir/lower.ml:1005`–`1014`) reads an `already`
+  guard BEFORE registering: `already = List.mem_assoc type_name l` against
+  the accumulating `_iface_methods` table (`lib/tir/lower.ml:1008`–`1011`),
+  and only lowers/registers the method `if not already` (`lib/tir/lower.ml:
+  1014`). The first `impl Speak(Dog)` walked populates the `(type_name,
+  mangled)` entry; the second `impl Speak(Dog)` for the identical
+  `(iface, type)` pair sees `already = true` and is silently skipped —
+  first-registered wins, unconditionally.
+
+Both citations re-grepped live in this worktree for this task
+(`eval.ml:8324`/`:8640`; `lib/tir/lower.ml:1005`–`1014`) — line numbers may
+drift with future edits, but the mechanism (last-write-wins `Hashtbl.replace`
+vs. first-write-wins `List.mem_assoc` guard) is the structural fact, not an
+artifact of a specific line number.
+
+**The same divergence holds for generic-vs-specific overlap, and for
+derive-vs-manual overlap — it is not specific to two textually identical
+impls.** Two further probes, same methodology, both confirmed live this task:
+
+- **Generic-vs-specific:** `impl Speak(Box(a))` (a blanket/generic impl over
+  every `Box`) declared BEFORE `impl Speak(Box(Int))` (a concrete,
+  intuitively "more specific" impl), called on `Box(42)`. Interpreted prints
+  `"int box"` (the later, more-specific impl — by registration order, not by
+  any specificity reasoning: `impl_matches_ty` never compares "how many
+  wildcards," §2.3's `(T-ImplMatch)`); compiled prints `"generic box"` (the
+  FIRST-declared, less-specific impl). **Whichever backend "looks right" for
+  a given overlap is accidental, not designed** — there is no specificity
+  resolution in either path, so the interpreter only happens to look
+  specificity-aware here because the more-specific impl was written second.
+- **Derive-vs-manual:** `derive Show, Eq for Color` (expanding, at desugar
+  time, to an ordinary `DImpl Eq(Color)` — `core-march-types.md` §2.3 /
+  `interface-impl-survey.md` §5) followed by a hand-written `impl Eq(Color)
+  do fn eq(a, b) do true end end` that unconditionally returns `true`.
+  Interpreted `Red == Blue` prints `true` (the hand-written impl, registered
+  textually after the derive-expanded one); compiled prints `false` (the
+  derive-generated structural comparison, registered first). This confirms
+  the SAME root cause — last-registered-wins vs. first-registered-wins — also
+  governs collisions between a `derive`-generated impl and a hand-written
+  one, not only two hand-written impls of the same shape.
+
+**This is an OPEN, deliberately-left-unfixed divergence — NOT the same
+situation as §4.2.1's `ERecordUpdate` case.** §4.2.1 documents a divergence
+that this reference project **adjudicated and converged**: the compiled
+panic-on-unknown-field behavior was declared normative, the interpreter was
+changed to match it, both backends now agree, and its `specs/todos.md` entry
+is closed. The impl-coherence divergence documented here is different in
+kind: there is no "obviously correct" backend to converge on (first-wins and
+last-wins are both defensible policies, and neither implements real
+specificity-based resolution — see the generic-vs-specific probe above), and
+choosing one is a genuine language-design decision (add a coherence check
+that rejects overlap outright, à la Rust; pick and document one deterministic
+selection policy shared by both backends; or formally embrace "incoherent
+instances" the way Haskell's `OverlappingInstances` extension does, with an
+explicit specificity order) — not something this documentation slice is
+scoped to adjudicate. The correct precedent for this shape of finding is the
+codebase's genuinely-open filed divergences, not the closed one: `specs/
+todos.md`'s open `- [ ]` entries for cross-backend behavior differences that
+are *documented and tracked, not fixed* — e.g. "Compiled and interpreted
+`hash()` use different, backend-specific algorithms with no cross-backend
+value equality for RECORD types" and "`to_string` on any non-primitive type
+… is broken compiled" — and `test/test_oracle.ml`'s `known_divergence` list
+(`test/test_oracle.ml:138`–`174`), which exists precisely to let an
+already-filed, open compiler bug reproduce in the `@oracle` conformance sweep
+as a loud `KNOWN_DIVERGENCE` (not a silent skip, not a hard failure) until it
+is either fixed or the design question above is resolved. This finding is
+filed in that same spirit — see `specs/todos.md`'s new entry (filed by this
+task) — deliberately left open, not folded into a false convergence the way
+§4.2.1 was.
+
+**Why this cannot be a `check_types.sh` corpus `accept`/`reject` program.**
+Every program in `specs/lang/types/{accept,reject}/` is judged by a SINGLE
+`march --check` invocation's exit code and (for `reject/`) message substring
+— it never runs the program, and it never invokes a second backend. The
+divergence documented here is invisible to that harness by construction:
+`--check` on the repro above exits 0 on both backends' shared typechecker (it
+is not a type error at all — both backends' front ends fully agree that the
+program is well-typed), and the entire disagreement only appears once the
+program is actually RUN, once on each of two different backends
+(`march file.march` vs. `march --compile … && ./a.out`), which `check_types.sh`
+never does. This is structurally identical to the limitation §5's golden
+corpus already documents for the (now-converged) `ERecordUpdate` case: "a
+program that is supposed to error on both sides can never register as a
+golden `MATCH` regardless of backend agreement" (§4.2.1/§5) — except here the
+harness gap is even more fundamental, since `check_types.sh` was never
+designed to run programs or compare two backends at all, only to classify a
+single `--check` invocation's accept/reject verdict. A conformance corpus
+entry that could witness "both backends accept the SAME program yet disagree
+at runtime" would need a third bucket alongside `accept`/`reject` — exactly
+the "divergence, not a clean accept/reject" bucket
+`.superpowers/sdd/interface-impl-survey.md` §4/§9 already names and
+recommends deferring rather than forcing into the existing two-bucket
+harness. This documentation slice therefore pins the divergence in prose
+(this subsection) and in `specs/todos.md` (the filed bug, with the repro and
+both outputs), not as a new corpus file.
+
 ### 4.5 Relationship to the small-step form (the metatheory target)
 
 `specs/lean4-metatheory-plan.md` will state the semantics as a **small-step**
