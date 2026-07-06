@@ -1,4 +1,4 @@
-# Grammar corpus index (Task 1 seed: p01–p02 parse, r01–r02 reject)
+# Grammar corpus index (p01–p08 parse, r01–r04 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,8 +33,8 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 4/4 — 2 parse, 2
-reject; Task 1 seed only).
+Exit 0 iff every program behaves as declared (currently 12/12 — 8 parse, 4
+reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
 `reject/` like `types/`) — an intentional, acknowledged divergence: "must
@@ -49,7 +49,16 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p02_match_multi_expr_arms.march`](parse/p02_match_multi_expr_arms.march) | §3.3 (newline-glom inside `Match`, the arm-boundary lookahead), §3.4 (`is_pattern_start` used as the lookahead's pre-filter) | A `match` with two arms, each a **multi-expression body** (`let`/`let`/final-expr). Exercises every branch of the arm-boundary state machine: `NL` after `ARROW` suppressed, `NL` after each internal `let` suppressed (bails on `LET` at depth 0), and the `NL` before the second arm's `Square(side) ->` correctly emitted as the arm separator (lookahead reaches `ARROW` at depth 0 after crossing the `LPAREN...RPAREN` of `Square(side)`). Run (non-`--check`) it prints `36` then `16` — the *only* correct output if the arm boundary resolved exactly where §3.3 says it does, so this is a value-witness, not just a parse-witness. |
 | [`reject/r01_then_keyword_rejected.march`](reject/r01_then_keyword_rejected.march) | §1 honesty note / (future §4) — `THEN` is a lexer token with no production that can ever complete a parse | `if true then ... else ... end` — `then` only appears in `parser.mly`'s dedicated error-recovery production (`IF; _c = expr; THEN; ...; error`), which unconditionally raises a diagnostic; there is no path from `THEN` to a value. Captured live: `` I don't recognize `then` here — March uses do/end blocks instead. `` |
 | [`reject/r02_record_pattern_in_arm_unreachable.march`](reject/r02_record_pattern_in_arm_unreachable.march) | §3.4 (cross-check corollary: `LBRACE` is correctly absent from `is_pattern_start`, since no pattern production starts with it) / (future §6) — `PatRecord` has no surface production | `match 1 do { x } -> x end` — a record-shaped pattern in an arm position. `simple_pattern`/`pattern` have no production beginning with `LBRACE`, so `token_filter`'s `is_pattern_start` (§3.4) correctly does not list it either, and menhir rejects the construct outright with its generic fallback. Captured live: `I got stuck here`. This double-checks as a §3.4 witness now and will be promoted to the primary reachability witness for `PatRecord` in Task 4's §6. |
+| [`parse/p03_additive_left_assoc.march`](parse/p03_additive_left_assoc.march) | §4.5 `expr_add` — left-associativity of `-` | `10 - 3 - 2` prints `5` (`(10 - 3) - 2`), not `9` (`10 - (3 - 2)`, what right-associativity would give) — a value-witness of `expr_add`'s left-recursive production. |
+| [`parse/p04_mul_binds_tighter_than_add.march`](parse/p04_mul_binds_tighter_than_add.march) | §4.5 `expr_mul` binds tighter than `expr_add` (stratification, no `%prec` needed) | `1 + 2 * 3` prints `7`, not `9` — proves `*` binds before `+` purely from the stratum nesting (`expr_add`'s operands are `expr_mul`, not `expr_add`). |
+| [`parse/p05_pipe_left_to_right_chain.march`](parse/p05_pipe_left_to_right_chain.march) | §4.2 `expr_pipe` — left-associativity of `\|>` | `3 \|> double \|> inc` prints `7` (`inc(double(3))`), not `8` (`double(inc(3))`) — witnesses `expr_pipe`'s left recursion (`expr_pipe PIPE_ARROW expr_or`). |
+| [`parse/p06_field_access_vs_application.march`](parse/p06_field_access_vs_application.march) | §4.7 `expr_app` / §4.8 `expr_field` — field access resolves before becoming a call argument | `get(b.get)` prints `105` — `b.get` (`expr_field`) is fully reduced to a value before being passed as `expr_app`'s sole argument. |
+| [`parse/p07_list_comprehension_with_guard.march`](parse/p07_list_comprehension_with_guard.march) | §4.9 list comprehensions (`expr_atom`-level, `desugar_list_comp`) | `[x * 2 for x in [1,2,3,4,5], x > 2]` prints `[6, 8, 10]` — filter-then-map desugaring order, binding a `pattern` after `for`. |
+| [`parse/p08_comparison_binds_tighter_than_bool.march`](parse/p08_comparison_binds_tighter_than_bool.march) | §4.3/§4.4 — `expr_cmp` binds tighter than `expr_and`/`expr_or` | `1 < 2 && 3 > 2` prints `true`, only well-typed if `&&`'s operands are the two `Bool` comparison results, not `Int`s captured by a tighter-binding `&&`. |
+| [`reject/r03_chained_comparison_nonassoc.march`](reject/r03_chained_comparison_nonassoc.march) | §4.4 `expr_cmp` — non-associativity (`%nonassoc EQEQ NEQ LT GT LEQ GEQ`, `parser.mly:217`) | `1 < 2 < 3` — both operands of a comparison are `expr_add`, one level down, not `expr_cmp` again, so chained comparisons have no derivation. Captured live: `I got stuck here`. |
+| [`reject/r04_malformed_comprehension_missing_in.march`](reject/r04_malformed_comprehension_missing_in.march) | §4.9 list comprehensions — malformed form (missing `in <expr>`) | `[x * 2 for x]` — `for pattern` with no following `in expr`. Captured live: `I got stuck here` (menhir's generic fallback; no bespoke comprehension diagnostic exists). |
 
-Later tasks (2–5) will extend this table with the expression-precedence,
-block/statement, pattern/type, and declaration-form corpora; see
+Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
+Later tasks (3–5) will extend this table with the block/statement,
+pattern/type, and declaration-form corpora; see
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task breakdown.

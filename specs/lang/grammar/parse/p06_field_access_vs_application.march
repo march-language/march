@@ -1,0 +1,21 @@
+mod P06FieldAccessVsApplication do
+  type Box = { get: Int }
+
+  fn make_box() do
+    { get: 5 }
+  end
+
+  fn get(x) do
+    x + 100
+  end
+
+  fn main() do
+    let b = make_box()
+    -- get(b.get) == 105 only if `b.get` (expr_field, a DOT-chain reduced
+    -- all the way down to expr_atom) binds as the SOLE argument to the
+    -- outer application `get(...)` -- i.e. field access resolves to a
+    -- value before the enclosing call is built, not the other way around
+    -- (which would be a parse error: `get` is not itself a record).
+    println(get(b.get))
+  end
+end

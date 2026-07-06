@@ -2,9 +2,9 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 (in progress) · 2026-07-06 · Task 1: preprocessing layers (lexer +
-`token_filter`) formalized; expression/statement/pattern/type/declaration
-grammar (§4–§9) not yet written.**
+**v1 (in progress) · 2026-07-06 · Tasks 1–2: preprocessing layers (lexer +
+`token_filter`) and the expression precedence ladder (§4) formalized;
+statement/pattern/type/declaration grammar (§5–§9) not yet written.**
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter is built task-by-task from).
@@ -572,6 +572,386 @@ it assumes its input has already had this resolution performed on it by
 `token_filter`, and §4 onward states its EBNF on that basis (filtered-stream
 input), never on raw lexer output.
 
+## 4. Expressions — the precedence ladder
+
+Source: `lib/parser/parser.mly` (1403 lines; the expression rules run
+`parser.mly:1036–1273`, the precedence declarations are at
+`parser.mly:214–220`). Everything in this section takes the **filtered**
+token stream (§2–§3) as input: in particular, `NL` has already been deleted
+almost everywhere expressions live (it only ever survives as a match-arm
+separator, §3.3), so no production below needs to mention it.
+
+### 4.0 Precedence table (tightest-binding → loosest)
+
+This is the reader's quick reference; §4.1–§4.9 give the resolved production
+for each row and cite the exact rule (§4.10 then covers the `then` token,
+which has no row here because it never parses at all).
+
+| # | Stratum (`parser.mly` rule) | Operators / forms | Associativity | How it binds |
+|---|---|---|---|---|
+| 1 (tightest) | `expr_atom` | literals, identifiers, constructors, `(…)`, tuples, records, lists, list comprehensions, `if`/`match`/`cond`/`with` (via `expr`, see note below), lambdas, `do…end` | n/a | atomic — never itself recurses through a lower stratum except via explicit `(…)` |
+| 2 | `expr_field` | `.` (field/module access, plus the contextual field names `send`/`choose`/`offer`) | left | `expr_field DOT lower_name/upper_name/SEND/CHOOSE/OFFER` |
+| 3 | `expr_app` | function application `f(a, b, …)`, constructor application `Con(a, b, …)` | n/a (application is not itself a binary operator; chained direct calls like `f(1)(2)` do **not** parse at all — see §4.7) | `expr_field LPAREN … RPAREN`; falls through to `expr_field %prec prec_app` otherwise |
+| 4 | `expr_unary` | unary `-` (`negate`), `!` (`not`) | right (prefix; self-recursive on the right) | `MINUS expr_unary` / `BANG expr_unary` |
+| 5 | `expr_mul` | `* / % *. /.`  | left | `expr_mul OP expr_unary` |
+| 6 | `expr_add` | `+ - ++ +. -.` | left | `expr_add OP expr_mul` |
+| 7 | `expr_cmp` | `== != < > <= >=` | **non-assoc** (chained comparisons do not parse — §4.4 below) | `expr_add OP expr_add`, both operands one stratum down |
+| 8 | `expr_and` | `&&` | left | `expr_and AND expr_cmp` |
+| 9 | `expr_or` | `\|\|` | left | `expr_or OR expr_and` |
+| 10 (loosest) | `expr_pipe` | `\|>` | left | `expr_pipe PIPE_ARROW expr_or` |
+
+`expr` itself (`parser.mly:1036–1093`) sits *above* `expr_pipe` — it is not
+another precedence level so much as the entry point that adds the
+non-operator expression forms that don't participate in the operator ladder
+at all (`ASSERT`, lambdas via bare `FN`, `IF`, `MATCH`/`ECond`, `WITH`) as
+alternatives alongside `expr_pipe`; see §4.1.
+
+### 4.1 `expr` — the top-level entry point
+
+```ebnf
+expr ::= expr_pipe
+       | "assert" expr
+       | "fn" "->" lambda_body
+       | "fn" lambda_params "->" lambda_body
+       | "if" expr "do" block_body "else" block_body "end"
+       | "match" expr "do" arm_sep? branch (arm_sep branch)* "end"
+       | "match" "do" arm_sep? cond_branch (arm_sep cond_branch)* "end"
+       | "with" with_binding ("," with_binding)* "do" block_body "end"
+       | "with" with_binding ("," with_binding)* "do" block_body
+             "else" arm_sep? branch (arm_sep branch)* "end"
+```
+
+(`parser.mly:1036–1093`.) These alternatives are **not** part of the
+operator precedence ladder — they're keyword-led forms distinguishable by
+their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`), so there is no
+shift/reduce ambiguity between them and `expr_pipe`; menhir picks the
+alternative whose first token matches. Two of note:
+
+- **`match do … end` (no scrutinee) is `ECond`** (`parser.mly:1075`), i.e.
+  March's `cond`-equivalent: each `cond_branch` (`parser.mly:1292–1296`) is
+  a boolean `expr ARROW block_body`, with a bare `_` arm desugaring to
+  `true ARROW block_body` (`parser.mly:1295–1296`). This is why the plan
+  and other chapters refer to "`cond` (scrutinee-less `match do`)" — there
+  is no separate `COND` keyword; it's the same `MATCH` token disambiguated
+  by the presence/absence of the scrutinee `expr` before `DO`.
+- **`with … do … else … end`** (`parser.mly:1087–1093`) desugars in-parser
+  (`build_with`, `parser.mly:161–167`) into nested `EMatch` on each binding
+  in turn, so `with Ok(a) <- e1, Ok(b) <- e2 do body else h end` becomes
+  `match e1 do Ok(a) -> match e2 do Ok(b) -> body | <else arms> end | <else
+  arms> end` — a different desugaring from `let?` (§5, Task 3), which is a
+  **block-level** (not `expr`-level) construct: `let? p = e` only appears
+  as a `block_expr`/`lambda_stmts` production (`parser.mly:1003–1004,
+  1119–1120`), never as a standalone `expr`, and is right-folded into
+  nested `ELetQ` continuations by `fold_letq` (`parser.mly:147–156`) rather
+  than parsed as a ladder-level operator. Full detail on `let?`'s placement
+  constraints (it cannot be the last expression in a block) is Task 3's
+  §5, not this section — it is noted here only to distinguish it from
+  `with`, which *is* an `expr`-level production.
+
+### 4.2 `expr_pipe` — pipe, loosest-binding, left-associative
+
+```ebnf
+expr_pipe ::= expr_pipe "|>" expr_or
+            | expr_or
+```
+
+(`parser.mly:1122–1125`.) Left-recursive on the left operand, so `a |> f |>
+g` parses as `(a |> f) |> g`, i.e. `g(f(a))` once `EPipe` is later lowered
+— confirmed as a value-witness by
+[`parse/p05_pipe_left_to_right_chain.march`](grammar/parse/p05_pipe_left_to_right_chain.march):
+`3 |> double |> inc` prints `7` (`inc(double(3))`), not `8`
+(`double(inc(3))`), which is what right-associativity would have produced.
+`|>` is the loosest-binding operator in the ladder — its RHS is `expr_or`,
+one full stratum down, so `|>` never has to compete with `||`/`&&`/etc. for
+which side "wins" a shared operand.
+
+### 4.3 `expr_or` / `expr_and` — boolean connectives, left-associative
+
+```ebnf
+expr_or  ::= expr_or "||" expr_and
+           | expr_and
+expr_and ::= expr_and "&&" expr_cmp
+           | expr_cmp
+```
+
+(`parser.mly:1127–1133`.) Both left-recursive/left-associative, both
+desugared immediately into ordinary calls (`EApp (EVar "||"/"&&", …)`
+— **not** special AST nodes) — so short-circuit evaluation, if any, is a
+property of how `eval`/codegen treat the `||`/`&&` builtins, not of the
+parse tree shape. `&&` binds tighter than `||` (it sits one level below in
+the stratification, mirroring the conventional arithmetic-like precedence
+of the two connectives), and both bind looser than comparisons: confirmed
+live by
+[`parse/p08_comparison_binds_tighter_than_bool.march`](grammar/parse/p08_comparison_binds_tighter_than_bool.march)
+— `1 < 2 && 3 > 2` parses as `(1 < 2) && (3 > 2)` (prints `true`), which
+would be a type error (`&&` on non-bool `Int` operands) under any parse
+that let `&&` bind tighter than `<`/`>`.
+
+### 4.4 `expr_cmp` — comparisons, non-associative
+
+```ebnf
+expr_cmp ::= expr_add "==" expr_add
+           | expr_add "!=" expr_add
+           | expr_add "<"  expr_add
+           | expr_add ">"  expr_add
+           | expr_add "<=" expr_add
+           | expr_add ">=" expr_add
+           | expr_add                    (* %prec EQEQ *)
+```
+
+(`parser.mly:1135–1142`.) This is the one stratum that is **not**
+left-recursive on comparison itself — both operands are `expr_add`, one
+level down, not `expr_cmp` again. That means **chained comparisons do not
+parse**: `1 < 2 < 3` has no valid derivation (there is no rule reducing
+`expr_cmp OP expr_add` back into something an outer `<` could consume) and
+menhir rejects it outright — confirmed live by
+[`reject/r03_chained_comparison_nonassoc.march`](grammar/reject/r03_chained_comparison_nonassoc.march)
+(`1 < 2 < 3`, rejected with menhir's generic `I got stuck here`). The
+`%nonassoc EQEQ NEQ LT GT LEQ GEQ` declaration at `parser.mly:217` exists to
+resolve the **residual** shift/reduce ambiguity menhir would otherwise flag
+for the trailing `e = expr_add %prec EQEQ { e }` fallthrough alternative
+(`parser.mly:1142`) — without an explicit precedence, menhir cannot tell
+whether that bare-`expr_add` alternative should reduce before or after a
+following comparison operator is examined; `%nonassoc` tells it neither
+direction is allowed, matching the grammar's structural non-associativity.
+The `MINUS` declaration (`%left MINUS`, `parser.mly:218`) plays a similar
+disambiguation role one level down, for unary-vs-binary `-` (§4.6), and is
+unrelated to comparisons despite sitting adjacent in the declaration list.
+
+### 4.5 `expr_add` / `expr_mul` — arithmetic, left-associative, standard binding
+
+```ebnf
+expr_add ::= expr_add "+"  expr_mul
+           | expr_add "-"  expr_mul
+           | expr_add "++" expr_mul
+           | expr_add "+." expr_mul
+           | expr_add "-." expr_mul
+           | expr_mul
+
+expr_mul ::= expr_mul "*"  expr_unary
+           | expr_mul "/"  expr_unary
+           | expr_mul "%"  expr_unary
+           | expr_mul "*." expr_unary
+           | expr_mul "/." expr_unary
+           | expr_unary
+```
+
+(`parser.mly:1144–1158`.) Both strata are left-recursive → left-associative,
+and `*`/`/`/`%` (and their `.`-suffixed float forms) bind **tighter** than
+`+`/`-`/`++` purely because `expr_add`'s alternatives recurse through
+`expr_mul` (not `expr_add`) for both operands' *inner* structure — the
+stratification itself is the precedence mechanism here, no `%prec`
+annotation is needed or present. Confirmed live:
+[`parse/p04_mul_binds_tighter_than_add.march`](grammar/parse/p04_mul_binds_tighter_than_add.march)
+— `1 + 2 * 3` prints `7`, not `9` (which is what equal-precedence
+left-to-right evaluation would give). Left-associativity of `-` is
+confirmed by
+[`parse/p03_additive_left_assoc.march`](grammar/parse/p03_additive_left_assoc.march)
+— `10 - 3 - 2` prints `5` (`(10 - 3) - 2`), not `9` (`10 - (3 - 2)`, what
+right-associativity would give). Note `++` (list/string append) and the
+float-suffixed operators share `expr_add`'s precedence level exactly —
+there is no separate stratum for them. All six operators desugar to
+ordinary `EApp (EVar "<op>", [a; b], …)` calls, same as §4.3's boolean
+connectives.
+
+### 4.6 `expr_unary` — prefix `-`/`!`, right-recursive (prefix), tightest operator level
+
+```ebnf
+expr_unary ::= "-" expr_unary
+             | "!" expr_unary
+             | expr_app
+```
+
+(`parser.mly:1161–1166`.) `MINUS expr_unary` self-recurses so that repeated
+prefixing works (`- - x`), and desugars to a call to the builtin `negate`;
+`BANG expr_unary` similarly desugars to `not`. This is the tightest
+*operator* stratum — tighter than `*`/`/` — which is what makes `1 - -2`
+parse as `1 - (negate 2)` rather than failing or misparsing: confirmed live
+by running `println(1 - -2)`, which prints `3`. The `%left MINUS`
+declaration at `parser.mly:218` resolves the shift/reduce conflict between
+treating a `MINUS` as *this* rule's unary prefix vs. as `expr_add`'s binary
+infix operator when a `MINUS` token is seen after an existing `expr_add` on
+the stack — menhir needs the explicit declaration because `expr_unary`'s
+prefix `MINUS` and `expr_add`'s infix `MINUS` are structurally
+distinguishable only via lookahead menhir's LALR core would otherwise
+report as a conflict; declaring `MINUS` `%left` (matching `expr_add`'s
+associativity) resolves it in favor of the intended shift/reduce outcome
+without changing the grammar's actual shape.
+
+### 4.7 `expr_app` — application, left-binding via chained atoms
+
+```ebnf
+expr_app ::= expr_field "(" separated_list(",", expr) ")"
+           | UPPER_IDENT "(" ")"
+           | UPPER_IDENT "(" separated_nonempty_list(",", expr) ")"
+           | expr_field                    (* %prec prec_app *)
+```
+
+(`parser.mly:1168–1175`.) Function application `f(a, b, …)` and constructor
+application `Con(a, b, …)`/`Con()` are siblings at this stratum; a bare
+`UPPER_IDENT` immediately followed by `(` is always constructor application
+(`ECon`), never a curried call, because `expr_field`'s own atom production
+for a bare `UPPER_IDENT` (§4.9) is `%prec prec_atom`, which sits *below*
+`LPAREN` in the precedence table (`parser.mly:219–220`) specifically so
+that `Foo()` shifts the `(` into this rule rather than reducing `Foo` to an
+atom first.
+
+**Chained direct calls like `f(1)(2)` do not parse.** `expr_app`'s
+function/callee position is `expr_field`, whose only base case is
+`expr_atom` (§4.8–4.9) — `expr_atom` has no alternative that accepts a bare
+`expr_app`. So once `f(1)` has reduced to an `expr_app`, there is no
+production that re-admits that whole application as the callee of a
+further `(...)`; the grammar has no rule shaped like `expr_app "(" … ")"`.
+Confirmed live: `adder(1)(2)` (calling a curried function returned by
+`adder(1)`) is rejected with menhir's generic `I got stuck here` at the
+second `(`. March expresses "call the result of a call" via an explicit
+intermediate binding (`let f = adder(1)` then `f(2)`) rather than curried
+juxtaposition. The `prec_app` virtual token (declared at `parser.mly:219`,
+doc comment at `parser.mly:213`) exists purely to make `f()` shift `(`
+instead of reducing `f` to a bare atom first — the same *shape* of
+disambiguation `prec_atom` performs for bare `UPPER_IDENT`/`ATOM` (§4.9).
+
+### 4.8 `expr_field` — field/module access, left-associative chains
+
+```ebnf
+expr_field ::= expr_field "." lower_name
+             | expr_field "." upper_name
+             | expr_field "." "send"
+             | expr_field "." "choose"
+             | expr_field "." "offer"
+             | expr_atom
+```
+
+(`parser.mly:1179–1194`.) Left-recursive → left-associative, so `a.b.c`
+parses as `(a.b).c`, and a qualified module path like `A.B.c` is *also*
+just repeated `expr_field` application (there is no separate "module path"
+production at the expression level — `upper_name` after a `DOT` covers
+`A.B`-shaped sub-module chains the same way `lower_name` covers a terminal
+field/function name). `send`/`choose`/`offer` are ordinary keywords
+elsewhere in the grammar (actor-DSL primitives, `expr_atom` in the
+`SPAWN`/`SEND` case and top-level `CHOOSE`/`OFFER` productions) but are
+explicitly re-admitted as field names here so that `Chan.send(…)`,
+`Chan.choose(…)`, `Chan.offer(…)` parse as ordinary method-call-shaped
+field access rather than colliding with those keywords (§3.2 documents the
+token_filter-level half of the `CHOOSE` disambiguation specifically).
+Confirmed live by
+[`parse/p06_field_access_vs_application.march`](grammar/parse/p06_field_access_vs_application.march):
+`get(b.get)` prints `105` — the field access `b.get` (an `Int`) is fully
+resolved as `expr_field`'s base case before being handed as the sole
+argument to the outer `get(...)` application, proving `expr_field`
+reduces before `expr_app`'s argument list closes around it (which is also
+just the ordinary top-down parse of `expr_app`'s first alternative, since
+`expr_field` is what appears before the argument-list `LPAREN`).
+
+### 4.9 `expr_atom` — atoms: the base of the ladder
+
+```ebnf
+expr_atom ::= INT | FLOAT | STRING | BOOL
+            | INTERP_START interp_parts              (* string interpolation *)
+            | SIGIL_PREFIX STRING
+            | SIGIL_PREFIX INTERP_START interp_parts  (* sigil + interpolation *)
+            | ATOM "(" separated_list(",", expr) ")"
+            | ATOM                                    (* %prec prec_atom *)
+            | LOWER_IDENT
+            | "_"
+            | "tag"
+            | UPPER_IDENT                              (* %prec prec_atom *)
+            | "?" LOWER_IDENT
+            | "?"                                      (* %prec prec_hole *)
+            | "(" expr ")"
+            | "(" expr "," separated_nonempty_list(",", expr) ")"   (* tuple *)
+            | "(" ")"                                   (* unit / empty tuple *)
+            | "do" block_body "end"
+            | "[" expr "for" pattern "in" expr "]"                   (* list comprehension *)
+            | "[" expr "for" pattern "in" expr "," expr "]"          (* … with guard *)
+            | "[" "]"
+            | "[" separated_nonempty_list(",", expr) "]"             (* list literal *)
+            | "{" separated_nonempty_list(",", record_field_expr) "}"        (* record literal *)
+            | "{" expr "with" separated_nonempty_list(",", record_field_expr) "}"  (* record update *)
+            | "spawn" "(" expr ")"
+            | "send" "(" expr "," expr ")"
+            | "dbg" "(" ")"  |  "dbg" "(" expr ")"
+            | "state"
+```
+
+(`parser.mly:1196–1266`.) This is the bottom of the ladder: every
+alternative is either a literal/name terminal or delimited by an explicit
+bracket pair (`( )`, `[ ]`, `{ }`, `do…end`), so nothing here needs a
+precedence declaration to disambiguate against the operator strata above it
+— parenthesization is exactly how a lower-precedence expression re-enters
+as an operand at any higher stratum. Three points worth calling out
+explicitly:
+
+- **`prec_atom` and `prec_hole`** (`parser.mly:211–212, 214, 216`) are
+  virtual tokens — never emitted by the lexer — that exist solely so
+  menhir can resolve, without ambiguity, that a bare `UPPER_IDENT`/`ATOM`/
+  `QUESTION` should be treated as *lower precedence than* `LOWER_IDENT`/
+  `LPAREN` when one of those immediately follows: `prec_atom` sits below
+  `LPAREN` in the table (`parser.mly:216, 220`) precisely so `Foo(...)`/
+  `:atom(...)` shift into the argument-list form (`expr_app`/`ATOM
+  LPAREN…RPAREN`, §4.7/here) instead of reducing the bare name to an atom
+  first; `prec_hole` (`QUESTION %prec prec_hole`, `parser.mly:1225`) sits
+  below `LOWER_IDENT` (`parser.mly:215`) so that a bare `?` followed by an
+  identifier shifts into the named-hole form (`?foo` → `EHole (Some
+  "foo")`, `parser.mly:1223–1224`) rather than reducing to an anonymous
+  hole (`EHole None`) too early.
+- **`if`/`match`/`with` are NOT `expr_atom` alternatives** — they are
+  alternatives of `expr` itself (§4.1), one level *above* the whole
+  ladder, not atoms. (An earlier draft of this survey area conflated the
+  two; the live grammar's `IF`/`MATCH`/`WITH` productions all live at
+  `parser.mly:1051–1093`, inside `expr:`, never inside `expr_atom:`.) This
+  matters for precedence reasoning: since they're `expr` alternatives
+  chosen by leading keyword (not reachable through `expr_pipe`'s ladder at
+  all when written bare), an `if …` used as an *operand* of a binary
+  operator (e.g. `1 + if c do 2 else 3 end`) is **not directly
+  expressible** — the operand strata (`expr_add` etc.) only accept
+  `expr_mul`/`expr_unary`/etc., never bare `expr`, so `if`/`match`/`with`
+  must be parenthesized to appear as an operand: `1 + (if c do 2 else 3
+  end)`. `do…end` (a bare block used as an expression, `parser.mly:1231`)
+  **is** an `expr_atom` alternative, so a `do…end` block *can* appear
+  unparenthesized as an operand.
+- **List comprehensions** (`parser.mly:1232–1238`) are `expr_atom`-level
+  bracket-delimited forms:
+  ```ebnf
+  list_comp ::= "[" expr "for" pattern "in" expr "]"
+              | "[" expr "for" pattern "in" expr "," expr "]"
+  ```
+  binding a full `pattern` (§6, Task 4 — not just `simple_pattern`, so
+  constructor/tuple/list patterns are legal comprehension binders too) and
+  desugaring **in-parser** (`desugar_list_comp`, `parser.mly:131–140`,
+  called from the two comprehension actions at `parser.mly:1233–1238`) —
+  there is no `EListComp` AST node; by the time the parser returns, a
+  comprehension is already `EApp(List.map, [src, mk_comp_lambda pat body])`
+  (no guard) or `EApp(List.map, [EApp(List.filter, [src, mk_comp_lambda pat
+  pred]), mk_comp_lambda pat body])` (with a guard) — filter-then-map, in
+  that order. `mk_comp_lambda` (`parser.mly:117–127`) builds a plain
+  one-param lambda when the pattern is a bare `PatVar`, or a one-param
+  lambda wrapping an `EMatch` for any richer pattern (tuple/constructor/
+  list-literal destructuring in the binder position). Confirmed live by
+  [`parse/p07_list_comprehension_with_guard.march`](grammar/parse/p07_list_comprehension_with_guard.march):
+  `[x * 2 for x in [1, 2, 3, 4, 5], x > 2]` prints `[6, 8, 10]` — filtering
+  to `{3, 4, 5}` before doubling, matching the filter-then-map desugaring
+  order exactly. The malformed form `[x * 2 for x]` (missing `in <expr>`)
+  is rejected live by
+  [`reject/r04_malformed_comprehension_missing_in.march`](grammar/reject/r04_malformed_comprehension_missing_in.march)
+  with menhir's generic `I got stuck here` — there is no bespoke
+  comprehension-specific diagnostic.
+
+### 4.10 `then` — a token with no accepting production
+
+`THEN` (`lexer.mll` keyword table; `parser.mly:177` token declaration) is
+declared as a token but **appears in exactly one place in the entire
+grammar**: the dedicated error-recovery alternative
+`IF; _c = expr; THEN; _t = expr; error` (`parser.mly:1063–1067`), which
+unconditionally calls `error_raise` with the message `` I don't recognize
+`then` here — March uses do/end blocks instead. `` — there is no path from
+a successfully-shifted `THEN` token to a value; every derivation containing
+`THEN` terminates in this one diagnostic-raising action. `then` therefore
+**can never parse**, by construction, in any position — not just after
+`if`. Confirmed live by
+[`reject/r01_then_keyword_rejected.march`](grammar/reject/r01_then_keyword_rejected.march)
+(`if true then 1 else 2 end`, captured message matches exactly).
+
 ## Conformance corpus
 
 This chapter is backed by a runnable parse/reject corpus at
@@ -596,14 +976,16 @@ MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar
 ```
 
 See [`grammar/INDEX.md`](grammar/INDEX.md) for the full program-to-rule map.
-This Task-1 pass seeds the corpus with four programs anchoring §2–§3 (the
-preprocessing layers); Tasks 2–5 grow it alongside §4–§9.
+Task 1 seeded the corpus with four programs anchoring §2–§3 (the
+preprocessing layers); Task 2 added six more (`p03`–`p08`, `r03`–`r04`)
+anchoring §4's precedence/associativity claims and the list-comprehension
+grammar — 12 programs total (8 `parse/`, 4 `reject/`) as of this pass.
+Tasks 3–5 grow it further alongside §5–§9.
 
 ---
 
 ## Coming in later tasks (not yet written)
 
-- **§4 Expressions** — the stratified precedence ladder (Task 2).
 - **§5 Blocks & statements** — `block_body`, `if`/`match`/`cond`, `let?`
   placement (Task 3).
 - **§6 Patterns** — `simple_pattern`/`pattern`, reachability
