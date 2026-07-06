@@ -177,6 +177,15 @@ let known_divergence_tbl =
   List.iter (fun (k, reason) -> Hashtbl.replace tbl k reason) known_divergence;
   tbl
 
+let oracle_cross_mode = Sys.getenv_opt "MARCH_ORACLE_CROSS" <> None
+
+(* known_divergence stays ACTIVE in cross mode: the cross executor runs the
+   NATIVE-compiled binary as its reference, so a known compiled crash (sort
+   family, dataframe) reproduces in that native step and must still be masked —
+   it is not a cross-compilation signal.  What cross mode DOES suppress is the
+   "stale entry" warning (below): an interp-vs-compiled divergence like the
+   to_string `#<tag:N>` bug produces identical output native and cross, so it
+   MATCHes here — that is expected, not evidence the bug is fixed. *)
 let known_divergence_reason path =
   let base = Filename.basename (Filename.remove_extension path) in
   Hashtbl.find_opt known_divergence_tbl base
@@ -504,6 +513,8 @@ let () =
      other non-divergent outcome). Loud [WARN], not a hard failure — the
      entry should be pruned once the underlying bug is confirmed fixed. *)
   let stale_known_divergences =
+    if oracle_cross_mode then []   (* known_divergence N/A in cross mode (see known_divergence_reason) *)
+    else
     List.filter_map (fun (base, reason) ->
       let matching =
         List.filter (fun (name, _) ->
