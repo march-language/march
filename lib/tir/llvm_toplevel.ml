@@ -33,16 +33,21 @@
     [Llvm_toplevel.*], so the re-export is the only thing that matters for
     API stability. *)
 
+(** Target architecture for native/cross builds. *)
+type arch = X86_64 | Arm64
+
 (** Compilation target. *)
 type target_config =
   | Native          (** Host-native binary (arm64-apple-macosx, x86_64-linux, etc.) *)
+  | LinuxGnu of { arch : arch; glibc_min : string }
+      (** Cross target: dynamic glibc Linux, e.g. x86_64-unknown-linux-gnu *)
   | Wasm64Wasi      (** wasm64-wasi — 8-byte pointers, WASI preview *)
   | Wasm32Wasi      (** wasm32-wasi — 4-byte pointers, WASI preview *)
   | Wasm32Unknown   (** wasm32-unknown-unknown — browser, no WASI *)
   | Js              (** ES module output — no LLVM, no clang *)
 
 let is_wasm_target = function
-  | Native | Js -> false
+  | Native | LinuxGnu _ | Js -> false
   | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
 
 let is_wasm32 = function
@@ -54,26 +59,43 @@ let native_triple = lazy (get_native_triple ())
 
 let target_triple = function
   | Native          -> Lazy.force native_triple
+  | LinuxGnu { arch = X86_64; _ } -> "x86_64-unknown-linux-gnu"
+  | LinuxGnu { arch = Arm64;  _ } -> "aarch64-unknown-linux-gnu"
   | Wasm64Wasi      -> "wasm64-wasi"
   | Wasm32Wasi      -> "wasm32-wasi"
   | Wasm32Unknown   -> "wasm32-unknown-unknown"
   | Js              -> "js"
 
+(** Architecture, when meaningful (native's arch is the host, decided by clang). *)
+let target_arch = function
+  | LinuxGnu { arch; _ } -> Some arch
+  | Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js -> None
+
+let target_is_linux = function
+  | LinuxGnu _ -> true
+  | Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js -> false
+
+(** zig cc -target string for a cross target, or None for host/wasm/js. *)
+let zig_target = function
+  | LinuxGnu { arch = X86_64; glibc_min } -> Some ("x86_64-linux-gnu." ^ glibc_min)
+  | LinuxGnu { arch = Arm64;  glibc_min } -> Some ("aarch64-linux-gnu." ^ glibc_min)
+  | Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js -> None
+
 (** Pointer size in bytes for the target. Dead code, carried verbatim from
     [llvm_emit.ml] (Wave 3 Task 7 move): grepped at move time, no caller
     anywhere in the tree — see specs/todos.md filing. *)
 let target_ptr_size = function
-  | Native | Wasm64Wasi | Js -> 8
+  | Native | LinuxGnu _ | Wasm64Wasi | Js -> 8
   | Wasm32Wasi | Wasm32Unknown -> 4
 
 (** LLVM pointer type name for the target. Dead code, same as above. *)
 let target_ptr_ty = function
-  | Native | Wasm64Wasi | Js -> "ptr"
+  | Native | LinuxGnu _ | Wasm64Wasi | Js -> "ptr"
   | Wasm32Wasi | Wasm32Unknown -> "ptr"
 
 (** LLVM integer type matching pointer width. Dead code, same as above. *)
 let target_int_ty = function
-  | Native | Wasm64Wasi | Js -> "i64"
+  | Native | LinuxGnu _ | Wasm64Wasi | Js -> "i64"
   | Wasm32Wasi | Wasm32Unknown -> "i32"
 
 (** Emit the LLVM preamble (`declare`d externs for the C runtime / every

@@ -151,7 +151,9 @@ let build_cmd =
   let target =
     Arg.(value & opt (some string) None &
          info ["target"] ~docv:"TARGET"
-           ~doc:"Compilation target: native (default), js, wasm32-unknown-unknown, wasm64-wasi, wasm32-wasi. \
+           ~doc:"Compilation target: native (default), linux/amd64, linux/arm64, js, \
+                 wasm32-unknown-unknown, wasm64-wasi, wasm32-wasi. The $(b,linux/*) targets \
+                 cross-compile a dynamic-glibc Linux binary via $(b,zig cc). \
                  Use $(b,js) to emit an ES module (.mjs) for browsers and Node.js.")
   in
   let run r d f pkg tgt =

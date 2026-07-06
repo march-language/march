@@ -608,8 +608,12 @@ let parse_target s =
   | "wasm32-wasi" | "wasm32" -> March_tir.Llvm_emit.Wasm32Wasi
   | "wasm32-unknown-unknown" | "wasm-browser" | "browser" -> March_tir.Llvm_emit.Wasm32Unknown
   | "js" | "javascript" -> March_tir.Llvm_emit.Js
+  | "linux/amd64" | "linux/x86_64" | "linux-x86_64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; glibc_min = "2.31" })
+  | "linux/arm64" | "linux/aarch64" | "linux-arm64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; glibc_min = "2.31" })
   | other ->
-    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
+    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, linux/amd64, linux/arm64, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
     exit 1
 
 (* ------------------------------------------------------------------ *)
@@ -1208,6 +1212,10 @@ let compile filename =
         let target_parsed = parse_target !target_str in
         let target_label  = match target_parsed with
           | March_tir.Llvm_emit.Native          -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
@@ -1809,6 +1817,10 @@ let compile filename =
         (* CAS: check for a cached binary before running clang *)
         let target_label = match target with
           | March_tir.Llvm_emit.Native -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"
@@ -2089,19 +2101,29 @@ let compile filename =
                path so their `#include "march_ffi.h"` resolves with no config. *)
             let ffi_inc = if !ffi_c_files = [] then ""
                           else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
+            (* Target-derived C compiler + linker decisions (cross-compilation).
+               [xtarget] is re-parsed locally so nothing here depends on the
+               build host: a cross Linux .so/binary needs Linux linker flags even
+               when built on macOS, and vice versa. *)
+            let xtarget = parse_target !target_str in
+            let link_is_linux =
+              March_tir.Llvm_emit.target_is_linux xtarget
+              || (match xtarget with
+                  | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
+                  | _ -> false) in
             let rdynamic_flag =
               (* Export all symbols so dlopen'd patch .so can resolve back to server.
                  Pass via -Wl, so the flag goes straight to the linker, not the clang driver.
                  Linux (GNU ld): --export-dynamic. macOS (ld64): -export_dynamic. *)
               if !hot_reload_prefix <> None && not !compile_so then
-                if Sys.file_exists "/proc/version" then " -Wl,--export-dynamic"
+                if link_is_linux then " -Wl,--export-dynamic"
                 else " -Wl,-export_dynamic"
               else "" in
             let so_flag =
               if !compile_so then
                 (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
                    macOS: clang uses -undefined dynamic_lookup for the same effect. *)
-                let undef = if Sys.file_exists "/proc/version"
+                let undef = if link_is_linux
                             then " -Wl,--allow-shlib-undefined"
                             else " -undefined dynamic_lookup" in
                 " -shared -fPIC" ^ undef
@@ -2109,7 +2131,7 @@ let compile filename =
             let reload_ldl =
               (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
               if !hot_reload_prefix <> None && not !compile_so
-                 && Sys.file_exists "/proc/version" then " -ldl" else "" in
+                 && link_is_linux then " -ldl" else "" in
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
@@ -2118,9 +2140,43 @@ let compile filename =
                   Printf.eprintf "march: --signing-pubkey: invalid base64 or not 32 bytes\n";
                   ""
               else "" in
+            (* Target-derived C compiler + arch flags (cross-compilation). *)
+            let cc_driver =
+              match March_tir.Llvm_emit.zig_target xtarget with
+              | Some zt -> Printf.sprintf "zig cc -target %s" zt
+              | None    -> "clang"
+            in
+            let arch_cflags =
+              match xtarget with
+              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> ""   (* NEON by default; SSE flags are x86-only *)
+              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
+              | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
+            in
+            (* P1 cross targets are pure-compute: drop every module that pulls in
+               an external C library (OpenSSL/zlib/zstd/brotli/libblake3) and the
+               HCR runtime (march_reload.c needs libblake3), and zero out their
+               host-discovered link flags — otherwise host lib paths
+               (-L/opt/homebrew/lib) leak into the cross link.  TLS/compression/
+               hot-reload for cross land in P2/P3. *)
+            let is_cross = March_tir.Llvm_emit.target_is_linux xtarget in
+            let openssl_flags2  = if is_cross then "" else openssl_flags2 in
+            let compress_flags2 = if is_cross then "" else compress_flags2 in
+            let blake3_flags2   = if is_cross then "" else blake3_flags2 in
+            let extra_c_files =
+              if not is_cross then extra_c_files
+              else
+                let dropped = ["march_tls.c"; "march_compress.c";
+                               "march_blake3.c"; "march_reload.c"] in
+                extra_c_files
+                |> String.split_on_char ' '
+                |> List.filter (fun p ->
+                     p = "" || not (List.mem (Filename.basename p) dropped))
+                |> String.concat " " in
             let cmd = Printf.sprintf
-              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
-              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+            (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+               Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
