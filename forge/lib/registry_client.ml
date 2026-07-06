@@ -1,4 +1,4 @@
-(** Secret-safe subprocess runner for forge/tasks/registry.march — the client
+(** Secret-safe subprocess runner for forge/tasks/forge_registry.march — the client
     that speaks forgepm's publish/retire HTTP API (see
     forgepm/specs/forge-publish-client.md). The API token must never appear
     in a shell command string or the child process's argv (both are visible
