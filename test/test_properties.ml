@@ -2709,6 +2709,54 @@ let record_update_converged_unit_tests = [
   `Quick, test_record_update_missing_field_on_erased_base_converged;
 ]
 
+(* ── CLI: --timings covers the compiler frontend ─────────────────────────── *)
+
+(** A trivial module that exercises the full compile pipeline (parse through
+    llvm-emit) without depending on anything exotic. *)
+let timings_probe_source =
+  "mod TimingsProbe do\n\
+  \  fn main() do\n\
+  \    println(to_string(1 + 1))\n\
+  \  end\n\
+   end\n"
+
+let test_timings_covers_frontend () =
+  match Lazy.force march_bin_opt with
+  | None -> ()  (* no binary — skip, consistent with oracle_check *)
+  | Some bin ->
+    let src_file = write_temp_march timings_probe_source in
+    let bin_file = src_file ^ ".bin" in
+    let cmd = Printf.sprintf "%s --compile --timings %s -o %s 2>&1 1>/dev/null"
+        (Filename.quote bin) (Filename.quote src_file) (Filename.quote bin_file) in
+    let tmp = Filename.temp_file "march_timings_out" ".txt" in
+    (* No `timeout` wrapper: this is a fixed, non-generated 3-line probe
+       compiling, not a fuzzer-generated program that might hang. *)
+    let _rc = Sys.command (Printf.sprintf "sh -c %s > %s"
+        (Filename.quote cmd) (Filename.quote tmp)) in
+    let out =
+      let ic = open_in tmp in
+      let s = In_channel.input_all ic in
+      close_in ic; s
+    in
+    (try Sys.remove tmp with _ -> ());
+    (try Sys.remove src_file with _ -> ());
+    (try Sys.remove bin_file with _ -> ());
+    let contains s sub =
+      let sl = String.length s and bl = String.length sub in
+      let rec loop i = i + bl <= sl && (String.sub s i bl = sub || loop (i + 1)) in
+      loop 0
+    in
+    List.iter (fun label ->
+        Alcotest.(check bool)
+          (Printf.sprintf "[timings] output mentions %S" label) true
+          (contains out (Printf.sprintf "  %s\n" label)))
+      ["parse"; "desugar"; "resolve-imports"; "stdlib-load"; "typecheck"; "lower"]
+
+let timings_unit_tests = [
+  "--timings covers frontend phases (parse/desugar/resolve/stdlib-load)",
+  `Quick, test_timings_covers_frontend;
+]
+
 (* ── Test suite registration ────────────────────────────────────────────── *)
 
 let () =
@@ -2716,6 +2764,7 @@ let () =
   run "March property tests" [
     "oracle: classify_compile (unit)", classify_compile_unit_tests;
     "oracle: record-update converged (unit)", record_update_converged_unit_tests;
+    "cli: timings (unit)", timings_unit_tests;
     "parse+typecheck", List.map QCheck_alcotest.to_alcotest [
       prop_parse_no_unexpected_exception;
       prop_typecheck_no_crash;

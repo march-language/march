@@ -1248,6 +1248,14 @@ let compile filename =
       end
     end
   in
+  (* Per-stage timing: stamp records wall time since just before parsing.
+     Enabled by --timings; output goes to stderr so it doesn't mix with
+     the compiled binary's stdout. *)
+  let t_compile_start = Unix.gettimeofday () in
+  let stamp label =
+    if !do_timings then
+      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
+  in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -1275,6 +1283,7 @@ let compile filename =
        | None -> ()
        | Some h -> Printf.eprintf "hint: %s\n" h)
     ) parse_errs;
+  stamp "parse";
   (* Apply .march.spans sidecar remapping if present *)
   let module_ast =
     match March_ast.Span_remap.load_sidecar filename with
@@ -1290,6 +1299,7 @@ let compile filename =
         d.span.March_ast.Ast.start_col d.message
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
+  stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
@@ -1304,6 +1314,7 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
      to the external version: strip the stdlib copy so the external one is
@@ -1334,18 +1345,11 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "stdlib-load";
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
   let source_cas_state = early_cas in
-  (* Per-stage timing: stamp records wall time since process start.
-     Enabled by --timings; output goes to stderr so it doesn't mix with
-     the compiled binary's stdout. *)
-  let t_compile_start = Unix.gettimeofday () in
-  let stamp label =
-    if !do_timings then
-      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
-  in
   (* Typecheck + capability enforcement (applies to both eval and compile paths).
      Capability enforcement is embedded in check_module via check_module_needs:
        - transitive needs propagation across module imports
