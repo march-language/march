@@ -9,7 +9,7 @@ let handle = function
 
 let known_builtin_names =
   [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "refactor"; "format";
-    "interactive"; "i"; "clean"; "deps"; "add"; "publish";
+    "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
@@ -544,6 +544,30 @@ let publish_cmd =
   let run o d r ins = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ~registry:r ~insecure:ins ()) in
   Cmd.v (Cmd.info "publish" ~doc:"Validate and publish the current package")
     Term.(const run $ old_source $ dry_run $ registry $ insecure)
+
+(* ---------------------------------------------------------------- forge retire *)
+
+let retire_cmd =
+  let version_arg =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"VERSION" ~doc:"Version to retire, e.g. 1.2.3")
+  in
+  let reason =
+    Arg.(value & opt string "" &
+         info ["reason"] ~docv:"TEXT" ~doc:"Retirement reason (stored on the registry)")
+  in
+  let registry =
+    Arg.(value & opt (some string) None &
+         info ["registry"] ~docv:"URL"
+           ~doc:"Registry base URL (default: $(b,FORGE_REGISTRY) env var, or https://forgepm.org)")
+  in
+  let insecure =
+    Arg.(value & flag & info ["insecure"]
+           ~doc:"Allow a http:// registry (local dev only)")
+  in
+  let run v r reg ins = handle (Cmd_retire.run ~version:v ~reason:r ~registry:reg ~insecure:ins ()) in
+  Cmd.v (Cmd.info "retire" ~doc:"Retire a published version of the current package")
+    Term.(const run $ version_arg $ reason $ registry $ insecure)
 
 (* -------------------------------------------------------------- forge install *)
 
@@ -1129,7 +1153,7 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; check_cmd; fix_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
