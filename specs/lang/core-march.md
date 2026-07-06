@@ -2031,7 +2031,7 @@ mechanically verified** —
 this is the roadmap's §7 faithfulness risk made concrete, and it remains true
 now that the core is complete: the rules are only as faithful as the review of
 each citation. What *is* mechanically checked is weaker but real: the golden
-corpus (§5) confirms that, on these 36 programs, the interpreter these rules
+corpus (§5) confirms that, on these 37 programs, the interpreter these rules
 describe and the independently-written compiled backend produce identical
 output. A divergence there would mean either the interpreter or the compiler is
 wrong; agreement plus arm-for-arm review is the reference's correctness
@@ -2177,9 +2177,126 @@ Both programs keep every observation on the handler-`println` path (never
 `get_actor_field` / `pid_of_int`), so neither SIGSEGVs compiled — the
 precondition for being a golden `MATCH` at all.
 
+#### 4.10.6 Lifecycle (`kill` / `is_alive`) and epoch-stamped capabilities
+
+§4.10.1–.5 pin the message plane (spawn / send / receive / drain). This
+subsection pins the **lifecycle plane**: how an actor is killed, how its
+liveness is observed, what a send to a dead actor does, and the epoch-stamped
+`Cap` mechanism by which a capability held across a restart is rejected. As with
+the rest of §4.10, these are side-effecting builtins over mutable actor state,
+stated operationally against `eval.ml`.
+
+**`kill(pid)` (`eval.ml:2961`) — force-crash an actor.** The arm is
+`[VPid pid] -> crash_actor pid "killed"; VUnit`. It delegates to `crash_actor`
+(`eval.ml:1766`), which — for a live actor — sets `inst.ai_alive <- false`
+(`eval.ml:1772`), runs the actor's resource-cleanup thunks and linear-value drop
+handlers in reverse acquisition order, notifies any supervisor/monitors, and
+crashes bidirectionally-linked actors. `crash_actor` is idempotent: killing an
+already-dead actor (`Some inst when not inst.ai_alive`) or an unknown pid is a
+no-op. `kill` itself returns `VUnit`.
+
+**`is_alive(pid)` (`eval.ml:2964`) — observe liveness as a `Bool`.** It looks
+the pid up in the global `actor_registry`; a live/dead registered actor returns
+`VBool inst.ai_alive`, and an **unknown pid returns `VBool false`**. This is the
+one lifecycle observation that is SAFE under the compiled backend: it is a pure
+registry lookup returning a boolean, touching no mailbox and dereferencing no
+actor payload — unlike `get_actor_field`/`pid_of_int` (the §4.10.1 SIGSEGV
+finding), `is_alive` is byte-identical interpreted vs compiled. The typing side
+pins its signature as `is_alive : Pid(a) -> Bool` (`core-march-types.md` §2.6.3,
+`typecheck.ml:1341`); `kill : Pid(a) -> Unit` (`typecheck.ml:1340`).
+
+The lifecycle witness is **`g37_actor_lifecycle`** (§5): `spawn` a `Counter`
+(→ `ai_alive = true`, so `is_alive` is `true`), then `kill` (→ `ai_alive =
+false`, so `is_alive` is `false`), each printed via a `Bool→String` helper.
+Output `alive=true` / `alive=false`, `MATCH` under `verify.sh`.
+
+**Send to a dead actor — verified behavior.** A plain `send(pid, msg)` to a
+dead or unknown pid is a **silent fire-and-forget drop returning `None`**: the
+`ESend` arm (`eval.ml:7265`) returns `VCon ("None", [])` for both the
+`None` (unknown pid) and `Some inst when not inst.ai_alive` (killed) cases, and
+`Some(())` only on a successful enqueue. It does **not** raise. A `send_checked`
+on a stale/dead cap returns the `:error` atom (below) rather than `None`. Both
+were verified live in the interpreter (`send(dead) = None`,
+`send_checked(dead) = :error`).
+
+> **Finding (compiled-runtime fidelity gap — the capability/dead-send plane is
+> NOT byte-identical).** The dead-actor and capability paths **diverge** between
+> the interpreter and the compiled backend, and are therefore excluded from the
+> golden corpus (a divergent program cannot be a `MATCH`). Verified live on both
+> backends:
+>
+> | Probe (single actor) | interpreted | compiled |
+> |---|---|---|
+> | `send(dead_pid, Msg)` | `None` | `Some` |
+> | `send_checked(live_cap, Msg)` | `:ok` | a non-`:ok`, non-`:error` uninterned atom |
+> | `send_checked(dead_cap, Msg)` | `:error` | a non-`:ok`, non-`:error` uninterned atom |
+> | `get_cap(dead_pid)` | `None` | `Some` |
+> | `get_cap(live_pid)` / `send(live_pid, Msg)` / `is_alive` | `Some` / `Some` / bool | `Some` / `Some` / bool (agree) |
+>
+> The compiled backend does not implement the dead-actor drop for plain `send`
+> (returns `Some` unconditionally); its `get_cap` does not gate on liveness; and
+> its `send_checked` performs no epoch validation at all — it returns an
+> **uninterned/garbage atom** (which compares equal to neither `:ok` nor
+> `:error`, and `show`s as `:<atom>`) regardless of whether the cap is live,
+> dead, or stale. So the entire epoch-`Cap` validation plane is non-functional
+> compiled — not merely "rejects valid caps," but yields an unspecified atom for
+> every `send_checked`. The **live-actor** message plane (`spawn`/`send`/`receive`/
+> `run_until_idle`/`is_alive`) agrees — which is why the §4.10.5 witnesses and
+> `g37` (all on the live/`is_alive` path) are clean `MATCH`es while a cap /
+> dead-send witness is not. The epoch-`Cap` rules below are the **interpreter's**
+> semantics; they are documented for reference-completeness and are NOT claimed
+> byte-identical compiled.
+
+**Epoch-stamped capabilities (`Cap`) — the interpreter's model.** A capability
+is `VCap of int * int = (pid, epoch)` (`eval.ml:48`): a send-permit stamped with
+the actor's restart epoch at the moment it was minted. The registry carries a
+per-actor monotone `ai_epoch` counter (`eval.ml:110`) and a global
+`revocation_table : (int*int, unit) Hashtbl.t` (`eval.ml:389`). The invariant
+(`eval.ml:384–388`): **a cap is invalid iff its `(pid, epoch)` is in the
+revocation table OR the actor's current `ai_epoch` differs from the cap's epoch**
+(a restart occurred) OR the actor is dead/unknown.
+
+- **`get_cap(pid)` (`eval.ml:3129`)** — the ONLY surface way to obtain a `Cap`.
+  Returns `Some(Cap(pid, inst.ai_epoch))` if the actor is alive, else `None`.
+  Typed `get_cap : Pid(a) -> Option(Cap(a))` (`typecheck.ml:1473`).
+- **`send_checked(cap, msg)` (`eval.ml:3137`)** — a validated send. Returns the
+  `:ok` atom iff the actor is known, alive, `inst.ai_epoch = cap_epoch`, and
+  `(pid, cap_epoch)` is **not** in the revocation table; otherwise `:error`. On
+  `:ok` it enqueues `msg` on the mailbox asynchronously (call `run_until_idle()`
+  to process — same async plane as §4.10.2). Typed
+  `send_checked : Cap(a) -> a -> Atom` (`typecheck.ml:1474`; curried — one
+  message arg, not a `(Cap, msg)` pair).
+- **`revoke_cap(cap)` (`eval.ml:3164`)** — adds `(pid, epoch)` to the revocation
+  table and returns `:ok` (idempotent). **`is_cap_valid(cap)` (`eval.ml:3172`)**
+  — the boolean form of the invariant above. *Neither `revoke_cap` nor
+  `is_cap_valid` is registered in the typechecker's builtin table*
+  (`typecheck.ml` has `get_cap`/`send_checked` at `:1473–1474` but no
+  `revoke_cap`/`is_cap_valid`), so a surface program calling them is rejected
+  with `I cannot find \`revoke_cap\``. They exist as `eval.ml` builtins reachable
+  only from OCaml/internal paths — a typecheck-visibility gap noted as a finding.
+
+**Two invalidation paths.**
+
+1. **Explicit revoke.** `revoke_cap(cap)` records `(pid, epoch)` in the
+   revocation table; a subsequent `send_checked(cap, …)` matches the
+   `Hashtbl.mem revocation_table` arm and returns `:error`. Deterministic, no
+   supervisor needed — but, per the typecheck-visibility gap above, not
+   expressible in a pure surface program today.
+2. **Restart (epoch staleness).** A supervised restart replaces the crashed
+   instance with a fresh one whose epoch is `old.ai_epoch + 1`
+   (`spawn_child_actor`, `eval.ml:1512–1518`; `increment_epoch` at
+   `eval.ml:1100` bumps `ai_epoch <- ai_epoch + 1`). A `Cap` captured **before**
+   the restart therefore carries a stale epoch, so `send_checked` hits the
+   `inst.ai_epoch <> cap_epoch` arm and returns `:error` — the capability is
+   auto-invalidated across the restart without any explicit revoke. The
+   **restart-triggered** witness (a supervisor crashing and restarting a child,
+   then a pre-restart `Cap` being rejected) belongs to the **supervision**
+   section (Task 5); this subsection documents the epoch-staleness *rule* and
+   cites it; see the supervision section for the end-to-end restart case.
+
 ## 5. Golden conformance corpus
 
-Thirty-six programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty-seven programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2219,7 +2336,11 @@ covering the interleaving-free actor slice of §4.10 (spawn + async `send` +
 witnesses named in §4.10.5's determinism property (interp==compiled
 byte-identical for actor programs whose output does not depend on scheduler
 interleaving), observing state only through handler `println`s so neither
-SIGSEGVs compiled:
+SIGSEGVs compiled; `g37` is the actor-lifecycle addition, covering the
+`spawn → kill → is_alive` liveness slice of §4.10.6 (a pure registry-bool
+observation, the only lifecycle plane byte-identical compiled — the capability /
+dead-`send` plane diverges and is documented as a finding in §4.10.6, not as a
+golden program):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -2259,8 +2380,9 @@ SIGSEGVs compiled:
 | `g34_nested_tuple_let.march` | nested `PatTuple` destructured in a block `let` (`let ((a,b),(c,d)) = …`) — componentwise `match_list` recursion under E-Blk-Let. Added after the concurrent fix (`3f719a8e`) to `lib/tir/lower.ml`'s block-`let` nested-pattern lowering that the golden corpus's Task-2 tuple work had surfaced (it emitted invalid LLVM before); the `match`-form equivalent (g16) always compiled | `10` |
 | `g35_actor_spawn_send.march` | operational actor slice (§4.10): `spawn` a single `Counter` actor (`ESpawn` → `actor_inst` in `actor_registry`, returns `VPid`), three async `send(c, Inc(n))` (FIFO mailbox enqueue, non-blocking) each returning the new `{count:…}` state, a `Report()` handler that `println`s the accumulated count, drained by one `run_until_idle()` (scheduler-drain to fixed point) — the interleaving-free determinism witness of §4.10.5 | `count=8` / `done` |
 | `g36_actor_receive.march` | operational actor slice (§4.10): an `Inbox` actor whose `on Start()` handler calls `receive()` ONCE to pop the already-queued `Follow(99)` (sent immediately after `Start()`, so present before dispatch — the non-blocking pop-or-`BlockedOnReceive` path, `eval.ml:3076`) and `println`s its payload; honors the once-per-handler `receive()` limitation (§4.10.3) | `got=99` / `done` |
+| `g37_actor_lifecycle.march` | actor lifecycle slice (§4.10.6): `spawn` a `Counter` (`ai_alive = true`) so `is_alive` returns `true`, then `kill` (`crash_actor` sets `ai_alive <- false`, `eval.ml:2961/1766/1772`) so `is_alive` returns `false` — observed via the `Bool` `is_alive` returns (`eval.ml:2964`, a registry lookup SAFE compiled), printed via a `Bool→String` helper. The one lifecycle observation byte-identical compiled; the cap / dead-`send` plane diverges (§4.10.6 finding) and is NOT a golden program | `alive=true` / `alive=false` |
 
-**Result: 36 / 36 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 37 / 37 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not

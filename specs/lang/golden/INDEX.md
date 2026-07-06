@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g36)
+# Golden corpus index (g01–g37)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (36/36 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (37/37 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -13,7 +13,10 @@ Task 1; `g14`–`g16` Task 2; `g17`–`g20` Task 3; `g21`–`g23` Task 4; `g24`�
 Task 5; `g28`–`g30` Task 6; `g31`–`g32` Task 7; `g33`–`g34` post-Phase-1 corpus
 widening after the concurrent `float_to_string` (`g33`) and block-`let`
 nested-`PatTuple` lowering (`g34`) backend fixes landed; `g35`–`g36` the
-actor-operational addition (§4.10 spawn/send/receive/run_until_idle).
+actor-operational addition (§4.10 spawn/send/receive/run_until_idle); `g37` the
+actor-lifecycle addition (§4.10.6 spawn/kill/is_alive — the one lifecycle plane
+byte-identical compiled; the capability/dead-`send` plane diverges and is a
+prose finding, not a golden program).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -53,6 +56,7 @@ actor-operational addition (§4.10 spawn/send/receive/run_until_idle).
 | `g34_nested_tuple_let` | nested `PatTuple` destructured in a block `let` — added after the `3f719a8e` lowering fix the corpus surfaced | E-Blk-Let + `match(PatTuple)` componentwise `match_list` (§4.2/§4.3) |
 | `g35_actor_spawn_send` | `spawn` a single `Counter` actor + three async `send(Inc(n))` + `Report()` handler `println` + one `run_until_idle()` drain (interleaving-free determinism witness) | E-Spawn/E-Send/run_until_idle (§4.10.1–.5, `eval.ml:7194/7265/3067→7523`) |
 | `g36_actor_receive` | `on Start()` handler calls `receive()` once to pop an already-queued `Follow(99)` and `println`s its payload (non-blocking pop path) | receive pop-or-`BlockedOnReceive` (§4.10.3, `eval.ml:3076`) |
+| `g37_actor_lifecycle` | `spawn` → `is_alive` (`true`) → `kill` → `is_alive` (`false`), each printed via a `Bool→String` helper (registry-bool observation, SAFE compiled) | `kill`/`is_alive` + `crash_actor`/`ai_alive` (§4.10.6, `eval.ml:2961/2964/1766/1772`) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
@@ -76,3 +80,14 @@ note explaining why:
   is pinned instead by a unit test
   (`test/test_properties.ml`,
   `test_record_update_missing_field_on_erased_base_converged`).
+- **The capability / dead-`send` plane** (`get_cap` / `send_checked` /
+  `revoke_cap`, and plain `send` to a dead pid) — the interpreter and compiled
+  backend **diverge** here (a filed finding, §4.10.6): compiled, `send` to a dead
+  actor returns `Some` (interp `None`), `send_checked` on a live cap returns
+  `:error` (interp `:ok`), and `get_cap(dead)` returns `Some` (interp `None`). A
+  divergent program cannot be a golden `MATCH`, so the epoch-`Cap` mechanism is
+  documented in §4.10.6 prose + citations rather than by a golden program. Only
+  the lifecycle *liveness* plane (`spawn`/`kill`/`is_alive`) agrees compiled —
+  that is what `g37` witnesses. (`revoke_cap`/`is_cap_valid` are additionally not
+  registered in the typechecker, so they are not even surface-callable — a second
+  finding in §4.10.6.)
