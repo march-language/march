@@ -1248,6 +1248,14 @@ let compile filename =
       end
     end
   in
+  (* Per-stage timing: stamp records wall time since just before parsing.
+     Enabled by --timings; output goes to stderr so it doesn't mix with
+     the compiled binary's stdout. *)
+  let t_compile_start = Unix.gettimeofday () in
+  let stamp label =
+    if !do_timings then
+      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
+  in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -1275,6 +1283,7 @@ let compile filename =
        | None -> ()
        | Some h -> Printf.eprintf "hint: %s\n" h)
     ) parse_errs;
+  stamp "parse";
   (* Apply .march.spans sidecar remapping if present *)
   let module_ast =
     match March_ast.Span_remap.load_sidecar filename with
@@ -1290,6 +1299,7 @@ let compile filename =
         d.span.March_ast.Ast.start_col d.message
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
+  stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
@@ -1304,6 +1314,7 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
      to the external version: strip the stdlib copy so the external one is
@@ -1334,18 +1345,11 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "stdlib-load";
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
   let source_cas_state = early_cas in
-  (* Per-stage timing: stamp records wall time since process start.
-     Enabled by --timings; output goes to stderr so it doesn't mix with
-     the compiled binary's stdout. *)
-  let t_compile_start = Unix.gettimeofday () in
-  let stamp label =
-    if !do_timings then
-      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
-  in
   (* Typecheck + capability enforcement (applies to both eval and compile paths).
      Capability enforcement is embedded in check_module via check_module_needs:
        - transitive needs propagation across module imports
@@ -2660,17 +2664,43 @@ let run_check_cmd files =
     let desugared = March_desugar.Desugar.desugar_module module_ast in
     let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     import_user_files := user_files @ !import_user_files;
-    let desugared =
-      { desugared with
-        March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
-    in
-    (* Wrap each user file in a DMod so its names are accessible as Module.name,
-       mirroring what load_stdlib_file does for stdlib modules. *)
+    (* [extra_decls] (this file's auto-discovered/imported modules) must stay
+       FLAT top-level siblings of this file's own DMod, not merged into its
+       body — nesting them one level in (a) gives them the wrong qualified
+       name (Module.name becomes EntryFile.Module.name — the exact hazard
+       [resolve_imports]'s own doc comment warns against) and (b) hides
+       cross-file duplicates from the dedup pass below: when checking
+       multiple files together, each file's OWN [resolve_imports] call
+       independently auto-discovers the whole search path (its dedup tables
+       are scoped to that one call), so two files that both see the same
+       shared dependency each produce their own copy of it — only visible
+       to dedup if both copies land as top-level siblings here. *)
     [March_ast.Ast.DMod (desugared.March_ast.Ast.mod_name,
                          March_ast.Ast.Public,
                          desugared.March_ast.Ast.mod_decls,
                          March_ast.Ast.dummy_span)]
+    @ extra_decls
   ) files in
+  (* [resolve_imports] auto-discovers the WHOLE library search path on every
+     call, with its dedup tables scoped to that single call — so calling it
+     once per [files] entry (above) independently re-embeds every shared
+     transitive import once per file that (directly or auto-discovered-ly)
+     pulls it in.  For N files sharing common dependencies this blows up the
+     combined module to N copies of the shared decls (confirmed: verified
+     against a live project, error-message repeat count scaled exactly
+     linearly with file count, and total time compounded far worse than
+     linearly on top of that — 5 files took 24x longer than 1).  Every
+     top-level decl this loop produces is a whole-module DMod, and a given
+     module name always maps to exactly one file (one-mod-per-file
+     convention), so any two DMods sharing a name ARE the same module —
+     keep only the first occurrence. *)
+  let seen_mod_names : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let all_decls = List.filter (function
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, _, _) ->
+      if Hashtbl.mem seen_mod_names mn then false
+      else begin Hashtbl.add seen_mod_names mn (); true end
+    | _ -> true
+  ) all_decls in
   (* Build a synthetic combined module and type-check it *)
   let dummy_span = March_ast.Ast.{
     file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0
@@ -2688,17 +2718,21 @@ let run_check_cmd files =
     d.span.March_ast.Ast.file = "" ||
     d.span.March_ast.Ast.file = "<unknown>"
   in
-  let user_errors = List.filter (fun d ->
-    is_user_file d &&
-    d.March_errors.Errors.severity = March_errors.Errors.Error
+  let user_diags severity = List.filter (fun d ->
+    is_user_file d && d.March_errors.Errors.severity = severity
   ) diags in
-  List.iter (fun (d : March_errors.Errors.diagnostic) ->
-    Printf.eprintf "%s:%d:%d: error: %s\n"
+  let user_errors   = user_diags March_errors.Errors.Error in
+  let user_warnings = user_diags March_errors.Errors.Warning in
+  let print_diag label (d : March_errors.Errors.diagnostic) =
+    Printf.eprintf "%s:%d:%d: %s: %s\n"
       d.span.March_ast.Ast.file
       d.span.March_ast.Ast.start_line
       d.span.March_ast.Ast.start_col
+      label
       d.message
-  ) user_errors;
+  in
+  List.iter (print_diag "warning") user_warnings;
+  List.iter (print_diag "error") user_errors;
   if user_errors <> [] then exit 1
   else exit 0
 
