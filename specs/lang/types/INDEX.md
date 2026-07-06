@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t20 accept, t01–t15 reject)
+# Typing corpus index (t01–t22 accept, t01–t17 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -31,7 +31,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 35/35 — 20 accept, 15
+Exit 0 iff every program behaves as declared (currently 39/39 — 22 accept, 17
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -59,6 +59,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t16`–`t17`, `reject/t12` | Task 5 | local recursive functions (T-LetFn) |
 | `accept/t18`–`t20`, `reject/t13`–`t15` | Task 6 | interface-constraint model (T-Discharge, §2.1/§2.1a/§2.1b), boolean primitives |
 | — | Task 7 | no new programs — consolidation + this INDEX + CI wiring only |
+| `accept/t21`–`t22`, `reject/t16`–`t17` | Typechecker fixes (2026-07-05) | witnesses for findings 16 (`f0f5299c`, let-annotation enforcement), 15 (`8cbd6dd2`, generic `when`-constraint re-check), and 13 (`7e40dc5b`, ELetFn diagnostic dedup — pins `reject/t12` at one diagnostic, no new program) |
 
 ## `accept/` — must typecheck
 
@@ -84,6 +85,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t18_num_constraint_discharged` | (δT-Add, T-Discharge) — `1 + 2` (Int) and `1.0 +. 2.0` (Float) both discharge cleanly | |
 | `t19_eq_ord_constraint_discharged` | (δT-Eq, δT-Ord, T-Discharge) — `x == y` and `x < y` on two `Int`s discharge against built-in instances | |
 | `t20_bool_ops` | (δT-And, δT-Or, δT-Not) — `&&`/`\|\|`/`not` over `Bool`-typed comparisons | |
+| `t21_let_annot_ok` | **(T-Let annotation, finding 16 fix)** — a correct `let x : Int = 5` and a polymorphic RHS bound at a more specific instance (`let f : (Int) -> Int = fn n -> n`) both typecheck | |
+| `t22_generic_when_constraint_satisfied` | **(T-Discharge via instantiate, finding 15 fix)** — a generic `when Ord(a)`/`when Eq(a)` bound SATISFIED at the call site (Int/String) still typechecks | |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -104,8 +107,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t13_num_no_impl_string` | (T-Discharge, `CNum`) — `x + y` on two agreeing `String`s, violating `+`'s own `Num` obligation at the enclosing `fn`'s discharge point | `String does not implement Num (only Int and Float do)` |
 | `t14_ord_no_impl_adt` | (T-Discharge, `CInterface "Ord"`) — `a < b` on a bare 2-ctor ADT with no `impl Ord` | `` `Hue` does not implement interface `Ord` `` |
 | `t15_and_non_bool_operand` | (δT-And) — `1 && true`, an `Int` operand against `&&`'s fixed `Bool → Bool → Bool` | `March does not coerce Int to Bool` |
+| `t16_let_annot_mismatch` | **(T-Let annotation, finding 16 fix)** — `let x : Int = "foo"` now rejects (the annotation is a checking context for the RHS) | `` expected `Int` but got `String`. `` |
+| `t17_generic_when_constraint_unsatisfied` | **(T-Discharge via instantiate, finding 15 fix)** — `same(Rood, Rood)` with `fn same(a, b) when Eq(a)` on a no-`Eq` ADT now rejects | `` `Hue` does not implement interface `Eq`. `` |
 
-**Result: 35 / 35 (20 accept, 15 reject).**
+**Result: 39 / 39 (22 accept, 17 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

@@ -1299,8 +1299,16 @@ typechecker that this document exists to pin down, not defects:
     witness); a branch-body mismatch falls through to the same "All branches of
     a match must have the same type." text `EMatch` uses (no `ECond`-specific
     branch-mismatch message exists).
-13. **A local recursive function (`ELetFn`) is monomorphic inside its own body
-    and generalized only afterward — but via a DIFFERENT mechanism than
+13. **[RESOLVED 2026-07-05, commit `7e40dc5b`]** — the duplicate-diagnostic
+    quirk noted at the end of this finding is fixed: the `ELetFn` arm now
+    measures the `env.errors` count before/after the return-annotation unify
+    and, if it grew, routes the later self-type/arrow reconciliation through a
+    scratch (discarded) error context, so the identical mismatch is reported
+    ONCE (verified via `--check-json`; two genuinely-distinct errors still both
+    report). Corpus witness `reject/t12` unchanged. The typing-rule description
+    below (monomorphic-then-generalized `ELetFn`) is unaffected and remains
+    accurate. **A local recursive function (`ELetFn`) is monomorphic inside its
+    own body and generalized only afterward — but via a DIFFERENT mechanism than
     `T-Let`'s.** `infer_block`'s `ELetFn` arm (T-LetFn, typecheck.ml:4371–4399)
     binds the function's own name to a bare `Mono β` (fresh, ungeneralized)
     BEFORE typing the body, so a recursive call inside the body resolves via
@@ -1371,8 +1379,23 @@ typechecker that this document exists to pin down, not defects:
     all, `a`/`b` are simply unannotated params, and the `Num` obligation
     both arises AND evaporates within `add_poly`'s own declaration, never
     reaching a call site to be re-checked.
-15. **A `when Interface(a)` constraint on an explicit function bound is
-    correctly enforced when it can be discharged AT THE FUNCTION'S OWN
+15. **[RESOLVED 2026-07-05, commit `8cbd6dd2`]** — root cause found and fixed.
+    The `when Eq(a)` argument `a` (an unannotated VALUE parameter) was resolved
+    only against `fn_tvars` (signature type-variable names), which has no entry
+    for a value-parameter name, so `check_fn` minted a FRESH placeholder var
+    disconnected from the parameter's actual type and attached the constraint to
+    THAT — a phantom `generalize` quantified away, so at each call site
+    `instantiate` substituted it with an independent fresh var never bound to the
+    argument, and `discharge_constraints` always saw an `Unbound` TVar and
+    skipped it. Fix (`lib/typecheck/typecheck.ml`): when the `when`-clause name
+    isn't a signature type var, resolve it against the value-parameter binding in
+    `body_env` and attach the constraint to the parameter's own type variable, so
+    it survives generalization, rides through `instantiate` onto the caller's
+    `pending_constraints`, and is discharged at the call site. `same(Rood,Rood)`
+    now rejects; satisfiable generic constraints still accept (corpus
+    `accept/t22`, `reject/t17`). The soundness-gap analysis below is retained for
+    the record. **A `when Interface(a)` constraint on an explicit function bound
+    is correctly enforced when it can be discharged AT THE FUNCTION'S OWN
     DECLARATION (a concretely-annotated parameter), but is SILENTLY NOT
     RE-CHECKED at call sites when the bound type variable is left generic —
     a genuine, reproducible typechecker gap, distinct from finding 14's
@@ -1426,8 +1449,15 @@ typechecker that this document exists to pin down, not defects:
     corpus's purpose — the corpus instead uses the primitive, always-correctly
     -enforced `Ord`/`Num` constraints for its `reject/` witnesses, findings
     above).
-16. **`let`-binding type annotations (`let x : T = e`) are parsed but never
-    enforced by the typechecker — the second filed, open gap.** Found while
+16. **[RESOLVED 2026-07-05, commit `f0f5299c`]** — the annotation is now a
+    CHECKING context. A new `infer_let_annotated` helper resolves `bind_ty` via
+    `surface_ty` and checks the RHS against it with `check_expr` (so a
+    polymorphic RHS bound at a more specific instance still works), falling back
+    to plain inference only when the annotation isn't a resolvable type (a
+    phantom/typestate tag). `let x : Int = "foo"` now rejects; `accept/t21` +
+    `reject/t16` pin both directions. The gap analysis below is retained for the
+    record. **`let`-binding type annotations (`let x : T = e`) WERE parsed but
+    never enforced by the typechecker — the second filed, open gap.** Found while
     building Task 2's tuple/record corpus. The parser accepts a type
     annotation on a `let` binding and stores it as `Ast.bind_ty`, but
     (T-Let)'s `infer_block` arm (§2, typecheck.ml:4293–4324) never consults it
@@ -1650,9 +1680,11 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   algorithm") — the natural next widening slice after this one (see the
   now-superseded "Next" prose two paragraphs above, kept as historical
   provenance).
-- **The constraint-survival soundness gap itself (finding 15, §4)** — a proper
-  fix (not just documentation) and a regression test belong with that Phase-2
-  widening, since fixing `typecheck.ml` is out of scope for a docs-only task.
+- **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
+  2026-07-05 (commit `8cbd6dd2`): the `when`-clause now attaches the constraint
+  to the value parameter's own type variable, so it survives generalization and
+  is re-checked at call sites. The general `impl Iface(T)` declaration-checking
+  machinery (previous bullet) remains the Phase-2 widening item.
 - **Refinement types (z3-discharged).** Roadmap Phase 3 (§4.5/§6): "the
   refinement/capability soundness claims are machine-checked in Lean 4" is the
   acceptance criterion; this document's bidirectional HM judgment (§1) is the
@@ -1678,5 +1710,8 @@ Together, `core-march.md` (operational) + this document (typing) are
 **Level-1 for the Core March fragment** per the roadmap's leveling (§2); the
 next phase of BOTH documents is the Level-2 conformance work already underway
 (the golden corpus + this document's `accept`/`reject` corpus) plus, per §4.4
-of the roadmap, adjudicating the operational side's `known_divergence` queue —
-this document's own analogous queue is the single open item, finding 15.
+of the roadmap, adjudicating the operational side's `known_divergence` queue.
+This document's own analogous queue is now empty: findings 13, 15, and 16 —
+the three filed typechecker gaps — were all RESOLVED 2026-07-05 (commits
+`7e40dc5b`, `8cbd6dd2`, `f0f5299c`), with corpus witnesses (`reject/t16`,
+`reject/t17`, `accept/t21`, `accept/t22`) and unit tests.
