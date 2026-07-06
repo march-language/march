@@ -2103,3 +2103,22 @@ First-ever compilation of a full March program (HTTP server with stdlib dependen
 - **3 real typechecker bugs surfaced by the corpus, filed and deliberately left OPEN** (not fixed in this docs-only track — see `specs/todos.md`'s P1 "Compiler (found during Core March language-spec typing track, 2026-07-05)" section and the `ELetFn` entry in "Compiler: Type System"): (i) `let x : T = e` type annotations are parsed (`Ast.bind_ty`) but never consulted by `typecheck.ml` — the RHS is inferred, not checked, so the annotation is decorative; (ii) a user-declared `when Interface(a)` bound on a generic function parameter is enforced at the function's own declaration but not re-checked when instantiated at a later polymorphic call site — a genuine, narrow soundness gap (built-in `Num`/`Eq`/`Ord`/`Show` constraints are unaffected); (iii) `ELetFn` with a conflicting return-type annotation reports the identical mismatch diagnostic twice (cosmetic, does not affect `check_types.sh`).
 
 Nothing this campaign opened is silently unclosed: every P0/P1/P2 the four waves surfaced carries either a landing commit, a `specs/todos.md` entry with a disposition, or (for the one dynamic-record chip above) an explicit "still open, still tracked" note in this same paragraph.
+
+## Spec consolidation — language reference v1 (2026-07-06)
+
+The ~21 scattered current-truth language-reference docs (across `specs/features/*.md`,
+`docs/*.md`, and root guides) are consolidated into **one versioned, structured
+reference set under `specs/lang/`**: an umbrella index (`specs/lang/index.md`) over the
+two conformance-tested core references (`core-march.md` operational, `core-march-types.md`
+typing), a promoted `surface-syntax.md` grammar chapter, and **19 canonical per-topic
+chapters** (modules, let-propagation, pattern-matching, interfaces, type-system,
+linear-types, refinement-types, session-types, capabilities, memory-model,
+safety-by-construction, actors, supervision, parallelism, clustering, standard-library).
+Compiler internals are grouped into a sibling **implementation reference**
+(`specs/impl/index.md`) over 9 docs, referenced-not-merged. Superseded docs redirect via
+stubs; `scripts/check-docs.sh` now lints all of `specs/lang/` + `specs/impl/`. Real
+doc-correctness bugs fixed en route: `module-system`'s obsolete `pub`/`then`,
+`let-propagation`'s false "not yet implemented" (`let?` shipped), `refinement-types`'
+wrong `List.nth |> Option.unwrap`, the actor-system compiled-scheduler self-contradiction,
+and the CAS doc's phantom `driver.ml` pointer. Satisfies roadmap §4.6 (consolidate/version
+the reference). NEXT spec step: the resolved surface grammar.

@@ -676,7 +676,7 @@ to each.
    `refactor.ml`, `coverage.ml`, `lsp/lib/*.ml` — add real cases (do **not** rely
    on their catch-alls; see §13).
 8. Tests (§14).
-9. Docs: `CLAUDE.md`, `syntax_reference.md`, `docs/tour.md` (§16).
+9. Docs: `CLAUDE.md`, `surface-syntax.md`, `docs/tour.md` (§16).
 
 Steps 1–6 are the functional core and can land together (the build will fail
 until typecheck/eval/tir are handled — those have no catch-all). Step 7 is the
@@ -697,7 +697,7 @@ After landing: update `specs/todos.md` (move to Done) and `specs/progress.md`
 > with the same `E`. For per-step handling use `with … else …`. `let?` cannot be
 > the last expression in a block.
 
-### `syntax_reference.md` (new "Result propagation" section)
+### `surface-syntax.md` (new "Result propagation" section)
 
 Show the `let?` chain and the `with … else` alternative side by side, and call
 out that a `with` **without** `else` crashes on `Err`.

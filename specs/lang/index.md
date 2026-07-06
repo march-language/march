@@ -1,6 +1,6 @@
 # March Language Reference
 
-**v1 (in progress) · 2026-07-05 · core fragment complete, topic chapters migrating**
+**v1 · 2026-07-06 · core language reference consolidated (core fragment conformance-tested; topic chapters canonical)**
 
 ---
 
@@ -59,9 +59,10 @@ point before diving into this reference.
 
 ## Chapter map
 
-Status legend: **canonical** = the authoritative chapter exists at this path
-today. **pending (Task N)** = not yet migrated; still lives at its pre-
-consolidation location until the named task lands.
+Status legend: **canonical** = the authoritative chapter lives at this path
+under `specs/lang/` (including the two conformance-tested core references).
+**external (sibling)** = the implementation reference, maintained as its own
+document outside `specs/lang/` and linked from here rather than duplicated.
 
 | Topic | Chapter file | Status |
 |---|---|---|
