@@ -2291,8 +2291,146 @@ revocation table OR the actor's current `ai_epoch` differs from the cap's epoch*
    auto-invalidated across the restart without any explicit revoke. The
    **restart-triggered** witness (a supervisor crashing and restarting a child,
    then a pre-restart `Cap` being rejected) belongs to the **supervision**
-   section (Task 5); this subsection documents the epoch-staleness *rule* and
-   cites it; see the supervision section for the end-to-end restart case.
+   subsection (§4.10.7); this subsection documents the epoch-staleness *rule* and
+   cites it; §4.10.7 covers the end-to-end restart case.
+
+#### 4.10.7 Supervision (`one_for_one` restart + epoch invalidation)
+
+§4.10.6 pinned the lifecycle plane (`kill`/`is_alive`) and the epoch-stamped
+`Cap` mechanism, but left the actual **restart** — the event that bumps an
+actor's epoch — to this subsection. Supervision is how a crashed child is
+automatically respawned; a restart is the concrete producer of the "epoch
+staleness" invalidation §4.10.6 described in the abstract. As with the rest of
+§4.10, this is stated operationally against `eval.ml`, and — because the whole
+child-observation surface diverges or crashes compiled (below) — it is the
+**interpreter's** semantics, documented for reference-completeness and NOT
+claimed byte-identical compiled.
+
+**Supervisor declaration (static form).** An actor becomes a supervisor by
+carrying a `supervise` block in its definition, which the parser stores as
+`actor_supervise : supervise_config option` on the `actor_def` (`ast.ml:276`;
+`Some` ⇔ this actor is a supervisor). The block names a restart `strategy`, a
+`max_restarts N within S` budget, and a list of `ChildActor field` children:
+
+```march
+actor Worker do
+  state { count : Int }
+  init do
+    println("worker init")
+    { count: 0 }
+  end
+  on Work() do { count: state.count + 1 } end
+end
+
+actor Sup do
+  state { wa : Int, wb : Int }
+  init  { wa: 0, wb: 0 }
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 60
+    Worker wa
+    Worker wb
+  end
+end
+```
+
+`spawn(Sup)` (the `ESpawn` supervisor arm, `eval.ml:7207–7254`) eagerly
+instantiates each declared child: it evaluates each child's `init`
+(`eval.ml:7220`), allocates a child `actor_inst` with `ai_supervisor = Some
+sup_pid` (`:7228`), and overlays the child pids into the corresponding
+supervisor-state fields (`wa`/`wb` become the children's `VInt` pids, `:7240–
+7251`). The `supervise_config` record is `{ sc_fields; sc_strategy;
+sc_max_restarts; sc_window_secs; sc_order }` (`ast.ml:264–270`).
+
+**`one_for_one` — a child crash restarts just that child.** When a supervised
+child crashes, `crash_actor` (`eval.ml:1766`) — after marking it dead and running
+its cleanup — notifies its supervisor via `notify_supervisor sup_pid pid`
+(`eval.ml:1816`). `notify_supervisor` (`:1748`) dispatches on the supervisor's
+static strategy enum (`sc_strategy`, `:1756–1762`):
+
+- `OneForOne  -> one_for_one_restart` (`eval.ml:1760`)
+- `OneForAll  -> one_for_all_restart` (`:1761`)
+- `RestForOne -> rest_for_one_restart` (`:1762`)
+
+`one_for_one_restart` (`eval.ml:1545`) locates which supervisor-state field held
+the crashed pid (`:1553–1557`), checks the `max_restarts`-within-`window` budget
+(`:1574–1581`; exceeding it crashes the supervisor itself, `:1581`), then calls
+`spawn_child_actor` (`:1586`, definition `:1505`) to allocate a **fresh** child
+instance and rewrites just that field to the new pid (`:1588–1592`). The
+siblings' pids and instances are untouched — that is the `one_for_one` property:
+only the crashed child is replaced. `one_for_all_restart` (`:1597`) and
+`rest_for_one_restart` (`:1648`) exist and implement the "restart all" and
+"restart the crashed child + all declared after it" policies respectively; this
+subsection focuses on `one_for_one` and defers their detail (their surface form
+is `strategy one_for_all` / `strategy rest_for_one`, exercised in
+`examples/supervision_strategies.march`).
+
+**Two supervision subsystems — do not conflate them.** March has *two* distinct
+supervisor implementations with different strategy coverage:
+
+1. The **static** `actor Name do … supervise do strategy … end end` declaration
+   form (above) dispatches through the **full three-strategy enum**
+   `OneForOne | OneForAll | RestForOne` (`ast.ml:254–257`, dispatched at
+   `eval.ml:1756–1762`) — all three strategies are implemented.
+2. The **dynamic** supervisor (a runtime `dyn_sup_state` with no static
+   `actor_def`, created via the `Supervisor.spec`/registry path) carries its
+   strategy as a **string** field `ds_strategy` whose own comment pins it as
+   `"one_for_one" (only strategy supported now)` (`eval.ml:141`) — the dynamic
+   path implements **`one_for_one` only**. A crash routed to a dynamic
+   supervisor goes through `notify_dyn_supervisor` (`eval.ml:1753`), not the
+   static enum dispatch.
+
+The `one_for_one` semantics documented here are the ones both subsystems share;
+the three-strategy claim applies **only** to the static declaration form.
+
+**Epoch invalidation across a restart (cross-ref §4.10.6).** A restart is where
+the epoch bump of §4.10.6 actually happens. `spawn_child_actor`
+(`eval.ml:1505`) inherits the crashed instance's epoch and adds one — the new
+child's `ai_epoch = old.ai_epoch + 1` (`eval.ml:1513–1518`). So a `Cap` minted
+against the child **before** its crash carries the pre-restart epoch; after the
+restart the live instance's `ai_epoch` differs, so a `send_checked` on that
+stale `Cap` hits the `inst.ai_epoch <> cap_epoch` arm (`eval.ml:3147`) and
+returns `:error` — the capability is auto-invalidated across the restart with no
+explicit `revoke_cap` (§4.10.6's "Restart (epoch staleness)" path). **This is
+INTERPRETER-only on two counts:** (a) §4.10.6's filed finding that the compiled
+`send_checked`/epoch-`Cap` plane is entirely non-functional (it returns an
+uninterned garbage atom for every cap regardless of liveness/staleness — see the
+§4.10.6 divergence table), so the stale-cap rejection cannot be observed
+compiled at all; and (b) the only surface way to *hold* a pre-restart child cap
+is to read the child pid out of the supervisor state via `get_actor_field` +
+`pid_of_int`, which crash compiled (below). The epoch-invalidation rule is
+therefore documented as the interpreter's semantics only.
+
+**Why the restart witness is PROSE-ONLY (not golden-testable compiled).** A
+golden program must produce byte-identical output interpreted and compiled
+(§5). Every way to observe a supervised child from surface March routes through
+a path that diverges or crashes compiled, so no deterministic restart witness
+survives the compiled-parity gate — verified live on both backends this task:
+
+| Observation path | interpreted | compiled |
+|---|---|---|
+| `spawn(Sup)` runs each child's `init` body (a `println` in `init`) | fires once per child (deterministic) | does **not** run the children's `init` at spawn → 0 prints (DIVERGES) |
+| `get_actor_field(sup, "wa")` (read a child pid out of supervisor state) | returns `Some(pid)` | hard stub returns `None` unconditionally (`runtime/march_runtime.c:3329`) |
+| `pid_of_int(n)` (turn that int back into a `Pid` to `send`/`kill`/`is_alive`) | valid `Pid` | unsafe untagged int→pointer cast (`:3324`) → subsequent deref **SIGSEGV** |
+| whole `examples/supervision_strategies.march` compiled | exit 0, restarts observed | **exit 139 / SIGSEGV** (garbage pids, then crash) |
+
+The last row was confirmed live: `examples/supervision_strategies.march`
+interprets cleanly (exit 0, showing the `one_for_one`/`one_for_all`/
+`rest_for_one` restarts) but the compiled binary prints a garbage pid
+(`wa=2599429144`, from `get_actor_field` returning `None` and `pid_of_int`
+casting it) and then **exits 139**. Even the mildest witness — "a supervisor
+spawns its declared children," observed purely through a printing `init` body
+with NO `get_actor_field`/`pid_of_int` — **diverges** (interp fires the child
+`init`s, compiled runs none). A directly-spawned actor's printing `init` *does*
+run byte-identically on both backends (that path is not supervisor-mediated), so
+the divergence is specifically the supervisor-child-spawn plane, not `init`
+bodies in general. Both the `get_actor_field`/`pid_of_int` compiled crash and
+the `Actor.call` timeout gap encountered nearby are filed as open findings in
+`specs/todos.md`. Consequently the supervision restart semantics are documented
+here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
+added** — the same class of "the observation surface diverges/crashes compiled,
+so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
+out-of-scope scheduler races.
 
 ## 5. Golden conformance corpus
 

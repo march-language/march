@@ -91,3 +91,13 @@ note explaining why:
   that is what `g37` witnesses. (`revoke_cap`/`is_cap_valid` are additionally not
   registered in the typechecker, so they are not even surface-callable — a second
   finding in §4.10.6.)
+- **The supervision / `one_for_one` restart plane** — supervisor declaration +
+  child restart + epoch invalidation (§4.10.7) is documented in prose + `eval.ml`
+  citations, NOT by a golden program, because the entire child-observation
+  surface diverges or crashes compiled (filed findings in `specs/todos.md`): the
+  only surface way to reach a supervised child, `get_actor_field`/`pid_of_int`,
+  SIGSEGVs compiled (`examples/supervision_strategies.march` exits 139), and even
+  a `get_actor_field`-free "supervisor spawns its declared children" witness
+  (observed via a printing child `init`) diverges — interp runs each child's
+  `init` at `spawn(Sup)`, compiled runs none. A divergent/crashing program cannot
+  be a golden `MATCH`, so no `g38` restart witness was added.
