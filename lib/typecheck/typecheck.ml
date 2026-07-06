@@ -1153,9 +1153,14 @@ let builtin_impls : (string * ty) list =
     ("Eq",   t_bool);  ("Eq",   t_unit);  ("Eq",   t_atom);
     (* Ord *)
     ("Ord",  t_int);   ("Ord",  t_float); ("Ord",  t_string);
-    (* Show *)
+    (* Show — Atom included so `show(:tag)` / `show` on an Atom-typed value
+       typechecks (compiled backend lowers it to Show$Atom.show; the
+       interpreter renders VAtom a as ":" ^ a).  Without this, a direct
+       `show(a)` on a concretely-Atom-typed `a` failed with "Atom does not
+       implement interface Show" in BOTH modes even though `println(a)`
+       worked via the generic prelude path. *)
     ("Show", t_int);   ("Show", t_float); ("Show", t_string);
-    ("Show", t_bool);  ("Show", t_unit);
+    ("Show", t_bool);  ("Show", t_unit);  ("Show", t_atom);
     (* Hash *)
     ("Hash", t_int);   ("Hash", t_float); ("Hash", t_string);
     ("Hash", t_bool);

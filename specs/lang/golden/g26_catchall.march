@@ -1,0 +1,19 @@
+mod Main do
+  type Color = Red | Green | Blue | Other(Int)
+  -- Specific PatCon branches followed by a deliberate PatWild catch-all:
+  -- the `_` arm (eval.ml:773, match(PatWild, v) = ∅) selects whenever no
+  -- earlier specific pattern matched, so the match is exhaustive by design.
+  fn code(c) do
+    match c do
+      Red -> 1
+      Green -> 2
+      _ -> 0
+    end
+  end
+  fn main() do
+    println(int_to_string(code(Red)))
+    println(int_to_string(code(Green)))
+    println(int_to_string(code(Blue)))
+    println(int_to_string(code(Other(7))))
+  end
+end

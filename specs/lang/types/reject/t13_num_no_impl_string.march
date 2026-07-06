@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: String does not implement Num (only Int and Float do)
+mod M do
+  fn main() do
+    let x = "a"
+    let y = "b"
+    println(x + y)
+  end
+end

@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: Each condition in `match do` must be Bool.
+mod M do
+  fn describe(n : Int) : String do
+    match do
+      n -> "positive"
+      _ -> "other"
+    end
+  end
+
+  fn main() do
+    println(describe(5))
+  end
+end

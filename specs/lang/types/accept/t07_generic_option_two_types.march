@@ -1,0 +1,16 @@
+mod M do
+  type Box(a) = Full(a) | Vacant
+
+  fn unwrap_or(b : Box(a), default : a) : a do
+    match b do
+      Full(x) -> x
+      Vacant -> default
+    end
+  end
+
+  fn main() do
+    println(int_to_string(unwrap_or(Full(5), 0)))
+    println(unwrap_or(Full("hi"), "default"))
+    println(unwrap_or(Vacant, "fallback"))
+  end
+end

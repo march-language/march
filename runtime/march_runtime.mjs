@@ -8,15 +8,23 @@ export function march_print(s) {
   process.stdout.write(String(s));
 }
 
-/** Float → string matching C's %g (6 significant digits, no trailing zeros) */
+/** Float → string mirroring the interpreter's OCaml `string_of_float`
+ *  (`%.12g` + a trailing '.' on bare integers): 1.0 -> "1.", 1.5 -> "1.5",
+ *  0.1 -> "0.1". Whole numbers now agree with the native/interpreter backends
+ *  (specs/lang/golden/g09_float_show.march); extreme-exponent magnitudes where
+ *  JS toPrecision and C %g pick fixed-vs-exponential notation differently
+ *  remain a deferred edge (untested, out of scope for the whole-number fix). */
 export function march_float_to_string(f) {
-  if (!isFinite(f)) return String(f);
-  const s = f.toPrecision(6);
-  // Remove trailing zeros and unnecessary decimal point (like C's %g)
+  if (Number.isNaN(f)) return "nan";
+  if (f === Infinity) return "inf";
+  if (f === -Infinity) return "-inf";
+  let s = f.toPrecision(12);          // 12 significant digits, like %.12g
   if (s.includes('e')) {
-    return s.replace(/\.?0+(e)/, '$1');
+    s = s.replace(/\.?0+e/, 'e');     // strip trailing mantissa zeros before exp
+  } else if (s.includes('.')) {
+    s = s.replace(/0+$/, '');         // 1.500..0 -> "1.5" ; 1.000..0 -> "1."
   }
-  return s.replace(/\.?0+$/, '');
+  return /^-?\d+$/.test(s) ? s + '.' : s;   // bare integer 1 -> "1."
 }
 
 /** String byte length (UTF-8 bytes, matching the native backend) */

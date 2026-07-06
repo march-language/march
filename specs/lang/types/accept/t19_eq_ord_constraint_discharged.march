@@ -1,0 +1,8 @@
+mod M do
+  fn main() do
+    let x = 3
+    let y = 3
+    println(if x == y do "eq" else "neq" end)
+    println(if x < y do "lt" else "ge" end)
+  end
+end

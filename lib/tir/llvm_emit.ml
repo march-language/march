@@ -167,6 +167,7 @@ type ctx = Llvm_ctx.ctx = {
   remote_impl_hashes : (string, string) Hashtbl.t;
   remote_sig_hashes  : (string, string) Hashtbl.t;
   compile_so : bool;
+  atom_names : (int64, string) Hashtbl.t;
 }
 
 let make_ctx = Llvm_ctx.make_ctx
@@ -323,6 +324,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Atoms are interned as FNV-1a 64-bit hashes (bit63 forced == bit62 so
        they survive generic-slot tag round-trips — see atom_hash). *)
     let h = atom_hash name in
+    (* Record hash -> name so `Show$Atom.show` (emitted at end-of-module) can
+       reverse this otherwise-nameless value back to `:name`. *)
+    Hashtbl.replace ctx.atom_names h name;
     ("i64", Int64.to_string h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
     let gname = intern_string ctx s in

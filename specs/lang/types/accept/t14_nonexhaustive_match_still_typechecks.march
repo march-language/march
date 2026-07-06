@@ -1,0 +1,19 @@
+-- Deliberately non-exhaustive: no `Bloo` arm and no `_` catch-all.
+-- check_exhaustiveness (typecheck.ml:3159) reports this at `severity = Warning`
+-- (typecheck.ml:3173/3180), and `--check`'s exit code only fires on
+-- `severity = Error` (bin/main.ml:819-821) — so this program is well-typed
+-- (exit 0) despite the missing `Bloo` case. This is the witness program for
+-- that finding: exhaustiveness is non-blocking.
+mod M do
+  type Hue = Rood | Bloo
+
+  fn name(c : Hue) : String do
+    match c do
+      Rood -> "red"
+    end
+  end
+
+  fn main() do
+    println(name(Rood))
+  end
+end

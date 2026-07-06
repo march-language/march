@@ -296,6 +296,93 @@ let fn_declare_str (fn : Tir.fn_def) : string =
       Llvm_ctx.llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 
+(* Does [b]'s current contents contain [needle]?  Allocation-free inner
+   comparison so a scan over a whole module's IR text stays cheap.  Used only
+   by [emit_atom_show_table] to detect a @march_atom_to_string call site. *)
+let buffer_contains (b : Buffer.t) (needle : string) : bool =
+  let hay = Buffer.contents b in
+  let hlen = String.length hay and nlen = String.length needle in
+  if nlen = 0 || nlen > hlen then false
+  else begin
+    let found = ref false and i = ref 0 and last = hlen - nlen in
+    while (not !found) && !i <= last do
+      let j = ref 0 in
+      while !j < nlen && hay.[!i + !j] = needle.[!j] do incr j done;
+      if !j = nlen then found := true else incr i
+    done;
+    !found
+  end
+
+(** Show$Atom.show backing: generated hash→name reverse table.
+
+    Atoms compile to nameless FNV-1a i64 hashes (Llvm_ctx.atom_hash), so
+    `Show$Atom.show` (registered in lower.ml, body = atom_to_string(x)) can't
+    reconstruct `:name` from the runtime value alone.  Rather than a C-side
+    registry populated at startup, we emit the whole mapping as one generated
+    function — a switch over every atom (hash, name) collected during body
+    emission (ctx.atom_names, filled by emit_atom + emit_case).  Returning
+    `march_string_lit(":name")` mirrors `march_int_to_string` exactly, so RC
+    bookkeeping in the caller is identical to the Int/Float/Bool Show impls.
+
+    Emitted into ctx.extra_fns — which BOTH the AOT finalizer (emit_module) and
+    every JIT/REPL emitter flush — so the definition is always co-located with
+    the call in the SAME LLVM module (JIT fragments are compiled standalone; a
+    call with no in-module definition is a clang error).
+
+    Gated on the CALL actually appearing in this module's emitted code, not on
+    Show$Atom.show being emitted as a function: the tiny `atom_to_string(x)`
+    body is routinely inlined into its caller, so the wrapper vanishes while the
+    call to @march_atom_to_string remains.  Scanning the emitted IR is the
+    ground truth.  The `not already-defined` guard makes a second call on the
+    same ctx a no-op (can't double-define the symbol or its globals). *)
+let emit_atom_show_table ctx =
+  let call_site = "call ptr @march_atom_to_string" in
+  let referenced =
+    buffer_contains ctx.Llvm_ctx.buf call_site
+    || buffer_contains ctx.Llvm_ctx.extra_fns call_site
+  in
+  let already_defined =
+    buffer_contains ctx.Llvm_ctx.extra_fns "define ptr @march_atom_to_string"
+  in
+  if referenced && not already_defined then begin
+    (* Sort by hash for deterministic IR (Hashtbl.fold order is unspecified),
+       keeping the CAS content hash stable across identical inputs. *)
+    let atoms =
+      Hashtbl.fold (fun h name acc -> (h, name) :: acc) ctx.Llvm_ctx.atom_names []
+      |> List.sort (fun (a, _) (b, _) -> Int64.compare a b)
+    in
+    let b = ctx.Llvm_ctx.extra_fns in
+    List.iteri (fun i (_, name) ->
+        let s = ":" ^ name in
+        Printf.bprintf b
+          "@.atomname_%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+          i (String.length s + 1) (Llvm_ctx.llvm_escape_string s)
+      ) atoms;
+    (* Fallback for any hash not statically known (e.g. a runtime-produced atom
+       whose name never appears in source, or a cross-fragment REPL atom). *)
+    Buffer.add_string b
+      "@.atomname_unknown = private unnamed_addr constant [8 x i8] c\":<atom>\\00\"\n";
+    Buffer.add_string b "define ptr @march_atom_to_string(i64 %h) {\nentry:\n";
+    Buffer.add_string b "  switch i64 %h, label %atom_unknown [\n";
+    List.iteri (fun i (h, _) ->
+        Printf.bprintf b "    i64 %Ld, label %%atom_%d\n" h i
+      ) atoms;
+    Buffer.add_string b "  ]\n";
+    List.iteri (fun i (_, name) ->
+        let s = ":" ^ name in
+        Printf.bprintf b
+          "atom_%d:\n\
+          \  %%s%d = call ptr @march_string_lit(ptr @.atomname_%d, i64 %d)\n\
+          \  ret ptr %%s%d\n"
+          i i i (String.length s) i
+      ) atoms;
+    Buffer.add_string b
+      "atom_unknown:\n\
+      \  %su = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
+      \  ret ptr %su\n";
+    Buffer.add_string b "}\n"
+  end
+
 (* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
    Its single call site (emit_module, below) passes emit_expr as a labeled
    callback and qualifies the reference: see Llvm_tco.emit_mutual_tco_group. *)
@@ -913,6 +1000,10 @@ let emit_module ~emit_expr
             "\ndefine i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n  ret i32 0\n}\n")
      end);
 
+  (* Generate the @march_atom_to_string reverse table into extra_fns (no-op
+     unless a Show$Atom.show was emitted above).  Must precede the extra_fns
+     flush; ctx.atom_names is complete now (all fn bodies emitted). *)
+  emit_atom_show_table ctx;
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.Llvm_ctx.extra_fns;
 

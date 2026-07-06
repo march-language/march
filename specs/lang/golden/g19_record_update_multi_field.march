@@ -1,0 +1,11 @@
+mod Main do
+  fn sum3(r) do
+    r.a + r.b + r.c
+  end
+  fn main() do
+    let p = { a: 3, b: 4, c: 5 }
+    println(int_to_string(sum3(p)))
+    let q = { p with b: 40, c: 50 }
+    println(int_to_string(sum3(q)))
+  end
+end

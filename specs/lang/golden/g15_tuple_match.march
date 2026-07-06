@@ -1,0 +1,12 @@
+mod Main do
+  fn describe(p) do
+    match p do
+      (0, 0) -> "origin"
+      (x, y) -> int_to_string(x) ++ "," ++ int_to_string(y)
+    end
+  end
+  fn main() do
+    println(describe((0, 0)))
+    println(describe((3, 5)))
+  end
+end

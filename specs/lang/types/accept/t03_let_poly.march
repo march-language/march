@@ -1,0 +1,7 @@
+mod M do
+  fn main() do
+    let id = fn x -> x
+    println(int_to_string(id(5)))
+    println(id("hello"))
+  end
+end

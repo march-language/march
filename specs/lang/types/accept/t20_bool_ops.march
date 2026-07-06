@@ -1,0 +1,16 @@
+mod M do
+  fn describe(n : Int) do
+    let is_small = n > 0 && n < 10
+    let is_edge = n <= 0 || n >= 10
+    if is_small && not(is_edge) do
+      "small"
+    else
+      "other"
+    end
+  end
+
+  fn main() do
+    println(describe(5))
+    println(describe(50))
+  end
+end

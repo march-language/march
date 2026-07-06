@@ -1,0 +1,6 @@
+mod Main do
+  fn main() do
+    println(bool_to_string(3 == 3))
+    println(bool_to_string(3 == 4))
+  end
+end

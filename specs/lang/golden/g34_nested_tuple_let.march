@@ -1,0 +1,6 @@
+mod Main do
+  fn main() do
+    let ((a, b), (c, d)) = ((1, 2), (3, 4))
+    println(int_to_string(a + b + c + d))
+  end
+end

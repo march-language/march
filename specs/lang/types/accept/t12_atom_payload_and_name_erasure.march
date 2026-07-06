@@ -1,0 +1,32 @@
+mod M do
+  -- Two DIFFERENT-named nullary atoms returned from the two arms of one `if`:
+  -- this only typechecks because EAtom's inferred type is the bare, name-erased
+  -- `Atom` for EVERY tag — :red and :blue share the exact same type.
+  fn pick_color(prefer_red : Bool) : Atom do
+    if prefer_red do
+      :red
+    else
+      :blue
+    end
+  end
+
+  -- A payload-carrying atom: the payload expression is typechecked (so `1 + 1`
+  -- must itself be well-typed) but its type is discarded — the whole atom is
+  -- still just `Atom`, payload and all.
+  fn tagged(n : Int) : Atom do
+    :count(n + 1)
+  end
+
+  fn describe(a : Atom) : String do
+    match a do
+      :count(x) -> int_to_string(x)
+      _ -> "no payload"
+    end
+  end
+
+  fn main() do
+    println(describe(pick_color(true)))
+    println(describe(pick_color(false)))
+    println(describe(tagged(41)))
+  end
+end

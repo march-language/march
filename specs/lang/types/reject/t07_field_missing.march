@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: This record does not have a field called `z`.
+mod M do
+  fn main() do
+    let p = { x: 1, y: 2 }
+    println(int_to_string(p.z))
+  end
+end

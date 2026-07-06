@@ -1,0 +1,9 @@
+mod Main do
+  fn main() do
+    println(float_to_string(3.5))
+    println("hello, march")
+    let a = :ok
+    println(bool_to_string(a == :ok))
+    println(bool_to_string(a == :error))
+  end
+end

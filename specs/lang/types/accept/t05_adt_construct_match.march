@@ -1,0 +1,15 @@
+mod M do
+  type Hue = Rood | Bloo
+
+  fn name(c : Hue) : String do
+    match c do
+      Rood -> "red"
+      Bloo -> "blue"
+    end
+  end
+
+  fn main() do
+    println(name(Rood))
+    println(name(Bloo))
+  end
+end

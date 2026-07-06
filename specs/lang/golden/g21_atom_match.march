@@ -1,0 +1,10 @@
+mod Main do
+  fn main() do
+    let status = :ok
+    match status do
+      :ok -> println("matched ok")
+      :error -> println("matched error")
+      _ -> println("matched other")
+    end
+  end
+end

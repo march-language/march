@@ -18,7 +18,7 @@ let builtin_names : StringSet.t =
       "<"; ">"; "<="; ">="; "&&"; "||";
       "=="; "!="; "++";
       "print"; "println"; "print_stderr"; "print_int"; "print_float";
-      "int_to_string"; "float_to_string"; "bool_to_string";
+      "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
       "read_line"; "io_read_line"; "not";

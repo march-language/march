@@ -182,6 +182,20 @@ without anyone writing a targeted test.
 
 ## 5. Phasing
 
+> **STATUS: COMPLETE (2026-07-04).** All five phases landed on branch
+> `claude/hopeful-kapitsa-9f49f3` via `specs/plans/2026-07-04-differential-oracle-plan.md`
+> (8 tasks, subagent-driven, each independently reviewed):
+> Phase 1 `8bc7cbd7`+earlier (crash-as-failure, exit-3 ICE signal, loud skip
+> accounting); Phase 2a/2b/2c `f0f3ff0d`/`692dd751`/`6c247953` (container,
+> derived-method, and record-update/dual-position/FBIP/erased generators, each
+> wired through `oracle_check` via a dedicated `prop_oracle_*` property);
+> Phase 3 `685ca687` (opt-level matrix `--opt 0`/`--opt 2` + exit-code parity);
+> Phase 4 `3c1518fe` (full-corpus conformance sweep hardened — crashes/ICEs now
+> fail, `known_divergence` vs `nondeterministic_allowlist`); Phase 5 (this doc +
+> the `compiler-rc` skill's "conformance sweep is the eval.ml refactor gate"
+> note). Bugs the effort found/reproduced are listed in `specs/progress.md`'s
+> oracle-expansion completion entry.
+
 - **Phase 1 — close the oracle's own holes** (§4.1): compiler-crash-vs-skip
   distinction, skip accounting. Small, unblocks everything.
 - **Phase 2 — generator expansion** (§4.2): the highest-leverage bug-catching

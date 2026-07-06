@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: Both branches of an if expression must return the same type
+mod M do
+  fn main() do
+    let x = if true do 1 else "no" end
+    ()
+  end
+end

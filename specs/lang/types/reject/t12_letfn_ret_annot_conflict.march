@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+mod M do
+  fn describe(n : Int) do
+    fn go(k) : Int do
+      match k do
+        0 -> "done"
+        _ -> go(k - 1)
+      end
+    end
+    go(n)
+  end
+
+  fn main() do
+    println(int_to_string(describe(3)))
+  end
+end

@@ -210,6 +210,7 @@ let stdlib_file_list = [
   "presence.march";
   "env.march";
   "config.march";
+  "cli.march";
   "test.march";
   "tuple.march";
   "char.march";
@@ -872,7 +873,11 @@ let run_test_cmd args =
     end;
     (* Run doctests extracted from fn_doc fields *)
     let parse_expr src =
-      let lexbuf = Lexing.from_string src in
+      (* Wrap in `do ... end` so a doctest chaining a `let` line into a
+         following statement (see March_doctest.Doctest.extract) parses as
+         a block body; a single bare expression degenerates to itself. *)
+      let wrapped = "do\n" ^ src ^ "\nend" in
+      let lexbuf = Lexing.from_string wrapped in
       let expr =
         try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
         with

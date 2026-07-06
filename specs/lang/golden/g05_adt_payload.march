@@ -1,0 +1,13 @@
+mod Main do
+  type Opt = Non | Som(Int)
+  fn unwrap(o) do
+    match o do
+      Non -> 0
+      Som(v) -> v + 100
+    end
+  end
+  fn main() do
+    println(int_to_string(unwrap(Non)))
+    println(int_to_string(unwrap(Som(7))))
+  end
+end

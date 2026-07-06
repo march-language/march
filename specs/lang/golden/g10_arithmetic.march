@@ -1,0 +1,13 @@
+mod Main do
+  fn main() do
+    println(int_to_string(7 - 2))
+    println(int_to_string(6 * 7))
+    println(int_to_string(17 / 5))
+    println(int_to_string(17 % 5))
+    println(int_to_string((-7) / 2))
+    println(int_to_string((-7) % 2))
+    println(int_to_string(-(5)))
+    println(float_to_string(1.75 - 0.25))
+    println(float_to_string(2.5 * 3.0))
+  end
+end

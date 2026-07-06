@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: Match guards must be Bool.
+mod M do
+  fn classify(n : Int) : String do
+    match n do
+      n when n + 1 -> "huh"
+      _ -> "other"
+    end
+  end
+
+  fn main() do
+    println(classify(5))
+  end
+end
