@@ -184,6 +184,19 @@ void *march_tls_client_ctx(void *ca_file, void *alpn_list,
     /* Enable session tickets for TLS 1.3 resumption */
     SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 
+    /* Without this, a bare SSL_read() can return 0 (with SSL_get_error()
+     * reporting SSL_ERROR_ZERO_RETURN/SSL_ERROR_SYSCALL rather than a
+     * retry-me signal) after internally consuming a non-application-data
+     * record — e.g. a TLS 1.3 post-handshake NewSessionTicket, which most
+     * real-world servers send immediately after the handshake completes,
+     * before any application data. march_tls_read has no retry loop and
+     * treats that as end-of-stream, so a real HTTPS response byte never
+     * arrives (verified: a bare-socket exchange with the same server via
+     * `openssl s_client` gets the real response instantly). This never
+     * showed up against a plain local dev TLS server that skips session
+     * tickets; only against a real remote TLS 1.3 server. */
+    SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+
     return make_ok_int((int64_t)(uintptr_t)ctx);
 }
 
