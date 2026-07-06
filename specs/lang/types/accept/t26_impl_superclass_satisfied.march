@@ -1,0 +1,37 @@
+mod M do
+  -- Superclass/`requires` bounds: `interface Greet(a) requires Speak(a)`
+  -- means `impl Greet(T)` is only accepted once `impl Speak(T)` is already
+  -- in scope (typecheck.ml:7118-7143, the DImpl arm's superclass-discharge
+  -- step, same `impl_matches_ty` search used for `when` clauses). Here
+  -- `impl Speak(Dog)` is declared first, so `impl Greet(Dog)` typechecks and
+  -- (run) prints "Hello, Rex" — witnessing the SATISFIED case.
+  type Dog = Dog(String)
+
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  interface Greet(a) requires Speak(a) do
+    fn greet : a -> String
+  end
+
+  impl Speak(Dog) do
+    fn speak(d) do
+      match d do
+        Dog(name) -> name
+      end
+    end
+  end
+
+  impl Greet(Dog) do
+    fn greet(d) do
+      match d do
+        Dog(name) -> "Hello, " ++ name
+      end
+    end
+  end
+
+  fn main() do
+    println(greet(Dog("Rex")))
+  end
+end

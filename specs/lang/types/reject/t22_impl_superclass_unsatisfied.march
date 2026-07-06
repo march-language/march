@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: required superclass `Speak(Dog)` is not satisfied
+mod M do
+  -- Superclass/`requires` bounds ARE enforced: `impl Greet(Dog)` requires
+  -- `Speak(Dog)` (interface Greet(a) requires Speak(a)) but no
+  -- `impl Speak(Dog)` exists anywhere in scope, so the DImpl arm's
+  -- superclass-discharge step (typecheck.ml:7118-7143) rejects it — the same
+  -- `impl_matches_ty` search (T-ImplMatch) used to discharge `when` clauses,
+  -- just walked over `interface.iface_superclasses` instead.
+  type Dog = Dog(String)
+
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  interface Greet(a) requires Speak(a) do
+    fn greet : a -> String
+  end
+
+  impl Greet(Dog) do
+    fn greet(d) do
+      match d do
+        Dog(name) -> "Hello, " ++ name
+      end
+    end
+  end
+
+  fn main() do
+    println(greet(Dog("Rex")))
+  end
+end

@@ -45,17 +45,23 @@ typechecker regression.
 material above with user-defined **`interface`/`impl` DECLARATION checking**
 itself — what makes an `interface Iface(a) do ... end` or `impl Iface(T) do
 ... end` well-formed, as opposed to how a `Num`/`Eq`/`Ord`/`Show` constraint is
-*discharged* against the built-in seed table (§2.1a, unchanged). Superclass/
-`when`-clause discharge, the `impl_matches_ty` structural-match judgment named
-in its own right, and the coherence/overlap story are a separate, later task
-in the same widening effort — cross-referenced from §2.3, not detailed there.
+*discharged* against the built-in seed table (§2.1a, unchanged). §2.3 also
+covers superclass/`requires` and `when`-clause discharge (both MANDATORY
+enforcement, not conditional gaps) and names the `impl_matches_ty` structural
+match as its own rule, `(T-ImplMatch)` — the judgment both discharge paths
+share, and the reason generic/parameterized impls work at all. The
+coherence/overlap story (what happens when TWO impls both match the same
+target, per `(T-ImplMatch)`'s lack of specificity resolution) is a separate,
+later task in the same widening effort — cross-referenced from §2.3, not
+detailed there.
 
 **Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): coherence/
 overlap resolution between impls (no rejection of overlapping impls exists;
-§2.3 notes the registration shape that causes this but the interpreter/
-compiled-backend divergence itself is a separate task's subject), refinements
-(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6 for
-the full deferred-set breakdown and its roadmap citations.
+§2.3's `(T-ImplMatch)` rule notes the specificity-blind matching that causes
+this but the interpreter/compiled-backend divergence itself is a separate
+task's subject), refinements (z3-discharged), the capability lattice
+(`lib/caps/`), and effects — see §6 for the full deferred-set breakdown and
+its roadmap citations.
 
 ## 1. The typing judgment
 
@@ -1177,8 +1183,10 @@ environment, so it cannot simply call the pass-2 function.
 ```
 (T-Impl)  τ_impl = surface_ty(idef.impl_ty)  sharing tvars with `when` clause   typecheck.ml:7078–7079
           Γ₁ = Γ[impls := impls[iface ↦ τ_impl :: impls[iface]]]                typecheck.ml:7081–7084
-          -- (2) each `when C(T)` clause discharged against Γ₁.impls           typecheck.ml:7086–7103  (Task 2)
-          -- (3) each `requires Super(T)` superclass discharged against Γ₁.impls  typecheck.ml:7118–7143 (Task 2)
+          ∀ (cname, [cty]) ∈ idef.impl_constraints, cty concrete:
+            (T-ImplMatch)-search Γ₁.impls[cname] for a match against cty        typecheck.ml:7086–7103
+          ∀ (sc_name, [sc_ty]) ∈ interface.iface_superclasses, sc_ty concrete:
+            (T-ImplMatch)-search Γ₁.impls[sc_name] for a match against sc_ty    typecheck.ml:7118–7143
           idef.impl_iface ∈ dom(Γ.interfaces)  (or a "Json*"-prefixed pseudo-iface)  typecheck.ml:7105–7117
           ∀ iface_m ∈ interface.iface_methods:
             iface_m.md_name ∈ names(idef.impl_methods)  ∨  iface_m.md_default ≠ None  typecheck.ml:7144–7157
@@ -1194,11 +1202,14 @@ environment, so it cannot simply call the pass-2 function.
           Γ ⊢ DImpl(idef) ⇒ Γ₁
 ```
 
-Steps (2) superclass/`when` discharge are Task 2's subject (forward-referenced
-here, not detailed); this section covers steps (1) and (4)–(7): impl-head
-instantiation and registration, interface existence, missing-method, extra-
-method, and signature-match — plus the final `discharge_constraints` call
-every declaration arm makes (§2.1a).
+This section covers all seven checks: impl-head instantiation and
+registration, `when`-clause discharge, superclass/`requires` discharge,
+interface existence, missing-method, extra-method, and signature-match —
+plus the final `discharge_constraints` call every declaration arm makes
+(§2.1a). The `when`-clause and superclass checks share the identical
+discharge shape (both search `env.impls` via the `(T-ImplMatch)` judgment,
+named and detailed below) — they are documented together immediately after
+item 1.
 
 1. **Instantiate the impl head, then register — unconditionally, no dedup, no
    uniqueness check.** `env.impls : ty list StrMap.t` is keyed only by
@@ -1207,10 +1218,124 @@ every declaration arm makes (§2.1a).
    There is no "is this type already present" lookup anywhere in this step —
    `env.impls` is built to be *searched* (via `impl_matches_ty`, a structural,
    non-unifying, wildcard-tolerant shape match — its own named rule,
-   `(T-ImplMatch)`, is Task 2's subject) rather than *inserted into with a
+   `(T-ImplMatch)`, detailed just below) rather than *inserted into with a
    conflict check*. This is why two impls of the same interface for the same
    type both typecheck with no diagnostic at all (a genuine coherence gap;
-   Task 4 documents and files it as a divergence, not fixed here).
+   a later task documents and files it as a divergence, not fixed here).
+
+**`(T-ImplMatch)` — the impl-head-matching judgment (typecheck.ml:4964–4984).**
+Both the `when`-clause check and the superclass check above (and, at the use
+site, `CInterface` constraint discharge itself, §2.1a) all reduce to the same
+question: *"is there an impl in `env.impls` whose head type covers this
+target type?"* That question is answered by one function, worth naming as
+its own rule:
+
+```
+(T-ImplMatch)  repr(impl_ty) = TVar _                                          typecheck.ml:4970
+               ────────────────────────────────────
+               impl_matches_ty(impl_ty, target_ty) = true    -- wildcard: any target
+
+(T-ImplMatch)  repr(target_ty) = TVar _        (impl_ty not itself a TVar)      typecheck.ml:4971
+               ────────────────────────────────────
+               impl_matches_ty(impl_ty, target_ty) = false   -- target unresolved: no
+
+(T-ImplMatch)  repr(impl_ty) = TCon(n, as1)   repr(target_ty) = TCon(n, as2)
+               |as1| = |as2|   ∀i. impl_matches_ty(as1[i], as2[i])              typecheck.ml:4972–4974
+               ────────────────────────────────────
+               impl_matches_ty(impl_ty, target_ty) = true
+
+               -- (TArrow/TTuple/TRecord: analogous same-shape pairwise recursion,
+               --  typecheck.ml:4975–4981; TLin unwraps and ignores linearity,
+               --  :4982; TError is permissive on either side, :4983; otherwise
+               --  plain structural equality, :4984)
+```
+
+`impl_matches_ty : ty -> ty -> bool` is a **structural, non-unifying,
+wildcard-tolerant shape match** — it never returns a substitution or binds a
+type variable, only a boolean "does this impl head cover that target." This
+single judgment is the crux of two, otherwise-unrelated-looking facts about
+March's impl system:
+
+- **It is why generic/parameterized impls work at all.** An impl head with
+  its own free type variable — `impl Speak(a)` (a blanket impl over every
+  type, `accept/t19_eq_ord_constraint_discharged`-adjacent shape) or
+  `impl Describe(Box(a))` (a generic impl over a parameterized type,
+  `accept/t24_interface_impl_generic_head`, witnessed at both `Box(Int)` and
+  `Box(String)`) — matches because the `TVar _, _ -> true` case (typecheck.ml
+  :4970) treats the impl's own unresolved type parameter as a wildcard, not
+  as "must unify with." There is no separate "instantiate the impl head at
+  the target type" step; matching and instantiation are conflated into one
+  permissive boolean check.
+- **It is also why coherence does not exist.** `impl_matches_ty` only answers
+  "does impl I cover target T," never "which impl, of possibly several
+  covering candidates, is the most specific." Nothing about the judgment (or
+  its call sites) compares two matching impls against each other — `env.impls`
+  is walked with `List.exists`, which stops at the first structural match and
+  discards the rest, so **there is no specificity resolution**: a fully
+  generic `impl Iface(a)` and a fully concrete `impl Iface(Dog)` can both
+  match a `Dog` target simultaneously, and nothing in `(T-ImplMatch)` itself
+  (or the discharge sites that call it) picks the more specific one — which
+  one actually runs is decided entirely by registration order in the
+  interpreter/codegen backends respectively, not by matching logic. A later
+  task documents this overlap/coherence divergence in full (the two-backend
+  runtime disagreement over which of several matching impls is selected);
+  this section's job is only to name and pin the matching judgment itself,
+  since it is the single mechanism both stories flow from.
+- **Linearity qualifiers are ignored for matching purposes**
+  (`TLin (_, t1), TLin (_, t2) -> impl_matches_ty t1 t2`, typecheck.ml:4982):
+  an impl declared for `linear T` matches a search for plain `T` and vice
+  versa — the linearity annotation itself is stripped away before the
+  structural comparison, not treated as part of the type's identity.
+
+**Superclass/`requires` bounds ARE enforced — this is a mandatory rejection,
+not a conditional gap.** `interface Greet(a) requires Speak(a) do ... end`
+records `Speak` in `Greet`'s `iface_superclasses` (parsed at
+`lib/parser/parser.mly:769-786`); when `impl Greet(T)` is declared, the
+superclass-discharge step (typecheck.ml:7118–7143) instantiates each
+required superclass's type arguments against the SAME impl type
+(`sc_tvars = [(interface.iface_param, inst_ty)]`, :7120) and, for each
+resulting concrete type, requires `env.impls` to already contain a matching
+impl for that superclass via `(T-ImplMatch)` — the identical search shape as
+the `when`-clause check in step (1). If no matching impl is found, the impl
+is rejected:
+
+```
+Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied.
+Add `impl Speak(Dog) do ... end` before this implementation.
+```
+
+(live-captured, `reject/t22_impl_superclass_unsatisfied`, from an
+`interface Greet(a) requires Speak(a)` with an `impl Greet(Dog)` but no
+`impl Speak(Dog)` anywhere in scope). Declaring `impl Speak(Dog)` before
+`impl Greet(Dog)` satisfies the bound and the program typechecks
+(`accept/t26_impl_superclass_satisfied`, run-witnessed: prints
+`"Hello, Rex"`). The comment at typecheck.ml:7141 notes **multi-param
+superclasses "not yet supported"** — `sc_inst_tys` is matched against a
+single-element list pattern (`| [sc_inst_ty] -> ... | _ -> ()`, :7124,
+:7141), so a hypothetical superclass with more than one type argument would
+silently skip the check entirely; this mirrors the identical single-argument
+limitation described just below for `when`-clauses, and is not separately
+probed since March's interface grammar only supports one type parameter per
+interface in the first place (`parser.mly:769-786`), so a multi-argument
+superclass constraint cannot arise from any interface declaration the parser
+accepts today.
+
+**The `when`-clause check (typecheck.ml:7086–7103) is the identical
+mechanism, applied to an impl's own constraints rather than its interface's
+superclasses.** `impl Iface(T) when Other(T) do ... end` requires `Other(T)`
+already implemented, using the same `(T-ImplMatch)` search against
+`env.impls`; if the constrained type is a bare, still-unresolved `TVar`
+(a generic `when` clause, e.g. `impl Wrap(a) when Speak(a)`), the check is
+skipped — `TVar _ -> ()` at :7091 — deferring to the ordinary use-site
+`CInterface` discharge instead (§2.1a), since there is nothing concrete to
+search for yet. Unsatisfied `when` message (already pinned in the existing
+corpus, `reject/t10`-shaped): `` Constraint `C(T)` in `when` clause is not
+satisfied. No `impl C(T)` is in scope. `` Only single-argument constraints
+are handled here too — the `_ -> ()` fallthrough at :7102 is likely
+unreachable in practice rather than a live gap, since the grammar for
+`constraint_expr` (`parser.mly:823-826`) only ever produces a one-element
+type-argument list.
+
 2. **Interface existence** (typecheck.ml:7105–7117): `idef.impl_iface` must be
    a key of `env.interfaces`, UNLESS its name starts with `"Json"` — `derive`'s
    `JsonTo`/`JsonFrom` pseudo-interfaces are deliberately never registered in
@@ -1298,8 +1423,12 @@ not a value from the impl (which never defined `greeting` at all).
 - `accept/t24_interface_impl_generic_head` — `impl Describe(Box(a))`, a
   parameterized/generic impl head, used at both `Box(Int)` and `Box(String)`
   (witnesses `impl_matches_ty`'s wildcard treatment of the impl's own free
-  type variable, named as `(T-ImplMatch)` and detailed in Task 2).
+  type variable, named and detailed above as `(T-ImplMatch)`).
 - `accept/t25_interface_default_method` — the default-method witness above.
+- `accept/t26_impl_superclass_satisfied` — `interface Greet(a) requires
+  Speak(a)`, with `impl Speak(Dog)` declared before `impl Greet(Dog)`;
+  typechecks and (run) prints `"Hello, Rex"` — the superclass bound
+  SATISFIED.
 - `reject/t18_impl_missing_method` — a required, non-default method omitted.
 - `reject/t19_impl_extra_method` — an impl method the interface never
   declared.
@@ -1307,6 +1436,10 @@ not a value from the impl (which never defined `greeting` at all).
   body type disagrees with the interface's declared signature.
 - `reject/t21_impl_unknown_interface` — `impl` of an interface name that was
   never declared.
+- `reject/t22_impl_superclass_unsatisfied` — the same `Greet requires Speak`
+  interface shape, but `impl Greet(Dog)` with no `impl Speak(Dog)` anywhere
+  in scope — the superclass bound UNSATISFIED (mandatory rejection, not a
+  conditional gap).
 
 ## 3. Conformance corpus
 
@@ -1877,14 +2010,16 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   `Num`/`Eq`/`Ord`/`Show` CONSTRAINT is discharged against the seed table
   (`builtin_impls`, `builtin_interfaces`); §2.3 now covers the general
   `interface`/`impl` declaration-checking machinery itself — registration,
-  missing/extra-method rejection, signature-match, and default methods. NOT
-  yet covered by this document: superclass/`when`-clause discharge as its own
-  named rule, the `impl_matches_ty` structural-match judgment `(T-ImplMatch)`,
-  and coherence/overlap rules (no rejection of overlapping impls exists at
-  all) — these are later tasks in the same widening effort, landing in this
-  document and its operational companion `core-march.md` respectively.
-  Roadmap: an extension of Phase 2 (§4.3's "declarative typing rules...
-  extracted from `typecheck.ml`'s algorithm").
+  missing/extra-method rejection, signature-match, default methods,
+  superclass/`requires` and `when`-clause discharge (both mandatory
+  enforcement), and the `impl_matches_ty` structural-match judgment as its
+  own named rule, `(T-ImplMatch)`. NOT yet covered by this document:
+  coherence/overlap rules (no rejection of overlapping impls exists at all,
+  and `(T-ImplMatch)` performs no specificity resolution between two
+  simultaneously-matching impls) — this is a later task in the same widening
+  effort, landing in this document and its operational companion
+  `core-march.md` respectively. Roadmap: an extension of Phase 2 (§4.3's
+  "declarative typing rules... extracted from `typecheck.ml`'s algorithm").
 - **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
   2026-07-05 (commit `8cbd6dd2`): the `when`-clause now attaches the constraint
   to the value parameter's own type variable, so it survives generalization and

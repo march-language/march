@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t25 accept, t01–t21 reject)
+# Typing corpus index (t01–t26 accept, t01–t22 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -31,7 +31,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 46/46 — 25 accept, 21
+Exit 0 iff every program behaves as declared (currently 48/48 — 26 accept, 22
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -61,6 +61,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | — | Task 7 | no new programs — consolidation + this INDEX + CI wiring only |
 | `accept/t21`–`t22`, `reject/t16`–`t17` | Typechecker fixes (2026-07-05) | witnesses for findings 16 (`f0f5299c`, let-annotation enforcement), 15 (`8cbd6dd2`, generic `when`-constraint re-check), and 13 (`7e40dc5b`, ELetFn diagnostic dedup — pins `reject/t12` at one diagnostic, no new program) |
 | `accept/t23`–`t25`, `reject/t18`–`t21` | Widening slice 1, Task 1 (2026-07-06) | user-defined `interface`/`impl` DECLARATION checking (§2.3: `(T-Interface)` registration, `(T-Impl)`'s ordered checks — missing/extra-method, signature-match, unknown-interface — and default methods) |
+| `accept/t26`, `reject/t22` | Widening slice 1, Task 2 (2026-07-06) | superclass/`requires` and `when`-clause discharge (mandatory enforcement, §2.3), the `impl_matches_ty` structural-match judgment named as its own rule, `(T-ImplMatch)` |
 
 ## `accept/` — must typecheck
 
@@ -91,6 +92,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t23_interface_impl_basic` | (T-Interface), (T-Impl) — a minimal user-declared `interface Speak(a) do fn speak : a -> String end` + `impl Speak(Dog)` providing exactly `speak` | run-witnessed: prints `"Rex"` |
 | `t24_interface_impl_generic_head` | (T-Impl), `impl_matches_ty` wildcard semantics — a generic/parameterized impl head `impl Describe(Box(a))`, used at both `Box(Int)` and `Box(String)` | |
 | `t25_interface_default_method` | **(T-Impl) default methods** — an interface method with a default body, omitted by the impl; `inject_defaults` (desugar) splices the default in before typecheck ever sees the impl, so no missing-method error fires | run-witnessed: `greeting(Cat("Tom"))` prints `42` (the default, not a value the impl ever defined) |
+| `t26_impl_superclass_satisfied` | **(T-Impl) superclass discharge** — `interface Greet(a) requires Speak(a)`, with `impl Speak(Dog)` declared before `impl Greet(Dog)` | run-witnessed: prints `"Hello, Rex"` — the bound SATISFIED |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -117,8 +119,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t19_impl_extra_method` | (T-Impl) extra undeclared method — an impl provides a method the interface never listed | `` Interface `Speak` does not declare a method `bark`. `` |
 | `t20_impl_signature_mismatch` | (T-Impl) signature-match — a provided method's inferred body type disagrees with the interface's declared signature | `` `speak` in `impl Speak` must match the interface signature `` |
 | `t21_impl_unknown_interface` | (T-Impl) interface-existence — `impl` of an interface name never declared with `interface` | `` Unknown interface `NotDeclared` — is it declared above this impl? `` |
+| `t22_impl_superclass_unsatisfied` | **(T-Impl) superclass discharge, unsatisfied** — `interface Greet(a) requires Speak(a)`, `impl Greet(Dog)` declared with no `impl Speak(Dog)` anywhere in scope — mandatory rejection, not a conditional gap | `` Cannot implement `Greet(Dog)`: required superclass `Speak(Dog)` is not satisfied. `` |
 
-**Result: 46 / 46 (25 accept, 21 reject).**
+**Result: 48 / 48 (26 accept, 22 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
@@ -166,6 +169,15 @@ from the repo root) or as part of the CI workflow's dedicated step.
   encoded in this harness at all (a `--check` program cannot witness an
   interp-vs-compiled split). Documented and filed as its own task's subject
   (`core-march.md`'s dispatch/coherence section, `specs/todos.md`).
+- **No `reject/` program for a multi-argument superclass or `when` constraint.**
+  Both the superclass-discharge and `when`-clause-discharge steps (§2.3,
+  typecheck.ml:7086–7103, 7118–7143) only handle a single-argument constrained
+  type (`| [ty] -> ... | _ -> ()`); a hypothetical multi-argument constraint
+  would silently skip the check. Not committed as a corpus program because
+  March's interface grammar only supports one type parameter per interface
+  (`parser.mly:769-786`), so no `interface`/`impl`/`requires`/`when` surface
+  syntax the parser accepts can actually produce a multi-argument constraint
+  today — the branch is very likely dead code, not a live, reachable gap.
 
 ## Why not `@oracle`? (the harness-model difference from the golden corpus)
 
