@@ -4421,6 +4421,14 @@ and infer_block env exprs =
         Hashtbl.replace env.type_map p.param_name.span (repr pty)
       ) params param_tys;
     let body_ty = infer_block env_inner [body] in
+    (* Track whether the return-annotation unify (below) already reported a
+       mismatch, so the later self-type/arrow-type reconciliation does not
+       rediscover and DOUBLE-REPORT the identical conflict once it flows
+       through the self-reference `fn_ty` (finding 13).  We compare the
+       diagnostic count before/after rather than a boolean, so a genuinely
+       distinct error from the self-reference (which grows the count on the
+       arrow unify but NOT here) is still surfaced. *)
+    let errs_before_ret = List.length env.errors.March_errors.Errors.diagnostics in
     let ret_ty  = match ret_ann with
       | None -> body_ty
       | Some ann ->
@@ -4429,8 +4437,18 @@ and infer_block env exprs =
         unify env ~span:sp ~reason:None body_ty expected;
         expected
     in
+    let ret_annot_reported =
+      List.length env.errors.March_errors.Errors.diagnostics > errs_before_ret
+    in
     let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
-    unify env ~span:sp ~reason:None fn_ty arrow_ty;
+    if ret_annot_reported then
+      (* The return-annotation unify already reported this mismatch; run the
+         arrow reconciliation for its type-linking side effects only, routing
+         any (duplicate) report to a scratch context that we discard. *)
+      unify { env with errors = March_errors.Errors.create () }
+        ~span:sp ~reason:None fn_ty arrow_ty
+    else
+      unify env ~span:sp ~reason:None fn_ty arrow_ty;
     let gen_ty = generalize (env.level - 1) arrow_ty in
     let env' = bind_var name.txt gen_ty env in
     infer_block env' rest

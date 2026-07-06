@@ -1474,6 +1474,54 @@ let test_let_annot_poly_instance_accepts () =
   end|} in
   Alcotest.(check bool) "let : (Int)->Int = fn n -> n accepted" false (has_errors ctx)
 
+(* ── Finding 13: ELetFn return-annotation mismatch reported ONCE ────────── *)
+
+(* A local recursive fn whose return annotation conflicts with its
+   self-consistent body must report the mismatch exactly ONCE, not twice (the
+   direct return-annotation unify and the self-type/arrow reconciliation both
+   used to rediscover the same conflict through the self-reference). *)
+let test_letfn_ret_annot_mismatch_single_diagnostic () =
+  let ctx = typecheck {|mod M do
+    fn describe(n : Int) do
+      fn go(k) : Int do
+        match k do
+          0 -> "done"
+          _ -> go(k - 1)
+        end
+      end
+      go(n)
+    end
+    fn main() do
+      println(int_to_string(describe(3)))
+    end
+  end|} in
+  Alcotest.(check bool) "ELetFn ret-annot conflict rejected" true (has_errors ctx);
+  Alcotest.(check int) "reported exactly once"
+    1 (count_errors_matching ctx "expected `Int` but got `String`.")
+
+(* Safety: two genuinely-distinct type errors must both still be reported —
+   the dedup must not swallow the second, unrelated error. *)
+let test_letfn_two_distinct_errors_both_report () =
+  let ctx = typecheck {|mod M do
+    fn describe(n : Int) do
+      fn go(k) : Int do
+        match k do
+          0 -> "done"
+          _ -> go(k - 1)
+        end
+      end
+      let bad : Bool = 42
+      go(n)
+    end
+    fn main() do
+      println(int_to_string(describe(3)))
+    end
+  end|} in
+  Alcotest.(check int) "ELetFn conflict reported once"
+    1 (count_errors_matching ctx "expected `Int` but got `String`.");
+  Alcotest.(check int) "distinct Bool/Int error still reported"
+    1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5912,6 +5960,10 @@ let compiler_suites =
           Alcotest.test_case "finding 16: let : Int = String rejected"       `Quick test_let_annot_mismatch_rejects;
           Alcotest.test_case "finding 16: let : Int = 5 accepted"            `Quick test_let_annot_correct_accepts;
           Alcotest.test_case "finding 16: let : (Int)->Int = fn n->n accept" `Quick test_let_annot_poly_instance_accepts;
+        ] );
+      ( "letfn_ret_annot", [
+          Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
+          Alcotest.test_case "finding 13: two distinct errors both report"   `Quick test_letfn_two_distinct_errors_both_report;
         ] );
       ( "return_refine_guard", [
           Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;
