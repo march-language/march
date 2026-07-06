@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t31 accept, t01–t25 reject)
+# Typing corpus index (t01–t33 accept, t01–t25 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -21,6 +21,14 @@ interpreted, not only `--check`ing them.
 also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls
 dispatch through the identical rules as hand-written ones), same
 dual-purpose pattern as `t27`–`t28` above.
+
+**Note (`t32`–`t33`):** these anchor **operational** (module declaration,
+nesting, and name-resolution) rules in `core-march.md` §4.7, widening slice 2
+Task 2 — not typing rules in `core-march-types.md` (module VISIBILITY, the
+`core-march-types.md` counterpart, is Task 3's subject and rides `reject/t25`
++ `accept/t31` instead, from Task 1). Same dual-purpose pattern as `t27`–`t28`:
+ordinary well-typed programs for the `--check` half, with their expected
+printed VALUE re-verified by running them interpreted.
 
 ## The `--check` accept/reject harness model
 
@@ -46,7 +54,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 56/56 — 31 accept, 25
+Exit 0 iff every program behaves as declared (currently 58/58 — 33 accept, 25
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -81,6 +89,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | — | Widening slice 1, Task 4 (2026-07-06) | no new programs — coherence/overlap is a runtime interp-vs-compiled DIVERGENCE (`core-march.md` §4.4.3), which a single-`--check`-invocation harness cannot witness; documented in prose + filed in `specs/todos.md` instead |
 | `accept/t29`–`t30`, `reject/t23`–`t24` | Widening slice 1, Task 5 (2026-07-06) | `derive`/`satisfy` as `DImpl` GENERATORS (§2.4): the closed five-interface `derive` set + `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case, `satisfy`'s name-matching all-or-nothing wiring, and the filed `derive X for UnknownType` silent-no-op gap (§4.1 finding 17) |
 | `accept/t31`, `reject/t25` | Widening slice 2, Task 1 (2026-07-06) | cross-module **visibility fix** — `load_module_into_env`'s `ex_public` gate for `ExFn`/`ExValue` (a private `pfn`/value is no longer callable cross-module: `reject/t25` pins `is private to module \`Array\``); the ACCEPT side proves the gate is narrow — a PUBLIC cross-module call still resolves and the OPAQUE-TYPE pattern (a private `ptype`'s bare name usable in a cross-module annotation, `ExType`/`ExRecord` left ungated) still holds (`accept/t31`) |
+| `accept/t32`–`t33` | Widening slice 2, Task 2 (2026-07-06) | module declaration/nesting/name-resolution OPERATIONAL rules (`core-march.md` §4.7, not `core-march-types.md`): the `DMod` export mechanism (`own_names`, `"Name.member"` re-prefixing into the enclosing scope and the global `module_registry`), the bare-fails/qualified-works asymmetry, and the lexical-scoping nuance (a `pfn` nested inside `A` callable bare from a module nested inside `A`) |
 
 ## `accept/` — must typecheck
 
@@ -117,6 +126,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t29_derive_eq_show` | **(§2.4) `derive` as a `DImpl` generator** — `derive Eq, Show for Color` expands (desugar-time) into ordinary `impl Eq(Color)`/`impl Show(Color)` blocks, indistinguishable from hand-written ones; also a run-value witness for `core-march.md` §4.4.4 (derive-generated impls dispatch through the SAME `impl_tbl` rule as §4.4.2) | run-witnessed: prints `Red` / `true` / `false` |
 | `t30_satisfy_wiring` | **(§2.4) `satisfy` as a `DImpl` generator** — `satisfy Named for Person` wires an EXISTING top-level `fn name` to `interface Named(a)`'s one method purely by name match, no `impl` block written | run-witnessed: prints `"Ada"` |
 | `t31_cross_module_public_and_opaque_ptype` | **module visibility — the ACCEPT side (slice 2, Task 1)** — a PUBLIC cross-module call (`Array.length(Array.empty())`) still resolves, AND a private `ptype`'s bare type NAME (`ConsistentHash.HashRing(String)`) is still usable as a cross-module param annotation (the opaque-type pattern; `ExType`/`ExRecord` left ungated). Witnesses the narrowness of the `ExFn`/`ExValue` gate that `reject/t25` exercises | run-witnessed: exit 0, `length(empty()) == 0` |
+| `t32_qualified_cross_module_call` | **module operational rules (`core-march.md` §4.7, E-DMod) — qualified cross-module resolution** — `A.double(21)`, a nested module's declared `fn` reached by full qualification from its sibling `Main`; witnesses the `own_names` export step (`eval.ml:8228–8271`) that re-prefixes `A`'s own names to `"A.member"` in the enclosing scope | run-witnessed: prints `42` |
+| `t33_nested_module_lexical_resolution` | **module operational rules (§4.7) — the lexical-scoping nuance** — `secret`, a `pfn` (private) declared inside `A`, is called BARE (unqualified) from `Inner`, a module nested directly inside `A`; privacy only gates cross-module qualified access (a typecheck-time concern), not lexical access from a directly-nested module | run-witnessed: prints `42` |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -148,7 +159,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t24_satisfy_missing_function` | (§2.4) `satisfy` all-or-nothing — `satisfy Named for Person` where no top-level `fn name` exists anywhere in the module | `` satisfy Named for Person: no function `name` found in scope. `` |
 | `t25_cross_module_private_fn` | **module visibility — the REJECT side (slice 2, Task 1)** — `Array.lst_rev(...)`, a real private `pfn` (stdlib/array.march:39), is no longer callable by qualification from unrelated code; `load_module_into_env`'s new `ex_public` gate for `ExFn`/`ExValue` makes the qualified lookup miss, so `qualified_error_msg` reports the private-access message (the same shape the `ExCtor` gate already produced for private constructors) | `` is private to module `Array` `` |
 
-**Result: 56 / 56 (31 accept, 25 reject).**
+**Result: 58 / 58 (33 accept, 25 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

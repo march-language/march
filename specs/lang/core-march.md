@@ -55,6 +55,20 @@ resolves the same overlap differently) is documented in full in §4.4.3, with
 in this same widening slice, cross-referenced from §4.4.2 rather than
 repeated there.
 
+**Widening slice (2026-07-06, modules):** §4.7 adds **module declaration,
+nesting, and name resolution** — how `mod Name do … end` evaluates and
+exports its declared names as `"Name.member"` into the enclosing scope, why a
+bare (unqualified) reference never resolves into a sibling nested module
+while a qualified one does, the lexical-scoping nuance that makes a private
+`pfn` callable bare from a module nested directly inside its declaring
+module, and the grammar-level one-mod-per-file rule. Cross-module VISIBILITY
+enforcement (`pfn`/`ptype` privacy) is a TYPECHECK-time concept
+(`core-march-types.md`'s corresponding Task 3 section) — §4.7 states
+precisely that the evaluator's own export gate (`own_names`, declared-by-
+this-module) is not the same, narrower gate typecheck applies (`pub_set`,
+declared-PUBLIC-by-this-module), so privacy is enforced before eval ever
+runs, not by eval itself.
+
 **It is not** the whole language semantics. The CORE covers the pure,
 value-level reduction fragment; everything outside it — strings as first-class
 data (beyond their appearance in the value grammar), `to_string`/`show` and the
@@ -344,7 +358,7 @@ the core by §4.**
 The interpreter is a **big-step** evaluator: `eval_expr : env -> expr -> value`
 (`eval.ml:6943`). We present the semantics in the same big-step, environment
 form — one rule per `eval_expr` arm — because that makes the "spec matches the
-implementation" cross-check exact (rule ⇄ arm). §4.5 states the small-step
+implementation" cross-check exact (rule ⇄ arm). §4.8 states the small-step
 reduction form the eventual metatheory (`specs/lean4-metatheory-plan.md`) will
 use and its relationship to this one.
 
@@ -1573,7 +1587,189 @@ JSON payload's own embedded type-tag structurally, and the bare `env`
 binding exists as a secondary, lexically-scoped path for direct
 `from_json(v)` calls that already know their target type from context.
 
-### 4.5 Relationship to the small-step form (the metatheory target)
+### 4.7 Module declaration, nesting, and name resolution
+
+This subsection specifies **`DMod`** (`mod Name do … end`) — declaration,
+nesting, how a module contributes names to its enclosing scope, and how bare
+vs. qualified references resolve at runtime. `core-march-types.md`'s Task 3
+section documents the corresponding TYPING side (`pub_set`-filtered export,
+the `ex_public` visibility gate, the no-per-module-type-namespace design
+point) — **visibility (`pfn`/`ptype` privacy) is a TYPECHECK-time concept**;
+this subsection describes what the EVALUATOR itself does, which — as the note
+at the end of this subsection makes precise — exports unconditionally by
+*declaration*, not by *publicity*.
+
+**(E-DMod)**
+
+```
+(E-DMod)    ρ ⊢ eval_mod_decls(decls, ρ ⊳ stubs) ⇓ ρ_mod                    eval.ml:8168–8226
+            own = declared_names(decls)                                    eval.ml:8231–8248
+            ρ' = { (Name.k, v) | (k, v) ∈ ρ_mod, k ∈-prefix own }          eval.ml:8250–8271
+            ─────────────────────────────────────────────────────────────
+            ρ ⊢ DMod(Name, _, decls) ⇓ ρ' @ ρ
+```
+
+Concretely, from `lib/eval/eval.ml:8168–8276` (the `DMod` arm of `eval_decl`):
+
+1. **Entry — `module_stack`.** `module_stack := name.txt :: !module_stack`
+   (`eval.ml:8170`) pushes the module's name; it is popped
+   (`module_stack := List.tl !module_stack`, `eval.ml:8227`) once the module's
+   own declarations have all been evaluated. This stack is what
+   `current_doc_prefix ()` (`eval.ml:342–345`) reads to qualify doc-comment
+   keys, and — read again at `eval.ml:314`/`339` — is the same stack `EField`'s
+   qualified-lookup path (§4.2's prose note, "`EField` also doubles as
+   qualified module-member access") consults when flattening a dotted
+   reference; nesting is therefore represented at eval time as an ordinary
+   stack push/pop around a normal (non-tail-recursive) recursive descent —
+   **nesting depth is unlimited** (no depth check anywhere in the arm),
+   matching the survey's live probe (`mod Main do mod A do mod Inner do … end
+   end end` evaluates and typechecks with no special-casing).
+2. **Two-pass body evaluation** (`eval.ml:8171–8226`, `eval_mod_decls`). Same
+   shape as top-level `DFn` mutual recursion: a first pass installs a
+   `<stub:name>` closure (`eval.ml:8175–8176`) for every `DFn` in the module's
+   OWN decl list, so a forward reference from one sibling fn to another
+   (declared later in the same `mod` body, or mutually recursive with it)
+   resolves; the second pass (`eval_mod_decls`, `eval.ml:8181–8224`) folds
+   over `decls` in order, replacing each stub with its real `VClosure`/
+   `VMultiarity` binding (multi-arity clause grouping mirrors the top-level
+   `DFn` overloading rule, `eval.ml:8208–8216`) and threading the accumulating
+   env through `inner_ref` so a nested `DMod` inside this one sees all of its
+   elder siblings' bindings, exactly like ordinary top-level sequencing.
+3. **Export — the `own_names` gate** (`eval.ml:8228–8271`). After the body
+   finishes, `declared_names` (`eval.ml:8231–8248`) walks the module's OWN
+   `decls` list ONLY (not `mod_env`, which also contains everything inherited
+   from the outer scope) and collects every name **this module itself
+   declares**: `DFn` names, `DLet` pattern-bound variables (including nested
+   tuple/ctor patterns, `eval.ml:8235–8241`), nested `DMod` names, and
+   `DExtern` fn names (`eval.ml:8243–8245`). `is_own_key`
+   (`eval.ml:8250–8256`) then filters `mod_env`'s bindings to just those keys
+   equal to, or dot-prefixed by, an `own_names` entry (so `"B.f"` is kept when
+   `B` is itself a declared sub-module, letting a nested module's own
+   qualified exports flow through transitively) — every kept `(k, v)` pair is
+   re-prefixed to `"Name." ^ k"` (`eval.ml:8257–8261`) and, after
+   deduplicating so a module's own binding wins over a same-named binding
+   that merely leaked in from the outer scope via `inner_ref`
+   (`eval.ml:8262–8271`, comment explains the `"MyNet.connect"` motivating
+   case), the resulting `"Name.member"` bindings are (a) prepended onto the
+   returned environment (`prefixed @ env`, `eval.ml:8276` — so unqualified
+   code in THIS scope can still see them qualified) and (b) also written into
+   the global `module_registry` hashtable (`eval.ml:8272–8275`) — the
+   single cross-module lookup table `EField`'s qualified-access fallback
+   reads from (§4.2's prose note; `eval.ml:313–320`'s doc comment: "a closure
+   captured in Router can call UsersController.index even if
+   UsersController hadn't been evaluated yet when Router was defined, because
+   the lookup happens at call time against this registry"). **This is the
+   mechanism by which a module "exports its declared names as `Mod.name`
+   into the outer scope."**
+4. **`own_names`, not `pub_set` — the visibility caveat, stated precisely.**
+   The gate at step 3 is keyed on **`own_names`: names this module
+   DECLARED**, independent of whether a declaration used `fn`/`pfn` or
+   `type`/`ptype`. Typecheck's corresponding `DMod` export step
+   (`typecheck.ml`, documented in `core-march-types.md`'s Task 3 section)
+   additionally filters by **`pub_set`: names this module marked PUBLIC** —
+   a strictly narrower set for any module with at least one private member.
+   **The evaluator therefore exports every name a module declares, public or
+   private, into `module_registry` and the returned env** — nothing in
+   `eval.ml`'s `DMod` arm itself checks `Ast.Public`/`Ast.Private`. This is
+   not a bug in the interpreter: cross-module privacy enforcement is a
+   TYPECHECK-time gate (`load_module_into_env`'s `ex_public` check,
+   `typecheck.ml:657–692`, extended to `ExFn`/`ExValue` by the visibility fix
+   landed earlier in this widening slice, commit `c0570d16`) that runs BEFORE
+   `eval.ml` ever sees the program — every construct this reference's golden
+   corpus and the `specs/lang/types/` corpus exercise passes through
+   `--check` first, so a private cross-module reference is already rejected
+   before eval-time export semantics come into play. `eval.ml`'s "export
+   everything declared" behavior is an **available-if-typecheck-is-skipped**
+   fact worth stating precisely rather than leaving implicit, since a
+   hypothetical future eval-only entry point (bypassing typecheck) would not,
+   on its own, re-enforce privacy — the same caveat the survey raises in its
+   §1 closing note.
+
+**Bare vs. qualified resolution.** A bare, unqualified reference (`f()`) is
+ordinary `lookup_var`/`env.vars` lookup — it is **never** auto-satisfied by a
+sibling nested module's export, public or not, because a sibling module's
+names only ever enter the enclosing scope under the `"Name.member"` qualified
+key (step 3 above), never under the bare `member` key. Confirmed live:
+
+```march
+mod Main do
+  mod A do
+    fn f() : Int do 1 end
+  end
+  fn main() : Int do f() end          -- bare — A never bare-exports "f"
+end
+```
+rejects — `` I cannot find `f`. Did you mean `%`? `` (exit 1) — while changing
+the call site to the qualified form `A.f()` typechecks (exit 0) and, run
+interpreted, evaluates to `1` (see `accept/t32`, below, for the pinned
+corpus witness). This is exactly what the export rule above predicts: `A`'s
+`own_names` include `f`, so `mod_env`'s `"f"` binding is re-exported as
+`"A.f"` — never as bare `"f"` — into `Main`'s scope.
+
+**The lexical-scoping nuance: a `pfn` nested lexically inside `A` IS callable
+bare from a module nested inside `A`.** This is not an exception to the rule
+above — it falls out of ordinary lexical `env` threading (step 2): a nested
+`DMod Inner` inside `A` is evaluated by `eval_mod_decls` with `A`'s own
+`inner_ref` env already in scope (the same fold that threads elder siblings'
+bindings to younger ones, per step 2), so `Inner`'s body sees `A`'s `secret`
+binding as an ordinary, unqualified lexical variable — exactly as it would see
+any other outer-scope `let`-bound name. Confirmed live:
+
+```march
+mod Main do
+  mod A do
+    pfn secret() : Int do 42 end
+    mod Inner do
+      fn call_secret() : Int do secret() end     -- bare call, lexically inside A
+    end
+  end
+  fn main() do println(int_to_string(A.Inner.call_secret())) end
+end
+```
+typechecks (exit 0) and, run interpreted, prints `42` — pinned as
+`accept/t33`, below. `secret` being declared `pfn` (private) is irrelevant to
+THIS resolution path: privacy (per the typing reference) only gates
+CROSS-module qualified access, not same-module (including nested-submodule)
+LEXICAL access — `Inner` is textually inside `A`, so it is not "another
+module" from the visibility rule's point of view any more than a `let` bound
+in an outer block is invisible to an inner block.
+
+**One-mod-per-file.** Confirmed live (re-grepped `lib/parser/parser.mly:240–245`
+— this is a GRAMMAR-level rejection, a dedicated Menhir production with an
+`error` token right after a complete `MOD … END`, not a later semantic pass
+over an already-parsed file):
+```march
+mod A do
+  fn f() : Int do 1 end
+end
+
+mod Main do
+  fn main() : Int do A.f() end
+end
+```
+rejects with the exact message
+`` A file may have only one top-level `mod`; everything else must live inside it. ``
+(exit 1) — every declaration besides the file's single top-level `mod` must
+live INSIDE it (nesting, per this subsection, is unlimited). This is the
+file-wrapper rule the grammar reference documents at
+`specs/lang/surface-syntax.md`'s "Module" section ("Every file must start with
+a module declaration"); this subsection adds the precise rejection mechanism
+and message for the two-top-level-`mod` case, which the grammar reference
+does not itself spell out.
+
+**Value-witness corpus** (`specs/lang/types/accept/`, run interpreted to
+confirm the printed value, not just `--check`ed — see `t27`–`t30` for the
+precedent of this reference's corpus doubling as an operational witness):
+
+- **`accept/t32_qualified_cross_module_call`** — `A.double(21)` from `Main`,
+  a plain qualified cross-module call to a public fn in a sibling nested
+  module; prints `42`. Witnesses the export mechanism (step 3) and the
+  qualified-resolves/bare-fails asymmetry above.
+- **`accept/t33_nested_module_lexical_resolution`** — `A.Inner.call_secret()`
+  calls a `pfn` bare, from a module nested directly inside its declaring
+  module; prints `42`. Witnesses the lexical-scoping nuance above.
+
+### 4.8 Relationship to the small-step form (the metatheory target)
 
 `specs/lean4-metatheory-plan.md` will state the semantics as a **small-step**
 relation `e → e'` (for progress + preservation). The standard call-by-value,
@@ -1587,10 +1783,11 @@ apparatus (contexts + the substitution-vs-environment reconciliation) is
 metatheory work (the Lean track), not part of this reference — but note it is a
 *refinement* of §4.2, not a different semantics.
 
-### 4.6 Faithfulness (the honest caveat)
+### 4.9 Faithfulness (the honest caveat)
 
-The §4.2–4.4 rules were transcribed arm-for-arm from `eval.ml` at the cited
-lines. That transcription is **human-reviewed, not mechanically verified** —
+The §4.2–4.4 rules (and §4.7's `(E-DMod)`) were transcribed arm-for-arm from
+`eval.ml` at the cited lines. That transcription is **human-reviewed, not
+mechanically verified** —
 this is the roadmap's §7 faithfulness risk made concrete, and it remains true
 now that the core is complete: the rules are only as faithful as the review of
 each citation. What *is* mechanically checked is weaker but real: the golden

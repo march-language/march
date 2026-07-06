@@ -1,0 +1,22 @@
+mod Main do
+  -- Operational witness (core-march.md §4.7): the lexical-scoping nuance.
+  -- `secret` is a PRIVATE (`pfn`) function declared inside `A`. Privacy only
+  -- gates CROSS-module qualified access (a typecheck-time concern, see
+  -- core-march-types.md's module-visibility section and reject/t25's
+  -- `Array.lst_rev` case) -- it does not gate ordinary LEXICAL access from a
+  -- module nested directly inside the declaring module. `Inner` is evaluated
+  -- with `A`'s own env already in scope (eval.ml's `inner_ref` threading), so
+  -- `Inner.call_secret` sees `secret` as an ordinary bare name, exactly as it
+  -- would see any other outer-scope binding.
+  mod A do
+    pfn secret() : Int do 42 end
+
+    mod Inner do
+      fn call_secret() : Int do secret() end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(A.Inner.call_secret()))
+  end
+end
