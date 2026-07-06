@@ -1,0 +1,17 @@
+-- Regression fixture: a sibling module (`OqToken`), auto-discovered via
+-- MARCH_LIB_PATH, declares an `opaque` variant type.  The ENTRY module
+-- references it under its TYPE-QUALIFIED name (`OqToken.Token`) in a parameter
+-- annotation.  `surface_ty` used to resolve the qualified reference to a
+-- distinct nominal `TCon("OqToken.Token")` that would not unify with the BARE
+-- `TCon("Token")` that this module's own constructor (`make`) and accessor
+-- (`value`) produce, so a value crossing the module boundary failed with
+-- "expected `OqToken.Token` but got `Token`" (and the reverse).  This is the
+-- variant/opaque analogue of the `Cfg.Site` record leak in the whole_program
+-- rule.
+mod OqToken do
+  opaque type Token = Token(String)
+  fn make(raw : String) : Token do Token(raw) end
+  fn value(t : Token) : String do
+    match t do Token(s) -> s end
+  end
+end

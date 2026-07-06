@@ -282,6 +282,45 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, module-qualified opaque/variant type paths unify with bare)
+
+Found while verifying the opaque-types doc example live: a value produced inside a
+module (bare type `Token`) failed to typecheck against the same type referenced
+from outside under its qualified name (`Token.Token`), with the baffling
+`expected `Token.Token` but got `Token``. Reproduced identically with same-file
+nested `mod Token do … end` and with separate-file `MARCH_LIB_PATH` compilation,
+and in BOTH unification directions (bare value → qualified param, and
+qualified value → bare param).
+
+- **Root cause (`lib/typecheck/typecheck.ml`, `surface_ty`):** March has a single
+  global type namespace where a type's *bare* name is its canonical identity — the
+  value side always uses it (constructor `ci_type = name.txt`; the "ci_type is the
+  BARE type name" note in Pass 1b even canonicalizes disambiguated ctors). But
+  `surface_ty` resolved a qualified annotation `Mod.Type` to a distinct nominal
+  `TCon("Mod.Type")` (name kept verbatim), which never unified with the bare
+  `TCon("Type")` the value carried.
+- **Fix:** after arity resolution, canonicalize the constructor name to its bare
+  suffix — the component after the last `.` — whenever that suffix denotes a type
+  of the same arity in scope. Non-dotted names are a strict no-op
+  (`canon_name = name.txt`), so only genuinely-qualified annotations are affected;
+  the arity guard keeps distinct types apart, genuine mismatches (`Int` vs `Token`,
+  wrong arity) still error, and using rindex also canonicalizes nested refs
+  (`A.B.Type`).
+- **Coverage:** 2 new `test/test_compiler.ml` typecheck tests (same-file nested,
+  both directions — typecheck-clean + eval to `"hi"`) and a new `MARCH_LIB_PATH`
+  dune rule (`test/imports/opaque_qual/`, RED→GREEN). Verified end-to-end in
+  compiled mode too. `docs/modules.md`'s opaque-type example — which additionally
+  used a top-level `fn` outside its module (a *separate* one-mod-per-file parse
+  error) — was rewritten to a compilable sibling-module form.
+- **Not fixed (pre-existing, separate code path):** the analogous qualified
+  *record* case (`test/whole_program` `Cfg.Site` rule) still fails identically on
+  base and after this change — cross-module record param resolution, out of scope
+  here.
+
+**Test counts:** 402 compiler (+2) / 230 eval / 389 codegen / 804 stdlib /
+53 stdlib_march / 29 snapshots — all alcotest runners green under `dune runtest`.
+Pre-existing Slow/environmental and `whole_program/cfg` failures unchanged.
+
 ## Current State (as of 2026-07-06, `derive` on a variant colliding with a stdlib record type fixed)
 
 A user variant type (e.g. `type Color = Red | Green | Blue`) whose name collides with a stdlib RECORD type (`Plot.Color = { r, g, b }`, always auto-loaded) failed to typecheck its derived impls — `derive Eq, Show for Color` compiled to "`Color` does not implement interface `Eq`", while renaming the type to `Status` fixed it. Records register in `env.records` under their BARE name globally, so `surface_ty` (and `register_impl_shape`) structurally expanded the variant's `impl Eq(Color)` into the record's `TRecord{r,g,b}` shape, which then never matched the variant's `TCon("Color")` dispatch target.

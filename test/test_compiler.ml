@@ -2707,6 +2707,61 @@ let test_qualified_show_call () =
   end|} in
   Alcotest.(check bool) "Show.show(x) resolves: no errors" false (has_errors ctx)
 
+(* Regression: a module-qualified type reference (`Token.Token`) from OUTSIDE a
+   module must be the SAME nominal type as the bare `Token` the module's own
+   constructor/accessor produce.  `surface_ty` used to resolve the qualified
+   reference to a distinct `TCon("Token.Token")` that would not unify with the
+   bare `TCon("Token")`, so a value crossing the module boundary failed with
+   "expected `Token.Token` but got `Token`".  This is the variant/opaque-type
+   analogue of the `Cfg.Site` record leak (see test/dune whole_program rule).
+   Exercises BOTH directions: a bare-typed value flowing into a qualified-typed
+   parameter (`use_it(Token.make ...)`), and a qualified-typed value flowing
+   into a bare-typed parameter (`Token.value(t)`). *)
+let test_qualified_opaque_type_unifies_bare () =
+  let ctx = typecheck {|mod TokenDemo do
+    mod Token do
+      opaque type Token = Token(String)
+      fn make(raw : String) : Token do Token(raw) end
+      fn value(t : Token) : String do
+        match t do Token(s) -> s end
+      end
+    end
+
+    fn use_it(t : Token.Token) : String do
+      Token.value(t)
+    end
+
+    fn main() : String do
+      use_it(Token.make("hi"))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "qualified `Token.Token` unifies with bare `Token`: no errors"
+    false (has_errors ctx)
+
+(* The same fixture must also evaluate end-to-end: the round-trip through the
+   qualified annotation returns the string threaded through the opaque type. *)
+let test_qualified_opaque_type_evals () =
+  let env = eval_module {|mod TokenDemo do
+    mod Token do
+      opaque type Token = Token(String)
+      fn make(raw : String) : Token do Token(raw) end
+      fn value(t : Token) : String do
+        match t do Token(s) -> s end
+      end
+    end
+
+    fn use_it(t : Token.Token) : String do
+      Token.value(t)
+    end
+
+    fn main() : String do
+      use_it(Token.make("hi"))
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "qualified opaque round-trip evaluates to \"hi\"" "hi" (vstr v)
+
 (* F5: linear let binding — used exactly once is ok *)
 let test_linear_let_ok () =
   let ctx = typecheck {|mod Test do
@@ -5815,6 +5870,9 @@ let compiler_suites =
           (* F2: qualified method calls Eq.eq, Show.show *)
           Alcotest.test_case "qualified Eq.eq call"          `Quick test_qualified_method_call;
           Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
+          (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
+          Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
+          Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
           Alcotest.test_case "linear let double use"         `Quick test_linear_let_double_use;

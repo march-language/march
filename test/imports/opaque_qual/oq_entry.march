@@ -1,0 +1,15 @@
+-- Entry module: references the sibling's opaque type under its qualified name
+-- `OqToken.Token` and must unify it with the bare `Token` produced inside
+-- OqToken, in BOTH directions:
+--   * `OqToken.value(t)` — a qualified-typed value (`t`) into a bare-typed param
+--   * `use_it(OqToken.make(...))` — a bare-typed value into a qualified-typed param
+-- Must `--check` clean (exit 0).
+mod OqEntry do
+  fn use_it(t : OqToken.Token) : String do
+    OqToken.value(t)
+  end
+
+  fn round_trip() : String do
+    use_it(OqToken.make("hi"))
+  end
+end

@@ -2266,6 +2266,28 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
             (qualified_error_msg name.txt);
           0
     in
+    (* March uses a single global type namespace: a type declared inside a
+       module has its *bare* name as its canonical identity.  Both the type's
+       own registration and the result type of its constructors use the bare
+       form (see the constructor `ci_type = name.txt` sites and the "ci_type is
+       the BARE type name" note in Pass 1b).  A *qualified* reference like
+       `Token.Token` from outside the module must therefore resolve to the SAME
+       nominal `TCon` as the bare `Token`, otherwise a value produced inside the
+       module (bare) fails to unify against the qualified annotation with the
+       baffling "expected `Token.Token` but got `Token`".  Canonicalize the
+       constructor name to its bare suffix whenever that suffix denotes a type
+       of the same arity in scope. *)
+    let canon_name =
+      (* The bare suffix is the component after the LAST '.' (the type's own
+         name); everything before is the module path.  Using rindex rather than
+         [split_qualified] (which splits at the FIRST dot for module-load
+         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`. *)
+      match String.rindex_opt name.txt '.' with
+      | Some i ->
+        let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
+        (match lookup_type bare env with Some a when a = arity -> bare | _ -> name.txt)
+      | None -> name.txt
+    in
     let args' = List.map (surface_ty env ~tvars) args in
     if List.length args' <> arity then
       Err.error env.errors ~span:name.span
@@ -2320,9 +2342,9 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
           TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
         | _ ->
           (* Normalize built-in unit/bool so surface annotations unify with internal reps *)
-          match name.txt with
+          match canon_name with
           | "Unit" -> t_unit
-          | _ -> TCon (name.txt, args'))))
+          | _ -> TCon (canon_name, args'))))
 
   | Ast.TyVar name ->
     (match List.assoc_opt name.txt !tvars with

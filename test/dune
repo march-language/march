@@ -631,6 +631,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (setenv MARCH_LIB_PATH imports/tq_ctor
           (run %{exe:../bin/main.exe} --check imports/tq_ctor/tq_ctor_entry.march))))
 
+; ── Regression: TYPE-qualified reference to a sibling's OPAQUE VARIANT type ──
+; A sibling module (`OqToken`) auto-discovered via MARCH_LIB_PATH declares an
+; `opaque type Token = Token(String)`.  The entry references it under its
+; qualified name (`OqToken.Token`) in a parameter annotation.  surface_ty
+; resolved the qualified path to a distinct nominal `TCon("OqToken.Token")`
+; that would not unify with the BARE `TCon("Token")` produced by OqToken's own
+; `make`/`value`, so values crossing the boundary failed with
+; "expected `OqToken.Token` but got `Token`" (and the reverse).  The bare name
+; is the canonical global identity (constructor `ci_type` is bare), so the
+; qualified reference must canonicalize to it.  `--check` must exit 0.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/opaque_qual/*.march))
+ (action (setenv MARCH_LIB_PATH imports/opaque_qual
+          (run %{exe:../bin/main.exe} --check imports/opaque_qual/oq_entry.march))))
+
 ; ── Regression: local fn definitions must shadow bulk imports ──
 ; `import X` (UseAll) rebound every public `X.name` as bare `name`,
 ; clobbering the importing module's OWN pass-1 placeholder when it defines a

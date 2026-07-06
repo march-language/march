@@ -72,20 +72,27 @@ end
 For types that should expose the name but hide the constructors, use `opaque`:
 
 ```march
-mod Token do
-  opaque type Token = Token(String)
+mod Auth do
+  mod Token do
+    opaque type Token = Token(String)
 
-  fn make(raw : String) : Token do Token(raw) end
-  fn value(t : Token) : String do
-    match t do Token(s) -> s end
+    fn make(raw : String) : Token do Token(raw) end
+    fn value(t : Token) : String do
+      match t do Token(s) -> s end
+    end
+  end
+
+  -- Outside Token: refer to the type by its qualified name `Token.Token`, but
+  -- you cannot construct `Token(_)` directly — only `Token.make` can.
+  fn process(t : Token.Token) : () do
+    println(Token.value(t))
   end
 end
-
--- Outside Token: can use Token as a type, but cannot construct Token(_) directly
-fn process(t : Token.Token) : () do
-  println(Token.value(t))
-end
 ```
+
+(A file has exactly one top-level `mod`, so the "outside" consumer above lives
+in a sibling module of `Token`. In real projects each module is its own file
+and the qualified name `Token.Token` works across files just the same.)
 
 ---
 
