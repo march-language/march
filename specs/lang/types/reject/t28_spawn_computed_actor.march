@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: `spawn` needs a plain actor name written directly, like `spawn(Counter)`.
+mod Main do
+  -- Widening actors slice, Task 1 -- `spawn` REJECTS a COMPUTED actor
+  -- expression. Both backends dispatch `spawn` by the actor's *name*, resolved
+  -- at COMPILE TIME to a statically generated `<Actor>_spawn` function -- there
+  -- is no runtime actor-descriptor value. So the `ESpawn` arm (`typecheck.ml`
+  -- `:4185`) accepts ONLY a bare actor name shape (`ECon(_, [], _)` / `EVar`,
+  -- `:4194-4202`) and rejects anything else with a clean diagnostic at
+  -- `:4197-4202`, rather than letting a well-typed program reach the internal
+  -- `failwith` in TIR lowering. Here the argument is a FUNCTION CALL
+  -- (`pick()`), not a literal name, so it is rejected. (`spawn(if … end)` and
+  -- `spawn(A(x))` reject identically -- any non-literal actor expression.)
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn pick() do Counter end
+
+  fn main() do
+    let p = spawn(pick())
+    println("unreachable")
+  end
+end

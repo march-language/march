@@ -1939,6 +1939,126 @@ a hard reject), confirmed live and pinned as
 enforcement mechanism — it is the same `pub_set` absence surfacing through a
 second syntactic front door.
 
+### 2.6 Actors: declaration, spawn, and `Pid` typing
+
+March's actor construct — `actor Name do state { … } init { … } on Msg(…) do
+… end end` — is checked by `typecheck.ml`'s `DActor` arm (`Ast.DActor (_vis,
+name, actor, _sp)`, `typecheck.ml:6742`). This subsection pins **what that arm
+verifies** and, separately, **what type `spawn(Name)` actually produces** — the
+two are governed by different code and, as it turns out, disagree about the
+`Pid` type parameter in a way worth stating plainly.
+
+#### 2.6.1 What the actor declaration checks
+
+The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
+
+1. **State type construction (`:6744–6748`).** The `state { f : T, … }` field
+   declarations are turned into a canonical `TRecord` — each field's surface
+   annotation resolved by `surface_ty`, then the fields **sorted by name** so
+   the state type has a stable structural identity regardless of source order.
+   This record type is the actor's *state type*, written `state_ty` below.
+
+2. **Duplicate-handler rejection (`:6752–6760`).** Two `on Msg(…)` arms with the
+   *same* message name are a hard error (`` actor '…' defines handler '…' more
+   than once ``) — the only diagnostic the arm raises unconditionally.
+
+3. **Constructor registration (`:6768–6784`).** Two kinds of constructor are
+   added to the environment:
+   - the **actor name itself** as a *nullary* constructor whose result type is
+     the actor's own name (`add_ctor name.txt { ci_type = name.txt; ci_arg_tys
+     = []; … }`, `:6769`) — this is what makes a bare `spawn(Counter)` /
+     `Counter` resolve at all as an `ECon(_, [], _)`;
+   - one **message constructor per handler** (`ci_type = name.txt ^ "_Msg"`,
+     `:6781`), so `send(pid, Msg(x))` typechecks. Unannotated handler params get
+     a per-`(handler, position)` placeholder tyvar (`"$p<i>_<Msg>"`, `:6778`)
+     that instantiates to a fresh variable, so an omitted annotation does not
+     block `send`.
+
+4. **`init` checked against the state type (`:6785–6787`).** The `init { … }`
+   expression is checked (not merely inferred) against `state_ty`, with the
+   reason `` actor init must return the initial state record `` — so an `init`
+   whose record shape disagrees with the declared `state {…}` fields is
+   rejected here.
+
+5. **Each handler body checked to RETURN the state type (`:6789–6820`).** Every
+   `on Msg(…) do … end` body is typechecked in an environment where `state` is
+   bound to `state_ty` (`:6790` — the field is read as `state.field`, *not*
+   `self.field`) and each declared message param is in scope (`:6792–6798`). The
+   body's inferred type is then unified against `state_ty` (`:6805–6806`); a
+   mismatch produces the rich `` handler '…' in actor '…' must return the state
+   type `` diagnostic (`:6811–6819`) — this is what enforces the convention that
+   a handler ends by returning the *new* state record.
+
+#### 2.6.2 `spawn` — resolved by literal actor name at compile time
+
+`spawn` is typed by the `ESpawn` arm (`Ast.ESpawn (actor, _)`,
+`typecheck.ml:4185`). It first infers the argument (`ignore (infer_expr env
+actor)`, `:4186`) and then **requires the argument to be a bare actor name**:
+only `ECon(_, [], _)` or `EVar` are accepted (`:4194–4202`). Anything else — an
+`if`, a `match`, a function call, or a payload-carrying `A(x)` — is rejected
+with the fixed diagnostic (`:4197–4202`, verified live):
+
+> `` `spawn` needs a plain actor name written directly, like `spawn(Counter)`. ``
+> A computed actor expression (from an `if`, `match`, or function call) isn't
+> supported: March resolves which actor to spawn at compile time from its name.
+
+The rationale is in the source comment (`:4187–4193`): both backends dispatch
+`spawn` by the actor's *name*, resolved at compile time to a statically
+generated `<Actor>_spawn` function; there is no runtime actor-descriptor value,
+and the TIR lowering assumes exactly the `ECon(_, [], _)` / `EVar` shape — so
+the typechecker rejects a computed actor expression up front rather than letting
+a well-typed program reach the internal `failwith` in lowering. This is
+witnessed by `reject/t28_spawn_computed_actor` (`spawn(pick())`, pinning the
+first line of the message).
+
+#### 2.6.3 The `Pid` type parameter — the truthful account (a finding)
+
+The natural expectation — and the wording carried into this task — is that
+`spawn(Counter)` yields `Pid[state]`, i.e. a `Pid` parameterized by the actor's
+STATE type. **Live probing shows this is false at the surface.** What is true:
+
+- **`spawn` returns `Pid[<fresh unification variable>]`, not `Pid[state]`.** The
+  `ESpawn` arm's result is `TCon ("Pid", [fresh_var env.level])`
+  (`typecheck.ml:4203`; `t_pid a = TCon ("Pid", [a])`, `:983`) — a *fresh,
+  unconstrained* variable, computed with no reference to the state type. Probe:
+  `let p = if true do spawn(Counter) else spawn(Named) end`, where `Counter`'s
+  state is `{ count : Int }` and `Named`'s is `{ name : String }`, **typechecks
+  clean** — the two `if`-branches unify only because each `spawn` produced an
+  independent free var. Were the parameter the state type, the branches would be
+  `Pid({count:Int})` vs `Pid({name:String})` and the `if` would be rejected by
+  T-If. It is not.
+
+- **The `Pid[state_ty]` binding at `:6821` exists but is effectively
+  unobservable.** After checking the handlers, `DActor` does `bind_var name.txt
+  (Mono (TCon ("Pid", [state_ty]))) env_with_ctors` (`:6821`) — the actor *name*
+  is var-bound to `Pid[state]`. But a bare occurrence of the actor name never
+  reaches this binding: the *constructor* registration at `:6769` (the actor as
+  a nullary `ECon` of type `<Name>`) takes precedence, so a bare `Counter` is
+  typed `Counter`, not `Pid[state]`. Probe: `is_alive(Counter)` (where
+  `is_alive : Pid(a) -> Bool`) is **rejected** with `` expected `Pid(r3)` but
+  got `Counter` `` — the name resolves to the nullary ctor's `Counter` type, not
+  the `Pid[state]` value binding.
+
+- **Even an explicit `Pid[T]` annotation is impossible today.** The built-in
+  `Pid` is registered at arity 1 (`builtin_types`, `typecheck.ml:1849`), but the
+  stdlib module `GlobalPid` declares `type Pid = { node_id : String, local_pid :
+  Int, creation : Int }` (`stdlib/global_pid.march:11`) — a *0-arity record*.
+  Because March has a single global type namespace with no per-module type
+  identity (§2.5, the no-per-module-type-namespace design point), that bare
+  `Pid` **shadows** the built-in in `env.types`, so a surface annotation
+  `Pid(T)` is rejected with `` `Pid` expects 0 type argument(s) but got 1. ``
+  (arity check, `:2348–2351`). There is thus no annotation the surface can write
+  to *force* a `Pid`'s parameter to the state type either.
+
+**Net:** the state type is genuinely *checked* — `init` and every handler must
+conform to it (§2.6.1) — but it does **not** propagate to any observable `Pid`
+at a `spawn` site. `spawn(Counter) : Pid[α]` for a fresh `α`; the `α` unifies
+opportunistically with whatever the surrounding builtins demand (e.g. the `a` in
+`is_alive : Pid(a) -> Bool`, `:1341`), and stays free otherwise. The
+"`Pid[state]`" phrasing is therefore aspirational, not a fact about the current
+typechecker; `accept/t39_actor_spawn_pid` witnesses the accept path (`is_alive`
+on a fresh `spawn` result), and this finding is logged in §4.1.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -2340,6 +2460,34 @@ typechecker that this document exists to pin down, not defects:
     would assert behavior this finding identifies as WRONG (the program
     currently, incorrectly, `--check`s clean) — once fixed, a
     `reject/derive_unknown_type`-style program should be added here.
+
+18. **[OPEN — filed, not fixed] `spawn(Actor)` does NOT yield `Pid[state]`; the
+    `Pid` parameter is an unconstrained fresh variable, and the state type never
+    reaches an observable `Pid`.** Found while building §2.6 (actors widening,
+    Task 1). The `ESpawn` arm returns `TCon ("Pid", [fresh_var env.level])`
+    (`typecheck.ml:4203`), a fresh var computed with no reference to the actor's
+    state type. The `bind_var name.txt (Mono (TCon ("Pid", [state_ty])))` at
+    `:6821` *does* record the state type against the actor name, but that binding
+    is unreachable from a bare occurrence: the nullary-constructor registration
+    at `:6769` (actor name ⇒ type `<Name>`) shadows it, so a bare `Counter` is
+    typed `Counter`, not `Pid[state]`. Live probes (re-verified for this task):
+    `let p = if true do spawn(Counter) else spawn(Named) end` typechecks clean
+    with `Counter`/`Named` carrying *different* state records (proving each
+    `spawn` yields an independent free var, not `Pid[state]`); `is_alive(Counter)`
+    is rejected `` expected `Pid(r3)` but got `Counter` `` (the name is the
+    nullary ctor, not the `Pid[state]` value). Compounding it, no surface
+    annotation can pin the parameter either: the built-in arity-1 `Pid`
+    (`typecheck.ml:1849`) is shadowed in the single global type namespace (§2.5)
+    by stdlib `GlobalPid`'s 0-arity `type Pid` record (`stdlib/global_pid.march:
+    11`), so `Pid(T)` annotations reject `` `Pid` expects 0 type argument(s) but
+    got 1. ``. So the state type is *checked* inside the actor decl (init +
+    handler conformance, §2.6.1) but is not carried by the `Pid` at any `spawn`
+    site. This is a faithfulness note, not a corpus reject (there is no
+    *incorrect* program to pin — `accept/t39_actor_spawn_pid` witnesses the
+    actual, fresh-var accept behavior); tightening `spawn`'s result to
+    `Pid[state]` (or making the actor name resolve to its `:6821` `Pid[state]`
+    binding) would be a compiler change, out of scope for this docs slice. See
+    §2.6.3 for the full account.
 
 ## 5. What this validated, and what's next
 
