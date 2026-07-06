@@ -80,6 +80,9 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`reject/r11_supervise_missing_strategy.march`](reject/r11_supervise_missing_strategy.march) | §9.3 `supervise_block` — `strategy`/`STRATEGY` is mandatory, not optional | A `supervise do … end` block that opens straight on `max_restarts` with no leading `strategy one_for_one` (`STRATEGY` is not `option()`-wrapped in `supervise_block`, so skipping it is a genuine parse-stage rejection, not a typecheck one). Captured live: `I got stuck here`. |
 | [`reject/r12_cap_unknown_directive.march`](reject/r12_cap_unknown_directive.march) | §9.6 — the five `cap …` forms are fixed lexer strings, not a `cap` keyword plus an arbitrary argument | `cap no_such_thing` — `"no_such_thing"` is not one of the five words the lexer's two-word `cap …` patterns match (`lexer.mll:176–180`), so `cap` lexes as a bare `LOWER_IDENT` and the whole line falls through every `decl` alternative to `decl_list_r`'s generic error-recovery rule. Captured live: `` Parse error in declaration ``. |
 | [`reject/r13_protocol_step_missing_payload_type.march`](reject/r13_protocol_step_missing_payload_type.march) | §9.4 `protocol_step` — the `: ty` payload annotation is mandatory | `Client -> Server` with no trailing `: PayloadType` — `protocol_step`'s message-step alternative requires `COLON; t = ty` after the `sender ARROW receiver`, so the step ends prematurely and the following `END` cannot be shifted where a payload type was expected. Captured live: `I got stuck here`. |
+| [`reject/r14_curried_call_not_chained.march`](reject/r14_curried_call_not_chained.march) | §7.3/§4.7 — `f(1)(2)` curried-call juxtaposition is a parse error | `adder(1)(side(99))` — a call's closing `)` immediately followed by `(` with no intervening newline. The newline-sensitive guard in `token_filter.ml` (a `Call`-close `RPAREN` followed by `LPAREN`) rejects it before menhir. Captured live: `` `f(...)(...)` is not a chained call — March functions are not curried. `` — resolves the §7.3 silent-mis-split finding. |
+| [`parse/p23_iife_lambda_call.march`](parse/p23_iife_lambda_call.march) | §7.3 — the guard must NOT fire on an IIFE `(fn x -> …)(n)` | `(fn x -> x + 1)(5)` — here the `)` closes a parenthesized EXPRESSION/lambda (a `Group`, not a call's arg list), so the paren-kind stack records `Group` and the curried-call guard passes it through. `--check` exit 0 — the critical constraint that a naive "reject all `)(`" would break. |
+| [`parse/p24_two_line_call_juxtaposition.march`](parse/p24_two_line_call_juxtaposition.march) | §7.3 — a newline between `)` and `(` means two statements, not a curried call | `f(1)⏎(g(2))` on two lines — the guard is newline-sensitive (`saw_nl_since_significant`), so the trailing `(g(2))` parses as its own `block_expr` exactly as before. `--check` exit 0, even though the same text on one line (`f(1)(g(2))`) is now rejected. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -96,11 +99,14 @@ an `interface`/`impl` pair, a generic record+self-referential-variant `type`
 declaration, and the obsolete-`pub`-keyword and one-`mod`-per-file rejection
 findings. A later pass fully resolving §9's DSL declaration forms added
 p18–p22/r11–r13: `actor`+`supervise`, `app`/`on_start`/`Supervisor.spec`,
-`protocol`/`choose`, `transitions`, and the capability-directive forms —
-35 programs total (22 `parse/`, 13 `reject/`), the corpus's final count for
-this pass. See `specs/plans/2026-07-06-resolved-grammar-plan.md` for the
-task-by-task breakdown that built the first 27; the DSL-resolution pass is
-tracked in its own commit rather than a numbered plan task. CI-wired as the
-`grammar-check` dune alias (`test/dune`), mirroring `specs/lang/types/`'s
-`types-check` — run directly with `dune build @grammar-check`, not part of
-`runtest`/`oracle`.
+`protocol`/`choose`, `transitions`, and the capability-directive forms.
+A later fix (2026-07-06) resolving the §7.3 `f(1)(2)` silent-mis-split
+finding added r14/p23/p24: the curried-call-juxtaposition reject and the
+IIFE + two-line witnesses the newline-sensitive guard must still accept —
+38 programs total (24 `parse/`, 14 `reject/`). See
+`specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
+breakdown that built the first 27; the DSL-resolution pass and the
+`f(1)(2)` fix are tracked in their own commits rather than numbered plan
+tasks. CI-wired as the `grammar-check` dune alias (`test/dune`), mirroring
+`specs/lang/types/`'s `types-check` — run directly with `dune build
+@grammar-check`, not part of `runtest`/`oracle`.

@@ -807,20 +807,29 @@ for a bare `UPPER_IDENT` (§4.9) is `%prec prec_atom`, which sits *below*
 that `Foo()` shifts the `(` into this rule rather than reducing `Foo` to an
 atom first.
 
-**Chained direct calls like `f(1)(2)` do not parse.** `expr_app`'s
+**Chained direct calls like `f(1)(2)` do not parse — and are now rejected
+with a dedicated diagnostic in every position.** `expr_app`'s
 function/callee position is `expr_field`, whose only base case is
 `expr_atom` (§4.8–4.9) — `expr_atom` has no alternative that accepts a bare
 `expr_app`. So once `f(1)` has reduced to an `expr_app`, there is no
 production that re-admits that whole application as the callee of a
 further `(...)`; the grammar has no rule shaped like `expr_app "(" … ")"`.
-Confirmed live: `adder(1)(2)` (calling a curried function returned by
-`adder(1)`) is rejected with menhir's generic `I got stuck here` at the
-second `(`. March expresses "call the result of a call" via an explicit
-intermediate binding (`let f = adder(1)` then `f(2)`) rather than curried
-juxtaposition. The `prec_app` virtual token (declared at `parser.mly:219`,
-doc comment at `parser.mly:213`) exists purely to make `f()` shift `(`
-instead of reducing `f` to a bare atom first — the same *shape* of
-disambiguation `prec_atom` performs for bare `UPPER_IDENT`/`ATOM` (§4.9).
+Historically menhir rejected the *operand-position* case (`println(adder(1)(2))`)
+with a generic `I got stuck here`, while the *statement-position* case
+(`let r = adder(1)(2)` as a bare block statement) silently mis-split into
+two statements with no error at all (§7.3). As of 2026-07-06 a
+newline-sensitive guard in `token_filter.ml` catches the `)(` juxtaposition
+**before** menhir in *both* positions: a `LPAREN` that immediately follows a
+call's closing `RPAREN`, with no intervening newline, now raises
+`` `f(...)(...)` is not a chained call — March functions are not curried. ``
+(see §7.3 for the resolution and the IIFE/two-line cases the guard
+deliberately preserves). March expresses "call the result of a call" via an
+explicit intermediate binding (`let f = adder(1)` then `f(2)`) rather than
+curried juxtaposition. The `prec_app` virtual token (declared at
+`parser.mly:219`, doc comment at `parser.mly:213`) exists purely to make
+`f()` shift `(` instead of reducing `f` to a bare atom first — the same
+*shape* of disambiguation `prec_atom` performs for bare `UPPER_IDENT`/`ATOM`
+(§4.9).
 
 ### 4.8 `expr_field` — field/module access, left-associative chains
 
@@ -1566,7 +1575,7 @@ exercises every claim above in one program:
   String)` and the match-arm destructure/reconstruct round-tripped the
   first element back out correctly.
 
-### 7.3 Finding: `f(1)(2)` silently mis-splits into two statements outside operand position
+### 7.3 Finding (RESOLVED 2026-07-06): `f(1)(2)` is now a newline-sensitive parse error
 
 While building this section's corpus, a gap in §4.7's existing claim
 surfaced. §4.7 states "chained direct calls like `f(1)(2)` do not parse,"
@@ -1597,11 +1606,41 @@ reads as though the rejection is universal, when it is actually
 position-dependent (argument/operand position: hard parse error; bare
 block-statement position: silently reparses as two statements with no
 error at all, which is arguably the more surprising outcome for a reader to
-miss). Filed in `specs/todos.md` as a doc-precision follow-up for §4.7
-rather than corrected here, since Task 4's scope is §6–§7 and this chapter's
-process requires no drive-by edits to an earlier task's already-committed
-section; no `parser.mly` change is warranted (there is no bug to fix — the
-grammar behaves exactly as its own rules, taken together, predict).
+miss).
+
+**Resolution (2026-07-06).** Rather than leave the statement-position case
+as a silent split, the decision was to make `f(1)(2)` a **parse error** with
+a helpful message. The fix lives in `lib/parser/token_filter.ml` (not
+`parser.mly`), because the newline-sensitivity it requires is only available
+before the token filter deletes the newline: `f(1)(2)` and `f(1)⏎(g(2))`
+are token-identical by the time menhir sees them, so the distinction *must*
+be drawn while the `NL` token still exists. The filter now threads three
+pieces of state through its emit boundary — a paren-kind stack (each emitted
+`LPAREN` is classified `Call` if the preceding significant token is
+value-ending, else `Group`/`Tuple`/lambda-paren), the previous significant
+token, and a "newline seen since the previous significant token" flag — and,
+when it is about to emit a `LPAREN` that immediately follows a **call's**
+closing `RPAREN` with no intervening newline, raises
+`` `f(...)(...)` is not a chained call — March functions are not curried. ``
+(hint: `` Write `f(a, b)` for a multi-argument call, or put the second call
+on its own line if you meant two separate statements. ``). The guard is
+narrow by construction — exactly three behaviours, all pinned by corpus
+witnesses:
+
+- **Reject** `f(1)(2)` / `Con(1)(2)` / `f(g(1))(2)` (errors on the outer) —
+  the `RPAREN` closed a *call*, no newline follows
+  ([`reject/r14_curried_call_not_chained.march`](grammar/reject/r14_curried_call_not_chained.march)).
+- **Accept** an IIFE `(fn x -> x + 1)(5)` — the `RPAREN` closes a
+  parenthesized **expression** (a `Group`, not a call's arg list), so the
+  guard does not fire
+  ([`parse/p23_iife_lambda_call.march`](grammar/parse/p23_iife_lambda_call.march)).
+- **Accept** a two-line `f(1)⏎(g(2))` — the newline is the user's signal of
+  two separate statements
+  ([`parse/p24_two_line_call_juxtaposition.march`](grammar/parse/p24_two_line_call_juxtaposition.march)).
+
+This is the sole compiler behaviour change from this finding; `parser.mly`
+is untouched. Multi-argument calls (`f(a, b)`) and every other legitimate
+`)(`-free program parse exactly as before.
 
 ## 8. Declarations (core)
 
@@ -2353,25 +2392,24 @@ the `types-check` alias `specs/lang/types/` already uses — not part of
 
 Building this chapter's conformance corpus surfaced two categories of fact
 about the live parser that are worth collecting in one place rather than
-leaving scattered across the sections that happened to surface them —
-neither is a bug to fix (both are the grammar behaving exactly as its own
-stated rules predict), but both are easy to get wrong from reading only one
-section in isolation:
+leaving scattered across the sections that happened to surface them:
 
-- **`f(1)(2)`-shaped chained calls are rejected only in operand/argument
-  position — in bare block-statement position they silently mis-split into
-  two unrelated statements with no diagnostic at all.** Full detail and the
-  live-confirmed repro (including a side-effecting variant proving the
-  second call really executes as its own statement) is in §7.3, surfaced
-  while building §7's type-annotation corpus program (Task 4, patterns/
-  types). §4.7 states the operand-position rejection correctly but its
-  blanket "does not parse" phrasing does not itself call out the
-  position-dependence — §7.3 is the consolidated correction; this is a
-  **documentation-precision gap in §4.7's phrasing**, not a parser bug, and
-  is filed as an open doc-precision follow-up in `specs/todos.md` (under
-  "Grammar / lint contradictions") rather than fixed by editing §4.7 itself
-  (this chapter's per-task scoping rule: no drive-by edits to an earlier
-  task's already-committed section).
+- **RESOLVED (2026-07-06) — `f(1)(2)` is now a newline-sensitive parse
+  error.** Previously, `f(1)(2)`-shaped chained calls were rejected only in
+  operand/argument position (menhir's generic `I got stuck here`); in bare
+  block-statement position (`let r = adder(1)(2)`) they silently mis-split
+  into two unrelated statements with no diagnostic at all — the more
+  surprising outcome. This has been fixed: a newline-sensitive guard in
+  `lib/parser/token_filter.ml` rejects a `LPAREN` that immediately follows a
+  **call's** closing `RPAREN` (no intervening newline) in *every* position,
+  with `` `f(...)(...)` is not a chained call — March functions are not
+  curried. `` The guard deliberately preserves the two legitimate `)(`
+  shapes: an IIFE `(fn x -> x)(5)` (the `)` closes a group/lambda, not a
+  call) and a two-line `f(1)⏎(g(2))` (the newline signals two statements).
+  Full detail — including the three-piece filter state and the corpus
+  witnesses (`reject/r14`, `parse/p23`, `parse/p24`) — is in §7.3. This is
+  the one compiler behaviour change from this finding; `parser.mly` is
+  untouched.
 - **`token_filter.ml`'s `is_pattern_start` predicate (§3.4) is a
   hand-maintained shadow of `parser.mly`'s `pattern`/`simple_pattern`/
   `soft_lower_name` first-token set, not a derived table** — a prior review
@@ -2390,6 +2428,6 @@ Both `PatRecord`/`PatAs` unreachability (§6.3) and `then`'s
 no-accepting-production status (§4.10) are reachability *claims this
 chapter makes and witnesses live*, not open findings requiring follow-up —
 they are listed here only for completeness of cross-reference, not because
-either is unresolved. See `specs/todos.md`'s "Grammar / lint contradictions
-(2026-07-03)" section for the `f(1)(2)` entry's tracked disposition and any
-future updates.
+either is unresolved. The `f(1)(2)` entry in `specs/todos.md`'s "Grammar /
+lint contradictions (2026-07-03)" section is now closed (moved to Done,
+2026-07-06) — see §7.3 for the fix.

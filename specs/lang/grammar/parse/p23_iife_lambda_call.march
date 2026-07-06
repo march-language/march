@@ -1,0 +1,10 @@
+mod P23IifeLambdaCall do
+  -- §7.3 — an immediately-invoked lambda `(fn x -> …)(n)` is NOT a curried
+  -- call: the `)` closes a parenthesized EXPRESSION (a group/lambda), not a
+  -- call's arg list, so the newline-sensitive `Call`-close guard in
+  -- token_filter must NOT fire. This must keep parsing (and typechecking).
+  fn main() do
+    let r = (fn x -> x + 1)(5)
+    r
+  end
+end
