@@ -2,10 +2,11 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 (in progress) · 2026-07-06 · Tasks 1–3: preprocessing layers (lexer +
-`token_filter`), the expression precedence ladder (§4), and blocks/
-statements/significant-newline semantics (§5) formalized; pattern/type/
-declaration grammar (§6–§9) not yet written.**
+**v1 (in progress) · 2026-07-06 · Tasks 1–4: preprocessing layers (lexer +
+`token_filter`), the expression precedence ladder (§4), blocks/
+statements/significant-newline semantics (§5), and patterns/types (§6–§7,
+including the `PatRecord`/`PatAs` reachability finding) formalized;
+declaration grammar (§8–§9) not yet written.**
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter is built task-by-task from).
@@ -1181,6 +1182,418 @@ deliberate, documented design choice (the `fold_letq` doc comment says so
 outright: "the typechecker flags the empty continuation with a clear
 error"), not a parser gap to file.
 
+## 6. Patterns
+
+Source: `lib/parser/parser.mly` (`pattern` at `parser.mly:1311–1320`,
+`simple_pattern` at `parser.mly:1322–1341`, `qualified_upper` at
+`parser.mly:1305–1309`, `soft_lower_name` at `parser.mly:1353–1367`). Like
+§4–§5, this section describes the grammar over the **filtered** token stream
+(§2–§3); §3.4 already cross-checked `token_filter`'s `is_pattern_start`
+shadow predicate against these exact same productions, so this section
+states the productions themselves as the primary reference.
+
+### 6.1 `simple_pattern` — the narrower pattern grammar
+
+```ebnf
+simple_pattern ::= "_"
+                  | soft_lower_name
+                  | INT
+                  | "-" INT
+                  | FLOAT
+                  | "-" FLOAT
+                  | STRING
+                  | BOOL
+                  | "(" pattern ")"
+                  | "(" pattern "," separated_nonempty_list(",", pattern) ")"   (* tuple *)
+                  | "[" "]"                                                     (* Nil sugar *)
+                  | "[" separated_nonempty_list(",", pattern) "]"               (* Cons-chain sugar *)
+```
+
+(`parser.mly:1322–1341`.) Twelve alternatives, in source order (the EBNF
+above groups the two literal-negation pairs and the two list-literal cases
+onto shared lines for readability, so it shows ten bullet-level shapes over
+the same twelve grammar alternatives):
+
+- `UNDERSCORE` → `PatWild` — the wildcard, matches anything, binds nothing.
+- `soft_lower_name` → `PatVar` — a variable binding. `soft_lower_name`
+  (`parser.mly:1353–1367`) is not just `LOWER_IDENT`: it additionally accepts
+  13 keyword alternatives that would otherwise be reserved words —
+  `STATE`, `INIT`, `LOOP`, `ON`, `PROTOCOL`, `APP`, `AS`, `WITH`, `WHEN`,
+  `USE`, `IN`, `FOR`, `TAG` — each mapped back to its literal lowercase
+  spelling (e.g. `STATE` → `PatVar "state"`). This is what makes `fn (state,
+  event, payload) -> …`-shaped actor-DSL code parse: without this widening,
+  `state` used as an ordinary parameter/binding name would collide with the
+  `STATE` keyword. Note `AS` is in this list — a bare `as` is a legal
+  variable name in binding position (`let as = 5` parses; there is no
+  dedicated as-pattern syntax competing for the token, see §6.3).
+- `INT` / `MINUS INT` → `PatLit (LitInt …)` — plain and negative integer
+  literals. The negative form is its own two-token alternative (`MINUS`
+  immediately followed by `INT`), not a unary-minus *expression* embedded in
+  a pattern — patterns have no operator ladder of their own.
+- `FLOAT` / `MINUS FLOAT` → `PatLit (LitFloat …)` — same shape, for floats.
+- `STRING` → `PatLit (LitString …)`, `BOOL` → `PatLit (LitBool …)` — literal
+  patterns for the two remaining scalar kinds.
+- `LPAREN pattern RPAREN` → parenthesization (returns the inner pattern
+  unchanged, no new AST node) — lets a full `pattern` (e.g. a bare
+  constructor pattern, only otherwise reachable via `pattern`, not
+  `simple_pattern`) appear anywhere a `simple_pattern` is required, by
+  wrapping it in parens. This is the escape hatch that makes `let Some(x) =
+  opt` fail (§6.2) but `let (Some(x)) = opt`... **also** fail — parenthesizing
+  doesn't help here because the parenthesized form still reduces to a bare
+  `pattern`, and `simple_pattern`'s `LPAREN pattern RPAREN` alternative
+  accepts any `pattern` including a `PatCon`, so in fact `let (Some(x)) = opt`
+  **does** parse (confirmed live, exit 0) — the parens are exactly the
+  mechanism that lets a constructor pattern reach `let`-position, since
+  `let` only accepts `simple_pattern` (§6.2) and this is `simple_pattern`'s
+  own rule for admitting an arbitrary `pattern` inside explicit parens.
+- `LPAREN pattern COMMA … RPAREN` → `PatTuple` — tuple-destructuring
+  pattern, two or more comma-separated sub-patterns.
+- `LBRACKET RBRACKET` → sugar for `PatCon (Nil, [])`; `LBRACKET
+  separated_nonempty_list(",", pattern) RBRACKET` → sugar for a right-folded
+  `Cons`-chain, `[a, b]` becoming `PatCon(Cons, [a; PatCon(Cons, [b;
+  PatCon(Nil, [])])])` — list-literal patterns desugar in-parser to ordinary
+  constructor patterns over March's built-in `List` representation; there is
+  no dedicated `PatList` AST node.
+
+### 6.2 `pattern` — adds constructors and atoms on top of `simple_pattern`
+
+```ebnf
+pattern ::= qualified_upper "(" separated_nonempty_list(",", pattern) ")"
+          | qualified_upper
+          | ATOM "(" separated_nonempty_list(",", pattern) ")"
+          | ATOM
+          | simple_pattern
+
+qualified_upper ::= UPPER_IDENT
+                   | UPPER_IDENT "." UPPER_IDENT
+```
+
+(`parser.mly:1311–1320`; `qualified_upper` at `parser.mly:1305–1309`.)
+`pattern` is `simple_pattern` **plus** two more alternatives, both leading
+with a token `simple_pattern` never starts with (`UPPER_IDENT` or `ATOM`):
+
+- **Constructor patterns**, `C(...)`/bare `C` → `PatCon`. The callee is
+  `qualified_upper`, not a bare `UPPER_IDENT` — it also accepts the
+  two-segment `TypeName.CtorName` form (e.g. `Http.Get`) for disambiguating
+  same-named constructors across modules; the doc comment right above
+  `qualified_upper` (`parser.mly:1300–1304`) notes this dotted lookahead is
+  conflict-free because `DOT` never appears in `qualified_upper`'s own
+  follow set. A bare `C` with no argument list is `PatCon (C, [])` — nullary
+  constructor patterns need no parens (`None`, `Nil`, an enum-like variant).
+- **Atom patterns**, `:tag(...)`/bare `:tag` → `PatAtom`. Structurally
+  identical shape to constructor patterns (parenthesized-args or bare), just
+  keyed by the `ATOM` token instead of `qualified_upper`; both were
+  value-witnessed together by
+  [`parse/p14_list_and_atom_payload_patterns.march`](grammar/parse/p14_list_and_atom_payload_patterns.march)
+  (below).
+- Everything else falls through to `simple_pattern` (6.1).
+
+**Where `simple_pattern` is used more narrowly than the full `pattern`.**
+Three call sites in `parser.mly` bind only `simple_pattern`, never `pattern`
+directly:
+
+- `block_expr`'s `let`/`linear let` alternative — `LET; p = simple_pattern;
+  ty = option(type_annot); EQUALS; e = expr` (`parser.mly:997, 1000`, also
+  the module-level `let` at `parser.mly:390` and `let`-error-recovery sites
+  at `parser.mly:393, 975, 1010`).
+- `block_expr`'s `let?` alternative — `LET; QUESTION; p = simple_pattern;
+  EQUALS; e = expr` (`parser.mly:968, 970`) and its `lambda_stmts` mirror
+  (`parser.mly:1086`) and the REPL's `repl_input`/`repl_sequence` mirrors
+  (`parser.mly:1344, 1368`).
+- Function **parameters** — `param` binds `soft_lower_name` directly
+  (`parser.mly:980–988`), a strict subset of `simple_pattern` (no literals,
+  no tuples, no lists) — so a March function parameter can never be a
+  full pattern of any kind, only a plain name (or `_`); tuple/constructor
+  destructuring of a parameter requires an extra `let` in the function body.
+
+Consequently **a bare constructor pattern is not directly usable in a `let`
+binding**: `let Some(x) = opt` fails to parse (confirmed live against the
+pre-built compiler while writing this section — `` I got stuck here `` at
+`Some`; not committed as a separate corpus program since `reject/r07`
+already covers the `let`-position reachability gap this fact is adjacent
+to), because `Some(x)` is a `pattern` alternative (`qualified_upper LPAREN …
+RPAREN`), not one of `simple_pattern`'s twelve alternatives, and `let` only
+accepts `simple_pattern`. The only way to bind a
+constructor pattern in a `let` is via `simple_pattern`'s own
+parenthesization escape hatch (6.1): `let (Some(x)) = opt` **does** parse,
+because the parens make it `simple_pattern`'s `LPAREN pattern RPAREN`
+alternative, and a `PatCon` is a perfectly good `pattern`. **`match` arms use
+the full `pattern`, not `simple_pattern`** (`branch`'s `p = pattern`,
+`parser.mly:1280`), so constructor/atom patterns need no such parenthesizing
+in `match` — this asymmetry (parens needed at `let`, not needed in `match`)
+is exactly the practical consequence of the `simple_pattern`/`pattern`
+split, and the reason idiomatic March destructures constructors via `match`
+rather than `let` whenever the scrutinee isn't already known-exhaustive.
+
+### 6.3 Reachability: `PatRecord` and `PatAs` are implemented but unreachable
+
+The AST (`lib/ast/ast.ml:47–48`) defines two more pattern constructors that
+**never appear anywhere in `parser.mly`**:
+
+```
+grep -c 'PatRecord\|PatAs' lib/parser/parser.mly
+```
+
+returns **`0`** — confirmed live for this pass. Neither `simple_pattern`
+(6.1) nor `pattern` (6.2) has a production that builds a `PatRecord` (`{
+f, … }`, the record-destructuring pattern — note `LBRACE` starts **no**
+pattern alternative at all, consistent with §3.4's cross-check that
+`is_pattern_start` correctly omits `LBRACE`) or a `PatAs` (`p as x`, an
+as-pattern — `AS` is consumed only by `soft_lower_name` as an ordinary
+variable-name spelling, §6.1, and by the module-alias form `alias P as Q`,
+never by a pattern-level `AS` production). Both constructors are fully
+implemented downstream — `eval.ml`'s `match_pattern` has working
+`PatRecord`/`PatAs` arms, `typecheck.ml`'s `infer_pattern` has working arms
+for both, and `desugar.ml` has arms that recurse into an *already
+constructed* `PatRecord`/`PatAs` (respanning, collecting bound names) — but
+nothing in `parser.mly` ever constructs one fresh from surface syntax. This
+is the same fact
+[`core-march.md`](core-march.md) (§2, §4.3, and the dedicated §4.3.1
+"Implemented-but-unreachable pattern forms") and
+[`core-march-types.md`](core-march-types.md) (§ around line 781: "`PatRecord`
+and `PatAs` are each documented as unreachable from surface syntax") already
+document from the operational/typing side; this chapter adds the
+**grammar-level** half of that story — exactly which productions are
+missing and why no combination of existing alternatives can reach them.
+
+**Live witnesses (both new to this pass's corpus):**
+
+- [`reject/r02_record_pattern_in_arm_unreachable.march`](grammar/reject/r02_record_pattern_in_arm_unreachable.march)
+  (seeded in Task 1 as a §3.4 corollary, promoted here to the primary §6
+  reachability witness for `PatRecord`) — `match 1 do { x } -> x end`.
+  `{` cannot start any `pattern`/`simple_pattern` alternative, so `branch`
+  (`parser.mly:1279–1281`) never even gets as far as trying to parse a
+  pattern; menhir rejects immediately with its generic fallback, captured
+  live as `` I got stuck here ``.
+- [`reject/r07_record_pattern_in_let_unreachable.march`](grammar/reject/r07_record_pattern_in_let_unreachable.march)
+  (new) — `let { x } = r` witnesses the same fact at a second, independent
+  call site (`block_expr`'s `let`, §6.2's `simple_pattern`-only
+  restriction) rather than re-testing the match-arm position. Captured
+  live: `` I got stuck here ``, pointing at the `{`.
+- [`reject/r08_as_pattern_unreachable.march`](grammar/reject/r08_as_pattern_unreachable.march)
+  (new) — `match 1 do x as y -> y end` witnesses `PatAs`-unreachability.
+  Unlike the two `PatRecord` witnesses above, this one does **not** hit
+  menhir's generic fallback: `x` fully reduces to `simple_pattern`/`pattern`
+  (`PatVar "x"`) via the ordinary route, so `branch`'s first alternative is
+  one token from completing — it wants `ARROW` next — and seeing `AS`
+  instead trips `branch`'s own dedicated error-recovery alternative
+  (`_p = pattern; _guard = option(when_guard); error`, `parser.mly:1282–
+  1286`), producing the bespoke message `` I was expecting `->` in the match
+  arm here: `` (not generic-fallback text) — because there genuinely is no
+  production that continues past a fully-reduced `pattern` other than
+  `ARROW`, an as-pattern can never be assembled no matter which token
+  follows the base pattern. `core-march.md`'s own live cross-check
+  (`core-march.md:895–899`) independently confirms both the match-arm
+  message (`x as y -> y`, `n as whole -> …`) and a `let`-position variant
+  (`let (n as whole) = 5` → `` I got stuck here ``) — this chapter's `r08`
+  corroborates the match-arm case the reference already pinned, from the
+  grammar side.
+
+Both `reject/r07` and `reject/r08` were captured live against the
+pre-built compiler for this pass, and neither unexpectedly parsed — the
+reachability claim holds as stated, no parser finding to file for either.
+
+## 7. Types
+
+Source: `lib/parser/parser.mly` (`ty`/`ty_nat_add`/`ty_nat_mul`/`ty_app`/
+`ty_atom` at `parser.mly:910–955`; `ty_record_field` at `parser.mly:957–958`;
+`type_annot`/`ret_annot`/`type_params` at `parser.mly:901–908`). Type
+expressions are parsed by an entirely separate stratified ladder from
+`expr`'s (§4) — `ty` does not share any nonterminal with the expression
+grammar except where `TyRefine` deliberately embeds a full `expr` as a
+refinement predicate (below) — so no precedence declaration in `parser.mly`
+(`214–220`) does double duty between the two; the type ladder resolves its
+one ambiguity (arrow associativity) purely by recursive structure, the same
+technique §4.5/§4.6 already showed for `expr_add`/`expr_unary`.
+
+### 7.1 The type-expression ladder
+
+```ebnf
+ty         ::= ty_nat_add "->" ty
+             | ty_nat_add
+
+ty_nat_add ::= ty_nat_add "+" ty_nat_mul
+             | ty_nat_mul
+
+ty_nat_mul ::= ty_nat_mul "*" ty_app
+             | ty_app
+
+ty_app     ::= upper_name "(" separated_nonempty_list(",", ty) ")"
+             | upper_name "." dotted_upper_tail "(" separated_nonempty_list(",", ty) ")"
+             | ty_atom
+
+ty_atom    ::= INT
+             | LOWER_IDENT
+             | upper_name "." dotted_upper_tail
+             | upper_name
+             | "linear" ty_atom
+             | "affine" ty_atom
+             | "(" ")"
+             | "(" ty ")"
+             | "(" ty "," separated_nonempty_list(",", ty) ")"
+             | "{" ty_app "|" expr "}"                          (* refinement, no binder *)
+             | "{" lower_name ":" ty "|" expr "}"                (* refinement, with binder *)
+             | "{" separated_nonempty_list(",", ty_record_field) "}"
+
+ty_record_field ::= lower_name ":" ty
+```
+
+(`parser.mly:910–958`.) Four strata, tightest-to-loosest read bottom-up
+exactly as printed (`ty_atom` binds tightest, `ty`'s bare arrow is loosest):
+
+- **`ty_atom`** (`parser.mly:930–955`) — the base case. `INT` here builds a
+  **type-level natural-number literal** (`TyNat`, e.g. a vector-length index
+  type), not an ordinary value type — March's type language includes a small
+  arithmetic sublanguage for these (`TyNatOp`, see `ty_nat_add`/`ty_nat_mul`
+  below) that only participates when the surrounding type actually uses
+  `TyNat`s; ordinary code never encounters it. `LOWER_IDENT` here is a
+  **type variable** (`TyVar`) — this is how generics/polymorphism are
+  written: a lowercase name in type-annotation position is universally
+  quantified (HM-style), with **no explicit binder syntax at the `fn`
+  level** — contrast `type`/`ptype`/`opaque type` declarations, which *do*
+  have an explicit `type_params` binder (`LPAREN separated_nonempty_list(",",
+  lower_name) RPAREN`, `parser.mly:907–908`, used at each of the eight
+  `type`/`ptype`/`opaque type`/`alwayslinear type` declaration sites (each of
+  the four forms has a variant-body and a record-body alternative),
+  `parser.mly:436–465`) — a function signature's type variables are always
+  implicit and inferred, never declared. A bare `upper_name` (or dotted
+  `upper_name "." dotted_upper_tail`, e.g. `IO.Network`, joined into one
+  `TyCon` name with the dots kept as literal text,
+  `parser.mly:933–936`) with no argument list is `TyCon (name, [])` — a
+  nullary type constructor (`Int`, `Bool`, a zero-parameter user type).
+  `LINEAR ty_atom` / `AFFINE ty_atom` wrap a type in a linearity annotation
+  (`TyLinear`) — March's linear-types facility, orthogonal to the rest of
+  the type grammar. `LPAREN RPAREN` is the unit/empty-tuple type
+  (`TyTuple []`); `LPAREN ty RPAREN` is plain parenthesization (no new node,
+  same escape-hatch role parens play in `expr`/`pattern`); `LPAREN ty COMMA
+  … RPAREN` is a **tuple type** (`TyTuple`, two or more comma-separated
+  members, e.g. `(Int, String)`). The three `LBRACE …` alternatives are
+  **refinement types** (`TyRefine`, `{ Int | v >= 0 }` binderless or `{ v :
+  Int | v >= 0 }` with an explicit binder — note the doc comment at
+  `parser.mly:949–951` on how menhir resolves the shared `lower_name COLON
+  ty` prefix against a **record type**'s own `lower_name COLON ty` field
+  syntax by looking ahead to whether `PIPE` or `COMMA`/`RBRACE` follows) and
+  **record types** (`TyRecord`, `{ l₁: t₁, l₂: t₂, … }` — note the field
+  separator is `:`, not `=`, the same convention `ty_record_field`
+  (`parser.mly:957–958`) and record *literal*/*pattern* syntax share
+  elsewhere in the grammar).
+- **`ty_app`** (`parser.mly:922–928`) — type-constructor application with
+  arguments, `Foo(a, b, …)` → `TyCon (Foo, [a; b; …])` (plus the
+  dotted-module-path variant, `parser.mly:925–927`, joined the same way
+  `ty_atom`'s dotted case is). This is how every generic user type is
+  written: `List(Int)`, `Option(a)`, `Pair(a, b)` — there is no dedicated
+  sugar production for `Option`/`Result` specifically. Both are compiler
+  **builtins** registered directly in the typechecker's arity table
+  (`Option` arity 1, `Result` arity 2 — `lib/typecheck/typecheck.ml:1816,
+  1818`), not `type`/`ptype` declarations anywhere in `stdlib/`
+  (`stdlib/option.march`'s own doc comment says outright: "The type
+  `Option(a)` is a builtin with constructors `Some` and `None`"), but from
+  the **type-expression grammar's** point of view they are ordinary
+  `TyCon`-with-args applications through `ty_app`, exactly like any
+  user-defined generic type — `Option(Int)`/`Result(a, String)` parse via
+  the same production as `Pair(a, b)` in this chapter's own corpus witness
+  (below); there is no special-cased "option-type"/"result-type" grammar
+  rule to document separately.
+- **`ty_nat_mul`/`ty_nat_add`** (`parser.mly:914–920`) — left-associative
+  `+`/`*` over types, but **only meaningful over `TyNat`/`TyNatOp`
+  operands** (type-level arithmetic on natural-number index types, e.g. a
+  fixed-size-vector length expression); reusing the same `PLUS`/`STAR`
+  tokens the value-level grammar uses for `expr_add`/`expr_mul` (§4.5)
+  causes no ambiguity because `ty` and `expr` are parsed from disjoint
+  contexts (a `ty` only ever appears after a `COLON`/inside a `type_annot`/
+  `ret_annot`/`ty_atom`'s own parens, never interchangeably with `expr`).
+  Ordinary generic types (`List(Int)`, records, tuples) never reach this
+  stratum's operator alternatives at all — they fall straight through
+  `ty_nat_mul`/`ty_nat_add` to `ty_app`/`ty_atom` — so in practice almost
+  all type annotations are "atoms and applications," and the nat-arithmetic
+  strata are dormant machinery for a narrow feature.
+- **`ty` itself** (`parser.mly:910–912`) — `TyArrow`, function types. **The
+  production is right-recursive on the right operand (`ty`, the full
+  nonterminal again) and left-bounded by one stratum down
+  (`ty_nat_add`)** — the identical shape §4.6's prefix `expr_unary` used for
+  right-associativity, just with the roles of "self" and "one-down"
+  swapped to the arrow's right and left sides respectively. This makes
+  `->` **right-associative**: `A -> B -> C` parses as `A -> (B -> C)`, a
+  curried one-argument-at-a-time function type, not `(A -> B) -> C`. There
+  is no `%prec`/precedence declaration involved — as with `expr_add`/
+  `expr_mul`'s left-associativity (§4.5), the associativity is a pure
+  consequence of which side of the production recurses into `ty` again vs.
+  drops to `ty_nat_add`, with no menhir conflict to resolve at all (unlike
+  `expr_unary`'s prefix-`MINUS` case, which did need `%left MINUS` to
+  disambiguate against `expr_add`'s infix use of the same token — `ty` has
+  no competing use of `ARROW` to disambiguate against).
+
+### 7.2 Value-witnessing arrow-associativity, generics, tuple and record types
+
+[`parse/p13_rich_type_annotation.march`](grammar/parse/p13_rich_type_annotation.march)
+exercises every claim above in one program:
+
+- `fn build(mk: Int -> (Int, Int) -> { x: Int, y: Int }, scale: Int, pair:
+  (Int, Int))` — `mk`'s annotation, read right-associatively per 7.1, is `Int
+  -> ((Int, Int) -> { x: Int, y: Int })`: a function taking an `Int` and
+  returning a function from a **tuple type** `(Int, Int)` to a **record
+  type** `{ x: Int, y: Int }` (`:`-separated fields, §7.1). The body calls
+  `mk(scale)` (one argument, consuming the outer arrow) and then applies the
+  result to `pair` as a *separate* statement (`step(pair)`, not the chained
+  `mk(scale)(pair)` shape — see the finding below on why this matters), so
+  the program only typechecks at all if `mk`'s type really did parse as a
+  2-step curried arrow rather than, say, a 2-argument function type (which
+  the grammar has no production for anyway — `ty` has no `(A, B) -> C`
+  multi-arg-arrow alternative; multi-argument functions are always
+  `A -> (B -> C)` curried arrows or a single tuple-typed argument, never
+  both at once as one production).
+- `type Pair(a, b) = MkPair(a, b)` and `fn swap(p: Pair(a, b))` — a
+  **generic user type** (`type_params (a, b)` at the declaration,
+  `parser.mly:907–908`) referenced in a function signature via `ty_app`
+  (`Pair(a, b)`, with `a`/`b` as `TyVar`s, resolved by inference to
+  `Pair(Int, String)` at the call site `swap(MkPair(1, "one"))`) — proves
+  `ty_app`'s constructor-application production accepts type variables as
+  arguments, not just concrete `TyCon`s.
+- Running the program (not just `--check`) prints `10`, `20`, `one` — the
+  `10`/`20` are only obtainable if `build`'s curried-arrow parameter really
+  invoked as `mk(scale)` then `step(pair)` (each producing the expected
+  scaled record field), and `one` is only obtainable if `swap`'s generic
+  `Pair(a, b)` annotation let `MkPair(1, "one"))` unify as `Pair(Int,
+  String)` and the match-arm destructure/reconstruct round-tripped the
+  first element back out correctly.
+
+### 7.3 Finding: `f(1)(2)` silently mis-splits into two statements outside operand position
+
+While building this section's corpus, a gap in §4.7's existing claim
+surfaced. §4.7 states "chained direct calls like `f(1)(2)` do not parse,"
+witnessed there by `adder(1)(2)` as a `println(...)` **argument** — correct
+in that position: `println(adder(1)(2))` does fail with `` I got stuck
+here `` at the second `(`, because `expr_app` has no production admitting a
+further `LPAREN … RPAREN` after it has already reduced. **But the same
+`adder(1)(2)` text, written as (or ending) a bare `block_expr` rather than
+as an operand nested inside another expression, does not raise any parse
+error at all** — confirmed live: `let r = adder(1)(2)` inside a function
+body typechecks and runs with no diagnostic, but `r` is bound to
+`adder(1)` alone (a closure value, prints `<fn>`), and the trailing `(2)`
+silently becomes a **second, independent `block_expr`** — a
+parenthesized-expression statement whose value is simply discarded unless
+it happens to be the block's last expression (confirmed further: a
+side-effecting `adder(1)(side(99))` prints `99` — `side` really does run —
+proving `(side(99))` is parsed and evaluated as its own statement, not
+folded into the preceding call). This falls directly out of §5.1's own
+rule (`block_body` is `nonempty_list(block_expr)`, no separator needed,
+`parser.mly:992–994`): once `adder(1)` reduces to a complete `expr`/
+`block_expr`, a following `(`-led token is perfectly capable of starting a
+brand-new `block_expr` (the `LPAREN expr RPAREN` alternative of
+`expr_atom`, §4.9), and nothing in `block_body`'s grammar requires the two
+to be related. **This is a documentation-precision gap, not a parser bug**
+— the behavior is exactly what the stated grammar predicts once §4.7 and
+§5.1 are read together, but §4.7's blanket phrasing ("does not parse")
+reads as though the rejection is universal, when it is actually
+position-dependent (argument/operand position: hard parse error; bare
+block-statement position: silently reparses as two statements with no
+error at all, which is arguably the more surprising outcome for a reader to
+miss). Filed in `specs/todos.md` as a doc-precision follow-up for §4.7
+rather than corrected here, since Task 4's scope is §6–§7 and this chapter's
+process requires no drive-by edits to an earlier task's already-committed
+section; no `parser.mly` change is warranted (there is no bug to fix — the
+grammar behaves exactly as its own rules, taken together, predict).
+
 ## Conformance corpus
 
 This chapter is backed by a runnable parse/reject corpus at
@@ -1210,16 +1623,15 @@ preprocessing layers); Task 2 added six more (`p03`–`p08`, `r03`–`r04`)
 anchoring §4's precedence/associativity claims and the list-comprehension
 grammar; Task 3 added five more (`p09`–`p11`, `r05`–`r06`) anchoring §5's
 block-sequencing, `if`/`else if`, `match`/`cond` arm-boundary, and `let?`
-placement rules — 17 programs total (11 `parse/`, 6 `reject/`) as of this
-pass. Tasks 4–5 grow it further alongside §6–§9.
+placement rules; Task 4 added five more (`p12`–`p14`, `r07`–`r08`) anchoring
+§6's nested-pattern/generic-type/atom-and-list-pattern claims and the
+`PatRecord`/`PatAs` reachability findings — 22 programs total (14 `parse/`,
+8 `reject/`) as of this pass. Task 5 grows it further alongside §8–§9.
 
 ---
 
 ## Coming in later tasks (not yet written)
 
-- **§6 Patterns** — `simple_pattern`/`pattern`, reachability
-  (`PatRecord`/`PatAs`) (Task 4).
-- **§7 Types** — the type-expression grammar (Task 4).
 - **§8 Declarations** — `mod`, `fn`/`pfn`, `type`/`ptype`, `use`/`import`,
   `interface`/`impl` (Task 5).
 - **§9 DSL appendix** — actors, capabilities, protocols, transitions,

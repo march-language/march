@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p11 parse, r01–r06 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06)
+# Grammar corpus index (p01–p14 parse, r01–r08 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 17/17 — 11 parse, 6
+Exit 0 iff every program behaves as declared (currently 22/22 — 14 parse, 8
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -62,12 +62,21 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p11_if_else_if_chain.march`](parse/p11_if_else_if_chain.march) | §5.2 `if`/`else` — "`else if`" is `else` + a nested `if…end`, not a dedicated production | A 4-way `if … else if … else if … else … end end end` classification chain — note the three stacked trailing `end`s, one per nested `if`, since there is no `ELSIF` token/production eliding them. Prints `negative`/`zero`/`small`/`large` for `-5`/`0`/`3`/`100`. |
 | [`reject/r05_letq_last_in_block.march`](reject/r05_letq_last_in_block.march) | §5.4 `let?` position constraint | `fn f() do let? x = Ok(1) end` — `let?` as the last `block_expr`. Parses fine (`fold_letq` produces `ELetQ(p, e, EBlock([], sp), sp)`); rejected at **typecheck**, not parse (`Typecheck.infer_expr`'s `ELetQ` case matches the empty-`EBlock` continuation). `march --check` still exits 1. Captured live: `` `let?` cannot be the last expression in a block. ``. |
 | [`reject/r06_if_missing_else.march`](reject/r06_if_missing_else.march) | §5.2 `if` requires `else` — no bare `if` | `if x > 0 do 1 end` with no `else` branch — a genuine **parse**-stage rejection (`parser.mly:1058–1062`'s dedicated `error` alternative fires before typechecking). Captured live: `` March `if` expressions always need an `else` branch: ``. |
+| [`parse/p12_nested_constructor_tuple_pattern.march`](parse/p12_nested_constructor_tuple_pattern.march) | §6.2 `pattern` — constructor patterns nesting a tuple pattern (`PatCon` wrapping `PatTuple`) | `match Pair(2, (3, 4)) do Pair(scale, (a, b)) -> ... end` destructures both the constructor's own args and its nested tuple arg in one pattern. Prints `14` (`2 * (3 + 4)`) — only obtainable if the nested destructure bound `scale=2, a=3, b=4` correctly. |
+| [`parse/p13_rich_type_annotation.march`](parse/p13_rich_type_annotation.march) | §7.1 `ty` ladder — arrow right-associativity, tuple types, record types, generic `ty_app` | `mk: Int -> (Int, Int) -> { x: Int, y: Int }` parses as `Int -> ((Int, Int) -> {x,y})` per §7.1's right-recursive `ty` production; `type Pair(a, b) = MkPair(a, b)` exercises `type_params` + `ty_app` with type-variable arguments. Prints `10`, `20`, `one` — the curried arrow, tuple/record types, and generic instantiation all resolved as documented. |
+| [`parse/p14_list_and_atom_payload_patterns.march`](parse/p14_list_and_atom_payload_patterns.march) | §6.2 `pattern` — atom patterns (`PatAtom`) and §6.1 list-literal pattern sugar (`PatCon(Cons/Nil, …)`) | `:ok(n)`/`:error(_msg)` atom-payload patterns and `[a, b]`/`[a, b, c]`/`[]` list-literal patterns in the same program. Prints `70`, `-1`, `3`, `6`, `0` — each value only obtainable if the corresponding atom/list-arity arm matched. |
+| [`reject/r07_record_pattern_in_let_unreachable.march`](reject/r07_record_pattern_in_let_unreachable.march) | §6.3 reachability — `PatRecord` unreachable, witnessed at a second call site (`let`, not `match`) | `let { x } = r` — `simple_pattern` (what `let` accepts, §6.2) has no `LBRACE`-led alternative, same as full `pattern`. Captured live: `I got stuck here`. |
+| [`reject/r08_as_pattern_unreachable.march`](reject/r08_as_pattern_unreachable.march) | §6.3 reachability — `PatAs` unreachable | `match 1 do x as y -> y end` — `x` fully reduces to `pattern` via the ordinary route, so `branch`'s dedicated error-recovery alternative fires wanting `ARROW`, not menhir's generic fallback. Captured live: `` I was expecting `->` in the match arm here ``. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
 the `if`/`else if` stacking rule, the three-way `match` arm-boundary
 witness, and the `let?`-last-in-block constraint (a typecheck-stage
 rejection, called out explicitly since every other `reject/` program here
-pins a parse-stage diagnostic). Later tasks (4–5) will extend this table
-with the pattern/type and declaration-form corpora; see
+pins a parse-stage diagnostic). Task 4 (§6 Patterns, §7 Types) added
+p12–p14/r07–r08: a nested constructor+tuple pattern, a rich curried/tuple/
+record/generic type annotation, atom- and list-literal patterns, and the
+two new `PatRecord`/`PatAs` reachability witnesses (`r02` from Task 1 is
+the third, promoted to primary status in §6.3). Task 5 will extend this
+table with the declaration-form corpus; see
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task breakdown.

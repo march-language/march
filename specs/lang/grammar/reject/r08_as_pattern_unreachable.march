@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: I was expecting `->` in the match arm here
+mod R08AsPatternUnreachable do
+  fn main() do
+    match 1 do
+      x as y -> y
+    end
+  end
+end
