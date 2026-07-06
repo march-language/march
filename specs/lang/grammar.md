@@ -2,11 +2,13 @@
 
 > Part of the March Language Reference — see [specs/lang/index.md](index.md).
 
-**v1 (in progress) · 2026-07-06 · Tasks 1–4: preprocessing layers (lexer +
+**v1 (in progress) · 2026-07-06 · Tasks 1–5: preprocessing layers (lexer +
 `token_filter`), the expression precedence ladder (§4), blocks/
-statements/significant-newline semantics (§5), and patterns/types (§6–§7,
-including the `PatRecord`/`PatAs` reachability finding) formalized;
-declaration grammar (§8–§9) not yet written.**
+statements/significant-newline semantics (§5), patterns/types (§6–§7,
+including the `PatRecord`/`PatAs` reachability finding), and declaration
+forms + a lighter DSL appendix (§8–§9, including the multi-head-`fn`-merge
+mechanism and the one-`mod`-per-file rule) formalized. Task 6 (consolidation
++ CI-wiring) remains.**
 
 **Depends on:** `specs/plans/2026-07-06-resolved-grammar-plan.md` (the
 implementation plan this chapter is built task-by-task from).
@@ -1594,6 +1596,533 @@ process requires no drive-by edits to an earlier task's already-committed
 section; no `parser.mly` change is warranted (there is no bug to fix — the
 grammar behaves exactly as its own rules, taken together, predict).
 
+## 8. Declarations (core)
+
+Source: `lib/parser/parser.mly` (`module_` at `parser.mly:231–255`;
+`decl_list_r` at `parser.mly:262–267`; `decl` at `parser.mly:275–334`, plus
+each named `*_decl` rule it dispatches to). Unlike §4–§7, declarations are
+parsed directly off the **filtered** token stream at the outermost level —
+`module_`/`decl_list_r` never sit inside a `Match`/`Paren` context, so none
+of §3's newline-glom machinery is in play here; a `decl` boundary is decided
+purely by which fixed keyword (`FN`, `LET`, `TYPE`, `MOD`, `USE`, …) starts
+the next token, exactly the same "leading-keyword dispatch, no lookahead
+needed" shape §4.1 already used for `expr`'s `IF`/`MATCH`/`WITH`
+alternatives.
+
+### 8.1 `mod … do … end` — the module wrapper, and the one-`mod`-per-file rule
+
+```ebnf
+module_   ::= "mod" upper_dot_path "do" decl_list_r "end" EOF
+
+decl_list_r ::= decl*
+```
+
+(`parser.mly:231–234`, `262–264`.) A March **file** is exactly one top-level
+`mod NAME do … end` followed immediately by `EOF` — `upper_dot_path`
+(`parser.mly:717–719`) additionally allows a dotted path (`mod A.B.C do …
+end`), joined into one name by `join_mod_path` (`parser.mly:46–54`).
+**`mod` nested inside a `mod` body is a completely different, ordinary
+`decl` alternative** — `mod_decl` (`parser.mly:632–640`), reachable through
+`decl`'s `d = mod_decl { d }` line (`parser.mly:315`) — so `mod Outer do mod
+Inner do … end end` (a nested submodule) parses fine; what's disallowed is
+a **second `mod` at the top level of the file**, after the first one's
+closing `end`.
+
+`module_` has three additional alternatives, all of which unconditionally
+raise a diagnostic rather than accept (`error_raise`/`raise
+(ParseError …)`, never returning a value) — precisely the same "every
+extra alternative is a rejection with a better message" pattern §5.2's `if`
+error-recovery alternatives already established:
+
+- **A complete `mod … end` followed by more tokens before `EOF`**
+  (`parser.mly:240–245`) is the one-`mod`-per-file rule's own diagnostic:
+  `MOD; _path = upper_dot_path; DO; _decls = decl_list_r; END; error` raises
+  `` A file may have only one top-level `mod`; everything else must live
+  inside it. `` with a suggested fix showing the nested-`fn` shape. This is
+  the alternative a second top-level `mod A2 do … end` hits: the first
+  `mod` closes cleanly at its `END`, then the second `MOD` token is exactly
+  what `error` matches here. Confirmed live by
+  [`reject/r10_second_top_level_mod_rejected.march`](grammar/reject/r10_second_top_level_mod_rejected.march)
+  — two top-level `mod … end` blocks in one file, `march --check` exits 1
+  with the message above, verbatim.
+- `MOD; _n = upper_dot_path; error` (`parser.mly:246–250`) — a `mod Name`
+  with no `do` at all: `` I was expecting `do` to start the module body
+  here: ``.
+- A bare `error` with nothing recognizable at all (`parser.mly:251–255`) —
+  the file doesn't even start with `MOD`: `` March programs must start
+  with a module declaration: ``.
+
+### 8.2 `fn` / `pfn` — function declarations, and how multi-head clauses merge
+
+```ebnf
+fn_decl ::= "fn"  lower_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "fn"  lower_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "pfn" lower_name "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+          | "pfn" lower_name "[" fn_bound_param,+ "]" "(" fn_param,* ")" ret_annot? when_guard? "do" block_body "end"
+```
+
+(`parser.mly:341–397`; the bracketed `fn_bound_param,+` form,
+`parser.mly:339, 355–369, 383–397`, is a bounded-generic parameter list,
+e.g. `fn max[a: Ord](x: a, y: a) do … end` — orthogonal to the multi-head
+mechanism below.) **Each of these four alternatives builds exactly one
+`DFn`, carrying exactly one clause** (`fn_clauses = [{ fc_params = params;
+fc_guard = guard; fc_body = body; … }]`, `parser.mly:349–352` etc.) — the
+grammar itself has **no production for a multi-clause function
+declaration**; `fn foo(0) do … end` and a following `fn foo(n) do … end`
+are, to `decl`/`fn_decl`, two entirely unrelated, complete `DFn` values,
+indistinguishable in shape from two functions with different names.
+
+**Multi-head merging happens entirely outside the grammar, in one
+post-parse pass over the declaration list: `group_fn_clauses`
+(`parser.mly:67–112`, doc comment `56–66`), invoked once on the `decl_list_r`
+each of `module_` (`parser.mly:234`) and nested `mod_decl` (`parser.mly:635`)
+produces.** It is a linear left-to-right fold over the flat `decl list`
+that:
+
+1. Walks the list; on each `DFn` it finds, scans strictly **forward**
+   through `collect_same` (`parser.mly:75–80`) absorbing every
+   **immediately-following** `DFn` with the **same `fn_name.txt`**,
+   concatenating their `fn_clauses` lists in source order
+   (`clauses_acc @ d.fn_clauses`) and taking the **first** non-`None`
+   return-type annotation seen among the group (`parser.mly:77`) — so only
+   one clause in a multi-head group needs (or may state) a `ret_annot`, and
+   the parser does not require them to agree syntactically (typechecking is
+   a separate, later pass).
+2. Anything that isn't part of that adjacent run — a different name, or a
+   non-`DFn` declaration — ends the group and the fold continues from
+   there (`parser.mly:83`, `d :: rest -> go (d :: acc) rest`).
+3. **Adjacency is required, and non-adjacency is a hard error, not silent
+   shadowing.** After grouping, a second validation pass
+   (`parser.mly:88–111`) walks the *grouped* output and raises if any `DFn`
+   name appears **twice** in it — which can only happen if the same
+   function name occurred in two non-adjacent positions in the original
+   source (e.g. another declaration, or an unrelated function, sitting
+   between two `fn foo` groups) — with the message `` clauses of `%s` must
+   be adjacent; earlier clauses at line %d would be silently unreachable ``
+   (`parser.mly:100–103`), naming the earlier group's line and suggesting
+   moving the clauses together. Confirmed live (not committed as a separate
+   corpus program, since the plan's Task 5 scope calls for the merge itself
+   plus the two named reject programs, not every error path): a three-`fn`
+   program with `fn f(0) do … end`, an unrelated `fn g() do … end` in
+   between, then a second `fn f(n) do … end` is rejected with exactly this
+   message, naming the first `fn f`'s line.
+
+**Net effect: consecutive same-name `fn`/`pfn` clauses become one
+`DFn`/multi-clause function**, later compiled as ordinary pattern-matching
+dispatch over the clauses in source order (each clause's `fc_params`
+becoming one match arm) — this is what makes `fn fib(0) do 0 end` / `fn
+fib(1) do 1 end` / `fn fib(n) do fib(n-1)+fib(n-2) end`, written as three
+textually separate `fn` declarations, behave as a single three-armed
+function. Value-witnessed by
+[`parse/p15_multi_head_fn_merge.march`](grammar/parse/p15_multi_head_fn_merge.march):
+running it (not just `--check`) prints `55` — `fib(10)` is only obtainable
+if all three heads merged into one dispatching function (a lone `fn fib(n)
+do fib(n-1)+fib(n-2) end`, with no base cases, would never terminate; a lone
+`fn fib(0)`/`fn fib(1)` would never be reached for `n = 10` if the three
+were somehow kept as three independent, non-merged single-clause
+functions — the only way `println(fib(10))` produces `55` and returns is if
+`group_fn_clauses` really did fold all three into one 3-clause `DFn`
+compiled as a 3-arm match).
+
+There are also two grammar-level error-recovery alternatives specific to
+`fn_decl` (`parser.mly:398–407`), both firing when the parameter list closes
+but no `do` follows: `` I was expecting `do` to start the function body
+here: `` for both `fn` and `pfn`.
+
+### 8.3 `let` declarations
+
+```ebnf
+let_decl ::= "let" simple_pattern type_annot? "=" expr
+```
+
+(`parser.mly:424–427`, `DLet (Public, …)` — module/top-level `let`, reachable
+through `decl`'s `d = let_decl { d }` line, `parser.mly:307`.) This is the
+**module-level** `let` — a different production from `block_expr`'s `let`
+(§5.1, `parser.mly:997`), though both share the identical
+`simple_pattern type_annot? "=" expr` shape and both are restricted to
+`simple_pattern`, not full `pattern` (§6.2's restriction applies
+identically here: a bare constructor pattern needs `simple_pattern`'s own
+parenthesization escape hatch, `let (Some(x)) = expr`, to bind at module
+level too). A missing `=` after the pattern/annotation is caught by a
+dedicated error alternative (`parser.mly:428–432`): `` I was expecting `=`
+in the let binding here: ``. Module-level `let` is always public
+(`DLet (Public, …, _)` — the constructor argument is hardcoded, not derived
+from a keyword choice); there is no `plet`/private module-level `let`
+production in the grammar.
+
+### 8.4 `type` / `ptype` — variant, record, and generic declarations
+
+```ebnf
+type_decl ::= "opaque"? "type" upper_name type_params? "=" variant ("|" variant)*
+            | "opaque"? "type" upper_name type_params? "=" "{" ty_record_field,* "}"
+            | "ptype" upper_name type_params? "=" variant ("|" variant)*
+            | "ptype" upper_name type_params? "=" "{" ty_record_field,* "}"
+            | "alwayslinear" "type" upper_name type_params? "=" variant ("|" variant)*
+            | "alwayslinear" "type" upper_name type_params? "=" "{" ty_record_field,* "}"
+            | "tag" upper_name                                (* sugar: type Foo = Foo *)
+
+type_params ::= "(" lower_name,+ ")"
+
+variant ::= upper_name ("(" ty,+ ")")?
+          | ATOM ("(" ty,+ ")")?
+```
+
+(`parser.mly:434–478`; `type_params` at `parser.mly:907–908`; `variant` at
+`parser.mly:964–972`.) Eight declaration-site alternatives (four
+visibility/linearity prefixes × {variant body, record body}), plus the
+`tag` sugar and two error-recovery alternatives, all funneled through one
+`type_decl` rule:
+
+- **`type`**/**`opaque type`** are both `DType (Public, …)` — visible,
+  public type declarations. The *only* difference `opaque` makes at the
+  grammar level is that its variant-body alternative maps every variant's
+  visibility to `Private` before constructing the `DType`
+  (`parser.mly:439`, `List.map (fun v -> { v with var_vis = Private }) …` —
+  contrast the plain `type` variant-body alternative, `parser.mly:445–448`,
+  which keeps each `variant`'s own visibility, always `Public` per the
+  `variant` production above since `var_vis = Public` is hardcoded there
+  too) — i.e. "the type name is public but its constructors are private to
+  the module," a visibility split at the constructor level the grammar
+  encodes by post-processing the parsed variant list, not by a different
+  production shape. `opaque`'s record-body alternative
+  (`parser.mly:441–444`) does not perform this remapping (records have no
+  per-field visibility concept at this level).
+- **`ptype`** is `DType (Private, …)` — the type name itself is private to
+  the module (§8.6 states the general public/private convention this
+  mirrors).
+- **`alwayslinear type`** builds a distinct AST node, `DAlwaysLinearType`
+  (`parser.mly:461–468`), not `DType` — March's linear-types facility for a
+  type whose values must always be used exactly once; grammar-wise it is
+  the same variant/record body shapes, just tagged into a different
+  top-level constructor.
+- **`tag Foo`** (`parser.mly:469–473`) is pure sugar: it builds
+  `DType (Public, Foo, [], TDVariant [{ var_name = Foo; var_args = []; … }],
+  …)` directly in the parser action — exactly equivalent to writing `type
+  Foo = Foo` by hand, a zero-argument phantom-label type used for
+  compile-time tagging.
+- **Generic parameters** (`type_params`, `parser.mly:907–908`) are an
+  explicit, parenthesized list of **lowercase** names right after the type
+  name — `type Pair(a, b) = MkPair(a, b)` — the one place in the grammar a
+  generic's type variables **are** explicitly bound at the declaration
+  (contrast §7.1's note that a `fn` signature's type variables are always
+  implicit/inferred, never declared this way).
+- **Variant bodies** (`separated_nonempty_list(PIPE, variant)`) are
+  pipe-separated `variant`s, each either a bare name/atom (nullary
+  constructor, `var_args = []`) or a name/atom applied to a parenthesized,
+  comma-separated list of **types** as its argument shapes (`var_args = […]`)
+  — the `ATOM`-headed alternatives (`parser.mly:969–972`) mean an atom like
+  `:ok`/`:error` can be used as a variant constructor name interchangeably
+  with an `UPPER_IDENT` one, e.g. `type Status = :ok | :error(String)`.
+- **Record bodies** (`LBRACE ty_record_field,* RBRACE`) are the same
+  `{ label: Type, … }` shape §7.1 already introduced for record *types*;
+  here it's a fresh type declaration's sole body rather than an inline
+  type expression.
+- A `TYPE; upper_name; error` alternative (`parser.mly:474–478`) fires when
+  no `=` follows the name: `` I was expecting `=` after the type name
+  here: ``.
+
+Value-witnessed (generics + record body together) by
+[`parse/p17_generic_type_record_variant.march`](grammar/parse/p17_generic_type_record_variant.march):
+`type Box(a) = { value: a, label: String }` (a one-type-parameter record
+type) and `type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))` (a
+self-referential generic variant type, `Tree(a)` used as one of `Node`'s
+own argument types) in the same program, run (not just `--check`) to print
+`42`, `answer`, `2` — the record field accesses and the recursive `depth`
+match over `Leaf`/`Node` only produce these values if both declarations
+parsed with their generic parameter correctly threaded through.
+
+### 8.5 `use` / `import` / `alias` — import forms and selectors
+
+```ebnf
+use_decl    ::= "use" upper_name use_path_tail
+use_path_tail ::= ε                                            (* UseSingle *)
+                | "." "*"                                       (* UseAll *)
+                | "." "{" lower_name,* "}"                      (* UseNames *)
+                | "." lower_name                                (* UseNames [one] *)
+                | "." upper_name use_path_tail                  (* recurse deeper *)
+
+import_decl ::= "import" upper_name import_path_tail
+import_path_tail ::= ε                                          (* UseAll *)
+                    | "," "only" ":" "[" lower_name,* "]"        (* UseNames *)
+                    | "," "except" ":" "[" lower_name,* "]"      (* UseExcept *)
+                    | "." "{" any_name,* "}"                     (* UseNames *)
+                    | "." upper_name import_path_tail            (* recurse deeper *)
+
+alias_decl ::= "alias" upper_dot_path "," "as" ":" upper_name
+             | "alias" upper_dot_path "as" upper_name
+             | "alias" upper_dot_path                            (* alias to its own last segment *)
+```
+
+(`use_decl` at `parser.mly:647–650`, `use_path_tail`/`use_selector` at
+`parser.mly:659–672`; `import_decl` at `parser.mly:679–682`,
+`import_path_tail` at `parser.mly:691–700`; `alias_decl_rule` at
+`parser.mly:703–710`.) Both `use` and `import` build the same `DUse` AST
+node — they are two alternative surface **spellings** for the same import
+facility, not two different features: `use A.B.*`/`use A.B.{f, g}`/`use
+A.B.foo`/`use A` (Elm/OCaml-flavored dotted-path style, right-recursive tail
+so the lookahead after each `.` — `UPPER_IDENT` vs `LOWER_IDENT` vs `*` vs
+`{` — unambiguously selects the next alternative, per the doc comment at
+`parser.mly:642–646, 652–658`) vs. `import Mod`/`import Mod.Sub, only:
+[f,g]`/`import Mod.Sub, except: [f,g]`/`import Mod.Sub.{A, B}`
+(Elixir-flavored comma-clause style, doc comment `parser.mly:674–678,
+684–690`). `alias` is a separate declaration (`DAlias`, not `DUse`) that
+introduces a short name for a long dotted path, in either `alias Long.Name,
+as: Short` (Elixir-style keyword-clause) or `alias Long.Name as Short`
+(bare `as`) spelling, or with no rename at all (`alias Long.Name` aliases
+to the path's own last segment).
+
+### 8.6 `interface` / `impl` — typeclass-style method signatures and implementations
+
+```ebnf
+interface_decl ::= "interface" upper_name "(" lower_name ")"
+                       ("requires" constraint_expr,+)?
+                       "do" method_sig* "end"
+
+method_sig ::= "fn" lower_name ":" ty ("do" expr "end")?
+
+impl_decl ::= "impl" upper_dot_path "(" ty ")"
+                 ("when" constraint_expr,+)?
+                 "do" fn_decl* "end"
+
+constraint_expr ::= upper_dot_path "(" ty ")"
+```
+
+(`interface_decl` at `parser.mly:771–781`; `method_sig` at
+`parser.mly:788–794`; `impl_decl` at `parser.mly:799–814`; `constraint_expr`
+at `parser.mly:821–825`.) `interface` declares a typeclass-shaped bundle of
+method signatures parameterized over one type variable (the single
+`lower_name` in parens — March interfaces are single-parameter, unlike
+`type_params`' arbitrary arity), each `method_sig` being a bare `fn name: ty`
+signature with an **optional default implementation**
+(`preceded_by_do_end(expr)`, `parser.mly:790, 793–794` — a `do expr end`
+body supplying a default method body inline in the interface itself,
+usable when an `impl` doesn't override it). An optional `requires` clause
+(`parser.mly:773`) names superclass interface constraints, e.g. `interface
+Ord(a) requires Eq(a) do … end`. `impl` implements an interface for one
+concrete type (`upper_dot_path` so `impl Conduit.Storage(T) do … end`
+reaches an interface through a dotted module path, per the doc comment
+`parser.mly:796–798`), with an optional `when` clause of further
+constraints (`parser.mly:801`), and a body of ordinary `fn_decl`s
+(`list(fn_decl)`, `parser.mly:802`) — so each method body inside an `impl`
+is parsed by the exact same `fn_decl` production §8.2 already describes,
+including its own multi-head-clause eligibility (an `impl` method can, in
+principle, be written as multiple same-name `fn` heads too, since
+`impl_methods` just filters the parsed `fn_decl` list down to `DFn`s,
+`parser.mly:810–813`, though `group_fn_clauses` is never re-invoked at this
+level — only `module_`/`mod_decl` group_fn_clauses their own top `decl`
+list, so multi-head merging inside an `impl` body is not exercised by this
+pass's corpus and left as a documented, untested-here gap). Both
+`interface`/`impl` have their own error-recovery alternatives for a missing
+parenthesized parameter (`parser.mly:782–786, 815–819`).
+
+Value-witnessed together (an interface with one method, an `impl` for a
+two-constructor `type`, dispatched through the interface's method name) by
+[`parse/p16_interface_impl_pair.march`](grammar/parse/p16_interface_impl_pair.march):
+running it (not just `--check`) prints `circle:5` then `square:3` — only
+obtainable if `describe`'s `impl`-provided body actually dispatched on the
+`Shape` variant's two constructors correctly, proving both the `interface`
+signature and the `impl` body parsed and wired together as one method.
+
+### 8.7 `derive` / `satisfy`
+
+```ebnf
+derive_decl  ::= "derive" upper_name,+ "for" upper_name
+satisfy_decl ::= "satisfy" upper_name,+ "for" upper_name,+
+```
+
+(`derive_decl` at `parser.mly:480–483`; `satisfy_decl` at
+`parser.mly:485–488`.) `derive Eq, Show for Shape` (`DDeriving`) requests
+compiler-synthesized instances of one or more interfaces for a single named
+type. `satisfy Eq for Int, String` (`DSatisfy`) is the converse shape — one
+or more interfaces asserted to already be satisfied by one or more named
+types (used to assert conformance for types the compiler cannot
+auto-derive, e.g. builtins) — note `satisfy`'s **second** list is also
+plural (`upper_name,+` for the type side too), unlike `derive`'s single
+target type.
+
+### 8.8 Visibility: `fn`/`type` public, `pfn`/`ptype` private, no `pub` keyword
+
+March spells declaration visibility as **a different leading keyword**,
+never as a modifier on a shared one:
+
+| Public | Private | Grammar evidence |
+|---|---|---|
+| `fn` | `pfn` | `fn_decl`'s four alternatives (§8.2) hardcode `fn_vis = Public` for the `FN`-led ones (`parser.mly:345, 360`) and `fn_vis = Private` for the `PFN`-led ones (`parser.mly:373, 388`) — visibility is baked into which keyword token started the declaration, not a separate field parsed from the source. |
+| `type`/`opaque type` | `ptype` | `type_decl`'s alternatives construct `DType (Public, …)` for `TYPE`/`OPAQUE TYPE` (`parser.mly:440, 444, 448, 452`) and `DType (Private, …)` for `PTYPE` (`parser.mly:456, 460`) — same pattern, §8.4. |
+| module-level `let` | *(none)* | `let_decl` only ever builds `DLet (Public, …)` (`parser.mly:426`) — there is no `plet`/private-`let` keyword or production in the grammar at all. |
+
+**There is no `pub` keyword anywhere in the lexer or parser.** `grep -n
+"PUB\b" lib/lexer/lexer.mll lib/parser/parser.mly` (re-run live for this
+pass) returns nothing — no token, no keyword-table entry, no production.
+Writing `pub fn foo() do … end` therefore does not fail because `pub` is a
+recognized-but-rejected modifier; it fails because `pub` lexes as an
+ordinary `LOWER_IDENT` (it's just not in the keyword table), and
+`decl_list_r`'s only alternative for an unrecognized declaration-starting
+token sequence is its own catch-all `error` production
+(`parser.mly:265–267`): `ds = decl_list_r; error` raises the generic ``
+Parse error in declaration `` — there is no bespoke "`pub` is obsolete, did
+you mean `fn`?" diagnostic; `pub` is not special-cased at all, it is simply
+not a keyword, so `pub fn foo() …` parses exactly as far as an ordinary
+`LOWER_IDENT` `fn_attr`/`decl` alternative could take it (none can, since
+`pub` is followed by `fn`, not one of `fn_attr`'s own `AT`-led shapes) and
+then hits the generic declaration-error fallback. Confirmed live by
+[`reject/r09_pub_fn_keyword_rejected.march`](grammar/reject/r09_pub_fn_keyword_rejected.march)
+(`pub fn add(a, b) do … end`) — `march --check` exits 1 with exactly ``
+Parse error in declaration ``, pointing at the `pub` token, matching the
+plan's own prediction that this would be a generic rather than bespoke
+message.
+
+## 9. DSL appendix (lighter treatment)
+
+The remaining declaration forms are all **domain-specific sub-languages**
+layered on top of the same `decl`/token_filter machinery §1–§8 already
+describe in full — actors, applications, supervision trees, session-type
+protocols, capability manifests, and state-machine transitions. This
+section sketches each form's **shape** and cites its `parser.mly` rule so a
+reader can locate it, but — as the plan's Task 5 scope states explicitly —
+**does not** resolve every alternative, every error-recovery production, or
+every disambiguation rule the way §4–§8 do for the expression/pattern/type/
+core-declaration grammar. Treat this section as a map, not a full
+resolution: **`parser.mly` remains the authority for the exact grammar of
+every form below**, and fully resolving each one (in the same depth as
+§3.2's `choose…by` token_filter treatment, or §8.2's `group_fn_clauses`
+treatment) is explicitly out of scope for this pass — noted here as
+future-deepening work, not a gap being silently passed over.
+
+### 9.1 `actor` — actor declarations and message handlers
+
+```ebnf
+actor_decl ::= "actor" upper_name "do"
+                 "state" "{" field,* "}"
+                 "init" expr
+                 supervise_block?
+                 actor_handler*
+               "end"
+
+actor_handler ::= "on" upper_name "(" param,* ")" "do" block_body "end"
+```
+
+(`actor_decl` at `parser.mly:490–505`; `actor_handler` at
+`parser.mly:601–604`.) An actor bundles a `state { field: Type, … }` shape,
+an `init` expression producing the initial state, an optional nested
+`supervise do … end` block (§9.3), and zero or more `on Msg(params) do …
+end` message handlers — each handler pattern-matches on one message
+constructor. `actor_decl` also has its own missing-`do` error alternative
+(`parser.mly:491–495`).
+
+### 9.2 `app` / `on_start` / `on_stop` — application entry points
+
+```ebnf
+app_decl ::= "app" upper_name "do" on_start_block? on_stop_block? block_body "end"
+
+on_start_block ::= "on_start" "do" block_body "end"
+on_stop_block  ::= "on_stop"  "do" block_body "end"
+```
+
+(`app_decl` at `parser.mly:513–526`; `on_start_block`/`on_stop_block` at
+`parser.mly:528–534`.) `app` is the OTP-style application root: an optional
+`on_start`/`on_stop` lifecycle-hook block, each guarded by its own
+`option(...)`, followed by an ordinary `block_body` (typically a
+`Supervisor.spec(...)` call wiring up the supervision tree, §9.3). Its own
+missing-`do` error alternative is at `parser.mly:514–518`.
+
+### 9.3 `supervise` — supervision trees
+
+```ebnf
+supervise_block ::= "supervise" "do"
+                       "strategy" restart_strategy
+                       "max_restarts" INT "within" INT
+                       supervise_child*
+                     "end"
+
+restart_strategy ::= "one_for_one" | "one_for_all" | "rest_for_one"
+supervise_child  ::= upper_name lower_name
+```
+
+(`supervise_block` at `parser.mly:577–590`; `restart_strategy_tok` at
+`parser.mly:596–599`; `supervise_child` at `parser.mly:592–594`.) Nested
+inside an `actor_decl` (§9.1, as its optional `supervise_block?`), this
+names a fixed restart strategy, a restart-budget window
+(`max_restarts N within SECONDS`), and a list of `ChildActorType
+field_name` children supervised in that declared order (`sc_order`,
+`parser.mly:583, 587`).
+
+### 9.4 `protocol` / `choose` — binary session types
+
+```ebnf
+protocol_decl ::= "protocol" upper_name "do" protocol_step* "end"
+
+protocol_step ::= upper_name "->" upper_name ":" ty
+                 | "loop" "do" protocol_step* "end"
+                 | "choose" "by" upper_name ":" arm_sep? choose_branch (arm_sep choose_branch)* "end"
+
+choose_branch ::= "|"? lower_name "->" protocol_step*
+```
+
+(`protocol_decl` at `parser.mly:615–617`; `protocol_step` at
+`parser.mly:619–625`; `choose_branch` at `parser.mly:627–629`.) A `protocol`
+declares a binary session type as a sequence of directed message steps
+(`Sender -> Receiver : PayloadType`), an optional `loop do … end` repeating
+sub-sequence, and a `choose by Chooser: label -> steps… | label -> steps…
+end` branch point (§3.2 already covers the `token_filter`-level half of
+disambiguating this `CHOOSE` from `Chan.choose(...)` application syntax;
+this is the corresponding grammar-level production, using the same
+`arm_sep` — `NL`/`PIPE` — §5.3 defines for `match`).
+
+### 9.5 `transitions` — compiler-enforced state-machine transitions
+
+```ebnf
+transitions_decl ::= "transitions" upper_name "do" transition_arm* "end"
+
+transition_arm ::= upper_name ":" upper_name "->" upper_name "via" lower_name
+```
+
+(`transitions_decl` at `parser.mly:760–762`; `transition_arm` at
+`parser.mly:764–767`.) Each arm names a resource/handle type, a `From ->
+To` state pair, and the function (`via fn_name`) that performs that
+transition — used by March's linear-resource state-machine enforcement to
+check that a handle's state transitions only happen through the declared
+functions.
+
+### 9.6 Capability directives: `needs`, `proof cap`, and the five `cap …` forms
+
+```ebnf
+needs_decl     ::= "needs" cap_path,+
+proof_cap_decl ::= "proof cap" upper_name
+cap_no_panic_decl      ::= "cap no_panic"
+cap_pure_decl          ::= "cap pure"
+cap_no_extern_decl     ::= "cap no_extern"
+cap_deterministic_decl ::= "cap deterministic"
+cap_no_alloc_decl      ::= "cap no_alloc"
+
+cap_path ::= upper_name ("." upper_name)*
+```
+
+(`needs_decl` at `parser.mly:723–725`, `cap_path` at `parser.mly:727–729`;
+`proof_cap_decl` at `parser.mly:731–733`; the five `cap_*_decl` rules at
+`parser.mly:735–753`.) `needs IO.Network, IO.Clock` declares a module's
+required capability manifest as a comma-separated list of dotted
+capability paths. The five `cap …` forms and `proof cap` are each a
+**single fixed multi-word token** at the lexer level (§2.1 already notes
+`CAP_NO_PANIC`/`CAP_PURE`/`CAP_NO_EXTERN`/`CAP_DETERMINISTIC`/
+`CAP_NO_ALLOC` are matched as one lexer pattern each, whitespace baked in,
+`lexer.mll:175–180`) — so at the grammar level each is a trivial
+zero-argument declaration (`DOpts (["no_panic"], …)` etc., or `DProofCap
+(name, …)` for `proof cap SomeName`) that exists purely to record a
+module-level compiler-enforced option or a proof obligation; the
+interesting disambiguation work (telling `cap pure` the two-word directive
+apart from an identifier `cap` followed by an identifier `pure`) happens
+entirely in the lexer, not here.
+
+**This section is intentionally not exhaustive.** None of §9.1–§9.6 states
+every error-recovery alternative, resolves every menhir precedence
+interaction, or value-witnesses every corpus claim the way §4–§8 do —
+sketching shape + citation is the deliberate scope boundary for this pass.
+Deepening any of these to §4–§8's resolution level (full EBNF, every
+error-recovery message captured live, dedicated parse/reject corpus
+programs per form) is future work, not implied to be already done by this
+appendix's existence.
+
 ## Conformance corpus
 
 This chapter is backed by a runnable parse/reject corpus at
@@ -1625,14 +2154,8 @@ grammar; Task 3 added five more (`p09`–`p11`, `r05`–`r06`) anchoring §5's
 block-sequencing, `if`/`else if`, `match`/`cond` arm-boundary, and `let?`
 placement rules; Task 4 added five more (`p12`–`p14`, `r07`–`r08`) anchoring
 §6's nested-pattern/generic-type/atom-and-list-pattern claims and the
-`PatRecord`/`PatAs` reachability findings — 22 programs total (14 `parse/`,
-8 `reject/`) as of this pass. Task 5 grows it further alongside §8–§9.
-
----
-
-## Coming in later tasks (not yet written)
-
-- **§8 Declarations** — `mod`, `fn`/`pfn`, `type`/`ptype`, `use`/`import`,
-  `interface`/`impl` (Task 5).
-- **§9 DSL appendix** — actors, capabilities, protocols, transitions,
-  supervision (lighter treatment) (Task 5).
+`PatRecord`/`PatAs` reachability findings; Task 5 added five more
+(`p15`–`p17`, `r09`–`r10`) anchoring §8's multi-head-`fn`-merge,
+`interface`/`impl`, and generic-type/record-variant claims, plus the
+obsolete-`pub`-keyword and one-`mod`-per-file reachability/rejection
+findings — 27 programs total (17 `parse/`, 10 `reject/`) as of this pass.

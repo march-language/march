@@ -1,0 +1,21 @@
+mod P16InterfaceImplPair do
+  interface Describable(a) do
+    fn describe: a -> String
+  end
+
+  type Shape = Circle(Int) | Square(Int)
+
+  impl Describable(Shape) do
+    fn describe(s) do
+      match s do
+        Circle(r) -> "circle:" ++ to_string(r)
+        Square(side) -> "square:" ++ to_string(side)
+      end
+    end
+  end
+
+  fn main() do
+    println(describe(Circle(5)))
+    println(describe(Square(3)))
+  end
+end
