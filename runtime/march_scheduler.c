@@ -937,7 +937,15 @@ void march_sched_preempt_start(void) {
     struct sigaction sa;
     sa.sa_handler = march_preempt_signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;   /* auto-restart interruptible syscalls */
+    /* SA_ONSTACK: deliver on the per-thread alternate signal stack.  Scheduler
+     * threads run green threads on lazily-grown, guard-page-protected stacks; a
+     * green thread's SP can sit right above a PROT_NONE guard page.  Without
+     * SA_ONSTACK the kernel pushes the (large, FP-bearing) signal frame onto
+     * that green stack, faulting into the guard page during signal delivery —
+     * an unrecoverable crash on glibc/Linux (macOS masks it by mapping the
+     * frame differently).  Delivering on the alt stack (set up per thread in
+     * sched_loop) keeps preemption off the green stack. */
+    sa.sa_flags = SA_RESTART | SA_ONSTACK;
     if (sigaction(SIGUSR1, &sa, NULL) != 0) {
         perror("march_sched: sigaction(SIGUSR1)");
         return;   /* preemption unavailable but scheduler still works */
