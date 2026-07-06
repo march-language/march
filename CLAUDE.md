@@ -153,7 +153,7 @@ specs/                      design specs, progress tracking, feature plans
 
 ## Surface syntax notes
 
-See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of all March syntax.
+See [specs/lang/surface-syntax.md](specs/lang/surface-syntax.md) for a complete quick-reference of all March syntax.
 
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`

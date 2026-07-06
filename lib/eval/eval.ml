@@ -272,6 +272,22 @@ let is_type_dispatched_method iface meth =
   | "Show", "show" | "Eq", "eq" | "Ord", "compare" | "Hash", "hash" -> true
   | _ -> false
 
+(** Whether [iface] is a built-in interface whose value-level dispatch reads
+    [impl_tbl] under the shared (iface, type) key (see [is_type_dispatched_method]).
+
+    Such an interface has exactly ONE dispatch method (Eq→eq, Ord→compare,
+    Show→show, Hash→hash), but a user may declare it with the built-in name and
+    give it EXTRA methods — e.g. [Eq]'s default [neq], or [Ord]'s [lt]/[gt]/
+    [le]/[ge].  Those extra methods must NOT be written into [impl_tbl], or they
+    clobber the dispatch method under the same key: the builtin then invokes the
+    wrong method and [neq → eq → neq] recurses forever (stack overflow).
+    Non-dispatched interfaces (Json, Drop, user interfaces) are unaffected —
+    nothing reads their (iface, type) entry by value, so they keep their
+    existing per-method registration. *)
+let is_type_dispatched_iface = function
+  | "Show" | "Eq" | "Ord" | "Hash" -> true
+  | _ -> false
+
 (** Constructor → type name mapping.
     Maps each data constructor name (e.g. "Red") to its declaring type (e.g. "Color").
     Populated when [eval_decl] processes [DType] nodes.
@@ -8300,7 +8316,12 @@ let rec eval_decl (env : env) (d : decl) : env =
         if type_name <> "" then begin
           match List.assoc_opt mname.txt new_env with
           | Some fn_val ->
-            Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* For a type-dispatched interface, only its single dispatch method
+               may claim the shared (iface, type) key; extra methods (e.g. Eq's
+               default `neq`) must not clobber it, or builtin dispatch invokes
+               the wrong method and recurses forever (neq → eq → neq). *)
+            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
             Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
@@ -8611,7 +8632,12 @@ let eval_module_env (m : module_) : env =
           if type_name <> "" then begin
             match List.assoc_opt mname.txt new_acc with
             | Some fn_val ->
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+              (* For a type-dispatched interface, only its single dispatch method
+                 may claim the shared (iface, type) key; extra methods (e.g. Eq's
+                 default `neq`) must not clobber it, or builtin dispatch invokes
+                 the wrong method and recurses forever (neq → eq → neq). *)
+              if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
+                Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
               let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
               Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()

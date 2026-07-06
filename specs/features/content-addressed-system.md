@@ -131,7 +131,7 @@ Strongly-Connected Component detection for function dependency graphs using Tarj
 
 ## Compilation Integration
 
-> **Update (March 20, 2026, Track D):** The CAS is now wired into the default compilation path in `driver.ml`. All 401+ tests pass with CAS-enabled compilation.
+> **Update (March 20, 2026, Track D):** The CAS is now wired into the default compilation path in `bin/main.ml`. All 401+ tests pass with CAS-enabled compilation.
 
 ### Current Wiring Status
 
@@ -223,7 +223,7 @@ Comprehensive test suite organized by phase:
    - If a library function changes, all dependents are recompiled even if cached
 
 5. ~~**Not Integrated with Main Compilation Loop:**~~ ✅ **FIXED** (Track D)
-   - CAS is now wired into the default compilation path via `driver.ml`
+   - CAS is now wired into the default compilation path via `bin/main.ml`
    - All 401+ tests pass with CAS-enabled compilation
 
 ## Dependencies on Other Features

@@ -1490,6 +1490,53 @@ let test_default_method_eval () =
   Alcotest.(check bool) "neq default returns true for 1 neq 2" true
     (vbool result)
 
+let test_default_method_user_type () =
+  (* Regression: a user-declared `interface Eq(a)` (name collides with the
+     built-in Eq) with a default `neq` calling `eq`, implemented for a USER
+     type, must terminate and return the correct answer.
+
+     The builtin `eq`/`==` dispatcher resolves the impl from
+     `impl_tbl[("Eq", type)]`.  The DImpl eval used to write EVERY method of the
+     impl under that single (iface, type) key, so the injected default `neq`
+     (processed after `eq`) clobbered the `eq` entry.  A builtin `eq` on a
+     Widget then invoked `neq`, whose body called `eq`, which dispatched to
+     `neq` again → unbounded recursion (stack overflow / hang).  This mirrors
+     the "Default Implementations" example in docs/interfaces.md.
+
+     NOTE: the existing `test_default_method_eval` uses `impl Eq(Int)`, which
+     never triggered the bug: the builtin `eq` short-circuits primitives
+     (`[VInt a; VInt b] -> VBool (a = b)`) BEFORE consulting `impl_tbl`.  A user
+     ADT is required to exercise the corrupted table. *)
+  let src = {|mod Test do
+    interface Eq(a) do
+      fn eq  : a -> a -> Bool
+      fn neq : a -> a -> Bool do fn (x, y) -> !eq(x, y) end
+    end
+    type Widget = Widget(Int)
+    impl Eq(Widget) do
+      fn eq(a, b) do
+        match (a, b) do
+          (Widget(x), Widget(y)) -> x == y
+        end
+      end
+    end
+    fn neq_diff() do neq(Widget(1), Widget(2)) end
+    fn neq_same() do neq(Widget(7), Widget(7)) end
+    fn eq_diff()  do eq(Widget(1), Widget(2)) end
+    fn eq_same()  do eq(Widget(5), Widget(5)) end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check bool) "neq(Widget 1, Widget 2) = true"  true
+    (vbool (call_fn env "neq_diff" []));
+  Alcotest.(check bool) "neq(Widget 7, Widget 7) = false" false
+    (vbool (call_fn env "neq_same" []));
+  (* A direct `eq` call must also terminate: the corrupted table made even this
+     path loop, since bare `eq` on an ADT routes through the builtin dispatcher. *)
+  Alcotest.(check bool) "eq(Widget 1, Widget 2) = false"  false
+    (vbool (call_fn env "eq_diff" []));
+  Alcotest.(check bool) "eq(Widget 5, Widget 5) = true"   true
+    (vbool (call_fn env "eq_same" []))
+
 let test_missing_required_method () =
   (* Impl omits a non-default method — should error *)
   let ctx = typecheck {|mod Test do
@@ -4261,6 +4308,7 @@ let eval_suites =
           Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
           Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
