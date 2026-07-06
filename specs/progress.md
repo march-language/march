@@ -282,6 +282,15 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, `derive` on a variant colliding with a stdlib record type fixed)
+
+A user variant type (e.g. `type Color = Red | Green | Blue`) whose name collides with a stdlib RECORD type (`Plot.Color = { r, g, b }`, always auto-loaded) failed to typecheck its derived impls — `derive Eq, Show for Color` compiled to "`Color` does not implement interface `Eq`", while renaming the type to `Status` fixed it. Records register in `env.records` under their BARE name globally, so `surface_ty` (and `register_impl_shape`) structurally expanded the variant's `impl Eq(Color)` into the record's `TRecord{r,g,b}` shape, which then never matched the variant's `TCon("Color")` dispatch target.
+
+- **Fix (`lib/typecheck/typecheck.ml`):** new `name_is_variant env name` guard on all three record-expansion `when` clauses — a name that also denotes a variant (some constructor in `env.ctors` has it as its parent `ci_type`) is kept nominal (`TCon`) rather than expanded to a same-named record's structure. A variant is never a record, so genuine record impls still expand and dispatch structurally.
+- **Regression tests:** 2 compiled-interp-parity cases in `test/test_codegen.ml` (`newtype_derived_method_crash` group) — variant vs stdlib `Plot.Color`, and a self-contained variant vs a local nested record with distinct fields; both RED pre-fix, GREEN post-fix. `docs/interfaces.md`'s canonical `derive` example now works as written (no doc change needed).
+
+**Test counts:** 400 compiler / 230 eval / 391 codegen (+2) / 804 stdlib (full, with Slow) / 53 stdlib_march / 29 snapshots — all runners exit 0. Pre-existing Slow failures unchanged.
+
 ## Current State (as of 2026-07-05, three Core-March typechecker findings fixed: let-annotations, ELetFn dup diagnostic, generic when-constraint soundness)
 
 Fixed the three typechecker gaps surfaced by the Core March typing conformance corpus (`specs/lang/core-march-types.md` §4.1 findings 13/15/16), all in `lib/typecheck/typecheck.ml`:

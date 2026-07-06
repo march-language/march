@@ -6720,6 +6720,54 @@ let test_multi_ctor_derived_methods_unaffected_compiled () =
     ~expected:"true\nfalse\n-1"
     ()
 
+(** Regression: a user variant type whose bare name collides with a stdlib
+    RECORD type (`Plot.Color = { r, g, b }`, always auto-loaded) must still
+    resolve its derived impls. Records register in `env.records` under their
+    BARE name globally, so pre-fix `surface_ty` / `register_impl_shape`
+    structurally expanded the variant's `impl Eq(Color)` to the record's
+    `TRecord{r,g,b}` shape; that never matched the variant's `TCon("Color")`
+    dispatch target, so typecheck reported "`Color` does not implement
+    interface `Eq`". Renaming the type (e.g. to `Status`) sidestepped it — the
+    type-NAME collision with the stdlib record was the sole trigger. Fixed by
+    `name_is_variant` guarding the record expansion in typecheck.ml. *)
+let test_derive_variant_name_collides_stdlib_record_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_stdlib_name_collision"
+    ~src:"mod ColorMod do\n\
+         \  type Color = Red | Green | Blue\n\
+         \  derive Eq, Show for Color\n\
+         \  fn main() do\n\
+         \    println(show(Green))\n\
+         \    println(bool_to_string(eq(Red, Red)))\n\
+         \    println(bool_to_string(eq(Red, Blue)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Green\ntrue\nfalse"
+    ()
+
+(** Same bug, self-contained (independent of any particular stdlib module):
+    a nested RECORD `Palette.Color` collides with the enclosing module's own
+    variant `Color`. Distinct field names (`hue/sat/lum`) prove the corrupting
+    shape is the local nested record, not stdlib `Plot.Color`, so this test
+    still guards the fix if `Plot.Color` is ever renamed or removed. *)
+let test_derive_variant_name_collides_local_record_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_local_name_collision"
+    ~src:"mod SelfContained do\n\
+         \  mod Palette do\n\
+         \    type Color = { hue: Int, sat: Int, lum: Int }\n\
+         \  end\n\
+         \  type Color = Red | Green | Blue\n\
+         \  derive Eq, Show for Color\n\
+         \  fn main() do\n\
+         \    println(show(Green))\n\
+         \    println(bool_to_string(eq(Red, Red)))\n\
+         \    println(bool_to_string(eq(Red, Blue)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Green\ntrue\nfalse"
+    ()
+
 (** A hand-written (non-derived) `impl Eq(Wrap)` with a nested destructure
     match must also work — this isolates defect (2) (the emit_case Newtype
     TVar-recovery) from defect (1) (derive's shared-span typecheck
@@ -7885,6 +7933,10 @@ let codegen_suites =
             test_boxed_pair_derived_methods_unaffected_compiled;
           Alcotest.test_case "control: multi-ctor derived methods unaffected (P1)" `Quick
             test_multi_ctor_derived_methods_unaffected_compiled;
+          Alcotest.test_case "derive on variant whose name collides with a stdlib record" `Quick
+            test_derive_variant_name_collides_stdlib_record_compiled;
+          Alcotest.test_case "derive on variant whose name collides with a local nested record" `Quick
+            test_derive_variant_name_collides_local_record_compiled;
           Alcotest.test_case "hand-written impl nested-destructure match on newtype (P1)" `Quick
             test_handwritten_impl_nested_match_newtype_compiled;
           Alcotest.test_case "== operator on String-payload newtype (P1, distinct bug)" `Quick

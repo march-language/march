@@ -2197,6 +2197,29 @@ and solve_nat_eq env ~span ~reason op a b n =
    §11  Surface-type → internal-type conversion
    ================================================================= *)
 
+(** True when [name] denotes a variant/sum type in scope — i.e. some
+    constructor has it as its parent type ([ci_type], matched bare or as a
+    [.name] suffix since [ci_type] may be module-qualified).
+
+    Records register in [env.records] under their BARE name globally, so a
+    user's `type Color = Red | Green | Blue` collides in that flat namespace
+    with, e.g., stdlib `Plot.Color = { r, g, b }`.  Without this guard the
+    record-structural expansion below (and in [register_impl_shape]) rewrites
+    the variant's `impl Eq(Color)` to the record's `TRecord{r,g,b}` shape,
+    which then never matches the variant's `TCon("Color")` dispatch target —
+    the derived impl becomes invisible and the type "does not implement Eq".
+    A variant type is never itself a record, so suppressing the expansion for
+    variant names only removes incorrect expansions. *)
+let name_is_variant env name =
+  let matches ci_type =
+    ci_type = name ||
+    (let n = String.length name and l = String.length ci_type in
+     l > n && ci_type.[l - n - 1] = '.' && String.sub ci_type (l - n) n = name)
+  in
+  StrMap.exists
+    (fun _ cis -> List.exists (fun (ci : ctor_info) -> matches ci.ci_type) cis)
+    env.ctors
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -2249,9 +2272,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
            name.txt arity (List.length args'));
     (* If this is a named record type, expand it structurally so that
-       type annotations like `: Point` unify correctly with record literals. *)
+       type annotations like `: Point` unify correctly with record literals.
+       Skip when the name also denotes a variant (see [name_is_variant]): the
+       local variant shadows a same-named record from another module. *)
     (match StrMap.find_opt name.txt env.records with
-     | Some (params, field_decls) when List.length params = List.length args' ->
+     | Some (params, field_decls)
+       when List.length params = List.length args'
+            && not (name_is_variant env name.txt) ->
        let saved = !tvars in
        List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
        let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
@@ -2283,7 +2310,9 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
               ) None exports.me_entries)
        in
        (match registry_record with
-        | Some (params, field_decls) when List.length params = List.length args' ->
+        | Some (params, field_decls)
+          when List.length params = List.length args'
+               && not (name_is_variant env name.txt) ->
           let saved = !tvars in
           List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
           let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
@@ -4922,9 +4951,13 @@ let register_impl_shape env (idef : Ast.impl_def) =
          (`TRecord [...]`); they don't unify, so `impl Iface(Record)` is invisible
          to a call in a module checked before the impl's own module — which is
          exactly the cross-module / multi-file case. Variant types are unaffected
-         (they are not in [env.records] and stay nominal). *)
+         (they are not in [env.records] and stay nominal) — except a variant
+         whose bare name collides with a record from another module, which
+         [name_is_variant] guards against exactly as [surface_ty] does. *)
       (match StrMap.find_opt n.txt env.records with
-       | Some (params, field_decls) when List.length params = List.length args' ->
+       | Some (params, field_decls)
+         when List.length params = List.length args'
+              && not (name_is_variant env n.txt) ->
          let saved = !tvars in
          List.iter2 (fun pname arg -> tvars := M.add pname arg !tvars) params args';
          let flds = List.map (fun (fn, fty) -> (fn, lenient_ty fty)) field_decls in
