@@ -2349,3 +2349,109 @@ depth, deliberately not fully resolved, and named as such.
 NEXT spec step (roadmap): DSL-forms full resolution (§9 deepening) and any
 follow-up from the `f(1)(2)` documentation-precision finding, both tracked in
 `specs/todos.md`.
+
+## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
+
+`specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened
+past widening slice 1 (interfaces/impls) to cover **module declaration and
+nesting, bare-vs-qualified name resolution, `use`/`import`/`alias`, and
+visibility (`pfn`/`ptype`)** — closing out the five-task widening slice
+(`specs/plans/2026-07-06-widening-modules-plan.md`). Unlike slice 1
+(docs-only), this slice **includes a real compiler fix**, made first and
+gated on the full test suite, with the documentation describing the
+corrected post-fix behavior throughout.
+
+- **Task 1 — the compiler fix (`c0570d16`):** `load_module_into_env`
+  (`lib/typecheck/typecheck.ml:657–692`) loaded `ExFn`/`ExValue`/`ExType`/
+  `ExRecord` cross-module export entries unconditionally, never checking
+  `entry.ex_public` — so a private `pfn`/value from another module (e.g.
+  `Array.lst_rev`, a real `pfn` in `stdlib/array.march`) was callable from
+  anywhere, while the neighboring `ExCtor` arm already correctly gated
+  private constructors. Fixed by adding the `ex_public` gate to `ExFn`/
+  `ExValue` ONLY — `ExType`/`ExRecord` are deliberately left ungated (the
+  **opaque-type pattern**: a private `ptype`'s bare type NAME stays
+  nominally referenceable cross-module even though its constructor access is
+  separately gated via `ExCtor`; gating `ExType` would have broken live,
+  tested stdlib code — `stdlib/consistent_hash.march`'s private
+  `ptype HashRing(a)` is referenced as a public parameter's annotation in
+  `stdlib/work_dispatch.march`). Full suite green before/after (rebuilt +
+  `scripts/run-tests.sh` full run, no regressions). A same-file diagnostic-
+  quality companion fix (misleading `` Unknown module `A` `` for a same-file
+  private nested-module member, now `` Function `secret` is private to
+  module `A`. ``) landed concurrently as `96ec5969` (`env.local_mods`).
+- **Task 2 (`core-march.md` §4.7):** module declaration/nesting and the
+  `DMod` name-resolution/export OPERATIONAL rules — the `own_names`-gated
+  export step that re-prefixes a module's own declared names as
+  `"Name.member"` into the enclosing scope and the global `module_registry`;
+  the bare-fails/qualified-works asymmetry (a sibling module's names are
+  never bare-exported); the lexical-scoping nuance (a `pfn` nested lexically
+  inside `A` IS callable bare from a module nested inside `A`, since privacy
+  only gates cross-module qualified access, not ordinary lexical scoping);
+  the one-mod-per-file grammar rule.
+- **Task 3 (`core-march-types.md` §2.5):** module visibility as a TYPING
+  concept — `pub_set`-filtered export, the cross-file `ex_public` gate (Task
+  1), and the **opaque-type asymmetry** stated precisely: `pfn`/private
+  value = hidden; `ptype`/`opaque type`'s bare type NAME = always
+  nominally referenceable (`ExType` ungated by design). Also documents the
+  **no-per-module-type-namespace design point** (types resolve by bare name
+  only — two sibling modules' same-named types are the literal same nominal
+  type, not merely similar; value-witnessed, `A.Foo`/`B.Foo` collision) and
+  the `9001e4c0` qualified-type-path unification that is its flip side.
+  **A real, precisely-traced enforcement gap was found and filed (not
+  fixed):** `opaque type`'s constructor-hiding is NOT actually enforced
+  against a qualified constructor reference from a separate compilation
+  unit — `prebind_mod_members` (`typecheck.ml:8032–8087`) registers the
+  qualified constructor key unconditionally on `var_vis`, before the later,
+  correctly `ci_vis`-filtered `DMod` export step's result is merged in; the
+  same class of bug Task 1 fixed for `ExFn`/`ExValue`, but on the
+  same-compilation-unit registration path instead of the cross-file
+  `Module_registry` path, and for the `ExCtor`/`ci_vis` check. Live-verified
+  against `test/imports/opaque_qual/`: `OqToken.Token("bypass")` from an
+  unrelated sibling file typechecks and runs.
+- **Task 4 (`core-march.md` §4.7.1):** `use`/`import`/`alias` surface
+  selectors (`UseAll`/`UseNames`/`UseExcept`/`UseSingle`, and `import`'s
+  Elixir-style `only:`/`except:` sugar over the same `DUse` AST node) and
+  **the file-based resolver pre-pass** (`lib/resolver/resolver.ml`) — a
+  SEPARATE mechanism from typecheck's `DUse` handling that looks for an
+  actual `.march` FILE, so `use A.*` against an in-file nested `mod A` fails
+  (`` Module `A` not found (looked for `a.march` …) ``) even though `A` is
+  plainly present and reachable by ordinary qualification. Selective
+  `use X.{name}` of a private/non-exported name rejects consistently with
+  Task 1's visibility fix (`` Module `Array` does not export `lst_rev`. ``,
+  the same `pub_set` absence `reject/t26` exercises one syntactic layer up).
+- **Task 5 (this entry) — finalize + reconcile `specs/lang/modules.md`:**
+  both references cross-check coherently (operational §4.7/§4.7.1 ↔ typing
+  §2.5); `modules.md` (the tutorial chapter) is reconciled against the
+  corrected post-fix behavior — its "Visibility" section previously claimed
+  `ptype` hides "both the type name and its constructors," which live
+  verification found FALSE (a plain `ptype`'s variant constructors default
+  `var_vis = Public` by grammar regardless of the type's own visibility;
+  only `opaque type` forces `var_vis = Private` on its variants, and even
+  that is undermined by the filed `prebind_mod_members` gap above) — and its
+  opaque-type "known compiler limitation" note (qualified annotations
+  failing to unify) is now marked Resolved (`9001e4c0`). Cross-references to
+  `core-march.md` §4.7/§4.7.1 and `core-march-types.md` §2.5 added. **Bonus
+  findings while reconciling `modules.md`:** three of its own code examples
+  were broken by the one-mod-per-file rule (a "Qualified Access" example
+  with two top-level `mod`s in one file; a dotted-module-naming example
+  presented as one file when the two modules must live in separate files; a
+  stray top-level statement after the "opaque type"/"Module-Level Constants"
+  examples' closing `end`) and its "A Full Example" section (citing
+  `examples/modules.march`, which doesn't actually match) used
+  `import`/`alias` against an in-file nested module — exactly the
+  file-vs-in-file resolver distinction Task 4 documents as a hard
+  rejection. All four fixed and every code example in the chapter
+  re-verified live (`--check` + run to the stated printed value).
+
+**Corpus:** `specs/lang/types/` grew from 54 to **65 programs** (38 accept /
+27 reject — `accept/t31`–`t38`, `reject/t25`–`t27`), all cited in
+`specs/lang/types/INDEX.md`. `check_types.sh`: 65/65, exit 0. No new CI
+wiring needed — rides the existing `types-check` dune alias.
+
+**Findings filed (`specs/todos.md`):** the `opaque type` constructor-hiding
+gap (`prebind_mod_members`, `typecheck.ml:8032–8087`) — left OPEN,
+docs-only slice, structurally identical to the class of bug Task 1 fixed
+but on a different registration path.
+
+**Next queued widening slice:** actors (per the roadmap's Phase-2b/3
+phasing).
