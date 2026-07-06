@@ -2086,6 +2086,14 @@ let assert_trecord_sorted flds label =
         (String.concat ", " sorted))
   | None -> ()
 
+(** Forward ref to [expand_record], which is defined later because it depends on
+    [surface_ty].  [unify] uses it to reconcile a nominal record [TCon] with the
+    structural [TRecord] the same type expands to elsewhere (see the
+    [TCon]/[TRecord] case in [unify]).  Wired up immediately after
+    [expand_record] is defined. *)
+let expand_record_ref : (env -> ty -> ty option) ref =
+  ref (fun _ _ -> None)
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
@@ -2135,6 +2143,24 @@ let rec unify env ~span ?(reason = None) t1 t2 =
       List.iter2
         (fun (_, t1) (_, t2) -> unify env ~span ~reason t1 t2)
         f1 f2
+
+  (* Reconcile a nominal record [TCon] with its structural [TRecord] form.
+     A record type's *name* and its *field structure* are interchangeable in
+     March's structural record model, but the two representations reach [unify]
+     from different paths: [surface_ty] expands a record annotation to a
+     [TRecord], while lighter-weight converters (notably [prebind_fn_scheme],
+     which pre-binds cross-module function signatures in Pass 1 without record
+     field information) leave the same type as a nominal [TCon(Name)].  When a
+     cross-module qualified reference like `Cfg.Site` meets the owning module's
+     own structural use, the two sides collide as `TCon` vs `TRecord`.  Expand
+     the [TCon] side via the [expand_record_ref] hook (a no-op unless [Name]
+     denotes a known record that is not also a colliding variant — variants and
+     opaque types stay nominal) and retry; fall back to a genuine mismatch if it
+     does not name an unambiguous record. *)
+  | (TCon _ as tc), (TRecord _ as tr) | (TRecord _ as tr), (TCon _ as tc) ->
+    (match !expand_record_ref env tc with
+     | Some (TRecord _ as expanded) -> unify env ~span ~reason expanded tr
+     | _ -> report_mismatch env ~span ~reason t1 t2)
 
   | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
     unify env ~span ~reason inner1 inner2
@@ -2484,6 +2510,19 @@ let expand_record env ty =
        Some (TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds))
      | _ -> None)
   | _ -> None
+
+(* Wire up the forward ref so [unify] (defined earlier) can reconcile a nominal
+   record [TCon] with its structural [TRecord] form.  Guard with
+   [name_is_variant] exactly as [surface_ty]'s own record-expansion does: in a
+   global-namespace collision a variant and a record can share a printed name
+   (and the record leaks into [env.records] under that bare name), so a bare
+   [TCon] naming the *variant* must NOT be expanded into the colliding record's
+   structure — that would silently unify two genuinely distinct types and
+   swallow the "two distinct types share the name" diagnostic. *)
+let () = expand_record_ref := (fun env ty ->
+  match repr ty with
+  | TCon (name, _) when name_is_variant env name -> None
+  | _ -> expand_record env ty)
 
 (** Register per-field linear sentinels for a named record variable [varname].
     When [ty] is or expands to a TRecord with linear fields, adds phantom
