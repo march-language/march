@@ -36,12 +36,25 @@ interface Eq(a) do
 end
 ```
 
-> **Known issue:** a user-declared `interface Eq(a)` whose default `neq` calls
-> `eq` currently hangs/stack-overflows at runtime — the name collides with the
-> compiler's own built-in `Eq` dispatch. This is a real compiler bug (not a
-> documentation error); avoid shadowing the built-in `Eq`/`neq` names with a
-> default method that calls back into `eq` until it's fixed. `Ord`'s
-> `cmp`-calling defaults (below) are unaffected.
+> **Historical note (resolved):** an earlier version of this document warned
+> that a user-declared `interface Eq(a)` whose default `neq` calls `eq`
+> "hangs/stack-overflows at runtime" due to an `impl_tbl` dispatch-key
+> collision with the compiler's built-in `Eq` dispatch. That specific bug is
+> FIXED — reverified live (interpreted and compiled): the example above
+> typechecks and runs to completion on both backends with no hang, no stack
+> overflow, and (interpreted) the correct answer. A different, real, still-open
+> compiled-only bug was found while reverifying this callout, though: a default
+> method's body that calls a *sibling* interface method (`neq` calling `eq`,
+> or `Ord`'s `lt`/`gt` calling `cmp`) compiles to a lambda that does not
+> re-evaluate correctly per call — it can return the same answer regardless of
+> the actual arguments — on the COMPILED backend only (the interpreter is
+> correct). This is unrelated to the old `Eq`-name-collision mechanism (it
+> reproduces identically for a user interface with no built-in-name collision
+> at all, and `Ord`'s `cmp`-calling defaults are affected too, contrary to what
+> this callout previously claimed). See `specs/todos.md` ("Compiler:
+> interfaces/impls declaration checking, Task 6 closeout") for the live repro
+> and citations; see `core-march.md` §4.4.2 for how method dispatch actually
+> works operationally.
 
 Any type implementing `Eq` automatically gets `neq` for free. It only needs to implement `eq`.
 
@@ -335,11 +348,17 @@ end
 
 ## Interface Dispatch
 
-The compiler resolves interface dispatch at compile time (after monomorphization). There are no vtables or runtime type lookups — interface calls are direct function calls to the concrete implementation.
+For the **compiled backend**, the compiler resolves most interface dispatch at compile time (after monomorphization): a call site whose argument type is known statically is compiled to a direct function call to the concrete implementation, with no boxing for primitive types and no per-call overhead.
 
-This means:
-- Zero overhead compared to a direct call
-- The compiler can inline implementations across interface boundaries
+That compile-time-resolved picture is not the whole story, though — it describes the compiled backend's common case, not a single dispatch mechanism the whole language shares. See `core-march.md` §4.4.2 ("Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding") for the full, precise operational account, which this section summarizes:
+
+- The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a genuine **runtime hashtable** (`impl_tbl`, keyed `(interface, type_name)`) looked up by the argument's dynamic type at the call site — this is real runtime type-directed dispatch, not something resolved ahead of time.
+- **User-defined interfaces** get no dispatch table at all, in either backend — a call resolves through ordinary lexical `env`/name binding (whichever `impl`'s method was bound most recently in scope), which is also why overlapping impls of a user interface are "just shadowing," not a coherence policy (see `core-march.md` §4.4.3 for the known interpreter/compiled divergence this causes when more than one impl of the same interface/type pair is in scope).
+
+So "no vtables or runtime type lookups" is accurate for the compiled backend's statically-resolved calls, but not as a claim about the language or the interpreter in general — treat this section's overhead claims as scoped to the compiled backend's common-case dispatch, not a universal guarantee:
+
+- Zero overhead compared to a direct call, for the compiled backend's statically-resolved case
+- The compiler can inline implementations across interface boundaries in that case
 - No boxing required for primitive types
 
 ---

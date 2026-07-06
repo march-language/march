@@ -49,19 +49,24 @@ itself — what makes an `interface Iface(a) do ... end` or `impl Iface(T) do
 covers superclass/`requires` and `when`-clause discharge (both MANDATORY
 enforcement, not conditional gaps) and names the `impl_matches_ty` structural
 match as its own rule, `(T-ImplMatch)` — the judgment both discharge paths
-share, and the reason generic/parameterized impls work at all. The
-coherence/overlap story (what happens when TWO impls both match the same
-target, per `(T-ImplMatch)`'s lack of specificity resolution) is a separate,
-later task in the same widening effort — cross-referenced from §2.3, not
-detailed there.
+share, and the reason generic/parameterized impls work at all. §2.4 covers
+`derive`/`satisfy` as `DImpl` *generators*. The coherence/overlap story (what
+happens when TWO impls both match the same target, per `(T-ImplMatch)`'s lack
+of specificity resolution) is documented in full as an open, filed
+interpreter/compiled divergence in `core-march.md` §4.4.3 (the operational
+companion, since a `--check`-only harness cannot witness a runtime
+interp-vs-compiled split) — §2.3 notes it inline at the point the gap arises
+(item 1 of `(T-Impl)`'s ordered checks) and cross-references that subsection
+rather than repeating it here.
 
-**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): coherence/
-overlap resolution between impls (no rejection of overlapping impls exists;
-§2.3's `(T-ImplMatch)` rule notes the specificity-blind matching that causes
-this but the interpreter/compiled-backend divergence itself is a separate
-task's subject), refinements (z3-discharged), the capability lattice
-(`lib/caps/`), and effects — see §6 for the full deferred-set breakdown and
-its roadmap citations.
+**Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): refinements
+(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6
+for the full deferred-set breakdown and its roadmap citations. Coherence/
+overlap resolution between impls is NOT in this deferred set — it is a known,
+intentionally OPEN divergence (documented in `core-march.md` §4.4.3 and filed
+in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
+resolving the divergence itself (a language-design decision — add a coherence
+check, or pick a shared deterministic selection policy) is what's deferred.
 
 ## 1. The typing judgment
 
@@ -2223,19 +2228,21 @@ operationally). What is explicitly OUT of scope for this document, and where
 each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
 
 - **User-defined `impl`/interface DECLARATION syntax, beyond the four
-  built-ins — PARTIALLY LANDED (§2.3, 2026-07-06).** §2.1a/§2.1b document how a
+  built-ins — LANDED (§2.3/§2.4, 2026-07-06).** §2.1a/§2.1b document how a
   `Num`/`Eq`/`Ord`/`Show` CONSTRAINT is discharged against the seed table
-  (`builtin_impls`, `builtin_interfaces`); §2.3 now covers the general
+  (`builtin_impls`, `builtin_interfaces`); §2.3 covers the general
   `interface`/`impl` declaration-checking machinery itself — registration,
   missing/extra-method rejection, signature-match, default methods,
   superclass/`requires` and `when`-clause discharge (both mandatory
   enforcement), and the `impl_matches_ty` structural-match judgment as its
-  own named rule, `(T-ImplMatch)`. NOT yet covered by this document:
-  coherence/overlap rules (no rejection of overlapping impls exists at all,
-  and `(T-ImplMatch)` performs no specificity resolution between two
-  simultaneously-matching impls) — this is a later task in the same widening
-  effort, landing in this document and its operational companion
-  `core-march.md` respectively. Roadmap: an extension of Phase 2 (§4.3's
+  own named rule, `(T-ImplMatch)`; §2.4 covers `derive`/`satisfy` as `DImpl`
+  generators. Coherence/overlap — no rejection of overlapping impls exists at
+  all, and `(T-ImplMatch)` performs no specificity resolution between two
+  simultaneously-matching impls — is noted on the typing side (§2.3, `(T-Impl)`
+  step 1) and documented in full, with live-captured interpreter-vs-compiled
+  evidence, in the operational companion `core-march.md` §4.4.3 as an open,
+  deliberately-unresolved divergence (filed in `specs/todos.md`, not fixed by
+  this documentation slice). Roadmap: an extension of Phase 2 (§4.3's
   "declarative typing rules... extracted from `typecheck.ml`'s algorithm").
 - **The constraint-survival soundness gap itself (finding 15, §4)** — RESOLVED
   2026-07-05 (commit `8cbd6dd2`): the `when`-clause now attaches the constraint
@@ -2268,7 +2275,15 @@ Together, `core-march.md` (operational) + this document (typing) are
 next phase of BOTH documents is the Level-2 conformance work already underway
 (the golden corpus + this document's `accept`/`reject` corpus) plus, per §4.4
 of the roadmap, adjudicating the operational side's `known_divergence` queue.
-This document's own analogous queue is now empty: findings 13, 15, and 16 —
-the three filed typechecker gaps — were all RESOLVED 2026-07-05 (commits
-`7e40dc5b`, `8cbd6dd2`, `f0f5299c`), with corpus witnesses (`reject/t16`,
-`reject/t17`, `accept/t21`, `accept/t22`) and unit tests.
+This document's queue of filed typechecker gaps has **one genuinely open
+item**, added by the interfaces/impls widening slice: **finding 17** (§4.1,
+`derive X for UnknownType` silently no-ops) is OPEN — filed in
+`specs/todos.md` under "Compiler: Type System," deliberately NOT fixed by this
+documentation-only slice. The three PRIOR filed gaps — findings 13, 15, and
+16 — were all RESOLVED 2026-07-05 (commits `7e40dc5b`, `8cbd6dd2`,
+`f0f5299c`), with corpus witnesses (`reject/t16`, `reject/t17`, `accept/t21`,
+`accept/t22`) and unit tests. The widening slice's operational companion,
+`core-march.md` §4.4.3, also filed a second open item this slice — the
+impl-coherence/overlap interpreter-vs-compiled divergence, documented there in
+full with both backends' outputs and filed in `specs/todos.md` alongside
+finding 17.

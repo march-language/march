@@ -282,6 +282,73 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, Core March widening slice 1 — interfaces/impls declaration checking, CLOSEOUT)
+
+`specs/lang/core-march-types.md` and `specs/lang/core-march.md` — the two
+conformance-tested core-language references — are widened past the core
+expression fragment to cover **user-defined `interface`/`impl` declaration
+checking, method dispatch, and the `derive`/`satisfy` generators**, closing
+out the six-task widening slice (`specs/plans/2026-07-06-widening-interfaces-impls-plan.md`).
+
+- **Typing side (`core-march-types.md` §2.3/§2.4):** `(T-Interface)` (pure
+  registration, almost nothing rejectable at the interface itself) and
+  `(T-Impl)` (the seven ordered checks: impl-head instantiation/registration,
+  `when`-clause discharge, superclass/`requires` discharge — MANDATORY
+  enforcement, not a conditional gap — interface existence, missing-method,
+  extra-method, signature-match) are transcribed arm-for-arm from
+  `typecheck.ml`, with `impl_matches_ty` named as its own rule, `(T-ImplMatch)`
+  — the structural, non-unifying, wildcard-tolerant shape match that is both
+  why generic impls work and why coherence doesn't exist. §2.4 covers
+  `derive`'s closed five-interface set (`Eq`/`Show`/`Hash`/`Ord`/`Json`,
+  `Json` special-cased via `JsonTo`/`JsonFrom` pseudo-interfaces) and
+  `satisfy`'s name-matching, all-or-nothing wiring.
+- **Operational side (`core-march.md` §4.4.2–§4.4.4):** method dispatch is a
+  hard four-name split — `Show`/`Eq`/`Ord`/`Hash` dispatch through a genuine
+  runtime `impl_tbl` hashtable keyed `(iface, type_name)`; every user-defined
+  interface gets NO dispatch table at all and resolves through ordinary
+  lexical `env` binding, which is why overlapping user-interface impls are
+  "just shadowing," not a designed policy. `derive`/`satisfy`-generated impls
+  run through the identical dispatch rules as hand-written ones (§4.4.4).
+- **The flywheel findings (both filed, both left OPEN by design — this is a
+  documentation-only slice):**
+  1. **Impl coherence has no check anywhere, and the two backends disagree.**
+     Two `impl Speak(Dog)` blocks for the same interface/type both typecheck
+     with zero diagnostic; the interpreter selects the LAST-registered impl
+     (`Hashtbl.replace`), the compiled backend selects the FIRST-registered
+     (`List.mem_assoc` guard in `lib/tir/lower.ml`) — confirmed live for
+     plain, generic-vs-specific, and derive-vs-manual overlap. Framed
+     explicitly as an OPEN divergence needing a language-design decision
+     (unlike the CONVERGED `ERecordUpdate` divergence in §4.2.1), filed in
+     `specs/todos.md`.
+  2. **`derive X for UnknownType` silently no-ops** — exit 0, no diagnostic,
+     on both `--check` and RUN — the one asymmetric exception among every
+     other "declaration target doesn't exist" case in this slice (which all
+     correctly reject). Filed in `specs/todos.md`.
+  3. **Bonus finding surfaced while reconciling `interfaces.md`'s stale
+     "hangs" callout (below):** that callout was WRONG (verified live,
+     neither backend hangs), but a different, real, previously-undocumented
+     compiled-only bug exists in the same area — a user-interface default
+     method whose body calls a sibling interface method (`neq` calling `eq`,
+     `lt`/`gt` calling `cmp`) compiles to a lambda that returns the same
+     answer regardless of the actual call arguments. Filed in `specs/todos.md`.
+- **`specs/lang/interfaces.md` reconciled:** the stale "Known issue" callout
+  (claiming a default `neq`-calling-`eq` "hangs/stack-overflows," attributed to
+  a now-fixed `impl_tbl` dispatch-key collision) is corrected to a historical
+  note — reproduced live, does NOT hang, but points at finding 3 above instead.
+  The "Interface Dispatch" section's over-strong "no vtables or runtime type
+  lookups" claim is softened and scoped to the compiled backend's
+  statically-resolved common case, with a cross-reference to `core-march.md`
+  §4.4.2's full account (built-in interfaces DO use a runtime `impl_tbl`
+  hashtable in the interpreter).
+- **Corpus:** `specs/lang/types/` grew from 39 to **54 programs** (30 accept /
+  24 reject — `accept/t23`–`t30`, `reject/t18`–`t24`), all cited in
+  `specs/lang/types/INDEX.md`. `check_types.sh`: 54/54, exit 0. No new CI
+  wiring needed — the `types-check` dune alias walks the whole
+  `accept/`/`reject/` tree, so the additions ride the existing lane.
+- **Next queued widening slice:** modules or actors (per the roadmap's
+  Phase-2b/3 phasing) — the same design-spec → plan → conformance-anchored
+  execution loop this slice and the seven Phase-1 core slices both proved out.
+
 ## Current State (as of 2026-07-06, multi-arm `with ... else` parsing fixed)
 
 Multi-arm `with ... else` (the monadic-`with` error-handling form documented in `docs/pattern-matching.md`'s "With" section) now parses. Previously any `with pat <- e do body else ... end` with **two or more** else-arms failed to parse — the caret landed on the second arm's `->` — regardless of arm shape (nullary ctors, payload ctors, infix-operator bodies). A single else-arm always worked. Root cause in `lib/parser/token_filter.ml`: else-arms use the same `separated_nonempty_list(arm_sep, branch)` grammar as `match` branches (needing NL/PIPE separators), but the token filter only emitted arm-separator NLs inside a `Match` context. A monadic `with`'s `do` pushed a plain `Block`, so the newlines between else-arms were swallowed as insignificant whitespace; with a single arm no separator is needed, so only multi-arm forms broke. Fix: a new `With` context variant marks the `with`-block — recorded when the `do` follows a `<-` (`GETS`, unique to with-bindings; multiple bindings of one `with` dedup to a single pending entry keyed by paren-depth) — and at the `else` keyword the `With` context is promoted to `Match` so the arms are newline-separated exactly like a `match` body; the single `end` pops it. Composes cleanly with the cond-form/when-guard token-filter work landed earlier the same day (the promoted arms are ordinary pattern arms, `ms_is_cond = false`). The with-body itself stays block-style. `if ... else` (block-body else, top-of-stack `Block`), record-update `{ e with ... }` (uses `WITH` but no `GETS`), and `else if` chains are untouched. Pre-existing limitation (verified identical on base — NOT a regression; mirrors the `match`-scrutinee case): a *bare* unparenthesized `do`-block expression (`if`/`with`) as a with-binding RHS steals the pending marker — parenthesize the RHS (a bare `match` RHS works, since `match` has its own pending mechanism). 4 new parser regression tests in `test/test_compiler.ml`. The 3-arm example in `docs/pattern-matching.md` now compiles.

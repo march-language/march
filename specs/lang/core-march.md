@@ -50,8 +50,10 @@ table at all and resolve through the same ordinary lexical `env` binding §4.1
 already specifies for every other name — which is exactly why overlapping
 user-interface impls are "just shadowing," not a designed policy. The
 coherence/overlap divergence this causes (and how the COMPILED backend
-resolves the same overlap differently) is a separate, later task in the same
-widening effort — cross-referenced from §4.4.2, not detailed there.
+resolves the same overlap differently) is documented in full in §4.4.3, with
+`derive`/`satisfy`-generated impls' identical treatment in §4.4.4 — both land
+in this same widening slice, cross-referenced from §4.4.2 rather than
+repeated there.
 
 **It is not** the whole language semantics. The CORE covers the pure,
 value-level reduction fragment; everything outside it — strings as first-class
@@ -1289,8 +1291,8 @@ interpreted, exit 0).
 "just shadowing," not a designed coherence policy** (the full divergence
 story — including how the COMPILED backend's TIR lowering resolves the same
 overlap differently, first-registered-wins instead of last-registered-wins —
-is Task 4's subject, `core-march.md`'s coherence subsection; this document
-forward-references it and does not restate or duplicate its analysis here).
+is §4.4.3's subject, immediately below; this subsection forward-references it
+and does not restate or duplicate its analysis here).
 The mechanism demonstrated live while drafting this section: extending
 `t27`'s program with a SECOND `impl Speak(Cat) do fn speak(self) do ... end
 end` block (same interface, different type) makes `speak(Dog("Rex"))` PANIC
@@ -1304,8 +1306,9 @@ blocks that both bind the same bare name — there is no special-casing
 anywhere in the `false`-branch of (E-DImpl) that would make it behave
 otherwise. (This two-impl shape is deliberately NOT committed as a corpus
 program here — an interpreter-only PANIC is exactly the coherence
-divergence Task 4 documents formally with both backends' outputs side by
-side, so it belongs there, not duplicated as a bare crash in this section.)
+divergence §4.4.3, immediately below, documents formally with both backends'
+outputs side by side, so it belongs there, not duplicated as a bare crash in
+this section.)
 
 **Context, not a rule: the `is_type_dispatched_iface` guard defends against a
 same-key collision that today never actually fires.** The doc comment at
@@ -1824,20 +1827,23 @@ converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
 Phase-1 tasks did):**
 
 - strings as first-class data (beyond their appearance in the value grammar);
-- `to_string`/`show` and the interface-dispatch machinery — **PARTIALLY
-  LANDED (§4.4.2, 2026-07-06).** §4.4.2 now documents the runtime METHOD
-  DISPATCH mechanism itself: the four-name `impl_tbl` type-directed lookup for
+- `to_string`/`show` and the interface-dispatch machinery — **LANDED
+  (§4.4.2–§4.4.4, 2026-07-06).** §4.4.2 documents the runtime METHOD DISPATCH
+  mechanism itself: the four-name `impl_tbl` type-directed lookup for
   `Show`/`Eq`/`Ord`/`Hash`, and the ordinary lexical `env`-binding path every
-  user-defined interface takes instead. NOT yet covered here: the coherence/
-  overlap divergence between the two backends when the SAME (iface, type) has
-  more than one impl in scope (forward-referenced from §4.4.2, landing as its
-  own subsection — the widening effort's next task in this same slice), and
-  `derive`/`satisfy`'s own generation rules (`core-march-types.md` §2.3 covers
-  their typing side; a later task covers `derive`'s five-interface closed set
-  operationally). The known container-`to_string`/`hash`/atom-`_show`
-  divergences §5 routes around are UNCHANGED by this landing — those are
-  bugs in the fallback arms §4.4.2 explicitly does not re-litigate, not in
-  the dispatch mechanism §4.4.2 newly specifies;
+  user-defined interface takes instead. §4.4.3 documents the coherence/overlap
+  divergence between the two backends when the SAME `(iface, type)` has more
+  than one impl in scope (last-registered-wins interpreted vs.
+  first-registered-wins compiled — an OPEN, deliberately-left-unfixed
+  divergence, filed in `specs/todos.md`, not a corpus accept/reject). §4.4.4
+  documents `derive`/`satisfy`'s operational consequence — a generated impl
+  runs through the identical dispatch rules as a hand-written one, plus
+  `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case
+  (`core-march-types.md` §2.3/§2.4 cover the typing/desugar side of all of
+  this). The known container-`to_string`/`hash`/atom-`_show` divergences §5
+  routes around are UNCHANGED by this landing — those are bugs in the fallback
+  arms §4.4.2 explicitly does not re-litigate, not in the dispatch mechanism
+  §4.4.2 newly specifies;
 - effects and IO ordering;
 - actors;
 - refinements;
