@@ -336,7 +336,7 @@ end
 
 Checking is definite-failure (flags only what can *never* hold — no false
 positives) and runs only when `z3` is on `PATH`. See the
-[Refinement Types guide](docs/refinement-types.md) for the full story and
+[Refinement Types guide](refinement-types.md) for the full story and
 limitations (`Int`/`Bool` only, no `Float` value-refinements, direct calls only).
 
 ---

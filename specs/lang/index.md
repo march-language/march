@@ -73,12 +73,12 @@ consolidation location until the named task lands.
 | Pattern matching | [`pattern-matching.md`](pattern-matching.md) | canonical |
 | Interfaces (typeclasses) | [`interfaces.md`](interfaces.md) | canonical |
 | Type system (tutorial companion to core-march-types.md) | [`type-system.md`](type-system.md) | canonical |
-| Linear types | `linear-types.md` | pending (Task 3) |
-| Refinement types | `refinement-types.md` | pending (Task 3) |
-| Session types | `session-types.md` | pending (Task 3) |
-| Capabilities | `capabilities.md` | pending (Task 3) |
-| Memory model (Perceus/FBIP, user-facing) | `memory-model.md` | pending (Task 3) |
-| Safety by construction | `safety-by-construction.md` | pending (Task 3) |
+| Linear types | [`linear-types.md`](linear-types.md) | canonical |
+| Refinement types | [`refinement-types.md`](refinement-types.md) | canonical |
+| Session types | [`session-types.md`](session-types.md) | canonical |
+| Capabilities | [`capabilities.md`](capabilities.md) | canonical |
+| Memory model (Perceus/FBIP, user-facing) | [`memory-model.md`](memory-model.md) | canonical |
+| Safety by construction | [`safety-by-construction.md`](safety-by-construction.md) | canonical |
 | Actors | `actors.md` | pending (Task 4) |
 | Supervision | `supervision.md` | pending (Task 4) |
 | Parallelism | `parallelism.md` | pending (Task 4) |
