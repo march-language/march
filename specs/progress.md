@@ -283,6 +283,48 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
+
+Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong
+**integer** results — the `Ok` payload was double-tagged. The thunk trampoline
+stores `task[3] = (apply_ret << 1) | 1`; for an `Int` the `apply` fn already
+returns a tagged scalar (`2*n+1`), so `task[3] = 4*n+3`. `march_task_await`
+(`runtime/march_runtime.c`) wraps `task[3]` straight into `Ok(...)`, and the
+normal `Ok(n)` destructure untags only once → `2*n+1`. So compiled
+`Task.await(async(fn () -> 6*7))` yielded `Ok(85)` (= `2*42+1`),
+`await_many([10,20,30])` summed to `123` (= 21+41+61), and an `async_stream`
+squares-sum came out `2×correct + N`. The interpreter was always correct, and
+`Task.await_unwrap` was already fixed (commit 291f6b5f double-untags it) — but
+the `Result`-returning `await`/`await_many`/`async_stream` paths, which all
+funnel through the single `task_await` builtin, never got that fix. Fixed in
+`lib/tir/llvm_emit.ml`'s `task_await` case: when the statically-known `Task`
+inner type is `i64`, strip the extra tag from the freshly-allocated `Ok`
+payload field (offset 16) with one `ashr` (`4*n+3` is always odd, so an
+unconditional shift is the exact inverse of the trampoline double-tag). The
+ptr-payload path is left byte-identical → zero RC risk; verified the emitted IR
+for a String/List task carries none of the new instructions. Compiled ==
+interpreter confirmed: `42 / 60 / 55 / 99`.
+
+Also restored `test/apps/actor_stress.march` — a broad actor/task stress
+fixture (five actors: Counter/Stack/Collector/Waiter/Relay, `receive()`
+inside a handler, FIFO message ordering, `Task.async`/`await`/`await_many`/
+`async_stream`, bulk sends) that had rotted to stale `init { x = 0 }` /
+`{ s with x = ... }` (`=` where the grammar now requires `:`) and was wired
+into no test runner. Converted the syntax, dropped the `Task.race` / `Task.any`
+and cancel-token tests (the native backend can't link the `task_cancel_by_id`
+helper those rely on — a separate open gap, filed as a follow-up), added
+`needs IO.Console`, and pinned it as a native compiled-run golden
+`native_actor_stress` (+ a focused regression golden `native_task_await_int`)
+in `test/dune`, both run under `MARCH_NUM_SCHEDULERS=1` so the fire-and-forget
+actor/task `println`s serialise deterministically (multi-scheduler mode
+interleaves them mid-line — and single-thread is the only race-free config for
+the runtime's non-atomic local refcounting). Two compiled-only follow-ups filed
+(interpreter fine for both): the `task_cancel_by_id` native codegen gap
+(blocks `Task.race`/`Task.any`/cancel-tokens) and a ptr-payload `Task.await`
+runtime OOM. Full suite green: **421 compiler / 231 eval / 391 codegen / 804
+stdlib** (alcotest counts unchanged — the two additions are `test/dune` native
+golden-diff rules, not alcotest cases).
+
 ## Current State (as of 2026-07-06, same-file private nested-module member diagnostic fixed)
 
 A same-file qualified reference to a PRIVATE nested-module member now reports
