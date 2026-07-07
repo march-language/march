@@ -16,6 +16,18 @@ let typecheck src =
 
 let has_errors ctx = March_errors.Errors.has_errors ctx
 
+(** True iff DESUGARING [src] produces any error diagnostic. Mirrors the CLI
+    (bin/main.ml threads a shared [errors] ctx through [desugar_module] and
+    exits 1 if it has errors) — needed because the plain [typecheck] helper
+    above discards desugar-phase errors (its [parse_and_desugar] calls
+    [desugar_module] with no [~errors] arg). Used for the derive-unknown-type
+    regression (finding 17), whose error is emitted at desugar time. *)
+let desugar_has_errors src =
+  let ast = parse_module src in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors ast);
+  March_errors.Errors.has_errors errors
+
 (* ── Desugaring tests ───────────────────────────────────────────────────── *)
 
 let typecheck_full src =

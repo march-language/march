@@ -1,0 +1,17 @@
+-- Capabilities widening, Task 4 -- `cap no_extern` (`check_no_extern_module`,
+-- `typecheck.ml:6231-6255`), the ACCEPT side: a module with neither a
+-- `DExtern` block nor a `needs` path whose first two dotted segments are
+-- `IO`/`Foreign` (`has_foreign`, `:6242-6248`). `check_no_extern_module`
+-- walks the module's declarations and only raises on `Ast.DExtern` or a
+-- `DNeeds` entry naming `IO.Foreign` (or a longer path under it, e.g.
+-- `IO.Foreign.Blocking`); an ordinary `needs IO.Network` plus a plain `fn`
+-- body trips neither branch, so `--check` exits 0 with no diagnostic. See
+-- core-march-types.md §2.8.11.
+mod NoFFIService do
+  cap no_extern
+  needs IO.Network
+
+  fn ping(_cap : Cap(IO.Network), host : String) : Int do
+    string_length(host)
+  end
+end

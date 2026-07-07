@@ -1,0 +1,16 @@
+-- Capabilities widening, Task 1 -- Check 1 subsumption, root covers a child.
+-- `listen`'s signature uses `Cap(IO.Network)`, but the module declares only
+-- the ROOT `needs IO`. Check 1 (`typecheck.ml:5561`) covers a used cap if ANY
+-- declared `needs` subsumes it: `cap_subsumes "IO" "IO.Network"` is true
+-- because "IO.Network"'s ancestor chain is `["IO.Network"; "IO"]`
+-- (`cap_ancestors`, `cap_lattice.ml:39-46`; hierarchy entry `("IO.Network",
+-- Some "IO")`, `:21`). So a broad `needs IO` covers every descendant without
+-- repeating each one. See core-march-types.md §2.8.
+mod Server do
+  needs IO
+
+  fn listen(cap : Cap(IO.Network), port : Int) : Int do
+    let _ = cap
+    port
+  end
+end

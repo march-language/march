@@ -1,0 +1,25 @@
+-- Capabilities widening, Task 3 -- `cap_narrow`/`root_cap` capability
+-- threading (§2.8.8): a caller holding the broad `Cap(IO)` narrows it via
+-- `cap_narrow` (`typecheck.ml:1458`, `Cap(IO) -> Cap(a)`, a POLYMORPHIC
+-- return) to `Cap(IO.Network)` and threads the narrowed cap to a callee whose
+-- signature demands the stricter sub-capability. Both `boot`'s `Cap(IO)`
+-- param and `listen`'s `Cap(IO.Network)` param are covered by the single
+-- module-level `needs IO` via subsumption (Check 1, §2.8.3) -- `cap_narrow`
+-- does not itself relax or tighten what Check 1 requires; it only changes the
+-- STATIC TYPE of the value being passed so a stricter callee's signature
+-- unifies. `cap_narrow` is compile-time only: the value is runtime-erased
+-- (compiles to `null`/`VUnit`), so this narrowing has no runtime effect --
+-- it exists purely so the type system can express least-privilege threading.
+-- See core-march-types.md §2.8.8.
+mod Server do
+  needs IO
+
+  fn listen(_cap : Cap(IO.Network), port : Int) : Int do
+    port
+  end
+
+  fn boot(root : Cap(IO)) : Int do
+    let net_cap = cap_narrow(root)
+    listen(net_cap, 8080)
+  end
+end

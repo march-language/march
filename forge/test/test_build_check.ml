@@ -317,6 +317,60 @@ let test_build_app_with_broken_orphan_fails_before_compile () =
           true
           (contains_substring m "typecheck"))
 
+(** Scaffold a minimal standalone lib project by hand (no [Scaffold], since
+    we need full control over its [deps] section): [name]/forge.toml +
+    [name]/lib/, with [deps] entries pointing at other path-dep roots. *)
+let make_path_dep_project ~name ~deps =
+  let root = Filename.temp_dir ("forge_transdep_" ^ name ^ "_") "" in
+  Unix.mkdir (Filename.concat root "lib") 0o755;
+  let deps_lines = String.concat "" (List.map (fun (dep_name, dep_root) ->
+      Printf.sprintf "%s = { path = %S }\n" dep_name dep_root) deps) in
+  write_file (Filename.concat root "forge.toml")
+    (Printf.sprintf
+       "[package]\nname = %S\nversion = \"0.1.0\"\ntype = \"lib\"\n\n[deps]\n%s"
+       name deps_lines);
+  root
+
+(** Regression test for forge's dependency resolver not walking transitive
+    deps: a project depending on B (path dep), where B itself depends on C
+    (path dep), never got C on its own MARCH_LIB_PATH — so C's modules were
+    unreachable to the depending project's own code even though B could see
+    them directly. Confirmed live: `scroll` depends on `bastion` (path/git
+    dep), `bastion` itself depends on `depot` (git dep); scroll's own
+    `forge check` failed with "Unknown module Pool" (a depot module) until
+    [Cmd_build.lib_path_env] and [Cmd_deps.run]'s install walk were both
+    made to recurse into each dep's own forge.toml. Repro: A depends on B
+    via path; B depends on C via path; A's own code calls C's module
+    directly (never imports B at all) — this only typechecks if C's lib/
+    made it onto A's MARCH_LIB_PATH transitively through B. *)
+let test_lib_path_env_walks_transitive_path_deps () =
+  let c_root = make_path_dep_project ~name:"leafc" ~deps:[] in
+  Fun.protect ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote c_root)) in ())
+    (fun () ->
+      write_file (Filename.concat c_root (Filename.concat "lib" "leaf.march"))
+        "mod Leaf do\n\n  fn value() : Int do\n    99\n  end\n\nend\n";
+      let b_root = make_path_dep_project ~name:"midb" ~deps:["leafc", c_root] in
+      Fun.protect ~finally:(fun () ->
+          let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote b_root)) in ())
+        (fun () ->
+          write_file (Filename.concat b_root (Filename.concat "lib" "mid.march"))
+            "mod Mid do\n\n  fn value() : Int do\n    1\n  end\n\nend\n";
+          with_project ~project_type:Project.Lib (fun _name root ->
+              let toml_path = Filename.concat root "forge.toml" in
+              let oc = open_out_gen [Open_append] 0o644 toml_path in
+              Printf.fprintf oc "\n[deps.midb]\npath = %S\n" b_root;
+              close_out oc;
+              let user_mod = Filename.concat root (Filename.concat "lib" "user_mod.march") in
+              write_file user_mod
+                "mod UserMod do\n\n  fn use_leaf() : Int do\n    Leaf.value()\n  end\n\nend\n";
+              match Cmd_check.check () with
+              | Error m ->
+                Alcotest.fail
+                  ("expected transitive dep leafc's Leaf module to be reachable \
+                    through midb, got Error: " ^ m)
+              | Ok _ -> ())))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -336,6 +390,8 @@ let () =
         test_check_stdlib_shadow_does_not_corrupt_unrelated_module;
       Alcotest.test_case "check: qualified-call cycle does not break bare ctor ordering" `Quick
         test_check_qualified_cycle_does_not_break_bare_ctor_ordering;
+      Alcotest.test_case "lib_path_env walks transitive path deps" `Quick
+        test_lib_path_env_walks_transitive_path_deps;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;

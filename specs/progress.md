@@ -661,6 +661,32 @@ Measuring real compile/typecheck time on an external ~85-file project (`~/code/b
 
 **Test counts:** `forge/test/test_build_check.exe` gains 2 new Alcotest cases (9 total, up from 7) — warning-surfacing from the combined module, and cache-marker existence/mtime-stability across a repeat check. Standard six runners: 420 compiler / 231 eval / 391 codegen / 804 stdlib, all exit 0.
 
+## Current State (as of 2026-07-07, `forge deps`/`forge build`/`forge check` now walk transitive dependencies)
+
+`forge`'s dependency resolution was flat: `Cmd_deps.run` (`forge/lib/cmd_deps.ml`) only ever installed a project's OWN direct `[deps]` entries into `forge.lock`, and `Cmd_build.lib_path_env` (`forge/lib/cmd_build.ml`) only ever expanded those same direct deps onto `MARCH_LIB_PATH` — a dependency's OWN dependencies (e.g. a project depending on `bastion`, which itself depends on `depot`) never reached the depending project at all. Confirmed live: `~/code/scroll` (depends on `bastion` via path) failed `forge check` with `Unknown module Pool` (a `depot` module) until `depot` was added directly to scroll's own `forge.toml` as a workaround. Root-caused to both `Cmd_deps.run` and `Cmd_build.lib_path_env` iterating a single flat `deps` list with no recursion into each installed dependency's own `forge.toml`.
+
+Fixed by adding `Project.dep_root_dir` (`forge/lib/project.ml`) — resolves an installed dependency's own root directory (a `PathDep`'s target, or a git dep's CAS clone under `~/.march/cas/deps/<name>`) so its `forge.toml` can be read — and wiring a transitive walk on both sides: `Cmd_build.collect_transitive_deps` recursively expands `MARCH_LIB_PATH` through every dependency-of-a-dependency (each entry carries the ROOT it should resolve a relative `PathDep` against, since a nested dependency's own path deps are relative to ITS root, not the top-level project's); `Cmd_deps.bfs_install` installs and records dependencies wave-by-wave, discovering each wave's own `forge.toml` `[deps]` only after that wave is actually installed (needed for git deps, which don't have a readable `forge.toml` until cloned). Both dedup by name with nearest-wins semantics (a project's own direct dep shadows the same name pulled in transitively) and guard against dependency cycles via a `visited` set. Verified live against the real `scroll` → `bastion` → `depot` chain with the workaround reverted: `forge deps` now records `depot` in scroll's own `forge.lock` (previously absent), and `forge check` passes cleanly (0 errors, 4 pre-existing `depot` warnings) with no direct dependency on `depot` in scroll's `forge.toml`.
+
+**Test counts:** `forge/test/test_build_check.exe` gains 1 new Alcotest case (13 total, up from 12) — a 3-project path-dep chain (A → B → C) where A's own code calls a C module directly, reachable only if C's lib/ made it onto A's `MARCH_LIB_PATH` transitively through B. Standard six runners unaffected by this change (forge-only); full `forge/test/*.exe` suite green.
+
+## Current State (as of 2026-07-07, native codegen: bare sibling calls 2+ levels deep in a stdlib/imported file mis-qualified — undefined symbols at link time)
+
+Found while getting `~/code/march_doc` to build cleanly with `forge build`: stdlib's `CRDT.PNCounter` (a `mod PNCounter do ... end` nested inside `mod CRDT do ... end`) failed to LINK — `Undefined symbols: _PNCounter.map_inc, _PNCounter.map_sum, _PNCounter.map_max_merge`, referenced from the correctly-named `_CRDT.PNCounter.increment`/`.value`/etc. **Root cause:** `desugar.ml`'s `qualify_module_refs` rewrites a bare intra-module call (`map_inc(...)` inside `PNCounter`'s own `increment`) to its fully-qualified form so TIR lowering's `rename_tir_vars` (which independently produces the SAME fully-qualified name for the actual definition, via `lower_mod_decls`'s correctly-accumulating `prefix`) has something to match against — but `qualify_module_refs` always started its prefix accumulation at `""`, walking only `m.mod_decls`. Since `March_ast.Ast.module_` splits a file's sole top-level `mod X do ... end` into separate `mod_name`/`mod_decls` fields (`mod_decls` is already the UNWRAPPED body — there is no `DMod` node for the file's own name inside it), a stdlib/imported file's OWN top-level mod name was silently missing from the walk: `CRDT.PNCounter`'s bare `map_inc` call got qualified as only `PNCounter.map_inc` (one level, from the immediate enclosing submodule) instead of `CRDT.PNCounter.map_inc` (the true two-level nesting), while the DEFINITION correctly ended up `CRDT.PNCounter.map_inc` (TIR lowering's prefix accumulation has direct access to the file's own DMod wrapper once auto-discovery re-wraps it for merging) — reference and definition diverged, and the divergent name was never called anywhere else, so the linker rejected it outright. The one-line repro: `mod Outer do mod Inner do pfn helper... fn wrapped -> helper(x) end end` compiled standalone reproduces a RELATED but distinct issue (see below); the real bug needed a SEPARATE file loaded by name (matching how `CRDT.PNCounter` is actually reached) to surface, since the entry file's own top-level mod is *correctly* never included in the prefix (TIR unwraps the entry module — see `Typecheck.cap_qual_prefix`'s doc comment for the existing, correct convention on the typecheck side that this fix now mirrors on the desugar side).
+
+**Fix:** `qualify_module_refs` (`lib/desugar/desugar.ml`) takes an `~entry_prefix` seed instead of always starting at `""`; `desugar_module` gained an `~is_entry` flag (default `true`, preserving every existing caller's behavior) that computes `entry_prefix = if is_entry then "" else m.mod_name.txt ^ "."`. The two non-entry desugar call sites — `lib/resolver/resolver.ml`'s auto-discovery (`load`/the sorted-DMod-building pass) and `bin/main.ml`'s `load_stdlib_file` — now pass `~is_entry:false` (the latter still passes `~is_entry:true` — the default — specifically for `prelude.march`, whose members are unwrapped into global/bare scope exactly like an entry module, per its own special-case handling immediately below). Verified: the real `CRDT.PNCounter` repro (`new`/`increment`/`decrement`/`value` compiled and run standalone) now links and produces the correct value; `~/code/march_doc`'s own `forge build` no longer errors on `_PNCounter.*` undefined symbols (only the unrelated, pre-existing, documented `http_fetch`/`http_fetch_available` native-target gap remains — those builtins are wired only for eval/browser targets, per the 2026-06-18 stdlib entry above). New native golden test `test/native/nested_mod_qualcall.march` (compiles the real `CRDT.PNCounter` shape, diffs against `.expected`).
+
+**NOT fixed (out of scope, narrower, lower-impact):** an entry file EXPLICITLY self-qualifying its own top-level mod name from within itself (e.g. `mod Outer do fn main() do Outer.Inner.wrapped(5) end end`, writing out `Outer.` even though already inside `Outer`) still produces undefined symbols — TIR correctly never prefixes the entry module's own members, but the user wrote the reference WITH that prefix, and nothing currently strips it back off. Unusual to write in practice (nobody normally re-types their own file's enclosing mod name when calling into their own nested submodule bare or via the immediate submodule name alone); filed but not actioned this pass.
+
+## Current State (as of 2026-07-07, `march check`/`forge check` seed pass 1 from a cached stdlib typecheck env)
+
+Follow-up to the compile/typecheck-speed sweep started earlier this week: `--timings` showed stdlib typecheck alone is ~68% of `forge check`'s wall time on a small (10-file) real project (`~/code/march_doc`), ~19% on a 16-file one (`~/code/scroll`), ~5% on an 80-file outlier (`~/code/bastion`) — a large, avoidable, constant cost re-paid on every `run_check_cmd` invocation (the `march check f1 f2 ...` subcommand `forge check`/`forge build` batch onto, per the earlier batching work). **Investigated a persistent-daemon design first** (fork-per-request, Unix socket, warm in-memory state — see `specs/plans/2026-07-07-compiler-daemon-perf-plan.md`'s superseded "REVISED" section) **but found it unnecessary**: `Typecheck.check_module_core` gained an additive `?seed_env` parameter (pass 1 starts from it instead of `base_env`, no other structural change — every existing caller passing `None` is byte-for-byte unaffected). `bin/main.ml`'s `run_check_cmd` now builds (or loads from an on-disk Marshal cache, `get_stdlib_tc_env`, content-hash-keyed) a `stdlib_tc_env` via `check_module_core` on stdlib decls ALONE, then typechecks just the user's own files seeded from it — unless a user file shadows a stdlib module name (rare; falls back unchanged to the original from-scratch combined check).
+
+Verified byte-identical diagnostic output against the unmodified compiler across `march_doc`/`marathon`/`scroll`/`bastion` plus synthetic error/warning fixtures — this is a pure performance change, not a diagnostic-behavior change, for the shipped scope. Measured on a warm cache: `march_doc` `forge check` 0.86s → 0.20s (~4.3x), `marathon` 0.51s → 0.16s (~3.2x); `scroll`/`bastion` (both shadow a stdlib name via a transitive `depot` dependency) see no change, by design — the fallback path is untouched.
+
+**A real regression was found and reverted before shipping, not after:** an earlier version of this change also wired `compile` (`--compile`) to skip the stdlib prepend the same way — but `compile`'s `desugared` value is ALSO the input to TIR lowering, which needs stdlib's function BODIES (not just their inferred types) to emit a working binary. Skipping the prepend there silently dropped stdlib from what actually gets lowered. The full test suite caught this immediately (24 codegen + 6 stdlib failures, all `"type-incorrect TIR reached codegen"` internal-compiler-errors — stdlib functions the user's code called into were simply never lowered) before this was reported as complete. `compile` was reverted to its original always-prepend behavior; only `run_check_cmd` (`--check`-only, no lowering) uses the seed-env optimization. Caching stdlib's LOWERED TIR for `--compile` too is explicitly out of scope for now — a separate, riskier follow-up given `lower.ml`'s heavy reliance on global mutable `Hashtbl` refs (the same machinery whose interaction with auto-discovery produced the transitive-qualification bug fixed earlier this session), and not obviously justified by `--compile`'s smaller measured lowering-cost share relative to typecheck's.
+
+**Test counts:** full six-runner suite green after the revert — 804 stdlib / 391 codegen / 428 compiler / 231 eval, 0 failures.
+
 ## Current State (as of 2026-07-06, multi-arm `with ... else` parsing fixed)
 
 Multi-arm `with ... else` (the monadic-`with` error-handling form documented in `docs/pattern-matching.md`'s "With" section) now parses. Previously any `with pat <- e do body else ... end` with **two or more** else-arms failed to parse — the caret landed on the second arm's `->` — regardless of arm shape (nullary ctors, payload ctors, infix-operator bodies). A single else-arm always worked. Root cause in `lib/parser/token_filter.ml`: else-arms use the same `separated_nonempty_list(arm_sep, branch)` grammar as `match` branches (needing NL/PIPE separators), but the token filter only emitted arm-separator NLs inside a `Match` context. A monadic `with`'s `do` pushed a plain `Block`, so the newlines between else-arms were swallowed as insignificant whitespace; with a single arm no separator is needed, so only multi-arm forms broke. Fix: a new `With` context variant marks the `with`-block — recorded when the `do` follows a `<-` (`GETS`, unique to with-bindings; multiple bindings of one `with` dedup to a single pending entry keyed by paren-depth) — and at the `else` keyword the `With` context is promoted to `Match` so the arms are newline-separated exactly like a `match` body; the single `end` pops it. Composes cleanly with the cond-form/when-guard token-filter work landed earlier the same day (the promoted arms are ordinary pattern arms, `ms_is_cond = false`). The with-body itself stays block-style. `if ... else` (block-body else, top-of-stack `Block`), record-update `{ e with ... }` (uses `WITH` but no `GETS`), and `else if` chains are untouched. Pre-existing limitation (verified identical on base — NOT a regression; mirrors the `match`-scrutinee case): a *bare* unparenthesized `do`-block expression (`if`/`with`) as a with-binding RHS steals the pending marker — parenthesize the RHS (a bare `match` RHS works, since `match` has its own pending mechanism). 4 new parser regression tests in `test/test_compiler.ml`. The 3-arm example in `docs/pattern-matching.md` now compiles.
@@ -2815,6 +2841,136 @@ describing the corrected post-fix behavior throughout.
 
 Next queued widening slice: **effects/capabilities**, or **error-handling /
 `let?`** (per the roadmap) — see `specs/todos.md`.
+
+## Core March widening slice 5 — capabilities/effects: IO permission caps + behavioral module caps (2026-07-07, CLOSEOUT)
+
+`specs/lang/core-march-types.md` is widened past widening slice 4 (session
+types/protocols/channels) to cover **the capability/effect system**: the
+18-entry IO-permission hierarchy, `needs`/`Cap(X)` signature enforcement and
+subsumption, transitive `use` and extern-implied caps, `cap_narrow`/
+`root_cap` compile-time threading, the effect-inference two projections,
+realtime exclusion — AND the five **behavioral module caps** (`cap
+no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) — a seven-task slice
+that, unlike slices 3 and 4's docs-only shape, lands **two real compiler
+fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
+
+- **The system is purely compile-time/static.** `Cap(X)` is runtime-erased
+  (`null` in LLVM IR, `VUnit` in the interpreter); no capability check has
+  any effect on program output. Enforcement lives entirely in `--check`
+  (`lib/typecheck/typecheck.ml` plus two post-typecheck `lib/refinecheck/`
+  passes). This property (verified, survey P6b) means the slice needed **no
+  golden corpus** — every witness is a `march --check` accept/reject
+  program in `specs/lang/types/`.
+- **F2 fix (Task 5).** `cap pure`'s and `cap deterministic`'s banned-builtin
+  sets (`pure_banned`/`deterministic_banned`) were hardcoded, hand-maintained
+  name lists that referenced builtins which **do not exist** (`write_file`,
+  `random_int`, `now_ms`) while **missing** the real effectful ones
+  (`file_write`, `random_bytes`, `unix_time_ms`) — so `cap pure` + `file_write`
+  and `cap deterministic` + `unix_time_ms(())` both typechecked with `--check`
+  exit 0, a genuine soundness hole. Fixed by deriving both sets from the
+  authoritative `builtin_cap_table` effect map (the same map Check 1b and
+  `cap_infer.ml` already trust): `pure_banned` = every table builtin (all are
+  effectful) plus the incidental non-table names `spawn`/`send`/`exit`;
+  `deterministic_banned` = only the subset the table maps to a nondeterminism
+  cap (`IO.Clock`/`IO.Random`), via a new `is_nondeterministic_cap` helper —
+  keeping `cap deterministic` correctly weaker than `cap pure` (it still
+  permits an ordinary `file_read`). Verified both directions: the previously
+  silently-accepted programs now reject with the cap's own error; a
+  genuinely-pure module and a `cap deterministic` module calling `file_read`
+  both still accept (no over-rejection).
+- **F3 fix (Task 6).** `cap no_panic` covered every NAMED panic-surface
+  function (`panic`, `unwrap`, `head`, `List.nth`, …) via a transitive
+  fixpoint, but never consulted the exhaustiveness checker's verdict — a
+  non-exhaustive `match` inside a `cap no_panic` module typechecked clean
+  (only the ordinary, non-blocking exhaustiveness Warning fired) and then
+  panicked at runtime with "no matching clause." Fixed by adding a shared
+  `env.nonexhaustive_match_spans : Ast.span list ref` side-table:
+  `check_exhaustiveness` now records every non-exhaustive match's span (in
+  addition to its existing Warning), and `check_no_panic_module` reads that
+  table, promoting to an ERROR any span nested inside one of ITS OWN
+  module's function bodies. Exhaustiveness itself is not reimplemented —
+  the fix only plumbs an already-computed verdict to a second consumer. Key
+  regression guard: `accept/t14_nonexhaustive_match_still_typechecks` (a
+  PLAIN, non-`cap no_panic` non-exhaustive match) still accepts — the
+  promotion is scoped strictly to `cap no_panic` modules.
+- **Corpus:** types 78 → **104** (56 accept, 48 reject; all count sites —
+  `INDEX.md` header, the `104/104` result line, `check-docs.sh`'s Check C —
+  consistent). `accept/t45`–`t56` cover IO-cap subsumption (Check 1),
+  transitive `use`/extern caps (Checks 4/1c/5), `cap_narrow`/`root_cap`
+  threading and the migrate-state caveat mitigation (Check 8), and the
+  behavioral caps' correct-case shapes; `reject/t36`–`t48` cover the
+  corresponding violations, including `t45`–`t48` — the F2/F3 witnesses that
+  were IMPOSSIBLE to add before their respective fixes landed (they
+  accepted, incorrectly, pre-fix). `check_types.sh` 104/104, exit 0. No
+  golden corpus change (static/compile-time property, per above).
+- **Six findings filed OPEN in `specs/todos.md`'s "Compiler: Capabilities/
+  effects" section** (F2/F3 have their own Done entries, distinct from
+  these six):
+  1. **F1** — body-scanned IO caps (a direct function-body call to an IO
+     builtin with no `Cap(X)` in any signature) are WARNING-only, not
+     error; the "absence of `needs` = machine-verified purity" guarantee
+     holds only at the signature/transitive-`use`/extern-cap ERROR surface
+     (Checks 1/4/5), not at the body-call WARNING surface (Check 1b).
+  2. **F6** — only 10 of the 18 IO-permission hierarchy entries are
+     registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`); the
+     other 8 are valid `needs` targets but reject as `Unknown module IO`
+     when written inside `Cap(...)`.
+  3. **The flaky narrowing HINT** — Check 3's `Cap(IO)`-narrowing hint fires
+     nondeterministically (~1-in-10) on a byte-identical binary and input;
+     the `--check` exit code itself is invariant, so no corpus program is
+     affected, but it is a real, previously-undocumented compiler
+     nondeterminism (likely hash/traversal-order dependence).
+  4. **F5** (cosmetic) — `println`/`print` produce no Check-1b body-scan
+     diagnostic at all, despite being registered in `builtin_cap_table` —
+     a coverage gap, not a soundness gap.
+  5. **The proof-cap mint mismatch** (deliberately unlabeled, not "F7" —
+     every letter `F1`–`F8` is already in use elsewhere in this document,
+     including by the UNRELATED session-types-slice linearity/
+     diagnostic-noise findings) — the `capabilities.md`-documented proof-cap
+     "mint" idiom (`execute_pending_migrations(raw); ()`) does not actually
+     typecheck; the mechanism that DOES work — `cap_narrow`'s polymorphic
+     return type — is unrestricted, and any code holding an ordinary
+     `Cap(IO)` can mint an arbitrary nominal proof capability with it, with
+     no covering `needs` and no `mod`-scoping. Deferred to a later
+     proof-caps-focused slice per the widening plan; not fixed here.
+  6. **The guarded-match exhaustiveness gap** — a pattern guard
+     short-circuits `check_exhaustiveness` before it ever records a span
+     (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+     match inside a `cap no_panic` module is invisible to both the
+     ordinary warning and F3's new error path — live-verified to panic at
+     runtime uncaught. Pre-existing behavior F3 correctly inherits rather
+     than introduces; not in F3's scope; would need a guard-aware
+     (Z3-backed) exhaustiveness analysis to close.
+- **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
+  already wired into `specs/lang/index.md`'s chapter map before this slice)
+  reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
+  the honest three-tier severity, each with a live-verified transcript: the
+  opening "absence of a capability declaration is a machine-verified
+  guarantee of purity" claim, the IO-caps-intro "the build fails with a
+  clear message" claim, "What the compiler tells you"'s "There are no false
+  positives" + "The absence of `needs` is itself a machine-verified
+  guarantee" claims, and the capability-inference-hints section's "the type
+  checker already enforces `needs` as an error" claim. The behavioral-caps
+  section is extended from documenting two caps (`no_panic`/`no_alloc`) to
+  all five, adding `cap no_extern`/`cap pure`/`cap deterministic` for the
+  first time and noting the F2/F3 fixes inline. The proof-caps section gets
+  a "known mismatch" callout pointing at the proof-cap mint mismatch
+  finding. Every code example this task touched or added was re-`--check`ed
+  live against the current oracle.
+- **`core-march-types.md` finalized.** §2.8.11/§2.8.12's F2/F3 write-ups
+  flip from the mid-slice "open"/"UNSOUND" framing (accurate when Task 4
+  wrote them, before Tasks 5–6 landed) to describe both as FIXED, with
+  before/after transcripts; the stale mid-slice `100/100` illustrative
+  count is corrected to the final `104/104`; §6's roadmap bullet is updated
+  from "Tasks 1-3 landed, behavioral caps still deferred" to reflect all
+  seven tasks landed, with the proof-cap mint mismatch named as the
+  remaining deferred item; a citation-drift pass re-grepped `typecheck.ml:`
+  line numbers that had shifted (by up to ~70 lines) as a side effect of the
+  Task 5/6 fix commits inserting code above them. `check_types.sh`
+  reconfirmed 104/104; `check-docs.sh` reconfirmed exit 0.
+
+Next queued widening slice: **proof caps** (closing the proof-cap mint
+mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
 
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 

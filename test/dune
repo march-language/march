@@ -743,6 +743,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
+; ── Regression: bare sibling call 2 levels deep in a stdlib file must
+; qualify with the file's OWN top-level mod name, not just the immediate
+; enclosing submodule (desugar's qualify_module_refs; see
+; nested_mod_qualcall.march's header comment for the full story). ──
+(rule
+ (targets native_nested_mod_qualcall native_nested_mod_qualcall.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/nested_mod_qualcall.march)
+       (file ../stdlib/crdt.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_mod_qualcall
+        native/nested_mod_qualcall.march)
+   (with-stdout-to native_nested_mod_qualcall.out
+        (system "./native_nested_mod_qualcall")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_mod_qualcall.expected native_nested_mod_qualcall.out)))
+
 ; ── Regression: RPC CAS impl_hash stable across separate compilations ──
 ; The remote_ref_hashes / march_remote_register admission check compares a
 ; function's impl_hash computed in the CALLER binary against the SERVER's.  Two

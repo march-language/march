@@ -175,9 +175,36 @@ let dep_to_lib_paths ~root (dep_name, dep) =
      | None  -> [])
   | _ -> []
 
+(** Walk a project's dependency graph transitively: for every direct dep,
+    also pull in ITS OWN prod [deps] (recursively), so e.g. a project
+    depending on `bastion`, which itself depends on `depot`, gets `depot`
+    on its MARCH_LIB_PATH too.  Each entry carries the root it should be
+    resolved relative to (a PathDep is relative to the DECLARING project's
+    root, not the top-level one).  Dedup is by dep name, nearest-wins (a
+    project's own direct dep shadows the same name pulled in transitively),
+    and a [visited] set guards against dependency cycles. *)
+let rec collect_transitive_deps visited (root, deps) =
+  List.concat_map (fun (dep_name, dep) ->
+      if Hashtbl.mem visited dep_name then []
+      else begin
+        Hashtbl.add visited dep_name ();
+        let here = [(root, dep_name, dep)] in
+        let nested =
+          match Project.dep_root_dir ~project_root:root (dep_name, dep) with
+          | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
+            (match Project.load_from_dir dep_dir with
+             | Ok dep_proj -> collect_transitive_deps visited (dep_dir, dep_proj.Project.deps)
+             | Error _ -> [])
+          | _ -> []
+        in
+        here @ nested
+      end
+    ) deps
+
 (** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
     of the [march] compiler.  Contains the project's own lib/, any dep lib
-    roots (scoped by environment), and config/ when present.
+    roots (scoped by environment) — walked transitively — and config/ when
+    present.
 
     [release=true]  → only prod [deps] are on the path (ships to users).
     [release=false] → [deps] + [dev-deps] + [dev-only-deps] are included. *)
@@ -189,6 +216,8 @@ let lib_path_env ?(release=false) proj =
     if release then proj.Project.deps
     else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
   in
+  let visited = Hashtbl.create 16 in
+  let transitive_deps = collect_transitive_deps visited (proj.Project.root, scoped_deps) in
   (* A dependency's lib/ may group modules into subfolders exactly like the
      primary package (e.g. lib/api, lib/wire).  The module resolver searches
      each lib path flatly, so expand every dep lib root into the root plus all
@@ -196,7 +225,8 @@ let lib_path_env ?(release=false) proj =
      the primary package below.  Without this, a reorganised dependency's
      internal cross-module imports fail with "Module not found" in consumers. *)
   let dep_lib_paths = List.concat_map
-    (dep_to_lib_paths ~root:proj.Project.root) scoped_deps in
+    (fun (root, dep_name, dep) -> dep_to_lib_paths ~root (dep_name, dep))
+    transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ collect_lib_dirs lib_dir
