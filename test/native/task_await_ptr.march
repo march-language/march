@@ -1,0 +1,27 @@
+-- Regression: compiled Task.await on a heap (ptr) result must untag the Ok
+-- payload.  The thunk trampoline stores task[3] = (apply_ret << 1) | 1;
+-- march_task_await wraps it straight into Ok, but the Ok(x) destructure loads
+-- a ptr field raw (no untag), so pre-fix the String/List payload was a wild
+-- ~2*addr pointer -> `march: out of memory` / SIGSEGV.  The i64 case guards
+-- the shared untag path (double-tag 4*n+3 -> n).  Awaits are sequential and
+-- each result is printed immediately, so output is deterministic under
+-- MARCH_NUM_SCHEDULERS=1.
+mod TaskAwaitPtr do
+  fn main() : Unit do
+    let s = Task.async(fn () -> "hello" ++ " world")
+    match Task.await(s) do
+      Ok(v)  -> println("str=" ++ v)
+      Err(e) -> println("err=" ++ e)
+    end
+    let l = Task.async(fn () -> [1, 2, 3, 4])
+    match Task.await(l) do
+      Ok(xs) -> println("len=" ++ int_to_string(List.length(xs)))
+      Err(_) -> println("err")
+    end
+    let n = Task.async(fn () -> 6 * 7)
+    match Task.await(n) do
+      Ok(k)  -> println("int=" ++ int_to_string(k))
+      Err(_) -> println("err")
+    end
+  end
+end
