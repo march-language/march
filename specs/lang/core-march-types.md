@@ -90,6 +90,22 @@ Task 2) is the operational companion — `own_names`-gated export, bare-fails/
 qualified-works name resolution, and the lexical-scoping nuance for a
 directly-nested module.
 
+**Widening slice (session types, 2026-07-06):** §2.7 adds **session-typed
+channel/protocol typing** — greenfield content, the first coverage this
+document has for `protocol`/`Chan`/`MPST`. `protocol Name do ... end`
+declaration (three step forms: `ProtoMsg`/`ProtoLoop`/`ProtoChoice`), the
+per-role local `session_ty` a protocol PROJECTS onto (`project_steps`/
+`project_protocol`), binary duality (`dual_session_ty`, the `dual(A) == B`
+check), MPST send/recv-pair consistency (documented as TYPING-ONLY — the
+compiled MPST runtime is broken, a separate finding filed by the operational
+widening task), and the `Chan(Role, Proto)` linear endpoint type. Also files
+**F4**: a real typing bug where the MPST merge rule (meant to let a
+non-chooser role skip an irrelevant choice) leaks into the BINARY duality
+check, wrongly rejecting a legal binary protocol whose two `choose` branches
+happen to carry the same payload type. Per-op channel state-ADVANCEMENT
+(`Chan.send`/`recv`/`choose`/`offer`/`close` typing) is a separate, later
+widening task — §2.7 documents the protocol/projection/duality layer only.
+
 ## 1. The typing judgment
 
 March's typechecker is **bidirectional Hindley–Milner**: two mutually-recursive
@@ -2153,6 +2169,365 @@ discriminant *position*, a message from actor A's variant and a message from
 actor B's variant can occupy the same discriminant slot and be
 indistinguishable to B's dispatch `ECase`.)
 
+### 2.7 Session types: protocols, projection, and channels
+
+March has a **session-typed channel** construct: a `protocol` declares a
+global choreography between named roles, the typechecker **projects** that
+global choreography onto each role's own point of view (a `session_ty`), and
+a `Chan(Role, Proto)` value is a **linear** endpoint carrying that local view
+as live, mutable type-state — every channel operation both checks the current
+state and advances it. This subsection covers the DECLARATIVE half: what a
+`protocol` looks like, how projection computes each role's local type, how
+binary duality and MPST consistency are verified, and what `Chan(Role, Proto)`
+resolves to as a surface type. **Per-operation typing** — what `Chan.send`/
+`Chan.recv`/`Chan.choose`/`Chan.offer`/`Chan.close` each require and how they
+advance the state — is a different arm of `typecheck.ml` and is covered by a
+later widening task, not here.
+
+#### 2.7.1 `protocol` declaration — three step forms
+
+A protocol is a top-level declaration, `DProtocol of name * protocol_def *
+span` (`lib/ast/ast.ml:151`), where `protocol_def = { proto_steps :
+protocol_step list }` (`ast.ml:287–289`). `protocol_step` has **exactly three**
+variants (`ast.ml:291–294`) — there is no separate "receive" step (send/recv
+are the two ends of one `ProtoMsg`) and no `ProtoEnd`/`ProtoVar` (those are
+synthesized only during projection, §2.7.2):
+
+```
+and protocol_step =
+  | ProtoMsg    of name * name * ty                         (* Sender -> Receiver : T *)
+  | ProtoLoop   of protocol_step list                        (* loop do ... end *)
+  | ProtoChoice of name * (name * protocol_step list) list   (* choose by Role: label -> steps *)
+```
+
+The parser (`lib/parser/parser.mly:606–627`) mirrors this one-for-one:
+`protocol_decl` is `PROTOCOL upper_name DO list(protocol_step) END`;
+`protocol_step` matches `sender ARROW receiver COLON ty` → `ProtoMsg`, `LOOP DO
+... END` → `ProtoLoop`, and `CHOOSE BY chooser COLON ... branches ... END` →
+`ProtoChoice` (branches via `choose_branch: option(PIPE) label ARROW
+list(protocol_step)`, `:627–629`). Example (the parser's own doc comment,
+`parser.mly:606–614`):
+
+```march
+protocol Transfer do
+  Client -> Server : Request(String)
+  Server -> Client : Response(Int)
+  loop do
+    Client -> Server : More(String)
+    Server -> Client : Ack()
+  end
+end
+```
+
+Roles (`Client`, `Server` above) are bare uppercase names — there is no
+separate "declare a role" syntax. A role does not need to be a declared type
+(a bound `type Client = Client` or similar); if it isn't, the typechecker
+emits a non-fatal HINT during `--check`/run (harmless to `--check`'s exit
+code, but the message shares a stream with program stdout when interpreted —
+a cosmetic finding filed by the operational widening task, not repeated here).
+This document's own corpus programs (§2.7.6) declare each role as its own
+nullary type to avoid the HINT.
+
+#### 2.7.2 `session_ty` — the local, per-role view
+
+The type layer's representation of channel state is `session_ty`
+(`typecheck.ml:105–116`, "Local session type — per-endpoint view of a binary
+protocol. Computed by projecting the global `Ast.protocol_def` onto one
+role."):
+
+```
+and session_ty =
+  | SSend   of ty * session_ty            (* Send a value of type T, then follow S (binary) *)
+  | SRecv   of ty * session_ty            (* Receive a value of type T, then follow S (binary) *)
+  | SChoose of (string * session_ty) list (* Actively select a branch label *)
+  | SOffer  of (string * session_ty) list (* Passively wait for the other side to pick *)
+  | SEnd                                  (* Session complete -- channel must be closed *)
+  | SRec    of string * session_ty        (* Recursive binding: Rec(X, S) *)
+  | SVar    of string                     (* Back-reference to a recursive binder *)
+  | SError                                (* Error sentinel *)
+  (* MPST: role-annotated send/recv for multi-party protocols (N>2 participants). *)
+  | SMSend  of string * ty * session_ty   (* Send to role: MSend(target_role, T, S) *)
+  | SMRecv  of string * ty * session_ty   (* Receive from role: MRecv(source_role, T, S) *)
+```
+
+`SSend`/`SRecv`/`SChoose`/`SOffer` are the **binary** (exactly 2 roles) forms;
+`SMSend`/`SMRecv` are their **MPST** (>2 roles) counterparts, each carrying an
+explicit peer-role name instead of relying on there being only one possible
+peer. `SRec`/`SVar` encode a `loop` as a named recursive binder plus
+back-references to it — the standard µ-type encoding (`Rec(X, S)` /
+`X`). `SEnd` means the session is complete and the channel must be closed;
+`SError` is an internal sentinel for a protocol that failed to project (so a
+malformed protocol doesn't cascade into unrelated unification failures
+downstream).
+
+The channel *value's* type is `TChan of session_ty ref` (`typecheck.ml:95`,
+"Linear session-typed channel endpoint") — a `ty` constructor wrapping a
+**mutable reference** to the endpoint's *current* local session state. This
+is why a channel is not polymorphic: `TChan` is treated as closed/opaque by
+`occurs`/`subst`/`ftv` (no type variables flow through it), and why each
+channel operation can *mutate* the ref in place to reflect the new state
+after the operation, rather than requiring the surrounding code to thread a
+fresh type through by hand (the per-operation typing that reads/rewrites this
+ref is the subject of the later per-op widening task).
+
+Structural equality over `session_ty` comes in two flavors, both load-bearing
+for what follows: `session_ty_equal` (used by `unify` when two `TChan`s meet,
+and by the binary duality check, §2.7.3) and the stricter
+`session_ty_exact_equal` (`typecheck.ml:2058`, "Exact structural equality
+including payload types. Used by MPST mergeability check to determine if
+branches can be merged. Two branches can be merged only if they are
+completely identical.") — the latter is exactly what makes §2.7.5's F4
+finding possible.
+
+#### 2.7.3 Projection — global protocol to per-role local type
+
+**`project_steps env ~proto_name ~multiparty steps role cont`**
+(`typecheck.ml:5870`) walks a `protocol_step list` and produces the
+`session_ty` that `role` observes, given a continuation `cont` for what comes
+after these steps:
+
+- **`ProtoMsg (sender, receiver, msg_ty)`** — if `role` is the sender, emit
+  `SSend`/`SMSend` (binary/MPST, keyed on the `~multiparty` flag) carrying the
+  receiver's name (MPST) and the continuation; if `role` is the receiver,
+  emit `SRecv`/`SMRecv` symmetrically; if `role` is neither, this step is
+  invisible to `role` and projection just recurses into the continuation —
+  the role "doesn't participate in this step."
+- **`ProtoLoop inner_steps`** — the inner steps are projected with a fresh
+  `SVar` back-reference (`<proto_name>_loop`) as their own continuation; if
+  the role isn't involved anywhere in the loop body, the loop collapses away
+  entirely (`inner = SVar _` case) rather than emitting a vacuous `SRec`;
+  otherwise the outer continuation is substituted into the back-reference
+  (`subst_svar`) and the whole thing is wrapped in `SRec (rec_var, ...)`.
+- **`ProtoChoice (chooser, branches)`** — each branch's steps are projected
+  (with the OUTER continuation `cont`, since every branch eventually rejoins
+  the same protocol tail); if `role` is the chooser, the result is
+  `SChoose branch_tys` (an active choice); otherwise it's `SOffer branch_tys`
+  UNLESS every branch happens to project to the exact same local type for
+  this role (`session_ty_exact_equal`, checked pairwise against the first
+  branch) — in which case the branches **merge** into that single shared
+  type, because the role "need not observe the choice at all." This is the
+  standard MPST merge rule (comment at `typecheck.ml:5906–5919`), and it is
+  the mechanism behind the F4 finding below (§2.7.5).
+
+**`project_protocol env ~span ~proto_name pdef`** (`typecheck.ml:5952`) is the
+entry point: it collects every role mentioned anywhere in the protocol
+(`roles_of_steps`, walking all three step forms including branch arms), sets
+`multiparty = List.length roles > 2`, and projects each role via
+`project_steps ... role SEnd` (every role's local view ends in `SEnd` unless
+a `loop` makes part of it recursive). The `(role, session_ty) list` result is
+stored as `pi_projections` on the `proto_info` record (`typecheck.ml:428–431`,
+"Computed session-type information for a declared `protocol`. Stored in
+`env.protocols` after `DProtocol` is checked."), keyed by protocol name.
+
+After projecting, `project_protocol` runs a **consistency check** that
+differs by role count:
+
+- **Binary (exactly 2 roles `[a; b]`)** — verifies **duality**: `dual(proj_a)
+  == proj_b` (§2.7.4).
+- **Multiparty (>2 roles)** — verifies **matching send/recv role pairs**
+  (§2.7.4's MPST paragraph).
+
+A protocol that fails either check is rejected at its OWN declaration site —
+the error is attached to the `protocol` block's span, not to any later use of
+`Chan.new`/`Chan(Role, Proto)`.
+
+#### 2.7.4 Duality (binary) and consistency (MPST)
+
+**Binary duality.** `dual_session_ty` (`typecheck.ml:5935`) computes what the
+*other* endpoint of a binary session must look like: `SSend ↔ SRecv` (with the
+payload type held fixed and the continuation recursively dualized), `SChoose
+↔ SOffer` (branch-wise), and `SEnd`/`SVar`/`SError` are self-dual (unchanged).
+`project_protocol`'s binary arm (`typecheck.ml:5972–5986`) then requires
+`session_ty_equal (dual_session_ty proj_a) proj_b` — i.e. role `a`'s local
+type, mechanically dualized, must equal role `b`'s ACTUAL projected local
+type. A mismatch is reported with both sides rendered via `pp_session_ty`:
+
+> `` Protocol `<name>`: the projection onto `<a>` and the projection onto
+> `<b>` are not duals of each other.
+> dual(<a>) = <printed dual>
+> but <b> has: <printed actual projection> ``
+
+This is exactly the diagnostic the F4 repro below produces.
+
+**MPST consistency.** For protocols with more than two roles, there is no
+single "the other side" to dualize against — instead, `project_protocol`'s
+multiparty arm (`typecheck.ml:5987+`) walks every `ProtoMsg(sender, receiver,
+T)` in the ORIGINAL global steps (via `gather_msgs`, recursing through
+`ProtoLoop`/`ProtoChoice`) and, for each one, confirms that the sender's own
+projection actually contains a matching `SMSend(receiver, T, ...)` somewhere
+along its spine (`has_msend`, unfolding `SRec`s and descending into
+`SChoose`/`SOffer` branches) AND the receiver's projection contains the
+matching `SMRecv(sender, T, ...)` (`has_mrecv`, symmetric). This is a weaker
+check than binary duality — it confirms every declared message has a sender
+side and a receiver side that agree on type, but (unlike the binary case) it
+does not attempt to verify the full relative ORDERING of every role's local
+type against every other role's; ordering consistency for 3+ roles is
+enforced only insofar as `project_steps`'s single top-down walk of the shared
+global step list is definitionally what both projections are derived from.
+
+**MPST is TYPING-ONLY in this reference.** The projection/consistency
+machinery above is real, exercised by `--check`, and covered by an accept
+witness in this task's corpus (§2.7.6, `t42`). But **the compiled MPST
+runtime is broken** — every `MPST.*` program that runs correctly interpreted
+segfaults (exit 139) when compiled, deterministically, even for an
+all-`String`-payload protocol with no numeric/boolean data involved. This is
+filed as **F3** by the operational widening task (the session-types survey,
+`.superpowers/sdd/sessions-survey.md` §4), not by this task — mentioned here
+only so a reader of this typing section doesn't conclude MPST is
+production-usable end-to-end. Everything documented in this subsection is
+real, correctly-implemented STATIC typing; the runtime gap is a separate,
+already-filed compiled-backend defect.
+
+#### 2.7.5 The F4 finding — the MPST merge rule leaks into binary duality
+
+**[OPEN — filed, not fixed] A legal binary protocol whose two `choose`
+branches carry the SAME payload type is wrongly rejected as "not duals."**
+Cause: the mergeability optimization in `project_steps`'s `ProtoChoice` arm
+(`typecheck.ml:5906–5919`, §2.7.3) is a correct rule for a **non-chooser role
+in an MPST protocol** — if that role can't tell the branches apart, it's fine
+to collapse them. But `project_steps` applies this SAME merge rule
+unconditionally, including when `multiparty = false` (a plain 2-role binary
+protocol). For a binary protocol, the "non-chooser" IS the chooser's sole
+peer — there is no third role for whom the branches are "irrelevant." When
+both `choose` branches happen to carry an identical local type
+(`session_ty_exact_equal`), the peer's projection COLLAPSES from `SOffer
+{...}` down to that single shared type — which is no longer the dual of the
+chooser's `SChoose {...}`, so the binary duality check (§2.7.4) rejects the
+protocol as malformed even though it is a perfectly sensible binary
+choose/offer protocol.
+
+**Minimal repro — rejected** (`Server`'s two branches both send an `Int`
+back to `Client`, so they merge and duality breaks):
+
+```march
+protocol Decision do
+  choose by Client:
+    ok  -> Server -> Client : Int
+    err -> Server -> Client : Int
+  end
+end
+```
+
+`march --check` on this protocol exits **1**:
+
+```
+Protocol `Decision`: the projection onto `Client` and the projection onto `Server` are not duals of each other.
+dual(Client) = Offer{ok: Send(Int, End), err: Send(Int, End)}
+but Server has: Send(Int, End)
+```
+
+(Note the diagnostic itself is evidence of the bug: `Server`'s actual
+projection printed is `Send(Int, End)` — the MERGED type — not `Choose{ok:
+..., err: ...}`, which is what a chooser's projection should be.)
+
+**Same protocol shape, branches made type-distinct — accepted:**
+
+```march
+protocol Decision do
+  choose by Client:
+    ok  -> Server -> Client : Int
+    err -> Server -> Client : String
+  end
+end
+```
+
+`march --check` on this variant exits **0** — because the branches no longer
+satisfy `session_ty_exact_equal`, the merge doesn't fire, `Client`'s
+projection stays a genuine `SOffer {ok: Recv(Int,End), err: Recv(String,End)}`,
+and that IS the dual of `Server`'s `SChoose {ok: Send(Int,End), err:
+Send(String,End)}`.
+
+**Impact:** any binary protocol author who happens to give two `choose`
+branches the same payload type (a common, unremarkable shape — e.g. both an
+`ok` and an `err` branch replying with a plain `Int` status code) hits a
+spurious, confusing rejection whose message talks about "duals" rather than
+anything resembling "make your branches type-distinct." The workaround
+(differentiate the branch payload types, even trivially, e.g. wrap one in a
+single-field record) is non-obvious from the error text alone. This is a
+genuine typechecker bug — filed in `specs/todos.md` under "Compiler: Type
+System" (F4), not fixed here (out of scope for a docs-only widening task;
+the fix direction is to gate the merge-rule branch in `ProtoChoice` on
+`multiparty`, only merging for the true MPST non-chooser case).
+
+#### 2.7.6 `Chan(Role, Proto)` — the linear channel-endpoint surface type
+
+Users write `Chan(RoleName, ProtoName)` as a type annotation (e.g. a function
+parameter `ch : Chan(Client, Echo)`). The parser produces this as an ordinary
+type application, `TyCon("Chan", [TyCon(RoleName,[]); TyCon(ProtoName,[])])`
+— there is no dedicated channel-type grammar production. `surface_ty`
+intercepts this shape as a special case (`typecheck.ml:2285–2311`, inside the
+`Ast.TyCon (name, args)` arm) BEFORE the general type-lookup path:
+
+1. Look up `proto.txt` in `env.protocols`; if it's not a declared protocol,
+   error `` I don't know a protocol called `<name>`. `` and return `TChan (ref
+   SError)`.
+2. Otherwise, look up `role.txt` in that protocol's `pi_projections`
+   (§2.7.3); if the role never appeared in the protocol, error `` Protocol
+   `<proto>` has no role called `<role>`.\nKnown roles: <comma-separated list>
+   `` and return `TChan (ref SError)`.
+3. Otherwise, return **`TLin (Ast.Linear, TChan (ref sty))`** — the role's
+   projected local `session_ty`, wrapped in a fresh mutable ref, wrapped in
+   `TChan`, wrapped in a **linear** marker.
+
+The `TLin (Linear, ...)` wrapper is not incidental: a channel endpoint MUST be
+used exactly once along its session (each operation consumes the current
+endpoint value and returns a new one representing the advanced state), so the
+surface type is linear by construction — the same linearity machinery that
+governs other linear values in March (letting the generic linear-`let`
+tracker catch a double-use of a channel binding). `Chan.new(Proto)`
+constructs a pair of such endpoints directly (returning the first two role
+projections as a `(linear Chan, linear Chan)` tuple; MPST's `MPST.new`
+returns an N-tuple, one endpoint per role, in role-sorted order) — the exact
+checks each `Chan.*`/`MPST.*` builtin performs on ITS argument's current
+`session_ty` state (requiring `SSend`, requiring `SEnd`, etc.) are the
+per-operation typing arms deferred to the later widening task (§2.7's
+preamble).
+
+#### 2.7.7 Corpus witnesses (this task)
+
+Three new `accept/` programs (§3's sibling harness, `specs/lang/types/`,
+`t41`–`t42`):
+
+- **`accept/t41_binary_protocol_chan_new`** — a well-formed BINARY protocol
+  (`Echo`, `Client -> Server : Int; Server -> Client : Int`), `Chan.new(Echo)`
+  destructured into a `(Chan(Client,Echo), Chan(Server,Echo))` pair, both
+  endpoints threaded through a straight-line send/recv/close sequence with
+  send always textually before its matching recv (avoiding the unrelated
+  no-scheduler recv-before-send runtime deadlock the operational widening
+  task documents) — a genuine positive witness for §2.7.1–§2.7.4 and
+  §2.7.6's `Chan(Role, Proto)` annotation resolving to a real projected
+  `session_ty`. `--check` exits 0; run interpreted, prints `43` (an Int
+  echoed and incremented once round-trip), confirming the projected types
+  actually correspond to a runnable protocol shape (not merely a
+  vacuously-accepted declaration).
+- **`accept/t42_mpst_protocol_new`** — a well-formed 3-role MPST protocol
+  (`Relay`: `Client -> Server : String; Server -> Logger : String; Logger ->
+  Client : String`), `MPST.new(Relay)` destructured into a 3-tuple of role
+  endpoints — witnesses §2.7.3's multiparty branch of `project_protocol`
+  (role collection, `multiparty = true`, the send/recv-pair consistency
+  check) and §2.7.4's "MPST is typing-only" callout: the protocol
+  DECLARATION and the `MPST.new` construction both `--check` and run clean
+  (interpreted prints a confirmation string) — it is only actually SENDING a
+  message over the resulting endpoints that would hit the compiled-backend
+  F3 segfault, which this witness deliberately does not exercise (out of
+  scope for a `--check`-anchored typing corpus; F3 is the operational
+  widening task's concern).
+
+Both new programs declare every role (`Client`/`Server`/`Logger`) as its own
+nullary type (`type Client = Client`, etc.) specifically to avoid the
+undeclared-role HINT noted in §2.7.1 — a deliberately clean `--check` run
+with no stderr noise at all.
+
+The F4 finding (§2.7.5) is deliberately NOT given its own `reject/` corpus
+program in this task: unlike the corpus's usual reject witnesses (which pin
+a program that is CORRECTLY rejected), a `reject/` entry for F4's repro would
+assert that the wrongly-rejected protocol is SUPPOSED to fail — codifying the
+bug as intended behavior, exactly the anti-pattern this document's other
+findings (e.g. findings 15–17, §4.1) already avoid for the same reason. The
+repro lives in this subsection's prose instead, verified live (§2.7.5), ready
+to become a genuine `reject/`-turned-`accept/` migration once the underlying
+`ProtoChoice` merge-rule gating is fixed.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -2647,6 +3022,41 @@ typechecker that this document exists to pin down, not defects:
     path is `accept/t40_actor_send_typed_payload`. Cross-ref §2.6.4 and finding
     18.
 
+20. **[OPEN — filed, not fixed] F4 — the MPST merge rule leaks into binary
+    duality: a `choose` with two structurally-identical-type branches is
+    wrongly rejected as "not duals of each other."** Found while building §2.7
+    (session-types widening, this task). `project_steps`'s `ProtoChoice` arm
+    (`typecheck.ml:5906–5919`) applies the standard MPST "merge branches that
+    project to the exact same local type for a non-participating role" rule
+    UNCONDITIONALLY — including for a plain 2-role BINARY protocol, where the
+    "non-chooser" role is the chooser's only peer, not a bystander the merge
+    rule was designed for. When both `choose` branches happen to carry the
+    same payload type (`session_ty_exact_equal`, `:2058`), the peer's
+    projection silently collapses from `SOffer {...}` to that one shared type
+    — which is then no longer the dual of the chooser's `SChoose {...}`, so
+    `project_protocol`'s binary duality check (`:5972–5986`) rejects the
+    protocol. Minimal repro (re-verified live for this task):
+    ```march
+    protocol Decision do
+      choose by Client:
+        ok  -> Server -> Client : Int
+        err -> Server -> Client : Int
+      end
+    end
+    ```
+    `--check` exits **1**: `` Protocol `Decision`: the projection onto `Client`
+    and the projection onto `Server` are not duals of each other.\ndual(Client)
+    = Offer{ok: Send(Int, End), err: Send(Int, End)}\nbut Server has:
+    Send(Int, End) `` — note the printed `Server` projection is already the
+    MERGED `Send(Int, End)`, not a `Choose{...}`, which is the tell. Making the
+    branches type-distinct (`err -> Server -> Client : String`) typechecks
+    clean (exit 0) with no other change. See §2.7.5 for the full writeup. Not
+    a corpus `reject/` program (it typechecks incorrectly today; a `reject/`
+    witness would codify the bug as intended behavior) — filed in
+    `specs/todos.md` under "Compiler: Type System" with this exact repro, not
+    fixed (docs-only slice; the fix direction is gating the merge branch on
+    `multiparty` in `ProtoChoice`).
+
 ## 5. What this validated, and what's next
 
 **Validated:** the type-side methodology works end-to-end — the bidirectional HM
@@ -2830,6 +3240,30 @@ findings 1–15; and created `specs/lang/types/INDEX.md` (mirroring
 `specs/lang/types/INDEX.md` for the harness model and CI-wiring rationale).
 `check_types.sh`: unchanged at 35/35 (20 accept, 15 reject), exit 0 — no
 corpus programs were added or modified by this task.
+
+**Session-types widening, Task 2 (this pass) added:** §2.7, this document's
+FIRST session-type content — `protocol` declaration (three step forms,
+`DProtocol`/`protocol_def`/`protocol_step`, `ast.ml:151`/`287–294`, parser
+`parser.mly:606–627`); the local per-role `session_ty` representation
+(`typecheck.ml:105–116`) and the channel value type `TChan of session_ty ref`
+(`:95`); projection (`project_steps`, `:5870`; `project_protocol`, `:5952`);
+binary duality (`dual_session_ty`, `:5935`, the `dual(A) == B` check,
+`:5972–5986`); MPST send/recv-pair consistency (documented as TYPING-ONLY —
+the compiled MPST runtime segfaults, F3, filed by the operational widening
+task, not this one); and the `Chan(Role, Proto)` linear surface type
+(`surface_ty`'s `TyCon("Chan", ...)` special case, `:2285–2311`). Filed **F4**
+(§2.7.5, §4.1 finding 20): the MPST merge rule (`:5906–5919`) leaks into the
+binary duality check, wrongly rejecting a legal binary `choose` protocol whose
+two branches carry the same payload type — reproduced live both ways
+(rejected identical-type / accepted type-distinct), not fixed (docs-only
+slice). Two new `accept/` programs: `accept/t41_binary_protocol_chan_new` (a
+binary `Echo` protocol, `Chan.new`, straight-line send/recv/close, run-
+witnessed printing `43`) and `accept/t42_mpst_protocol_new` (a 3-role `Relay`
+protocol, `MPST.new`, run-witnessed printing a confirmation string) —
+`check_types.sh`: 71/71 (42 accept, 29 reject), exit 0. Per-operation channel
+typing (`Chan.send`/`recv`/`choose`/`offer`/`close` state advancement) and the
+corresponding `reject/` corpus are explicitly OUT of scope for this task —
+the next session-types widening task's subject.
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 

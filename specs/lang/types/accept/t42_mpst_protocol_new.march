@@ -1,0 +1,30 @@
+mod Main do
+  -- Session-types widening, Task 2 -- MPST (multi-party, >2 roles) protocol
+  -- projection + send/recv-pair consistency typing (core-march-types.md
+  -- §2.7.3-§2.7.4). `protocol Relay` has 3 roles, so `project_protocol`
+  -- (`typecheck.ml:5952`) sets `multiparty = true` and projects each role to
+  -- `SMSend`/`SMRecv` (role-annotated, `:115-116`) instead of the binary
+  -- `SSend`/`SRecv`; the multiparty consistency check (`:5987+`) verifies
+  -- every `ProtoMsg` in the global steps has a matching send/recv pair across
+  -- the two endpoints involved. `MPST.new(Relay)` destructures into a 3-tuple
+  -- of role endpoints (role-sorted). NOTE (§2.7.4): this witnesses the TYPING
+  -- side only -- the compiled MPST runtime segfaults on any program that
+  -- actually SENDS a message over these endpoints (F3, filed by the
+  -- operational widening task); this program deliberately only declares and
+  -- constructs the protocol, never sends, so it is unaffected by F3 and
+  -- typechecks + runs (both backends) cleanly.
+  type Client = Client
+  type Server = Server
+  type Logger = Logger
+
+  protocol Relay do
+    Client -> Server : String
+    Server -> Logger : String
+    Logger -> Client : String
+  end
+
+  fn main() do
+    let (cc, sc, lc) = MPST.new(Relay)
+    println("mpst protocol projected and typechecked")
+  end
+end

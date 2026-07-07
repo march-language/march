@@ -566,6 +566,25 @@ finding, and convention drift.  Listed in the recommended order.
 - ✅ **Capability body enforcement — Phase 1: stdlib `needs` annotation** — (Duplicate entry; see Phase 1 item in Done section.)
 - ✅ **Capability body enforcement — Phase 2: body-scanning pass** — (Duplicate entry; see Phase 2 item in Done section.)
 
+### Compiler: Session types (protocols/channels)
+
+- [ ] **F4 — the MPST merge rule leaks into binary duality: a `choose` with two structurally-identical-type branches is wrongly rejected as "not duals of each other."** Found and pinned by `specs/lang/core-march-types.md` §2.7.5 and §4.1 finding 20 (session-types widening, Task 2, 2026-07-06). Cause: `project_steps`'s `ProtoChoice` arm (`typecheck.ml:5906–5919`) applies the standard MPST mergeability rule — "if all branches project to the exact same local type for a non-chooser role, collapse them into that one type (the role need not observe the choice)" — UNCONDITIONALLY, including when `multiparty = false` (an ordinary 2-role binary protocol). For a binary protocol the "non-chooser" role is the chooser's ONLY peer, not a bystander the merge rule was designed to exempt. When both `choose` branches happen to carry an identical payload type (`session_ty_exact_equal`, `typecheck.ml:2058`), the peer's projection collapses from `SOffer {...}` to that single shared type, which is then no longer the dual of the chooser's `SChoose {...}` — so `project_protocol`'s binary duality check (`:5972–5986`) rejects a perfectly legal protocol. Minimal repro (verified live):
+  ```march
+  protocol Decision do
+    choose by Client:
+      ok  -> Server -> Client : Int
+      err -> Server -> Client : Int
+    end
+  end
+  ```
+  `march --check` on this exits **1**:
+  ```
+  Protocol `Decision`: the projection onto `Client` and the projection onto `Server` are not duals of each other.
+  dual(Client) = Offer{ok: Send(Int, End), err: Send(Int, End)}
+  but Server has: Send(Int, End)
+  ```
+  (The printed `Server` projection is already the MERGED `Send(Int, End)`, not a `Choose{...}` — the tell that the merge rule fired.) Making the branches type-distinct (`err -> Server -> Client : String`) typechecks clean (exit 0) with no other change — confirmed live. **Impact:** any binary protocol author whose two `choose` branches happen to share a payload type (a common, unremarkable shape, e.g. two branches both replying with a plain `Int` status code) hits a spurious rejection whose message talks about "duals" rather than anything resembling the actual cause. Fix direction: gate the merge-rule branch in `ProtoChoice` on `multiparty`, only merging for the true MPST non-chooser case (a binary protocol's peer role should always get `SOffer`, never a collapsed type). Filed here (not fixed — docs-only widening slice, out of scope for a reference-widening task); a `reject/` corpus program was deliberately NOT added for this repro (it currently, incorrectly, typechecks as accepted when branches differ, and incorrectly rejects when they match — a `reject/` witness for either behavior would codify the bug as intended). See `specs/lang/core-march-types.md` §2.7.5 for the full writeup and both live-verified repros (reject + accept sides).
+
 ### Runtime: Hot Code Reloading
 
 Spec: `specs/hot-code-reload.md`. Erlang-style live code swapping for deployed Bastion apps. **Two key findings from the design review:** (1) March's whole-program optimization (mono, defun, Perceus/borrow, LTO) is in tension with module isolation — hot reload must *forfeit* those at the boundary; two execution models, **Model A (interpreter trampoline)** shippable now, **Model B (native JIT)** research gated on a spike. (2) The CAS (`lib/cas/`) is the natural HCR substrate — per-SCC granularity, dual `sig_hash`/`impl_hash`, compiler/runtime identity already in the artifact key, two-tier content-addressed store — so it replaces the bespoke ABI table, source-diff, shipping protocol, and integer-ID scheme **once `did_hash` is Merkle-populated**. Phasing is CAS-prerequisite-first, then trampoline. **(RESOLVED prerequisite: the `impl_hash` Merkle-root population is DONE — see Phase 1 below and `progress.md` 2026-06-21 "Hot Code Reload — Phase 1". The CAS substrate is now available; remaining HCR work is Phases 2–7.)**
