@@ -3556,7 +3556,7 @@ caps** are a per-module syntactic ban on certain call/construct shapes,
 declared with a bare `cap <name>` statement at the top of a `mod` body —
 **not** an IO-permission accounting device at all. They share only the `cap`
 keyword and one AST constructor with the `needs`/`Cap(X)` machinery above:
-`Ast.DOpts of string list * span` (`ast.ml:166`), a flat string-list "options"
+`Ast.DOpts of string list * span` (`ast.ml:165`), a flat string-list "options"
 declaration, quite unlike `DNeeds`'s per-path list-of-lists (§2.8.3). Five
 dedicated lexer tokens recognize the five spellings directly, each requiring
 exactly one intervening space (`lexer.mll:176-180`):
@@ -3571,9 +3571,9 @@ exactly one intervening space (`lexer.mll:176-180`):
 
 Four of the five (`no_panic`/`pure`/`no_extern`/`deterministic`) set a
 boolean flag on the typechecking `env` inside `check_decl`'s `DOpts` arm
-(`typecheck.ml:7170-7175`: `no_panic_mod`/`pure_mod`/`no_extern_mod`/
+(`typecheck.ml:7564-7568`: `no_panic_mod`/`pure_mod`/`no_extern_mod`/
 `deterministic_mod`), each consulted once, at the end of module checking, by
-its own dedicated pass (`typecheck.ml:7844-7853`). **`cap no_alloc` is the
+its own dedicated pass (`typecheck.ml:8245-8254`). **`cap no_alloc` is the
 one exception** — it has no `env` field of its own at all; instead
 `lib/refinecheck/no_alloc.ml`'s `check_decls` (`:72-83`) re-scans the raw
 `Ast.decl list` for a `DOpts` entry containing `"no_alloc"` independently,
@@ -3583,17 +3583,17 @@ as its own free-standing post-typecheck refinecheck pass (parallel to
 (a from-scratch AST re-scan in a different file), and the two checks never
 share state.
 
-**`cap no_panic`** (`check_no_panic_module`, `typecheck.ml:6116-6193`) bans
+**`cap no_panic`** (`check_no_panic_module`, `typecheck.ml:6489-6566`) bans
 direct and TRANSITIVE calls to a fixed "panic surface" — three unioned name
-sets (`:6035-6058`): `panic_surface_direct` (`panic`, `panic_`, `todo_`,
+sets (`:6408-6431`): `panic_surface_direct` (`panic`, `panic_`, `todo_`,
 `unreachable_` — division/modulo are deliberately EXCLUDED from this set, per
-its own comment, `:6036-6039`, so the syntactic scan doesn't double-report
+its own comment, `:6409-6413`, so the syntactic scan doesn't double-report
 what the separate Z3-backed `division_safety.ml` pass already adjudicates),
 `panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and
 `panic_surface_stdlib` (dotted names: `List.nth`, `Option.unwrap`,
 `Result.unwrap`, `Array.get`, `String.slice_bytes`, …). The pass:
 
-1. Collects every `DFn`'s call sites via `calls_in_expr` (`:6085-6114`, the
+1. Collects every `DFn`'s call sites via `calls_in_expr` (`:6458`, the
    same walker `cap pure`/`cap deterministic` reuse below) — a syntactic
    `EApp(EVar _, …)` / `EApp(EField(EVar _, _, _), …)` collector that
    recurses into blocks/let/match/if/field/pipe but has an explicit
@@ -3602,9 +3602,9 @@ what the separate Z3-backed `division_safety.ml` pass already adjudicates),
    flags for the IO-cap side; a panic call reachable only inside a lambda
    literal or record-field expression is invisible to this scan too).
 2. Seeds a `panicky` set with every function whose OWN body directly calls a
-   panic-surface name (`:6139-6150`).
-3. Runs a **fixpoint** (`:6152-6170`) that adds any LOCAL function (one
-   declared as a `DFn` in this same module — `local_fns`, `:6130-6133`)
+   panic-surface name (`:6512-6523`).
+3. Runs a **fixpoint** (`:6525-6544`) that adds any LOCAL function (one
+   declared as a `DFn` in this same module — `local_fns`, `:6503-6505`)
    calling an already-`panicky` function, iterating until no new function is
    added — this is the TRANSITIVE closure: `helper` calling `a/b` (unsafe
    division) makes `helper` panicky, and `caller` calling `helper` makes
@@ -3643,8 +3643,8 @@ allocating helper is flagged only at the definition site of the helper
 itself, not additionally at each call site (contrast `cap no_panic`'s
 fixpoint, which DOES propagate transitively through local calls).
 
-**`cap pure`** (`check_pure_module`, `typecheck.ml:6208-6224`) and **`cap
-deterministic`** (`check_deterministic_module`, `typecheck.ml:6268-6285`)
+**`cap pure`** (`check_pure_module`, `typecheck.ml:6581-6597`) and **`cap
+deterministic`** (`check_deterministic_module`, `typecheck.ml:6641-6658`)
 share one shape: each walks every `DFn`'s clauses via the identical
 `calls_in_expr` collector `cap no_panic` uses, and raises an `Err.error` (NO
 transitive closure — only the function whose OWN body directly calls a
@@ -3658,12 +3658,12 @@ let pure_banned : StringSet.t = StringSet.of_list [
   "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
   "vault_delete"; "vault_update"; "vault_keys"; "write_file";
   "read_file"; "append_file"; "delete_file";
-]                                                  (* typecheck.ml:6197-6203 *)
+]                                                  (* typecheck.ml:6570-6576 *)
 
 let deterministic_banned : StringSet.t = StringSet.of_list [
   "random_int"; "random_float"; "random_bool"; "random_bytes";
   "uuid_v4"; "now_ms"; "now_ns"; "monotonic_ms";
-]                                                  (* typecheck.ml:6259-6262 *)
+]                                                  (* typecheck.ml:6632-6635 *)
 ```
 
 **Intended semantics** (both are documented, sound-sounding claims about the
@@ -3682,10 +3682,10 @@ cross-checked against the actual builtin surface**. `pure_banned` names
 `random_float`, `random_bool`, `now_ms` — **none of these exist as builtins**
 (verified: zero occurrences as a `VBuiltin` registration in `eval.ml`). The
 REAL effectful builtins are spelled differently: `file_write`, `file_read`,
-`file_append`, `file_delete` (registered `eval.ml:3989/3975/4001/4013`,
+`file_append`, `file_delete` (registered `eval.ml:4038/4024/4050/4062`,
 mapped `IO.FileWrite`/`IO.FileRead` in `builtin_cap_table`,
-`typecheck.ml:972` and neighbors), `random_bytes` (`eval.ml:4492`, `IO.Random`,
-`:1021`), and `unix_time_ms` (`eval.ml:4715`, `IO.Clock`, `:1018`) —
+`typecheck.ml:972` and neighbors), `random_bytes` (`eval.ml:4541`, `IO.Random`,
+`:1021`), and `unix_time_ms` (`eval.ml:4764`, `IO.Clock`, `:1018`) —
 `deterministic_banned` lists `now_ms` (nonexistent) but not `unix_time_ms`
 (the real wall-clock builtin). Consequence, live-verified this task: a `cap
 pure` module whose body calls `file_write` typechecks with **exit 0** — only
@@ -3754,7 +3754,7 @@ while an otherwise-identical `file_read` call in the same block triggers
 both. This is unrelated to the F2/F3 soundness gaps above (it is a body-scan
 COVERAGE gap, not a behavioral-cap enforcement gap — `println`/`print` are
 not in `pure_banned`'s omission list; they ARE correctly listed there,
-`:6198`, and `cap pure` DOES reject a bare `println` call, live-verified)
+`:6571`, and `cap pure` DOES reject a bare `println` call, live-verified)
 but worth noting here since it makes `IO.Console` the de-facto "free"
 capability at the body-scan layer specifically. Low priority; not
 investigated further in this docs-only task.
@@ -4676,16 +4676,16 @@ total after Task 3 (see below for the Task 4 total that supersedes it).
 five BEHAVIORAL module caps (`cap no_panic`/`no_alloc`/`no_extern`/`pure`/
 `deterministic`), a mechanism orthogonal to the IO-permission `needs`/`Cap(X)`
 machinery Tasks 1–3 cover (shares only the `cap` keyword and the `Ast.DOpts`
-AST node). `cap no_panic` (`check_no_panic_module`, `typecheck.ml:6116-6193`)
+AST node). `cap no_panic` (`check_no_panic_module`, `typecheck.ml:6489-6566`)
 and `cap no_alloc` (`lib/refinecheck/no_alloc.ml`) are CORRECT for the shapes
 this task's corpus witnesses (explicit `panic`/unsafe division; non-empty
 tuple/record/`ECon`/`ELam` construction). `cap no_extern`
-(`check_no_extern_module`, `typecheck.ml:6231-6255`) is likewise correct for
+(`check_no_extern_module`, `typecheck.ml:6604-6628`) is likewise correct for
 both its raise sites (a `DExtern` block; a `needs IO.Foreign` path). Files
 two headline UNSOUND under-approximations, both live-verified and both left
 UNFIXED by this docs-only task (their fixes and REJECT witnesses are Tasks 5
 and 6 of this same widening slice): **F2** — `pure_banned`
-(`typecheck.ml:6197-6203`) and `deterministic_banned` (`:6259-6262`) are
+(`typecheck.ml:6570-6576`) and `deterministic_banned` (`:6632-6635`) are
 hardcoded name lists that reference builtins which do not exist (`write_file`,
 `random_int`, `now_ms`, …) while missing the real effectful ones
 (`file_write`, `random_bytes`, `unix_time_ms`, …), so a `cap pure` module
