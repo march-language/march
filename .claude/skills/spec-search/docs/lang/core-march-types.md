@@ -90,6 +90,34 @@ Task 2) is the operational companion — `own_names`-gated export, bare-fails/
 qualified-works name resolution, and the lexical-scoping nuance for a
 directly-nested module.
 
+**Widening slice (session types, 2026-07-06):** §2.7 adds **session-typed
+channel/protocol typing** — greenfield content, the first coverage this
+document has for `protocol`/`Chan`/`MPST`. `protocol Name do ... end`
+declaration (three step forms: `ProtoMsg`/`ProtoLoop`/`ProtoChoice`), the
+per-role local `session_ty` a protocol PROJECTS onto (`project_steps`/
+`project_protocol`), binary duality (`dual_session_ty`, the `dual(A) == B`
+check), MPST send/recv-pair consistency (documented as TYPING-ONLY — the
+compiled MPST runtime is broken, a separate finding filed by the operational
+widening task), and the `Chan(Role, Proto)` linear endpoint type. Also files
+**F4**: a real typing bug where the MPST merge rule (meant to let a
+non-chooser role skip an irrelevant choice) leaks into the BINARY duality
+check, wrongly rejecting a legal binary protocol whose two `choose` branches
+happen to carry the same payload type. Per-op channel state-ADVANCEMENT
+(`Chan.send`/`recv`/`choose`/`offer`/`close` typing) is a separate, later
+widening task — §2.7 documents the protocol/projection/duality layer only.
+
+**Widening slice (session types, Task 3, 2026-07-06):** §2.7.8 extends §2.7
+with the per-operation channel typing that Task 2 explicitly deferred: the
+required incoming session state, what each op checks, and the advanced
+outgoing state for `Chan.new`/`send`/`recv`/`close`/`choose`/`offer` (cite
+the exact arm for each). Also files **F5** (§2.7.9): `Chan.offer` always
+returns the FIRST branch's continuation type regardless of which branch the
+peer actually chose at runtime — a documented conservative approximation
+that is a real (if narrow) soundness gap for `offer` over branches with
+DIFFERENT continuations. Six new `reject/` programs (`t30`–`t35`) pin the
+live per-op violation messages, plus one new `accept/` program (`t43`) for a
+full `choose`/`offer` round-trip.
+
 ## 1. The typing judgment
 
 March's typechecker is **bidirectional Hindley–Milner**: two mutually-recursive
@@ -2153,6 +2181,564 @@ discriminant *position*, a message from actor A's variant and a message from
 actor B's variant can occupy the same discriminant slot and be
 indistinguishable to B's dispatch `ECase`.)
 
+### 2.7 Session types: protocols, projection, and channels
+
+March has a **session-typed channel** construct: a `protocol` declares a
+global choreography between named roles, the typechecker **projects** that
+global choreography onto each role's own point of view (a `session_ty`), and
+a `Chan(Role, Proto)` value is a **linear** endpoint carrying that local view
+as live, mutable type-state — every channel operation both checks the current
+state and advances it. This subsection covers the DECLARATIVE half: what a
+`protocol` looks like, how projection computes each role's local type, how
+binary duality and MPST consistency are verified, and what `Chan(Role, Proto)`
+resolves to as a surface type. **Per-operation typing** — what `Chan.send`/
+`Chan.recv`/`Chan.choose`/`Chan.offer`/`Chan.close` each require and how they
+advance the state — is a different arm of `typecheck.ml` and is covered by a
+later widening task, not here.
+
+#### 2.7.1 `protocol` declaration — three step forms
+
+A protocol is a top-level declaration, `DProtocol of name * protocol_def *
+span` (`lib/ast/ast.ml:151`), where `protocol_def = { proto_steps :
+protocol_step list }` (`ast.ml:287–289`). `protocol_step` has **exactly three**
+variants (`ast.ml:291–294`) — there is no separate "receive" step (send/recv
+are the two ends of one `ProtoMsg`) and no `ProtoEnd`/`ProtoVar` (those are
+synthesized only during projection, §2.7.2):
+
+```
+and protocol_step =
+  | ProtoMsg    of name * name * ty                         (* Sender -> Receiver : T *)
+  | ProtoLoop   of protocol_step list                        (* loop do ... end *)
+  | ProtoChoice of name * (name * protocol_step list) list   (* choose by Role: label -> steps *)
+```
+
+The parser (`lib/parser/parser.mly:606–627`) mirrors this one-for-one:
+`protocol_decl` is `PROTOCOL upper_name DO list(protocol_step) END`;
+`protocol_step` matches `sender ARROW receiver COLON ty` → `ProtoMsg`, `LOOP DO
+... END` → `ProtoLoop`, and `CHOOSE BY chooser COLON ... branches ... END` →
+`ProtoChoice` (branches via `choose_branch: option(PIPE) label ARROW
+list(protocol_step)`, `:627–629`). Example (the parser's own doc comment,
+`parser.mly:606–614`):
+
+```march
+protocol Transfer do
+  Client -> Server : Request(String)
+  Server -> Client : Response(Int)
+  loop do
+    Client -> Server : More(String)
+    Server -> Client : Ack()
+  end
+end
+```
+
+Roles (`Client`, `Server` above) are bare uppercase names — there is no
+separate "declare a role" syntax. A role does not need to be a declared type
+(a bound `type Client = Client` or similar); if it isn't, the typechecker
+emits a non-fatal HINT during `--check`/run (harmless to `--check`'s exit
+code, but the message shares a stream with program stdout when interpreted —
+a cosmetic finding filed by the operational widening task, not repeated here).
+This document's own corpus programs (§2.7.6) declare each role as its own
+nullary type to avoid the HINT.
+
+#### 2.7.2 `session_ty` — the local, per-role view
+
+The type layer's representation of channel state is `session_ty`
+(`typecheck.ml:105–116`, "Local session type — per-endpoint view of a binary
+protocol. Computed by projecting the global `Ast.protocol_def` onto one
+role."):
+
+```
+and session_ty =
+  | SSend   of ty * session_ty            (* Send a value of type T, then follow S (binary) *)
+  | SRecv   of ty * session_ty            (* Receive a value of type T, then follow S (binary) *)
+  | SChoose of (string * session_ty) list (* Actively select a branch label *)
+  | SOffer  of (string * session_ty) list (* Passively wait for the other side to pick *)
+  | SEnd                                  (* Session complete -- channel must be closed *)
+  | SRec    of string * session_ty        (* Recursive binding: Rec(X, S) *)
+  | SVar    of string                     (* Back-reference to a recursive binder *)
+  | SError                                (* Error sentinel *)
+  (* MPST: role-annotated send/recv for multi-party protocols (N>2 participants). *)
+  | SMSend  of string * ty * session_ty   (* Send to role: MSend(target_role, T, S) *)
+  | SMRecv  of string * ty * session_ty   (* Receive from role: MRecv(source_role, T, S) *)
+```
+
+`SSend`/`SRecv`/`SChoose`/`SOffer` are the **binary** (exactly 2 roles) forms;
+`SMSend`/`SMRecv` are their **MPST** (>2 roles) counterparts, each carrying an
+explicit peer-role name instead of relying on there being only one possible
+peer. `SRec`/`SVar` encode a `loop` as a named recursive binder plus
+back-references to it — the standard µ-type encoding (`Rec(X, S)` /
+`X`). `SEnd` means the session is complete and the channel must be closed;
+`SError` is an internal sentinel for a protocol that failed to project (so a
+malformed protocol doesn't cascade into unrelated unification failures
+downstream).
+
+The channel *value's* type is `TChan of session_ty ref` (`typecheck.ml:95`,
+"Linear session-typed channel endpoint") — a `ty` constructor wrapping a
+**mutable reference** to the endpoint's *current* local session state. This
+is why a channel is not polymorphic: `TChan` is treated as closed/opaque by
+`occurs`/`subst`/`ftv` (no type variables flow through it), and why each
+channel operation can *mutate* the ref in place to reflect the new state
+after the operation, rather than requiring the surrounding code to thread a
+fresh type through by hand (the per-operation typing that reads/rewrites this
+ref is the subject of the later per-op widening task).
+
+Structural equality over `session_ty` comes in two flavors, both load-bearing
+for what follows: `session_ty_equal` (used by `unify` when two `TChan`s meet,
+and by the binary duality check, §2.7.3) and the stricter
+`session_ty_exact_equal` (`typecheck.ml:2058`, "Exact structural equality
+including payload types. Used by MPST mergeability check to determine if
+branches can be merged. Two branches can be merged only if they are
+completely identical.") — the latter is exactly what makes §2.7.5's F4
+finding possible.
+
+#### 2.7.3 Projection — global protocol to per-role local type
+
+**`project_steps env ~proto_name ~multiparty steps role cont`**
+(`typecheck.ml:5870`) walks a `protocol_step list` and produces the
+`session_ty` that `role` observes, given a continuation `cont` for what comes
+after these steps:
+
+- **`ProtoMsg (sender, receiver, msg_ty)`** — if `role` is the sender, emit
+  `SSend`/`SMSend` (binary/MPST, keyed on the `~multiparty` flag) carrying the
+  receiver's name (MPST) and the continuation; if `role` is the receiver,
+  emit `SRecv`/`SMRecv` symmetrically; if `role` is neither, this step is
+  invisible to `role` and projection just recurses into the continuation —
+  the role "doesn't participate in this step."
+- **`ProtoLoop inner_steps`** — the inner steps are projected with a fresh
+  `SVar` back-reference (`<proto_name>_loop`) as their own continuation; if
+  the role isn't involved anywhere in the loop body, the loop collapses away
+  entirely (`inner = SVar _` case) rather than emitting a vacuous `SRec`;
+  otherwise the outer continuation is substituted into the back-reference
+  (`subst_svar`) and the whole thing is wrapped in `SRec (rec_var, ...)`.
+- **`ProtoChoice (chooser, branches)`** — each branch's steps are projected
+  (with the OUTER continuation `cont`, since every branch eventually rejoins
+  the same protocol tail); if `role` is the chooser, the result is
+  `SChoose branch_tys` (an active choice); otherwise it's `SOffer branch_tys`
+  UNLESS every branch happens to project to the exact same local type for
+  this role (`session_ty_exact_equal`, checked pairwise against the first
+  branch) — in which case the branches **merge** into that single shared
+  type, because the role "need not observe the choice at all." This is the
+  standard MPST merge rule (comment at `typecheck.ml:5906–5919`), and it is
+  the mechanism behind the F4 finding below (§2.7.5).
+
+**`project_protocol env ~span ~proto_name pdef`** (`typecheck.ml:5952`) is the
+entry point: it collects every role mentioned anywhere in the protocol
+(`roles_of_steps`, walking all three step forms including branch arms), sets
+`multiparty = List.length roles > 2`, and projects each role via
+`project_steps ... role SEnd` (every role's local view ends in `SEnd` unless
+a `loop` makes part of it recursive). The `(role, session_ty) list` result is
+stored as `pi_projections` on the `proto_info` record (`typecheck.ml:428–431`,
+"Computed session-type information for a declared `protocol`. Stored in
+`env.protocols` after `DProtocol` is checked."), keyed by protocol name.
+
+After projecting, `project_protocol` runs a **consistency check** that
+differs by role count:
+
+- **Binary (exactly 2 roles `[a; b]`)** — verifies **duality**: `dual(proj_a)
+  == proj_b` (§2.7.4).
+- **Multiparty (>2 roles)** — verifies **matching send/recv role pairs**
+  (§2.7.4's MPST paragraph).
+
+A protocol that fails either check is rejected at its OWN declaration site —
+the error is attached to the `protocol` block's span, not to any later use of
+`Chan.new`/`Chan(Role, Proto)`.
+
+#### 2.7.4 Duality (binary) and consistency (MPST)
+
+**Binary duality.** `dual_session_ty` (`typecheck.ml:5935`) computes what the
+*other* endpoint of a binary session must look like: `SSend ↔ SRecv` (with the
+payload type held fixed and the continuation recursively dualized), `SChoose
+↔ SOffer` (branch-wise), and `SEnd`/`SVar`/`SError` are self-dual (unchanged).
+`project_protocol`'s binary arm (`typecheck.ml:5972–5986`) then requires
+`session_ty_equal (dual_session_ty proj_a) proj_b` — i.e. role `a`'s local
+type, mechanically dualized, must equal role `b`'s ACTUAL projected local
+type. A mismatch is reported with both sides rendered via `pp_session_ty`:
+
+> `` Protocol `<name>`: the projection onto `<a>` and the projection onto
+> `<b>` are not duals of each other.
+> dual(<a>) = <printed dual>
+> but <b> has: <printed actual projection> ``
+
+This is exactly the diagnostic the F4 repro below produces.
+
+**MPST consistency.** For protocols with more than two roles, there is no
+single "the other side" to dualize against — instead, `project_protocol`'s
+multiparty arm (`typecheck.ml:5987+`) walks every `ProtoMsg(sender, receiver,
+T)` in the ORIGINAL global steps (via `gather_msgs`, recursing through
+`ProtoLoop`/`ProtoChoice`) and, for each one, confirms that the sender's own
+projection actually contains a matching `SMSend(receiver, T, ...)` somewhere
+along its spine (`has_msend`, unfolding `SRec`s and descending into
+`SChoose`/`SOffer` branches) AND the receiver's projection contains the
+matching `SMRecv(sender, T, ...)` (`has_mrecv`, symmetric). This is a weaker
+check than binary duality — it confirms every declared message has a sender
+side and a receiver side that agree on type, but (unlike the binary case) it
+does not attempt to verify the full relative ORDERING of every role's local
+type against every other role's; ordering consistency for 3+ roles is
+enforced only insofar as `project_steps`'s single top-down walk of the shared
+global step list is definitionally what both projections are derived from.
+
+**MPST is TYPING-ONLY in this reference.** The projection/consistency
+machinery above is real, exercised by `--check`, and covered by an accept
+witness in this task's corpus (§2.7.6, `t42`). But **the compiled MPST
+runtime is broken** — every `MPST.*` program that runs correctly interpreted
+segfaults (exit 139) when compiled, deterministically, even for an
+all-`String`-payload protocol with no numeric/boolean data involved. This is
+filed as **F3** by the operational widening task (the session-types survey,
+`.superpowers/sdd/sessions-survey.md` §4), not by this task — mentioned here
+only so a reader of this typing section doesn't conclude MPST is
+production-usable end-to-end. Everything documented in this subsection is
+real, correctly-implemented STATIC typing; the runtime gap is a separate,
+already-filed compiled-backend defect.
+
+#### 2.7.5 The F4 finding — the MPST merge rule leaks into binary duality
+
+**[OPEN — filed, not fixed] A legal binary protocol whose two `choose`
+branches carry the SAME payload type is wrongly rejected as "not duals."**
+Cause: the mergeability optimization in `project_steps`'s `ProtoChoice` arm
+(`typecheck.ml:5906–5919`, §2.7.3) is a correct rule for a **non-chooser role
+in an MPST protocol** — if that role can't tell the branches apart, it's fine
+to collapse them. But `project_steps` applies this SAME merge rule
+unconditionally, including when `multiparty = false` (a plain 2-role binary
+protocol). For a binary protocol, the "non-chooser" IS the chooser's sole
+peer — there is no third role for whom the branches are "irrelevant." When
+both `choose` branches happen to carry an identical local type
+(`session_ty_exact_equal`), the peer's projection COLLAPSES from `SOffer
+{...}` down to that single shared type — which is no longer the dual of the
+chooser's `SChoose {...}`, so the binary duality check (§2.7.4) rejects the
+protocol as malformed even though it is a perfectly sensible binary
+choose/offer protocol.
+
+**Minimal repro — rejected** (`Server`'s two branches both send an `Int`
+back to `Client`, so they merge and duality breaks):
+
+```march
+protocol Decision do
+  choose by Client:
+    ok  -> Server -> Client : Int
+    err -> Server -> Client : Int
+  end
+end
+```
+
+`march --check` on this protocol exits **1**:
+
+```
+Protocol `Decision`: the projection onto `Client` and the projection onto `Server` are not duals of each other.
+dual(Client) = Offer{ok: Send(Int, End), err: Send(Int, End)}
+but Server has: Send(Int, End)
+```
+
+(Note the diagnostic itself is evidence of the bug: `Server`'s actual
+projection printed is `Send(Int, End)` — the MERGED type — not `Choose{ok:
+..., err: ...}`, which is what a chooser's projection should be.)
+
+**Same protocol shape, branches made type-distinct — accepted:**
+
+```march
+protocol Decision do
+  choose by Client:
+    ok  -> Server -> Client : Int
+    err -> Server -> Client : String
+  end
+end
+```
+
+`march --check` on this variant exits **0** — because the branches no longer
+satisfy `session_ty_exact_equal`, the merge doesn't fire, `Client`'s
+projection stays a genuine `SOffer {ok: Recv(Int,End), err: Recv(String,End)}`,
+and that IS the dual of `Server`'s `SChoose {ok: Send(Int,End), err:
+Send(String,End)}`.
+
+**Impact:** any binary protocol author who happens to give two `choose`
+branches the same payload type (a common, unremarkable shape — e.g. both an
+`ok` and an `err` branch replying with a plain `Int` status code) hits a
+spurious, confusing rejection whose message talks about "duals" rather than
+anything resembling "make your branches type-distinct." The workaround
+(differentiate the branch payload types, even trivially, e.g. wrap one in a
+single-field record) is non-obvious from the error text alone. This was a
+genuine typechecker bug — **FIXED 2026-07-07** (fix-campaign pilot): the
+merge-rule branch in `project_steps`'s `ProtoChoice` arm is now gated on
+`multiparty`, so a binary (2-role) protocol's non-chooser always projects to
+`SOffer{…}` (it always observes the choice) and only a true MPST bystander
+role merges. A binary protocol with two identical-type `choose` branches now
+typechecks (witnessed by `accept/t44_binary_choice_identical_branches`). The
+prose above is retained to describe the historical defect; the "workaround" is
+no longer necessary. See `specs/todos.md` for the Done entry.
+
+#### 2.7.6 `Chan(Role, Proto)` — the linear channel-endpoint surface type
+
+Users write `Chan(RoleName, ProtoName)` as a type annotation (e.g. a function
+parameter `ch : Chan(Client, Echo)`). The parser produces this as an ordinary
+type application, `TyCon("Chan", [TyCon(RoleName,[]); TyCon(ProtoName,[])])`
+— there is no dedicated channel-type grammar production. `surface_ty`
+intercepts this shape as a special case (`typecheck.ml:2285–2311`, inside the
+`Ast.TyCon (name, args)` arm) BEFORE the general type-lookup path:
+
+1. Look up `proto.txt` in `env.protocols`; if it's not a declared protocol,
+   error `` I don't know a protocol called `<name>`. `` and return `TChan (ref
+   SError)`.
+2. Otherwise, look up `role.txt` in that protocol's `pi_projections`
+   (§2.7.3); if the role never appeared in the protocol, error `` Protocol
+   `<proto>` has no role called `<role>`.\nKnown roles: <comma-separated list>
+   `` and return `TChan (ref SError)`.
+3. Otherwise, return **`TLin (Ast.Linear, TChan (ref sty))`** — the role's
+   projected local `session_ty`, wrapped in a fresh mutable ref, wrapped in
+   `TChan`, wrapped in a **linear** marker.
+
+The `TLin (Linear, ...)` wrapper is not incidental: a channel endpoint MUST be
+used exactly once along its session (each operation consumes the current
+endpoint value and returns a new one representing the advanced state), so the
+surface type is linear by construction — the same linearity machinery that
+governs other linear values in March (letting the generic linear-`let`
+tracker catch a double-use of a channel binding). `Chan.new(Proto)`
+constructs a pair of such endpoints directly (returning the first two role
+projections as a `(linear Chan, linear Chan)` tuple; MPST's `MPST.new`
+returns an N-tuple, one endpoint per role, in role-sorted order) — the exact
+checks each `Chan.*`/`MPST.*` builtin performs on ITS argument's current
+`session_ty` state (requiring `SSend`, requiring `SEnd`, etc.) are the
+per-operation typing arms deferred to the later widening task (§2.7's
+preamble).
+
+#### 2.7.7 Corpus witnesses (this task)
+
+Three new `accept/` programs (§3's sibling harness, `specs/lang/types/`,
+`t41`–`t42`):
+
+- **`accept/t41_binary_protocol_chan_new`** — a well-formed BINARY protocol
+  (`Echo`, `Client -> Server : Int; Server -> Client : Int`), `Chan.new(Echo)`
+  destructured into a `(Chan(Client,Echo), Chan(Server,Echo))` pair, both
+  endpoints threaded through a straight-line send/recv/close sequence with
+  send always textually before its matching recv (avoiding the unrelated
+  no-scheduler recv-before-send runtime deadlock the operational widening
+  task documents) — a genuine positive witness for §2.7.1–§2.7.4 and
+  §2.7.6's `Chan(Role, Proto)` annotation resolving to a real projected
+  `session_ty`. `--check` exits 0; run interpreted, prints `43` (an Int
+  echoed and incremented once round-trip), confirming the projected types
+  actually correspond to a runnable protocol shape (not merely a
+  vacuously-accepted declaration).
+- **`accept/t42_mpst_protocol_new`** — a well-formed 3-role MPST protocol
+  (`Relay`: `Client -> Server : String; Server -> Logger : String; Logger ->
+  Client : String`), `MPST.new(Relay)` destructured into a 3-tuple of role
+  endpoints — witnesses §2.7.3's multiparty branch of `project_protocol`
+  (role collection, `multiparty = true`, the send/recv-pair consistency
+  check) and §2.7.4's "MPST is typing-only" callout: the protocol
+  DECLARATION and the `MPST.new` construction both `--check` and run clean
+  (interpreted prints a confirmation string) — it is only actually SENDING a
+  message over the resulting endpoints that would hit the compiled-backend
+  F3 segfault, which this witness deliberately does not exercise (out of
+  scope for a `--check`-anchored typing corpus; F3 is the operational
+  widening task's concern).
+
+Both new programs declare every role (`Client`/`Server`/`Logger`) as its own
+nullary type (`type Client = Client`, etc.) specifically to avoid the
+undeclared-role HINT noted in §2.7.1 — a deliberately clean `--check` run
+with no stderr noise at all.
+
+The F4 finding (§2.7.5) is deliberately NOT given its own `reject/` corpus
+program in this task: unlike the corpus's usual reject witnesses (which pin
+a program that is CORRECTLY rejected), a `reject/` entry for F4's repro would
+assert that the wrongly-rejected protocol is SUPPOSED to fail — codifying the
+bug as intended behavior, exactly the anti-pattern this document's other
+findings (e.g. findings 15–17, §4.1) already avoid for the same reason. The
+repro lives in this subsection's prose instead, verified live (§2.7.5), ready
+to become a genuine `reject/`-turned-`accept/` migration once the underlying
+`ProtoChoice` merge-rule gating is fixed.
+
+#### 2.7.8 Per-operation channel typing — the state-ADVANCEMENT arms
+
+§2.7.6 named the six `Chan.*` builtins (`new`/`send`/`recv`/`close`/`choose`/
+`offer`) as "the exact checks each op performs on its argument's current
+`session_ty` state" without detailing them — this subsection is that detail
+(widening slice, Task 3). Every op is a hard-coded `EApp (EVar "Chan.<op>",
+args, sp)` case in `infer_expr` (`typecheck.ml:3436–3643`), matched BEFORE the
+general application arm, immediately after a normalization step
+(`typecheck.ml:3426–3431`) that rewrites the field-access surface form
+`Chan.send(ch, v)` — parsed as `EApp(EField(ECon("Chan",[],_), "send", _),
+[ch;v], sp)` — into the canonical `EApp(EVar "Chan.send", [ch;v], sp)` shape
+every arm below matches on. Each arm follows the same three-step shape: read
+the channel argument's current type, `unfold_srec` it (§2.7.2) to expose the
+outermost `session_ty` constructor, and either advance (success) or report
+`pp_session_ty other` in a dedicated error (failure). All six ops consume
+their channel argument as a `TLin (Linear, TChan (ref sty))` (§2.7.6) and, on
+success, return a FRESH `TChan (ref cont)` — a new mutable ref, not the same
+one — matching the linear discipline: the old endpoint value is gone, only
+the newly-returned one is live.
+
+- **`Chan.new(Proto)` — `typecheck.ml:3436–3474`.** Not itself a state
+  transition (there is no incoming channel), but the entry point that
+  MANUFACTURES the first `TChan` values: the sole argument must resolve to a
+  declared protocol name (`ELit(LitString _)`/`ELit(LitAtom _)`/`EVar`/
+  `ECon(_,[],_)` — a bare `Chan.new(Echo)` is the `ECon` shape, `:3437–3441`);
+  looked up in `env.protocols` (error `` Chan.new: protocol `<name>` is not
+  declared. `` if absent, `:3449–3452`); the protocol's `pi_projections`
+  (§2.7.3) must have **at least two** roles (`` protocol `<name>` has no
+  roles. ``/`` protocol `<name>` has only one role. `` for 0/1, `:3461–3468`);
+  for 2 or more roles, returns a 2-tuple of the FIRST TWO projections (in
+  `pi_projections`'s stored role-sorted order, §2.7.3), each independently
+  wrapped `TLin (Linear, TChan (ref sty))` (`:3456–3460`, `:3469–3475`) — for
+  a 3+-role MPST protocol this is why `Chan.new` is binary-only in practice:
+  a caller wanting all N endpoints uses `MPST.new` instead (§2.7's MPST
+  paragraph), which returns the full N-tuple.
+- **`Chan.send(ch, v)` — `typecheck.ml:3479–3505`.** Requires the channel be
+  at `SSend(payload_ty, cont)` (`:3488`); `check_expr`s `v` against
+  `payload_ty` with `~reason:(Some (RBuiltin "Payload type of Chan.send"))`
+  (`:3489–3490`) — this is an ORDINARY checking-mode call into the same
+  bidirectional engine §1/§2 describe, so a payload type mismatch renders as
+  the generic mismatch diagnostic (e.g. `` expected `Int` but got `String`. ``
+  with the `Payload type of Chan.send` reason line), NOT a session-specific
+  message (`reject/t33`, §2.7.10). On success, returns `TLin (Linear, TChan
+  (ref cont))` — the channel advances to `cont`, the continuation named in
+  `SSend`. Any other incoming state is rejected: **`` Chan.send: channel is
+  at `%s` but I expected `Send(T, ...)`. `` (`:3496`)**, `%s` filled by
+  `pp_session_ty other` (e.g. `` channel is at `Recv(Int, End)` but I
+  expected `Send(T, ...)`. ``, `reject/t30`).
+- **`Chan.recv(ch)` — `typecheck.ml:3509–3535`.** Requires `SRecv(payload_ty,
+  cont)` (`:3518`); no payload to check (recv PRODUCES a value, it
+  doesn't consume one) — on success returns `TTuple [payload_ty; TLin
+  (Linear, TChan (ref cont))]` (`:3519`), i.e. a `(T, Chan)` pair, advancing
+  to `cont`. Wrong state: **`` Chan.recv: channel is at `%s` but I expected
+  `Recv(T, ...)`. `` (`:3524`)** (`reject/t34`, the mirror image of `t30`:
+  calling `recv` on a channel that is actually at `Send`).
+- **`Chan.close(ch)` — `typecheck.ml:3537–3560`.** Requires `SEnd` exactly
+  (`:3546`); on success returns `t_unit` — there is no continuation to
+  advance to, `close` is the terminal op on an endpoint (and, being
+  `TLin`-typed, the linear tracker still requires the channel value ITSELF
+  have been produced and consumed exactly once up to this point; `close`
+  simply doesn't hand back a new channel to keep threading). Wrong state:
+  **`` Chan.close: channel is at `%s` but I expected `End`. `` (`:3551`)**
+  (`reject/t31`: closing a channel before its session has actually reached
+  `SEnd`, e.g. before the matching `recv` on the peer side has run).
+- **`Chan.choose(ch, :label)` — `typecheck.ml:3564–3605`.** Requires
+  `SChoose branches` (`:3578`); the label argument must be an atom LITERAL
+  (`Ast.EAtom`/`Ast.ELit (LitAtom _)`, `:3570–3573` — a computed/variable
+  label is rejected with `` Chan.choose: label must be an atom literal (e.g.
+  :ok). ``, `:3582`, since branch selection must be resolvable at typecheck
+  time against the protocol's fixed branch list); the label string is then
+  looked up in `branches` via `List.assoc_opt` (`:3585`) — a name that isn't
+  one of the protocol's declared branches is **`` Chan.choose: label `:%s` is
+  not a valid branch of this protocol. `` (`:3590`)** (`reject/t32`); a valid
+  label returns `TLin (Linear, TChan (ref cont))` where `cont` is THAT
+  branch's own continuation (`:3586`) — so, unlike `offer` below, `choose`'s
+  result state is always exactly correct (the chooser statically names which
+  branch it's taking; there is no runtime uncertainty to approximate). Wrong
+  incoming state (channel not at `SChoose` at all): **`` Chan.choose: channel
+  is at `%s` but I expected `Choose{...}`. `` (`:3596`)**.
+- **`Chan.offer(ch)` — `typecheck.ml:3614–3643`.** Requires `SOffer branches`
+  (`:3623`); on success returns `TTuple [t_atom; cont_ty]` where `cont_ty` is
+  `TLin (Linear, TChan (ref sty))` for the **FIRST** entry in `branches`
+  (`:3624–3627` — `match branches with (_, sty) :: _ -> ... | [] -> TError`)
+  — regardless of which label the atom actually turns out to be at runtime.
+  This is the conservative approximation this subsection flags as **F5**
+  (§2.7.9): the type says "you get the first branch's continuation," full
+  stop, no dependency on the returned `Atom` value. Wrong incoming state:
+  **`` Chan.offer: channel is at `%s` but I expected `Offer{...}`. ``
+  (`:3633`)**.
+
+**Linearity, briefly.** Every op above both CONSUMES its `ch` argument
+(reading its current `session_ty` once) and, except `close`, PRODUCES a new
+`TChan` value at the advanced state — the same `TLin (Linear, ...)` wrapper
+from §2.7.6 travels through every step of a session. Enforcement is the
+GENERIC linear-`let` tracker (the same mechanism guarding any other linear
+value in March), not a session-specific accounting pass: a `let`-bound
+channel continuation used twice is caught as an ordinary double-use
+(`` The linear value `<x>` is used more than once here. ``, `reject/t35`,
+§2.7.10) with no session-typing-specific diagnostic at all. This is also
+exactly why the enforcement is PARTIAL — reusing a linear **parameter**
+endpoint whose session state coincidentally still matches, or silently
+DROPPING an unclosed `SEnd` continuation without ever calling `close`, both
+slip through, because neither is a double-*use*/never-*use* of a `let`
+binding in the sense the generic tracker checks. Those two holes are **F7**,
+filed by the operational widening task (`.superpowers/sdd/sessions-survey.md`
+§4 F7) — cross-referenced here, not re-filed.
+
+#### 2.7.9 The F5 finding — `Chan.offer`'s continuation is a fixed, not a
+per-branch, approximation
+
+**[OPEN — filed, not fixed]** `Chan.offer` (`typecheck.ml:3614`, §2.7.8)
+always types its result as `(Atom, Chan at the FIRST branch's continuation)`,
+regardless of which branch the peer actually chose at runtime. The comment
+directly above the arm (`typecheck.ml:3607–3613`) is explicit about this
+being deliberate: *"the exact continuation is not known statically without
+dependent types, so we return the first branch's continuation type as a
+conservative approximation that still lets users write match expressions
+over the returned atom."* That is a real, narrow but genuine soundness gap:
+an `offer` over branches whose continuations DIFFER (e.g. one branch
+continues with `Send(Int, End)`, another with `Send(String, End)`) is
+mis-typed for every branch except the first — the returned channel's static
+type claims the first branch's continuation even when the runtime atom names
+a different branch. A program that `match`es on the returned label and then
+tries to drive the channel differently PER branch is not actually re-typed
+per branch; the typechecker has already committed to one fixed continuation
+type before the match is even inspected. Concretely: given
+```march
+protocol Decision do
+  choose by Client:
+    ok  -> Client -> Server : Int
+    err -> Client -> Server : String
+  end
+end
+```
+`Chan.offer(sc)` on the `Server` endpoint always yields a channel typed
+`Chan(Server, Send(Int, End))` (the `:ok` branch's continuation) — if the
+peer actually chose `:err` (so the true runtime session is at
+`Send(String, End)`), the type is simply wrong, and a subsequent
+`Chan.send(sc2, "text")` would be REJECTED at typecheck time (the checker
+insists on `Int`) even though the peer, having chosen `:err`, is waiting to
+`recv` a `String`. Fixing this properly needs branch-indexed / dependent
+typing of the returned continuation on the returned `Atom` value (refining
+the tuple's second component based on a `match` over the first) — out of
+scope for this docs-only slice; filed in `specs/todos.md` under "Compiler:
+Type System" as **F5**, cross-referenced to `.superpowers/sdd/
+sessions-survey.md` §4 F5. Not given a `reject/` corpus program for the same
+reason F4 (§2.7.5) isn't: it typechecks (wrongly-permissively) today, so a
+`reject/` entry would codify the gap as intended behavior. `accept/t43`
+(§2.7.10) deliberately exercises a case where the approximation happens to
+be exact (the chooser always picks the first-listed branch), so the round-
+trip witness stays green without papering over F5.
+
+#### 2.7.10 Corpus witnesses (Task 3 — per-op reject corpus + one round-trip accept)
+
+Six new `reject/` programs (`specs/lang/types/reject/`, `t30`–`t35`), each
+pinning the live message from a distinct §2.7.8 arm (`EXPECT-ERROR`
+annotation is the exact grepped substring; full text is what `--check`
+actually prints, verified live for this task):
+
+- **`t30_send_at_recv_state`** — `Chan.send` called twice in a row on the
+  same protocol thread (no intervening `recv`), so the second call's
+  argument is at `Recv(Int, End)`, not `SSend`. Pinned: `` Chan.send: channel
+  is at `Recv(Int, End)` but I expected `Send(T, ...)`. ``
+- **`t31_close_before_end`** — `Chan.close` on the receive endpoint before
+  its matching `Chan.recv` has run. Pinned: `` Chan.close: channel is at
+  `Recv(Int, End)` but I expected `End`. ``
+- **`t32_invalid_choose_label`** — `Chan.choose(cc, :maybe)` where `:maybe`
+  is not one of `Decision`'s declared branches (`:ok`/`:err`). Pinned: ``
+  Chan.choose: label `:maybe` is not a valid branch of this protocol. ``
+- **`t33_wrong_payload_type`** — `Chan.send(cc, "not an int")` against a
+  protocol declaring `Client -> Server : Int`; the ORDINARY constructor/
+  type-mismatch path, not a session-specific message (§2.7.8's `Chan.send`
+  bullet). Pinned: `` expected `Int` but got `String` ``.
+- **`t34_recv_at_wrong_state`** — `Chan.recv(cc)` on the Client endpoint of
+  `Echo` immediately after `Chan.new`, while `cc` is still at `Send(Int,
+  Recv(Int, End))` (the first op must be a send, not a recv). Pinned: ``
+  Chan.recv: channel is at `Send(Int, Recv(Int, End))` but I expected
+  `Recv(T, ...)`. ``
+- **`t35_linear_used_twice`** — `Chan.close(cc2)` called twice on the same
+  `let`-bound continuation — the generic linear-`let` tracker (§2.7.8's
+  linearity paragraph), not session-specific accounting. Pinned: `` The
+  linear value `cc2` is used more than once here. ``
+
+One new `accept/` program, **`accept/t43_choose_offer_roundtrip`**: a
+two-branch `Decision` protocol (`ok -> Int`, `err -> String` — deliberately
+TYPE-DISTINCT branches, avoiding the F4 merge-rule pitfall, §2.7.5) driven
+through a full `choose`/`send`/`close` (chooser side) and `offer`/`recv`/
+`close` (offerer side) round-trip. `--check` exits 0; run interpreted, prints
+`:ok` then `42` — confirming the projected per-op advancement in §2.7.8
+actually corresponds to a runnable protocol shape, and (per §2.7.9) that the
+`Chan.offer` approximation is exact for this witness because the chooser
+always picks the first-listed branch (`:ok`).
+
+`check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -2647,6 +3233,61 @@ typechecker that this document exists to pin down, not defects:
     path is `accept/t40_actor_send_typed_payload`. Cross-ref §2.6.4 and finding
     18.
 
+20. **[OPEN — filed, not fixed] F4 — the MPST merge rule leaks into binary
+    duality: a `choose` with two structurally-identical-type branches is
+    wrongly rejected as "not duals of each other."** Found while building §2.7
+    (session-types widening, this task). `project_steps`'s `ProtoChoice` arm
+    (`typecheck.ml:5906–5919`) applies the standard MPST "merge branches that
+    project to the exact same local type for a non-participating role" rule
+    UNCONDITIONALLY — including for a plain 2-role BINARY protocol, where the
+    "non-chooser" role is the chooser's only peer, not a bystander the merge
+    rule was designed for. When both `choose` branches happen to carry the
+    same payload type (`session_ty_exact_equal`, `:2058`), the peer's
+    projection silently collapses from `SOffer {...}` to that one shared type
+    — which is then no longer the dual of the chooser's `SChoose {...}`, so
+    `project_protocol`'s binary duality check (`:5972–5986`) rejects the
+    protocol. Minimal repro (re-verified live for this task):
+    ```march
+    protocol Decision do
+      choose by Client:
+        ok  -> Server -> Client : Int
+        err -> Server -> Client : Int
+      end
+    end
+    ```
+    `--check` exits **1**: `` Protocol `Decision`: the projection onto `Client`
+    and the projection onto `Server` are not duals of each other.\ndual(Client)
+    = Offer{ok: Send(Int, End), err: Send(Int, End)}\nbut Server has:
+    Send(Int, End) `` — note the printed `Server` projection is already the
+    MERGED `Send(Int, End)`, not a `Choose{...}`, which is the tell. Making the
+    branches type-distinct (`err -> Server -> Client : String`) typechecks
+    clean (exit 0) with no other change. See §2.7.5 for the full writeup. Not
+    a corpus `reject/` program (it typechecks incorrectly today; a `reject/`
+    witness would codify the bug as intended behavior) — filed in
+    `specs/todos.md` under "Compiler: Type System" with this exact repro, not
+    fixed (docs-only slice; the fix direction is gating the merge branch on
+    `multiparty` in `ProtoChoice`).
+21. **[OPEN — filed, not fixed] F5 — `Chan.offer` always returns the FIRST
+    branch's continuation type, regardless of which branch the peer actually
+    chose at runtime.** Found while extending §2.7 with per-op channel typing
+    (session-types widening, Task 3). `Chan.offer`'s arm (`typecheck.ml:3614`,
+    §2.7.8/§2.7.9) requires the channel be at `SOffer branches` and returns
+    `(Atom, Chan at branches's FIRST entry's continuation)` unconditionally
+    (`:3624–3627`) — the arm's own comment (`:3607–3613`) calls this "a
+    conservative approximation" since the true continuation depends on the
+    peer's runtime choice, which is not statically knowable without dependent
+    types. For an `SOffer` whose branches have DIFFERENT continuations, this
+    is a real (if narrow) soundness gap: the returned channel's static type
+    is simply wrong whenever the peer picked any branch other than the
+    first, and a program that `match`es the returned label and then drives
+    the channel differently per branch is never actually re-typed per
+    branch. Not a corpus `reject/` program (it typechecks — wrongly
+    permissively — today; a `reject/` witness would codify the gap as
+    intended) — filed in `specs/todos.md` under "Compiler: Type System" with
+    the cite and repro, not fixed (docs-only slice; the fix direction is
+    branch-indexed/dependent typing of the returned continuation on the
+    returned `Atom`). See §2.7.9 for the full writeup and worked example.
+
 ## 5. What this validated, and what's next
 
 **Validated:** the type-side methodology works end-to-end — the bidirectional HM
@@ -2830,6 +3471,49 @@ findings 1–15; and created `specs/lang/types/INDEX.md` (mirroring
 `specs/lang/types/INDEX.md` for the harness model and CI-wiring rationale).
 `check_types.sh`: unchanged at 35/35 (20 accept, 15 reject), exit 0 — no
 corpus programs were added or modified by this task.
+
+**Session-types widening, Task 2 (this pass) added:** §2.7, this document's
+FIRST session-type content — `protocol` declaration (three step forms,
+`DProtocol`/`protocol_def`/`protocol_step`, `ast.ml:151`/`287–294`, parser
+`parser.mly:606–627`); the local per-role `session_ty` representation
+(`typecheck.ml:105–116`) and the channel value type `TChan of session_ty ref`
+(`:95`); projection (`project_steps`, `:5870`; `project_protocol`, `:5952`);
+binary duality (`dual_session_ty`, `:5935`, the `dual(A) == B` check,
+`:5972–5986`); MPST send/recv-pair consistency (documented as TYPING-ONLY —
+the compiled MPST runtime segfaults, F3, filed by the operational widening
+task, not this one); and the `Chan(Role, Proto)` linear surface type
+(`surface_ty`'s `TyCon("Chan", ...)` special case, `:2285–2311`). Filed **F4**
+(§2.7.5, §4.1 finding 20): the MPST merge rule (`:5906–5919`) leaks into the
+binary duality check, wrongly rejecting a legal binary `choose` protocol whose
+two branches carry the same payload type — reproduced live both ways
+(rejected identical-type / accepted type-distinct), not fixed (docs-only
+slice). Two new `accept/` programs: `accept/t41_binary_protocol_chan_new` (a
+binary `Echo` protocol, `Chan.new`, straight-line send/recv/close, run-
+witnessed printing `43`) and `accept/t42_mpst_protocol_new` (a 3-role `Relay`
+protocol, `MPST.new`, run-witnessed printing a confirmation string) — after
+this task's two programs, `check_types.sh` stood at 71/71 (42 accept, 29
+reject), exit 0. Per-operation channel typing (`Chan.send`/`recv`/`choose`/
+`offer`/`close` state advancement) and the corresponding `reject/` corpus were
+explicitly OUT of scope for this task — the next session-types widening
+task's subject (see the Task 3 entry immediately below for where the corpus
+went from there).
+
+**Session-types widening, Task 3 (2026-07-06) added:** §2.7.8, the per-
+operation channel typing Task 2 explicitly deferred above — the required
+incoming session state, what each op checks, and the advanced outgoing state
+for `Chan.new`/`send`/`recv`/`close`/`choose`/`offer` (each transcribed from
+its own `typecheck.ml` arm, cited in §2.7.8). Filed **F5** (§2.7.9):
+`Chan.offer` always returns the FIRST branch's continuation type regardless of
+which branch the peer actually chose at runtime — a documented conservative
+approximation that is a real (if narrow) soundness gap for `offer` over
+branches with DIFFERENT continuations. Six new `reject/` programs
+(`t30`–`t35`) pin the live per-op violation messages (send-at-wrong-state,
+close-before-`End`, invalid `choose` label, wrong payload type, recv-at-
+wrong-state, a linear channel continuation used twice), plus one new
+`accept/` program (`t43_choose_offer_roundtrip`) for a full `choose`/`send`/
+`close` + `offer`/`recv`/`close` round-trip, run-witnessed printing `:ok` then
+`42`. `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0 — the
+corpus's current total (§3).
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
