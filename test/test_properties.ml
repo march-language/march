@@ -728,7 +728,17 @@ let oracle_check src =
       ) else begin
         let (rc_run, compiled_out) = run_capture ~timeout:10 (Filename.quote bin_file) in
         (try Sys.remove bin_file with _ -> ());
-        if rc_run <> 0 then None  (* runtime crash — skip *)
+        if rc_run >= 128 then
+          (* Signal-killed binary (sh reports 128+signal: SIGABRT=134,
+             SIGSEGV=139, SIGBUS=138…).  The interpreter already succeeded on
+             this program, so a crashing binary is a compiler bug (usually an
+             RC miscompile) — a FAILURE, not a skip.  Clean nonzero exits stay
+             skips below: the generated program may legitimately error at
+             runtime (process_exit, runtime panics), and `timeout` reports 124. *)
+          Some (Error (interp_out,
+                       Printf.sprintf "<binary killed by signal %d (exit %d)> %s"
+                         (rc_run - 128) rc_run compiled_out))
+        else if rc_run <> 0 then None  (* clean nonzero error exit — skip *)
         else if interp_out = compiled_out then Some (Ok ())
         else Some (Error (interp_out, compiled_out))
       end
