@@ -283,6 +283,75 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
+
+Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong
+**integer** results — the `Ok` payload was double-tagged. The thunk trampoline
+stores `task[3] = (apply_ret << 1) | 1`; for an `Int` the `apply` fn already
+returns a tagged scalar (`2*n+1`), so `task[3] = 4*n+3`. `march_task_await`
+(`runtime/march_runtime.c`) wraps `task[3]` straight into `Ok(...)`, and the
+normal `Ok(n)` destructure untags only once → `2*n+1`. So compiled
+`Task.await(async(fn () -> 6*7))` yielded `Ok(85)` (= `2*42+1`),
+`await_many([10,20,30])` summed to `123` (= 21+41+61), and an `async_stream`
+squares-sum came out `2×correct + N`. The interpreter was always correct, and
+`Task.await_unwrap` was already fixed (commit 291f6b5f double-untags it) — but
+the `Result`-returning `await`/`await_many`/`async_stream` paths, which all
+funnel through the single `task_await` builtin, never got that fix. Fixed in
+`lib/tir/llvm_emit.ml`'s `task_await` case: when the statically-known `Task`
+inner type is `i64`, strip the extra tag from the freshly-allocated `Ok`
+payload field (offset 16) with one `ashr` (`4*n+3` is always odd, so an
+unconditional shift is the exact inverse of the trampoline double-tag). The
+ptr-payload path is left byte-identical → zero RC risk; verified the emitted IR
+for a String/List task carries none of the new instructions. Compiled ==
+interpreter confirmed: `42 / 60 / 55 / 99`.
+
+Also restored `test/apps/actor_stress.march` — a broad actor/task stress
+fixture (five actors: Counter/Stack/Collector/Waiter/Relay, `receive()`
+inside a handler, FIFO message ordering, `Task.async`/`await`/`await_many`/
+`async_stream`, bulk sends) that had rotted to stale `init { x = 0 }` /
+`{ s with x = ... }` (`=` where the grammar now requires `:`) and was wired
+into no test runner. Converted the syntax, dropped the `Task.race` / `Task.any`
+and cancel-token tests (the native backend can't link the `task_cancel_by_id`
+helper those rely on — a separate open gap, filed as a follow-up), added
+`needs IO.Console`, and pinned it as a native compiled-run golden
+`native_actor_stress` (+ a focused regression golden `native_task_await_int`)
+in `test/dune`, both run under `MARCH_NUM_SCHEDULERS=1` so the fire-and-forget
+actor/task `println`s serialise deterministically (multi-scheduler mode
+interleaves them mid-line — and single-thread is the only race-free config for
+the runtime's non-atomic local refcounting). Two compiled-only follow-ups filed
+(interpreter fine for both): the `task_cancel_by_id` native codegen gap
+(blocks `Task.race`/`Task.any`/cancel-tokens) and a ptr-payload `Task.await`
+runtime OOM. Full suite green: **421 compiler / 231 eval / 391 codegen / 804
+stdlib** (alcotest counts unchanged — the two additions are `test/dune` native
+golden-diff rules, not alcotest cases).
+
+## Current State (as of 2026-07-06, compiled Task.await heap-payload crash fixed)
+
+Compiled `Task.await` on a task whose result is a heap value (String, List,
+tuple, record, ADT) no longer crashes at runtime (`march: out of memory` /
+SIGSEGV) — it now returns the correct `Ok(payload)`, matching the interpreter.
+Root cause: the thunk trampoline stores `task[3] = (apply_ret << 1) | 1` (the
+apply-wrapper's uniform-slot return, tagged once), and `march_task_await` wraps
+that straight into `Ok(...)`; but a boxed-ADT field must hold the uniform value
+`apply_ret` verbatim. An `Ok(x)` destructure loads a **ptr** field raw (a normal
+`Ok(heap_ptr)` stores an even raw pointer, so no untag is applied), so the Ok
+payload carried the wild `(addr<<1)|1 ≈ 2*addr` value; `IS_HEAP_PTR` rejects it
+(odd) so `incrc`/`decrc` silently no-op'd, and the first deref of the payload
+(`march_string_concat`, `List.length`) read garbage. This is the ptr sibling of
+the i64 double-tag fix `f89b8711` (on main, not this branch), whose commit note
+wrongly assumed the ptr path was already correct. Fix (`lib/tir/llvm_emit.ml`
+`task_await` case): extend `f89b8711`'s guard from `inner_ty = "i64"` to
+`"i64" || "ptr"` and `ashr` the freshly-allocated Ok payload field (offset 16)
+once — `task[3]` is always odd, so one arithmetic shift is the exact inverse for
+both reps (`4*n+3 → 2*n+1` for i64, `(addr<<1)|1 → addr` for ptr); `"double"`
+(Float, separately ABI-broken through the `void*` trampoline) is left
+byte-identical. Covers all combinators that funnel through `task_await`
+(`await_many`, `async_stream`/`_n`, `all_settled`, `race`). Verified compiled ==
+interpreter across String/List/tuple/ADT/list-of-string payloads and `await_many`
+over Strings, clean under ASAN. Regression: `test/native/task_await_ptr.{march,expected}`
++ a `test/dune` native compiled-run golden. Codegen-only change (interpreter,
+type-checker, and stdlib suites unaffected): **391 codegen / 231 eval pass**.
+
 ## Current State (as of 2026-07-06, same-file private nested-module member diagnostic fixed)
 
 A same-file qualified reference to a PRIVATE nested-module member now reports
@@ -376,6 +445,12 @@ out the six-task widening slice (`specs/plans/2026-07-06-widening-interfaces-imp
 - **Next queued widening slice:** modules or actors (per the roadmap's
   Phase-2b/3 phasing) — the same design-spec → plan → conformance-anchored
   execution loop this slice and the seven Phase-1 core slices both proved out.
+## Current State (as of 2026-07-06, `run_check_cmd` stdlib-shadowing corruption fixed)
+
+Trying to bring a real dependency (`depot`) fully clean via the batched multi-file `march check` surfaced a third bug: two of depot's own constructors resolved fine standalone but became unresolvable — no diagnostic pointing at the cause — once checked alongside a large downstream consumer. Bisected to a single trigger file whose only relevant property was `mod Crypto do`, shadowing stdlib's own `Crypto`. Root cause: `run_check_cmd` never had the stdlib-shadow-stripping guard the single-file `compile` path already has (`extern_mod_names`, added for this exact scenario per its own doc comment), so two DMods named `Crypto` landed in the same combined module and corrupted unrelated global typecheck state. Fixed by filtering `stdlib_decls` against the checked files' own module names in `run_check_cmd` too. New regression test `test_check_stdlib_shadow_does_not_corrupt_unrelated_module` in `forge/test/test_build_check.ml` — a same-file constructor build+match didn't reproduce the bug; only a build-via-qualified-call-in-one-file + consume-via-bare-pattern-in-another-file shape did, matching the real repro exactly. Fixing this also cleared several of the downstream consumer's own errors that turned out to be misattributed — they were the same corruption's victims, not real bugs in that project.
+
+**Test counts:** `forge/test/test_build_check.exe` gains 1 more case (11 total, up from 10). Standard six runners: 421 compiler / 231 eval / 391 codegen / 804 stdlib, all exit 0.
+
 ## Current State (as of 2026-07-06, duplicate diagnostics for a broken constructor field type fixed)
 
 Triaging the diagnostic output from the `run_check_cmd` fix above on the real bastion project surfaced a second, unrelated duplicate-diagnostic bug: `instantiate_ctor` (`lib/typecheck/typecheck.ml`) re-resolves a constructor's stored surface argument types on every instantiation (needed for fresh per-use type variables), so a field type that fails to resolve gets its error re-emitted once per instantiation of that constructor (pattern match, constructor call) rather than once — bastion's `Fallback(Conn -> ActionResult -> Conn)` (a broken `ActionResult` reference) was reported 4 times at the identical span. Fixed generically at `Errors.report` (`lib/errors/errors.ml`), the single choke point every diagnostic passes through: a diagnostic exactly matching an already-reported `(severity, span, message)` triple is now skipped, since a byte-identical repeat at the same location can only be the same fact re-derived. New regression test `test_broken_ctor_field_type_reported_once` in `test/test_compiler.ml`. Verified against the live repro: bastion's project-wide diagnostic count dropped from 54 to 46 (all removed duplicates, no new or missing distinct errors).
@@ -506,7 +581,7 @@ Verified: golden `verify.sh` 32/32 MATCH exit 0 (unchanged — no programs touch
 **The high-value part:** adjudicated and CONVERGED the `ERecordUpdate`-on-a-missing-field divergence tracked in `specs/todos.md` since Wave 1's B5 fix. The compiled contract (`march_record_update_dyn` panics on an unknown field name) is now the single normative rule; `eval.ml`'s `ERecordUpdate` was changed to validate every update name against the base record's actual fields before merging, raising `eval_error "record update: no field '%s' in record"` instead of silently fabricating the field. This divergence was only ever reachable through an ERASED base (`record_from_list`/`record_put`, a bare type variable the typechecker cannot check field names against) — a statically-typed record literal base already made an unknown-field update a typecheck-time error on both backends, so ordinary `{ base with f: v }` call sites across stdlib/examples were unaffected. Verified clean before keeping the change: all six standard runners green (**400 compiler / 230 eval / 385 codegen / 803 stdlib / 53 stdlib_march / 29 snapshots**) and the `@oracle` conformance sweep green (34 matched / 7 known-divergence, pre-existing and unrelated / 0 un-triaged, exit 0). The dedicated unit test that pinned the divergence (`test/test_properties.ml`) now asserts convergence instead (both backends exit nonzero with a "no field" message); `specs/todos.md`'s open P0 entry is retired (moved to Done).
 ## Current State (as of 2026-07-06, `forge publish`/`forge retire` wired to a real registry)
 
-`forge publish`/`forge retire` submit/retire packages against a running forgepm registry over native HTTP/TLS (Bearer auth, multipart tarball upload, HTTPS-by-default with an explicit `--insecure` escape hatch); see `forge/tasks/forge_registry.march` + `forge/tasks/test_registry.march`. Previously `forge publish` only validated locally and printed "registry push not yet implemented" — this closes that gap. New: `Registry_client.run_action`/`validate_registry_url` (`forge/lib/registry_client.ml`) spawn the embedded March client via `Unix.create_process_env` (token passed only through the child's environment block, never argv/a shell string, no pipes); `forge retire <VERSION> [--reason TEXT] [--registry URL] [--insecure]` (`forge/lib/cmd_retire.ml`); `--registry`/`--insecure` flags on `forge publish`. 13 new unit tests for the client's pure logic (multipart framing, response classification, endpoint URLs, manifest parsing). Live-verified end-to-end against a real local forgepm dev server: publish, retire, and the HTTPS gate all behaved correctly against a fixture package. Exit codes: 0 success, 1 client/config error, 2 local validation failure, 3 network/transport error, 4 server 4xx, 5 server 5xx.
+`forge publish`/`forge retire` submit/retire packages against a running forgepm registry over native HTTP/TLS (Bearer auth, multipart tarball upload, HTTPS-by-default with an explicit `--insecure` escape hatch); see `forge/tasks/forge_registry.march` + `forge/tasks/test_registry.march`. Previously `forge publish` only validated locally and printed "registry push not yet implemented" — this closes that gap. New: `Registry_client.run_action`/`validate_registry_url` (`forge/lib/registry_client.ml`) compile the embedded March client fresh (must be compiled — the interpreter's `Tls.*` builtins are unit-testing stubs, not real TLS) and run it via `Unix.create_process_env` (token passed only through the child's environment block, never argv/a shell string, no pipes); `forge retire <VERSION> [--reason TEXT] [--registry URL] [--insecure]` (`forge/lib/cmd_retire.ml`); `--registry`/`--insecure` flags on `forge publish`. 13 new unit tests for the client's pure logic (multipart framing, response classification, endpoint URLs, manifest parsing). Live-verified end-to-end against a real local forgepm dev server: publish, retire, and the HTTPS gate all behaved correctly against a fixture package. Exit codes: 0 success, 1 client/config error, 2 local validation failure, 3 network/transport error, 4 server 4xx, 5 server 5xx. **Two real compiler/runtime bugs fixed en route to a real `https://forgepm.org` production round-trip** (both blocked ANY compiled program's TLS client, not just this one): `lib/tir/llvm_builtins.ml`'s `tls_write` builtin was declared `ret_ty = TUnit` instead of `Result(Int, String)` (the C function actually returns a heap-allocated Result, corrupting the compiled backend's handling of the pointer — this was also the root cause of the previously-documented compiled-SMTP SIGSEGV in `marathon`'s README); and `runtime/march_tls.c`'s client `SSL_CTX` never set `SSL_MODE_AUTO_RETRY`, so `SSL_read` could return an empty "clean shutdown" signal after consuming a TLS 1.3 post-handshake record before any real application data arrived. See `specs/todos.md`'s Done entry for the full repro/fix writeup.
 
 ## Current State (as of 2026-07-05, `Cli` stdlib module — final-review fixes)
 

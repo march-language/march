@@ -535,7 +535,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_accept(i64 %fd, i64 %ctx_handle)" };
   { march_name = "tls_read"; c_name = Some "march_tls_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_read(i64 %ssl_handle, i64 %max_bytes)" };
-  { march_name = "tls_write"; c_name = Some "march_tls_write"; ret_ty = Some Tir.TUnit;
+  { march_name = "tls_write"; c_name = Some "march_tls_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tls_write(i64 %ssl_handle, ptr %data)" };
   { march_name = "tls_close"; c_name = Some "march_tls_close"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_tls_close(i64 %ssl_handle)" };
