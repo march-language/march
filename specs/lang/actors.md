@@ -155,36 +155,55 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 
 ## Synchronous Request-Reply via `Actor.call`
 
-The `Actor` module provides a synchronous call pattern:
+The `Actor` module provides a synchronous call pattern. You pass a **zero-arg
+sentinel constructor** as the call message; its tag selects which handler
+receives the call, and the runtime injects the caller (the *reply channel*) as
+that handler's **first argument**. The handler answers with `Actor.reply`:
 
 ```march
-actor Store do
+type GetReq = GetReq          -- zero-arg sentinel for the sync call
+
+actor Counter do
   state { count : Int }
   init  { count: 0 }
 
-  on Inc() do
-    { count: state.count + 1 }
+  -- First handler (tag 0) = the call handler; reply_to is the caller.
+  on GetCount(reply_to) do
+    Actor.reply(reply_to, state.count)
+    state
   end
 
-  on Call(ref, Get()) do
-    Actor.reply(ref, state.count)
-    state
+  on Inc(n : Int) do
+    { state with count: state.count + n }
   end
 end
 
 fn main() do
-  let pid = spawn(Store)
-  send(pid, Inc())
-  send(pid, Inc())
+  let pid = spawn(Counter)
+  Actor.cast(pid, Inc(1))
   run_until_idle()
-  match Actor.call(pid, Get(), 5000) do
+  match Actor.call(pid, GetReq, 5000) do
     Ok(n)  -> println("count = " ++ int_to_string(n))
     Err(e) -> println("error: " ++ e)
   end
 end
 ```
 
-`Actor.call(pid, msg, timeout_ms)` sends `Call(ref, msg)` to the actor and waits for `Actor.reply(ref, result)`. Returns `Ok(result)` or `Err(reason)`.
+`Actor.call(pid, sentinel, timeout_ms)` reads the tag from the zero-arg
+`sentinel`, builds an augmented message (same tag, with the caller in field 0),
+and routes it to the handler at that tag. That handler receives the caller as
+its first argument and must call `Actor.reply(reply_to, result)` to unblock the
+call. `Actor.call` returns `Ok(result)`, or `Err(reason)` if no reply arrives.
+
+Two consequences of the tag-selects-the-handler rule:
+
+- **The call handler must be declared FIRST** in the actor, so it sits at tag 0
+  — the sentinel `GetReq` has tag 0, and that is the handler the call routes to.
+- **The sentinel must have a name distinct from the handler** (`GetReq` vs
+  `GetCount`) to avoid a constructor-name clash.
+
+There is no `Call` wrapper constructor, and the call handler takes exactly one
+argument (the reply channel).
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
 
