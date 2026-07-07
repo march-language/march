@@ -2455,11 +2455,15 @@ branches the same payload type (a common, unremarkable shape — e.g. both an
 spurious, confusing rejection whose message talks about "duals" rather than
 anything resembling "make your branches type-distinct." The workaround
 (differentiate the branch payload types, even trivially, e.g. wrap one in a
-single-field record) is non-obvious from the error text alone. This is a
-genuine typechecker bug — filed in `specs/todos.md` under "Compiler: Type
-System" (F4), not fixed here (out of scope for a docs-only widening task;
-the fix direction is to gate the merge-rule branch in `ProtoChoice` on
-`multiparty`, only merging for the true MPST non-chooser case).
+single-field record) is non-obvious from the error text alone. This was a
+genuine typechecker bug — **FIXED 2026-07-07** (fix-campaign pilot): the
+merge-rule branch in `project_steps`'s `ProtoChoice` arm is now gated on
+`multiparty`, so a binary (2-role) protocol's non-chooser always projects to
+`SOffer{…}` (it always observes the choice) and only a true MPST bystander
+role merges. A binary protocol with two identical-type `choose` branches now
+typechecks (witnessed by `accept/t44_binary_choice_identical_branches`). The
+prose above is retained to describe the historical defect; the "workaround" is
+no longer necessary. See `specs/todos.md` for the Done entry.
 
 #### 2.7.6 `Chan(Role, Proto)` — the linear channel-endpoint surface type
 

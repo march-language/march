@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t43 accept, t01–t35 reject)
+# Typing corpus index (t01–t44 accept, t01–t35 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -74,7 +74,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 78/78 — 43 accept, 35
+Exit 0 iff every program behaves as declared (currently 79/79 — 44 accept, 35
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -165,6 +165,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t41_binary_protocol_chan_new` | **binary session-type protocol declaration + projection + duality + `Chan(Role,Proto)` typing (§2.7, session-types widening Task 2)** — `protocol Echo` (2 roles, `Client`/`Server`, each declared as its own nullary type to avoid the undeclared-role HINT); `project_protocol` (`typecheck.ml:5952`) projects each role's local `session_ty` and verifies binary duality (`dual_session_ty`, `:5935`, check `:5972–5986`); `Chan(Client,Echo)`/`Chan(Server,Echo)` resolve via `surface_ty`'s `TyCon("Chan",...)` special case (`:2285–2311`) to a linear `TChan` endpoint; `Chan.new(Echo)` constructs both endpoints, threaded through a straight-line send/recv/close sequence (send always before its matching recv, avoiding the unrelated no-scheduler runtime deadlock) | `--check` exit 0; run-witnessed: prints `43` |
 | `t42_mpst_protocol_new` | **MPST (3-role) protocol projection + send/recv-pair consistency typing (§2.7.3–§2.7.4, session-types widening Task 2)** — `protocol Relay` (`Client`/`Server`/`Logger`, all `String` payloads); `project_protocol` sets `multiparty = true`, projects each role to role-annotated `SMSend`/`SMRecv` (`:115–116`) instead of binary `SSend`/`SRecv`, and verifies every `ProtoMsg` has a matching send/recv pair across its two endpoints (`:5987+`); `MPST.new(Relay)` destructures into a 3-tuple of role endpoints. Witnesses that MPST is TYPING-ONLY in this reference — the program deliberately never sends a message, so it is unaffected by the compiled MPST segfault (F3, filed by the operational widening task) | `--check` exit 0; run-witnessed: prints a confirmation string |
 | `t43_choose_offer_roundtrip` | **`choose`/`offer` full session round-trip (§2.7.8, session-types widening Task 3)** — `protocol Decision` (`choose by Client: ok -> Int \| err -> String`, two branches with DIFFERENT payload types so the F4 merge-rule pitfall does not fire); `Chan.choose(cc, :ok)` advances to the `:ok` branch's continuation (`typecheck.ml:3564`), followed by `Chan.send`/`Chan.close`; `Chan.offer(sc)` (`:3614`) returns `(Atom, Chan at FIRST branch's continuation)` — here the chooser always picks `:ok`, which IS the first branch, so the F5 approximation happens to be exact for this witness (see F5, §2.7.9, for why that isn't true in general) | `--check` exit 0; run-witnessed: prints `:ok` then `42` |
+| `t44_binary_choice_identical_branches` | **F4 FIX witness (fix-campaign, 2026-07-07) — a BINARY protocol with two IDENTICAL-payload-type `choose` branches now typechecks** — `protocol Decision` (`choose by Client: ok -> Int \| err -> Int`, both branches `Int`). Before the F4 fix this was WRONGLY rejected "not duals of each other": `project_steps`'s `ProtoChoice` merge rule collapsed the non-chooser (`Server`) projection from `SOffer{...}` to the shared `Recv(Int, End)`, breaking binary duality. The fix gates the merge on `multiparty` (`typecheck.ml`), so a 2-role protocol's non-chooser always projects to `SOffer{...}`. Flips the §2.7.5 finding-20 defect from a documented bug to a passing accept. See `core-march-types.md` §2.7.5 (FIXED) + `specs/todos.md` finding 20 (Done) | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -206,7 +207,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t34_recv_at_wrong_state` | **channel-op session typing (§2.7.8, session-types widening Task 3) — recv-at-wrong-state** — `Chan.recv(cc)` called on the Client endpoint of `Echo` immediately after `Chan.new`, while `cc` is still at `Send(Int, Recv(Int, End))` (the first op must be a send); `Chan.recv`'s arm (`typecheck.ml:3509`) requires `SRecv` | `` Chan.recv: channel is at `Send(Int, Recv(Int, End))` but I expected `Recv(T, ...)`. `` |
 | `t35_linear_used_twice` | **channel-op linearity (§2.7.8, session-types widening Task 3) — linear channel continuation used twice** — `Chan.close(cc2)` called twice on the same `let`-bound continuation; channel endpoints are `TLin (Linear, TChan ...)` (§2.7.6), and double-use of a `let`-bound linear value is caught by the GENERIC linear tracker, not session-specific accounting (same diagnostic shape as any other linear value used twice) | `` The linear value `cc2` is used more than once here. `` |
 
-**Result: 78 / 78 (43 accept, 35 reject).**
+**Result: 79 / 79 (44 accept, 35 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
