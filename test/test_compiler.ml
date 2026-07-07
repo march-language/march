@@ -3468,6 +3468,98 @@ let test_resolver_skips_dangling_symlink () =
   Alcotest.(check bool) "dangling symlink not collected"
     false (List.exists (fun p -> Filename.basename p = "broken") files)
 
+(** Regression test for the O(var-refs * imports) blowup in
+    [Typecheck.record_use]: every EVar lookup used to linearly scan
+    [env.import_tracker], whose length is one entry per use/import/alias
+    declaration across the WHOLE combined program (stdlib + every file
+    pulled in via MARCH_LIB_PATH auto-discovery).  On a real multi-hundred-
+    file project (forgepm + bastion + depot + march_doc, ~200 files) this
+    made `march check` hang for 30+ minutes burning 100% CPU in
+    List.mem/compare_val (confirmed via `sample`), instead of completing in
+    seconds.  This test builds a synthetic MARCH_LIB_PATH with many
+    auto-discovered modules, each importing a shared module (`import Shared`)
+    and referencing several of its functions -- the exact shape that
+    stresses [record_use]'s import-tracker lookup -- and asserts the check
+    completes within a bound chosen to clearly separate "linear" from
+    "quadratic blowup" at this N.  Measured directly (CAS cache cleared
+    between runs, so these are real typecheck times, not cache hits):
+      files   pre-fix (quadratic)   post-fix (indexed)
+       400          ~1.2s                ~0.6s
+      1200          ~8.2s                ~1.4s   (~6x)
+      2000         ~21.1s                ~2.3s   (~9x)
+      3000         ~45.5s                ~3.7s  (~12x)
+    Pre-fix time roughly follows n^2 (k ~= 5e-6); post-fix is ~linear.  This
+    test uses N = 2500 files, where the pre-fix code would take ~31s (already
+    past the 30s bound below) while the fixed code takes ~3s -- comfortably
+    separating "would time out" from "clearly fine" without making the test
+    itself slow. *)
+let test_large_multi_file_check_is_not_quadratic () =
+  let dir = Filename.temp_file "march_lib_path_scale_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    (* Best-effort cleanup: this test writes thousands of small files. *)
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in
+    output_string oc contents;
+    close_out oc
+  in
+  (* One shared module with several functions, imported by every generated
+     module below via `import Shared` (a UseAll-style bulk import) -- this
+     populates one [import_tracker] entry per importing file, and each
+     `helperN()` call inside those files is an EVar lookup that must mark
+     the right entry used via [record_use]. *)
+  let n_helpers = 20 in
+  let shared_src =
+    let buf = Buffer.create 1024 in
+    Buffer.add_string buf "mod Shared do\n";
+    for i = 0 to n_helpers - 1 do
+      Buffer.add_string buf (Printf.sprintf "  fn helper%d() do\n    %d\n  end\n" i i)
+    done;
+    Buffer.add_string buf "end\n";
+    Buffer.contents buf
+  in
+  write_file (Filename.concat dir "shared.march") shared_src;
+  let n_files = 2500 in
+  let n_refs  = 30 in
+  for i = 0 to n_files - 1 do
+    let buf = Buffer.create 512 in
+    Buffer.add_string buf (Printf.sprintf "mod Wu%d do\n" i);
+    Buffer.add_string buf "  import Shared\n";
+    Buffer.add_string buf "  fn value() do\n";
+    for j = 0 to n_refs - 1 do
+      Buffer.add_string buf
+        (Printf.sprintf "    let x%d = helper%d() + %d\n" j (j mod n_helpers) j)
+    done;
+    Buffer.add_string buf "    x0\n  end\nend\n";
+    write_file (Filename.concat dir (Printf.sprintf "wu%d.march" i)) (Buffer.contents buf)
+  done;
+  (* Entry file: trivial, imports nothing itself -- all the files above are
+     pulled in purely via MARCH_LIB_PATH auto-discovery (resolve_imports's
+     step 2), exactly like forgepm's `.march` tree under MARCH_LIB_PATH. *)
+  let entry_src = "mod Entry do\n  fn main() do\n    0\n  end\nend\n" in
+  Unix.putenv "MARCH_LIB_PATH" dir;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let m = parse_and_desugar entry_src in
+    let start = Unix.gettimeofday () in
+    let (resolve_errors, extra_decls, _user_files) =
+      March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+    Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+    let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+    let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+    let elapsed = Unix.gettimeofday () -. start in
+    Alcotest.(check bool) "no typecheck errors" false (has_errors errors);
+    (* 30s bound: the fixed (indexed) code finishes this N in ~3-5s even on a
+       loaded CI box; the pre-fix O(var-refs * imports) scan measured ~31s+
+       at this exact N (see the doc comment above) -- comfortably on the far
+       side of this bound, so a regression back to the linear-scan version
+       would fail this test rather than merely being "a bit slower". *)
+    Alcotest.(check bool)
+      (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
+      true (elapsed < 30.0)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -6086,6 +6178,9 @@ let compiler_suites =
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
             test_resolver_skips_dangling_symlink;
+          Alcotest.test_case
+            "large multi-file MARCH_LIB_PATH check is not quadratic (record_use import_tracker)"
+            `Slow test_large_multi_file_check_is_not_quadratic;
         ] );
       ( "diagnostic dedup",
         [
