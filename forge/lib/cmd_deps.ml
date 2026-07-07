@@ -196,6 +196,48 @@ let update_dep name (dep : Project.dep) =
     Printf.printf "  %s: path dep — nothing to update\n%!" name;
     Ok ()
 
+(** Install a wave of deps, then discover the NEXT wave from each newly
+    installed dep's own forge.toml [deps] (recursing into transitive
+    dependencies — e.g. installing `bastion` also pulls in `depot` if
+    bastion's own forge.toml declares it).  [project_root] is the root of
+    the project that declared the current [wave] (needed to resolve a
+    PathDep in that wave relative to its OWN declaring project, not the
+    top-level one — each recursive call passes the dep's own root down).
+    [visited] dedups by name across the whole graph: a name already seen
+    (nearest — i.e. more direct — wins) is skipped entirely. *)
+let rec bfs_install visited ~project_root wave =
+  match wave with
+  | [] -> []
+  | _ ->
+    let fresh = List.filter (fun (name, _) ->
+        if Hashtbl.mem visited name then false
+        else begin Hashtbl.add visited name (); true end
+      ) wave in
+    let results = List.map (fun (name, dep) -> (name, dep, install_dep name dep)) fresh in
+    let next_wave = List.concat_map (fun (name, dep, result) ->
+        match result with
+        | Error _ -> []
+        | Ok _ ->
+          (match Project.dep_root_dir ~project_root (name, dep) with
+           | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
+             (match Project.load_from_dir dep_dir with
+              | Ok dep_proj -> List.map (fun (n, d) -> (n, d, dep_dir)) dep_proj.Project.deps
+              | Error _ -> [])
+           | _ -> [])
+      ) results in
+    let this_level = List.map (fun (name, _, result) -> (name, result)) results in
+    (* Group the next wave's entries by their (possibly differing) declaring
+       root so each recursive call resolves PathDeps against the right root. *)
+    let by_root = Hashtbl.create 4 in
+    List.iter (fun (n, d, root) ->
+        let existing = try Hashtbl.find by_root root with Not_found -> [] in
+        Hashtbl.replace by_root root ((n, d) :: existing)
+      ) next_wave;
+    let nested = Hashtbl.fold (fun root deps acc ->
+        acc @ bfs_install visited ~project_root:root (List.rev deps)
+      ) by_root [] in
+    this_level @ nested
+
 (* ------------------------------------------------------------------ *)
 (*  forge deps                                                         *)
 (* ------------------------------------------------------------------ *)
@@ -252,7 +294,8 @@ let run () =
       Ok ()
     end else begin
       Printf.printf "resolving %d dependencies...\n%!" (List.length all_deps);
-      let results = List.map (fun (n, d) -> (n, install_dep n d)) all_deps in
+      let visited = Hashtbl.create 16 in
+      let results = bfs_install visited ~project_root:proj.Project.root all_deps in
       let errors  = List.filter_map (fun (_, r) ->
           match r with Error e -> Some e | Ok _ -> None) results in
       let entries = List.filter_map (fun (_, r) ->
