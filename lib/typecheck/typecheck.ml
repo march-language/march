@@ -3293,13 +3293,44 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
   ) branches
 
 (** Emit a Warning if the match on [scrut_ty] with [branches] is non-exhaustive.
-    Skips the check when any branch has a guard (coverage becomes undecidable). *)
+
+    When any branch carries a [when] guard, exact coverage is undecidable in
+    general (we cannot know at typecheck time whether a guard succeeds), so we do
+    NOT emit the ordinary Warning. But a guarded match can still DEFINITELY panic:
+    a branch whose pattern is only reachable behind a guard cannot be relied on to
+    match, so it contributes nothing to GUARANTEED coverage. If the GUARDLESS
+    branches alone are non-exhaustive, then when every guard happens to fail at
+    runtime no arm matches and the match panics ("no matching clause"). For the
+    guarded case we therefore compute exhaustiveness over the guardless branches
+    only and, if that sub-match is non-exhaustive, RECORD the span (so
+    [check_no_panic_module] can promote it to an error inside a `cap no_panic`
+    module) WITHOUT emitting a global Warning — guarded matches are common in
+    ordinary code and get no such warning today, so only `cap no_panic` modules
+    (which opt into strictness) are made stricter. *)
 let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let has_guards =
     List.exists (fun (br : Ast.branch) -> br.branch_guard <> None) branches
   in
-  if has_guards then ()
+  if has_guards then begin
+    (* Coverage guaranteed by the GUARDLESS branches only (an all-guarded match
+       yields an empty matrix, which [find_missing_mc] correctly reports as
+       non-exhaustive rather than crashing). If those alone are exhaustive the
+       match can never fall through → safe. Otherwise record the span so
+       [check_no_panic_module] rejects it; no global Warning here. *)
+    let guardless_matrix =
+      List.filter_map
+        (fun (br : Ast.branch) ->
+          match br.branch_guard with
+          | None   -> Some [norm_pat br.branch_pat]
+          | Some _ -> None)
+        branches
+    in
+    match find_missing_mc env [scrut_ty] guardless_matrix with
+    | None -> ()
+    | Some _ ->
+      env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans)
+  end
   else begin
     let matrix =
       List.map (fun (br : Ast.branch) -> [norm_pat br.branch_pat]) branches

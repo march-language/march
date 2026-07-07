@@ -2753,8 +2753,10 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
      match inside a `cap no_panic` module is invisible to both the
      ordinary warning and F3's new error path — live-verified to panic at
      runtime uncaught. Pre-existing behavior F3 correctly inherits rather
-     than introduces; not in F3's scope; would need a guard-aware
-     (Z3-backed) exhaustiveness analysis to close.
+     than introduces; not in F3's scope. **(Subsequently FIXED, fix-campaign
+     batch 3, 2026-07-07 — see the dedicated entry below; a guard-aware SMT
+     analysis turned out NOT to be needed: computing coverage over the
+     GUARDLESS branches only is a sound, conservative, bounded fix.)**
 - **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
   already wired into `specs/lang/index.md`'s chapter map before this slice)
   reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
@@ -2785,6 +2787,53 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
 
 Next queued widening slice: **proof caps** (closing the proof-cap mint
 mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
+
+## Fix-campaign batch 3 — `cap no_panic` guarded-match exhaustiveness gap (2026-07-07)
+
+Closes the residual soundness gap slice 5 (above) filed OPEN as finding 6: a
+`match` with a `when` guard used to short-circuit `check_exhaustiveness`
+entirely (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+match inside a `cap no_panic` module was recorded by NEITHER the ordinary
+Warning NOR F3's `env.nonexhaustive_match_spans` side-table — `--check` exited
+0 with zero diagnostics, then panicked at runtime ("no matching clause") on a
+value that failed every guard. Exactly the failure class `cap no_panic` exists
+to rule out.
+
+- **The fix (`lib/typecheck/typecheck.ml`, `check_exhaustiveness`).** For a
+  guarded match, the function no longer returns immediately. It computes
+  coverage over the GUARDLESS branches ONLY (`guardless_matrix` = the
+  `norm_pat`s of the arms with `branch_guard = None`). A branch reachable only
+  behind a guard cannot be relied on to match, so it contributes nothing to
+  GUARANTEED coverage; if the guardless branches alone are non-exhaustive, the
+  match can panic when every guard fails at runtime → the span is recorded into
+  `env.nonexhaustive_match_spans` and `check_no_panic_module` promotes it to an
+  ERROR, exactly as for the guard-free case. If the guardless branches ARE
+  exhaustive (a guarded arm followed by an unguarded catch-all), nothing is
+  recorded and the match still accepts. `find_missing_mc` already handles an
+  empty matrix (all-guarded match) correctly, so an all-guarded match reports
+  non-exhaustive rather than crashing.
+- **Minimal blast radius.** The guarded case RECORDS the span but emits **no
+  global Warning** — guarded matches are common in ordinary code and get no
+  such warning today, so only `cap no_panic` modules (which opt into
+  strictness) are made stricter. The guard-FREE path is untouched (still
+  Warning + record). No non-`cap no_panic` behavior changed — the
+  record-without-warning split is clean, regression-guarded by a new
+  plain-module guarded-non-exhaustive unit test that stays silent.
+- **Corpus.** types 107 → **109** (58 → **59** accept, 49 → **50** reject):
+  `reject/t50_cap_no_panic_guarded_nonexhaustive` (guardless arms `{None}`,
+  non-exhaustive — IMPOSSIBLE to reject pre-fix, accepted exit 0) and
+  `accept/t59_cap_no_panic_guarded_guardless_catchall` (adds an unguarded
+  `Some(v)` arm → guardless-exhaustive → still accepts, proving no
+  over-rejection). `check_types.sh` 109/109, exit 0; `check-docs.sh` exit 0.
+- **Unit tests.** 3 new NON-VACUOUS cases in `test/test_compiler.ml`'s
+  `cap_no_panic` group (RED pre-fix / GREEN after): `cap no_panic` + guarded
+  non-exhaustive → `has_errors` true; `cap no_panic` + guarded guardless-catch-
+  all → no error; plain (non-cap) guarded non-exhaustive → no error (the
+  record-without-warning regression guard).
+- **Docs.** `core-march-types.md` §2.8.11's residual-gap paragraph and §2.1a's
+  guard-short-circuit paragraph flipped from "open gap" to FIXED with the
+  guardless-matrix mechanism; the §2.8 preamble roadmap note updated.
+  `specs/todos.md` finding 6 converted from OPEN to a ✅ FIXED entry.
 
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 

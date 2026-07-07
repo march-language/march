@@ -147,9 +147,14 @@ describe F2/F3 as fixed, reconciled the `capabilities.md` tutorial, and filed
 two further findings (the proof-cap mint mismatch, deliberately unlabeled
 since `F1`–`F8` are all already in use elsewhere in this document, deferred
 to a later proof-caps slice — and a residual guarded-match exhaustiveness
-gap F3 inherits but does not introduce). Still deferred: proof-cap
-mint/forge (Check 6) itself remains unfixed (the proof-cap mint mismatch
-finding documents the gap, not a fix).
+gap F3 inherited but did not introduce). The guarded-match gap was
+subsequently FIXED (fix-campaign batch 3, 2026-07-07): `check_exhaustiveness`
+now computes coverage over the GUARDLESS branches of a guarded match and
+records the span when they are non-exhaustive, so a guarded non-exhaustive
+match in a `cap no_panic` module is now an ERROR (§2.8.11, §2.1a; witnesses
+`reject/t50`, `accept/t59`). Still deferred: proof-cap mint/forge (Check 6)
+itself remains unfixed (the proof-cap mint mismatch finding documents the gap,
+not a fix).
 
 ## 1. The typing judgment
 
@@ -524,16 +529,26 @@ both `infer_match` and the `EMatch` arm of `check_expr`, typecheck.ml:
 4199/4288) and DOES emit a diagnostic for a missing case; that diagnostic is
 simply non-fatal by design.
 
-Exhaustiveness checking is also SKIPPED ENTIRELY (not merely downgraded) when
-ANY branch of the match carries a guard: `let has_guards = List.exists (…
-branch_guard <> None) branches in if has_guards then () else …`
-(typecheck.ml:3161–3164) — "coverage becomes undecidable" once a guard is
-present (the comment at typecheck.ml:3158), since a guard can make an
-otherwise-total pattern set partial at runtime (E-Match's guard-false
-fall-through, core-march.md:741–751). Redundancy checking, by contrast, only
-skips INDIVIDUAL guarded arms (`if br.branch_guard = None then …`,
-typecheck.ml:3136) while still checking the unguarded ones against the
-accumulated prefix.
+When ANY branch of the match carries a guard, the ordinary Warning is SKIPPED
+(exact coverage is undecidable once a guard is present — a guard can make an
+otherwise-total pattern set partial at runtime via E-Match's guard-false
+fall-through, core-march.md:741–751). But a guarded match can still DEFINITELY
+panic, so `check_exhaustiveness` no longer returns immediately in the guarded
+case: it computes coverage over the GUARDLESS branches ONLY (`let
+guardless_matrix = List.filter_map (fun br -> match br.branch_guard with None ->
+Some [norm_pat br.branch_pat] | Some _ -> None) branches`, typecheck.ml:3315–
+3332). A branch reachable only behind a guard cannot be relied on to match, so
+it contributes nothing to GUARANTEED coverage; if the guardless branches alone
+are non-exhaustive the match can panic when every guard fails at runtime. In
+that case the span is RECORDED into `env.nonexhaustive_match_spans` (so
+`check_no_panic_module` promotes it to an error inside a `cap no_panic` module,
+§2.8.11) but NO global Warning is emitted — guarded matches are common in
+ordinary code and get no warning today, so only `cap no_panic` modules (which
+opt into strictness) are made stricter. (An all-guarded match yields an empty
+guardless matrix, which `find_missing_mc` correctly reports as non-exhaustive
+rather than crashing.) Redundancy checking, by contrast, only skips INDIVIDUAL
+guarded arms (`if br.branch_guard = None then …`, typecheck.ml:3136) while still
+checking the unguarded ones against the accumulated prefix.
 
 **Conformance-corpus consequence:** an `accept/` program with a deliberately
 non-exhaustive `match` is CORRECT — it is SUPPOSED to typecheck
@@ -3807,23 +3822,33 @@ pins the latter as a permanent regression guard: a bare non-exhaustive match
 outside a `cap no_panic` module must never be promoted). See §2.8.12 below
 for the REJECT corpus witness this fix made possible.
 
-**A residual gap F3 inherits, not introduces (open, filed in
-`specs/todos.md` as a distinct finding):** `check_exhaustiveness` skips its
-entire coverage computation — including recording a span into
-`nonexhaustive_match_spans` — whenever ANY arm of the match carries a
-pattern guard (`typecheck.ml:~3297`, `if has_guards then ()`; guard coverage
-is undecidable in general without a guard-aware SMT analysis, per the
-function's own doc comment). So a `cap no_panic` module containing a
-guarded, genuinely non-exhaustive match is invisible to *both* the ordinary
-warning and F3's new error path — `--check` exits 0 with zero diagnostics,
-live-verified (`x when x > 0 -> 1`, no catch-all, over an `Int`
-scrutinee), and calling it at a value that fails the guard panics at
-runtime exactly as the un-fixed F3 case did. This is **not a regression**
-and **not in F3's scope** — F3's fix correctly consumes whatever verdict
-`check_exhaustiveness` computes, and this blind spot predates and is
-independent of that fix; fixing it would need a guard-aware exhaustiveness
-analysis (substantially more than span-plumbing). Filed as its own open
-finding, distinct from F3.
+**The guarded-match gap F3 inherited — now FIXED (fix-campaign batch 3,
+2026-07-07):** originally, `check_exhaustiveness` skipped its entire coverage
+computation — including recording a span into `nonexhaustive_match_spans` —
+whenever ANY arm of the match carried a pattern guard, so a `cap no_panic`
+module containing a guarded, genuinely non-exhaustive match was invisible to
+*both* the ordinary warning and F3's error path (`--check` exited 0 with zero
+diagnostics). The conservative, sound fix: for a guarded match,
+`check_exhaustiveness` now computes coverage over the GUARDLESS branches ONLY
+(`guardless_matrix`, `typecheck.ml:~3315`). A branch reachable only behind a
+guard cannot be relied on to match, so it contributes nothing to GUARANTEED
+coverage; if the guardless branches alone are non-exhaustive, then when every
+guard fails at runtime no arm matches and the match panics — so the span is
+recorded (`nonexhaustive_match_spans`) and `check_no_panic_module` promotes it
+to an ERROR exactly as for a guard-free non-exhaustive match. Crucially, the
+guarded case RECORDS the span but emits **no global Warning** (guarded matches
+are common in ordinary code and get no warning today; only `cap no_panic`
+modules, which opt into strictness, are made stricter — so non-`cap no_panic`
+behavior is unchanged). If the guardless branches ARE exhaustive (e.g. a
+guarded arm followed by an unguarded catch-all), the match can never fall
+through and still accepts. Live-verified: `Some(v) when v > 0 -> v; None -> 0`
+(guardless arms `{None}`, non-exhaustive) in a `cap no_panic` module now
+REJECTS with the same `contains a non-exhaustive \`match\`` error; adding an
+unguarded `Some(v) -> …` arm makes it ACCEPT again. Witnesses:
+`reject/t50_cap_no_panic_guarded_nonexhaustive`, `accept/t59_cap_no_panic_
+guarded_guardless_catchall`. This was **not a regression** and **not in F3's
+original scope** — F3 correctly consumed whatever verdict `check_exhaustiveness`
+computed; batch 3 extended that verdict to the guarded case.
 
 **F5 (open, cosmetic, filed in `specs/todos.md`):** `println`/`print` are
 registered in `builtin_cap_table` under `IO.Console` and DO count as a

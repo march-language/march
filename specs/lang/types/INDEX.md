@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t58 accept, t01–t49 reject)
+# Typing corpus index (t01–t59 accept, t01–t50 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -164,6 +164,26 @@ non-blocking Warning (`accept/t14`, exit 0 — the key regression guard). An
 exhaustive match, or one with a `_ -> ...` catch-all, still accepts. See
 `specs/todos.md` (F3 → Done).
 
+**Note (`reject/t50`, `accept/t59`):** fix-campaign batch 3 (2026-07-07) — the
+**guarded-match exhaustiveness fix** (now Done), closing the residual gap F3
+inherited. A `match` with a `when` guard used to short-circuit
+`check_exhaustiveness` entirely (`if has_guards then ()`), so a guarded,
+genuinely non-exhaustive match was recorded by NEITHER the ordinary Warning NOR
+F3's `env.nonexhaustive_match_spans` side-table — invisible to `cap no_panic`'s
+error path. The fix: for a guarded match, `check_exhaustiveness` now computes
+coverage over the GUARDLESS branches ONLY. A branch reachable only behind a
+guard cannot be relied on to match, so it contributes nothing to guaranteed
+coverage; if the guardless branches are non-exhaustive the match can panic when
+every guard fails at runtime, so the span is recorded (and
+`check_no_panic_module` promotes it to an ERROR) exactly as for the guard-free
+case — but WITHOUT a global Warning (only `cap no_panic` modules opt into this
+strictness; ordinary guarded matches are unaffected). `reject/t50` = `cap
+no_panic` + `Some(v) when v > 0 -> v; None -> 0` (guardless arms `{None}`,
+non-exhaustive) — IMPOSSIBLE to reject pre-fix. `accept/t59` adds an unguarded
+`Some(v) -> …` arm → guardless-exhaustive → still accepts (proving the fix is
+not over-rejecting). See `specs/todos.md` (the guarded-match gap → Done) and
+`core-march-types.md` §2.8.11 + §2.1a.
+
 ## The `--check` accept/reject harness model
 
 Unlike the operational golden corpus (`specs/lang/golden/`, which runs each
@@ -188,7 +208,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 107/107 — 58 accept, 49
+Exit 0 iff every program behaves as declared (currently 109/109 — 59 accept, 50
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -237,6 +257,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t51`–`t53`, `reject/t40`–`t41` | Capabilities widening, Task 3 (2026-07-07) | `cap_narrow`/`root_cap` threading + effect inference + Check 8 + Check 7 (§2.8.8-§2.8.9): `root_cap : Cap(IO)` (`typecheck.ml:1457`, a value) and `cap_narrow : Cap(IO) -> Cap(a)` (`:1458`, POLYMORPHIC return — compile-time, runtime-erased); `record_fn_caps` (`:5435`) accumulates `cap_closures` (own + module-wide) and `own_cap_closures` (own only); **Check 8** (`:5798`) — a `*_migrate_state` fn must be IO-free, checked via the own-caps projection so a module's handler-level `needs` doesn't false-blame a pure migrate (the F-caveat mitigation); **Check 7** (`:5755`) — a `Tagged(_, Realtime)` param excludes `Cap(Alloc\|IO\|Panic)` params. Accept: narrow-and-thread-to-a-stricter-callee (`t51`), narrow `root_cap` twice to two sibling sub-caps in one fn (`t52`), a pure `*_migrate_state` fn beside a real `actor` in a `needs IO.Console` module (`t53`, the caveat-mitigation witness). Reject: a `*_migrate_state` fn calling `println` (`t40`, Check 8); a user-declared nullary `Realtime` type in `Tagged(Int, Realtime)` alongside `Cap(IO)` (`t41`, Check 7 — `Realtime` itself is not pre-registered in `builtin_types`, so a user must declare it before writing `Tagged(_, Realtime)` at all) |
 | `accept/t54`–`t56`, `reject/t42`–`t44` | Capabilities widening, Task 4 (2026-07-07) | Behavioral module caps (§2.8.11): `cap no_panic` (`check_no_panic_module`, `typecheck.ml:6523`), `cap no_alloc` (`lib/refinecheck/no_alloc.ml`), `cap no_extern` (`check_no_extern_module`, `:6668`), `cap pure` (`check_pure_module`, `:6645`), `cap deterministic` (`check_deterministic_module`, `:6710`) — all parsed from `Ast.DOpts` (`ast.ml:165`). Accept: a genuinely-pure `cap pure` arithmetic module (`t54`, stays valid across the F2 fix), a valid `cap no_alloc` module with only comparisons/arithmetic (`t55`), a valid `cap no_extern` module (`t56`). Reject: `cap no_panic` + explicit `panic` (`t42`), `cap no_alloc` + tuple construction (`t43`), `cap no_extern` + an `extern` block (`t44`). Files **F2** (**now FIXED in Task 5**) — `pure_banned`/`deterministic_banned` named nonexistent builtins and missed the real effectful ones, so `cap pure`+`file_write` (or `cap deterministic`+`unix_time_ms`) typechecked clean; **F3** (**now FIXED in Task 6**) — `cap no_panic` didn't consume the exhaustiveness checker's verdict, so a non-exhaustive `match` in a `cap no_panic` module typechecked clean and panicked at runtime; **F5** (open, cosmetic) — `println`/`print` skip the Check-1b body-scan diagnostic entirely. F2/F3's fixes + REJECT witnesses land in Tasks 5/6 of this slice |
 | `reject/t45`–`t47` | Capabilities widening, Task 5 — F2 FIX (2026-07-07) | **F2 FIXED**: `pure_banned` (`typecheck.ml:6637`) and `deterministic_banned` (`:6700`) are no longer hand-maintained name lists — both are DERIVED from `builtin_cap_table` (`:1012`), the authoritative effect map Check 1b already trusts. `pure_banned` = every table builtin (all effectful) ∪ `{spawn, send, exit}`; `deterministic_banned` = only table builtins whose cap is a nondeterminism source (`IO.Clock`/`IO.Random`, via `is_nondeterministic_cap`, `:6628`), so `cap deterministic` stays weaker than `cap pure` (still permits a deterministic `file_read`). Reject: `cap pure` + `file_write` (`t45`), `cap pure` + `random_bytes` (`t46`), `cap deterministic` + `unix_time_ms` (`t47`) — each type-correct so the cap ban is the sole rejection; all three ACCEPTED (exit 0) pre-fix. See `specs/todos.md` (F2 → Done) |
+| `accept/t59`, `reject/t50` | Fix-campaign batch 3 — guarded-match exhaustiveness (2026-07-07) | **Guarded-match gap FIXED**: `check_exhaustiveness` (`typecheck.ml`) no longer short-circuits on `has_guards` — for a guarded match it computes coverage over the GUARDLESS branches only and records the span into `env.nonexhaustive_match_spans` when they are non-exhaustive (WITHOUT a global Warning — only `cap no_panic` modules opt into this strictness), so `check_no_panic_module` promotes a guarded non-exhaustive match to an ERROR. Closes the residual gap F3 inherited. Reject: `cap no_panic` + `Some(v) when v > 0 -> v; None -> 0` (guardless arms `{None}`, non-exhaustive, `t50` — IMPOSSIBLE to reject pre-fix). Accept: adds an unguarded `Some(v)` → guardless-exhaustive (`t59`). See `specs/todos.md` (guarded-match gap → Done) |
 
 ## `accept/` — must typecheck
 
@@ -300,6 +321,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t56_cap_no_extern_ok` | **`cap no_extern` (§2.8.11, capabilities widening Task 4) — the ACCEPT side** — no `DExtern` block and no `needs` path starting `IO.Foreign`; `needs IO.Network` plus a plain `Cap(IO.Network)`-taking `fn` trips neither of `check_no_extern_module`'s two raise sites (`typecheck.ml:6604-6628`) | `--check` exit 0 |
 | `t57_cap_all_hierarchy_args` | **F6 FIX witness (fix-campaign, 2026-07-07) — all 18 capability-hierarchy roots are now valid `Cap(X)` type ARGUMENTS** — `builtin_types` (`typecheck.ml`) registered only 10 of the 18 `IO.*` entries as 0-arity type names, so `Cap(IO.Random)`/`Cap(IO.Mut)`/`Cap(IO.Foreign)`/`Cap(IO.Telemetry)` (all valid `needs` targets) were rejected `` Unknown module `IO` ``. The missing 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`, `IO.Foreign`, `IO.Foreign.Blocking`, `IO.NetConnect.TLS`) are now registered, mirroring the full 18-entry hierarchy in `lib/caps/cap_lattice.ml:15-33`. This witness types four of the newly-registered roots as `Cap(X)` params with matching `needs` lines. Flips the `reject/t48` note ("only 10/18 valid today") to resolved | `--check` exit 0 |
 | `t58_revoke_cap_typechecks` | **fix-campaign (2026-07-07) — `revoke_cap`/`is_cap_valid` are now typecheck-registered builtins** — both are `eval.ml` epoch-plane builtins (`eval.ml:3164`/`:3172`) but had NO entry in the typecheck builtin table (only `get_cap`/`send_checked` were present, `typecheck.ml:1486-1487`), so surface `revoke_cap(cap)` was rejected `` I cannot find `revoke_cap` ``. Registered as `revoke_cap : Cap(a) -> Atom` (returns the `:ok` atom) and `is_cap_valid : Cap(a) -> Bool`, mirroring `get_cap`'s `poly1` form. Witness spawns an actor (fresh-var `Pid`, cf. `accept/t39`), `get_cap`s it, then exercises both new builtins on the `Cap(a)` payload | `--check` exit 0 |
+| `t59_cap_no_panic_guarded_guardless_catchall` | **guarded-match exhaustiveness fix, ACCEPT side (fix-campaign batch 3, 2026-07-07)** — a `cap no_panic` module whose guarded `match` (`Some(v) when v > 0 -> v`) is followed by an UNGUARDED `Some(v) -> …` and `None -> …`, so the GUARDLESS branches `{Some, None}` cover the whole `Option(Int)` domain. `check_exhaustiveness` computes coverage over the guardless matrix, finds it exhaustive, records nothing, and `check_no_panic_module` has no span to promote. Proves the fix is not over-rejecting every guarded match. Reject companion: `reject/t50` (drop the unguarded `Some(v)`). See `core-march-types.md` §2.8.11 + §2.1a | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -355,8 +377,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 
 | `t48_cap_no_panic_nonexhaustive_match` | **`cap no_panic` (§2.8.11, capabilities widening Task 6 — F3 FIX witness) — the match-non-exhaustiveness panic surface** — a non-exhaustive `match` lowers to a runtime "no matching clause" panic, so a `cap no_panic` module must reject it just like an explicit `panic` (cf. `reject/t42`). `check_exhaustiveness` (`typecheck.ml`) already finds every non-exhaustive match; besides the usual Warning it now records the offending `match`'s span into `env.nonexhaustive_match_spans` (a shared ref). `check_no_panic_module` (runs ONLY for `cap no_panic` modules) reads that side-table and, for any recorded span nested (via `span_within` containment) inside one of THIS module's own function bodies, reports an ERROR. A non-exhaustive match in a PLAIN module stays a non-blocking Warning (`accept/t14`), so the fix is scoped to `cap no_panic`. Accepted (exit 0) pre-fix | `` contains a non-exhaustive `match`, which panics at runtime `` |
 | `t49_derive_unknown_type` | **finding 17 FIX witness (fix-campaign, 2026-07-07) — `derive X for UnknownType` now ERRORs instead of silently no-opping** — `expand_derive` (`desugar.ml`) previously returned a bare `[]` when the derive TARGET TYPE was absent from the module's `type_defs`, emitting no diagnostic, so `derive Show for NoSuchType` typechecked clean (exit 0) — a misspelled type name was indistinguishable from a no-op. The `None` branch now mirrors its sibling (unknown derive INTERFACE) and emits an `Err.error` at the type-name span before returning `[]`. Accepted (exit 0) pre-fix | `` Unknown type `NoSuchType` in `derive` `` |
+| `t50_cap_no_panic_guarded_nonexhaustive` | **guarded-match exhaustiveness fix (fix-campaign batch 3, 2026-07-07) — the GUARDED-match panic surface** — a `cap no_panic` module whose `match opt do Some(v) when v > 0 -> v; None -> 0 end` has GUARDLESS arms `{None}` alone (non-exhaustive, missing an unguarded `Some`); when the `when v > 0` guard fails at runtime no arm matches and the match panics. A `when` guard used to short-circuit `check_exhaustiveness` entirely (`if has_guards then ()`), so this was invisible to both the ordinary Warning and F3's error path (accepted exit 0, zero diagnostics). The fix computes coverage over the GUARDLESS branches only and records the span when they are non-exhaustive; `check_no_panic_module` promotes it to an ERROR — no global Warning (only `cap no_panic` modules opt in). Accept companion: `accept/t59` (adds an unguarded `Some(v)`). IMPOSSIBLE to reject pre-fix. See `specs/todos.md` (guarded-match gap → Done), `core-march-types.md` §2.8.11 + §2.1a | `` contains a non-exhaustive `match`, which panics at runtime `` |
 
-**Result: 107 / 107 (58 accept, 49 reject).**
+**Result: 109 / 109 (59 accept, 50 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

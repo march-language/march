@@ -4044,6 +4044,55 @@ let test_plain_nonexhaustive_match_ok () =
   end|} in
   Alcotest.(check bool) "plain (non-cap) non-exhaustive match: no error" false (has_errors ctx)
 
+(* fix-campaign batch 3 — the GUARDED-match gap. A `match` with a `when` guard
+   used to short-circuit `check_exhaustiveness` entirely, so a guarded,
+   genuinely non-exhaustive match slipped past F3's error path. Here the
+   GUARDLESS arms are just `{None}` (missing an unguarded `Some`); when the
+   guard fails at runtime the match panics — a `cap no_panic` module must
+   reject it. RED pre-fix (accepted, exit 0), GREEN after. *)
+let test_cap_no_panic_guarded_nonexhaustive_match_error () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + guarded non-exhaustive match: error" true (has_errors ctx)
+
+(* A guarded match whose GUARDLESS arms ARE exhaustive can never fall through —
+   the unguarded `Some(v)` + `None` cover the whole domain — so it must still
+   accept even inside a `cap no_panic` module. Proves the fix is not
+   over-rejecting every guarded match. *)
+let test_cap_no_panic_guarded_guardless_catchall_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        Some(v) -> 0
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + guarded match w/ guardless catch-all: no error" false (has_errors ctx)
+
+(* REGRESSION GUARD: a PLAIN (non-cap) module's guarded non-exhaustive match
+   must stay silent (no error) — the guarded-match fix records the span but
+   emits NO global Warning, and promotion is still gated to `cap no_panic`. *)
+let test_plain_guarded_nonexhaustive_match_ok () =
+  let ctx = typecheck {|mod Plain do
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "plain (non-cap) guarded non-exhaustive match: no error" false (has_errors ctx)
+
 (* Division-safety guard / path-context tests *)
 
 let test_divsafety_match_guard_neq_zero_ok () =
@@ -6645,6 +6694,9 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + exhaustive match: no error"  `Quick test_cap_no_panic_exhaustive_match_ok;
           Alcotest.test_case "cap no_panic + wildcard match: no error"    `Quick test_cap_no_panic_wildcard_match_ok;
           Alcotest.test_case "plain non-exhaustive match: no error"       `Quick test_plain_nonexhaustive_match_ok;
+          Alcotest.test_case "cap no_panic + guarded non-exhaustive match: error" `Quick test_cap_no_panic_guarded_nonexhaustive_match_error;
+          Alcotest.test_case "cap no_panic + guarded guardless-catchall: no error" `Quick test_cap_no_panic_guarded_guardless_catchall_ok;
+          Alcotest.test_case "plain guarded non-exhaustive match: no error" `Quick test_plain_guarded_nonexhaustive_match_ok;
           (* Division-safety Z3 cases *)
           Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
           Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;
