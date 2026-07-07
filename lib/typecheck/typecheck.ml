@@ -5907,11 +5907,17 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
        else begin
          (* Mergeability: if all branches project to the same local type for
             this role, merge them into that type (the role need not observe
-            the choice at all).  This is the standard MPST merge rule. *)
+            the choice at all).  This is the standard MPST merge rule, and it
+            only applies to MULTIPARTY protocols (>2 roles), where a bystander
+            role genuinely does not observe a choice made between two OTHER
+            roles.  In a BINARY (2-role) protocol the non-chooser is the
+            chooser's only peer — the offerer — who MUST always observe the
+            choice (it runs [Chan.offer]); so we never merge there, even when
+            the branches happen to carry identical payload types. *)
          match branch_tys with
          | [] -> SOffer branch_tys
          | (_, first_ty) :: rest ->
-           if List.for_all (fun (_, ty) -> session_ty_exact_equal ty first_ty) rest then
+           if multiparty && List.for_all (fun (_, ty) -> session_ty_exact_equal ty first_ty) rest then
              first_ty   (* role not involved — merged/transparent *)
            else
              SOffer branch_tys

@@ -999,6 +999,72 @@ let test_session_duality_holds () =
     true
     (March_typecheck.Typecheck.session_ty_equal dual_client server_ty)
 
+let test_session_binary_choice_identical_branches () =
+  (* Regression (F4 / finding 20): the MPST "mergeability" rule must NOT be
+     applied to BINARY (2-role) protocols.  In a binary `choose by Server`, the
+     non-chooser (Client) is the chooser's only peer — the offerer — and MUST
+     always observe the choice.  Previously the merge rule fired unconditionally,
+     so when both branches carried an identical payload type the Client
+     projection collapsed from Offer{...} to the bare shared local type
+     (Recv(Int, End)), which is not the dual of Server's Choose{...}; duality then
+     failed and a perfectly legal protocol was rejected as "not duals".
+     Post-fix the merge is gated on `multiparty`, so Client stays an Offer and
+     duality holds. *)
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Decision do
+      choose by Server:
+        ok  -> Server -> Client : Int
+        err -> Server -> Client : Int
+      end
+    end
+  end|} in
+  (* The protocol must typecheck (projection + binary duality both pass). *)
+  Alcotest.(check bool) "binary identical-branch choice: no errors"
+    false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Decision" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  (* The non-chooser peer must remain an Offer{...} — NOT merged away. *)
+  (match client_ty with
+   | March_typecheck.Typecheck.SOffer _ ->
+     Alcotest.(check bool) "Client projects to Offer (not merged)" true true
+   | other ->
+     Alcotest.failf "Client should project to Offer{...} but got: %s" (pp_sty other));
+  (* And that Offer is exactly the dual of Server's Choose{...}. *)
+  let dual_server = March_typecheck.Typecheck.dual_session_ty server_ty in
+  Alcotest.(check bool) "dual(Server) = Client"
+    true
+    (March_typecheck.Typecheck.session_ty_equal dual_server client_ty)
+
+let test_session_mpst_bystander_still_merges () =
+  (* Regression companion to test_session_binary_choice_identical_branches:
+     the merge rule MUST still fire for MULTIPARTY (>2 role) protocols, where a
+     genuine bystander role does not observe a choice made between two OTHER
+     roles.  Here `C` sends to `A` before `A` chooses between two A->B branches;
+     `C` is uninvolved in the choice, so its projection across both branches is
+     identical and merges to a single transparent local type (MSend(A, Int, End))
+     rather than an Offer.  This proves the `multiparty &&` gate did not disable
+     the MPST merge. *)
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Coord do
+      C -> A : Int
+      choose by A:
+        go   -> A -> B : Int
+        stop -> A -> B : Int
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "3-role protocol: no errors" false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Coord" env.March_typecheck.Typecheck.protocols in
+  let c_ty = List.assoc "C" pi.March_typecheck.Typecheck.pi_projections in
+  (* Bystander C merges across the choice — a plain MSend, never an Offer. *)
+  (match c_ty with
+   | March_typecheck.Typecheck.SOffer _ ->
+     Alcotest.failf "bystander C should merge (not Offer) but got: %s" (pp_sty c_ty)
+   | _ -> ());
+  Alcotest.(check string) "bystander C merges to a single local type"
+    "MSend(A, Int, End)" (pp_sty c_ty)
+
 let test_session_loop_projection () =
   (* A protocol with a loop: generates SRec/SVar *)
   let (ctx, env) = typecheck_full {|mod Test do
@@ -6216,6 +6282,8 @@ let compiler_suites =
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;
+          Alcotest.test_case "session binary choice identical branches" `Quick test_session_binary_choice_identical_branches;
+          Alcotest.test_case "session mpst bystander still merges"       `Quick test_session_mpst_bystander_still_merges;
           Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
           Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
