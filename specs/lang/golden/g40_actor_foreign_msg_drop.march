@@ -1,0 +1,48 @@
+mod Main do
+  -- Operational actor foreign-message-drop witness (core-march.md §4.10, finding
+  -- 19 compiled-misroute fix). `send` does NOT gate a message by its target
+  -- actor (a deferred type-system gap), so a `Logger` message (`Zlog`) can be
+  -- sent to a `Counter` Pid and typechecks (exit 0). The INTERPRETER matches
+  -- handlers by NAME and silently DROPS a message no handler accepts
+  -- (eval.ml:7545 `No handler for this message tag`). The COMPILED backend used
+  -- to MISROUTE it: each actor's message type is lowered to a per-actor variant
+  -- and dispatched by an ECase, so `Zlog`'s discriminant indexed into Counter's
+  -- first handler slot and its String payload was reinterpreted as an Int
+  -- (memory-unsafe garbage). The fix forces actor message types to a Boxed heap
+  -- cell with a GLOBALLY-unique tag and gives the dispatch ECase a dropping
+  -- default arm, so a foreign message's tag matches no branch and is dropped —
+  -- byte-identical to the interpreter's drop. Determinism: one Counter actor, a
+  -- strictly-ordered send sequence, one run_until_idle() drain.
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc(n : Int) do
+      { count: state.count + n }
+    end
+
+    on Report() do
+      println("count=" ++ int_to_string(state.count))
+      { count: state.count }
+    end
+  end
+
+  actor Logger do
+    state { seen : Int }
+    init  { seen: 0 }
+
+    on Zlog(m : String) do
+      println("Logger.Zlog -> " ++ m)
+      { seen: state.seen + 1 }
+    end
+  end
+
+  fn main() do
+    let c = spawn(Counter)
+    send(c, Inc(3))
+    send(c, Zlog("stray"))   -- Zlog is a Logger message, not Counter's — dropped
+    send(c, Inc(4))
+    send(c, Report())        -- prints count=7 (the dropped Zlog contributed nothing)
+    run_until_idle()
+  end
+end

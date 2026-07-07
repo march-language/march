@@ -249,11 +249,23 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
           br_body = Tir.EApp (handler_fn_var, call_args) }
       ) actor.actor_handlers
   in
+  (* Default (drop) arm — finding-19 memory-safety fix.
+     `send` does not gate a message by its target actor (a deferred type-system
+     gap), so a message meant for a DIFFERENT actor can land in this actor's
+     mailbox.  Its <Actor>_Msg type is forced Boxed with a GLOBALLY-unique tag
+     (Repr.repr_of_ty / Llvm_toplevel.build_ctor_info), so a foreign message
+     carries a tag that matches NONE of this actor's dispatch branches and lands
+     here.  Return unit and drop it — byte-for-byte the interpreter's silent
+     foreign-message drop (eval.ml `No handler for this message tag`), instead of
+     misrouting its payload into the first handler at the wrong type.  The
+     scrutinee ($msg) is not referenced in this arm, so Perceus inserts the
+     dec_rc that releases the dropped message's heap cell (no leak). *)
+  let dispatch_default = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
   let dispatch_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_dispatch_suffix;
     fn_params = [actor_param; msg_var];
     fn_ret_ty = Tir.TUnit;
-    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
+    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, Some dispatch_default);
     fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
   } in
 

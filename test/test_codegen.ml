@@ -456,6 +456,57 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
     (ir_count ir "switch i32")
 
+(** Finding-19 memory-safety regression: two single-handler actors whose
+    messages, under the OLD per-actor 0-based Newtype encoding, were
+    indistinguishable at dispatch — a Logger message delivered to Counter's
+    mailbox was misrouted into Counter's Inc handler and its String payload
+    reinterpreted as an Int (memory-unsafe UB).
+
+    The fix forces each actor message type Boxed with a GLOBALLY-unique heap tag
+    and gives every dispatch ECase a dropping default arm. Assert the IR shape:
+      - Counter_dispatch switches on an i32 tag (Boxed decode — NOT a
+        tag-less Newtype value passed straight through), and
+      - has a case_default arm that decrefs the dropped message and returns
+        (the drop), rather than folding to `unreachable`, and
+      - Counter's and Logger's message ctor tags are DISTINCT (global numbering),
+        so a Logger message cannot match a Counter branch. *)
+let test_actor_foreign_msg_drop_boxed_dispatch () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    actor Logger do
+      state { seen : Int }
+      init  { seen: 0 }
+      on Log(m : String) do { seen: state.seen + 1 } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      send(c, Log("stray"))
+      run_until_idle()
+    end
+  end|} in
+  (* Boxed decode: the single-handler dispatch loads an i32 ctor tag and
+     switches on it (a tag-less Newtype would pass the value straight through
+     with no `switch i32`). *)
+  Alcotest.(check bool) "Counter dispatch switches on an i32 tag (Boxed, not Newtype)"
+    true (ir_contains ir "switch i32");
+  (* Dropping default arm: the dispatch has a case_default that releases the
+     message (via march_decrc) — the foreign-message drop, not `unreachable`. *)
+  Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
+    true (ir_contains ir "case_default");
+  (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
+     0x01000000+ actor-message tag space; distinctness is what makes a foreign
+     message fall to the default arm. The base tag 16777216 (0x01000000) is
+     assigned to the first message ctor; a second, distinct tag must also appear. *)
+  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
+    true (ir_contains ir "store i32 16777216");
+  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
+    true (ir_contains ir "store i32 16777217")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -7438,6 +7489,10 @@ let codegen_suites =
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
           Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
+        ] );
+      ( "actor_dispatch_codegen", [
+          Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
+            `Quick test_actor_foreign_msg_drop_boxed_dispatch;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
