@@ -8136,10 +8136,23 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
 
     Pass 2: check declarations in order, updating the environment.
 
-    Returns the [Err.ctx] containing all diagnostics. *)
-let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
+    Returns the [Err.ctx] containing all diagnostics.
+
+    [seed_env], when given, is used as pass 1's starting environment instead
+    of [base_env errors type_map] — its [vars]/[types]/[ctors]/[interfaces]/etc.
+    (e.g. an already-typechecked stdlib) are visible to [m]'s own forward-reference
+    prebinding and [check_decl] pass with NO other change to pass 1/1b/2's
+    structure, so passing [None] is exactly today's behavior. [seed_env]'s own
+    [type_map] is reused (shared, mutated in place with [m]'s new span→type
+    entries) instead of allocating a fresh one, so a caller who built [seed_env]
+    from a separately-checked module can still recover types for BOTH that
+    module's spans and [m]'s own via the single returned [type_map]. *)
+let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  let type_map = Hashtbl.create 256 in
+  let type_map = match seed_env with
+    | Some (se : env) -> se.type_map
+    | None -> Hashtbl.create 256
+  in
   (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
      declarations so that cross-module forward references are pre-bound in
      pass 1. This mirrors the eval.ml global module_registry approach.
@@ -8284,7 +8297,10 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
             | _ -> e
           ) env inner_decls
       | _ -> env
-    ) (base_env errors type_map) m.Ast.mod_decls
+    ) (match seed_env with
+        | Some se -> { se with errors; type_map }
+        | None -> base_env errors type_map)
+      m.Ast.mod_decls
   in
   (* Pass 1b: the entry module's own declarations live at the TOP LEVEL of the
      combined module (only the imported sibling modules are wrapped in [DMod]).
@@ -8486,9 +8502,9 @@ let check_module_with_env_full (env : env) (m : Ast.module_)
     a reduced duplicate here previously skipped the pass-1 type/ctor/record
     prebinding, so qualified type annotations (Bastion.Channel.ChannelConn)
     failed to resolve only in the LSP. *)
-let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
+let check_module_full ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  check_module_core ~errors m
+  check_module_core ~errors ?seed_env m
 
 let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   let env' = enter_level env in
