@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-07, spec-search Claude skill — FTS5 index over language/design docs)
+
+- **New dev-tooling, not a compiler change — no test count change.** `scripts/build-spec-index.sh` + `scripts/spec_index_build.py` vendor `specs/lang/`, `specs/impl/`, `specs/features/` (top-level `*.md` only) into `.claude/skills/spec-search/docs/` and build an FTS5 SQLite index (`sections` table: `file`, `heading_path`, `content`, `lineno`, `end_lineno` — one row per H1-H3 markdown section). `.claude/skills/spec-search/spec-search.sh` is a self-locating bash script (`sqlite3` CLI only, no Python at query time) supporting human-readable and `--json` output, ranked by `bm25()`. `.claude/skills/spec-search/SKILL.md` instructs Claude to search then `Read` only the matched section via `lineno`/`end_lineno` rather than whole chapters. Designed to be installed once at `~/.claude/skills/spec-search/` (user-level) so it works across every March project on the machine, not just this repo — verified by running the installed copy from `/tmp` and from a scratch directory with no `specs/` of its own. Design: `docs/superpowers/specs/2026-07-06-spec-search-fts5-design.md`; plan: `docs/superpowers/plans/2026-07-06-spec-search-fts5.md`.
+
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
 Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong
