@@ -283,6 +283,132 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-07, `march check` quadratic hang on large MARCH_LIB_PATH projects fixed)
+
+`march check`/`forge build --target ...` on a large multi-repo downstream project
+(forgepm + bastion + depot + march_doc as `path` deps, ~200 auto-discovered
+`.march` files under `MARCH_LIB_PATH`) burned 99.9% CPU for 30+ minutes instead
+of the seconds-to-low-minutes this kind of check should take — confirmed
+genuinely computing, not deadlocked, via repeated `sample <pid>` snapshots all
+showing the same hot call stack: `caml_main -> ... -> camlStdlib__List.mem_472
+-> caml_c_call -> caml_compare -> compare_val`, i.e. OCaml's polymorphic-compare
+`List.mem` dominating by a wide margin.
+
+**Root cause**: `Typecheck.record_use` (`lib/typecheck/typecheck.ml`) is called
+on every single `Ast.EVar` node during `infer_expr` — once per variable
+reference in the WHOLE combined program, since `check_module_core` typechecks
+stdlib + every MARCH_LIB_PATH-discovered file as one shared `env` (not
+per-file). It did:
+
+```ocaml
+if !(env.import_tracker) <> [] then
+  List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
+    !(env.import_tracker);
+```
+
+`env.import_tracker` accumulates ONE ENTRY PER `use`/`import`/`alias`
+DECLARATION ACROSS THE ENTIRE PROGRAM (populated at the four `ie_matches`
+construction sites — `DUse`'s `UseAll`/`UseNames`/`UseExcept`, and `DAlias` —
+and never scoped back down per-file), so this is a full `List.iter` (each
+`ie_matches` closure itself doing a `List.mem`/polymorphic-`=` scan for the
+`UseAll`/`UseExcept` shapes) over an unboundedly-growing list, on every EVar.
+That pairing is **O(total-var-refs × total-imports)** — quadratic in project
+size — and swamped everything else in the pipeline (parse/desugar/
+resolve-imports/stdlib-load were all sub-100ms per `--timings` even on the real
+forgepm repro; typecheck alone was 1.3-2s there and scales far worse on larger
+synthetic trees, see below).
+
+**Investigated and ruled out first, per the promising leads in `specs/todos.md`'s
+`user_files`/`loaded_paths` entry**: `lib/resolver/resolver.ml`'s `loaded_paths`,
+`resolved`, `in_progress`, and `seen` tables are already `Hashtbl`-based (not
+the bug); `lib/modules/module_registry.ml`'s `registry`/`loading` are also
+`Hashtbl`-based (not the bug). `bin/main.ml`'s `is_user_file` does a real
+`List.mem f user_files`, but it runs once per *diagnostic* (bounded by warning/
+error count — typically dozens to low hundreds even on a large project), not
+once per EVar — it never appeared in any `sample` profile at any scale tested
+and is a much smaller-order cost than `record_use`; left as-is.
+
+**Fix**: index `import_tracker` entries at creation time into a new
+`env.import_idx` — two `Hashtbl`s populated at all four `ie_matches`
+construction sites: `ie_exact_index` (every literal name an entry can
+exact-match: rebound short names for `UseAll`/`UseExcept`, the single name for
+`UseNames`, the alias name for `DAlias`, and the bare qualified module/alias
+name itself for the "referenced the module path literally" case) and
+`ie_prefix_index` (keyed by the first-dot-split "prefix root" of a qualified
+reference — e.g. `"Depot.Gate.foo"` and `"Depot"` both key to the same root,
+mirroring `split_qualified`'s existing first-dot-split convention elsewhere in
+this file). `record_use` now does two O(1)-average Hashtbl lookups instead of
+an O(n) scan; the prefix-index path still calls the entry's real `ie_matches`
+closure before marking it used (defends against two different imports sharing
+a first path segment), so semantics are exactly preserved, not approximated —
+verified by running the real forgepm repro before/after and diffing output
+(byte-identical diagnostics either way) and by the alcotest suite's existing
+unused-import/alias warning tests still passing unchanged.
+
+**Scaling verification** (synthetic MARCH_LIB_PATH: N auto-discovered modules
+each `import Shared` + 30 EVar references into it; CAS cache (`.march/cas`)
+cleared between every run so these are real typecheck times, not cache hits):
+
+| files | pre-fix (quadratic) | post-fix (indexed) | speedup |
+|-------|---------------------|---------------------|---------|
+| 400   | ~1.2s               | ~0.6s               | ~2x     |
+| 1200  | ~8.2s               | ~1.4s               | ~6x     |
+| 2000  | ~21.1s              | ~2.3s               | ~9x     |
+| 3000  | ~45.5s              | ~3.7s               | ~12x    |
+
+Pre-fix time fits ~quadratic (k≈5e-6·n²); post-fix is linear. The real
+forgepm repro (~200 files) itself only shows a modest 1.99s→1.32s
+improvement at its current size — the dramatic blowup only dominates at
+larger N, which is exactly why the task called for a synthetic scale-up to
+"nail the exact complexity class" rather than relying on the real repo alone.
+
+**Spurious-error cascade — same root cause or separate?** A secondary symptom
+was reported: a cascade of spurious `Unknown module` errors (`DateTime`,
+`UUID`, `IOList`, and reportedly `Config`) when scoping down a killed run.
+Investigated and confirmed **SEPARATE, not the same root cause, and not a
+compiler bug**: `find_stdlib_dir()` (duplicated in both `bin/main.ml` and
+`lib/modules/module_registry.ml`) resolves the bundled `stdlib/` directory via
+paths relative to the compiler executable (`exe_dir/../stdlib`, `../../stdlib`,
+etc.) or `"stdlib"` relative to CWD — all of which fail when (a) `main.exe` is
+invoked from a cwd outside the march source tree (e.g. `/path/to/forgepm`,
+exactly what the repro command does) AND (b) the binary was built via a
+partial `dune build bin/main.exe test/run_*.exe` rather than a full `dune
+build` / `dune build @install` (only the latter populates
+`_build/default/stdlib/` via the `stdlib/dune` `(install (section share))`
+stanza). When stdlib fails to resolve, `load_stdlib()` returns `[]` (no
+stdlib DMods get prepended), so every stdlib module reference falls through to
+`Typecheck.qualified_error_msg`'s lazy `Module_registry.ensure_loaded`
+fallback — which uses the SAME broken `find_stdlib_dir()` and also fails,
+producing "Unknown module" for genuinely-valid stdlib modules. Confirmed by:
+reproducing the exact cascade with the `import_tracker` fix fully applied but
+`_build/default/stdlib` temporarily removed (cascade reappears verbatim), and
+confirming it disappears with a complete build (zero "Unknown module" hits in
+the final clean run). This is a pre-existing build/packaging rough edge in a
+partially-built worktree, not something this fix touches or needs to fix —
+documented here so the next person who hits it recognizes it immediately
+instead of re-investigating from scratch.
+
+**Regression test**: `test_large_multi_file_check_is_not_quadratic` in
+`test/test_compiler.ml`'s `resolver` suite (`Slow`) builds a synthetic
+MARCH_LIB_PATH with 2500 auto-discovered modules (each `import Shared` +
+30 EVar refs into a 20-function shared module) and asserts the check
+completes under 30s. Confirmed RED pre-fix (measured 30.78s, matching the
+scaling-table calibration) / GREEN post-fix (~3-5s) by temporarily
+stashing/restoring `lib/typecheck/typecheck.ml`'s fix while keeping the test
+in place.
+
+**Full suite, complete build (not the partial `bin/main.exe test/run_*.exe`
+target list — a full `dune build` / `dune build @install` is needed to
+populate `_build/default/stdlib` and `_build/default/runtime`, else 14-15
+compiled-fixture tests fail with `march: cannot find runtime/march_runtime.c`,
+reproduced identically on an unmodified clean baseline worktree off this same
+`main` commit and confirmed to disappear with a complete build on BOTH
+branches — a pre-existing partial-build artifact, not a regression): **429
+compiler (+1) / 231 eval / 391 codegen / 805 stdlib pass, 0 failures.**
+Baseline (throwaway clean worktree off the same `main` commit, complete build):
+428/231/391/805, also 0 failures — confirms this change adds exactly the one
+new test and introduces zero regressions.
+
 ## Current State (as of 2026-07-07, interpreter HTTP server event-loop fix — idle client no longer wedges `forge run` dev server)
 
 - **`lib/eval/eval.ml` `run_http_event_loop` replaces the fully-sequential accept loop behind the interpreted `http_server_listen` builtin** (interpreter-only — `forge run` / plain `march file.march`; the compiled/LLVM path's `runtime/march_http.c` already has real event-loop/thread-pool concurrency and was not touched). The old implementation `select`ed only on the listening socket, then `accept`ed exactly one client and blocked synchronously on that client's `recv`/`send` for its whole request-response cycle before accepting the next — a client that opened the TCP connection and then paused before sending bytes (e.g. a WebSocket reconnect with backoff) parked the interpreter's one OS thread inside a blocking `recv()`, starving every other connection server-wide (reproduced firsthand via `sample <pid>` showing the sole thread blocked in `camlUnix.recv_1225`, with unrelated routes hanging 90+ seconds). Fix mirrors the interpreter's existing cooperative actor-mailbox scheduling pattern (`BlockedOnReceive`/`run_scheduler`) at the socket level instead of adding real OS threads (deliberately out of scope per `specs/todos.md`'s "interpreter-only scaffolding" note on `lib/scheduler/*.ml` and `task_spawn`'s Phase-1 eager-eval comment): every connection socket is set non-blocking and tracked as a small state machine (`http_conn_state` — `HCReadingRequest` accumulating bytes via `http_try_parse_request`, a Content-Length-aware incremental parser, until a full request is available; `HCWriting` draining a queued response buffer across non-blocking writes), and a single `Unix.select` per loop iteration multiplexes the listen socket plus every open client connection — no connection's I/O can block progress on any other. `EAGAIN`/`EWOULDBLOCK`/`EINTR` are treated as "not ready, retry next iteration." WebSocket upgrades are unchanged: `http_run_pipeline_and_respond` detects `WebSocketUpgrade`, writes the handshake, and still runs `handler_fn` synchronously/blocking on that one connection for its lifetime — identical to the pre-fix semantics (an open WS connection already monopolized the old sequential loop for its whole lifetime too, so this is unchanged behavior, not a new limitation). `handle_http_connection` (still used by the fork-based `http_server_spawn_n` N-request test variant, where each forked child only ever serves one client at a time by design) is untouched. Regression test `test_interp_http_server_idle_client_does_not_block_others` in `test/test_stdlib_suite.ml`'s `adversarial-regressions` group (`Slow`): launches `bin/main.exe` (interpreter, no `--compile`) as a real subprocess bound to a real port, opens a TCP connection that connects but never sends a byte, then a second connection that sends a complete `GET /` request, and asserts the response arrives within 1s of a 2s deadline. Verified to fail (times out, empty response) on the pre-fix code and pass post-fix by temporarily stashing/restoring `lib/eval/eval.ml` while keeping the test in place. **373 compiler / 224 eval / 327 codegen / 791 stdlib / 53 stdlib_march pass** (interpreter-level `test/stdlib/test_http_server.march` and `test_websocket.march` — pure Conn-value/pipeline tests, no real TCP — unaffected since the external `Conn`/`Upgrade` contract and `http_server_listen`/`http_server_spawn_n` signatures are unchanged). Not covered by this fix (pre-existing, orthogonal limitations worth flagging): no HTTP keep-alive (every connection is closed after one response is fully written, matching the prior behavior — a persistent keep-alive connection would need the state machine to loop back to `HCReadingRequest` after a write completes instead of closing); chunked `Transfer-Encoding` request bodies are not parsed (only `Content-Length`, matching prior behavior); a very large response body under sustained socket-buffer backpressure will correctly drain across many `select` iterations but hasn't been load-tested at scale.

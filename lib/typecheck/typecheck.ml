@@ -423,6 +423,41 @@ type import_entry = {
   ie_used    : bool ref;
 }
 
+(* Index bookkeeping for [record_use]'s import-tracker lookup.  [record_use]
+   runs once per EVar in the WHOLE combined program (stdlib + every
+   auto-discovered file), so it must not re-scan the full [import_tracker]
+   list (whose length is O(total use/import/alias decls across the whole
+   program)) on every call -- that pairing is O(var-refs * imports), which
+   is quadratic-and-then-some on a multi-hundred-file project.  Instead each
+   entry is also indexed by every literal name it can EXACT-match (module
+   short names / aliased names) into [ie_exact_index], and by its
+   qualification prefix (the module/alias name before the dot) into
+   [ie_prefix_index], so [record_use] does two O(1)-average Hashtbl lookups
+   instead of an O(n) scan.  This mirrors -- but does not replace -- each
+   entry's original [ie_matches] closure, which remains the source of truth
+   used at entry-creation time to populate the index (no behavior change,
+   just no longer scanning the flat list at lookup time). *)
+type import_index = {
+  ie_exact_index  : (string, import_entry list) Hashtbl.t;
+  (** name -> entries that match it via an EXACT name (short_names / n.txt /
+      short_name), populated with the same names the closures compare against. *)
+  ie_prefix_index : (string, import_entry list) Hashtbl.t;
+  (** prefix root (mod_str for Use*, alias short_name for DAlias) -> entries
+      that also accept a qualified reference under that prefix.  [record_use]
+      only consults this when the looked-up name contains a '.'. *)
+}
+
+let make_import_index () =
+  { ie_exact_index = Hashtbl.create 64; ie_prefix_index = Hashtbl.create 16 }
+
+let import_index_add_exact idx key entry =
+  let prev = try Hashtbl.find idx.ie_exact_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_exact_index key (entry :: prev)
+
+let import_index_add_prefix idx key entry =
+  let prev = try Hashtbl.find idx.ie_prefix_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_prefix_index key (entry :: prev)
+
 (** Computed session-type information for a declared [protocol].
     Stored in [env.protocols] after [DProtocol] is checked. *)
 type proto_info = {
@@ -456,6 +491,11 @@ type env = {
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
+  import_idx : import_index;
+  (** O(1)-average-lookup index mirroring [import_tracker] -- see
+      [import_index] for why [record_use] must not scan [import_tracker]
+      directly.  Shared (mutable) across all env copies derived from the
+      same root, same as [import_tracker]. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -546,6 +586,7 @@ let make_env errors type_map = {
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
+  import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   proof_caps = [];
@@ -2578,10 +2619,30 @@ let bind_linear_field_sentinels varname ty env =
 (** Record a use of variable [name].  Errors if a linear var is used
     more than once. *)
 let record_use name span env =
-  (* Mark any import entry that matches this name as used. *)
-  if !(env.import_tracker) <> [] then
-    List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
-      !(env.import_tracker);
+  (* Mark any import entry that matches this name as used.
+     [import_tracker] can hold one entry per use/import/alias declaration
+     across the WHOLE combined program (stdlib + every file pulled in via
+     MARCH_LIB_PATH auto-discovery) and [record_use] runs once per EVar in
+     that same combined program, so a linear scan here is O(var-refs *
+     imports) -- quadratic in project size and the dominant cost on any
+     multi-hundred-file project (confirmed via `sample` showing
+     List.mem/compare_val as the hot path during `march check`).  Use the
+     Hashtbl-backed [import_idx] instead: an exact-name lookup for the
+     common (unqualified) case, plus a prefix-root lookup only when [name]
+     is qualified (contains a '.').  Both indices were populated from the
+     exact same names/prefixes each entry's [ie_matches] closure compares
+     against, so this is behavior-preserving, just no longer O(n) per call. *)
+  (match Hashtbl.find_opt env.import_idx.ie_exact_index name with
+   | None -> ()
+   | Some entries -> List.iter (fun ie -> ie.ie_used := true) entries);
+  (match String.index_opt name '.' with
+   | None -> ()
+   | Some dot ->
+     let prefix_root = String.sub name 0 dot in
+     match Hashtbl.find_opt env.import_idx.ie_prefix_index prefix_root with
+     | None -> ()
+     | Some entries ->
+       List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
@@ -7445,7 +7506,19 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         (* Index for O(1) [record_use] lookup: every rebound short name is an
+            exact-match key, as is the bare module name itself (ie_matches's
+            "name = mod_str" clause -- an EVar referencing the module path
+            literally); the module's first path segment is the prefix-index
+            key a qualified reference (e.g. "Depot.Gate.foo") hashes to (see
+            [record_use] -- it looks up by first-dot-split, matching
+            [split_qualified]'s convention elsewhere in this file). *)
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env
      | Ast.UseNames names ->
@@ -7460,6 +7533,7 @@ let rec check_decl env (d : Ast.decl) : env =
                          ; ie_matches = (fun name -> name = n.Ast.txt)
                          ; ie_used = ref false } in
              env.import_tracker := entry :: !(env.import_tracker);
+             import_index_add_exact env.import_idx n.Ast.txt entry;
              bind_var n.Ast.txt sch env
            | None ->
              Err.error env.errors ~span:n.Ast.span
@@ -7496,7 +7570,12 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env)
 
@@ -7523,7 +7602,12 @@ let rec check_decl env (d : Ast.decl) : env =
                       (String.length name >= plen && String.sub name 0 plen = short_prefix)
                       || name = short_name)
                   ; ie_used = ref false } in
-      env.import_tracker := entry :: !(env.import_tracker)
+      env.import_tracker := entry :: !(env.import_tracker);
+      (* [short_name] has no dots, so it is both the exact-match key (bare
+         alias reference) and the prefix-index key (qualified reference
+         "FB.baz" first-dot-splits to exactly "FB" = short_name). *)
+      import_index_add_exact env.import_idx short_name entry;
+      import_index_add_prefix env.import_idx short_name entry
     end;
     bind_vars new_bindings env
 
