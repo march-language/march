@@ -6567,13 +6567,22 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
 
 (* ── cap pure: ban side-effectful builtins ───────────────────────────────── *)
 
-let pure_banned : StringSet.t = StringSet.of_list [
-  "spawn"; "send"; "print"; "println"; "eprint"; "eprintln";
-  "read_line"; "exit"; "random_int"; "random_float"; "random_bool";
-  "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
-  "vault_delete"; "vault_update"; "vault_keys"; "write_file";
-  "read_file"; "append_file"; "delete_file";
-]
+(* A cap tag denotes a NONDETERMINISM source (wall-clock or RNG) — the only
+   effects a `cap deterministic` module must reject. Ordinary IO
+   (file/console/network) is deterministic-ish and stays allowed. *)
+let is_nondeterministic_cap (cap : string) : bool =
+  cap = "IO.Clock" || cap = "IO.Random"
+
+(* `cap pure` = NO side effect at all → ban every builtin the authoritative
+   effect map (`builtin_cap_table`) attributes an IO/effect cap to. Derived
+   from the table (not a hand-guessed parallel list) so it stays in lockstep
+   with the real builtin surface. `spawn`/`send`/`exit` are impure surface
+   names not carried in the table (they route through other mechanisms) —
+   union them in as incidental-correct extras. *)
+let pure_banned : StringSet.t =
+  let from_table = builtin_cap_table |> List.map fst |> StringSet.of_list in
+  StringSet.union from_table
+    (StringSet.of_list [ "spawn"; "send"; "exit" ])
 
 let pure_suggestion : string =
   "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
@@ -6629,10 +6638,15 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
 
 (* ── cap deterministic: ban non-deterministic builtins ───────────────────── *)
 
-let deterministic_banned : StringSet.t = StringSet.of_list [
-  "random_int"; "random_float"; "random_bool"; "random_bytes";
-  "uuid_v4"; "now_ms"; "now_ns"; "monotonic_ms";
-]
+(* `cap deterministic` = no dependence on wall-clock time or an RNG (a weaker
+   claim than `pure` — a deterministic module MAY still do ordinary IO like
+   `println` or a `file_read`). Ban only the builtins the effect map attributes
+   to `IO.Clock`/`IO.Random`, derived from the same authoritative table. *)
+let deterministic_banned : StringSet.t =
+  builtin_cap_table
+  |> List.filter (fun (_, cap) -> is_nondeterministic_cap cap)
+  |> List.map fst
+  |> StringSet.of_list
 
 let deterministic_suggestion : string =
   "Use deterministic operations only in a `cap deterministic` module. \

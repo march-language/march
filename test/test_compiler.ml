@@ -4089,6 +4089,51 @@ let test_cap_pure_uuid_error () =
   end|} in
   Alcotest.(check bool) "cap pure + uuid_v4: error" true (has_errors ctx)
 
+(* ── F2 regression: `cap pure`/`cap deterministic` must reject the REAL
+   effectful builtins, not the nonexistent names the stale `pure_banned`/
+   `deterministic_banned` lists spelled.
+
+   ⚠️ These use REAL, type-correct builtins so `has_errors` (which counts only
+   `severity = Error`, never the F1 body-scan WARNING) is TRUE *solely* because
+   the behavioral-cap check fires. They are RED on the pre-fix compiler (the
+   stale lists missed `file_write`/`file_read`/`random_bytes`/`unix_time_ms`,
+   so only a WARNING+HINT fired and `has_errors` was false) and GREEN after the
+   F2 fix derives the banned sets from `builtin_cap_table`.
+
+   Contrast the four `now_ms`/`random_int` cases above: those pass even on the
+   pre-fix compiler for the WRONG reason — `now_ms`/`random_int` are NOT
+   builtins, so the program ALSO gets an "I cannot find" unbound ERROR that
+   satisfies `has_errors` regardless of the cap ban. *)
+
+(* `file_write : String -> String -> Result(Unit, r)` — the signature is
+   `Result(Unit, String)` (NOT `Unit`) so the ONLY Error is the cap ban, not a
+   type mismatch. *)
+let test_cap_pure_file_write_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn save(path : String, data : String) : Result(Unit, String) do
+      file_write(path, data)
+    end
+  end|} in
+  Alcotest.(check bool) "cap pure + file_write (real builtin): error" true (has_errors ctx)
+
+let test_cap_pure_file_read_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn load(path : String) : Result(String, String) do
+      file_read(path)
+    end
+  end|} in
+  Alcotest.(check bool) "cap pure + file_read (real builtin): error" true (has_errors ctx)
+
+(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct. *)
+let test_cap_pure_random_bytes_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn gen() : Bytes do random_bytes(16) end
+  end|} in
+  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true (has_errors ctx)
+
 let test_cap_no_extern_regular_fn_ok () =
   let ctx = typecheck {|mod Safe do
     cap no_extern
@@ -4116,6 +4161,34 @@ let test_cap_deterministic_now_ms_error () =
     fn ts() : Int do now_ms() end
   end|} in
   Alcotest.(check bool) "cap deterministic + now_ms: error" true (has_errors ctx)
+
+(* ── F2 regression (deterministic side): the REAL wall-clock builtin
+   `unix_time_ms : Unit -> Int` must be rejected. Type-correct (`: Int`,
+   `unix_time_ms(())`), so `has_errors` is TRUE only because the cap ban fires.
+   RED pre-fix (stale list spelled the nonexistent `now_ms`, missed this). *)
+let test_cap_deterministic_unix_time_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn ts() : Int do unix_time_ms(()) end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + unix_time_ms (real builtin): error"
+    true (has_errors ctx)
+
+(* `cap deterministic` is WEAKER than `cap pure`: it bans clock/RNG but not
+   ordinary IO. A deterministic `file_read` (mapped `IO.FileRead`, NOT a
+   nondeterminism source) must STILL be accepted — no `Error` from the cap
+   check. (A WARNING-level Check-1b body-scan diagnostic fires, but `has_errors`
+   ignores warnings.) This pins the intended semantics and guards against the
+   fix over-banning deterministic-but-effectful builtins. *)
+let test_cap_deterministic_file_read_ok () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn load(path : String) : Result(String, String) do
+      file_read(path)
+    end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + file_read: no error (weaker than pure)"
+    false (has_errors ctx)
 
 let test_cap_deterministic_arithmetic_ok () =
   let ctx = typecheck {|mod Det do
@@ -6463,10 +6536,15 @@ let compiler_suites =
           Alcotest.test_case "cap pure + now_ms: error"               `Quick test_cap_pure_now_ms_error;
           Alcotest.test_case "cap pure + random_int: error"           `Quick test_cap_pure_random_int_error;
           Alcotest.test_case "cap pure + uuid_v4: error"              `Quick test_cap_pure_uuid_error;
+          Alcotest.test_case "cap pure + file_write (real): error"    `Quick test_cap_pure_file_write_error;
+          Alcotest.test_case "cap pure + file_read (real): error"     `Quick test_cap_pure_file_read_error;
+          Alcotest.test_case "cap pure + random_bytes (real): error"  `Quick test_cap_pure_random_bytes_error;
           Alcotest.test_case "cap no_extern + regular fn: no error"   `Quick test_cap_no_extern_regular_fn_ok;
           Alcotest.test_case "cap deterministic + random_int: error"  `Quick test_cap_deterministic_random_int_error;
           Alcotest.test_case "cap deterministic + uuid_v4: error"     `Quick test_cap_deterministic_uuid_error;
           Alcotest.test_case "cap deterministic + now_ms: error"      `Quick test_cap_deterministic_now_ms_error;
+          Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
+          Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
         ] );
       ( "cap_no_alloc", [
