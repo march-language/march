@@ -2448,6 +2448,113 @@ prominent, mechanically-checked determinism property was pinned.
   backend column. Cross-references to the new operational (§4.10.1–.7) and typing
   (§2.6.1–.4) reference sections were added throughout.
 
+## Core March widening slice 4 — session types, protocols, and channels (2026-07-06, CLOSEOUT)
+
+`specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened
+past widening slice 3 (actors/messaging/supervision) to cover **the
+session-typed channel/protocol system**: `protocol` declaration, projection,
+binary duality, MPST send/recv-pair consistency, the `Chan(Role, Proto)`
+linear endpoint type, per-operation channel-state typing (`Chan.new`/`send`/
+`recv`/`close`/`choose`/`offer`), and the channel runtime (crossed-FIFO-queue
+representation, the no-scheduler synchronous model) — a six-task slice that,
+unlike slice 3, **includes a real (small, well-localized) compiler fix**,
+landed first and gated on the full six-runner suite, with both references
+describing the corrected post-fix behavior throughout.
+
+- **The compiler fix (F1/F2, Task 1).** `Chan.send`'s payload was lowered as a
+  bare untagged `i64` (no dedicated `llvm_emit.ml` arm; fell through the
+  general `EApp` path), while `Chan.recv`'s returned payload went through the
+  standard conditional erased-i64 untag restore — an asymmetry that corrupted
+  every **odd** `Int` payload (`43` came back `21`) and flipped every `Bool`
+  (`true`→`false`) compiled, while even Ints and heap/String payloads passed
+  by luck. Fixed by adding dedicated, additive `chan_send`/`chan_choose`/
+  `mpst_send` emit arms (mirroring the existing `vault_set`/`actor_reply`
+  precedent) that coerce the payload via `emit_atom_as ctx "ptr"` — the exact
+  inverse of recv's conditional untag, and a no-op for values already `ptr`,
+  so no other builtin's codegen is touched. The previously-vacuous
+  `test_session_*` value assertions in `test/test_compiler.ml` were
+  un-vacuumed to assert an ODD payload round-trips compiled (would have
+  failed pre-fix). Verified: `scripts/run-tests.sh` full six-runner suite
+  GREEN (426 compiler / 231 eval / 391 codegen / 804 stdlib / 29 snapshots).
+- **The headline property (mechanically pinned, post-fix).** For a program
+  using only the **binary** channel plane (`Chan.*`, not `MPST.*`) with
+  `Int`/`Bool`/`String` payloads, correctly interleaved (every `send` before
+  its matching `recv`), interpreted and compiled output is now
+  **byte-identical** — witnessed by two new golden programs, both `MATCH`
+  under `verify.sh`: `g38_chan_int_echo` (a `Chan.new`/`send`/`recv`/`close`
+  round-trip carrying an odd `Int`, `42` sent → `43` returned, exactly the
+  value class F1 corrupted) and `g39_chan_choose_offer` (`Chan.choose`/
+  `Chan.offer` branch selection over type-distinct branches, chooser picks
+  `:ok`, sends an odd `Int` after the label). **MPST is explicitly OUT of the
+  golden corpus** — every `MPST.*` program segfaults compiled (F3, below),
+  so it stays interp-only and typing-only in both references.
+- **Operational reference (`core-march.md` §4.11):** values and the crossed-
+  queue representation (§4.11.1), `Chan.new` role-sorted construction
+  (§4.11.2), `Chan.send`/`recv`/`close` (§4.11.3), `Chan.choose`/`Chan.offer`
+  as literally `chan_send`/`chan_recv` of an atom label (§4.11.4), the
+  interp==compiled property post-F1/F2 (§4.11.5), and the two filed scope
+  boundaries + one diagnostic-noise finding (§4.11.6).
+- **Typing reference (`core-march-types.md` §2.7):** `protocol` declaration's
+  three step forms (§2.7.1), the local per-role `session_ty` (§2.7.2),
+  projection (§2.7.3), binary duality + MPST consistency (§2.7.4, MPST marked
+  TYPING-ONLY), the F4 finding (§2.7.5), `Chan(Role, Proto)` (§2.7.6), Task
+  2's corpus witnesses (§2.7.7), per-operation channel-state typing (§2.7.8),
+  the F5 finding (§2.7.9), and Task 3's per-op reject corpus + round-trip
+  accept (§2.7.10).
+- **Corpora:** golden 37 → **39** (all count sites — `INDEX.md` header
+  `g01–g39`, the `39/39 MATCH` line, `core-march.md` §5's "Thirty-nine
+  programs" — consistent); types 69 → **78** (accept 40 → 43, reject 29 → 35;
+  all count sites — `INDEX.md` header, the `78/78 — 43 accept, 35 reject`
+  line, and the `78 / 78` result line — consistent). `verify.sh` 39/39,
+  `check_types.sh` 78/78, both exit 0.
+- **Six findings filed OPEN (not fixed — F1/F2 already fixed above; the rest
+  are docs-only-slice gaps), findings 20–25 in `core-march-types.md` §4.1:**
+  1. **F4 (finding 20)** — the MPST merge rule (meant to let a non-chooser
+     role skip an irrelevant choice) leaks into the BINARY duality check,
+     wrongly rejecting a legal binary `choose` protocol whose two branches
+     carry the same payload type. (§2.7.5)
+  2. **F5 (finding 21)** — `Chan.offer` always returns the FIRST branch's
+     continuation type regardless of which branch the peer actually chose at
+     runtime — a real, narrow soundness gap for branches with DIFFERENT
+     continuations. (§2.7.9)
+  3. **F3 (finding 22)** — every `MPST.*` program segfaults compiled (exit
+     139); the compiled MPST C runtime is not correctly wired to the lowered
+     representation. Interp-only in practice; no MPST golden witness exists
+     or should exist until this is fixed. (§4.11.5–.6)
+  4. **F6 (finding 23)** — no scheduler: `recv` never suspends, so a protocol
+     driven out of program order (receiver called before its sender)
+     typechecks cleanly but deadlocks/aborts at runtime on both backends. A
+     documented scope boundary (linear protocol-conformance checker over a
+     same-thread mailbox, not a concurrent-session system), not a bug. (§4.11.6)
+  5. **F7 (finding 24)** — session-channel linearity rides the generic `let`-
+     binding linear tracker, not session-specific accounting: dropping an
+     unclosed `SEnd` channel, and reusing a linear *parameter* endpoint whose
+     declared state coincidentally still matches, both slip through
+     uncaught. (§4.11.6)
+  6. **F8 (finding 25)** — an undeclared protocol participant emits a HINT to
+     STDERR at typecheck time — cosmetic diagnostic noise, confirmed NOT to
+     land in either side of `verify.sh`'s stdout/stdout+stderr comparison, so
+     it cannot cause a golden mismatch. (§4.11.6)
+  All six are filed OPEN in `specs/todos.md`'s "Compiler: Session types
+  (protocols/channels)" section, each cross-referenced to its reference
+  subsection; F1/F2 has its own Done entry in the same file, distinct from
+  the six open findings.
+- **MPST is consistently marked typing-only in both references.** The typing
+  reference documents MPST protocol declaration/projection/consistency as
+  real, checkable rules (§2.7, `accept/t42`); the operational reference
+  documents the compiled segfault (§4.11.5–.6, F3) and states plainly that no
+  MPST program can be a golden witness until F3 is fixed. Neither reference
+  implies MPST is runnable compiled.
+- **`specs/lang/session-types.md` (the pre-existing tutorial, wired into
+  `specs/lang/index.md`'s chapter map before this slice) reconciled**:
+  cross-references to `core-march.md` §4.11 and `core-march-types.md` §2.7
+  added, alongside a note on which plane is byte-identical (binary,
+  post-F1/F2) versus interp-only (MPST, F3) — the same reconciliation
+  pattern slice 3 applied to `actors.md`.
+
+Next queued widening slice: **effects/capabilities**, or **error-handling /
+`let?`** (per the roadmap) — see `specs/todos.md`.
+
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 
 `specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened

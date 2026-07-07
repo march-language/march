@@ -3486,11 +3486,30 @@ two branches carry the same payload type — reproduced live both ways
 slice). Two new `accept/` programs: `accept/t41_binary_protocol_chan_new` (a
 binary `Echo` protocol, `Chan.new`, straight-line send/recv/close, run-
 witnessed printing `43`) and `accept/t42_mpst_protocol_new` (a 3-role `Relay`
-protocol, `MPST.new`, run-witnessed printing a confirmation string) —
-`check_types.sh`: 71/71 (42 accept, 29 reject), exit 0. Per-operation channel
-typing (`Chan.send`/`recv`/`choose`/`offer`/`close` state advancement) and the
-corresponding `reject/` corpus are explicitly OUT of scope for this task —
-the next session-types widening task's subject.
+protocol, `MPST.new`, run-witnessed printing a confirmation string) — after
+this task's two programs, `check_types.sh` stood at 71/71 (42 accept, 29
+reject), exit 0. Per-operation channel typing (`Chan.send`/`recv`/`choose`/
+`offer`/`close` state advancement) and the corresponding `reject/` corpus were
+explicitly OUT of scope for this task — the next session-types widening
+task's subject (see the Task 3 entry immediately below for where the corpus
+went from there).
+
+**Session-types widening, Task 3 (2026-07-06) added:** §2.7.8, the per-
+operation channel typing Task 2 explicitly deferred above — the required
+incoming session state, what each op checks, and the advanced outgoing state
+for `Chan.new`/`send`/`recv`/`close`/`choose`/`offer` (each transcribed from
+its own `typecheck.ml` arm, cited in §2.7.8). Filed **F5** (§2.7.9):
+`Chan.offer` always returns the FIRST branch's continuation type regardless of
+which branch the peer actually chose at runtime — a documented conservative
+approximation that is a real (if narrow) soundness gap for `offer` over
+branches with DIFFERENT continuations. Six new `reject/` programs
+(`t30`–`t35`) pin the live per-op violation messages (send-at-wrong-state,
+close-before-`End`, invalid `choose` label, wrong payload type, recv-at-
+wrong-state, a linear channel continuation used twice), plus one new
+`accept/` program (`t43_choose_offer_roundtrip`) for a full `choose`/`send`/
+`close` + `offer`/`recv`/`close` round-trip, run-witnessed printing `:ok` then
+`42`. `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0 — the
+corpus's current total (§3).
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
