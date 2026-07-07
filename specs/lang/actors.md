@@ -213,10 +213,11 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 
 ## Synchronous Request-Reply via `Actor.call`
 
-The `Actor` module provides a synchronous call pattern. The actor's **first-declared
-handler** receives the synchronous call: the runtime delivers the call to handler slot 0,
-binding its first parameter to the reply address `ref`. That handler calls
-`Actor.reply(ref, result)` to unblock the caller, then returns the (unchanged) state:
+The `Actor` module provides a synchronous call pattern. You pass a **zero-arg
+sentinel constructor** as the call message; its tag selects which handler receives
+the call, and the runtime injects the caller (the *reply channel*) as that handler's
+**first argument**. The handler answers with `Actor.reply`:
+
 ```march
 type GetReq = GetReq          -- zero-arg sentinel for the sync call
 
@@ -224,42 +225,54 @@ actor Counter do
   state { count : Int }
   init  { count: 0 }
 
-  -- First handler (slot 0): receives the synchronous call.
-  -- `ref` is the reply address; `msg` is the inner call message.
-  on Call(ref, msg) do
-    Actor.reply(ref, state.count)
+  -- First handler (tag 0) = the call handler; reply_to is the caller.
+  on GetCount(reply_to) do
+    Actor.reply(reply_to, state.count)
     state
   end
 
-  -- Ordinary fire-and-forget handler.
-  on Inc() do
-    { count: state.count + 1 }
+  on Inc(n : Int) do
+    { state with count: state.count + n }
   end
 end
 
 fn main() do
   let pid = spawn(Counter)
-  Actor.cast(pid, Inc())
-  Actor.cast(pid, Inc())
-  match Actor.call(pid, Inc(), 5000) do
+  Actor.cast(pid, Inc(1))
+  run_until_idle()
+  match Actor.call(pid, GetReq, 5000) do
     Ok(n)  -> println("count = " ++ int_to_string(n))
     Err(e) -> println("error: " ++ e)
   end
 end
 ```
 
-This program prints `count = 2` interpreted. `Actor.call(pid, inner_msg, timeout_ms)`
-sends the call to the actor's first handler and waits for `Actor.reply(ref, result)`;
-it returns `Ok(result)` or `Err(reason)`. The reply address `ref` must be the **first
-parameter** of that first handler.
+This program prints `count = 1` compiled. `Actor.call(pid, sentinel, timeout_ms)`
+reads the tag from the zero-arg `sentinel`, builds an augmented message (same tag,
+with the caller in field 0), and routes it to the handler at that tag. That handler
+receives the caller as its first argument and must call `Actor.reply(reply_to, result)`
+to unblock the caller. `Actor.call` returns `Ok(result)`, or `Err(reason)` if no reply
+arrives.
+
+Two consequences of the tag-selects-the-handler rule:
+
+- **The call handler must be declared FIRST** in the actor, so it sits at tag 0 — the
+  sentinel `GetReq` has tag 0, and that is the handler the call routes to.
+- **The sentinel must have a name distinct from the handler** (`GetReq` vs `GetCount`)
+  to avoid a constructor-name clash.
+
+There is no `Call` wrapper constructor, and the call handler takes exactly one argument
+(the reply channel).
 
 > **Two caveats.** (1) The `timeout_ms` argument is accepted for API compatibility but is
 > **not enforced in the compiled runtime** (`runtime/march_runtime.c:1809–1810`) — a `call`
 > that blocks indefinitely will not be interrupted by its stated timeout compiled (a filed
-> open finding, `specs/todos.md`). (2) The handler that receives the call must be declared
-> **first** (slot 0), and its first parameter is the reply address — an `on Call(ref, Get())`
-> form with a *nested constructor pattern* for the second parameter does not parse; bind a
-> plain variable (`on Call(ref, msg)`) instead.
+> open finding, `specs/todos.md`). (2) The **interpreter dispatches `Actor.call`
+> differently**: it wraps the message as `Call(ref, msg)` and delivers it to a two-argument
+> handler matching `on Call(ref, msg)` (`lib/eval/eval.ml`), rather than tag-routing a
+> zero-arg sentinel to a one-argument handler. The compiled-canonical example above
+> therefore returns `Err("no reply …")` under the interpreter — this interpreter/compiled
+> `Actor.call` dispatch-form divergence is a filed open finding (`specs/todos.md`).
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
 
