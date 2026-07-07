@@ -2074,8 +2074,24 @@ let qualify_level (prefix : string) (own_names : string list) (decls : decl list
     For each [DMod], rewrites [EVar "name"] → [EVar "Mod.name"] in function
     bodies when [name] is a function declared directly in that module.
     The prefix accumulates as the walk descends into nested modules so that
-    "MyNet" inside the top-level module gets prefix "MyNet." matching TIR. *)
-let qualify_module_refs (decls : decl list) : decl list =
+    "MyNet" inside the top-level module gets prefix "MyNet." matching TIR.
+
+    [entry_prefix] seeds the accumulation for [decls] itself: "" for the
+    entry file (TIR unwraps its own top-level mod, so its own name must NOT
+    be part of the prefix — see [Typecheck.cap_qual_prefix]'s doc comment
+    for the matching convention on the typecheck side), or
+    ["ModName."] for a non-entry file loaded by its own top-level module
+    name (e.g. a stdlib/auto-discovered dependency file, whose [mod_decls]
+    is already the UNWRAPPED body of its own [mod ModName do ... end] —
+    the parser splits a file's sole top-level mod into [mod_name]/[mod_decls]
+    fields on [module_], so [decls] here never contains a [DMod] node for
+    the file's own name). Without this, a bare intra-module call two levels
+    deep inside such a file (e.g. stdlib's [CRDT.PNCounter] calling its own
+    sibling [map_inc] bare) got qualified as only "PNCounter.map_inc"
+    instead of "CRDT.PNCounter.map_inc" — mismatching the fully-qualified
+    name TIR lowering assigns the actual definition, which undefined-symbols
+    at link time (the reference and the definition never converged). *)
+let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
   let rec walk prefix decls =
     List.map (function
       | DMod (name, vis, inner, sp) ->
@@ -2088,13 +2104,22 @@ let qualify_module_refs (decls : decl list) : decl list =
       | d -> d
     ) decls
   in
-  walk "" decls
+  walk entry_prefix decls
 
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
-    [DDeriving] nodes are expanded into [DImpl] blocks here. *)
-let desugar_module ?errors (m : module_) : module_ =
+    [DDeriving] nodes are expanded into [DImpl] blocks here.
+
+    [is_entry] (default [true], matching every pre-existing caller's actual
+    usage) controls whether [m.mod_name] itself is included when qualifying
+    bare intra-module calls (see [qualify_module_refs]'s doc comment): the
+    program's entry file must NOT have its own top-level mod name folded in
+    (TIR unwraps it — its members are emitted bare), but a non-entry file
+    loaded by name (a stdlib module or an auto-discovered dependency, via
+    [Resolver]) must, since TIR keeps ITS OWN top-level mod name as part of
+    every member's fully-qualified emitted name. *)
+let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   (* Only route expression-level errors into the context when the CALLER
      supplied one (and therefore inspects it): reporting into a defaulted
      throwaway context would silently swallow the diagnostic and return
@@ -2126,5 +2151,6 @@ let desugar_module ?errors (m : module_) : module_ =
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
     ) expanded in
-  let decls = qualify_module_refs decls in
+  let entry_prefix = if is_entry then "" else m.mod_name.txt ^ "." in
+  let decls = qualify_module_refs ~entry_prefix decls in
   { m with mod_decls = decls }

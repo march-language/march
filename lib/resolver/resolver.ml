@@ -232,7 +232,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
               | Error msg ->
                 errors := (mod_name, from_span, msg) :: !errors; []
               | Ok ast ->
-                let ast = March_desugar.Desugar.desugar_module ast in
+                let ast = March_desugar.Desugar.desugar_module ~is_entry:false ast in
                 (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
                 Hashtbl.add resolved mod_name [];
                 let transitive = load_refs ast.March_ast.Ast.mod_decls in
@@ -310,7 +310,8 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                 | Error msg ->
                   Printf.eprintf "[lib] %s\n%!" msg; None
                 | Ok ast ->
-                  Some (canon_fp, file_path, March_desugar.Desugar.desugar_module ast)
+                  Some (canon_fp, file_path,
+                        March_desugar.Desugar.desugar_module ~is_entry:false ast)
           ) files in
         (* Sort: more dot-segments in mod name → load first (namespace leaves).
            Alphabetical tiebreak keeps things deterministic. *)

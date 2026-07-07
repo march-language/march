@@ -1,0 +1,17 @@
+-- Regression: a bare intra-module call two levels deep inside a stdlib file
+-- (CRDT.PNCounter calling its own sibling `map_inc` bare) used to get
+-- qualified as only "PNCounter.map_inc" instead of "CRDT.PNCounter.map_inc"
+-- by desugar's qualify_module_refs, since it never knew about the file's
+-- own top-level mod name (module_.mod_name is a separate field from the
+-- already-unwrapped mod_decls) — the reference and TIR's actual emitted
+-- definition name never converged, so the linker rejected the binary with
+-- undefined symbols for every PNCounter helper.  Exercise the exact shape:
+-- PNCounter.increment/value calling sibling pfns map_inc/map_sum bare.
+mod NestedModQualcall do
+  fn main() do
+    let c = CRDT.PNCounter.new()
+    let c1 = CRDT.PNCounter.increment(c, "a")
+    let c2 = CRDT.PNCounter.decrement(c1, "b")
+    println(String.from_int(CRDT.PNCounter.value(c2)))
+  end
+end

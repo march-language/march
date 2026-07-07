@@ -121,8 +121,15 @@ let load_stdlib_file path =
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-       let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
+       (* prelude.march's own members are unwrapped into global scope below
+          (matching TIR's entry-module unwrapping), so its bare intra-module
+          calls must NOT be qualified with "Prelude." — is_entry:true (the
+          default) keeps them bare, consistent with every other file. Every
+          other stdlib file keeps its own top-level mod name as part of every
+          member's qualified name (Module.member), so is_entry:false here. *)
+       let m = March_desugar.Desugar.desugar_module
+                 ~is_entry:(basename = "prelude.march") m in
        if basename = "prelude.march" then
          (* Unwrap the outer mod so prelude functions are in global scope *)
          (match m.March_ast.Ast.mod_decls with

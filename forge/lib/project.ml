@@ -351,6 +351,25 @@ let git_dep_lib_path dep_name =
     else if Sys.file_exists dep_dir then Some dep_dir
     else None
 
+(** Resolve the root directory of an already-installed dependency (a path
+    dep, or a git dep's clone under the CAS), so its own forge.toml can be
+    read to walk transitive dependencies.  [project_root] is the root of the
+    project that DECLARED [dep] (needed to resolve a relative PathDep).
+    Returns [None] for registry deps (not yet resolvable this way). *)
+let dep_root_dir ~project_root (dep_name, dep) =
+  match dep with
+  | PathDep rel_path ->
+    Some (if Filename.is_relative rel_path
+          then Filename.concat project_root rel_path
+          else rel_path)
+  | GitTagDep _ | GitBranchDep _ | GitRevDep _ ->
+    (match Sys.getenv_opt "HOME" with
+     | None -> None
+     | Some home ->
+       Some (Filename.concat home
+               (Filename.concat ".march" (Filename.concat "cas" (Filename.concat "deps" dep_name)))))
+  | RegistryDep _ -> None
+
 (** Create a directory and all its parents. *)
 let mkdir_p dir =
   let _ = Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dir)) in
