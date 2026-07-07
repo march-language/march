@@ -2701,6 +2701,21 @@ let run_check_cmd files =
       else begin Hashtbl.add seen_mod_names mn (); true end
     | _ -> true
   ) all_decls in
+  (* If a checked file's own module name shadows a stdlib module (e.g. a
+     project's own `mod Crypto do` — the exact scenario [compile]'s
+     [extern_mod_names] below already guards against for the single-file
+     --check/--compile path), strip the stdlib copy so the project's
+     definition is the sole one.  Without this, both DMods named "Crypto"
+     end up in the combined module and corrupt unrelated typecheck state:
+     confirmed live — an unrelated user file shadowing stdlib Crypto made a
+     completely different module's own constructor (`PgTarget`, from a
+     third file) become unresolvable, with no diagnostic pointing at the
+     real cause. *)
+  let stdlib_decls = List.filter (function
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, _, _) ->
+      not (Hashtbl.mem seen_mod_names mn)
+    | _ -> true
+  ) stdlib_decls in
   (* Build a synthetic combined module and type-check it *)
   let dummy_span = March_ast.Ast.{
     file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0

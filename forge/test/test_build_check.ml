@@ -144,6 +144,47 @@ let test_check_does_not_duplicate_shared_module_diagnostics () =
            not once per other file checked alongside it"
           1 warnings)
 
+(** Regression test for a stdlib-shadowing bug in [run_check_cmd]
+    (bin/main.ml): the single-file `--check`/`--compile` path already strips
+    a stdlib module from the combined declaration list when a project file
+    shadows it by name (`extern_mod_names`, added specifically for a project
+    `mod Crypto do` colliding with stdlib's own `Crypto`) — but the
+    multi-file `check` subcommand never had the same guard, so both DMods
+    named `Crypto` ended up in the combined module together. Confirmed live
+    against two real ~85-file projects: an unrelated file shadowing stdlib
+    `Crypto` corrupted typecheck state badly enough that a THIRD, completely
+    unrelated file's own constructor became unresolvable, with no diagnostic
+    pointing at the real cause. Minimizing the real repro down to three
+    files was itself load-bearing: a bare two-constructor type used only
+    through a same-file `Foo(n)` construction plus a same-file pattern match
+    did NOT reproduce it — the corruption only showed up once (a) a
+    SEPARATE file constructs the value via a qualified call (`Defs.make`)
+    and (b) a THIRD file consumes it via a bare (unqualified) constructor
+    pattern match, mirroring the real depot_url.march / depot_db_repo.march
+    shape exactly. *)
+let test_check_stdlib_shadow_does_not_corrupt_unrelated_module () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      let shadow = Filename.concat root (Filename.concat "lib" "crypto_shadow.march") in
+      let defs   = Filename.concat root (Filename.concat "lib" "defs.march") in
+      let user   = Filename.concat root (Filename.concat "lib" "user_mod.march") in
+      (* Shadows stdlib's own `Crypto` module by name. *)
+      write_file shadow "mod Crypto do\n\n  fn dummy() : Int do\n    1\n  end\n\nend\n";
+      (* Defines a two-constructor type and builds it via a qualified call
+         site elsewhere, entirely unrelated to Crypto. *)
+      write_file defs
+        "mod Defs do\n\n  type Thing = Foo(Int) | Bar(String)\n\n  \
+         fn make(n) do\n    Foo(n)\n  end\n\nend\n";
+      (* Consumes Defs.make's result via a BARE (unqualified) constructor
+         pattern match — the shape that broke in the real repro. *)
+      write_file user
+        "mod UserMod do\n\n  fn use_it(n) do\n    \
+         match Defs.make(n) do\n    \
+         Foo(x) -> x\n    \
+         Bar(_) -> 0\n    end\n  end\n\nend\n";
+      match Cmd_check.check () with
+      | Error m -> Alcotest.fail ("expected Ok despite the stdlib-shadowing file, got Error: " ^ m)
+      | Ok _    -> ())
+
 (** Rather than breaking PATH/MARCH_HOME to prove `march` isn't re-invoked
     (tried first — but that also perturbs `lib_path_env`, since
     `Toolchain.path_prefix ()` bakes the resolved toolchain's bin/ directly
@@ -235,6 +276,8 @@ let () =
         test_check_cache_short_circuits_unchanged_rebuild;
       Alcotest.test_case "check does not duplicate shared-module diagnostics" `Quick
         test_check_does_not_duplicate_shared_module_diagnostics;
+      Alcotest.test_case "check: stdlib shadow does not corrupt an unrelated module" `Quick
+        test_check_stdlib_shadow_does_not_corrupt_unrelated_module;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
