@@ -498,6 +498,18 @@ type env = {
   no_panic_modules : string list;
   (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
+  nonexhaustive_match_spans : Ast.span list ref;
+  (** Spans of every NON-exhaustive [match] discovered by [check_exhaustiveness]
+      anywhere in the compilation.  A non-exhaustive match lowers to a runtime
+      "no matching clause" panic, so it is a panic surface that
+      [check_no_panic_module] must reject — but only for matches nested inside a
+      `cap no_panic` module's OWN function bodies (attributed by span
+      containment, see [span_within]).  A mutable ref shared (like
+      [import_tracker]) across every env copy so all sites append to one list;
+      recording here is cheap and never itself an error — the read/attribution
+      is gated inside [check_no_panic_module], which only runs for
+      `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
+      Warning and is never promoted to an error. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -554,6 +566,7 @@ let make_env errors type_map = {
   cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
+  nonexhaustive_match_spans = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
@@ -3288,20 +3301,27 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
     in
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
-    | Some (ex :: _) ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
-          labels  = [];
-          notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-          code    = None; fix = None }
-    | Some [] ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = "Non-exhaustive pattern match";
-          labels  = [];
-          notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
-          code    = None; fix = None }
+    | Some missing ->
+      (* Record the non-exhaustive match's span so [check_no_panic_module] can
+         reject it as a runtime panic surface inside a `cap no_panic` module.
+         Recording is unconditional (cheap, non-error); attribution/promotion to
+         an error is gated there by span containment. *)
+      env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans);
+      (match missing with
+       | ex :: _ ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
+             labels  = [];
+             notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
+             code    = None; fix = None }
+       | [] ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = "Non-exhaustive pattern match";
+             labels  = [];
+             notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
+             code    = None; fix = None })
   end
 
 (** Unfold one step of a recursive session type.
@@ -6486,6 +6506,20 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELit _ | Ast.EVar _ -> acc
   | _ -> acc
 
+(** [span_within inner outer] is true when [inner] is nested inside [outer] by
+    source position — same file, and [inner]'s start/end fall within [outer]'s
+    line/column bounds.  Used to attribute a recorded non-exhaustive-match span
+    to the enclosing `cap no_panic` function whose body it lives in, so a match
+    in some UNRELATED (plain) module is never blamed on the no_panic module. *)
+let span_within (inner : Ast.span) (outer : Ast.span) : bool =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line > outer.Ast.start_line
+      || (inner.Ast.start_line = outer.Ast.start_line
+          && inner.Ast.start_col >= outer.Ast.start_col))
+  && (inner.Ast.end_line < outer.Ast.end_line
+      || (inner.Ast.end_line = outer.Ast.end_line
+          && inner.Ast.end_col <= outer.Ast.end_col))
+
 let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let fn_entries : (string * (string * Ast.span) list * Ast.span) list =
     List.filter_map (fun d ->
@@ -6563,6 +6597,27 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
         let _ = fn_span in
         Err.error errors ~span:site_span msg
     end
+  ) fn_entries;
+  (* A NON-exhaustive `match` lowers to a runtime "no matching clause" panic, so
+     it is a panic surface just like `panic`/`unwrap`.  [check_exhaustiveness]
+     already found and recorded every non-exhaustive match's span (see
+     [env.nonexhaustive_match_spans]); here we reject any that falls inside one
+     of THIS `cap no_panic` module's own function bodies.  Span containment
+     attributes each match to its enclosing fn, so a non-exhaustive match in an
+     unrelated (plain) module is never blamed on this module. *)
+  let mod_name = env.current_module in
+  let ne_spans = !(env.nonexhaustive_match_spans) in
+  List.iter (fun (fn_name, _calls, fn_span) ->
+    List.iter (fun (msp : Ast.span) ->
+      if span_within msp fn_span then
+        Err.error errors ~span:msp
+          (Printf.sprintf
+             "`%s` in `mod %s` (declared `cap no_panic`) contains a non-exhaustive \
+              `match`, which panics at runtime when no clause matches.\n\n\
+              A `cap no_panic` module must handle every case, or add a `_ -> ...` \
+              catch-all arm."
+             fn_name mod_name)
+    ) ne_spans
   ) fn_entries
 
 (* ── cap pure: ban side-effectful builtins ───────────────────────────────── *)

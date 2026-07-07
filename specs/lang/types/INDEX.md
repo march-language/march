@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t56 accept, t01–t47 reject)
+# Typing corpus index (t01–t56 accept, t01–t48 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -145,6 +145,25 @@ the real builtins). Reject: `cap pure` + `file_write` (`t45`); `cap pure` +
 type-correct so the ONLY rejection is the cap ban. These three witnesses were
 IMPOSSIBLE pre-fix (they accepted, exit 0). See `specs/todos.md` (F2 → Done).
 
+**Note (`reject/t48`):** Capabilities widening, Task 6 (2026-07-07) — the **F3
+FIX** (now Done). A NON-exhaustive `match` lowers to a runtime "no matching
+clause" panic, so it is a panic surface a `cap no_panic` module must reject,
+exactly like an explicit `panic` (`reject/t42`). Pre-fix `check_no_panic_module`
+worked purely from `calls_in_expr` (a name/span list of CALLS) and never
+inspected `EMatch`, so a `cap no_panic` module with a non-exhaustive match
+typechecked clean (exit 0, only a Warning) and then panicked at runtime.
+`check_exhaustiveness` (`typecheck.ml`) already finds every non-exhaustive
+match; the fix has it ALSO record the offending `match`'s span into a new shared
+ref `env.nonexhaustive_match_spans` (recording is cheap and never itself an
+error). `check_no_panic_module` — which runs ONLY for `cap no_panic` modules —
+reads that side-table and, for any recorded span nested (by `span_within`
+source-position containment) inside one of THIS module's own function bodies,
+reports an ERROR. Because the read is gated inside `check_no_panic_module`, a
+non-exhaustive match in a PLAIN (non-cap) module is NEVER promoted: it stays a
+non-blocking Warning (`accept/t14`, exit 0 — the key regression guard). An
+exhaustive match, or one with a `_ -> ...` catch-all, still accepts. See
+`specs/todos.md` (F3 → Done).
+
 ## The `--check` accept/reject harness model
 
 Unlike the operational golden corpus (`specs/lang/golden/`, which runs each
@@ -169,7 +188,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 103/103 — 56 accept, 47
+Exit 0 iff every program behaves as declared (currently 104/104 — 56 accept, 48
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -332,7 +351,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t46_cap_pure_random_bytes` | **`cap pure` (§2.8.11, capabilities widening Task 5 — F2 FIX witness) — the RNG builtin `random_bytes`** — `random_bytes` (mapped `IO.Random`, `typecheck.ml:1064`) is now in the table-derived `pure_banned`; pre-fix `pure_banned` spelled the nonexistent `random_int`/`random_float`/`random_bool` and missed the real `random_bytes`. `random_bytes : Int -> Bytes` is total, so `: Bytes` is type-correct and the ONLY rejection is the cap ban. Accepted (exit 0) pre-fix | `` which has side effects `` |
 | `t47_cap_deterministic_unix_time_ms` | **`cap deterministic` (§2.8.11, capabilities widening Task 5 — F2 FIX witness) — the wall-clock builtin `unix_time_ms`** — `check_deterministic_module` (`typecheck.ml:6650`) now bans exactly the builtins `builtin_cap_table` maps to a NONDETERMINISM cap (`IO.Clock`/`IO.Random`, via `is_nondeterministic_cap`); `unix_time_ms` (mapped `IO.Clock`, `:1061`) is now caught, where pre-fix `deterministic_banned` spelled the nonexistent `now_ms` and missed it. `unix_time_ms : Unit -> Int` so `unix_time_ms(())` at `: Int` is type-correct. `cap deterministic` stays WEAKER than `cap pure` (a deterministic module may still `file_read`) — only clock/RNG are banned. Accepted (exit 0) pre-fix | `` which is non-deterministic `` |
 
-**Result: 103 / 103 (56 accept, 47 reject).**
+| `t48_cap_no_panic_nonexhaustive_match` | **`cap no_panic` (§2.8.11, capabilities widening Task 6 — F3 FIX witness) — the match-non-exhaustiveness panic surface** — a non-exhaustive `match` lowers to a runtime "no matching clause" panic, so a `cap no_panic` module must reject it just like an explicit `panic` (cf. `reject/t42`). `check_exhaustiveness` (`typecheck.ml`) already finds every non-exhaustive match; besides the usual Warning it now records the offending `match`'s span into `env.nonexhaustive_match_spans` (a shared ref). `check_no_panic_module` (runs ONLY for `cap no_panic` modules) reads that side-table and, for any recorded span nested (via `span_within` containment) inside one of THIS module's own function bodies, reports an ERROR. A non-exhaustive match in a PLAIN module stays a non-blocking Warning (`accept/t14`), so the fix is scoped to `cap no_panic`. Accepted (exit 0) pre-fix | `` contains a non-exhaustive `match`, which panics at runtime `` |
+
+**Result: 104 / 104 (56 accept, 48 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

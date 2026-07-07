@@ -3990,6 +3990,60 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
 
+(* F3: a NON-exhaustive `match` lowers to a runtime "no matching clause" panic,
+   so a `cap no_panic` module must reject it — the missing-`None` arm below is a
+   panic surface just like an explicit `panic`. *)
+let test_cap_no_panic_nonexhaustive_match_error () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + non-exhaustive match: error" true (has_errors ctx)
+
+(* An EXHAUSTIVE match (all constructors covered) in a `cap no_panic` module
+   cannot panic and must still accept. *)
+let test_cap_no_panic_exhaustive_match_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + exhaustive match: no error" false (has_errors ctx)
+
+(* A `_ -> ...` catch-all makes the match total → still accepts. *)
+let test_cap_no_panic_wildcard_match_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+        _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + wildcard match: no error" false (has_errors ctx)
+
+(* KEY REGRESSION GUARD (F3): a PLAIN (non-cap) module's non-exhaustive match
+   must stay a non-blocking Warning — it must NOT become an error. The fix is
+   scoped to `cap no_panic` modules only. *)
+let test_plain_nonexhaustive_match_ok () =
+  let ctx = typecheck {|mod Plain do
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "plain (non-cap) non-exhaustive match: no error" false (has_errors ctx)
+
 (* Division-safety guard / path-context tests *)
 
 let test_divsafety_match_guard_neq_zero_ok () =
@@ -6513,6 +6567,10 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+          Alcotest.test_case "cap no_panic + non-exhaustive match: error" `Quick test_cap_no_panic_nonexhaustive_match_error;
+          Alcotest.test_case "cap no_panic + exhaustive match: no error"  `Quick test_cap_no_panic_exhaustive_match_ok;
+          Alcotest.test_case "cap no_panic + wildcard match: no error"    `Quick test_cap_no_panic_wildcard_match_ok;
+          Alcotest.test_case "plain non-exhaustive match: no error"       `Quick test_plain_nonexhaustive_match_ok;
           (* Division-safety Z3 cases *)
           Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
           Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;
