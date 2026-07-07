@@ -1734,7 +1734,7 @@ let test_session_eval_send_recv () =
     end
     fn run() do
       let (sc, rc) = Chan.new(Echo)
-      let sc2 = Chan.send(sc, 42)
+      let sc2 = Chan.send(sc, 43)
       let (n, rc2) = Chan.recv(rc)
       let rc3 = Chan.send(rc2, n + 1)
       let (result, sc3) = Chan.recv(sc2)
@@ -1744,7 +1744,9 @@ let test_session_eval_send_recv () =
     end
   end|} in
   let v = call_fn env "run" [] in
-  Alcotest.(check int) "eval echo protocol: result = 43" 43 (vint v)
+  (* Odd payload (43) exercises the erased-i64 tag path both legs; the compiled
+     value round-trip is asserted by test_session_compile_odd_int_roundtrip. *)
+  Alcotest.(check int) "eval echo protocol: result = 44" 44 (vint v)
 
 (* ── SRec multi-turn protocol tests ─────────────────────────────────────── *)
 
@@ -2425,6 +2427,119 @@ let test_session_compile_full_pipeline_no_crash () =
     end
   end|} in
   Alcotest.(check bool) "session compile full pipeline: no crash" true true
+
+(* ── Compiled channel-payload value round-trips (F1/F2 regression) ────────
+   The IR-shape tests above assert only that `march_chan_*` symbols APPEAR in
+   the emitted module — they never run the compiled binary or check a carried
+   value, so they stayed green while every ODD Int payload compiled to
+   `(v-1)/2` and every Bool flipped `true→false`.  Root cause: `march_chan_send`
+   received the payload as a bare untagged `i64`, while `march_chan_recv`'s
+   returned payload went through the erased-i64 CONDITIONAL-UNTAG restore
+   (ashr iff low bit set) — an asymmetric coercion.  The fix tags the payload
+   at the send site (llvm_emit.ml `chan_send`/`chan_choose`/`mpst_send` arms,
+   `emit_atom_as ctx "ptr"`) so send/recv are symmetric.  These tests compile
+   and RUN the binary, checking the printed value: they FAIL on the pre-fix
+   binary (43→21, true→false) and pass after.  Modelled on the compile-and-run
+   regression tests in test_codegen.ml (write source to a temp dir, run interp
+   for the baseline, then compile + run + check the printed value). *)
+
+(* Read the whole stdout+stderr of a command (trimmed). *)
+let session_read_cmd_output cmd =
+  let ic = Unix.open_process_in cmd in
+  let buf = Buffer.create 64 in
+  (try while true do Buffer.add_channel buf ic 1 done
+   with End_of_file -> ());
+  ignore (Unix.close_process_in ic);
+  String.trim (Buffer.contents buf)
+
+(* Write [src_text] to a fresh temp dir; return (project_root, main_exe, src, tmp). *)
+let session_write_src ~name src_text =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file name "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (name ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (project_root, main_exe, src, tmp)
+
+(** Odd Int payload (43) round-trips through Chan.send/recv compiled.  The
+    interpreter is the baseline (already correct); the compiled binary must
+    print the SAME value.  Pre-fix, the compiled run printed 21 (=(43-1)/2). *)
+let test_session_compile_odd_int_roundtrip () =
+  let (project_root, main_exe, src, tmp) =
+    session_write_src ~name:"march_session_oddint"
+      "mod Main do\n\
+      \  protocol Echo do\n\
+      \    Client -> Server : Int\n\
+      \    Server -> Client : Int\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let (cc, sc) = Chan.new(Echo)\n\
+      \    let cc2 = Chan.send(cc, 43)\n\
+      \    let (n, sc2) = Chan.recv(sc)\n\
+      \    let sc3 = Chan.send(sc2, n)\n\
+      \    let (result, cc3) = Chan.recv(cc2)\n\
+      \    Chan.close(cc3)\n\
+      \    Chan.close(sc3)\n\
+      \    println(int_to_string(result))\n\
+      \  end\n\
+       end\n"
+  in
+  (* interpreter baseline: the odd payload round-trips as 43 *)
+  let interp_out = session_read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interp: odd Int channel payload round-trips (43)"
+    "43" interp_out;
+  (* compiled: MUST print 43 too — pre-fix this printed 21 (the F1 miscompile) *)
+  let bin = Filename.concat tmp "sessoddintbin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = session_read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: odd Int channel payload round-trips as 43 (not 21 — F1 tag fix)"
+      "43" run_out
+
+(** Bool payload (true) round-trips through Chan.send/recv compiled.  Pre-fix,
+    the compiled run flipped true→false (the F2 miscompile). *)
+let test_session_compile_bool_roundtrip () =
+  let (project_root, main_exe, src, tmp) =
+    session_write_src ~name:"march_session_bool"
+      "mod Main do\n\
+      \  protocol B do\n\
+      \    Client -> Server : Bool\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let (cc, sc) = Chan.new(B)\n\
+      \    let cc2 = Chan.send(cc, true)\n\
+      \    let (b, sc2) = Chan.recv(sc)\n\
+      \    Chan.close(cc2)\n\
+      \    Chan.close(sc2)\n\
+      \    if b do println(\"TRUE\") else println(\"FALSE\") end\n\
+      \  end\n\
+       end\n"
+  in
+  let interp_out = session_read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interp: Bool channel payload round-trips (true)"
+    "TRUE" interp_out;
+  let bin = Filename.concat tmp "sessboolbin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = session_read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: Bool channel payload round-trips as TRUE (not FALSE — F2 tag fix)"
+      "TRUE" run_out
 
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
@@ -6231,6 +6346,8 @@ let compiler_suites =
           Alcotest.test_case "Chan.new/send/recv/close in IR"   `Quick test_session_compile_chan_new;
           Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
+          Alcotest.test_case "compiled odd Int payload round-trips (F1)" `Quick test_session_compile_odd_int_roundtrip;
+          Alcotest.test_case "compiled Bool payload round-trips (F2)"    `Quick test_session_compile_bool_roundtrip;
         ] );
       ( "policy_dce", [
           Alcotest.test_case "NoAlloc fn with EAlloc: violation"          `Quick test_policy_noalloc_alloc_violation;

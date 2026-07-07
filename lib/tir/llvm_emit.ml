@@ -1664,6 +1664,51 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "call void @march_actor_reply(ptr %s, ptr %s)" vref vres);
     ("i64", "0")
 
+  (* ── Channel/MPST payload sends: coerce the carried value/label to the
+     uniform tagged ptr rep so it survives the void* round-trip through the
+     C channel queue and matches the ptr→i64 CONDITIONAL-UNTAG that
+     Chan.recv / MPST.recv apply on the receive side (llvm_ctx.coerce
+     "ptr"→"i64", which ashr's iff the low bit is set).
+
+     march_chan_send / march_chan_choose / march_mpst_send are all declared
+     with a `ptr` payload/label/value slot (llvm_builtins.ml).  The general
+     EApp path below emits each arg with its NATURAL llvm type, so an Int
+     payload would arrive as a raw i64 (e.g. 43) instead of the tagged form
+     ((43<<1)|1 = 87); recv then sees low-bit-set and ashr's it → 21.  Every
+     odd Int corrupts as (v-1)/2 and Bool (odd-tagged immediate) flips
+     true→false; heap payloads (String/record/ADT) already arrive as `ptr`
+     and pass through emit_atom_as unchanged (coerce short-circuits ptr→ptr).
+     Coerce ONLY the value/label arg — the endpoint/role args are already ptr.
+     Return type mirrors the general path: these builtins return `Chan`
+     (TCon("Chan",[]) → "ptr"). *)
+  | Tir.EApp (f, [ep; value])
+    when f.Tir.v_name = "chan_send" ->
+    let vep = emit_atom_as ctx "ptr" ep in
+    let vv  = emit_atom_as ctx "ptr" value in
+    let r = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_chan_send(ptr %s, ptr %s)" r vep vv);
+    ("ptr", r)
+
+  | Tir.EApp (f, [ep; label])
+    when f.Tir.v_name = "chan_choose" ->
+    let vep = emit_atom_as ctx "ptr" ep in
+    let vl  = emit_atom_as ctx "ptr" label in
+    let r = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_chan_choose(ptr %s, ptr %s)" r vep vl);
+    ("ptr", r)
+
+  | Tir.EApp (f, [ep; role; value])
+    when f.Tir.v_name = "mpst_send" ->
+    let vep   = emit_atom_as ctx "ptr" ep in
+    let vrole = emit_atom_as ctx "ptr" role in
+    let vv    = emit_atom_as ctx "ptr" value in
+    let r = fresh ctx "cr" in
+    emit ctx (Printf.sprintf
+      "%s = call ptr @march_mpst_send(ptr %s, ptr %s, ptr %s)" r vep vrole vv);
+    ("ptr", r)
+
   (* ── EApp of a locally-bound closure variable ────────────────────── *)
   (* If f has a var_slot alloca AND is not a top-level function, it is a
      local closure — redirect to ECallPtr dispatch.
