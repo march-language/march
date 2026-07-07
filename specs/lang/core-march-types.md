@@ -60,8 +60,11 @@ interp-vs-compiled split) — §2.3 notes it inline at the point the gap arises
 rather than repeating it here.
 
 **Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): refinements
-(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6
-for the full deferred-set breakdown and its roadmap citations. Coherence/
+(z3-discharged), effects, and most of the capability lattice (`lib/caps/`) —
+see §6 for the full deferred-set breakdown and its roadmap citations; §2.8
+(added 2026-07-07) lands the capability lattice's first layer (IO permission
+hierarchy, `needs`, `Cap(X)` signature enforcement), with the rest of the
+system still queued. Coherence/
 overlap resolution between impls is NOT in this deferred set — it is a known,
 intentionally OPEN divergence (documented in `core-march.md` §4.4.3 and filed
 in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
@@ -117,6 +120,24 @@ that is a real (if narrow) soundness gap for `offer` over branches with
 DIFFERENT continuations. Six new `reject/` programs (`t30`–`t35`) pin the
 live per-op violation messages, plus one new `accept/` program (`t43`) for a
 full `choose`/`offer` round-trip.
+
+**Capabilities widening, Task 1 (2026-07-07):** §2.8 adds the FIRST
+capability/effect-system content this document has — greenfield, like §2.7's
+session-types debut. It covers the IO permission hierarchy (18 entries, one
+tree rooted at `IO`), `cap_subsumes`/`normalize` subsumption, the `needs`
+module manifest, and **Check 1**: every `Cap(X)` in a function/actor/extern
+signature must be covered by a declared `needs`, else ERROR. Files a live
+scoping finding: only 10 of the 18 hierarchy entries are registered as valid
+`Cap(X)` type ARGUMENTS today (`builtin_types`, `typecheck.ml:1858-1861`) —
+the other 8 are valid `needs` targets but reject as `` Unknown module `IO` ``
+if written inside `Cap(...)`; the corpus draws only from the 10 that work.
+Four new `accept/` programs (`t45`–`t48`: bare-covered, root-covers-child
+subsumption, sibling independence, a second mid-tier subsumption shape) and
+three new `reject/` programs (`t36`–`t38`: uncovered, narrow-does-not-cover-
+broad, sibling-does-not-cover-sibling). Deferred to later capabilities tasks:
+transitive `use`/extern-implied caps, `cap_narrow`/`root_cap` threading,
+effect inference, proof-cap mint/forge, and the behavioral module caps
+(`no_panic`/`no_alloc`/`pure`/`deterministic`/`no_extern`).
 
 ## 1. The typing judgment
 
@@ -2739,6 +2760,296 @@ always picks the first-listed branch (`:ok`).
 
 `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0.
 
+### 2.8 Capabilities and effects: the IO permission lattice, `needs`, and `Cap(X)` signature enforcement
+
+March's capability system is a **compile-time-only, static** discipline: a
+`Cap(X)` value proves the holder is authorized to perform IO in the family
+named by `X`, but the proof is **runtime-erased** — `Cap(X)` values compile to
+`null` in LLVM IR and to `VUnit` in the interpreter (no capability check has
+any effect on runtime semantics or output; a cap-threading program produces
+byte-identical results interpreted and compiled). All enforcement lives
+entirely in `--check` (the typechecker plus two post-typecheck refinecheck
+passes, out of scope for this subsection). This subsection covers the first,
+foundational layer: the **IO permission hierarchy**, the `needs` module
+manifest, and **Check 1** — every `Cap(X)` in a function/actor/extern
+**signature** must be covered by a declared `needs`. Later widening tasks
+extend §2.8 with transitive `use`/extern-implied caps, `cap_narrow`/
+`root_cap` threading, effect inference, and proof-cap minting — this
+subsection is deliberately narrow.
+
+#### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
+
+The hierarchy is a single static table, `hierarchy : (string * string option)
+list` (`lib/caps/cap_lattice.ml:15-34`) — each entry a dot-joined path and an
+optional parent path (`None` = root). It is shared, as the single source of
+truth, between `March_typecheck.Typecheck` (this subsection's body-scan/
+signature checks) and `March_refinecheck.Cap_infer` (the softer inference-hint
+pass) — both need the identical subsumption rule. The full table, exactly as
+declared:
+
+```
+IO                        (root)
+├── IO.Console
+├── IO.FileSystem
+│   ├── IO.FileRead
+│   └── IO.FileWrite
+├── IO.Network
+│   ├── IO.NetConnect
+│   │   ├── IO.Database
+│   │   └── IO.NetConnect.TLS
+│   └── IO.NetListen
+├── IO.Process
+├── IO.Clock
+├── IO.Random
+├── IO.Spawn
+├── IO.Mut
+├── IO.Telemetry
+└── IO.Foreign
+    └── IO.Foreign.Blocking
+```
+
+All 18 entries share the single root `IO` — this is one tree, not a forest,
+despite the surface impression that `IO.Console`/`IO.Process`/`IO.Clock`/
+`IO.Random`/`IO.Spawn`/`IO.Mut`/`IO.Telemetry` are "leaves with no interesting
+structure": every one of them still has `Some "IO"` as its parent, so
+`needs IO` covers all eighteen. The two three-level branches are
+`IO.FileSystem → {IO.FileRead, IO.FileWrite}` and `IO.Network →
+{IO.NetConnect → {IO.Database, IO.NetConnect.TLS}, IO.NetListen}` — `IO.
+Database` and `IO.NetConnect.TLS` are the only entries nested three deep.
+
+**FFI caps are explicitly outside this table.** The comment at
+`cap_lattice.ml:5-6` notes: "FFI caps like `LibC` are valid but not in this
+table — they are their own roots and have no subtyping relationship." An FFI
+capability name is checked for exact/self-subsumption only (see Check 5,
+deferred to a later task); it never subsumes or is subsumed by anything in
+the `IO` tree.
+
+#### 2.8.2 Subsumption: `cap_subsumes` and `normalize`
+
+Two pure list-walking functions define the ordering (`cap_lattice.ml:39-59`):
+
+```ocaml
+let cap_ancestors cap =
+  let rec go c acc =
+    let acc' = c :: acc in
+    match List.assoc_opt c hierarchy with
+    | Some (Some parent) -> go parent acc'
+    | _ -> acc'
+  in
+  List.rev (go cap [])
+
+let cap_subsumes parent child =
+  List.mem parent (cap_ancestors child)
+
+let normalize caps =
+  List.filter (fun c ->
+    not (List.exists (fun other -> other <> c && cap_subsumes other c) caps)
+  ) caps
+```
+
+`cap_ancestors cap` returns `cap` itself plus every ancestor up to (and
+including) the root, most-specific first — e.g. `cap_ancestors "IO.FileRead" =
+["IO.FileRead"; "IO.FileSystem"; "IO"]`. A name absent from the table (an FFI
+cap) returns just itself — the base case of `go`'s `match … | _ -> acc'` arm.
+
+`cap_subsumes parent child` is then simply "is `parent` among `child`'s
+ancestors (or `child` itself)" — **reflexive** (`cap_subsumes X X` is always
+true, since `cap_ancestors X` always starts with `X`) and **directional**: a
+broader declared cap covers a narrower used one, never the reverse.
+`cap_subsumes "IO" "IO.FileRead"` is true; `cap_subsumes "IO.FileRead" "IO"`
+is false — a child capability does not grant its own parent. Two siblings
+(e.g. `IO.FileRead` and `IO.FileWrite`) never subsume each other, since
+neither appears in the other's ancestor chain.
+
+`normalize caps` drops any cap in the list that is subsumed by another cap
+already present, preserving relative order of the survivors — e.g.
+`normalize ["IO"; "IO.FileRead"] = ["IO"]` (the broader cap absorbs the
+narrower) regardless of which order they were declared in. `check_module_needs`
+(§2.8.3) uses `normalize` when merging declared `needs` lists and accumulated
+per-function cap closures; a code comment at `typecheck.ml:5419` notes the
+merge is commutative — "merge order across the three call sites doesn't
+matter."
+
+**Typechecker alias.** `typecheck.ml:1103` re-exports the shared function
+directly: `let cap_subsumes = March_caps.Cap_lattice.cap_subsumes`. Every
+subsumption check in `check_module_needs` (Check 1 included) calls this one
+alias — there is no separate, possibly-divergent copy of the ordering logic in
+`typecheck.ml` itself.
+
+#### 2.8.3 The `needs` manifest and `Cap(X)` signatures
+
+A module declares which IO capability families it uses via a `needs`
+statement — one or more dotted paths, each on (conventionally) its own line:
+
+```march
+mod Server do
+  needs IO.Network
+
+  fn listen(cap : Cap(IO.Network), port : Int) : Int do
+    ...
+  end
+end
+```
+
+**AST and lexer.** `needs` parses to `Ast.DNeeds of name list list * span`
+(`lib/ast/ast.ml:159`) — **not** `DCapNeeds`; each element of the outer list is
+one dotted path already split into its component names (so `needs IO.Network`
+parses to a `DNeeds` entry `["IO"; "Network"]`, rejoined by
+`cap_path_of_names` back into the dotted string `"IO.Network"` for hierarchy
+lookups). The lexer recognizes the keyword directly: `("needs", NEEDS)`
+(`lib/lexer/lexer.mll:50`). A module may write multiple `needs` lines, one per
+capability family (as accept/t47, §2.8.5, does for two independent siblings)
+— `DNeeds` is collected per-declaration, not merged into one statement.
+
+**`Cap(X)` is an ordinary parametric type**, `Cap` a built-in type constructor
+of arity 1 (`builtin_types`, `typecheck.ml:1849`: `("Pid", 1); ("Cap", 1);
+...`). Its argument is a **dotted type name** resolved as a single string, not
+a nested type application — `Ast.TyCon (con, [arg]) when con.txt = "Cap"` then
+`match arg with Ast.TyCon (name, []) -> [name.txt]` (`cap_paths_in_surface_ty`,
+`typecheck.ml:1109-1125`, the helper that extracts every `Cap(X)` path
+occurring anywhere in a surface type — walking through `TyArrow`/`TyTuple`/
+`TyRecord`/`TyLinear`, and explicitly skipping `Tagged(X, T)`'s argument so a
+realtime tag is never misread as a capability reference, `:1116-1117`). So
+`Cap(IO.Network)` is parsed as `TyCon("Cap", [TyCon("IO.Network", [])])` — the
+dotted string `"IO.Network"` is the type name in its own right, not a
+qualified reference into a module named `IO`.
+
+**Scoping finding — not every hierarchy entry is a valid `Cap(X)` argument
+today.** `cap_paths_in_surface_ty` only extracts a path if it survives
+`surface_ty`'s ordinary type-name resolution (`Ast.TyCon(name, [])` must
+resolve to *some* registered 0-arity type before a `Cap(X)` reference
+typechecks at all). Live probing shows only **10 of the 18** hierarchy
+entries are pre-registered as valid type names for this purpose — the
+`builtin_types` table (`typecheck.ml:1858-1861`) lists exactly: `IO`,
+`IO.Console`, `IO.FileSystem`, `IO.FileRead`, `IO.FileWrite`, `IO.Network`,
+`IO.NetConnect`, `IO.NetListen`, `IO.Process`, `IO.Clock`. The other 8 —
+`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`,
+`IO.Foreign`, `IO.Foreign.Blocking`, `IO.NetConnect.TLS` — are valid
+`needs` targets (an all-string manifest, so `needs IO.Random` alone
+typechecks fine) but **cannot be written as a `Cap(X)` type annotation**:
+`fn f(c : Cap(IO.Random)) : Int do 1 end` rejects with `` Unknown module `IO`.
+Did you mean `Dir`? `` — `surface_ty`'s qualified-type fallback
+(`resolve_qualified_type`, `typecheck.ml:729-737`) attempts to load an actual
+module named `IO` (`stdlib/io.march`, which declares no types), fails to
+resolve `IO.Random` as one of its exported types, and falls through to the
+generic qualified-name-not-found diagnostic. This is a real, narrow gap
+(worth widening `builtin_types` in a future compiler-fix task) but is out of
+scope for this docs-only slice — the corpus below (§2.8.5) draws only from
+the 10 names that are valid `Cap(X)` arguments today.
+
+**Check 1** (`typecheck.ml:5558-5587`, comment "Check 1:" at `:5558`) is the
+core enforcement rule this subsection pins:
+
+> Every `Cap(X)` occurring in a function, actor-handler, or extern
+> **signature** (param or return type) must be covered — via `cap_subsumes`
+> — by at least one of the module's declared `needs` paths. If not, this is
+> an **ERROR** (not a warning; contrast Check 1b/1c for body-scanned/extern
+> uses, which are warning-only and covered by a later task).
+
+The set of signature-occurring `Cap(X)` paths (`used_caps`,
+`typecheck.ml:5448-5495`) is collected from three declaration shapes:
+
+- **`DFn`** — every named parameter's declared type plus the return type
+  (`param_tys @ ret_tys`, `:5450-5456`), scanned via `cap_paths_in_surface_ty`.
+- **`DActor`** — every handler's declared parameter types (`:5483-5488`) —
+  actor message handlers can receive `Cap(X)` values as message arguments, and
+  those are held to the same signature standard as an ordinary function's
+  parameters.
+- **`DExtern`** — the block's own `ext_cap_ty` (`:5492-5493`; enforced fully
+  by Check 5, a later task, but the use is recorded here too so Check 2's
+  "declared but unused" check doesn't misfire against an extern-implied use).
+
+For each collected `(cap_path, span)`, Check 1 (`:5561-5587`) computes
+`covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs`
+and, if not covered (and the cap is not a *self-declared proof capability* —
+proof caps are a later task's subject), raises an error at the signature's
+span. The exact message (captured live, `--check` on a `Cap(IO.Network)`
+param with no `needs` anywhere):
+
+```
+`Cap(IO.Network)` used in module `Server` but `IO.Network` is not declared in `needs`.
+help: add `needs IO.Network` to the module body.
+```
+
+Subsumption means the covering `needs` need not be an exact match: declaring
+the **root** `needs IO` covers *every* descendant `Cap(X)` in the signature
+sense — `cap_subsumes "IO" "IO.Network"` is true because `"IO.Network"`'s
+ancestor chain (§2.8.2) includes `"IO"`. The same holds one tier down: `needs
+IO.Network` covers `Cap(IO.NetConnect)` (its direct child), without covering
+`Cap(IO.NetListen)` (`IO.NetConnect`'s sibling) — subsumption only travels
+*up* the tree, never sideways. Two siblings never cover each other regardless
+of tier: a module using both `Cap(IO.FileRead)` and `Cap(IO.FileWrite)` must
+declare **both** `needs IO.FileRead` and `needs IO.FileWrite` (or the shared
+ancestor `needs IO.FileSystem`/`needs IO`) — one sibling's `needs` leaves the
+other's `Cap(X)` uncovered, and Check 1 raises independently per used path
+(`used_caps` is walked with `List.iter`, one diagnostic per uncovered entry,
+not a single aggregate check).
+
+**Directionality is not symmetric**, and this is worth stating plainly because
+it is the opposite of what "narrower requirement, broader capability" might
+suggest: a module declaring the **narrow** `needs IO.Network` does **not**
+cover a signature using the **broad** `Cap(IO)` — `cap_subsumes "IO.Network"
+"IO"` is false (a child capability never subsumes its own parent). This
+combination also triggers **Check 3** (`:5652`, out of this subsection's
+scope in detail, deferred to a later task) — a HINT suggesting the function
+narrow its `Cap(IO)` root parameter to a specific sub-capability for
+least-privilege — emitted *in addition to* Check 1's ERROR, not instead of
+it; the HINT does not change the exit code.
+
+#### 2.8.4 Worked example: the compiler's own demo
+
+`examples/capabilities.march` is a runnable illustration of the same rule:
+`CapDemo` declares `needs IO` once at module level, then every IO-touching
+function (`greet : Cap(IO.Console) -> String -> Unit`, `simulate_fetch :
+Cap(IO.Network) -> String -> String`) takes its own narrower `Cap(X)`
+parameter — each covered by the single root `needs IO` via subsumption
+(§2.8.2), rather than one `needs` line per sub-capability. `cap_narrow(cap)`
+(a separate builtin, out of scope for this subsection — deferred to a later
+`§2.8` extension) attenuates the ambient `root_cap : Cap(IO)` down to each
+narrower type before it is threaded to `greet`/`simulate_fetch`, demonstrating
+that the least-privilege *pattern* (pass the narrowest cap a callee's
+signature actually declares) is a caller-side convention layered on top of
+Check 1's coarser "declared `needs` covers everything used" guarantee — Check
+1 does not by itself force a caller to narrow before passing a cap onward.
+
+#### 2.8.5 Corpus witnesses (Task 1 — signature enforcement + subsumption)
+
+Four new `accept/` programs (`specs/lang/types/accept/`, `t45`-`t48`) and
+three new `reject/` programs (`t36`-`t38`), each verified live against
+`--check`:
+
+- **`t45_cap_bare_covered`** — `Cap(IO.Console)` param in a module declaring
+  exactly `needs IO.Console`; `cap_subsumes IO.Console IO.Console` holds
+  reflexively. `--check` exit 0.
+- **`t46_cap_broad_needs_covers_narrow`** — `Cap(IO.Network)` param covered by
+  the **root** `needs IO`; the canonical subsumption shape (§2.8.3). `--check`
+  exit 0.
+- **`t47_cap_sibling_independence`** — `Cap(IO.FileRead)` and
+  `Cap(IO.FileWrite)` (siblings under `IO.FileSystem`, §2.8.1) each covered by
+  its *own* `needs` line; proves Check 1 walks each used `Cap(X)`
+  independently, with no cross-sibling subsumption. `--check` exit 0.
+- **`t48_cap_midtier_subsumption`** — a second, independent subsumption shape:
+  `Cap(IO.NetConnect)` covered by `needs IO.Network` (`IO.NetConnect`'s direct
+  parent), one tier down from `t46`'s root-covers-all case, proving
+  subsumption holds at every tier of the tree, not only from the root.
+  `--check` exit 0.
+- **`t36_cap_sig_uncovered`** — `Cap(IO.Network)` param, no `needs` declared
+  at all; `declared_needs = []` covers nothing. Pinned: `` is not declared in
+  `needs` ``.
+- **`t37_cap_narrow_does_not_cover_broad`** — module declares the narrow
+  `needs IO.Network`; the signature uses the root `Cap(IO)`. Directionality
+  (§2.8.3): a child never covers its parent. Also emits the Check 3 narrowing
+  HINT ahead of the ERROR (both present in the same `--check` output; the
+  pinned substring is the ERROR text). Pinned: `` `Cap(IO)` used in module
+  `Server` but `IO` is not declared in `needs` ``.
+- **`t38_cap_sibling_does_not_cover_sibling`** — module declares only `needs
+  IO.FileRead`; a second function's signature uses `Cap(IO.FileWrite)` (its
+  sibling). Companion to `t47`, which declares both siblings and accepts.
+  Pinned: `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is
+  not declared in `needs` ``.
+
+`check_types.sh`: **86/86 (48 accept, 38 reject)**, exit 0.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -3513,7 +3824,30 @@ wrong-state, a linear channel continuation used twice), plus one new
 `accept/` program (`t43_choose_offer_roundtrip`) for a full `choose`/`send`/
 `close` + `offer`/`recv`/`close` round-trip, run-witnessed printing `:ok` then
 `42`. `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0 — the
-corpus's current total (§3).
+corpus's total after Task 3 (see below for the capabilities-widening total
+that supersedes it).
+
+**Capabilities widening, Task 1 (2026-07-07) added:** §2.8, the FIRST
+capability/effect-system content in this document — the 18-entry IO
+permission hierarchy (`lib/caps/cap_lattice.ml:15-34`, one tree rooted at
+`IO`), `cap_subsumes`/`normalize` subsumption (`:50`/`:56`, aliased at
+`typecheck.ml:1103`), the `needs` module manifest (`DNeeds`,
+`ast.ml:159`), and **Check 1** (`typecheck.ml:5558-5587`): every `Cap(X)` in
+a function/actor/extern signature must be covered — via subsumption — by a
+declared `needs`, else ERROR. Filed a live scoping finding while verifying
+the corpus: only 10 of the 18 hierarchy entries are registered as valid
+`Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`); the
+other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`,
+`IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets
+but reject as `` Unknown module `IO` `` if written inside `Cap(...)` — the
+qualified-type-resolution fallback tries to load an actual `IO` module and
+finds no matching exported type. Four new `accept/` programs (`t45`–`t48`:
+bare-covered reflexive case, root-covers-child subsumption, sibling
+independence — two siblings each need their own `needs`, and a second
+mid-tier subsumption shape) and three new `reject/` programs (`t36`–`t38`:
+uncovered `Cap(X)`, narrow `needs` does not cover a broader `Cap` — directional
+asymmetry, and sibling does not cover sibling). `check_types.sh`: **86/86
+(48 accept, 38 reject)**, exit 0 — the corpus's current total (§3).
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
@@ -3550,11 +3884,21 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   acceptance criterion; this document's bidirectional HM judgment (§1) is the
   Level-1 substrate that Phase 3's refinement layer would extend, not
   something this pass attempts.
-- **Linearity/capabilities.** The capability lattice (`lib/caps/`) is named
+- **Linearity/capabilities — PARTIALLY LANDED (§2.8, capabilities widening
+  Task 1, 2026-07-07).** The capability lattice (`lib/caps/`) is named
   explicitly in the roadmap's Phase 3 scope (§4.5, "refinement/capability
-  soundness") — deferred here for the same reason as refinements.
-  Linear/uniqueness typing is not separately named in the roadmap and is
-  narrower still; grouped with capabilities as a Phase-3-or-later concern.
+  soundness"). §2.8 lands the first, foundational layer — the 18-entry IO
+  permission hierarchy, `cap_subsumes`/`normalize` subsumption, the `needs`
+  manifest, and Check 1 (signature `Cap(X)` must be covered by a declared
+  `needs`, else ERROR). Still deferred: transitive `use`/extern-implied caps
+  (Checks 4/1c/5), `cap_narrow`/`root_cap` threading, effect inference/
+  migrate_state (Check 8) and realtime exclusion (Check 7), proof-cap mint/
+  forge (Check 6), and the three *behavioral* module caps (`cap no_panic`/
+  `no_alloc`/`pure`/`deterministic`/`no_extern`) — each a later widening
+  task's subject. Linear/uniqueness typing beyond the session-channel
+  linearity already covered in §2.7.6/§2.7.8 is not separately named in the
+  roadmap and is narrower still; grouped with capabilities as a
+  Phase-3-or-later concern.
 - **Effects.** Named alongside refinements/capabilities in the roadmap's
   problem statement (§4.3: "bidirectional HM inference + refinements + the
   capability lattice + effects") as part of the ambitious claim set a full

@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t44 accept, t01–t35 reject)
+# Typing corpus index (t01–t48 accept, t01–t38 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -50,6 +50,20 @@ ordinary well-typed `--check` programs, each also run interpreted to confirm
 its printed value; `reject/t27` follows the usual pinned-substring reject
 convention.
 
+**Note (`accept/t45`–`t48`, `reject/t36`–`t38`):** Capabilities widening,
+Task 1 (2026-07-07) — the first `core-march-types.md` §2.8 material: the IO
+capability hierarchy (18 entries, `lib/caps/cap_lattice.ml:15-34`),
+`cap_subsumes`/`normalize`, the `needs` manifest, and **Check 1**
+(`typecheck.ml:5561`) — every `Cap(X)` in a function/actor/extern SIGNATURE
+must be covered by a declared `needs` via subsumption, else ERROR. Also files
+a live finding: only 10 of the 18 hierarchy entries are registered as valid
+`Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`) — the
+other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`,
+`IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets but
+cannot be written as a `Cap(X)` annotation today (`Unknown module \`IO\``),
+so this task's corpus draws only from the registered 10. See
+core-march-types.md §2.8.3.
+
 ## The `--check` accept/reject harness model
 
 Unlike the operational golden corpus (`specs/lang/golden/`, which runs each
@@ -74,7 +88,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 79/79 — 44 accept, 35
+Exit 0 iff every program behaves as declared (currently 86/86 — 48 accept, 38
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -117,6 +131,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t40`, `reject/t29` | Widening actors slice, Task 3 (2026-07-06) | actor MESSAGE-PAYLOAD typing + the affinity non-guarantee (`core-march-types.md` §2.6.4): a message ctor's payload IS checked via the ordinary `ECon` path (`infer_expr env msg`, `typecheck.ml:4179`) — `accept/t40` = `send(counter, Inc(3))` accepts, `reject/t29` = `send(counter, Inc("x"))` rejects `` expected `Int` but got `String`. ``; but message ACCEPTANCE by the target actor is NOT checked — `send` discards the target Pid's type (`:4178`) and the only send-side check is `check_sendable`'s `RingBuf` denylist (`:3331`/`:3335`), so a wrong-actor send typechecks (silently DROPPED interpreted, MISROUTED compiled — §4.1 finding 19, documented in prose, not corpus-encoded) |
 | `accept/t41`–`t42` | Session-types widening, Task 2 (2026-07-06) | `protocol` declaration + projection + duality + `Chan(Role,Proto)` typing (`core-march-types.md` §2.7): `session_ty` (`typecheck.ml:105–116`), `TChan of session_ty ref` (`:95`), `project_steps`/`project_protocol` (`:5870`/`:5952`), binary duality via `dual_session_ty` (`:5935`, check `:5972–5986`), MPST send/recv-pair consistency (documented TYPING-ONLY — compiled MPST segfaults, F3, filed by the operational widening task) — `accept/t41` is a binary `Echo` protocol + `Chan.new` + `Chan(Role,Echo)` annotations, run-witnessed printing `43`; `accept/t42` is a 3-role MPST `Relay` protocol + `MPST.new`, run-witnessed printing a confirmation string (declare-only, never sends, so unaffected by F3). Also files **F4** (§2.7.5, §4.1 finding 20): the MPST merge rule (`:5906–5919`) leaks into binary duality, wrongly rejecting a legal binary `choose` protocol whose two branches carry the same payload type — reproduced live both ways (not a corpus `reject/` program; it would codify the bug as intended) |
 | `reject/t30`–`t35`, `accept/t43` | Session-types widening, Task 3 (2026-07-06) | per-operation channel typing + advancement (`core-march-types.md` §2.7.8): the six `reject/` programs pin the live message for each session-state violation — send-at-wrong-state (`t30`), close-before-`End` (`t31`), invalid `choose` label (`t32`), wrong payload type (`t33`, the ordinary `check_expr` path, not a session-specific message), recv-at-wrong-state (`t34`), and a linear channel continuation used twice (`t35`, the generic linear-`let` tracker, not session-specific accounting). `accept/t43` is a full `choose`/`send`/`close` + `offer`/`recv`/`close` round-trip on a two-branch (`Int`/`String`) `Decision` protocol, run-witnessed printing `:ok` then `42`. Also files **F5** (§2.7.9, §4.1 finding 21): `Chan.offer` (`typecheck.ml:3614`) always returns the FIRST branch's continuation type regardless of which branch the peer actually chose at runtime — a documented conservative approximation that is a real (if narrow) soundness gap for protocols whose `offer` branches have DIFFERENT continuations |
+| `accept/t44` | Session-types fix-campaign (2026-07-07) | F4 FIX witness (§2.7.5, FIXED): a binary `Decision` protocol whose two `choose` branches carry the SAME payload type (`Int`/`Int`) now typechecks — the merge rule in `project_steps`'s `ProtoChoice` arm is gated on `multiparty`, so a 2-role protocol's non-chooser always projects to `SOffer{...}` instead of collapsing to a shared `Recv`, restoring binary duality |
+| `accept/t45`–`t48`, `reject/t36`–`t38` | Capabilities widening, Task 1 (2026-07-07) | IO capability subsumption + `Cap(X)` signature enforcement (§2.8): the 18-entry hierarchy (`lib/caps/cap_lattice.ml:15-34`), `cap_subsumes`/`normalize` (`:50`/`:56`), the `needs` manifest (`DNeeds`, `ast.ml:159`), and **Check 1** (`typecheck.ml:5561`) — every `Cap(X)` in a function/actor/extern signature must be covered by a declared `needs` via subsumption, else ERROR. Accept: bare-covered (`t45`), root-covers-child subsumption (`t46`), sibling independence — each of two siblings needs its own `needs` (`t47`), a second mid-tier subsumption shape (`t48`). Reject: uncovered `Cap(X)` (`t36`), narrow `needs` does not cover a broader `Cap` (`t37`), sibling does not cover sibling (`t38`). Also files a live scoping finding: only 10 of the 18 hierarchy entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`) — the other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`, `IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets but cannot be written as a `Cap(X)` annotation (`Unknown module \`IO\``) |
 
 ## `accept/` — must typecheck
 
@@ -166,6 +182,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t42_mpst_protocol_new` | **MPST (3-role) protocol projection + send/recv-pair consistency typing (§2.7.3–§2.7.4, session-types widening Task 2)** — `protocol Relay` (`Client`/`Server`/`Logger`, all `String` payloads); `project_protocol` sets `multiparty = true`, projects each role to role-annotated `SMSend`/`SMRecv` (`:115–116`) instead of binary `SSend`/`SRecv`, and verifies every `ProtoMsg` has a matching send/recv pair across its two endpoints (`:5987+`); `MPST.new(Relay)` destructures into a 3-tuple of role endpoints. Witnesses that MPST is TYPING-ONLY in this reference — the program deliberately never sends a message, so it is unaffected by the compiled MPST segfault (F3, filed by the operational widening task) | `--check` exit 0; run-witnessed: prints a confirmation string |
 | `t43_choose_offer_roundtrip` | **`choose`/`offer` full session round-trip (§2.7.8, session-types widening Task 3)** — `protocol Decision` (`choose by Client: ok -> Int \| err -> String`, two branches with DIFFERENT payload types so the F4 merge-rule pitfall does not fire); `Chan.choose(cc, :ok)` advances to the `:ok` branch's continuation (`typecheck.ml:3564`), followed by `Chan.send`/`Chan.close`; `Chan.offer(sc)` (`:3614`) returns `(Atom, Chan at FIRST branch's continuation)` — here the chooser always picks `:ok`, which IS the first branch, so the F5 approximation happens to be exact for this witness (see F5, §2.7.9, for why that isn't true in general) | `--check` exit 0; run-witnessed: prints `:ok` then `42` |
 | `t44_binary_choice_identical_branches` | **F4 FIX witness (fix-campaign, 2026-07-07) — a BINARY protocol with two IDENTICAL-payload-type `choose` branches now typechecks** — `protocol Decision` (`choose by Client: ok -> Int \| err -> Int`, both branches `Int`). Before the F4 fix this was WRONGLY rejected "not duals of each other": `project_steps`'s `ProtoChoice` merge rule collapsed the non-chooser (`Server`) projection from `SOffer{...}` to the shared `Recv(Int, End)`, breaking binary duality. The fix gates the merge on `multiparty` (`typecheck.ml`), so a 2-role protocol's non-chooser always projects to `SOffer{...}`. Flips the §2.7.5 finding-20 defect from a documented bug to a passing accept. See `core-march-types.md` §2.7.5 (FIXED) + `specs/todos.md` finding 20 (Done) | `--check` exit 0 |
+| `t45_cap_bare_covered` | **Check 1 (§2.8, capabilities widening Task 1) — the base case** — `Cap(IO.Console)` param, module declares exactly `needs IO.Console`; `cap_subsumes IO.Console IO.Console` holds trivially (a cap covers itself) | `--check` exit 0 |
+| `t46_cap_broad_needs_covers_narrow` | **Check 1 subsumption (§2.8) — root covers a child** — `Cap(IO.Network)` param covered by the ROOT `needs IO`; `cap_subsumes "IO" "IO.Network"` holds because `"IO.Network"`'s ancestor chain includes `"IO"` | `--check` exit 0 |
+| `t47_cap_sibling_independence` | **Check 1 (§2.8) — siblings checked independently** — `Cap(IO.FileRead)` and `Cap(IO.FileWrite)` (siblings under `IO.FileSystem`, neither subsumes the other) each covered by its OWN `needs` line; proves Check 1 walks each used `Cap(X)` separately, no cross-sibling subsumption | `--check` exit 0 |
+| `t48_cap_midtier_subsumption` | **Check 1 subsumption (§2.8) — a second, mid-tier shape** — `Cap(IO.NetConnect)` param covered by `needs IO.Network` (`IO.NetConnect`'s direct parent), one tier down from t46's root-covers-all shape; also documents the corpus-scoping finding that only 10/18 hierarchy entries are valid `Cap(X)` type arguments today (`builtin_types`, `typecheck.ml:1858-1861`) | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -206,8 +226,11 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t33_wrong_payload_type` | **channel-op session typing (§2.7.8, session-types widening Task 3) — wrong payload type** — `Chan.send(cc, "not an int")` where the protocol declares `Client -> Server : Int`; `Chan.send`'s arm `check_expr`s the payload against the session's declared `T` (`typecheck.ml:3479–3482`) via the ORDINARY constructor/type-mismatch path, not a session-specific message — proves payload SHAPE is checked, not just session STATE | `` expected `Int` but got `String` `` |
 | `t34_recv_at_wrong_state` | **channel-op session typing (§2.7.8, session-types widening Task 3) — recv-at-wrong-state** — `Chan.recv(cc)` called on the Client endpoint of `Echo` immediately after `Chan.new`, while `cc` is still at `Send(Int, Recv(Int, End))` (the first op must be a send); `Chan.recv`'s arm (`typecheck.ml:3509`) requires `SRecv` | `` Chan.recv: channel is at `Send(Int, Recv(Int, End))` but I expected `Recv(T, ...)`. `` |
 | `t35_linear_used_twice` | **channel-op linearity (§2.7.8, session-types widening Task 3) — linear channel continuation used twice** — `Chan.close(cc2)` called twice on the same `let`-bound continuation; channel endpoints are `TLin (Linear, TChan ...)` (§2.7.6), and double-use of a `let`-bound linear value is caught by the GENERIC linear tracker, not session-specific accounting (same diagnostic shape as any other linear value used twice) | `` The linear value `cc2` is used more than once here. `` |
+| `t36_cap_sig_uncovered` | **Check 1 (§2.8, capabilities widening Task 1) — the base rejection** — `Cap(IO.Network)` param, no `needs` declared at all, so `declared_needs = []` covers nothing | `` is not declared in `needs` `` |
+| `t37_cap_narrow_does_not_cover_broad` | **Check 1 (§2.8) — subsumption is directional, not symmetric** — module declares the NARROW `needs IO.Network`, signature uses the ROOT `Cap(IO)`; `cap_subsumes "IO.Network" "IO"` is false (a child never covers its own parent). Also emits a Check 3 narrowing HINT ahead of the ERROR | `` `Cap(IO)` used in module `Server` but `IO` is not declared in `needs` `` |
+| `t38_cap_sibling_does_not_cover_sibling` | **Check 1 (§2.8) — one more violation: siblings don't cover each other** — module declares only `needs IO.FileRead`; `save`'s signature uses `Cap(IO.FileWrite)` (a sibling under `IO.FileSystem`), uncovered. Companion to `accept/t47`, which declares both siblings and accepts | `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs` `` |
 
-**Result: 79 / 79 (44 accept, 35 reject).**
+**Result: 86 / 86 (48 accept, 38 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
