@@ -1,0 +1,10 @@
+-- The bug: this module is NOT the compile entry (it is auto-discovered via
+-- MARCH_LIB_PATH), so its `alias` used to be dropped by lower_mod_decls'
+-- catch-all, leaving `T.answer` -> `_T.answer` undefined at link time while
+-- the definition was emitted as `AcBase.Target.answer`.
+mod AcCaller do
+  alias AcBase.Target as T
+  fn go() do
+    T.answer()
+  end
+end

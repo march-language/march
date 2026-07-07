@@ -175,6 +175,21 @@ let ty_of_expr (env : env) (e : Ast.expr) : Tir.ty =
     documented per the plan's "accumulator/table-build semantics" rule. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
+(** Module-alias prefix table: maps a `alias Long.Path as Short` declaration's
+    short name to its full module path (e.g. "PubSub" -> "Bastion.PubSub").
+    Consulted as an ORDER-INDEPENDENT fallback in [resolve_use_alias]: a
+    reference `Short.member` is rewritten to `Long.Path.member` by prefix
+    substitution, WITHOUT requiring the target function to have been lowered
+    yet.  This is what the exact-name entries the DAlias handlers build by
+    scanning [!fns] cannot guarantee — those only cover aliases whose target
+    module happened to be lowered first, which holds for the entry file's
+    top-level aliases (processed after every other module) but NOT for an
+    `alias` declared inside a non-entry (auto-discovered / stdlib) module
+    body, whose target sibling may be lowered afterward.  Global, matching
+    [_use_aliases]; explicit-alias short names rarely collide (same hijack
+    caveat as [_use_aliases], mitigated by first-wins registration). *)
+let _module_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
+
 (** Snapshot of each module's [current_module_aliases] env field (keyed by its qualified
     prefix, e.g. "TestLivePostgres."), saved at the end of [lower_mod_decls].
     Test/setup bodies are lowered in a SEPARATE later pass ([collect_tests]) after
@@ -291,7 +306,22 @@ let resolve_use_alias (env : env) (name : string) : string =
            name qualified (String.concat ", " cands)
        | _ -> ());
     qualified
-  | None -> name
+  | None ->
+    (* Module-alias prefix rewrite (order-independent) — see [_module_aliases].
+       Only consulted after every exact-name lookup above has missed, so an
+       imported/sibling exact fn-alias always wins.  A dotted `Short.member`
+       whose leading segment is a registered module alias is rewritten to
+       `Long.Path.member`; this resolves an `alias` declared inside a
+       non-entry module body, which builds no exact [!fns]-scanned entry when
+       its target sibling is lowered after it (the undefined-symbol bug). *)
+    (match String.index_opt name '.' with
+     | None -> name
+     | Some i ->
+       let head = String.sub name 0 i in
+       match Hashtbl.find_opt !_module_aliases head with
+       | Some real_path ->
+         real_path ^ String.sub name i (String.length name - i)
+       | None -> name)
 
 (* ── Qualified module lowering (refs) ──────────────────────────── *)
 
