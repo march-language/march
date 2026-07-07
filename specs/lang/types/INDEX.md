@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t50 accept, t01–t39 reject)
+# Typing corpus index (t01–t53 accept, t01–t41 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -64,6 +64,23 @@ cannot be written as a `Cap(X)` annotation today (`Unknown module \`IO\``),
 so this task's corpus draws only from the registered 10. See
 core-march-types.md §2.8.3.
 
+**Note (`accept/t51`–`t53`, `reject/t40`–`t41`):** Capabilities widening,
+Task 3 (2026-07-07) — extends `core-march-types.md` §2.8 (§2.8.8-§2.8.9) with
+`cap_narrow`/`root_cap` capability threading (compile-time, runtime-erased),
+the effect-inference two projections (`cap_closures` vs `own_cap_closures`,
+`record_fn_caps`, `typecheck.ml:5435`), **Check 8** (`typecheck.ml:5798`,
+ERROR — a `*_migrate_state` fn must be IO-free, checked via the own-caps
+projection so a module's handler-level `needs` doesn't false-blame a pure
+migrate), and **Check 7** (`typecheck.ml:5755`, ERROR — a
+`Tagged(_, Realtime)` param cannot coexist with a `Cap(Alloc|IO|Panic)`
+param). Accept: root-to-sub-cap threading into a stricter callee (`t51`), a
+second threading shape narrowing `root_cap` twice to two sibling sub-caps in
+one function (`t52`), a pure `*_migrate_state` fn living alongside an `actor`
+in a `needs IO.Console` module — the caveat-mitigation witness (`t53`).
+Reject: a `*_migrate_state` fn that performs IO (`t40`, Check 8); a
+user-declared nullary `Realtime` type used in `Tagged(Int, Realtime)`
+alongside `Cap(IO)` (`t41`, Check 7).
+
 **Note (`accept/t49`–`t50`, `reject/t39`):** Capabilities widening, Task 2
 (2026-07-07) — extends `core-march-types.md` §2.8 (§2.8.6-§2.8.7) with
 transitive `use` coverage (**Check 4**, `typecheck.ml:5661`, ERROR — a
@@ -102,7 +119,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 89/89 — 50 accept, 39
+Exit 0 iff every program behaves as declared (currently 94/94 — 53 accept, 41
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -148,6 +165,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `accept/t44` | Session-types fix-campaign (2026-07-07) | F4 FIX witness (§2.7.5, FIXED): a binary `Decision` protocol whose two `choose` branches carry the SAME payload type (`Int`/`Int`) now typechecks — the merge rule in `project_steps`'s `ProtoChoice` arm is gated on `multiparty`, so a 2-role protocol's non-chooser always projects to `SOffer{...}` instead of collapsing to a shared `Recv`, restoring binary duality |
 | `accept/t45`–`t48`, `reject/t36`–`t38` | Capabilities widening, Task 1 (2026-07-07) | IO capability subsumption + `Cap(X)` signature enforcement (§2.8): the 18-entry hierarchy (`lib/caps/cap_lattice.ml:15-34`), `cap_subsumes`/`normalize` (`:50`/`:56`), the `needs` manifest (`DNeeds`, `ast.ml:159`), and **Check 1** (`typecheck.ml:5561`) — every `Cap(X)` in a function/actor/extern signature must be covered by a declared `needs` via subsumption, else ERROR. Accept: bare-covered (`t45`), root-covers-child subsumption (`t46`), sibling independence — each of two siblings needs its own `needs` (`t47`), a second mid-tier subsumption shape (`t48`). Reject: uncovered `Cap(X)` (`t36`), narrow `needs` does not cover a broader `Cap` (`t37`), sibling does not cover sibling (`t38`). Also files a live scoping finding: only 10 of the 18 hierarchy entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`) — the other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`, `IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets but cannot be written as a `Cap(X)` annotation (`Unknown module \`IO\``) |
 | `accept/t49`–`t50`, `reject/t39` | Capabilities widening, Task 2 (2026-07-07) | transitive `use` + extern-implied caps (§2.8.6): **Check 4** (`typecheck.ml:5661`) — every module a given module `use`s must have ITS OWN declared `needs` covered transitively, via `env.module_caps` and the same `cap_subsumes` subsumption, ERROR on violation; **Check 5** (`typecheck.ml:5684`) — an extern block's own declared `Cap(X)` must be covered by `needs`, ERROR; **Check 1c** (`typecheck.ml:5607`) — every extern block additionally implies `IO.Foreign` (+`.Blocking`), WARNING-only. Accept: an importer declaring the real stdlib module `Vault`'s (`needs IO.Mut`) transitive obligation (`t49`); a well-formed extern covered on both Check 5 and Check 1c (`t50`). Reject: companion to `t49` with the covering `needs` removed, pinning Check 4's ERROR (`t39`). Also states the honest three-tier enforcement reality (Checks 1/4/5 = ERROR; Checks 1b/1c = WARNING-only, `--check` exit 0), reconciling `specs/lang/capabilities.md`'s tutorial overclaim — filed as **F1** (open); also files **F6** (found during Task 1, filed now) — the 10-of-18 `Cap(X)`-argument registration gap |
+| `accept/t51`–`t53`, `reject/t40`–`t41` | Capabilities widening, Task 3 (2026-07-07) | `cap_narrow`/`root_cap` threading + effect inference + Check 8 + Check 7 (§2.8.8-§2.8.9): `root_cap : Cap(IO)` (`typecheck.ml:1457`, a value) and `cap_narrow : Cap(IO) -> Cap(a)` (`:1458`, POLYMORPHIC return — compile-time, runtime-erased); `record_fn_caps` (`:5435`) accumulates `cap_closures` (own + module-wide) and `own_cap_closures` (own only); **Check 8** (`:5798`) — a `*_migrate_state` fn must be IO-free, checked via the own-caps projection so a module's handler-level `needs` doesn't false-blame a pure migrate (the F-caveat mitigation); **Check 7** (`:5755`) — a `Tagged(_, Realtime)` param excludes `Cap(Alloc\|IO\|Panic)` params. Accept: narrow-and-thread-to-a-stricter-callee (`t51`), narrow `root_cap` twice to two sibling sub-caps in one fn (`t52`), a pure `*_migrate_state` fn beside a real `actor` in a `needs IO.Console` module (`t53`, the caveat-mitigation witness). Reject: a `*_migrate_state` fn calling `println` (`t40`, Check 8); a user-declared nullary `Realtime` type in `Tagged(Int, Realtime)` alongside `Cap(IO)` (`t41`, Check 7 — `Realtime` itself is not pre-registered in `builtin_types`, so a user must declare it before writing `Tagged(_, Realtime)` at all) |
 
 ## `accept/` — must typecheck
 
@@ -203,6 +221,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t48_cap_midtier_subsumption` | **Check 1 subsumption (§2.8) — a second, mid-tier shape** — `Cap(IO.NetConnect)` param covered by `needs IO.Network` (`IO.NetConnect`'s direct parent), one tier down from t46's root-covers-all shape; also documents the corpus-scoping finding that only 10/18 hierarchy entries are valid `Cap(X)` type arguments today (`builtin_types`, `typecheck.ml:1858-1861`) | `--check` exit 0 |
 | `t49_transitive_use_covered` | **Check 4 (§2.8.6, capabilities widening Task 2) — transitive `use` coverage** — `Main` declares `needs IO.Mut` and `use`s the real stdlib module `Vault` (`stdlib/vault.march:26`, `needs IO.Mut`); Check 4 (`typecheck.ml:5661`) looks up `Vault`'s declared caps in `env.module_caps` and confirms `Main`'s own `needs IO.Mut` covers it (reflexive subsumption) | `--check` exit 0 |
 | `t50_extern_cap_and_foreign_covered` | **Check 5 + Check 1c (§2.8.6, capabilities widening Task 2) — extern block, both obligations covered** — `Bindings` declares `needs IO.Foreign` and `needs IO.FileSystem`, then an `extern "libc" : Cap(IO.FileSystem) do ... end` block; Check 5 (`typecheck.ml:5684`, ERROR) confirms the extern's own declared `Cap(IO.FileSystem)` is covered, Check 1c (`typecheck.ml:5607`, WARNING) confirms the blanket `IO.Foreign` implication is covered — neither fires | `--check` exit 0 |
+| `t51_cap_narrow_thread` | **`cap_narrow`/`root_cap` threading (§2.8.8, capabilities widening Task 3) — narrow-then-thread-to-a-stricter-callee** — `boot(root : Cap(IO))` narrows its ambient `Cap(IO)` via `cap_narrow(root)` to `Cap(IO.Network)` and passes the narrowed value to `listen`, whose signature demands the stricter sub-capability; both `Cap(IO)` and `Cap(IO.Network)` are covered by the single module-level `needs IO` (Check 1 subsumption, §2.8.3) — `cap_narrow` changes the STATIC TYPE of the threaded value, not what `needs` must cover | `--check` exit 0 (plus the expected Check 3 narrowing HINT on `boot`'s own `Cap(IO)` param) |
+| `t52_cap_narrow_multi` | **`cap_narrow`/`root_cap` threading (§2.8.8) — a second shape: `root_cap` read directly, narrowed twice to two sibling sub-caps** — `main` (no `Cap(X)` parameter of its own) reads `root_cap` and calls `cap_narrow` twice, minting an independently-typed `Cap(IO.Console)` and `Cap(IO.FileRead)` token from the same root, each threaded to its own callee. Proves narrowing composes and that a plain `root_cap` read needs no ambient parameter | `--check` exit 0 (no diagnostics at all — `main`'s signature carries no `Cap(X)`, so Check 3's narrowing HINT does not fire here) |
+| `t53_migrate_pure_needs_io` | **Check 8 (§2.8.9, capabilities widening Task 3) — the caveat-mitigation ACCEPT witness** — `Counter` declares `needs IO.Console` (for its `actor CounterActor`'s `on Inc` handler, which calls `println`) and a SIBLING top-level `fn counter_migrate_state(old) do old end` (pure, no `actor` nesting — migrate-state fns are ordinary `DFn`s recognized purely by the `_migrate_state` name suffix, `typecheck.ml:5368-5378`). Check 8 consults `env.own_cap_closures` (own caps only, excluding `module_wide_caps`), so the module's `needs IO.Console` does NOT get folded into the migrate fn's own-caps closure — no false blame | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -247,8 +268,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t37_cap_narrow_does_not_cover_broad` | **Check 1 (§2.8) — subsumption is directional, not symmetric** — module declares the NARROW `needs IO.Network`, signature uses the ROOT `Cap(IO)`; `cap_subsumes "IO.Network" "IO"` is false (a child never covers its own parent). Also emits a Check 3 narrowing HINT ahead of the ERROR | `` `Cap(IO)` used in module `Server` but `IO` is not declared in `needs` `` |
 | `t38_cap_sibling_does_not_cover_sibling` | **Check 1 (§2.8) — one more violation: siblings don't cover each other** — module declares only `needs IO.FileRead`; `save`'s signature uses `Cap(IO.FileWrite)` (a sibling under `IO.FileSystem`), uncovered. Companion to `accept/t47`, which declares both siblings and accepts | `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs` `` |
 | `t39_transitive_use_missing_cap` | **Check 4 (§2.8.6, capabilities widening Task 2) — transitive `use` coverage, REJECT side** — companion to `accept/t49` with the covering `needs IO.Mut` line removed: `Main` `use`s `Vault` (`needs IO.Mut`) but declares no `needs` of its own, so `declared_needs = []` covers nothing; Check 4 raises an ERROR (not a warning) | `` module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs` `` |
+| `t40_migrate_state_does_io` | **Check 8 (§2.8.9, capabilities widening Task 3) — the REJECT side** — companion to `accept/t53` with the migrate fn's body changed to call `println` (`IO.Console` in `builtin_cap_table`); `counter_migrate_state`'s own capability closure is now non-empty, so Check 8 raises regardless of the module's `needs IO.Console` declaration | `` migrate_state must be IO-free `` |
+| `t41_realtime_excludes_cap_io` | **Check 7 (§2.8.9, capabilities widening Task 3) — realtime exclusion** — a user-declared nullary `type Realtime = Realtime` (needed because `Realtime` is not itself pre-registered in `builtin_types`) makes `Tagged(Int, Realtime)` resolve as a surface type; `step`'s signature combines it with `Cap(IO)`, one of the three excluded roots (`Alloc`/`IO`/`Panic`); Check 7 (`is_realtime_tagged`/`is_excluded_cap`, `typecheck.ml:5760-5765`) matches on the type NAME, so a user-declared `Realtime` trips it exactly like a built-in one would | `` takes `Tagged(_, Realtime)` but also takes `Cap(IO)` `` |
 
-**Result: 89 / 89 (50 accept, 39 reject).**
+**Result: 94 / 94 (53 accept, 41 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

@@ -134,10 +134,12 @@ if written inside `Cap(...)`; the corpus draws only from the 10 that work.
 Four new `accept/` programs (`t45`–`t48`: bare-covered, root-covers-child
 subsumption, sibling independence, a second mid-tier subsumption shape) and
 three new `reject/` programs (`t36`–`t38`: uncovered, narrow-does-not-cover-
-broad, sibling-does-not-cover-sibling). Deferred to later capabilities tasks:
-transitive `use`/extern-implied caps, `cap_narrow`/`root_cap` threading,
-effect inference, proof-cap mint/forge, and the behavioral module caps
-(`no_panic`/`no_alloc`/`pure`/`deterministic`/`no_extern`).
+broad, sibling-does-not-cover-sibling). Task 2 (§2.8.6-§2.8.7) added
+transitive `use`/extern-implied caps (Checks 4/1c/5); Task 3 (§2.8.8-§2.8.9)
+added `cap_narrow`/`root_cap` threading, the effect-inference two
+projections, migrate_state IO-freedom (Check 8), and realtime exclusion
+(Check 7). Still deferred: proof-cap mint/forge (Check 6) and the behavioral
+module caps (`no_panic`/`no_alloc`/`pure`/`deterministic`/`no_extern`).
 
 ## 1. The typing judgment
 
@@ -2775,9 +2777,10 @@ manifest, **Check 1** — every `Cap(X)` in a function/actor/extern
 **signature** must be covered by a declared `needs` — and (§2.8.6) the
 transitive/extern-implied checks (4, 1c, 5) plus the honest three-tier
 enforcement reality (signature/transitive/extern-cap = ERROR; direct-body-
-call/extern-implied = WARNING). Later widening tasks extend §2.8 further with
-`cap_narrow`/`root_cap` threading, effect inference, and proof-cap minting —
-those remain out of scope here.
+call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
+`cap_narrow`/`root_cap` threading, the effect-inference two projections, the
+`*_migrate_state` IO-free check (Check 8), and realtime exclusion (Check 7).
+Proof-cap minting/forging (Check 6) remains out of scope here.
 
 #### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
 
@@ -3006,13 +3009,12 @@ function (`greet : Cap(IO.Console) -> String -> Unit`, `simulate_fetch :
 Cap(IO.Network) -> String -> String`) takes its own narrower `Cap(X)`
 parameter — each covered by the single root `needs IO` via subsumption
 (§2.8.2), rather than one `needs` line per sub-capability. `cap_narrow(cap)`
-(a separate builtin, out of scope for this subsection — deferred to a later
-`§2.8` extension) attenuates the ambient `root_cap : Cap(IO)` down to each
-narrower type before it is threaded to `greet`/`simulate_fetch`, demonstrating
-that the least-privilege *pattern* (pass the narrowest cap a callee's
-signature actually declares) is a caller-side convention layered on top of
-Check 1's coarser "declared `needs` covers everything used" guarantee — Check
-1 does not by itself force a caller to narrow before passing a cap onward.
+(§2.8.8) attenuates the ambient `root_cap : Cap(IO)` down to each narrower
+type before it is threaded to `greet`/`simulate_fetch`, demonstrating that
+the least-privilege *pattern* (pass the narrowest cap a callee's signature
+actually declares) is a caller-side convention layered on top of Check 1's
+coarser "declared `needs` covers everything used" guarantee — Check 1 does
+not by itself force a caller to narrow before passing a cap onward.
 
 #### 2.8.5 Corpus witnesses (Task 1 — signature enforcement + subsumption)
 
@@ -3256,6 +3258,275 @@ Two new `accept/` programs (`t49`-`t50`) and one new `reject/` program
   not declared in `needs` ``.
 
 `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0.
+
+#### 2.8.8 `cap_narrow` / `root_cap` — compile-time capability threading
+
+Two builtins power the least-privilege *pattern* §2.8.4 already gestured at
+(`cap_narrow(cap)`, deferred there to "a later §2.8 extension" — this is that
+extension). Both are entries in the ordinary builtin-type table, not special
+forms:
+
+```ocaml
+("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
+("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+```
+
+(`typecheck.ml:1457-1458`.)
+
+- **`root_cap : Cap(IO)`** is a *value*, not a function call — the ambient
+  root IO capability, conventionally read once near a program's entry point
+  (`let cap = root_cap`, as `examples/capabilities.march`'s `main` does) and
+  threaded downward from there. There is no other way to conjure a `Cap(IO)`
+  value out of nothing; every other `Cap(X)` in a program must ultimately
+  originate from `root_cap` (directly or through a chain of `cap_narrow`
+  calls and ordinary parameter-passing) or from a proof-cap mint (a separate
+  mechanism, Check 6, out of this subsection's scope).
+- **`cap_narrow : Cap(IO) -> Cap(a)`** takes the root capability and returns a
+  value at a **polymorphic** result type `Cap(a)` — the type-application site
+  (a `let`/parameter annotation, or the callee's declared parameter type)
+  determines which concrete `Cap(X)` the call instantiates to. This
+  polymorphic return is a deliberate design choice for the *narrowing* use
+  case documented here — `cap_narrow(root)` called where a `Cap(IO.Network)`
+  is expected instantiates `a := IO.Network`; called where a
+  `Cap(IO.Console)` is expected, the very same call instantiates
+  `a := IO.Console` — but it is also the mechanism a proof-cap mint
+  (`cap_narrow(some_cap) : Cap(Db.Migrated)`) uses to satisfy Check 6's
+  return-type rule, which is the substance of the **F4** finding (§4.1) that
+  a future proof-cap-focused task is expected to address. This subsection
+  notes the polymorphic-return reality factually, as context for that
+  deferred finding — **no fix to F4 is attempted here.**
+
+Both builtins are **compile-time-only and runtime-erased**, exactly like
+every other `Cap(X)` value (§2.8's opening determination, §1 above in the
+document): they compile to `null` in LLVM IR and to `VUnit` in the
+interpreter. Threading a cap through `cap_narrow` and a chain of function
+calls has **zero runtime effect** — the entire mechanism exists so the
+*static* type of a value can express a narrower obligation than the value it
+came from, letting Check 1 (§2.8.3) hold each callee to exactly the
+capability its own signature declares, rather than forcing every callee in a
+call chain to accept the same broad `Cap(IO)` its caller happened to hold.
+`cap_narrow` does not change what any `needs` declaration must cover — Check
+1's subsumption rule (§2.8.2) already lets a single root `needs IO` cover
+every narrower `Cap(X)` a module's functions use; narrowing is a *caller-side
+typing convention* layered on top of that coarser guarantee, not a separate
+enforcement mechanism. A module can freely call `cap_narrow` any number of
+times against the same `root_cap`/`Cap(IO)` value — each call is independent
+and side-effect-free (both dynamically, since it is erased, and statically,
+since it does not consume or mutate the argument in any linear sense; `Cap(X)`
+is an ordinary unrestricted type).
+
+#### 2.8.9 Effect inference's two projections, and Checks 7/8
+
+**The two projections.** `check_module_needs` tracks, per fully-qualified
+function name, two related but distinct sets via `record_fn_caps`
+(`typecheck.ml:5435-5447`):
+
+```ocaml
+let module_wide_caps : string list =
+  (* Caps that apply to every function in this module regardless of which
+     function's own signature/body/extern-block produced them: declared
+     [needs] ... and caps propagated in from imported modules (Check 4). *)
+  declared_needs @ propagated
+in
+let record_fn_caps (fn_qname : string) (own_caps : string list) =
+  let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+  let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+  Hashtbl.replace env.cap_closures fn_qname merged;
+  (* Parallel own-caps-only projection ... WITHOUT folding in
+     [module_wide_caps]. This is what the migrate_state IO-free check
+     needs — the merged closure would falsely blame a pure migrate_state
+     for its module's handler-level [needs]. *)
+  let prior_own = Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures fn_qname) in
+  let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
+  Hashtbl.replace env.own_cap_closures fn_qname merged_own
+```
+
+(`typecheck.ml:5421-5447`, `module_wide_caps` at `:5421`, `record_fn_caps` at
+`:5435`.) `record_fn_caps` is called once per function from each of three
+sites that already walk the module's declarations for other reasons —
+`used_caps` (signature `Cap(X)` scan, §2.8.3), `body_cap_uses` (Check 1b's
+builtin body-scan, §2.8.6), and the extern-implied-caps computation (Check
+1c) — passing in only that site's own contribution (`own_caps`); the
+function's `merged`/`merged_own` accumulate across all three call sites
+(a comment at `:5419` notes the merge order across sites doesn't matter,
+since `normalize` — §2.8.2 — is idempotent and commutative over set union).
+
+- **`cap_closures` (the merged/exported projection)** — `module_wide_caps @
+  own_caps`, i.e. *every* declared `needs` and propagated `use`-cap of the
+  enclosing module, folded into *every* function's entry regardless of what
+  that individual function's own signature/body/extern touches. This is the
+  projection intended for the hot-deploy capability-manifest consumer (the
+  design comment's stated purpose, `typecheck.ml:5405-5407`) — a
+  conservative, whole-module-obligation view.
+- **`own_cap_closures` (the own-caps-only projection)** — `own_caps` alone,
+  with `module_wide_caps` deliberately excluded. A function that itself
+  touches no `Cap(X)` signature, no cap-table builtin call, and no extern
+  block gets an **empty** entry here, even inside a module that declares
+  `needs IO` for its other functions' sake.
+
+**Why the distinction matters — the F-caveat.** A source comment at
+`typecheck.ml:5442` ("would falsely blame a pure function") flags exactly the
+risk the second projection exists to avoid: if migrate_state IO-freedom
+(Check 8, below) were checked against the *merged* `cap_closures`, a
+completely pure `*_migrate_state` function living in a `needs IO` module (as
+`actor` modules with IO-touching handlers commonly are) would be wrongly
+rejected for capabilities it never itself uses — purely because its module
+declares them for its *other* functions. Using `own_cap_closures` instead
+means Check 8 only ever sees what the migrate function's own signature, body,
+or extern-ness actually contributes. This is verified sound *and* precise for
+this one consumer (§2.8.9's corpus witnesses below, and the survey's P8c/P8d
+probes): a pure migrate_state in a `needs IO` module accepts (`accept/t53`);
+a migrate_state that itself calls an IO builtin is still caught (`reject/t40`).
+The IO-cap *inference* itself is sound over the `builtin_cap_table` domain —
+it never fails to attribute a table-listed builtin to the function that
+calls it; where it can still be incomplete is orthogonal to this
+own-vs-merged distinction (an effect reached only through a `Cap(X)` never
+declared as a type argument, §2.8.3's F6, or a builtin outside
+`builtin_cap_table` entirely).
+
+**Check 8 — `*_migrate_state` must be IO-free (ERROR).** A hot-reload
+state-migration function is recognized purely by a **name-suffix
+convention** — any top-level `fn`/extern-fn whose name ends in
+`_migrate_state`, checked by a small local predicate kept byte-identical to
+its TIR counterpart (`is_migrate_fn_name`, `typecheck.ml:5368-5378`, "a local
+copy of `March_tir.Tir_names.is_migrate_fn_name`" — duplicated because
+`march_typecheck` cannot depend on `march_tir`, which itself depends on
+`march_typecheck`):
+
+```ocaml
+let is_migrate_fn_name (fn_name : string) : bool =
+  let sfx = "_migrate_state" in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+```
+
+A migrate_state function is an **ordinary module-level declaration**, a
+sibling to any `actor` block in the same module — not a handler nested
+*inside* `actor Name do ... end`. Check 8 (`typecheck.ml:5798-5834`) iterates
+the module's flat `decls` list matching `Ast.DFn`/`Ast.DExtern` directly; it
+never descends into `Ast.DActor`'s `actor_handlers`, so a migrate function
+can never be written as an `on ... do ... end` arm — only as a plain `fn`
+(or extern-fn) whose name happens to end in the magic suffix:
+
+```ocaml
+let check_migrate_fn_io_free (qname : string) (sp : Ast.span) =
+  let own_caps =
+    Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures qname)
+  in
+  if own_caps <> [] then
+    Err.error env.errors ~span:sp (* "migrate_state must be IO-free
+      `<name>` calls capabilities that need `<caps>`.
+      migrate_state runs during the hot-migration window, before user
+      messages.
+      hint: move side effects into a normal handler that runs after
+      migration completes." *)
+```
+
+(`typecheck.ml:5798-5810`, `check_migrate_fn_io_free`.) The rationale (state
+migration runs during the hot-reload window, ahead of any queued user
+messages, so IO there — which could race the very reload replacing the code
+that's running it — is unsafe by construction, not merely undeclared) is in
+the diagnostic text itself. Because the check consults `own_cap_closures`
+(§2.8.9 above), a pure migrate function is accepted even in a `needs IO`
+module (`accept/t53`); a migrate function whose own body calls an
+IO-attributed builtin (e.g. `println`, mapped to `IO.Console` in
+`builtin_cap_table`) is rejected regardless of the module's `needs`
+(`reject/t40`) — the exact live message, captured against `reject/t40`:
+
+```
+migrate_state must be IO-free
+`counter_migrate_state` calls capabilities that need `IO.Console`.
+migrate_state runs during the hot-migration window, before user messages.
+hint: move side effects into a normal handler that runs after migration completes.
+```
+
+**Check 7 — realtime exclusion (ERROR).** A function whose signature has a
+`Tagged(_, Realtime)` parameter cannot *also* have a parameter typed
+`Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` — those three capability roots are
+excluded from realtime contexts because allocation, IO, and panicking are all
+unbounded-latency operations a hard-realtime deadline cannot tolerate.
+`Tagged` is a built-in arity-2 type constructor (`("Tagged", 2)`,
+`typecheck.ml:1854`, "specialization tag constructor: phantom policy/width
+tags") used here with a phantom `Realtime` tag as its second argument; Check
+7's two predicates match structurally on the AST, not by any special
+built-in identity:
+
+```ocaml
+let is_realtime_tagged = function
+  | Ast.TyCon ({txt="Tagged";_}, [_; Ast.TyCon ({txt="Realtime";_}, [])]) -> true
+  | _ -> false
+in
+let is_excluded_cap = function
+  | Ast.TyCon ({txt="Cap";_}, [Ast.TyCon ({txt=("Alloc"|"IO"|"Panic");_}, [])]) -> true
+  | _ -> false
+in
+```
+
+(`typecheck.ml:5759-5766`.) For every `DFn` whose parameter list contains a
+`Tagged(_, Realtime)`-typed parameter, Check 7 (`typecheck.ml:5768-5793`)
+scans every OTHER parameter and raises if any is one of the three excluded
+`Cap(X)` roots, at ERROR severity:
+
+```
+function `step` takes `Tagged(_, Realtime)` but also takes `Cap(IO)`.
+Realtime functions cannot hold `Cap(IO)` — allocation, IO, and panic are excluded from realtime contexts.
+hint: remove `Cap(IO)`
+```
+
+(Captured live against `reject/t41`.) **Scoping note — `Realtime` is not
+itself pre-registered.** Unlike the `Alloc`/`Panic` roots (`builtin_types`,
+`typecheck.ml:1856`: `("Alloc", 0); ("Panic", 0)`, "future capability roots
+excluded from realtime contexts"), there is no `("Realtime", 0)` entry in
+`builtin_types` — so `Tagged(Int, Realtime)` does not resolve as a surface
+type until a program declares its own nullary type named `Realtime` (an
+ordinary `type Realtime = Realtime` one-constructor ADT suffices; the
+`is_realtime_tagged` pattern above matches the type *name* `"Realtime"`
+textually, not any distinguished built-in identity, so a user-declared
+`Realtime` trips Check 7 exactly as a pre-registered one would). Both
+`reject/t41` and any future accept witness for the *positive* case (a
+`Tagged(_, Realtime)` function with no excluded cap parameter) must include
+this one-line `type Realtime = Realtime` declaration to make the annotation
+resolve at all — this is a narrow, cosmetic corpus-construction detail, not a
+soundness or enforcement gap: Check 7 itself fires correctly once the type
+resolves.
+
+#### 2.8.10 Corpus witnesses (Task 3 — `cap_narrow`/threading + Check 8 + Check 7)
+
+Three new `accept/` programs (`t51`-`t53`) and two new `reject/` programs
+(`t40`-`t41`), each verified live against `--check`:
+
+- **`t51_cap_narrow_thread`** — `boot(root : Cap(IO))` calls
+  `cap_narrow(root)` to obtain a `Cap(IO.Network)` value, threaded to
+  `listen`'s stricter signature; both `Cap(IO)` (on `boot` itself) and
+  `Cap(IO.Network)` (on `listen`) are covered by the module's single `needs
+  IO` via subsumption. `--check` exit 0, plus the expected Check 3 narrowing
+  HINT on `boot`'s own root-cap parameter (the same incidental HINT
+  `reject/t37` also emits alongside its ERROR — here there is no ERROR to
+  accompany it, since `boot`'s `Cap(IO)` use is itself covered).
+- **`t52_cap_narrow_multi`** — a second threading shape: `main` (no `Cap(X)`
+  parameter of its own) reads `root_cap` directly and calls `cap_narrow`
+  twice against it, minting a `Cap(IO.Console)` and a `Cap(IO.FileRead)` in
+  the same function, each threaded to its own callee. `--check` exit 0 with
+  **no diagnostics at all** — proving narrowing composes freely and that
+  reading `root_cap` needs no ambient parameter.
+- **`t53_migrate_pure_needs_io`** — the Check 8 caveat-mitigation ACCEPT
+  witness, built against a genuine `actor`-bearing module (not just a bare
+  `mod`, strengthening the survey's P8c probe): `Counter` declares `needs
+  IO.Console` for its `actor CounterActor`'s `on Inc` handler (which calls
+  `println`), and a sibling top-level `fn counter_migrate_state(old) do old
+  end` — pure, and NOT nested inside the `actor` block. Check 8 consults
+  `own_cap_closures`, which excludes the module's `needs`, so the pure
+  migrate function is not blamed. `--check` exit 0.
+- **`t40_migrate_state_does_io`** — companion to `t53` with the migrate
+  function's body changed to call `println`; its own capability closure is
+  now `["IO.Console"]`, non-empty, so Check 8 raises regardless of the
+  module's `needs IO.Console`. Pinned: `` migrate_state must be IO-free ``.
+- **`t41_realtime_excludes_cap_io`** — a user-declared `type Realtime =
+  Realtime` (§2.8.9's scoping note) makes `Tagged(Int, Realtime)` resolve;
+  `step`'s signature combines it with `Cap(IO)`. Pinned: `` takes `Tagged(_,
+  Realtime)` but also takes `Cap(IO)` ``.
+
+`check_types.sh`: **94/94 (53 accept, 41 reject)**, exit 0.
 
 ## 3. Conformance corpus
 
@@ -4079,7 +4350,36 @@ the covering `needs IO.Mut` removed, pinning Check 4's ERROR). Also files
 entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`,
 `typecheck.ml:1858-1861`) — see §2.8.3's scoping note, unchanged by this
 task. `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0 — the
-corpus's current total (§3).
+corpus's total after Task 2 (see below for the Task 3 total that
+supersedes it).
+
+**Capabilities widening, Task 3 (2026-07-07) added:** §2.8.8-§2.8.9 —
+`cap_narrow`/`root_cap` compile-time capability threading
+(`root_cap : Cap(IO)` a value, `cap_narrow : Cap(IO) -> Cap(a)` a
+POLYMORPHIC-return builtin, both `typecheck.ml:1457-1458`, both
+runtime-erased); the effect-inference two projections `record_fn_caps`
+computes per function (`typecheck.ml:5421-5447`) — `cap_closures` (own +
+module-wide `needs`) and `own_cap_closures` (own only); **Check 8**
+(`typecheck.ml:5798-5834`): a `*_migrate_state`-suffixed fn (recognized by
+name alone, `is_migrate_fn_name`, `:5368-5378` — an ordinary module-level
+sibling declaration, never nested inside an `actor` block) must be IO-free,
+checked against `own_cap_closures` so a module's handler-level `needs`
+cannot false-blame a pure migrate function (the F-caveat comment at `:5442`,
+verified sound and precise for this consumer); **Check 7**
+(`typecheck.ml:5755-5793`): a `Tagged(_, Realtime)` parameter excludes
+`Cap(Alloc|IO|Panic)` parameters on the same signature. Files a scoping
+note: `Realtime` is not itself pre-registered in `builtin_types` (unlike
+`Alloc`/`Panic`), so a program must declare its own nullary `Realtime` type
+before `Tagged(_, Realtime)` resolves at all — cosmetic, not a soundness
+gap, since Check 7 fires correctly once the annotation resolves. Three new
+`accept/` programs (`t51`: narrow-and-thread to a stricter callee; `t52`:
+`root_cap` narrowed twice to two sibling sub-caps in one function; `t53`:
+a pure `*_migrate_state` fn beside a real `actor` in a `needs IO.Console`
+module, the caveat-mitigation witness) and two new `reject/` programs
+(`t40`: a migrate_state fn calling `println`, Check 8; `t41`: a
+user-declared `Tagged(Int, Realtime)` alongside `Cap(IO)`, Check 7).
+`check_types.sh`: **94/94 (53 accept, 41 reject)**, exit 0 — the corpus's
+current total (§3).
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
@@ -4117,15 +4417,15 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   Level-1 substrate that Phase 3's refinement layer would extend, not
   something this pass attempts.
 - **Linearity/capabilities — PARTIALLY LANDED (§2.8, capabilities widening
-  Task 1, 2026-07-07).** The capability lattice (`lib/caps/`) is named
+  Tasks 1-3, 2026-07-07).** The capability lattice (`lib/caps/`) is named
   explicitly in the roadmap's Phase 3 scope (§4.5, "refinement/capability
-  soundness"). §2.8 lands the first, foundational layer — the 18-entry IO
-  permission hierarchy, `cap_subsumes`/`normalize` subsumption, the `needs`
-  manifest, and Check 1 (signature `Cap(X)` must be covered by a declared
-  `needs`, else ERROR). Still deferred: transitive `use`/extern-implied caps
-  (Checks 4/1c/5), `cap_narrow`/`root_cap` threading, effect inference/
-  migrate_state (Check 8) and realtime exclusion (Check 7), proof-cap mint/
-  forge (Check 6), and the three *behavioral* module caps (`cap no_panic`/
+  soundness"). §2.8 lands the IO-cap spine: the 18-entry IO permission
+  hierarchy, `cap_subsumes`/`normalize` subsumption, the `needs` manifest and
+  Check 1 (Task 1); transitive `use`/extern-implied caps, Checks 4/1c/5
+  (Task 2); `cap_narrow`/`root_cap` compile-time threading, the
+  effect-inference two projections, migrate_state IO-freedom (Check 8), and
+  realtime exclusion (Check 7) (Task 3). Still deferred: proof-cap mint/forge
+  (Check 6) and the three *behavioral* module caps (`cap no_panic`/
   `no_alloc`/`pure`/`deterministic`/`no_extern`) — each a later widening
   task's subject. Linear/uniqueness typing beyond the session-channel
   linearity already covered in §2.7.6/§2.7.8 is not separately named in the

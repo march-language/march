@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: migrate_state must be IO-free
+-- Capabilities widening, Task 3 -- Check 8 (`typecheck.ml:5798-5834`), the
+-- REJECT side. Companion to accept/t53 with the migrate fn's body changed
+-- to actually perform IO (`println`, `IO.Console` in `builtin_cap_table`,
+-- `typecheck.ml:1000-1001`). `counter_migrate_state`'s OWN capability closure
+-- (`env.own_cap_closures`) is now non-empty (`["IO.Console"]`), so Check 8
+-- raises regardless of the module's `needs IO.Console` declaration --
+-- migrate_state fns run during the hot-migration window, ahead of any
+-- pending user messages, so IO there is unsafe by construction, not merely
+-- undeclared. See core-march-types.md §2.8.9.
+mod Counter do
+  needs IO.Console
+
+  actor CounterActor do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc(x : Int) do
+      { count: state.count + x }
+    end
+  end
+
+  fn counter_migrate_state(old : Int) : Int do
+    println("migrating")
+    old
+  end
+end
