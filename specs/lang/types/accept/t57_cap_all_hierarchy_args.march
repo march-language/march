@@ -1,0 +1,23 @@
+-- F6: all 18 capability-hierarchy roots must be valid `Cap(X)` type ARGUMENTS.
+-- `builtin_types` (`typecheck.ml`) previously registered only 10 of the 18
+-- IO.* hierarchy entries as 0-arity type names, so writing `Cap(IO.Random)`,
+-- `Cap(IO.Mut)`, `Cap(IO.Foreign)`, etc. — valid `needs` targets — was
+-- rejected with `Unknown module `IO``. The missing 8 (IO.Random, IO.Database,
+-- IO.Spawn, IO.Mut, IO.Telemetry, IO.Foreign, IO.Foreign.Blocking,
+-- IO.NetConnect.TLS) are now registered, matching the hierarchy in
+-- lib/caps/cap_lattice.ml. See core-march-types.md §2.8.11.
+mod HierApp do
+  needs IO.Random
+  needs IO.Mut
+  needs IO.Foreign
+  needs IO.Telemetry
+
+  fn use_caps(
+    _r : Cap(IO.Random),
+    _m : Cap(IO.Mut),
+    _f : Cap(IO.Foreign),
+    _t : Cap(IO.Telemetry)
+  ) : Int do
+    0
+  end
+end

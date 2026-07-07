@@ -1485,6 +1485,8 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 3: Epoch-based capability builtins *)
     ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
     ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
+    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
@@ -1867,11 +1869,14 @@ let builtin_types : (string * int) list =
     ("Tagged", 2);
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
-    (* Capability token types — used as arguments to Cap(X) *)
+    (* Capability token types — used as arguments to Cap(X).
+       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
-    ("IO.Clock",      0);
+    ("IO.Clock",      0); ("IO.Random",     0); ("IO.Database",   0);
+    ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
+    ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 

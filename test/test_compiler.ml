@@ -4251,6 +4251,80 @@ let test_cap_deterministic_arithmetic_ok () =
   end|} in
   Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
 
+(* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
+   typecheck registration + finding 17 (derive unknown type) ──────────────── *)
+
+(* F6: all 18 capability-hierarchy roots are valid `Cap(X)` type arguments.
+   The 8 previously-unregistered ones (IO.Random, IO.Mut, IO.Foreign,
+   IO.Telemetry, …) were rejected `Unknown module IO` as a type argument even
+   though they were valid `needs` targets. RED pre-fix (Unknown module IO
+   error), GREEN after registering them in `builtin_types`. *)
+let test_cap_hierarchy_args_ok () =
+  let ctx = typecheck {|mod HierApp do
+    needs IO.Random
+    needs IO.Mut
+    needs IO.Foreign
+    needs IO.Telemetry
+    fn use_caps(
+      _r : Cap(IO.Random),
+      _m : Cap(IO.Mut),
+      _f : Cap(IO.Foreign),
+      _t : Cap(IO.Telemetry)
+    ) : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error"
+    false (has_errors ctx)
+
+(* A previously-unregistered leaf path with a dot in its own name. *)
+let test_cap_hierarchy_tls_arg_ok () =
+  let ctx = typecheck {|mod TlsApp do
+    needs IO.NetConnect.TLS
+    fn connect(_c : Cap(IO.NetConnect.TLS)) : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "Cap(IO.NetConnect.TLS) arg: no error" false (has_errors ctx)
+
+(* revoke_cap / is_cap_valid are now typecheck-registered builtins. A surface
+   program obtaining a Cap via get_cap and calling both must typecheck. RED
+   pre-fix (`I cannot find revoke_cap`), GREEN after registration. *)
+let test_revoke_cap_typechecks () =
+  let ctx = typecheck {|mod CapPlane do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+    fn check() : Bool do
+      let p = spawn(Counter)
+      match get_cap(p) do
+        Some(cap) ->
+          let _ = revoke_cap(cap)
+          is_cap_valid(cap)
+        None -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "revoke_cap/is_cap_valid: no error" false (has_errors ctx)
+
+(* finding 17: `derive X for UnknownType` now ERRORs (was a silent no-op).
+   The error is emitted at DESUGAR time, so this uses `desugar_has_errors`
+   (the plain `typecheck` helper discards desugar-phase errors). *)
+let test_derive_unknown_type_error () =
+  Alcotest.(check bool) "derive for unknown type: error" true
+    (desugar_has_errors {|mod Main do
+      derive Show for NoSuchType
+      fn main() : Int do 0 end
+    end|})
+
+(* Guard: `derive` for a REAL, declared type still expands cleanly (no error) —
+   the finding-17 fix must not newly-reject legitimate derives. *)
+let test_derive_known_type_ok () =
+  Alcotest.(check bool) "derive for declared type: no error" false
+    (desugar_has_errors {|mod Main do
+      type Color = Red | Green | Blue
+      derive Show for Color
+      fn main() : Int do 0 end
+    end|})
+
 (* ── cap no_alloc tests ─────────────────────────────────────────────────── *)
 
 (* Helper: run typecheck + no_alloc pass together. *)
@@ -6604,6 +6678,13 @@ let compiler_suites =
           Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
           Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+        ] );
+      ( "fix_batch_regressions", [
+          Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;
+          Alcotest.test_case "Cap(IO.NetConnect.TLS) arg: no error"     `Quick test_cap_hierarchy_tls_arg_ok;
+          Alcotest.test_case "revoke_cap/is_cap_valid: no error"        `Quick test_revoke_cap_typechecks;
+          Alcotest.test_case "derive for unknown type: error"           `Quick test_derive_unknown_type_error;
+          Alcotest.test_case "derive for declared type: no error"       `Quick test_derive_known_type_ok;
         ] );
       ( "cap_no_alloc", [
           Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
