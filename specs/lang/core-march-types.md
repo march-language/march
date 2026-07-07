@@ -3500,8 +3500,11 @@ Three new `accept/` programs (`t51`-`t53`) and two new `reject/` programs
   `listen`'s stricter signature; both `Cap(IO)` (on `boot` itself) and
   `Cap(IO.Network)` (on `listen`) are covered by the module's single `needs
   IO` via subsumption. `--check` exit 0, confirmed stable across 40+ repeated
-  live runs of the byte-identical binary and input. **F7 (new finding, live-
-  observed, not fixed here):** the incidental Check 3 narrowing HINT this
+  live runs of the byte-identical binary and input. **Finding — the flaky
+  narrowing HINT (capabilities, live-observed, not fixed here; filed in
+  `specs/todos.md`; NOT a §4.1 numbered entry, and distinct from the sessions
+  linearity "F7" cross-referenced earlier in this doc):** the incidental Check
+  3 narrowing HINT this
   program's `boot(root : Cap(IO))` parameter would be expected to also emit
   (the same HINT `reject/t37` emits alongside its ERROR, deterministically,
   100% of 20 repeated runs) is instead **flaky** on this two-function,
