@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: tuple construction allocates in a `cap no_alloc` module
+-- Capabilities widening, Task 4 -- `cap no_alloc` (`lib/refinecheck/no_alloc.ml`),
+-- the REJECT side: a non-empty `ETuple` inside a `cap no_alloc` module's
+-- function body. `check_expr`'s `ETuple` arm (`no_alloc.ml:20-24`) special-
+-- cases the EMPTY tuple `()` as non-allocating (unit carries no heap cell)
+-- but raises on any non-empty tuple literal -- `make_pair`'s `(a, b)`
+-- return expression allocates a 2-tuple, so `--check` exits 1 with `` tuple
+-- construction allocates in a `cap no_alloc` module. ``. See
+-- core-march-types.md §2.8.11.
+mod NoAllocPair do
+  cap no_alloc
+
+  fn make_pair(a : Int, b : Int) : (Int, Int) do
+    (a, b)
+  end
+end

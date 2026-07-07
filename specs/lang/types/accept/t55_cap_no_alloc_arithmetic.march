@@ -1,0 +1,31 @@
+-- Capabilities widening, Task 4 -- `cap no_alloc` (`lib/refinecheck/no_alloc.ml`),
+-- the ACCEPT side: a module whose function bodies never construct a
+-- non-empty tuple/record/constructor application or a lambda. `check_decls`
+-- (`no_alloc.ml:72-83`) scans every `DFn` in a module carrying `cap no_alloc`
+-- (detected via `DOpts (opts, _) when List.mem "no_alloc" opts`, `:74-76` --
+-- note this is a SEPARATE per-module `DOpts` scan from `typecheck.ml`'s own
+-- `no_panic_mod`/`pure_mod`/`no_extern_mod`/`deterministic_mod` flags, since
+-- `no_alloc` has no corresponding `env` field there); `check_expr`
+-- (`:17-65`) recurses into every sub-expression of if/match/let/blocks
+-- (`:38-64`) looking for `ETuple(non-empty)`, `ERecord`, `ECon(non-empty
+-- args)`, or `ELam` (`:20-37`). `max3`'s nested `if`/`else` and `abs_diff`'s
+-- `let` + arithmetic negation touch none of those four allocating shapes --
+-- only `Int` comparisons, subtraction, and (in `max3`) a bare parameter
+-- return -- so `--check` exits 0 with no diagnostic. See
+-- core-march-types.md §2.8.11.
+mod NoAllocMath do
+  cap no_alloc
+
+  fn max3(a : Int, b : Int, c : Int) : Int do
+    if a > b do
+      if a > c do a else c end
+    else
+      if b > c do b else c end
+    end
+  end
+
+  fn abs_diff(a : Int, b : Int) : Int do
+    let d = a - b
+    if d > 0 do d else 0 - d end
+  end
+end

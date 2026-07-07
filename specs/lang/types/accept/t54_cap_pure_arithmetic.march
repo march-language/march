@@ -1,0 +1,31 @@
+-- Capabilities widening, Task 4 -- `cap pure` (`check_pure_module`,
+-- `typecheck.ml:6208-6224`), the ACCEPT side: a module whose every function
+-- body is genuinely free of side effects. `check_pure_module` walks each
+-- `DFn`'s clauses via the same `calls_in_expr` call-collector `cap no_panic`
+-- uses (`typecheck.ml:6085-6114`) and flags any call whose callee name is in
+-- the hardcoded `pure_banned` set (`typecheck.ml:6197-6203`: `spawn`, `send`,
+-- `print(ln)`, `eprint(ln)`, `read_line`, `exit`, `random_*`, `uuid_v4`,
+-- `now_ms`, `sleep_ms`, `vault_*`, `*_file`). `add`/`scale` call only each
+-- other and the `+`/`*` operators -- none of which appear in `pure_banned`
+-- (arithmetic operators are not calls `calls_in_expr` even collects) -- so
+-- no diagnostic fires at all. This witness is deliberately chosen to remain
+-- valid across the F2 fix (Task 5 of this slice, which rebuilds
+-- `pure_banned` from `builtin_cap_table`): plain integer arithmetic and an
+-- internal function call are not, and will never become, members of any
+-- effectful-builtin set. Contrast `specs/todos.md`'s filed F2: a `cap pure`
+-- module calling the REAL effectful builtin `file_write` (absent from
+-- today's stale `pure_banned` list) currently, incorrectly, also accepts --
+-- this program's purity is genuine, not an artifact of the same gap. See
+-- core-march-types.md §2.8.11.
+mod PureMath do
+  cap pure
+
+  fn add(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  fn scale(a : Int, factor : Int) : Int do
+    let doubled = add(a, a)
+    doubled * factor
+  end
+end
