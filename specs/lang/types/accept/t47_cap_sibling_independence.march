@@ -1,0 +1,25 @@
+-- Capabilities widening, Task 1 -- sibling caps are checked INDEPENDENTLY.
+-- `IO.FileRead` and `IO.FileWrite` are siblings under `IO.FileSystem`
+-- (`cap_lattice.ml:18-20`: both have parent `Some "IO.FileSystem"`, neither is
+-- an ancestor of the other). Check 1 (`typecheck.ml:5561`) walks EACH used
+-- Cap(X) separately against the full `declared_needs` list — there is no
+-- cross-sibling subsumption, so a module using both `Cap(IO.FileRead)` and
+-- `Cap(IO.FileWrite)` in different signatures must declare BOTH `needs`
+-- lines; declaring only one would leave the other's `Cap` uncovered (see
+-- reject/t38 for that failure mode with a narrower single-sibling example).
+-- See core-march-types.md §2.8.
+mod Store do
+  needs IO.FileRead
+  needs IO.FileWrite
+
+  fn load(cap : Cap(IO.FileRead), path : String) : String do
+    let _ = cap
+    path
+  end
+
+  fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
+    let _ = cap
+    let _ = data
+    path
+  end
+end

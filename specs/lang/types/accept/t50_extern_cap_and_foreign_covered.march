@@ -1,0 +1,25 @@
+-- Capabilities widening, Task 2 -- Check 5 (extern `Cap(X)` must be in
+-- `needs`, ERROR) AND Check 1c (extern block implies `IO.Foreign`, WARNING),
+-- both satisfied. The `extern "libc" : Cap(IO.FileSystem) do ... end` block
+-- (`ext_cap_ty`, `ast.ml:339`) names TWO capability obligations at once:
+-- Check 5 (`typecheck.ml:5684-5701`) requires the extern's own declared
+-- `Cap(IO.FileSystem)` to be covered by `needs` -- an ERROR if missing, same
+-- severity as Check 1/4, NOT a warning; Check 1c (`typecheck.ml:5607-5620`)
+-- separately requires `needs IO.Foreign` (every extern block implies foreign-
+-- function-interface use) -- a WARNING if missing (contrast with Check 5's
+-- ERROR for the SAME extern block: two different obligations, two different
+-- severities, on one declaration). This program declares both `needs
+-- IO.Foreign` and `needs IO.FileSystem`, so neither fires. `IO.FileSystem` is
+-- one of the 10 hierarchy entries registered as a valid `Cap(X)` type
+-- argument today (F6, §2.8.3) -- `IO.Foreign` itself is a valid `needs`
+-- target but NOT a valid `Cap(X)` argument, which is why this extern's
+-- `ext_cap_ty` names `IO.FileSystem`, not `IO.Foreign`. See
+-- core-march-types.md §2.8.6.
+mod Bindings do
+  needs IO.Foreign
+  needs IO.FileSystem
+
+  extern "libc" : Cap(IO.FileSystem) do
+    fn c_read(fd : Int, buf : String, n : Int) : Int
+  end
+end

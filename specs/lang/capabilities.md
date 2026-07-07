@@ -25,11 +25,14 @@ That invisibility causes three recurring problems:
 
 **Audit blind spots.** Answering "which modules talk to the network?" in a large codebase means grepping and hoping — unless the compiler tracks it.
 
-March's capability system addresses all three. Effects appear in the type, the compiler traces them transitively through the call graph, and the *absence* of a capability declaration is a machine-verified guarantee of purity:
+March's capability system addresses all three. Effects appear in the type, and the compiler traces them through the call graph — with one honesty caveat worth stating up front: the *absence* of a capability declaration is a machine-verified, build-breaking guarantee **wherever `Cap(X)` flows through a signature** (a function/actor/extern parameter, or a transitive `use` of another module that requires one) — that surface is enforced as a hard error. A module that calls an IO builtin directly in a function *body*, without ever threading a `Cap(X)` through any signature, is instead flagged with a warning-level hint: informative, but `--check` still exits 0. See "What the compiler tells you," below, for both sides of that line, live-verified.
 
 ```march
 mod Price do
-  -- No `needs`. The compiler verifies this module is completely pure.
+  -- No `needs`, and every parameter here is an ordinary value — no `Cap(X)`
+  -- anywhere in the signature. This module cannot be forced to declare a
+  -- capability it doesn't have, and calling into it can never trigger a
+  -- signature-level cap error.
   fn compute(base : Float, discount : Float) : Float do
     base * (1.0 - discount)
   end
@@ -66,7 +69,7 @@ mod Server do
 end
 ```
 
-The compiler enforces this transitively. If your module calls `Server.listen`, you must also declare `needs IO.Network` — or the build fails with a clear message telling you which call requires which cap.
+The compiler enforces this transitively **when the capability flows through a signature** — Check 4: `Server.listen` takes `Cap(IO.Network)` as a parameter, so any module that `use`s `Server` and calls `listen` must itself declare `needs IO.Network` (directly or via a broader ancestor, e.g. `needs IO`), or the build fails with a clear message telling you which import requires which cap (verified live: a `Caller` module `use`ing `Server` without `needs IO.Network` gets `` module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. ``, exit 1). This ERROR-level guarantee is the signature/`use`/extern surface (Checks 1, 4, and 5) — see "What the compiler tells you," below, for the separate, weaker case where a module reaches for an IO builtin directly in a function body without ever putting `Cap(X)` in a signature.
 
 ### Capability hierarchy
 
@@ -132,18 +135,34 @@ Use the **narrowest capability that accurately describes what the code actually 
 
 ### What the compiler tells you
 
-When you call something effectful without declaring the matching cap, the compiler is specific:
+There are two severities, and which one you get depends on *where* the uncovered capability shows up — this honest distinction matters, so it's stated explicitly rather than glossed over.
+
+**Signature, transitive `use`, or `extern` — a build-breaking ERROR (`--check` exits 1).** If `Cap(X)` appears in a function/actor/extern parameter, or you `use` a module that itself needs a capability you haven't declared, there is no way to ship without fixing it:
 
 ```
-Warning: Config.load uses IO.FileRead but mod App does not declare `needs IO.FileRead`.
-hint: add `needs IO.FileRead` to the module body.
+$ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own
+-- ERROR --
+module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
+help: add `needs IO.Network` to the module body.
+$ echo $?
+1
 ```
 
-There are no false positives. Follow the hint, build again. The compiler traces the full call graph so it catches transitive effects too.
+**A direct body call to an IO builtin, with no `Cap(X)` anywhere in a signature — a WARNING (`--check` exits 0).** The compiler still tells you exactly what's missing and how to fix it — this is genuinely useful, actionable feedback — but it does not fail the build:
+
+```
+$ march --check reader.march   # fn slurp(path) : Result(String, String) do file_read(path) end — no needs
+-- HINT --    call to `file_read` requires `needs IO.FileRead` — add `needs IO.FileRead` to module `Reader`
+-- WARNING -- function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
+$ echo $?
+0
+```
+
+Follow the hint either way — it's always correct, and cleaning up the warning keeps a module's `needs` list an accurate account of what it does. But **don't rely on the warning to block a merge or a release**: it won't. If you need "this module absolutely cannot read files" as a hard, CI-enforced guarantee, thread `Cap(IO.FileRead)` through the relevant signatures so the violation lands on the ERROR side of this line, not the WARNING side.
 
 ### When *not* to use IO caps
 
-**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is itself a machine-verified guarantee.
+**Pure functions need nothing.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface** — the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). A module with no `needs` that calls IO builtins purely in function bodies will typecheck (`--check` exits 0) with only advisory warnings, not a rejection — see above.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels "less precise." Accurate beats narrow-but-wrong.
 
@@ -235,9 +254,9 @@ end
 
 ---
 
-## Behavioral module caps — `cap no_panic` and `cap no_alloc`
+## Behavioral module caps — `cap no_panic`, `cap no_alloc`, `cap no_extern`, `cap pure`, `cap deterministic`
 
-Beyond IO permission caps and proof caps, March has two *behavioral* capability declarations that trigger static analysis passes rather than type-system enforcement. They live in the module body alongside `needs` declarations.
+Beyond IO permission caps and proof caps, March has five *behavioral* capability declarations that trigger static analysis passes rather than IO-permission accounting. They share only the `cap` keyword with `needs`/`Cap(X)` — a module can declare `cap no_panic` and separately declare `needs IO.Network`, and the two mechanisms never interact. Each lives as a bare `cap <name>` statement in the module body.
 
 ### `cap no_panic` — guaranteed panic-free
 
@@ -251,13 +270,14 @@ mod SafeMath do
 end
 ```
 
-A module with `cap no_panic` must not contain any expression that can panic at runtime. The compiler enforces this with two sub-checks:
+A module with `cap no_panic` must not contain any expression that can panic at runtime. The compiler enforces this with three sub-checks:
 
-1. **Panic-surface ban** — `refine_check.ml` flags calls to functions that can panic (`assert`, `error`, etc.) when reachable without a proof of non-panic.
-2. **Division safety** — `division_safety.ml` proves every integer divisor is non-zero via the Z3 SMT solver. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
+1. **Panic-surface ban** (`check_no_panic_module`, `lib/typecheck/typecheck.ml`) — bans direct and *transitive* calls to a fixed panic surface: explicit `panic`/`todo`/`unreachable`, the prelude partial functions (`unwrap`, `expect`, `head`, `tail`, `last`), and dotted stdlib partials (`List.nth`, `Option.unwrap`, `Result.unwrap`, `Array.get`, …). Transitive means a local helper that calls one of these makes every local caller of that helper panicky too, computed as a fixpoint over the module's own functions.
+2. **Division safety** (`lib/refinecheck/division_safety.ml`) proves every integer divisor is non-zero via the Z3 SMT solver — a separate pass from (1), gated on the same `cap no_panic` flag. Both literal divisors (`a / 0` → immediate error) and variable divisors are handled:
    - Variable with an Int refinement `{v | pred}`: Z3 discharges `pred ⊢ v ≠ 0`; fast syntactic short-circuit for common patterns (`v > 0`, `v >= 1`, `v != 0`, `v < 0`).
    - Let-bound variable: Z3 discharges `var = rhs ⊢ var ≠ 0` with param assumptions injected.
    - No refinement or unsupported expression: conservative error.
+3. **Non-exhaustive `match` ban** — a `cap no_panic` module containing a `match` that does not cover every constructor is now (as of this widening slice's F3 fix) also an ERROR, not just the ordinary non-blocking exhaustiveness warning every other module gets: an uncaught pattern is a runtime panic ("no matching clause"), and `cap no_panic` exists precisely to rule that class of failure out. The fix wires the exhaustiveness checker's own verdict into `check_no_panic_module`, so a plain (non-`cap no_panic`) module's non-exhaustive match is untouched — still a warning, still `--check` exit 0.
 
 When Z3 is absent, `cap no_panic` is still conservatively enforced — `Unverified` outcomes are treated as errors.
 
@@ -288,15 +308,77 @@ Nullary constructors (`None`, `True`, `False`, custom zero-arg tags) and unit `(
 
 The check recurses into sub-expressions inside `if`, `match`, `let`, blocks, etc.
 
-### Choosing between the two
+### `cap no_extern` — no foreign calls
+
+```march
+mod NoFFIService do
+  cap no_extern
+  needs IO.Network
+
+  fn ping(_cap : Cap(IO.Network), host : String) : Int do
+    string_length(host)
+  end
+end
+```
+
+A module with `cap no_extern` may not contain an `extern` block and may not declare `needs IO.Foreign` — either one is an immediate error. Useful for a module that must stay pure C-free code, e.g. because it needs to run somewhere `extern`'s FFI trust boundary isn't available.
+
+### `cap pure` — no side effects at all
+
+```march
+mod PureMath do
+  cap pure
+
+  fn add(a : Int, b : Int) : Int do
+    a + b
+  end
+end
+```
+
+A module with `cap pure` bans every call to a builtin that performs any side effect — file IO, network IO, spawning, sending, vault access, console output, randomness, the clock — as well as `spawn`/`send`/`exit`. The banned set is derived from the same authoritative builtin-to-capability table (`builtin_cap_table`) the ordinary IO-cap body-scan check consults, so it stays in sync with the real builtin surface — a module declaring `cap pure` and calling `file_write` is rejected:
+
+```
+$ march --check leaky_pure.march   # cap pure; fn write(...) : Result(Unit, String) do file_write(path, contents) end
+-- ERROR -- `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+$ echo $?
+1
+```
+
+### `cap deterministic` — no clock, no randomness
+
+```march
+mod DeterministicSim do
+  cap deterministic
+
+  fn checksum(bytes : String) : Int do
+    string_length(bytes)
+  end
+end
+```
+
+`cap deterministic` is **strictly weaker than `cap pure`**: it bans only the two nondeterminism sources — wall-clock/monotonic-clock reads and random-number generation — so a `cap deterministic` module may still perform ordinary IO such as `file_read`, as long as it never touches the clock or an RNG:
+
+```
+$ march --check clock_leak.march   # cap deterministic; calls unix_time_ms(())
+-- ERROR -- `now` in `mod DetLeak` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic.
+$ echo $?
+1
+```
+
+**A fix landed in this reference's widening slice:** both `cap pure`'s and `cap deterministic`'s banned-builtin sets used to be hand-maintained name lists that referenced builtins spelled wrong or that never existed (e.g. `write_file`, `random_int`, `now_ms`) while missing the real ones (`file_write`, `random_bytes`, `unix_time_ms`) — so `cap pure`/`cap deterministic` silently failed to catch the most common effectful calls. Both sets are now derived from the compiler's single authoritative effect map, closing that gap; the fix does not change either cap's intended meaning, only which calls it actually catches.
+
+### Choosing among the five
 
 | I want to… | Use |
 |------------|-----|
-| Prove no integer division can panic | `cap no_panic` + Int refinements on divisor params |
+| Prove no integer division can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
 | Guarantee safe use in a realtime audio callback | `cap no_alloc` (+ `Tagged(DSP, Realtime)` for the calling site) |
+| Keep a module free of C/FFI trust-boundary crossings | `cap no_extern` |
+| Guarantee a module has zero side effects, not just no IO caps declared | `cap pure` |
+| Guarantee reproducible output — no clock, no RNG — while still allowing ordinary IO | `cap deterministic` |
 | Both — pure, panic-free, zero-alloc | `cap no_panic` and `cap no_alloc` together |
 
-Both declarations can coexist in the same module. Each is checked by its own independent pass.
+All five declarations can coexist in the same module. Each is checked by its own independent pass, and none of them subsumes or implies any other.
 
 ---
 
@@ -309,7 +391,7 @@ hint: this call uses IO.FileRead but mod Config does not declare `needs IO.FileR
 hint: add `needs IO.FileRead` to the module body.
 ```
 
-This is informational — the type checker already enforces `needs` as an error. The hint pass (`cap_infer.ml`) runs after typechecking and gives an actionable fix message in addition to the type error.
+This is informational, and it is **not necessarily backed by a type error** — do not assume one is coming. The hint pass (`cap_infer.ml`) runs after typechecking and shares the same underlying builtin-capability table as the typechecker's own body-scan check, but that check is *itself* warning-level for a direct body call (see "What the compiler tells you," above): the type checker enforces `needs` as a hard error only for `Cap(X)` reaching a signature, a transitive `use`, or an `extern` block. A `cap_infer.ml` hint attached to a plain body call to an IO builtin, with no `Cap(X)` in any signature, can appear on a program that `--check`s clean (exit 0) — the hint and the warning are the whole story in that case, not a preview of a rejection.
 
 ---
 
@@ -466,6 +548,8 @@ mod App do
   fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
 end
 ```
+
+> **Known mismatch, being reconciled in a later slice.** The `run_migrations` idiom shown above (`execute_pending_migrations(raw); ()`, minting the proof cap from a bare `()`) does not currently typecheck as written — a proof-cap-returning function body must produce its return value through `cap_narrow`, not a literal `()`. That works today (`cap_narrow`'s polymorphic return type instantiates to any `Cap(X)`, including a non-IO proof capability, at the call site), but it is broader than intended: `cap_narrow` is also the *ordinary* IO-capability-narrowing builtin, so nothing currently restricts proof-cap minting to `mod Db`'s own public functions the way the unforgeability guarantees above describe — any module holding an ordinary `Cap(IO)` can call `cap_narrow` at a `Cap(Db.Migrated)`-typed call site and mint one, without a `needs Db.Migrated` declaration of its own. This is a real, filed, open gap between the documented proof-cap security model and the current mechanism (not fixed by this reference pass); see `specs/todos.md` under "Compiler: Capabilities/effects" for the tracked finding and its live repro.
 
 ### When to use proof caps
 

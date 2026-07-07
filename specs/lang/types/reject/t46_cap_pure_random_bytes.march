@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: which has side effects
+-- Capabilities widening, Task 5 (F2 fix) -- `cap pure` (`check_pure_module`,
+-- `typecheck.ml:6581`), the REJECT side for the RNG source: a `cap pure`
+-- module whose body calls the REAL effectful builtin `random_bytes`
+-- (`builtin_cap_table` maps it to `IO.Random`, `typecheck.ml:1064`). Pre-fix,
+-- `pure_banned` spelled `random_int`/`random_float`/`random_bool` (names that
+-- DO NOT EXIST as builtins) and MISSED the real `random_bytes` -- so this
+-- program typechecked with exit 0 (UNSOUND). The F2 fix derives `pure_banned`
+-- from `builtin_cap_table`, so `random_bytes` is now banned. `random_bytes :
+-- Int -> Bytes` is total, so `: Bytes` is a correct signature and the ONLY
+-- rejection is `check_pure_module`'s own: `` `gen` in `mod LeakyPure`
+-- (declared `cap pure`) calls `random_bytes`, which has side effects. `` (A
+-- WARNING-level Check 1b body-scan diagnostic -- "requires `Cap(IO.Random)`"
+-- -- also fires alongside, per F1; it does not change the exit code and is
+-- not the substring pinned here.) See core-march-types.md §2.8.11.
+mod LeakyPure do
+  cap pure
+
+  fn gen() : Bytes do
+    random_bytes(16)
+  end
+end

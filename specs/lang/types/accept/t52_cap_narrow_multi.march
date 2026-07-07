@@ -1,0 +1,31 @@
+-- Capabilities widening, Task 3 -- `cap_narrow`/`root_cap` (§2.8.8), a second
+-- threading shape: `root_cap` (`typecheck.ml:1457`, `Mono (Cap(IO))`, a VALUE
+-- not a call) is read directly (no ambient `Cap(IO)` parameter needed --
+-- `main` itself takes no capability parameter), then narrowed via
+-- `cap_narrow` TWICE in the same function to two DIFFERENT sibling
+-- sub-capabilities (`Cap(IO.Console)` and `Cap(IO.FileRead)`), each threaded
+-- to its own stricter callee. Proves narrowing composes: a single ambient
+-- root cap can mint as many independently-typed narrowed tokens as callees
+-- require, and `main`'s own signature carries no `Cap(X)` at all (so no
+-- Check 3 narrowing HINT fires here, unlike t51 where `boot` itself takes the
+-- root `Cap(IO)`). See core-march-types.md §2.8.8.
+mod App do
+  needs IO
+
+  fn log(_cap : Cap(IO.Console), msg : String) : String do
+    msg
+  end
+
+  fn run_step(_cap : Cap(IO.FileRead), path : String) : String do
+    path
+  end
+
+  fn main() : String do
+    let root = root_cap
+    let console_cap = cap_narrow(root)
+    let file_cap = cap_narrow(root)
+    let a = log(console_cap, "starting")
+    let b = run_step(file_cap, "config.toml")
+    a ++ b
+  end
+end

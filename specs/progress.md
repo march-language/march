@@ -2656,6 +2656,136 @@ describing the corrected post-fix behavior throughout.
 Next queued widening slice: **effects/capabilities**, or **error-handling /
 `let?`** (per the roadmap) — see `specs/todos.md`.
 
+## Core March widening slice 5 — capabilities/effects: IO permission caps + behavioral module caps (2026-07-07, CLOSEOUT)
+
+`specs/lang/core-march-types.md` is widened past widening slice 4 (session
+types/protocols/channels) to cover **the capability/effect system**: the
+18-entry IO-permission hierarchy, `needs`/`Cap(X)` signature enforcement and
+subsumption, transitive `use` and extern-implied caps, `cap_narrow`/
+`root_cap` compile-time threading, the effect-inference two projections,
+realtime exclusion — AND the five **behavioral module caps** (`cap
+no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) — a seven-task slice
+that, unlike slices 3 and 4's docs-only shape, lands **two real compiler
+fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
+
+- **The system is purely compile-time/static.** `Cap(X)` is runtime-erased
+  (`null` in LLVM IR, `VUnit` in the interpreter); no capability check has
+  any effect on program output. Enforcement lives entirely in `--check`
+  (`lib/typecheck/typecheck.ml` plus two post-typecheck `lib/refinecheck/`
+  passes). This property (verified, survey P6b) means the slice needed **no
+  golden corpus** — every witness is a `march --check` accept/reject
+  program in `specs/lang/types/`.
+- **F2 fix (Task 5).** `cap pure`'s and `cap deterministic`'s banned-builtin
+  sets (`pure_banned`/`deterministic_banned`) were hardcoded, hand-maintained
+  name lists that referenced builtins which **do not exist** (`write_file`,
+  `random_int`, `now_ms`) while **missing** the real effectful ones
+  (`file_write`, `random_bytes`, `unix_time_ms`) — so `cap pure` + `file_write`
+  and `cap deterministic` + `unix_time_ms(())` both typechecked with `--check`
+  exit 0, a genuine soundness hole. Fixed by deriving both sets from the
+  authoritative `builtin_cap_table` effect map (the same map Check 1b and
+  `cap_infer.ml` already trust): `pure_banned` = every table builtin (all are
+  effectful) plus the incidental non-table names `spawn`/`send`/`exit`;
+  `deterministic_banned` = only the subset the table maps to a nondeterminism
+  cap (`IO.Clock`/`IO.Random`), via a new `is_nondeterministic_cap` helper —
+  keeping `cap deterministic` correctly weaker than `cap pure` (it still
+  permits an ordinary `file_read`). Verified both directions: the previously
+  silently-accepted programs now reject with the cap's own error; a
+  genuinely-pure module and a `cap deterministic` module calling `file_read`
+  both still accept (no over-rejection).
+- **F3 fix (Task 6).** `cap no_panic` covered every NAMED panic-surface
+  function (`panic`, `unwrap`, `head`, `List.nth`, …) via a transitive
+  fixpoint, but never consulted the exhaustiveness checker's verdict — a
+  non-exhaustive `match` inside a `cap no_panic` module typechecked clean
+  (only the ordinary, non-blocking exhaustiveness Warning fired) and then
+  panicked at runtime with "no matching clause." Fixed by adding a shared
+  `env.nonexhaustive_match_spans : Ast.span list ref` side-table:
+  `check_exhaustiveness` now records every non-exhaustive match's span (in
+  addition to its existing Warning), and `check_no_panic_module` reads that
+  table, promoting to an ERROR any span nested inside one of ITS OWN
+  module's function bodies. Exhaustiveness itself is not reimplemented —
+  the fix only plumbs an already-computed verdict to a second consumer. Key
+  regression guard: `accept/t14_nonexhaustive_match_still_typechecks` (a
+  PLAIN, non-`cap no_panic` non-exhaustive match) still accepts — the
+  promotion is scoped strictly to `cap no_panic` modules.
+- **Corpus:** types 78 → **104** (56 accept, 48 reject; all count sites —
+  `INDEX.md` header, the `104/104` result line, `check-docs.sh`'s Check C —
+  consistent). `accept/t45`–`t56` cover IO-cap subsumption (Check 1),
+  transitive `use`/extern caps (Checks 4/1c/5), `cap_narrow`/`root_cap`
+  threading and the migrate-state caveat mitigation (Check 8), and the
+  behavioral caps' correct-case shapes; `reject/t36`–`t48` cover the
+  corresponding violations, including `t45`–`t48` — the F2/F3 witnesses that
+  were IMPOSSIBLE to add before their respective fixes landed (they
+  accepted, incorrectly, pre-fix). `check_types.sh` 104/104, exit 0. No
+  golden corpus change (static/compile-time property, per above).
+- **Six findings filed OPEN in `specs/todos.md`'s "Compiler: Capabilities/
+  effects" section** (F2/F3 have their own Done entries, distinct from
+  these six):
+  1. **F1** — body-scanned IO caps (a direct function-body call to an IO
+     builtin with no `Cap(X)` in any signature) are WARNING-only, not
+     error; the "absence of `needs` = machine-verified purity" guarantee
+     holds only at the signature/transitive-`use`/extern-cap ERROR surface
+     (Checks 1/4/5), not at the body-call WARNING surface (Check 1b).
+  2. **F6** — only 10 of the 18 IO-permission hierarchy entries are
+     registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`); the
+     other 8 are valid `needs` targets but reject as `Unknown module IO`
+     when written inside `Cap(...)`.
+  3. **The flaky narrowing HINT** — Check 3's `Cap(IO)`-narrowing hint fires
+     nondeterministically (~1-in-10) on a byte-identical binary and input;
+     the `--check` exit code itself is invariant, so no corpus program is
+     affected, but it is a real, previously-undocumented compiler
+     nondeterminism (likely hash/traversal-order dependence).
+  4. **F5** (cosmetic) — `println`/`print` produce no Check-1b body-scan
+     diagnostic at all, despite being registered in `builtin_cap_table` —
+     a coverage gap, not a soundness gap.
+  5. **The proof-cap mint mismatch** (deliberately unlabeled, not "F7" —
+     every letter `F1`–`F8` is already in use elsewhere in this document,
+     including by the UNRELATED session-types-slice linearity/
+     diagnostic-noise findings) — the `capabilities.md`-documented proof-cap
+     "mint" idiom (`execute_pending_migrations(raw); ()`) does not actually
+     typecheck; the mechanism that DOES work — `cap_narrow`'s polymorphic
+     return type — is unrestricted, and any code holding an ordinary
+     `Cap(IO)` can mint an arbitrary nominal proof capability with it, with
+     no covering `needs` and no `mod`-scoping. Deferred to a later
+     proof-caps-focused slice per the widening plan; not fixed here.
+  6. **The guarded-match exhaustiveness gap** — a pattern guard
+     short-circuits `check_exhaustiveness` before it ever records a span
+     (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+     match inside a `cap no_panic` module is invisible to both the
+     ordinary warning and F3's new error path — live-verified to panic at
+     runtime uncaught. Pre-existing behavior F3 correctly inherits rather
+     than introduces; not in F3's scope; would need a guard-aware
+     (Z3-backed) exhaustiveness analysis to close.
+- **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
+  already wired into `specs/lang/index.md`'s chapter map before this slice)
+  reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
+  the honest three-tier severity, each with a live-verified transcript: the
+  opening "absence of a capability declaration is a machine-verified
+  guarantee of purity" claim, the IO-caps-intro "the build fails with a
+  clear message" claim, "What the compiler tells you"'s "There are no false
+  positives" + "The absence of `needs` is itself a machine-verified
+  guarantee" claims, and the capability-inference-hints section's "the type
+  checker already enforces `needs` as an error" claim. The behavioral-caps
+  section is extended from documenting two caps (`no_panic`/`no_alloc`) to
+  all five, adding `cap no_extern`/`cap pure`/`cap deterministic` for the
+  first time and noting the F2/F3 fixes inline. The proof-caps section gets
+  a "known mismatch" callout pointing at the proof-cap mint mismatch
+  finding. Every code example this task touched or added was re-`--check`ed
+  live against the current oracle.
+- **`core-march-types.md` finalized.** §2.8.11/§2.8.12's F2/F3 write-ups
+  flip from the mid-slice "open"/"UNSOUND" framing (accurate when Task 4
+  wrote them, before Tasks 5–6 landed) to describe both as FIXED, with
+  before/after transcripts; the stale mid-slice `100/100` illustrative
+  count is corrected to the final `104/104`; §6's roadmap bullet is updated
+  from "Tasks 1-3 landed, behavioral caps still deferred" to reflect all
+  seven tasks landed, with the proof-cap mint mismatch named as the
+  remaining deferred item; a citation-drift pass re-grepped `typecheck.ml:`
+  line numbers that had shifted (by up to ~70 lines) as a side effect of the
+  Task 5/6 fix commits inserting code above them. `check_types.sh`
+  reconfirmed 104/104; `check-docs.sh` reconfirmed exit 0.
+
+Next queued widening slice: **proof caps** (closing the proof-cap mint
+mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
+
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 
 `specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened

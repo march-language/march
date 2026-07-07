@@ -1,0 +1,14 @@
+-- Capabilities widening, Task 1 -- Check 1 (`typecheck.ml:5561`), the base case.
+-- `Cap(IO.Console)` appears in `log`'s SIGNATURE (a param type); the module
+-- declares exactly `needs IO.Console`, so `cap_subsumes IO.Console IO.Console`
+-- holds trivially (a cap covers itself, `cap_lattice.ml:50`) and Check 1
+-- passes with no narrowing HINT (that only fires for the `Cap(IO)` root,
+-- Check 3, `typecheck.ml:5652`). See core-march-types.md §2.8.
+mod Logger do
+  needs IO.Console
+
+  fn log(cap : Cap(IO.Console), msg : String) : String do
+    let _ = cap
+    msg
+  end
+end

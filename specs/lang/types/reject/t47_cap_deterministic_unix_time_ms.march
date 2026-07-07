@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: which is non-deterministic
+-- Capabilities widening, Task 5 (F2 fix) -- `cap deterministic`
+-- (`check_deterministic_module`, `typecheck.ml:6650`), the REJECT side: a
+-- `cap deterministic` module whose body reads the wall clock via the REAL
+-- builtin `unix_time_ms` (`builtin_cap_table` maps it to `IO.Clock`,
+-- `typecheck.ml:1061`). Pre-fix, `deterministic_banned` spelled `now_ms`
+-- (a name that DOES NOT EXIST) and MISSED the real `unix_time_ms` -- so this
+-- program typechecked with exit 0 (UNSOUND). The F2 fix derives
+-- `deterministic_banned` from `builtin_cap_table`, keeping only the builtins
+-- mapped to a NONDETERMINISM cap (`IO.Clock`/`IO.Random`); `unix_time_ms` is
+-- now banned. `unix_time_ms : Unit -> Int` so `unix_time_ms(())` with a `:
+-- Int` signature is type-correct, and the ONLY rejection is
+-- `check_deterministic_module`'s own: `` `ts` in `mod LeakyDet` (declared
+-- `cap deterministic`) calls `unix_time_ms`, which is non-deterministic. ``
+-- Note `cap deterministic` remains WEAKER than `cap pure`: a deterministic
+-- module may still do ordinary IO (e.g. `file_read`) -- only clock/RNG are
+-- banned. (A WARNING-level Check 1b body-scan diagnostic -- "requires
+-- `Cap(IO.Clock)`" -- also fires alongside, per F1; it does not change the
+-- exit code and is not the substring pinned here.) See
+-- core-march-types.md §2.8.11.
+mod LeakyDet do
+  cap deterministic
+
+  fn ts() : Int do
+    unix_time_ms(())
+  end
+end

@@ -498,6 +498,18 @@ type env = {
   no_panic_modules : string list;
   (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
+  nonexhaustive_match_spans : Ast.span list ref;
+  (** Spans of every NON-exhaustive [match] discovered by [check_exhaustiveness]
+      anywhere in the compilation.  A non-exhaustive match lowers to a runtime
+      "no matching clause" panic, so it is a panic surface that
+      [check_no_panic_module] must reject — but only for matches nested inside a
+      `cap no_panic` module's OWN function bodies (attributed by span
+      containment, see [span_within]).  A mutable ref shared (like
+      [import_tracker]) across every env copy so all sites append to one list;
+      recording here is cheap and never itself an error — the read/attribution
+      is gated inside [check_no_panic_module], which only runs for
+      `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
+      Warning and is never promoted to an error. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -554,6 +566,7 @@ let make_env errors type_map = {
   cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
+  nonexhaustive_match_spans = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
@@ -1472,6 +1485,8 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 3: Epoch-based capability builtins *)
     ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
     ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
+    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
@@ -1854,11 +1869,14 @@ let builtin_types : (string * int) list =
     ("Tagged", 2);
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
-    (* Capability token types — used as arguments to Cap(X) *)
+    (* Capability token types — used as arguments to Cap(X).
+       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
-    ("IO.Clock",      0);
+    ("IO.Clock",      0); ("IO.Random",     0); ("IO.Database",   0);
+    ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
+    ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
@@ -3288,20 +3306,27 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
     in
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
-    | Some (ex :: _) ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
-          labels  = [];
-          notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-          code    = None; fix = None }
-    | Some [] ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = "Non-exhaustive pattern match";
-          labels  = [];
-          notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
-          code    = None; fix = None }
+    | Some missing ->
+      (* Record the non-exhaustive match's span so [check_no_panic_module] can
+         reject it as a runtime panic surface inside a `cap no_panic` module.
+         Recording is unconditional (cheap, non-error); attribution/promotion to
+         an error is gated there by span containment. *)
+      env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans);
+      (match missing with
+       | ex :: _ ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
+             labels  = [];
+             notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
+             code    = None; fix = None }
+       | [] ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = "Non-exhaustive pattern match";
+             labels  = [];
+             notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
+             code    = None; fix = None })
   end
 
 (** Unfold one step of a recursive session type.
@@ -6486,6 +6511,20 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELit _ | Ast.EVar _ -> acc
   | _ -> acc
 
+(** [span_within inner outer] is true when [inner] is nested inside [outer] by
+    source position — same file, and [inner]'s start/end fall within [outer]'s
+    line/column bounds.  Used to attribute a recorded non-exhaustive-match span
+    to the enclosing `cap no_panic` function whose body it lives in, so a match
+    in some UNRELATED (plain) module is never blamed on the no_panic module. *)
+let span_within (inner : Ast.span) (outer : Ast.span) : bool =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line > outer.Ast.start_line
+      || (inner.Ast.start_line = outer.Ast.start_line
+          && inner.Ast.start_col >= outer.Ast.start_col))
+  && (inner.Ast.end_line < outer.Ast.end_line
+      || (inner.Ast.end_line = outer.Ast.end_line
+          && inner.Ast.end_col <= outer.Ast.end_col))
+
 let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let fn_entries : (string * (string * Ast.span) list * Ast.span) list =
     List.filter_map (fun d ->
@@ -6563,17 +6602,47 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
         let _ = fn_span in
         Err.error errors ~span:site_span msg
     end
+  ) fn_entries;
+  (* A NON-exhaustive `match` lowers to a runtime "no matching clause" panic, so
+     it is a panic surface just like `panic`/`unwrap`.  [check_exhaustiveness]
+     already found and recorded every non-exhaustive match's span (see
+     [env.nonexhaustive_match_spans]); here we reject any that falls inside one
+     of THIS `cap no_panic` module's own function bodies.  Span containment
+     attributes each match to its enclosing fn, so a non-exhaustive match in an
+     unrelated (plain) module is never blamed on this module. *)
+  let mod_name = env.current_module in
+  let ne_spans = !(env.nonexhaustive_match_spans) in
+  List.iter (fun (fn_name, _calls, fn_span) ->
+    List.iter (fun (msp : Ast.span) ->
+      if span_within msp fn_span then
+        Err.error errors ~span:msp
+          (Printf.sprintf
+             "`%s` in `mod %s` (declared `cap no_panic`) contains a non-exhaustive \
+              `match`, which panics at runtime when no clause matches.\n\n\
+              A `cap no_panic` module must handle every case, or add a `_ -> ...` \
+              catch-all arm."
+             fn_name mod_name)
+    ) ne_spans
   ) fn_entries
 
 (* ── cap pure: ban side-effectful builtins ───────────────────────────────── *)
 
-let pure_banned : StringSet.t = StringSet.of_list [
-  "spawn"; "send"; "print"; "println"; "eprint"; "eprintln";
-  "read_line"; "exit"; "random_int"; "random_float"; "random_bool";
-  "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
-  "vault_delete"; "vault_update"; "vault_keys"; "write_file";
-  "read_file"; "append_file"; "delete_file";
-]
+(* A cap tag denotes a NONDETERMINISM source (wall-clock or RNG) — the only
+   effects a `cap deterministic` module must reject. Ordinary IO
+   (file/console/network) is deterministic-ish and stays allowed. *)
+let is_nondeterministic_cap (cap : string) : bool =
+  cap = "IO.Clock" || cap = "IO.Random"
+
+(* `cap pure` = NO side effect at all → ban every builtin the authoritative
+   effect map (`builtin_cap_table`) attributes an IO/effect cap to. Derived
+   from the table (not a hand-guessed parallel list) so it stays in lockstep
+   with the real builtin surface. `spawn`/`send`/`exit` are impure surface
+   names not carried in the table (they route through other mechanisms) —
+   union them in as incidental-correct extras. *)
+let pure_banned : StringSet.t =
+  let from_table = builtin_cap_table |> List.map fst |> StringSet.of_list in
+  StringSet.union from_table
+    (StringSet.of_list [ "spawn"; "send"; "exit" ])
 
 let pure_suggestion : string =
   "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
@@ -6629,10 +6698,15 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
 
 (* ── cap deterministic: ban non-deterministic builtins ───────────────────── *)
 
-let deterministic_banned : StringSet.t = StringSet.of_list [
-  "random_int"; "random_float"; "random_bool"; "random_bytes";
-  "uuid_v4"; "now_ms"; "now_ns"; "monotonic_ms";
-]
+(* `cap deterministic` = no dependence on wall-clock time or an RNG (a weaker
+   claim than `pure` — a deterministic module MAY still do ordinary IO like
+   `println` or a `file_read`). Ban only the builtins the effect map attributes
+   to `IO.Clock`/`IO.Random`, derived from the same authoritative table. *)
+let deterministic_banned : StringSet.t =
+  builtin_cap_table
+  |> List.filter (fun (_, cap) -> is_nondeterministic_cap cap)
+  |> List.map fst
+  |> StringSet.of_list
 
 let deterministic_suggestion : string =
   "Use deterministic operations only in a `cap deterministic` module. \

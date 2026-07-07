@@ -1647,7 +1647,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     []
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
-    Emits an error for unknown interfaces; silently skips if the type is not found. *)
+    Emits an error for unknown interfaces and for unknown target types. *)
 let expand_derive
     (errors : Err.ctx)
     (type_defs : (string * (name list * type_def)) list)
@@ -1656,7 +1656,12 @@ let expand_derive
     (sp : span)
   : decl list =
   match List.assoc_opt type_name.txt type_defs with
-  | None -> []   (* type not found — silently skip *)
+  | None ->
+    Err.error errors ~span:type_name.span
+      (Printf.sprintf
+         "Unknown type `%s` in `derive` — is it declared in this module?"
+         type_name.txt);
+    []
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
         derive_impl errors type_name sp iface_name.txt iface_name.span tparams td

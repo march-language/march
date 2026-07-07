@@ -60,8 +60,11 @@ interp-vs-compiled split) — §2.3 notes it inline at the point the gap arises
 rather than repeating it here.
 
 **Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): refinements
-(z3-discharged), the capability lattice (`lib/caps/`), and effects — see §6
-for the full deferred-set breakdown and its roadmap citations. Coherence/
+(z3-discharged), effects, and most of the capability lattice (`lib/caps/`) —
+see §6 for the full deferred-set breakdown and its roadmap citations; §2.8
+(added 2026-07-07) lands the capability lattice's first layer (IO permission
+hierarchy, `needs`, `Cap(X)` signature enforcement), with the rest of the
+system still queued. Coherence/
 overlap resolution between impls is NOT in this deferred set — it is a known,
 intentionally OPEN divergence (documented in `core-march.md` §4.4.3 and filed
 in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
@@ -117,6 +120,36 @@ that is a real (if narrow) soundness gap for `offer` over branches with
 DIFFERENT continuations. Six new `reject/` programs (`t30`–`t35`) pin the
 live per-op violation messages, plus one new `accept/` program (`t43`) for a
 full `choose`/`offer` round-trip.
+
+**Capabilities widening, Task 1 (2026-07-07):** §2.8 adds the FIRST
+capability/effect-system content this document has — greenfield, like §2.7's
+session-types debut. It covers the IO permission hierarchy (18 entries, one
+tree rooted at `IO`), `cap_subsumes`/`normalize` subsumption, the `needs`
+module manifest, and **Check 1**: every `Cap(X)` in a function/actor/extern
+signature must be covered by a declared `needs`, else ERROR. Files a live
+scoping finding: only 10 of the 18 hierarchy entries are registered as valid
+`Cap(X)` type ARGUMENTS today (`builtin_types`, `typecheck.ml:1858-1861`) —
+the other 8 are valid `needs` targets but reject as `` Unknown module `IO` ``
+if written inside `Cap(...)`; the corpus draws only from the 10 that work.
+Four new `accept/` programs (`t45`–`t48`: bare-covered, root-covers-child
+subsumption, sibling independence, a second mid-tier subsumption shape) and
+three new `reject/` programs (`t36`–`t38`: uncovered, narrow-does-not-cover-
+broad, sibling-does-not-cover-sibling). Task 2 (§2.8.6-§2.8.7) added
+transitive `use`/extern-implied caps (Checks 4/1c/5); Task 3 (§2.8.8-§2.8.9)
+added `cap_narrow`/`root_cap` threading, the effect-inference two
+projections, migrate_state IO-freedom (Check 8), and realtime exclusion
+(Check 7); Task 4 (§2.8.11-§2.8.12) added the five BEHAVIORAL module caps
+(`no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) and filed two
+soundness gaps (F2, F3) as open; Tasks 5 and 6 then FIXED F2 and F3
+respectively (real compiler fixes, gated on the full test suite), each with
+its own now-possible `reject/` witness. Task 7 (closeout) finalized §2.8 to
+describe F2/F3 as fixed, reconciled the `capabilities.md` tutorial, and filed
+two further findings (the proof-cap mint mismatch, deliberately unlabeled
+since `F1`–`F8` are all already in use elsewhere in this document, deferred
+to a later proof-caps slice — and a residual guarded-match exhaustiveness
+gap F3 inherits but does not introduce). Still deferred: proof-cap
+mint/forge (Check 6) itself remains unfixed (the proof-cap mint mismatch
+finding documents the gap, not a fix).
 
 ## 1. The typing judgment
 
@@ -2739,6 +2772,1140 @@ always picks the first-listed branch (`:ok`).
 
 `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0.
 
+### 2.8 Capabilities and effects: the IO permission lattice, `needs`, and `Cap(X)` signature enforcement
+
+March's capability system is a **compile-time-only, static** discipline: a
+`Cap(X)` value proves the holder is authorized to perform IO in the family
+named by `X`, but the proof is **runtime-erased** — `Cap(X)` values compile to
+`null` in LLVM IR and to `VUnit` in the interpreter (no capability check has
+any effect on runtime semantics or output; a cap-threading program produces
+byte-identical results interpreted and compiled). All enforcement lives
+entirely in `--check` (the typechecker plus two post-typecheck refinecheck
+passes, out of scope for this subsection). This subsection covers the
+foundational layer: the **IO permission hierarchy**, the `needs` module
+manifest, **Check 1** — every `Cap(X)` in a function/actor/extern
+**signature** must be covered by a declared `needs` — and (§2.8.6) the
+transitive/extern-implied checks (4, 1c, 5) plus the honest three-tier
+enforcement reality (signature/transitive/extern-cap = ERROR; direct-body-
+call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
+`cap_narrow`/`root_cap` threading, the effect-inference two projections, the
+`*_migrate_state` IO-free check (Check 8), and realtime exclusion (Check 7).
+§2.8.11 covers a SEPARATE, orthogonal mechanism sharing only the `cap`
+keyword and the `Ast.DOpts` AST node: the five **behavioral module caps**
+(`no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) — per-module
+syntactic bans, not IO-permission accounting. Proof-cap minting/forging
+(Check 6) remains out of scope here.
+
+#### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
+
+The hierarchy is a single static table, `hierarchy : (string * string option)
+list` (`lib/caps/cap_lattice.ml:15-34`) — each entry a dot-joined path and an
+optional parent path (`None` = root). It is shared, as the single source of
+truth, between `March_typecheck.Typecheck` (this subsection's body-scan/
+signature checks) and `March_refinecheck.Cap_infer` (the softer inference-hint
+pass) — both need the identical subsumption rule. The full table, exactly as
+declared:
+
+```
+IO                        (root)
+├── IO.Console
+├── IO.FileSystem
+│   ├── IO.FileRead
+│   └── IO.FileWrite
+├── IO.Network
+│   ├── IO.NetConnect
+│   │   ├── IO.Database
+│   │   └── IO.NetConnect.TLS
+│   └── IO.NetListen
+├── IO.Process
+├── IO.Clock
+├── IO.Random
+├── IO.Spawn
+├── IO.Mut
+├── IO.Telemetry
+└── IO.Foreign
+    └── IO.Foreign.Blocking
+```
+
+All 18 entries share the single root `IO` — this is one tree, not a forest,
+despite the surface impression that `IO.Console`/`IO.Process`/`IO.Clock`/
+`IO.Random`/`IO.Spawn`/`IO.Mut`/`IO.Telemetry` are "leaves with no interesting
+structure": every one of them still has `Some "IO"` as its parent, so
+`needs IO` covers all eighteen. The two three-level branches are
+`IO.FileSystem → {IO.FileRead, IO.FileWrite}` and `IO.Network →
+{IO.NetConnect → {IO.Database, IO.NetConnect.TLS}, IO.NetListen}` — `IO.
+Database` and `IO.NetConnect.TLS` are the only entries nested three deep.
+
+**FFI caps are explicitly outside this table.** The comment at
+`cap_lattice.ml:5-6` notes: "FFI caps like `LibC` are valid but not in this
+table — they are their own roots and have no subtyping relationship." An FFI
+capability name is checked for exact/self-subsumption only (see Check 5,
+deferred to a later task); it never subsumes or is subsumed by anything in
+the `IO` tree.
+
+#### 2.8.2 Subsumption: `cap_subsumes` and `normalize`
+
+Two pure list-walking functions define the ordering (`cap_lattice.ml:39-59`):
+
+```ocaml
+let cap_ancestors cap =
+  let rec go c acc =
+    let acc' = c :: acc in
+    match List.assoc_opt c hierarchy with
+    | Some (Some parent) -> go parent acc'
+    | _ -> acc'
+  in
+  List.rev (go cap [])
+
+let cap_subsumes parent child =
+  List.mem parent (cap_ancestors child)
+
+let normalize caps =
+  List.filter (fun c ->
+    not (List.exists (fun other -> other <> c && cap_subsumes other c) caps)
+  ) caps
+```
+
+`cap_ancestors cap` returns `cap` itself plus every ancestor up to (and
+including) the root, most-specific first — e.g. `cap_ancestors "IO.FileRead" =
+["IO.FileRead"; "IO.FileSystem"; "IO"]`. A name absent from the table (an FFI
+cap) returns just itself — the base case of `go`'s `match … | _ -> acc'` arm.
+
+`cap_subsumes parent child` is then simply "is `parent` among `child`'s
+ancestors (or `child` itself)" — **reflexive** (`cap_subsumes X X` is always
+true, since `cap_ancestors X` always starts with `X`) and **directional**: a
+broader declared cap covers a narrower used one, never the reverse.
+`cap_subsumes "IO" "IO.FileRead"` is true; `cap_subsumes "IO.FileRead" "IO"`
+is false — a child capability does not grant its own parent. Two siblings
+(e.g. `IO.FileRead` and `IO.FileWrite`) never subsume each other, since
+neither appears in the other's ancestor chain.
+
+`normalize caps` drops any cap in the list that is subsumed by another cap
+already present, preserving relative order of the survivors — e.g.
+`normalize ["IO"; "IO.FileRead"] = ["IO"]` (the broader cap absorbs the
+narrower) regardless of which order they were declared in. `check_module_needs`
+(§2.8.3) uses `normalize` when merging declared `needs` lists and accumulated
+per-function cap closures; a code comment at `typecheck.ml:5438` notes the
+merge is commutative — "merge order across the three call sites doesn't
+matter."
+
+**Typechecker alias.** `typecheck.ml:1116` re-exports the shared function
+directly: `let cap_subsumes = March_caps.Cap_lattice.cap_subsumes`. Every
+subsumption check in `check_module_needs` (Check 1 included) calls this one
+alias — there is no separate, possibly-divergent copy of the ordering logic in
+`typecheck.ml` itself.
+
+#### 2.8.3 The `needs` manifest and `Cap(X)` signatures
+
+A module declares which IO capability families it uses via a `needs`
+statement — one or more dotted paths, each on (conventionally) its own line:
+
+```march
+mod Server do
+  needs IO.Network
+
+  fn listen(cap : Cap(IO.Network), port : Int) : Int do
+    ...
+  end
+end
+```
+
+**AST and lexer.** `needs` parses to `Ast.DNeeds of name list list * span`
+(`lib/ast/ast.ml:159`) — **not** `DCapNeeds`; each element of the outer list is
+one dotted path already split into its component names (so `needs IO.Network`
+parses to a `DNeeds` entry `["IO"; "Network"]`, rejoined by
+`cap_path_of_names` back into the dotted string `"IO.Network"` for hierarchy
+lookups). The lexer recognizes the keyword directly: `("needs", NEEDS)`
+(`lib/lexer/lexer.mll:50`). A module may write multiple `needs` lines, one per
+capability family (as accept/t47, §2.8.5, does for two independent siblings)
+— `DNeeds` is collected per-declaration, not merged into one statement.
+
+**`Cap(X)` is an ordinary parametric type**, `Cap` a built-in type constructor
+of arity 1 (`builtin_types`, `typecheck.ml:1862`: `("Pid", 1); ("Cap", 1);
+...`). Its argument is a **dotted type name** resolved as a single string, not
+a nested type application — `Ast.TyCon (con, [arg]) when con.txt = "Cap"` then
+`match arg with Ast.TyCon (name, []) -> [name.txt]` (`cap_paths_in_surface_ty`,
+`typecheck.ml:1123-1138`, the helper that extracts every `Cap(X)` path
+occurring anywhere in a surface type — walking through `TyArrow`/`TyTuple`/
+`TyRecord`/`TyLinear`, and explicitly skipping `Tagged(X, T)`'s argument so a
+realtime tag is never misread as a capability reference, `:1129-1130`). So
+`Cap(IO.Network)` is parsed as `TyCon("Cap", [TyCon("IO.Network", [])])` — the
+dotted string `"IO.Network"` is the type name in its own right, not a
+qualified reference into a module named `IO`.
+
+**Scoping finding — not every hierarchy entry is a valid `Cap(X)` argument
+today.** `cap_paths_in_surface_ty` only extracts a path if it survives
+`surface_ty`'s ordinary type-name resolution (`Ast.TyCon(name, [])` must
+resolve to *some* registered 0-arity type before a `Cap(X)` reference
+typechecks at all). Live probing shows only **10 of the 18** hierarchy
+entries are pre-registered as valid type names for this purpose — the
+`builtin_types` table (`typecheck.ml:1871-1874`) lists exactly: `IO`,
+`IO.Console`, `IO.FileSystem`, `IO.FileRead`, `IO.FileWrite`, `IO.Network`,
+`IO.NetConnect`, `IO.NetListen`, `IO.Process`, `IO.Clock`. The other 8 —
+`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`,
+`IO.Foreign`, `IO.Foreign.Blocking`, `IO.NetConnect.TLS` — are valid
+`needs` targets (an all-string manifest, so `needs IO.Random` alone
+typechecks fine) but **cannot be written as a `Cap(X)` type annotation**:
+`fn f(c : Cap(IO.Random)) : Int do 1 end` rejects with `` Unknown module `IO`.
+Did you mean `Dir`? `` — `surface_ty`'s qualified-type fallback
+(`resolve_qualified_type`, `typecheck.ml:742-750`) attempts to load an actual
+module named `IO` (`stdlib/io.march`, which declares no types), fails to
+resolve `IO.Random` as one of its exported types, and falls through to the
+generic qualified-name-not-found diagnostic. This is a real, narrow gap
+(worth widening `builtin_types` in a future compiler-fix task) but is out of
+scope for this docs-only slice — the corpus below (§2.8.5) draws only from
+the 10 names that are valid `Cap(X)` arguments today.
+
+**Check 1** (`typecheck.ml:5578-5607`, comment "Check 1:" at `:5578`) is the
+core enforcement rule this subsection pins:
+
+> Every `Cap(X)` occurring in a function, actor-handler, or extern
+> **signature** (param or return type) must be covered — via `cap_subsumes`
+> — by at least one of the module's declared `needs` paths. If not, this is
+> an **ERROR** (not a warning; contrast Check 1b/1c for body-scanned/extern
+> uses, which are warning-only and covered by a later task).
+
+The set of signature-occurring `Cap(X)` paths (`used_caps`,
+`typecheck.ml:5468-5515`) is collected from three declaration shapes:
+
+- **`DFn`** — every named parameter's declared type plus the return type
+  (`param_tys @ ret_tys`, `:5450-5456`), scanned via `cap_paths_in_surface_ty`.
+- **`DActor`** — every handler's declared parameter types (`:5483-5488`) —
+  actor message handlers can receive `Cap(X)` values as message arguments, and
+  those are held to the same signature standard as an ordinary function's
+  parameters.
+- **`DExtern`** — the block's own `ext_cap_ty` (`:5492-5493`; enforced fully
+  by Check 5, a later task, but the use is recorded here too so Check 2's
+  "declared but unused" check doesn't misfire against an extern-implied use).
+
+For each collected `(cap_path, span)`, Check 1 (`:5561-5587`) computes
+`covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs`
+and, if not covered (and the cap is not a *self-declared proof capability* —
+proof caps are a later task's subject), raises an error at the signature's
+span. The exact message (captured live, `--check` on a `Cap(IO.Network)`
+param with no `needs` anywhere):
+
+```
+`Cap(IO.Network)` used in module `Server` but `IO.Network` is not declared in `needs`.
+help: add `needs IO.Network` to the module body.
+```
+
+Subsumption means the covering `needs` need not be an exact match: declaring
+the **root** `needs IO` covers *every* descendant `Cap(X)` in the signature
+sense — `cap_subsumes "IO" "IO.Network"` is true because `"IO.Network"`'s
+ancestor chain (§2.8.2) includes `"IO"`. The same holds one tier down: `needs
+IO.Network` covers `Cap(IO.NetConnect)` (its direct child), without covering
+`Cap(IO.NetListen)` (`IO.NetConnect`'s sibling) — subsumption only travels
+*up* the tree, never sideways. Two siblings never cover each other regardless
+of tier: a module using both `Cap(IO.FileRead)` and `Cap(IO.FileWrite)` must
+declare **both** `needs IO.FileRead` and `needs IO.FileWrite` (or the shared
+ancestor `needs IO.FileSystem`/`needs IO`) — one sibling's `needs` leaves the
+other's `Cap(X)` uncovered, and Check 1 raises independently per used path
+(`used_caps` is walked with `List.iter`, one diagnostic per uncovered entry,
+not a single aggregate check).
+
+**Directionality is not symmetric**, and this is worth stating plainly because
+it is the opposite of what "narrower requirement, broader capability" might
+suggest: a module declaring the **narrow** `needs IO.Network` does **not**
+cover a signature using the **broad** `Cap(IO)` — `cap_subsumes "IO.Network"
+"IO"` is false (a child capability never subsumes its own parent). This
+combination also triggers **Check 3** (`:5652`, out of this subsection's
+scope in detail, deferred to a later task) — a HINT suggesting the function
+narrow its `Cap(IO)` root parameter to a specific sub-capability for
+least-privilege — emitted *in addition to* Check 1's ERROR, not instead of
+it; the HINT does not change the exit code.
+
+#### 2.8.4 Worked example: the compiler's own demo
+
+`examples/capabilities.march` is a runnable illustration of the same rule:
+`CapDemo` declares `needs IO` once at module level, then every IO-touching
+function (`greet : Cap(IO.Console) -> String -> Unit`, `simulate_fetch :
+Cap(IO.Network) -> String -> String`) takes its own narrower `Cap(X)`
+parameter — each covered by the single root `needs IO` via subsumption
+(§2.8.2), rather than one `needs` line per sub-capability. `cap_narrow(cap)`
+(§2.8.8) attenuates the ambient `root_cap : Cap(IO)` down to each narrower
+type before it is threaded to `greet`/`simulate_fetch`, demonstrating that
+the least-privilege *pattern* (pass the narrowest cap a callee's signature
+actually declares) is a caller-side convention layered on top of Check 1's
+coarser "declared `needs` covers everything used" guarantee — Check 1 does
+not by itself force a caller to narrow before passing a cap onward.
+
+#### 2.8.5 Corpus witnesses (Task 1 — signature enforcement + subsumption)
+
+Four new `accept/` programs (`specs/lang/types/accept/`, `t45`-`t48`) and
+three new `reject/` programs (`t36`-`t38`), each verified live against
+`--check`:
+
+- **`t45_cap_bare_covered`** — `Cap(IO.Console)` param in a module declaring
+  exactly `needs IO.Console`; `cap_subsumes IO.Console IO.Console` holds
+  reflexively. `--check` exit 0.
+- **`t46_cap_broad_needs_covers_narrow`** — `Cap(IO.Network)` param covered by
+  the **root** `needs IO`; the canonical subsumption shape (§2.8.3). `--check`
+  exit 0.
+- **`t47_cap_sibling_independence`** — `Cap(IO.FileRead)` and
+  `Cap(IO.FileWrite)` (siblings under `IO.FileSystem`, §2.8.1) each covered by
+  its *own* `needs` line; proves Check 1 walks each used `Cap(X)`
+  independently, with no cross-sibling subsumption. `--check` exit 0.
+- **`t48_cap_midtier_subsumption`** — a second, independent subsumption shape:
+  `Cap(IO.NetConnect)` covered by `needs IO.Network` (`IO.NetConnect`'s direct
+  parent), one tier down from `t46`'s root-covers-all case, proving
+  subsumption holds at every tier of the tree, not only from the root.
+  `--check` exit 0.
+- **`t36_cap_sig_uncovered`** — `Cap(IO.Network)` param, no `needs` declared
+  at all; `declared_needs = []` covers nothing. Pinned: `` is not declared in
+  `needs` ``.
+- **`t37_cap_narrow_does_not_cover_broad`** — module declares the narrow
+  `needs IO.Network`; the signature uses the root `Cap(IO)`. Directionality
+  (§2.8.3): a child never covers its parent. Also emits the Check 3 narrowing
+  HINT ahead of the ERROR (both present in the same `--check` output; the
+  pinned substring is the ERROR text). Pinned: `` `Cap(IO)` used in module
+  `Server` but `IO` is not declared in `needs` ``.
+- **`t38_cap_sibling_does_not_cover_sibling`** — module declares only `needs
+  IO.FileRead`; a second function's signature uses `Cap(IO.FileWrite)` (its
+  sibling). Companion to `t47`, which declares both siblings and accepts.
+  Pinned: `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is
+  not declared in `needs` ``.
+
+`check_types.sh` (Task 1 running total, superseded below): 86/86 (48 accept,
+38 reject), exit 0.
+
+#### 2.8.6 Transitive `use` and extern-implied caps (Checks 4, 1c, 5) — and the honest three-tier enforcement reality
+
+Check 1 (§2.8.3) is only the *first* of three genuinely error-level cap
+checks. `check_module_needs` also enforces two more shapes at ERROR severity,
+plus two shapes at WARNING-only severity that are frequently mistaken for
+errors because the tutorial-level docs describe them loosely. This
+subsection pins all four, and states the three-tier reality plainly because
+it is the single most consequential fact for anyone relying on `needs` as a
+soundness guarantee.
+
+**Check 4 — transitive `use` coverage (ERROR).** A module that `use`s another
+module inherits an obligation to cover whatever capabilities the *used*
+module itself declared via its own `needs`. Live cite, `typecheck.ml:5681-5703`
+(comment "Check 4:" at `:5681`):
+
+```ocaml
+List.iter (function
+  | Ast.DUse (ud, sp) ->
+    let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+    (match List.assoc_opt imported env.module_caps with
+     | None | Some [] -> ()
+     | Some req_caps ->
+       List.iter (fun req_cap ->
+         let covered =
+           List.exists (fun need -> cap_subsumes need req_cap) declared_needs
+         in
+         if not covered then
+           Err.error env.errors ~span:sp (* "module `Main` imports `Vault` which
+             requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`." *)
+       ) req_caps)
+  | _ -> ()
+) decls;
+```
+
+`env.module_caps : (string * string list) list` is an association list of
+`(module_name, that_module's_declared_needs)`, appended to every time a
+nested `DMod` finishes checking (`(name.txt, inner_needs) :: env'.module_caps`,
+`typecheck.ml:7081`). Check 4 looks up the imported module's name in this
+list and, for every capability the *used* module required, checks the
+*using* module's own `declared_needs` covers it via the same `cap_subsumes`
+subsumption Check 1 uses — so all of §2.8.2's directionality rules (broad
+covers narrow, siblings don't cover each other) apply identically here, one
+hop through a `use` edge. This is a real, **error-level** propagation: an
+importer cannot silently absorb an imported module's IO obligations by
+omission. Live witness — `stdlib/vault.march:26` declares `needs IO.Mut`; a
+module that `use`s `Vault` without declaring `needs IO.Mut` itself is
+rejected:
+
+```
+module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
+help: add `needs IO.Mut` to the module body.
+```
+
+Declaring `needs IO.Mut` (or any ancestor, e.g. the root `needs IO`) in the
+importer satisfies Check 4 (`accept/t49`, §2.8.7); omitting it rejects
+(`reject/t39`, §2.8.7).
+
+**Check 5 — extern `Cap(X)` must be in `needs` (ERROR).** An `extern "lib" :
+Cap(X) do ... end` block (`ext_cap_ty`, `ast.ml:339`) names a capability the
+FFI surface itself requires. Check 5 (`typecheck.ml:5704-5723`, comment
+"Check 5:" at `:5704`) is structurally the same shape as Check 1, applied to
+`DExtern` instead of `DFn`/`DActor`:
+
+```ocaml
+List.iter (function
+  | Ast.DExtern (edef, sp) ->
+    let cap_paths = cap_paths_in_surface_ty edef.ext_cap_ty in
+    List.iter (fun cap_path ->
+      let covered =
+        List.exists (fun need -> cap_subsumes need cap_path) declared_needs
+      in
+      if not covered then
+        Err.error env.errors ~span:sp (* "extern block `\"libc\"` uses
+          `Cap(IO.FileSystem)`, but `IO.FileSystem` is not declared in
+          `needs`." *)
+    ) cap_paths
+  | _ -> ()
+) decls;
+```
+
+This is an ERROR, not a warning — the extern block's own declared `Cap(X)`
+must be covered by `needs` exactly as a function signature's `Cap(X)` must
+be (§2.8.3). `accept/t50` (§2.8.7) declares `needs IO.FileSystem` covering an
+`extern "libc" : Cap(IO.FileSystem)` block and accepts.
+
+**Check 1c — extern blocks imply `IO.Foreign` (WARNING only).** Distinct
+from Check 5's ERROR on the extern's *own declared* `Cap(X)`, Check 1c
+(`typecheck.ml:5627-5642`, comment "Check 1c:" at `:5627`) additionally holds
+that *every* extern block, regardless of what `Cap(X)` it declares, implies
+`IO.Foreign` (an FFI call is inherently foreign-code execution) — and, per
+the extern-implied-caps computation feeding this check
+(`typecheck.ml:5559-5570`), `IO.Foreign.Blocking` too if any of the block's
+functions are marked blocking. Unlike Check 5, an uncovered `IO.Foreign`
+implication is only a **WARNING**:
+
+```ocaml
+List.iter (fun (cap_path, sp) ->
+  let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+  if not covered then
+    Err.warning_with_fix env.errors ~span:sp
+      ~fix:(Err.FInsert { after_line = ...; text = "  needs " ^ cap_path })
+      (* "extern block in `Bindings` requires `Cap(IO.Foreign)` but `Bindings`
+         does not declare `needs IO.Foreign`." *)
+) extern_cap_uses;
+```
+
+So a single `extern` block carries **two independent capability obligations
+of two different severities**: its own declared `Cap(X)` is ERROR-enforced
+(Check 5), while the blanket `IO.Foreign` implication is WARNING-only (Check
+1c). `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
+so neither fires; dropping only the `IO.Foreign` line would still `--check`
+exit 0 (a warning, not a rejection) — dropping the `IO.FileSystem` line
+would exit 1 (Check 5, an error). This asymmetry is easy to miss because
+both obligations originate from the same `extern` block and both suggest the
+identical `needs <X>` fix.
+
+**Check 1b — body-scanned builtin calls (WARNING only) — the F1 crux.** A
+function *body* that calls a `builtin_cap_table` builtin (`file_read`,
+`tls_connect`, `vault_set`, …, `typecheck.ml:1012-1111`) without a covering
+`needs` is Check 1b (`typecheck.ml:5608-5626`, comment "Check 1b:" at
+`:5608`), and it is **WARNING-only**, exactly parallel in shape to Check 1c:
+
+```ocaml
+List.iter (fun (cap_path, sp) ->
+  let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+  let self_declared = (* proof-cap self-declaration exemption, out of scope here *) in
+  if not covered && not self_declared then
+    Err.warning_with_fix env.errors ~span:sp
+      ~fix:(Err.FInsert { after_line = ...; text = "  needs " ^ cap_path })
+      (* "function body calls a builtin that requires `Cap(IO.FileRead)` but
+         `Reader` does not declare `needs IO.FileRead`." *)
+) body_cap_uses;
+```
+
+**This is the load-bearing distinction the reference must state plainly, in
+contrast to `specs/lang/capabilities.md`'s tutorial framing** (`:69` "The
+compiler enforces this transitively... the build fails"; `:142`/`:312`
+describe the body-call case as a "hint"/"warning" correctly labeled in the
+example text, but the surrounding prose — "There are no false positives"
+(`:142` area) and "the type checker already enforces `needs` as an error"
+(`:312`) — overstates what actually happens). The truth, reproduced live
+side by side:
+
+```
+=== signature Cap(IO.FileRead), no needs (Check 1, ERROR) ===
+`Cap(IO.FileRead)` used in module `Reader` but `IO.FileRead` is not declared in `needs`.
+help: add `needs IO.FileRead` to the module body.
+EXIT=1
+
+=== body call to file_read, no needs (Check 1b, WARNING) ===
+-- HINT --
+call to `file_read` requires `needs IO.FileRead` — add `needs IO.FileRead` to module `Reader`
+-- WARNING --
+function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
+hint: add `needs IO.FileRead` to the module body.
+EXIT=0
+```
+
+So the three-tier reality is:
+
+| Position | Check | Severity | `--check` exit on violation |
+|---|---|---|---|
+| `Cap(X)` in a fn/actor/extern **signature** | Check 1 | **ERROR** | 1 |
+| `use`d module's declared caps uncovered | Check 4 | **ERROR** | 1 |
+| extern's own declared `Cap(X)` uncovered | Check 5 | **ERROR** | 1 |
+| body call to a cap-table builtin, uncovered | Check 1b | WARNING | 0 |
+| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | WARNING | 0 |
+
+"Absence of `needs` is a machine-verified guarantee of purity" (the
+tutorial's framing) holds **only** for the signature/transitive/extern-cap
+surface (Checks 1/4/5) — a module that calls IO builtins directly in a
+function body, with no `Cap(X)` anywhere in any signature, is *warned*, not
+*rejected*; `--check` still exits 0. Authors who want the ERROR-level
+guarantee must thread `Cap(X)` through every effectful function's signature,
+not merely call the builtin and rely on the warning. This gap is filed as
+**F1** in `specs/todos.md` (open, deferred) — it is a design/enforcement
+choice, not a bug in the mechanics of Checks 1/4/5 themselves, which are
+sound and precise over the `builtin_cap_table` domain (§2.8.3's F6 scoping
+note is a separate, narrower gap about which hierarchy entries can even be
+*written* as `Cap(X)`).
+
+#### 2.8.7 Corpus witnesses (Task 2 — transitive `use` + extern-implied caps)
+
+Two new `accept/` programs (`t49`-`t50`) and one new `reject/` program
+(`t39`), each verified live against `--check`:
+
+- **`t49_transitive_use_covered`** — `Main` declares `needs IO.Mut` and `use`s
+  the real stdlib module `Vault` (`stdlib/vault.march:26`, `needs IO.Mut`).
+  Check 4 walks `Main`'s single `DUse`, finds `Vault`'s declared cap
+  (`IO.Mut`) in `env.module_caps`, and confirms it is covered by `Main`'s own
+  `needs IO.Mut` (reflexive subsumption). `--check` exit 0.
+- **`t50_extern_cap_and_foreign_covered`** — `Bindings` declares both `needs
+  IO.Foreign` and `needs IO.FileSystem`, then an `extern "libc" :
+  Cap(IO.FileSystem) do ... end` block. Check 5 confirms the extern's own
+  declared `Cap(IO.FileSystem)` is covered; Check 1c confirms the blanket
+  `IO.Foreign` implication is covered. Neither fires. `--check` exit 0.
+- **`t39_transitive_use_missing_cap`** — companion to `t49` with the `needs
+  IO.Mut` line removed: `Main` `use`s `Vault` but declares no `needs` at all,
+  so `declared_needs = []` covers nothing and Check 4 raises. Pinned: ``
+  module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
+  not declared in `needs` ``.
+
+`check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0.
+
+#### 2.8.8 `cap_narrow` / `root_cap` — compile-time capability threading
+
+Two builtins power the least-privilege *pattern* §2.8.4 already gestured at
+(`cap_narrow(cap)`, deferred there to "a later §2.8 extension" — this is that
+extension). Both are entries in the ordinary builtin-type table, not special
+forms:
+
+```ocaml
+("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
+("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+```
+
+(`typecheck.ml:1470-1471`.)
+
+- **`root_cap : Cap(IO)`** is a *value*, not a function call — the ambient
+  root IO capability, conventionally read once near a program's entry point
+  (`let cap = root_cap`, as `examples/capabilities.march`'s `main` does) and
+  threaded downward from there. There is no other way to conjure a `Cap(IO)`
+  value out of nothing; every other `Cap(X)` in a program must ultimately
+  originate from `root_cap` (directly or through a chain of `cap_narrow`
+  calls and ordinary parameter-passing) or from a proof-cap mint (a separate
+  mechanism, Check 6, out of this subsection's scope).
+- **`cap_narrow : Cap(IO) -> Cap(a)`** takes the root capability and returns a
+  value at a **polymorphic** result type `Cap(a)` — the type-application site
+  (a `let`/parameter annotation, or the callee's declared parameter type)
+  determines which concrete `Cap(X)` the call instantiates to. This
+  polymorphic return is a deliberate design choice for the *narrowing* use
+  case documented here — `cap_narrow(root)` called where a `Cap(IO.Network)`
+  is expected instantiates `a := IO.Network`; called where a
+  `Cap(IO.Console)` is expected, the very same call instantiates
+  `a := IO.Console` — but it is also the mechanism a proof-cap mint
+  (`cap_narrow(some_cap) : Cap(Db.Migrated)`) uses to satisfy Check 6's
+  return-type rule, which is the substance of the **F4** finding (§4.1) that
+  a future proof-cap-focused task is expected to address. This subsection
+  notes the polymorphic-return reality factually, as context for that
+  deferred finding — **no fix to F4 is attempted here.**
+
+Both builtins are **compile-time-only and runtime-erased**, exactly like
+every other `Cap(X)` value (§2.8's opening determination, §1 above in the
+document): they compile to `null` in LLVM IR and to `VUnit` in the
+interpreter. Threading a cap through `cap_narrow` and a chain of function
+calls has **zero runtime effect** — the entire mechanism exists so the
+*static* type of a value can express a narrower obligation than the value it
+came from, letting Check 1 (§2.8.3) hold each callee to exactly the
+capability its own signature declares, rather than forcing every callee in a
+call chain to accept the same broad `Cap(IO)` its caller happened to hold.
+`cap_narrow` does not change what any `needs` declaration must cover — Check
+1's subsumption rule (§2.8.2) already lets a single root `needs IO` cover
+every narrower `Cap(X)` a module's functions use; narrowing is a *caller-side
+typing convention* layered on top of that coarser guarantee, not a separate
+enforcement mechanism. A module can freely call `cap_narrow` any number of
+times against the same `root_cap`/`Cap(IO)` value — each call is independent
+and side-effect-free (both dynamically, since it is erased, and statically,
+since it does not consume or mutate the argument in any linear sense; `Cap(X)`
+is an ordinary unrestricted type).
+
+#### 2.8.9 Effect inference's two projections, and Checks 7/8
+
+**The two projections.** `check_module_needs` tracks, per fully-qualified
+function name, two related but distinct sets via `record_fn_caps`
+(`typecheck.ml:5455-5467`):
+
+```ocaml
+let module_wide_caps : string list =
+  (* Caps that apply to every function in this module regardless of which
+     function's own signature/body/extern-block produced them: declared
+     [needs] ... and caps propagated in from imported modules (Check 4). *)
+  declared_needs @ propagated
+in
+let record_fn_caps (fn_qname : string) (own_caps : string list) =
+  let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+  let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+  Hashtbl.replace env.cap_closures fn_qname merged;
+  (* Parallel own-caps-only projection ... WITHOUT folding in
+     [module_wide_caps]. This is what the migrate_state IO-free check
+     needs — the merged closure would falsely blame a pure migrate_state
+     for its module's handler-level [needs]. *)
+  let prior_own = Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures fn_qname) in
+  let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
+  Hashtbl.replace env.own_cap_closures fn_qname merged_own
+```
+
+(`typecheck.ml:5441-5467`, `module_wide_caps` at `:5441`, `record_fn_caps` at
+`:5455`.) `record_fn_caps` is called once per function from each of three
+sites that already walk the module's declarations for other reasons —
+`used_caps` (signature `Cap(X)` scan, §2.8.3), `body_cap_uses` (Check 1b's
+builtin body-scan, §2.8.6), and the extern-implied-caps computation (Check
+1c) — passing in only that site's own contribution (`own_caps`); the
+function's `merged`/`merged_own` accumulate across all three call sites
+(a comment at `:5419` notes the merge order across sites doesn't matter,
+since `normalize` — §2.8.2 — is idempotent and commutative over set union).
+
+- **`cap_closures` (the merged/exported projection)** — `module_wide_caps @
+  own_caps`, i.e. *every* declared `needs` and propagated `use`-cap of the
+  enclosing module, folded into *every* function's entry regardless of what
+  that individual function's own signature/body/extern touches. This is the
+  projection intended for the hot-deploy capability-manifest consumer (the
+  design comment's stated purpose, `typecheck.ml:5429-5432`) — a
+  conservative, whole-module-obligation view.
+- **`own_cap_closures` (the own-caps-only projection)** — `own_caps` alone,
+  with `module_wide_caps` deliberately excluded. A function that itself
+  touches no `Cap(X)` signature, no cap-table builtin call, and no extern
+  block gets an **empty** entry here, even inside a module that declares
+  `needs IO` for its other functions' sake.
+
+**Why the distinction matters — the F-caveat.** A source comment at
+`typecheck.ml:5462` ("would falsely blame a pure function") flags exactly the
+risk the second projection exists to avoid: if migrate_state IO-freedom
+(Check 8, below) were checked against the *merged* `cap_closures`, a
+completely pure `*_migrate_state` function living in a `needs IO` module (as
+`actor` modules with IO-touching handlers commonly are) would be wrongly
+rejected for capabilities it never itself uses — purely because its module
+declares them for its *other* functions. Using `own_cap_closures` instead
+means Check 8 only ever sees what the migrate function's own signature, body,
+or extern-ness actually contributes. This is verified sound *and* precise for
+this one consumer (§2.8.9's corpus witnesses below, and the survey's P8c/P8d
+probes): a pure migrate_state in a `needs IO` module accepts (`accept/t53`);
+a migrate_state that itself calls an IO builtin is still caught (`reject/t40`).
+The IO-cap *inference* itself is sound over the `builtin_cap_table` domain —
+it never fails to attribute a table-listed builtin to the function that
+calls it; where it can still be incomplete is orthogonal to this
+own-vs-merged distinction (an effect reached only through a `Cap(X)` never
+declared as a type argument, §2.8.3's F6, or a builtin outside
+`builtin_cap_table` entirely).
+
+**Check 8 — `*_migrate_state` must be IO-free (ERROR).** A hot-reload
+state-migration function is recognized purely by a **name-suffix
+convention** — any top-level `fn`/extern-fn whose name ends in
+`_migrate_state`, checked by a small local predicate kept byte-identical to
+its TIR counterpart (`is_migrate_fn_name`, `typecheck.ml:5388-5400`, "a local
+copy of `March_tir.Tir_names.is_migrate_fn_name`" — duplicated because
+`march_typecheck` cannot depend on `march_tir`, which itself depends on
+`march_typecheck`):
+
+```ocaml
+let is_migrate_fn_name (fn_name : string) : bool =
+  let sfx = "_migrate_state" in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+```
+
+A migrate_state function is an **ordinary module-level declaration**, a
+sibling to any `actor` block in the same module — not a handler nested
+*inside* `actor Name do ... end`. Check 8 (`typecheck.ml:5818-5854`) iterates
+the module's flat `decls` list matching `Ast.DFn`/`Ast.DExtern` directly; it
+never descends into `Ast.DActor`'s `actor_handlers`, so a migrate function
+can never be written as an `on ... do ... end` arm — only as a plain `fn`
+(or extern-fn) whose name happens to end in the magic suffix:
+
+```ocaml
+let check_migrate_fn_io_free (qname : string) (sp : Ast.span) =
+  let own_caps =
+    Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures qname)
+  in
+  if own_caps <> [] then
+    Err.error env.errors ~span:sp (* "migrate_state must be IO-free
+      `<name>` calls capabilities that need `<caps>`.
+      migrate_state runs during the hot-migration window, before user
+      messages.
+      hint: move side effects into a normal handler that runs after
+      migration completes." *)
+```
+
+(`typecheck.ml:5827-5839`, `check_migrate_fn_io_free`.) The rationale (state
+migration runs during the hot-reload window, ahead of any queued user
+messages, so IO there — which could race the very reload replacing the code
+that's running it — is unsafe by construction, not merely undeclared) is in
+the diagnostic text itself. Because the check consults `own_cap_closures`
+(§2.8.9 above), a pure migrate function is accepted even in a `needs IO`
+module (`accept/t53`); a migrate function whose own body calls an
+IO-attributed builtin (e.g. `println`, mapped to `IO.Console` in
+`builtin_cap_table`) is rejected regardless of the module's `needs`
+(`reject/t40`) — the exact live message, captured against `reject/t40`:
+
+```
+migrate_state must be IO-free
+`counter_migrate_state` calls capabilities that need `IO.Console`.
+migrate_state runs during the hot-migration window, before user messages.
+hint: move side effects into a normal handler that runs after migration completes.
+```
+
+**Check 7 — realtime exclusion (ERROR).** A function whose signature has a
+`Tagged(_, Realtime)` parameter cannot *also* have a parameter typed
+`Cap(Alloc)`, `Cap(IO)`, or `Cap(Panic)` — those three capability roots are
+excluded from realtime contexts because allocation, IO, and panicking are all
+unbounded-latency operations a hard-realtime deadline cannot tolerate.
+`Tagged` is a built-in arity-2 type constructor (`("Tagged", 2)`,
+`typecheck.ml:1866-1867`, "specialization tag constructor: phantom policy/width
+tags") used here with a phantom `Realtime` tag as its second argument; Check
+7's two predicates match structurally on the AST, not by any special
+built-in identity:
+
+```ocaml
+let is_realtime_tagged = function
+  | Ast.TyCon ({txt="Tagged";_}, [_; Ast.TyCon ({txt="Realtime";_}, [])]) -> true
+  | _ -> false
+in
+let is_excluded_cap = function
+  | Ast.TyCon ({txt="Cap";_}, [Ast.TyCon ({txt=("Alloc"|"IO"|"Panic");_}, [])]) -> true
+  | _ -> false
+in
+```
+
+(`typecheck.ml:5779-5786`.) For every `DFn` whose parameter list contains a
+`Tagged(_, Realtime)`-typed parameter, Check 7 (`typecheck.ml:5787-5817`)
+scans every OTHER parameter and raises if any is one of the three excluded
+`Cap(X)` roots, at ERROR severity:
+
+```
+function `step` takes `Tagged(_, Realtime)` but also takes `Cap(IO)`.
+Realtime functions cannot hold `Cap(IO)` — allocation, IO, and panic are excluded from realtime contexts.
+hint: remove `Cap(IO)`
+```
+
+(Captured live against `reject/t41`.) **Scoping note — `Realtime` is not
+itself pre-registered.** Unlike the `Alloc`/`Panic` roots (`builtin_types`,
+`typecheck.ml:1868-1869`: `("Alloc", 0); ("Panic", 0)`, "future capability roots
+excluded from realtime contexts"), there is no `("Realtime", 0)` entry in
+`builtin_types` — so `Tagged(Int, Realtime)` does not resolve as a surface
+type until a program declares its own nullary type named `Realtime` (an
+ordinary `type Realtime = Realtime` one-constructor ADT suffices; the
+`is_realtime_tagged` pattern above matches the type *name* `"Realtime"`
+textually, not any distinguished built-in identity, so a user-declared
+`Realtime` trips Check 7 exactly as a pre-registered one would). Both
+`reject/t41` and any future accept witness for the *positive* case (a
+`Tagged(_, Realtime)` function with no excluded cap parameter) must include
+this one-line `type Realtime = Realtime` declaration to make the annotation
+resolve at all — this is a narrow, cosmetic corpus-construction detail, not a
+soundness or enforcement gap: Check 7 itself fires correctly once the type
+resolves.
+
+#### 2.8.10 Corpus witnesses (Task 3 — `cap_narrow`/threading + Check 8 + Check 7)
+
+Three new `accept/` programs (`t51`-`t53`) and two new `reject/` programs
+(`t40`-`t41`), each verified live against `--check`:
+
+- **`t51_cap_narrow_thread`** — `boot(root : Cap(IO))` calls
+  `cap_narrow(root)` to obtain a `Cap(IO.Network)` value, threaded to
+  `listen`'s stricter signature; both `Cap(IO)` (on `boot` itself) and
+  `Cap(IO.Network)` (on `listen`) are covered by the module's single `needs
+  IO` via subsumption. `--check` exit 0, confirmed stable across 40+ repeated
+  live runs of the byte-identical binary and input. **Finding — the flaky
+  narrowing HINT (capabilities, live-observed, not fixed here; filed in
+  `specs/todos.md`; NOT a §4.1 numbered entry, and distinct from the sessions
+  linearity "F7" cross-referenced earlier in this doc):** the incidental Check
+  3 narrowing HINT this
+  program's `boot(root : Cap(IO))` parameter would be expected to also emit
+  (the same HINT `reject/t37` emits alongside its ERROR, deterministically,
+  100% of 20 repeated runs) is instead **flaky** on this two-function,
+  `cap_narrow`-calling program shape — present in roughly 1 run out of 10,
+  absent otherwise, with no change to the file, the binary, or the working
+  directory between runs. A reduced repro (a single-function module with a
+  bare unused `Cap(IO)` parameter, no `cap_narrow` call at all) reproduces
+  the same flakiness, so it is not specific to `cap_narrow`; the exact
+  trigger was not isolated further (out of scope for this docs-only slice —
+  the HINT is advisory, and the flakiness never changes `--check`'s exit
+  code, so it does not affect this corpus's accept/reject correctness, only
+  the reliability of one HINT's presence). Worth a dedicated investigation
+  in a future task.
+- **`t52_cap_narrow_multi`** — a second threading shape: `main` (no `Cap(X)`
+  parameter of its own) reads `root_cap` directly and calls `cap_narrow`
+  twice against it, minting a `Cap(IO.Console)` and a `Cap(IO.FileRead)` in
+  the same function, each threaded to its own callee. `--check` exit 0 with
+  **no diagnostics at all** — proving narrowing composes freely and that
+  reading `root_cap` needs no ambient parameter.
+- **`t53_migrate_pure_needs_io`** — the Check 8 caveat-mitigation ACCEPT
+  witness, built against a genuine `actor`-bearing module (not just a bare
+  `mod`, strengthening the survey's P8c probe): `Counter` declares `needs
+  IO.Console` for its `actor CounterActor`'s `on Inc` handler (which calls
+  `println`), and a sibling top-level `fn counter_migrate_state(old) do old
+  end` — pure, and NOT nested inside the `actor` block. Check 8 consults
+  `own_cap_closures`, which excludes the module's `needs`, so the pure
+  migrate function is not blamed. `--check` exit 0.
+- **`t40_migrate_state_does_io`** — companion to `t53` with the migrate
+  function's body changed to call `println`; its own capability closure is
+  now `["IO.Console"]`, non-empty, so Check 8 raises regardless of the
+  module's `needs IO.Console`. Pinned: `` migrate_state must be IO-free ``.
+- **`t41_realtime_excludes_cap_io`** — a user-declared `type Realtime =
+  Realtime` (§2.8.9's scoping note) makes `Tagged(Int, Realtime)` resolve;
+  `step`'s signature combines it with `Cap(IO)`. Pinned: `` takes `Tagged(_,
+  Realtime)` but also takes `Cap(IO)` ``.
+
+`check_types.sh`: **94/94 (53 accept, 41 reject)**, exit 0 — the corpus's
+total after Task 3 (see §2.8.11 below for the Task 4 total that supersedes
+it).
+
+#### 2.8.11 Behavioral module caps: `no_panic`, `no_alloc`, `no_extern`, `pure`, `deterministic`
+
+A SEPARATE mechanism from everything else in §2.8: the **behavioral module
+caps** are a per-module syntactic ban on certain call/construct shapes,
+declared with a bare `cap <name>` statement at the top of a `mod` body —
+**not** an IO-permission accounting device at all. They share only the `cap`
+keyword and one AST constructor with the `needs`/`Cap(X)` machinery above:
+`Ast.DOpts of string list * span` (`ast.ml:165`), a flat string-list "options"
+declaration, quite unlike `DNeeds`'s per-path list-of-lists (§2.8.3). Five
+dedicated lexer tokens recognize the five spellings directly, each requiring
+exactly one intervening space (`lexer.mll:176-180`):
+
+```ocaml
+| "cap" [' ' '\t']+ "no_panic"      { CAP_NO_PANIC }
+| "cap" [' ' '\t']+ "pure"          { CAP_PURE }
+| "cap" [' ' '\t']+ "no_extern"     { CAP_NO_EXTERN }
+| "cap" [' ' '\t']+ "deterministic" { CAP_DETERMINISTIC }
+| "cap" [' ' '\t']+ "no_alloc"      { CAP_NO_ALLOC }
+```
+
+Four of the five (`no_panic`/`pure`/`no_extern`/`deterministic`) set a
+boolean flag on the typechecking `env` inside `check_decl`'s `DOpts` arm
+(`typecheck.ml:7634-7637`: `no_panic_mod`/`pure_mod`/`no_extern_mod`/
+`deterministic_mod`), each consulted once, at the end of module checking, by
+its own dedicated pass (`typecheck.ml:8312-8323`). **`cap no_alloc` is the
+one exception** — it has no `env` field of its own at all; instead
+`lib/refinecheck/no_alloc.ml`'s `check_decls` (`:72-83`) re-scans the raw
+`Ast.decl list` for a `DOpts` entry containing `"no_alloc"` independently,
+as its own free-standing post-typecheck refinecheck pass (parallel to
+`Division_safety`, §2.8's opening paragraph) — a module can be simultaneously
+`cap no_panic` (an `env`-flag-driven `typecheck.ml` pass) and `cap no_alloc`
+(a from-scratch AST re-scan in a different file), and the two checks never
+share state.
+
+**`cap no_panic`** (`check_no_panic_module`, `typecheck.ml:6523-6621`) bans
+direct and TRANSITIVE calls to a fixed "panic surface" — three unioned name
+sets (`:6408-6431`): `panic_surface_direct` (`panic`, `panic_`, `todo_`,
+`unreachable_` — division/modulo are deliberately EXCLUDED from this set, per
+its own comment, `:6409-6413`, so the syntactic scan doesn't double-report
+what the separate Z3-backed `division_safety.ml` pass already adjudicates),
+`panic_surface_prelude` (`unwrap`, `expect`, `head`, `tail`, `last`), and
+`panic_surface_stdlib` (dotted names: `List.nth`, `Option.unwrap`,
+`Result.unwrap`, `Array.get`, `String.slice_bytes`, …). The pass:
+
+1. Collects every `DFn`'s call sites via `calls_in_expr` (`:6458`, the
+   same walker `cap pure`/`cap deterministic` reuse below) — a syntactic
+   `EApp(EVar _, …)` / `EApp(EField(EVar _, _, _), …)` collector that
+   recurses into blocks/let/match/if/field/pipe but has an explicit
+   `| _ -> acc` fallthrough (no `ELam`/`ESpawn`/`ESend`/`ERecord` recursion —
+   the same asymmetry the capabilities survey's §2.1 `calls_in_expr` note
+   flags for the IO-cap side; a panic call reachable only inside a lambda
+   literal or record-field expression is invisible to this scan too).
+2. Seeds a `panicky` set with every function whose OWN body directly calls a
+   panic-surface name (`:6512-6523`).
+3. Runs a **fixpoint** (`:6525-6544`) that adds any LOCAL function (one
+   declared as a `DFn` in this same module — `local_fns`, `:6503-6505`)
+   calling an already-`panicky` function, iterating until no new function is
+   added — this is the TRANSITIVE closure: `helper` calling `a/b` (unsafe
+   division) makes `helper` panicky, and `caller` calling `helper` makes
+   `caller` panicky too, even though `caller` itself never divides.
+4. Reports one `Err.error` per panicky function, at the ORIGINAL call site's
+   span, distinguishing `` calls `%s`, which can panic `` (direct) from
+   `` transitively calls `%s`, which can panic `` (transitive) — the exact
+   wording the corpus below pins.
+
+Unsafe integer division/modulo is handled by a SEPARATE pass entirely —
+`March_refinecheck.Division_safety` (Z3-discharged) — which raises its own
+ERROR unless the divisor's declared type carries a `{v | v != 0}` or `v > 0`
+(or `v >= 1`) refinement; this is why `panic_surface_direct` explicitly
+excludes `/`/`%` (they are never `calls_in_expr`-collected as named calls in
+the first place — division is an AST operator node, not an `EApp`). Both
+passes independently gate on the SAME `no_panic_mod`/`env.no_panic_modules`
+flag, so a `cap no_panic` module's unsafe division is caught even though
+`check_no_panic_module` itself never inspects division at all.
+
+**`cap no_alloc`** (`lib/refinecheck/no_alloc.ml:17-65`) is a purely
+syntactic per-function-body scan for four heap-allocating expression shapes:
+a non-empty `ETuple` (the empty tuple `()` is explicitly exempted, `:20`, as
+carrying no heap cell), any `ERecord` literal, an `ECon` with one or more
+arguments (a nullary constructor — `:29` — allocates nothing, since a
+zero-arg ADT variant is represented as an immediate tag, not a boxed cell —
+consistent with `core-march.md`'s niche-representation account of nullary
+ADTs), and any `ELam` (closure literal — capturing a lambda's environment
+requires a heap allocation). The scan recurses into every other expression
+form — `if`/`match`/`let`/blocks/pipe/assert/sigil/`dbg`/`send`/record-update
+(`:38-63`) — so an allocation nested arbitrarily deep inside control flow is
+still caught, not just a top-level allocation. Unlike `cap no_panic`, there
+is **no transitive closure across function calls** — `check_decls` visits
+each `DFn` in the module independently (`:78-83`) and does not track which
+LOCAL helper functions allocate, so a `cap no_alloc` module calling its own
+allocating helper is flagged only at the definition site of the helper
+itself, not additionally at each call site (contrast `cap no_panic`'s
+fixpoint, which DOES propagate transitively through local calls).
+
+**`cap pure`** (`check_pure_module`, `typecheck.ml:6645-6661`) and **`cap
+deterministic`** (`check_deterministic_module`, `typecheck.ml:6710-6727`)
+share one shape: each walks every `DFn`'s clauses via the identical
+`calls_in_expr` collector `cap no_panic` uses, and raises an `Err.error` (NO
+transitive closure — only the function whose OWN body directly calls a
+banned name is blamed, unlike `no_panic`'s fixpoint) for any call whose
+callee name is a member of a `StringSet.t`, now **derived from the
+authoritative `builtin_cap_table` effect map** rather than a hand-guessed
+parallel list (the F2 fix, Task 5 of this widening slice — see below):
+
+```ocaml
+let is_nondeterministic_cap (cap : string) : bool =
+  cap = "IO.Clock" || cap = "IO.Random"          (* typecheck.ml:6628-6629 *)
+
+let pure_banned : StringSet.t =
+  let from_table = builtin_cap_table |> List.map fst |> StringSet.of_list in
+  StringSet.union from_table
+    (StringSet.of_list [ "spawn"; "send"; "exit" ])
+                                                   (* typecheck.ml:6637-6640 *)
+
+let deterministic_banned : StringSet.t =
+  builtin_cap_table
+  |> List.filter (fun (_, cap) -> is_nondeterministic_cap cap)
+  |> List.map fst
+  |> StringSet.of_list
+                                                   (* typecheck.ml:6700-6704 *)
+```
+
+`pure_banned` is every builtin the table attributes ANY effect cap to (all
+≈90 registered builtins are effectful, by construction of the table) union
+the three incidental non-table impure names `spawn`/`send`/`exit` (these
+route through other mechanisms and were never in `builtin_cap_table` to
+begin with). `deterministic_banned` is the strict subset the table maps to
+one of the two nondeterminism-source caps, `IO.Clock`/`IO.Random` — so `cap
+deterministic` stays correctly WEAKER than `cap pure`: it still permits an
+ordinary, deterministic-ish `file_read`/`println`, banning only the clock
+and RNG. **Before the Task 5 fix**, both sets were instead hardcoded,
+hand-maintained lists that had drifted out of sync with the real builtin
+surface — see the F2 write-up below for the exact pre-fix lists (which named
+builtins that do not exist) and the live before/after transcripts.
+
+**Intended semantics** (both are documented, sound-sounding claims about the
+module): `cap pure` promises the module's functions perform no observable
+side effect at all — no IO, no spawn/send, no mutation, no randomness; `cap
+deterministic` promises no dependence on wall-clock time or a random-number
+source, so re-running the module with the same inputs always produces the
+same outputs (a weaker claim than `pure` — a `deterministic` module MAY still
+do ordinary IO, e.g. `println`, as long as it isn't reading the clock or an
+RNG).
+
+**F2 — FIXED (Task 5 of this same widening slice, `specs/todos.md`).** Both
+banned sets used to be **hardcoded, hand-maintained name lists that were
+never cross-checked against the actual builtin surface**. `pure_banned` named
+`write_file`, `read_file`, `append_file`, `delete_file`, `random_int`,
+`random_float`, `random_bool`, `now_ms` — **none of these exist as
+builtins** (verified: zero occurrences as a `VBuiltin` registration in
+`eval.ml`). The REAL effectful builtins are spelled differently: `file_write`,
+`file_read`, `file_append`, `file_delete` (registered
+`eval.ml:4038/4024/4050/4062`, mapped `IO.FileWrite`/`IO.FileRead` in
+`builtin_cap_table`, `typecheck.ml:1018` and neighbors), `random_bytes`
+(`eval.ml:4541`, `IO.Random`, `:1077`), and `unix_time_ms` (`eval.ml:4764`,
+`IO.Clock`, `:1074`) — `deterministic_banned` listed `now_ms` (nonexistent)
+but not `unix_time_ms` (the real wall-clock builtin). Consequence,
+live-verified BEFORE the fix: a `cap pure` module whose body called
+`file_write` typechecked with **exit 0** — only Check 1b's UNRELATED
+body-scan HINT+WARNING fired (§2.8.6's own F1 finding; `` call to
+`file_write` requires `needs IO.FileWrite` ``), never `cap pure`'s own ``
+has side effects `` error:
+
+```
+$ march --check leaky_pure.march     # cap pure module calling file_write(...) — PRE-FIX transcript
+-- HINT --    call to `file_write` requires `needs IO.FileWrite` ...
+-- WARNING -- function body calls a builtin that requires `Cap(IO.FileWrite)` ...
+$ echo $?
+0
+```
+
+The same gap applied to `random_bytes` under `cap pure` and to
+`unix_time_ms(())` under `cap deterministic` (both independently
+live-verified pre-fix). This was a genuine soundness hole — a `cap pure`/`cap
+deterministic` module made a machine-checked claim that silently did not
+hold for the most common effectful builtins in the language. **The fix**
+(Task 5, landed in this same widening slice) derives both banned sets from
+`builtin_cap_table` (the authoritative effect map both Check 1b and
+`cap_infer.ml` already trust) instead of the hand-guessed parallel list:
+`pure_banned` is now every builtin the table maps to any effect cap (all
+≈90 are effectful) plus the incidental non-table names `spawn`/`send`/`exit`;
+`deterministic_banned` is only the subset the table maps to a nondeterminism
+cap (`IO.Clock`/`IO.Random`), via the new `is_nondeterministic_cap` helper —
+so `cap deterministic` stays correctly weaker than `cap pure` (it still
+permits an ordinary `file_read`). **Post-fix, live-verified:** the exact
+program above now rejects —
+
+```
+$ march --check leaky_pure.march     # cap pure module calling file_write(...) — POST-FIX transcript
+-- ERROR --  `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+$ echo $?
+1
+```
+
+— and the corresponding `random_bytes`-under-`cap-pure` /
+`unix_time_ms`-under-`cap-deterministic` cases reject the same way, while a
+genuinely-pure module (`accept/t54`) and a `cap deterministic` module calling
+`file_read` both still accept (no over-rejection). Regression tests in
+`test/test_compiler.ml` (`cap_pure_no_extern_det` group) pin both directions.
+See §2.8.12 below for the REJECT corpus witnesses this fix made possible.
+
+**F3 — FIXED (Task 6 of this same widening slice, `specs/todos.md`).**
+`cap no_panic`'s `panic_surface_*` sets (above) cover every NAMED partial
+function (`panic`, `unwrap`, `head`, `List.nth`, …) but used to miss the
+single most common IMPLICIT panic surface in ML-family code: a non-exhaustive
+`match`. March's non-exhaustiveness checker (`check_exhaustiveness`, §4.1
+finding 9) already ran unconditionally and already computed the right
+verdict — it only reported at `severity = Warning`, and
+`check_no_panic_module` never consulted that verdict at all (it only walked
+named calls via `calls_in_expr`, which does not model `EMatch` coverage).
+Consequence, live-verified BEFORE the fix: a `cap no_panic` module containing
+a two-constructor `match` that covered only one constructor typechecked with
+**exit 0**, emitting nothing but the generic (module-agnostic)
+non-exhaustiveness `-- WARNING --` — no `cap no_panic`-specific diagnostic at
+all:
+
+```
+$ march --check guarded_partial.march   # cap no_panic; match h do Rood -> 1 end (Hue = Rood | Bloo) — PRE-FIX
+-- WARNING -- Non-exhaustive pattern match — missing case: Bloo
+$ echo $?
+0
+```
+
+...and at RUNTIME (interpreted or compiled), calling `describe(Bloo)` aborted
+with a "no matching clause" panic — exactly the class of failure `cap
+no_panic` exists to rule out at compile time. **The fix** (Task 6) adds a
+shared `env` field, `nonexhaustive_match_spans : Ast.span list ref`:
+`check_exhaustiveness` now records the span of every non-exhaustive match it
+finds (in addition to its existing Warning), and `check_no_panic_module` —
+which runs only for `cap no_panic` modules — reads that side-table and
+promotes any recorded span nested inside one of the module's own function
+bodies to an ERROR. Exhaustiveness itself is not reimplemented; the fix only
+plumbs the already-computed verdict to a second consumer. **Post-fix,
+live-verified:** the exact program above now rejects —
+
+```
+$ march --check guarded_partial.march   # cap no_panic; match h do Rood -> 1 end — POST-FIX
+-- ERROR --  `describe` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches.
+$ echo $?
+1
+```
+
+— while an exhaustive `cap no_panic` match, and a PLAIN (non-`cap
+no_panic`) module's non-exhaustive match, both still accept (`accept/t14`
+pins the latter as a permanent regression guard: a bare non-exhaustive match
+outside a `cap no_panic` module must never be promoted). See §2.8.12 below
+for the REJECT corpus witness this fix made possible.
+
+**A residual gap F3 inherits, not introduces (open, filed in
+`specs/todos.md` as a distinct finding):** `check_exhaustiveness` skips its
+entire coverage computation — including recording a span into
+`nonexhaustive_match_spans` — whenever ANY arm of the match carries a
+pattern guard (`typecheck.ml:~3297`, `if has_guards then ()`; guard coverage
+is undecidable in general without a guard-aware SMT analysis, per the
+function's own doc comment). So a `cap no_panic` module containing a
+guarded, genuinely non-exhaustive match is invisible to *both* the ordinary
+warning and F3's new error path — `--check` exits 0 with zero diagnostics,
+live-verified (`x when x > 0 -> 1`, no catch-all, over an `Int`
+scrutinee), and calling it at a value that fails the guard panics at
+runtime exactly as the un-fixed F3 case did. This is **not a regression**
+and **not in F3's scope** — F3's fix correctly consumes whatever verdict
+`check_exhaustiveness` computes, and this blind spot predates and is
+independent of that fix; fixing it would need a guard-aware exhaustiveness
+analysis (substantially more than span-plumbing). Filed as its own open
+finding, distinct from F3.
+
+**F5 (open, cosmetic, filed in `specs/todos.md`):** `println`/`print` are
+registered in `builtin_cap_table` under `IO.Console` and DO count as a
+capability use for Check 2's "declared-but-unused `needs`" accounting
+(§2.8.6) — yet a bare `println` call with no covering `needs IO.Console`
+triggers **neither** Check 1b's warning **nor** the softer `cap_infer` HINT,
+while an otherwise-identical `file_read` call in the same block triggers
+both. This is unrelated to the F2/F3 soundness gaps above (it is a body-scan
+COVERAGE gap, not a behavioral-cap enforcement gap — `println`/`print` are
+not in `pure_banned`'s omission list; they ARE correctly listed there,
+`:6571`, and `cap pure` DOES reject a bare `println` call, live-verified)
+but worth noting here since it makes `IO.Console` the de-facto "free"
+capability at the body-scan layer specifically. Low priority; not
+investigated further in this docs-only task.
+
+#### 2.8.12 Corpus witnesses (Task 4 — behavioral caps, current-correct only)
+
+Task 4 added three new `accept/` programs (`t54`-`t56`) and three new
+`reject/` programs (`t42`-`t44`), each verified live against `--check` and
+scoped to the behaviors that were already correct at the time — `cap
+pure`/`cap deterministic` got prose (above) and an honest accept witness
+only, since the shapes that SHOULD reject (F2) still accepted then; those
+witnesses shipped with the Task 5/6 fixes, described after this list:
+
+- **`t54_cap_pure_arithmetic`** — `PureMath` (`cap pure`) declares `add`/
+  `scale`, calling only each other and `+`/`*`; neither is a member of
+  `pure_banned`, so `check_pure_module` finds nothing. `--check` exit 0, no
+  diagnostics. Chosen to remain a valid accept witness across the F2 fix
+  (which rebuilds `pure_banned` from `builtin_cap_table`) — plain arithmetic
+  and an internal function call can never become effectful builtins, fixed
+  or not.
+- **`t55_cap_no_alloc_arithmetic`** — `NoAllocMath` (`cap no_alloc`) declares
+  `max3` (nested `if`/`else`) and `abs_diff` (`let` + arithmetic negation);
+  neither touches any of `no_alloc.ml`'s four allocating shapes. `--check`
+  exit 0.
+- **`t56_cap_no_extern_ok`** — `NoFFIService` (`cap no_extern`, `needs
+  IO.Network`) declares one ordinary `fn ping(_cap : Cap(IO.Network), host :
+  String) : Int` calling `string_length`; no `DExtern` block, no `needs
+  IO.Foreign` path — neither of `check_no_extern_module`'s two raise sites
+  fires. `--check` exit 0.
+- **`t42_cap_no_panic_explicit_panic`** — `Guarded` (`cap no_panic`)
+  declares `fn fail() : Int do panic("boom") end`; `panic` is in
+  `panic_surface_direct`, matched directly (no fixpoint needed). Pinned: ``
+  calls `panic`, which can panic ``.
+- **`t43_cap_no_alloc_tuple`** — `NoAllocPair` (`cap no_alloc`) declares
+  `fn make_pair(a, b) : (Int, Int) do (a, b) end`; the non-empty 2-tuple
+  return trips `no_alloc.ml`'s `ETuple` arm. Pinned: `` tuple construction
+  allocates in a `cap no_alloc` module ``.
+- **`t44_cap_no_extern_extern_block`** — `NoFFI` (`cap no_extern`, `needs
+  IO.FileSystem`) declares an `extern "libc" : Cap(IO.FileSystem) do ... end`
+  block; `check_no_extern_module`'s `DExtern` arm raises unconditionally,
+  regardless of the extern's own Check 5 obligation being separately
+  satisfied (it is — `needs IO.FileSystem` covers it, so Check 5 itself does
+  not additionally fire here; a WARNING-level Check 1c diagnostic about the
+  missing `needs IO.Foreign` does fire alongside, but is not the pinned
+  substring). Pinned: `` contains an `extern` block ``.
+
+**Tasks 5 and 6 then added the F2/F3 fix-enabled `reject/` witnesses** —
+programs that were IMPOSSIBLE to add earlier because they accepted
+(incorrectly) before their respective fix landed:
+
+- **`t45_cap_pure_file_write`** / **`t46_cap_pure_random_bytes`** —
+  `LeakyPure` (`cap pure`) calling `file_write`/`random_bytes` respectively,
+  each with a type-correct `Result`-returning signature so the ONLY
+  rejection is the cap violation, not an incidental type mismatch. Pinned:
+  `` which has side effects ``.
+- **`t47_cap_deterministic_unix_time_ms`** — `DetLeak` (`cap deterministic`)
+  calling `unix_time_ms(())`. Pinned: `` which is non-deterministic ``.
+- **`t48_cap_no_panic_nonexhaustive_match`** — `Guarded` (`cap no_panic`)
+  with a `match opt do Some(x) -> x end` over an `Option(Int)` scrutinee,
+  missing the `None` case. Pinned: `` contains a non-exhaustive `match`,
+  which panics at runtime ``.
+
+Both fixes are verified live in both directions — the transcripts in the F2/F3
+write-up above show the exact same program shapes rejecting post-fix having
+accepted pre-fix; `accept/t54`/`t55`/`t56` and `accept/t14` (a PLAIN
+non-exhaustive match, outside any `cap no_panic` module) all continue to
+accept post-fix, confirming neither fix over-rejects.
+
+`check_types.sh`: **104/104 (56 accept, 48 reject)**, exit 0 — the corpus's
+current, final total for this widening slice (§3).
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -3513,7 +4680,170 @@ wrong-state, a linear channel continuation used twice), plus one new
 `accept/` program (`t43_choose_offer_roundtrip`) for a full `choose`/`send`/
 `close` + `offer`/`recv`/`close` round-trip, run-witnessed printing `:ok` then
 `42`. `check_types.sh`: **78/78 (43 accept, 35 reject)**, exit 0 — the
-corpus's current total (§3).
+corpus's total after Task 3 (see below for the capabilities-widening total
+that supersedes it).
+
+**Capabilities widening, Task 1 (2026-07-07) added:** §2.8, the FIRST
+capability/effect-system content in this document — the 18-entry IO
+permission hierarchy (`lib/caps/cap_lattice.ml:15-34`, one tree rooted at
+`IO`), `cap_subsumes`/`normalize` subsumption (`:50`/`:56`, aliased at
+`typecheck.ml:1103`), the `needs` module manifest (`DNeeds`,
+`ast.ml:159`), and **Check 1** (`typecheck.ml:5558-5587`): every `Cap(X)` in
+a function/actor/extern signature must be covered — via subsumption — by a
+declared `needs`, else ERROR. Filed a live scoping finding while verifying
+the corpus: only 10 of the 18 hierarchy entries are registered as valid
+`Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`); the
+other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`,
+`IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets
+but reject as `` Unknown module `IO` `` if written inside `Cap(...)` — the
+qualified-type-resolution fallback tries to load an actual `IO` module and
+finds no matching exported type. Four new `accept/` programs (`t45`–`t48`:
+bare-covered reflexive case, root-covers-child subsumption, sibling
+independence — two siblings each need their own `needs`, and a second
+mid-tier subsumption shape) and three new `reject/` programs (`t36`–`t38`:
+uncovered `Cap(X)`, narrow `needs` does not cover a broader `Cap` — directional
+asymmetry, and sibling does not cover sibling). `check_types.sh`: **86/86
+(48 accept, 38 reject)**, exit 0 — the corpus's total after Task 1 (see below
+for the Task 2 total that supersedes it).
+
+**Capabilities widening, Task 2 (2026-07-07) added:** §2.8.6-§2.8.7 —
+transitive `use` coverage (**Check 4**, `typecheck.ml:5661-5681`: every
+module a given module `use`s must have its own declared `needs` covered,
+transitively, via the same `cap_subsumes` subsumption, ERROR on violation),
+extern `Cap(X)` coverage (**Check 5**, `typecheck.ml:5684-5701`, ERROR), and
+the extern-implies-`IO.Foreign` obligation (**Check 1c**,
+`typecheck.ml:5607-5620`, WARNING-only) — plus the honestly-stated three-tier
+enforcement reality that reconciles `specs/lang/capabilities.md`'s tutorial
+overclaim (F1, filed): Checks 1/4/5 (signature/transitive/extern-cap) are
+true ERRORs, exit 1; Checks 1b (body-scanned builtin call, `typecheck.ml:5588
+-5605`) and 1c (extern-implied `IO.Foreign`) are WARNING-only, exit 0 —
+reproduced live side by side (a `Cap(IO.FileRead)` signature with no `needs`
+rejects; a body call to `file_read` with no `needs` only warns and
+`--check`s clean). Two new `accept/` programs (`t49`: an importer declaring
+the imported stdlib module `Vault`'s (`needs IO.Mut`) transitive obligation;
+`t50`: a well-formed `extern` block covered on both its Check 5 and Check 1c
+obligations) and one new `reject/` program (`t39`: companion to `t49` with
+the covering `needs IO.Mut` removed, pinning Check 4's ERROR). Also files
+**F6** (found while widening Task 1, filed now): only 10 of the 18 hierarchy
+entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`,
+`typecheck.ml:1858-1861`) — see §2.8.3's scoping note, unchanged by this
+task. `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0 — the
+corpus's total after Task 2 (see below for the Task 3 total that
+supersedes it).
+
+**Capabilities widening, Task 3 (2026-07-07) added:** §2.8.8-§2.8.9 —
+`cap_narrow`/`root_cap` compile-time capability threading
+(`root_cap : Cap(IO)` a value, `cap_narrow : Cap(IO) -> Cap(a)` a
+POLYMORPHIC-return builtin, both `typecheck.ml:1457-1458`, both
+runtime-erased); the effect-inference two projections `record_fn_caps`
+computes per function (`typecheck.ml:5421-5447`) — `cap_closures` (own +
+module-wide `needs`) and `own_cap_closures` (own only); **Check 8**
+(`typecheck.ml:5798-5834`): a `*_migrate_state`-suffixed fn (recognized by
+name alone, `is_migrate_fn_name`, `:5368-5378` — an ordinary module-level
+sibling declaration, never nested inside an `actor` block) must be IO-free,
+checked against `own_cap_closures` so a module's handler-level `needs`
+cannot false-blame a pure migrate function (the F-caveat comment at `:5442`,
+verified sound and precise for this consumer); **Check 7**
+(`typecheck.ml:5755-5793`): a `Tagged(_, Realtime)` parameter excludes
+`Cap(Alloc|IO|Panic)` parameters on the same signature. Files a scoping
+note: `Realtime` is not itself pre-registered in `builtin_types` (unlike
+`Alloc`/`Panic`), so a program must declare its own nullary `Realtime` type
+before `Tagged(_, Realtime)` resolves at all — cosmetic, not a soundness
+gap, since Check 7 fires correctly once the annotation resolves. Three new
+`accept/` programs (`t51`: narrow-and-thread to a stricter callee; `t52`:
+`root_cap` narrowed twice to two sibling sub-caps in one function; `t53`:
+a pure `*_migrate_state` fn beside a real `actor` in a `needs IO.Console`
+module, the caveat-mitigation witness) and two new `reject/` programs
+(`t40`: a migrate_state fn calling `println`, Check 8; `t41`: a
+user-declared `Tagged(Int, Realtime)` alongside `Cap(IO)`, Check 7).
+`check_types.sh`: **94/94 (53 accept, 41 reject)**, exit 0 — the corpus's
+total after Task 3 (see below for the Task 4 total that supersedes it).
+
+**Capabilities widening, Task 4 (2026-07-07) added:** §2.8.11-§2.8.12 — the
+five BEHAVIORAL module caps (`cap no_panic`/`no_alloc`/`no_extern`/`pure`/
+`deterministic`), a mechanism orthogonal to the IO-permission `needs`/`Cap(X)`
+machinery Tasks 1–3 cover (shares only the `cap` keyword and the `Ast.DOpts`
+AST node). `cap no_panic` (`check_no_panic_module`, `typecheck.ml:6489-6566`)
+and `cap no_alloc` (`lib/refinecheck/no_alloc.ml`) are CORRECT for the shapes
+this task's corpus witnesses (explicit `panic`/unsafe division; non-empty
+tuple/record/`ECon`/`ELam` construction). `cap no_extern`
+(`check_no_extern_module`, `typecheck.ml:6604-6628`) is likewise correct for
+both its raise sites (a `DExtern` block; a `needs IO.Foreign` path). Files
+two headline UNSOUND under-approximations, both live-verified and both left
+UNFIXED by this docs-only task (their fixes and REJECT witnesses are Tasks 5
+and 6 of this same widening slice): **F2** — `pure_banned`
+(`typecheck.ml:6570-6576`) and `deterministic_banned` (`:6632-6635`) are
+hardcoded name lists that reference builtins which do not exist (`write_file`,
+`random_int`, `now_ms`, …) while missing the real effectful ones
+(`file_write`, `random_bytes`, `unix_time_ms`, …), so a `cap pure` module
+calling `file_write` (or `random_bytes`), or a `cap deterministic` module
+calling `unix_time_ms(())`, typechecks clean today; **F3** — `cap no_panic`'s
+`panic_surface_*` sets cover named partial functions but never consult the
+exhaustiveness checker's already-computed verdict, so a non-exhaustive
+`match` inside a `cap no_panic` module typechecks clean and panics at
+runtime. Also notes **F5** (cosmetic): `println`/`print` skip the Check-1b
+body-scan diagnostic entirely despite being registered in
+`builtin_cap_table`. Three new `accept/` programs (`t54`: a genuinely-pure
+`cap pure` arithmetic module, valid across the coming F2 fix; `t55`: a valid
+`cap no_alloc` module; `t56`: a valid `cap no_extern` module) and three new
+`reject/` programs (`t42`: `cap no_panic` + explicit `panic`; `t43`: `cap
+no_alloc` + tuple construction; `t44`: `cap no_extern` + an `extern` block).
+`check_types.sh`: **100/100 (56 accept, 44 reject)**, exit 0 — the corpus's
+total after Task 4 (see below for the Task 5/6 totals that supersede it).
+
+**Capabilities widening, Task 5 (2026-07-07) — FIXED F2.** `pure_banned` and
+`deterministic_banned` are now derived from `builtin_cap_table` (the
+authoritative effect map) instead of the hand-guessed name lists Task 4
+found and filed. `cap pure` now bans every effectful builtin the table
+knows about (plus the incidental non-table `spawn`/`send`/`exit`); `cap
+deterministic` bans only the nondeterminism-cap subset (`IO.Clock`/
+`IO.Random`, via the new `is_nondeterministic_cap` helper), staying
+correctly weaker than `cap pure`. Three new `reject/` programs made possible
+by the fix (`t45`: `cap pure` + `file_write`; `t46`: `cap pure` +
+`random_bytes`; `t47`: `cap deterministic` + `unix_time_ms`), each
+type-correct so the cap ban is the sole rejection. Regression tests in
+`test/test_compiler.ml` pin both the newly-rejecting programs and continued
+acceptance of genuinely pure/deterministic modules. `scripts/run-tests.sh`
+full six-runner suite verified GREEN. `check_types.sh`: **103/103 (56
+accept, 47 reject)**, exit 0 — the corpus's total after Task 5 (see below
+for the Task 6 total that supersedes it).
+
+**Capabilities widening, Task 6 (2026-07-07) — FIXED F3.**
+`check_no_panic_module` now consumes the exhaustiveness checker's verdict: a
+new `env.nonexhaustive_match_spans` side-table records every non-exhaustive
+match's span (populated by `check_exhaustiveness`, which already computed
+this and only reported a Warning before), and `check_no_panic_module` reads
+it, promoting any span nested inside one of the module's own function
+bodies to an ERROR. One new `reject/` program made possible by the fix
+(`t48`: `cap no_panic` + a non-exhaustive `match` over `Option(Int)`).
+`accept/t14` (a PLAIN non-exhaustive match outside any `cap no_panic`
+module) continues to accept, confirming the fix does not over-reject
+ordinary code. `scripts/run-tests.sh` full six-runner suite verified GREEN.
+`check_types.sh`: **104/104 (56 accept, 48 reject)**, exit 0 — the corpus's
+final total for this widening slice (§2.8.12, §3).
+
+**Capabilities widening, Task 7 (2026-07-07) — closeout, no new corpus.**
+Finalized §2.8 to describe F2/F3 as FIXED throughout (rather than the
+mid-slice "open"/"UNSOUND" framing Task 4 wrote before Tasks 5–6 landed);
+corrected this section's own stale illustrative counts to the final
+104/104; updated §6's roadmap bullet from "Tasks 1-3 landed, behavioral caps
+still deferred" to reflect all seven tasks landed; reconciled the
+`specs/lang/capabilities.md` tutorial's F1-overclaiming prose (see
+`specs/todos.md`'s slice-5 closeout entry for the full list of corrected
+claims) and extended its behavioral-caps section to document all five caps
+(previously only `no_panic`/`no_alloc`); filed **the proof-cap mint
+mismatch** (deliberately unlabeled rather than a letter — `F1`–`F8` are all
+already in use elsewhere in this document, including by the UNRELATED
+session-types-slice linearity/diagnostic-noise findings — between the
+tutorial's documented idiom and the actual, unrestricted `cap_narrow`-based
+mechanism, deferred to a later proof-caps slice per the widening plan) and a
+residual **guarded-match exhaustiveness gap** (a
+pattern guard short-circuits `check_exhaustiveness` before it can record a
+span, so a guarded non-exhaustive match in a `cap no_panic` module is
+invisible to both the ordinary warning and F3's new error path — inherited
+from the pre-existing exhaustiveness checker, not a regression, not in F3's
+scope). `check_types.sh` reconfirmed 104/104; `check-docs.sh` reconfirmed
+exit 0.
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 
@@ -3550,11 +4880,31 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   acceptance criterion; this document's bidirectional HM judgment (§1) is the
   Level-1 substrate that Phase 3's refinement layer would extend, not
   something this pass attempts.
-- **Linearity/capabilities.** The capability lattice (`lib/caps/`) is named
+- **Linearity/capabilities — MOSTLY LANDED (§2.8, capabilities widening
+  Tasks 1-7, 2026-07-07).** The capability lattice (`lib/caps/`) is named
   explicitly in the roadmap's Phase 3 scope (§4.5, "refinement/capability
-  soundness") — deferred here for the same reason as refinements.
-  Linear/uniqueness typing is not separately named in the roadmap and is
-  narrower still; grouped with capabilities as a Phase-3-or-later concern.
+  soundness"). §2.8 lands the IO-cap spine: the 18-entry IO permission
+  hierarchy, `cap_subsumes`/`normalize` subsumption, the `needs` manifest and
+  Check 1 (Task 1); transitive `use`/extern-implied caps, Checks 4/1c/5
+  (Task 2); `cap_narrow`/`root_cap` compile-time threading, the
+  effect-inference two projections, migrate_state IO-freedom (Check 8), and
+  realtime exclusion (Check 7) (Task 3); **and the five *behavioral* module
+  caps** (`cap no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`,
+  Task 4), **including two real compiler fixes** for soundness gaps the
+  survey found — F2 (`cap pure`/`cap deterministic`'s banned-builtin sets
+  now derived from `builtin_cap_table`, Task 5) and F3 (`cap no_panic` now
+  rejects non-exhaustive matches via a recorded-span side-table, Task 6),
+  both gated on the full test suite. **Still deferred:** proof-cap
+  mint/forge (Check 6) itself — "the proof-cap mint mismatch" (filed in
+  `specs/todos.md`, deliberately unlabeled since every letter `F1`–`F8` is
+  already in use elsewhere in this document) documents a real mismatch
+  between `capabilities.md`'s documented mint idiom and the actual
+  (unrestricted) mechanism, filed but not fixed, expected to be the subject
+  of a dedicated later slice. Linear/uniqueness typing beyond the
+  session-channel linearity
+  already covered in §2.7.6/§2.7.8 is not separately named in the roadmap
+  and is narrower still; grouped with capabilities as a Phase-3-or-later
+  concern.
 - **Effects.** Named alongside refinements/capabilities in the roadmap's
   problem statement (§4.3: "bidirectional HM inference + refinements + the
   capability lattice + effects") as part of the ambitious claim set a full

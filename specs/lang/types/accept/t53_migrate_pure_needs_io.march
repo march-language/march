@@ -1,0 +1,33 @@
+-- Capabilities widening, Task 3 -- Check 8 (`typecheck.ml:5798-5834`), the
+-- caveat-mitigation ACCEPT witness. `Counter` is a `needs IO.Console` module
+-- (as if for its actor's handlers) that also declares a top-level SIBLING fn
+-- `counter_migrate_state` (the hot-reload state-migration naming convention,
+-- `is_migrate_fn_name`, `typecheck.ml:5368-5378` -- a plain, bare-suffixed
+-- `fn`, NOT nested inside the `actor do ... end` block; `check_module_needs`
+-- scans it as an ordinary `Ast.DFn` alongside the actor declaration). The
+-- migrate fn's own body is pure (just returns `old`) -- Check 8 must NOT
+-- false-blame it for the module's handler-level `needs IO.Console`, and it
+-- doesn't: Check 8 consults `env.own_cap_closures` (`record_fn_caps`'s
+-- own-caps-only projection, `typecheck.ml:5441-5444`), which excludes
+-- `module_wide_caps`, rather than the merged `env.cap_closures` the module's
+-- `needs` would otherwise fold into every function's closure. `--check`
+-- exits 0 -- this is the concrete accept witness for the design comment at
+-- `typecheck.ml:5442` ("would falsely blame a pure function"): the mitigation
+-- is real and works even against a genuine `actor`-bearing module, not just a
+-- bare `mod`. See core-march-types.md §2.8.9.
+mod Counter do
+  needs IO.Console
+
+  actor CounterActor do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc(x : Int) do
+      println("Counter.Inc -> " ++ int_to_string(state.count + x))
+      { count: state.count + x }
+    end
+  end
+
+  fn counter_migrate_state(old : Int) : Int do
+    old
+  end
+end

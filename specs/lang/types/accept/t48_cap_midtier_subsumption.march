@@ -1,0 +1,21 @@
+-- Capabilities widening, Task 1 -- a SECOND, independent subsumption shape:
+-- a MID-TIER declared `needs` (not the root `IO`, not an exact match) covers
+-- a deeper descendant. `IO.NetConnect`'s parent is `IO.Network`
+-- (`cap_lattice.ml:22`); declaring `needs IO.Network` here covers
+-- `Cap(IO.NetConnect)` via the same ancestor-walk `cap_subsumes` uses for
+-- t46, but one level down the tree instead of from the root — proving
+-- subsumption holds at every tier, not only "root covers everything."
+-- (`Cap(IO.Random)`/`Cap(IO.Database)`/`Cap(IO.Spawn)`/`Cap(IO.Mut)`/
+-- `Cap(IO.Telemetry)`/`Cap(IO.Foreign)`/`Cap(IO.NetConnect.TLS)` are valid
+-- `needs` targets but are NOT valid `Cap(X)` TYPE arguments today — only 10
+-- of the 18 hierarchy entries are registered in `builtin_types`
+-- (`typecheck.ml:1858-1861`); see core-march-types.md §2.8.3 for the finding.)
+-- See core-march-types.md §2.8.
+mod Client do
+  needs IO.Network
+
+  fn connect(cap : Cap(IO.NetConnect), host : String) : String do
+    let _ = cap
+    host
+  end
+end

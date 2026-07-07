@@ -1,0 +1,33 @@
+-- revoke_cap / is_cap_valid must be typecheck-registered builtins.
+-- Both are `eval.ml` builtins (epoch-based capability plane) but had NO entry
+-- in the typecheck builtin table — only `get_cap`/`send_checked` were present —
+-- so `revoke_cap(cap)` in surface code was rejected `I cannot find
+-- `revoke_cap``. They are now registered with `revoke_cap : Cap(a) -> Atom`
+-- (returns the `:ok` atom) and `is_cap_valid : Cap(a) -> Bool`, mirroring the
+-- `poly1` form of `get_cap`. The `Pid` is obtained via `spawn` (a fresh var,
+-- as in accept/t39) and fed to `get_cap`, whose `Cap(a)` payload the two new
+-- builtins then consume. See core-march-types.md §2.8.11.
+mod Main do
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn check() : Bool do
+    let p = spawn(Counter)
+    match get_cap(p) do
+      Some(cap) ->
+        let _ = revoke_cap(cap)
+        is_cap_valid(cap)
+      None -> false
+    end
+  end
+
+  fn main() do
+    println(bool_to_string(check()))
+  end
+end

@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: calls `panic`, which can panic
+-- Capabilities widening, Task 4 -- `cap no_panic` (`check_no_panic_module`,
+-- `typecheck.ml:6116-6193`), the REJECT side for the most direct panic
+-- surface: an explicit call to `panic`. `panic` is a member of
+-- `panic_surface_direct` (`typecheck.ml:6035-6041`) -- the syntactic
+-- call-collector `calls_in_expr` (`:6085-6114`) finds `fail`'s body calls
+-- `panic`, `is_direct_panic_site` (`:6135-6138`) matches it directly (no
+-- fixpoint/transitive step needed), and `check_no_panic_module` reports an
+-- ERROR at the call site: `` `fail` in `mod Guarded` (declared `cap
+-- no_panic`) calls `panic`, which can panic. `` See core-march-types.md
+-- §2.8.11.
+mod Guarded do
+  cap no_panic
+
+  fn fail() : Int do
+    panic("boom")
+  end
+end
