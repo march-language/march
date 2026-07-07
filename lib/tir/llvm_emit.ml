@@ -1222,11 +1222,38 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     else r_i64 in
     (inner_ty, r)
 
-  (* task_await(task_ptr) → delegate to march_task_await C runtime *)
+  (* task_await(task_ptr) → delegate to march_task_await C runtime.
+     march_task_await returns Ok(task[3]) where task[3] = (apply_ret << 1)|1.
+     For a ptr result apply_ret is a heap address, so the Ok field holds the
+     correctly-tagged uniform pointer and the normal destructure recovers it.
+     For an i64 result apply_ret is already a tagged scalar (2*n+1), so task[3]
+     is double-tagged (4*n+3): the Ok(n) destructure untags only once and
+     leaves 2*n+1.  Mirror the task_await_unwrap fix (commit 291f6b5f) by
+     stripping the extra tag from the Ok payload here, keyed on the statically
+     known Task inner type so the ptr path is left byte-identical. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
+    let inner_ty = match a with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
+         | _ -> "ptr")
+      | _ -> "ptr"
+    in
+    if inner_ty = "i64" then begin
+      (* Ok payload lives at field 0 (offset 16).  task[3] = 4*n+3 is always
+         odd, so an unconditional ashr-1 is the exact inverse of the trampoline
+         double-tag: 4*n+3 → 2*n+1 (the proper single-tagged uniform scalar). *)
+      let fp = fresh ctx "tawf" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
+      let v  = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
+      let v2 = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
+      emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp)
+    end;
     ("ptr", r)
 
   (* task_yield() → cooperative yield via march_sched_yield *)

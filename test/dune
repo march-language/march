@@ -1213,6 +1213,64 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_counter.expected native_actor_counter.out)))
 
+; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
+; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
+; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)
+; ── destructure untags only once, leaving 2*n+1.  Pre-fix this printed
+; ── await=85 / sum=123 / stream_sum=115 instead of 42 / 60 / 55.  Compile
+; ── natively, run single-threaded (deterministic), diff stdout.
+(rule
+ (targets native_task_await_int native_task_await_int.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_int.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_int
+        native/task_await_int.march)
+   (with-stdout-to native_task_await_int.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_int")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_int.expected native_task_await_int.out)))
+
+; ── Actor + task runtime stress (test/apps/actor_stress.march): five actors,
+; ── receive()-in-handler, FIFO ordering, and Task async/await/await_many/
+; ── async_stream, end-to-end in one compiled binary.  Fire-and-forget `send`
+; ── output is deferred to scheduler drain; run under MARCH_NUM_SCHEDULERS=1
+; ── so the concurrent println's serialise deterministically (multi-thread
+; ── mode interleaves them mid-line).  Compile natively, run, diff stdout.
+(rule
+ (targets native_actor_stress native_actor_stress.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file apps/actor_stress.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stress
+        apps/actor_stress.march)
+   (with-stdout-to native_actor_stress.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_actor_stress")))))
+
+(rule
+ (alias runtest)
+ (action (diff apps/actor_stress.expected native_actor_stress.out)))
+
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule
  (targets native_ffi_leak native_ffi_leak.out)
