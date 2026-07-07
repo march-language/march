@@ -3499,10 +3499,22 @@ Three new `accept/` programs (`t51`-`t53`) and two new `reject/` programs
   `cap_narrow(root)` to obtain a `Cap(IO.Network)` value, threaded to
   `listen`'s stricter signature; both `Cap(IO)` (on `boot` itself) and
   `Cap(IO.Network)` (on `listen`) are covered by the module's single `needs
-  IO` via subsumption. `--check` exit 0, plus the expected Check 3 narrowing
-  HINT on `boot`'s own root-cap parameter (the same incidental HINT
-  `reject/t37` also emits alongside its ERROR — here there is no ERROR to
-  accompany it, since `boot`'s `Cap(IO)` use is itself covered).
+  IO` via subsumption. `--check` exit 0, confirmed stable across 40+ repeated
+  live runs of the byte-identical binary and input. **F7 (new finding, live-
+  observed, not fixed here):** the incidental Check 3 narrowing HINT this
+  program's `boot(root : Cap(IO))` parameter would be expected to also emit
+  (the same HINT `reject/t37` emits alongside its ERROR, deterministically,
+  100% of 20 repeated runs) is instead **flaky** on this two-function,
+  `cap_narrow`-calling program shape — present in roughly 1 run out of 10,
+  absent otherwise, with no change to the file, the binary, or the working
+  directory between runs. A reduced repro (a single-function module with a
+  bare unused `Cap(IO)` parameter, no `cap_narrow` call at all) reproduces
+  the same flakiness, so it is not specific to `cap_narrow`; the exact
+  trigger was not isolated further (out of scope for this docs-only slice —
+  the HINT is advisory, and the flakiness never changes `--check`'s exit
+  code, so it does not affect this corpus's accept/reject correctness, only
+  the reliability of one HINT's presence). Worth a dedicated investigation
+  in a future task.
 - **`t52_cap_narrow_multi`** — a second threading shape: `main` (no `Cap(X)`
   parameter of its own) reads `root_cap` directly and calls `cap_narrow`
   twice against it, minting a `Cap(IO.Console)` and a `Cap(IO.FileRead)` in
