@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: Chan.send: channel is at
+mod Main do
+  -- Session-types widening, Task 3 -- send-at-wrong-state.
+  -- `protocol Echo` gives `cc` the local type Send(Int, Recv(Int, End)).
+  -- The FIRST channel op on `cc` must be a send. Calling Chan.send TWICE in
+  -- a row (no intervening recv) puts the second call's argument at
+  -- Recv(Int, End) -- Chan.send's arm (typecheck.ml:3479) requires
+  -- SSend(T,S) and rejects any other state with the pinned message.
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let cc2 = Chan.send(cc, 42)
+    let cc3 = Chan.send(cc2, 43)
+    Chan.close(cc3)
+    Chan.close(sc)
+  end
+end
