@@ -283,6 +283,49 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-07, module alias in a non-entry module body now resolves at codegen)
+
+`forge build` of a multi-repo project (forgepm → bastion) failed to LINK with
+`Undefined symbols: _PubSub.subscribe` (and `_unsubscribe`/`_unsubscribe_all`/
+`_broadcast_from`), referenced from `IslandSocket.handle_text`/`ws_loop`.
+bastion's `mod IslandSocket` declares `alias Bastion.PubSub as PubSub` and calls
+`PubSub.subscribe(...)`; typecheck resolved the alias, but codegen emitted the
+CALL as `_PubSub.subscribe` while the DEFINITION (`mod Bastion.PubSub`) was
+`Bastion.PubSub.subscribe` — the two never converged.
+
+**Root cause**: TIR lowering resolves module aliases through `_use_aliases` +
+`resolve_use_alias` (`lib/tir/lower.ml` / `lower_state.ml`). The top-level decl
+loop over `m.mod_decls` has a `DAlias` handler, but `lower_mod_decls` — which
+lowers every NON-entry module (auto-discovered MARCH_LIB_PATH files and nested
+`DMod`s) — had **no `DAlias` case** in its inner decl match; it fell into the
+`_ -> ()` catch-all. So an `alias` at the entry file's own top level resolved,
+but the identical alias inside any auto-discovered module body was silently
+dropped, and its `Short.member` calls kept the un-canonicalized alias name at
+codegen. This is the exact entry-file-vs-lib-file asymmetry: `alias X as Y` in
+the compile-entry module worked; the same in a sibling/dependency module linked
+to nothing.
+
+**Fix**: an order-independent module-alias prefix table `_module_aliases`
+(short name → full module path, e.g. `"PubSub" → "Bastion.PubSub"`), populated
+from `DAlias` in BOTH the top-level handler and the newly-added `lower_mod_decls`
+handler, plus a fallback branch in `resolve_use_alias` that rewrites
+`Short.member → Long.Path.member` by prefix substitution once every exact-name
+lookup has missed. The prefix rewrite is deliberately order-independent: the
+pre-existing exact-entry mechanism scans `!fns` and so only covers aliases whose
+target module was lowered first (guaranteed for the entry file, processed after
+every other module — NOT for a lib module whose target sibling may be lowered
+afterward). Exact entries still take precedence; the prefix table only
+backstops, so import/`use`-based exact aliases and the builtin/hijack guards in
+`resolve_use_alias` are untouched.
+
+New native golden (`test/dune` rule + `test/alias_codegen/` fixtures): a
+non-entry module `AcCaller` aliasing a 2-level `AcBase.Target`, compiled with
+MARCH_LIB_PATH, run, and diffed to `42` — RED pre-fix (`_T.answer` undefined →
+clang link failure), GREEN post-fix. Verified end-to-end: forgepm now compiles
+and links to a native binary (the last remaining deploy blocker). **Full suite
+(complete `dune build`): 443 compiler / 231 eval / 391 codegen / 805 stdlib
+pass, 0 failures.**
+
 ## Current State (as of 2026-07-07, `march check` quadratic hang on large MARCH_LIB_PATH projects fixed)
 
 `march check`/`forge build --target ...` on a large multi-repo downstream project

@@ -1,0 +1,5 @@
+-- Parent namespace so the 2-level module `AcBase.Target` resolves and so an
+-- `alias AcBase.Target as T` has a real target to point at.
+mod AcBase do
+  let marker = 1
+end

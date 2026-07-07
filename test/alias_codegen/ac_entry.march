@@ -1,0 +1,6 @@
+mod AcEntry do
+  needs IO.Console
+  fn main() do
+    println(String.from_int(AcCaller.go()))
+  end
+end

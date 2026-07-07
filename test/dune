@@ -771,6 +771,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_mod_qualcall.expected native_nested_mod_qualcall.out)))
 
+; ── Regression: `alias Long.Path as Short` inside a NON-entry (auto-
+; discovered via MARCH_LIB_PATH) module body must resolve `Short.member`
+; to `Long.Path.member` at codegen.  lower_mod_decls' inner decl match had
+; no DAlias case (only the entry file's top-level DAlias handler existed),
+; so a lib module's alias was silently dropped: the call emitted `_Short.
+; member` while the definition was `Long.Path.member` — undefined at link.
+; This bit forgepm (bastion's IslandSocket `alias Bastion.PubSub as PubSub`,
+; calling PubSub.subscribe/unsubscribe/broadcast_from).  The fix registers an
+; order-independent prefix mapping consulted by resolve_use_alias.  Fixtures
+; live in alias_codegen/ (ac_caller.march is the non-entry aliasing module;
+; ac_entry.march is the compile entry). ──
+(rule
+ (targets native_alias_codegen native_alias_codegen.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files alias_codegen/*.march))
+ (action
+  (progn
+   (setenv MARCH_LIB_PATH alias_codegen
+    (run %{exe:../bin/main.exe} --compile -o native_alias_codegen
+         alias_codegen/ac_entry.march))
+   (with-stdout-to native_alias_codegen.out
+        (system "./native_alias_codegen")))))
+
+(rule
+ (alias runtest)
+ (action (diff alias_codegen/ac_entry.expected native_alias_codegen.out)))
+
 ; ── Regression: RPC CAS impl_hash stable across separate compilations ──
 ; The remote_ref_hashes / march_remote_register admission check compares a
 ; function's impl_hash computed in the CALLER binary against the SERVER's.  Two
