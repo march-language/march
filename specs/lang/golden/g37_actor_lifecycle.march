@@ -1,0 +1,29 @@
+mod Main do
+  -- Operational actor lifecycle witness (core-march.md §4.10.6): spawn -> kill ->
+  -- is_alive. A single Counter actor is spawned (ai_alive = true), so is_alive
+  -- returns true; kill(pid) runs crash_actor (eval.ml:1766) which sets
+  -- inst.ai_alive <- false, so is_alive then returns false. Observation is via
+  -- the bool returned by is_alive (eval.ml:2964 — a registry lookup, SAFE
+  -- compiled), printed with println — NEVER get_actor_field / pid_of_int, which
+  -- SIGSEGV compiled. Determinism: a single actor, no mailbox/scheduler
+  -- dependence, so byte-identical interpreted vs compiled.
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc(n : Int) do
+      { count: state.count + n }
+    end
+  end
+
+  fn bool_str(b : Bool) do
+    if b do "true" else "false" end
+  end
+
+  fn main() do
+    let c = spawn(Counter)
+    println("alive=" ++ bool_str(is_alive(c)))
+    kill(c)
+    println("alive=" ++ bool_str(is_alive(c)))
+  end
+end

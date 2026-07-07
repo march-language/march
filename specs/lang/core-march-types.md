@@ -1939,6 +1939,220 @@ a hard reject), confirmed live and pinned as
 enforcement mechanism — it is the same `pub_set` absence surfacing through a
 second syntactic front door.
 
+### 2.6 Actors: declaration, spawn, and `Pid` typing
+
+March's actor construct — `actor Name do state { … } init { … } on Msg(…) do
+… end end` — is checked by `typecheck.ml`'s `DActor` arm (`Ast.DActor (_vis,
+name, actor, _sp)`, `typecheck.ml:6742`). This subsection pins **what that arm
+verifies** and, separately, **what type `spawn(Name)` actually produces** — the
+two are governed by different code and, as it turns out, disagree about the
+`Pid` type parameter in a way worth stating plainly.
+
+#### 2.6.1 What the actor declaration checks
+
+The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
+
+1. **State type construction (`:6744–6748`).** The `state { f : T, … }` field
+   declarations are turned into a canonical `TRecord` — each field's surface
+   annotation resolved by `surface_ty`, then the fields **sorted by name** so
+   the state type has a stable structural identity regardless of source order.
+   This record type is the actor's *state type*, written `state_ty` below.
+
+2. **Duplicate-handler rejection (`:6752–6760`).** Two `on Msg(…)` arms with the
+   *same* message name are a hard error (`` actor '…' defines handler '…' more
+   than once ``) — the only diagnostic the arm raises unconditionally.
+
+3. **Constructor registration (`:6768–6784`).** Two kinds of constructor are
+   added to the environment:
+   - the **actor name itself** as a *nullary* constructor whose result type is
+     the actor's own name (`add_ctor name.txt { ci_type = name.txt; ci_arg_tys
+     = []; … }`, `:6769`) — this is what makes a bare `spawn(Counter)` /
+     `Counter` resolve at all as an `ECon(_, [], _)`;
+   - one **message constructor per handler** (`ci_type = name.txt ^ "_Msg"`,
+     `:6781`), so `send(pid, Msg(x))` typechecks. Unannotated handler params get
+     a per-`(handler, position)` placeholder tyvar (`"$p<i>_<Msg>"`, `:6778`)
+     that instantiates to a fresh variable, so an omitted annotation does not
+     block `send`.
+
+4. **`init` checked against the state type (`:6785–6787`).** The `init { … }`
+   expression is checked (not merely inferred) against `state_ty`, with the
+   reason `` actor init must return the initial state record `` — so an `init`
+   whose record shape disagrees with the declared `state {…}` fields is
+   rejected here.
+
+5. **Each handler body checked to RETURN the state type (`:6789–6820`).** Every
+   `on Msg(…) do … end` body is typechecked in an environment where `state` is
+   bound to `state_ty` (`:6790` — the field is read as `state.field`, *not*
+   `self.field`) and each declared message param is in scope (`:6792–6798`). The
+   body's inferred type is then unified against `state_ty` (`:6805–6806`); a
+   mismatch produces the rich `` handler '…' in actor '…' must return the state
+   type `` diagnostic (`:6811–6819`) — this is what enforces the convention that
+   a handler ends by returning the *new* state record.
+
+#### 2.6.2 `spawn` — resolved by literal actor name at compile time
+
+`spawn` is typed by the `ESpawn` arm (`Ast.ESpawn (actor, _)`,
+`typecheck.ml:4185`). It first infers the argument (`ignore (infer_expr env
+actor)`, `:4186`) and then **requires the argument to be a bare actor name**:
+only `ECon(_, [], _)` or `EVar` are accepted (`:4194–4202`). Anything else — an
+`if`, a `match`, a function call, or a payload-carrying `A(x)` — is rejected
+with the fixed diagnostic (`:4197–4202`, verified live):
+
+> `` `spawn` needs a plain actor name written directly, like `spawn(Counter)`. ``
+> A computed actor expression (from an `if`, `match`, or function call) isn't
+> supported: March resolves which actor to spawn at compile time from its name.
+
+The rationale is in the source comment (`:4187–4193`): both backends dispatch
+`spawn` by the actor's *name*, resolved at compile time to a statically
+generated `<Actor>_spawn` function; there is no runtime actor-descriptor value,
+and the TIR lowering assumes exactly the `ECon(_, [], _)` / `EVar` shape — so
+the typechecker rejects a computed actor expression up front rather than letting
+a well-typed program reach the internal `failwith` in lowering. This is
+witnessed by `reject/t28_spawn_computed_actor` (`spawn(pick())`, pinning the
+first line of the message).
+
+#### 2.6.3 The `Pid` type parameter — the truthful account (a finding)
+
+The natural expectation — and the wording carried into this task — is that
+`spawn(Counter)` yields `Pid[state]`, i.e. a `Pid` parameterized by the actor's
+STATE type. **Live probing shows this is false at the surface.** What is true:
+
+- **`spawn` returns `Pid[<fresh unification variable>]`, not `Pid[state]`.** The
+  `ESpawn` arm's result is `TCon ("Pid", [fresh_var env.level])`
+  (`typecheck.ml:4203`; `t_pid a = TCon ("Pid", [a])`, `:983`) — a *fresh,
+  unconstrained* variable, computed with no reference to the state type. Probe:
+  `let p = if true do spawn(Counter) else spawn(Named) end`, where `Counter`'s
+  state is `{ count : Int }` and `Named`'s is `{ name : String }`, **typechecks
+  clean** — the two `if`-branches unify only because each `spawn` produced an
+  independent free var. Were the parameter the state type, the branches would be
+  `Pid({count:Int})` vs `Pid({name:String})` and the `if` would be rejected by
+  T-If. It is not.
+
+- **The `Pid[state_ty]` binding at `:6821` exists but is effectively
+  unobservable.** After checking the handlers, `DActor` does `bind_var name.txt
+  (Mono (TCon ("Pid", [state_ty]))) env_with_ctors` (`:6821`) — the actor *name*
+  is var-bound to `Pid[state]`. But a bare occurrence of the actor name never
+  reaches this binding: the *constructor* registration at `:6769` (the actor as
+  a nullary `ECon` of type `<Name>`) takes precedence, so a bare `Counter` is
+  typed `Counter`, not `Pid[state]`. Probe: `is_alive(Counter)` (where
+  `is_alive : Pid(a) -> Bool`) is **rejected** with `` expected `Pid(r3)` but
+  got `Counter` `` — the name resolves to the nullary ctor's `Counter` type, not
+  the `Pid[state]` value binding.
+
+- **Even an explicit `Pid[T]` annotation is impossible today.** The built-in
+  `Pid` is registered at arity 1 (`builtin_types`, `typecheck.ml:1849`), but the
+  stdlib module `GlobalPid` declares `type Pid = { node_id : String, local_pid :
+  Int, creation : Int }` (`stdlib/global_pid.march:11`) — a *0-arity record*.
+  Because March has a single global type namespace with no per-module type
+  identity (§2.5, the no-per-module-type-namespace design point), that bare
+  `Pid` **shadows** the built-in in `env.types`, so a surface annotation
+  `Pid(T)` is rejected with `` `Pid` expects 0 type argument(s) but got 1. ``
+  (arity check, `:2348–2351`). There is thus no annotation the surface can write
+  to *force* a `Pid`'s parameter to the state type either.
+
+**Net:** the state type is genuinely *checked* — `init` and every handler must
+conform to it (§2.6.1) — but it does **not** propagate to any observable `Pid`
+at a `spawn` site. `spawn(Counter) : Pid[α]` for a fresh `α`; the `α` unifies
+opportunistically with whatever the surrounding builtins demand (e.g. the `a` in
+`is_alive : Pid(a) -> Bool`, `:1341`), and stays free otherwise. The
+"`Pid[state]`" phrasing is therefore aspirational, not a fact about the current
+typechecker; `accept/t39_actor_spawn_pid` witnesses the accept path (`is_alive`
+on a fresh `spawn` result), and this finding is logged in §4.1.
+
+#### 2.6.4 Message-payload typing, and the actor-affinity non-guarantee
+
+`send(target, Msg(args))` is typed by the `ESend` arm (`Ast.ESend (cap, msg,
+sp)`, `typecheck.ml:4177`). It does exactly three things, in order:
+
+1. **Infers and DISCARDS the target's type** — `ignore (infer_expr env cap)`
+   (`:4178`). The `cap` Pid is typed (so a genuinely ill-typed target expression
+   still errors) but its type is thrown away: `send` never consults *which actor*
+   the target is, nor any accepted-message set.
+2. **Infers the message type** — `let msg_ty = infer_expr env msg` (`:4179`).
+   This is the payload-typing rule: because `msg` is an ordinary expression,
+   `Msg(args)` runs the **ordinary `ECon` constructor arm** (T-Con, §2). Each
+   handler `on Msg(p : T)` registered a message constructor `Msg` of payload type
+   `T` (message ctor `<Actor>_Msg`, §2.6.1 step 3), so `Msg(args)` is checked
+   exactly like any other constructor application — a wrong-typed argument is a
+   plain unification mismatch, no actor-specific machinery involved.
+3. **Runs `check_sendable`** — `check_sendable env.errors sp msg_ty` (`:4180`,
+   def `:3335`). This walks `msg_ty` structurally and errors ONLY on a
+   `RingBuf`-family constructor (`let non_sendable_types = ["RingBuf"]`, `:3331`)
+   — a hardcoded denylist of types that must stay owned by one actor. It is *not*
+   a message-acceptance check.
+
+`send` then returns `fresh_var env.level` (`:4183`) — an unconstrained result, so
+a caller may `match` on it (drop/`Option` semantics) or read state fields.
+
+**(T-Send) — the message-payload typing rule.**
+```
+Γ ⊢ cap ⇒ τ_cap        (τ_cap inferred, then discarded)
+Γ ⊢ msg ⇒ τ_msg        (ordinary ECon; the message ctor's payload type is checked)
+check_sendable(τ_msg)  (errors iff τ_msg mentions RingBuf)
+─────────────────────────────────────────────────────────  (T-Send)
+Γ ⊢ send(cap, msg) ⇒ β        (β fresh)
+```
+
+So the payload *shape* IS statically checked: `send(counter, Inc("x"))` where the
+handler is `on Inc(x : Int)` is rejected with the ordinary constructor-argument
+mismatch `` expected `Int` but got `String`. `` (witness
+`reject/t29_actor_send_wrong_payload`, captured live); a correctly-typed
+`send(counter, Inc(3))` typechecks (witness `accept/t40_actor_send_typed_payload`).
+
+**The actor-affinity non-guarantee — a `send` is NOT checked against the target
+actor's message set (finding 19).** Because step 1 discards `τ_cap` and step 3
+only denylists `RingBuf`, **nothing checks that the target actor actually handles
+the message you send it.** Sending a message that a *different* actor declares —
+`send(counter, Log("stray"))` where `Log` is a `Logger` handler, not a `Counter`
+one — `--check`s clean (exit 0). The `Pid` carries no type constraint that could
+gate this even in principle: per §2.6.3 / finding 18, `spawn` yields
+`Pid[<fresh var>]`, so the Pid does not statically encode its accepted-message
+set. This is distinct from finding 18: finding 18 is "the Pid is unparameterized
+after spawn / a `Pid(T)` annotation is impossible"; **this** finding is "`send`
+does not gate the message by the target actor" — rooted at `:4178` (target type
+discarded) and `:3331`/`:3335` (`check_sendable` is a `RingBuf` denylist, not an
+acceptance check), and it would remain true even if the Pid *did* carry a state
+type, because `send` never reads `τ_cap`.
+
+The **runtime consequence diverges by backend** (both verified live; see
+`§4.1` finding 19 for the exact captured output):
+
+- **Interpreted:** the message is dispatched by matching its tag against the
+  actor's handler *names* by string equality (`h.ah_msg.txt = msg_tag`,
+  `eval.ml:7545`); a foreign message matches no handler, so the `None ->`
+  branch **silently drops** it (`eval.ml:7547-7549`). No output, no crash.
+- **Compiled:** the message is lowered to a per-actor `<Actor>_Msg` variant in
+  *handler-declaration order* (`lower_actor.ml:17`) and dispatched by an
+  `ECase` on that variant's discriminant with **no default arm** (`ECase(msg,
+  branches, None)`, `lower_actor.ml:256`). A foreign message's discriminant
+  indexes into the *target* actor's branch table and hits whatever handler
+  occupies that slot — the `Log("stray")` above lands in `Counter`'s first
+  handler `Inc`, whose body then reinterprets the `String` payload pointer as an
+  `Int` (garbage, non-deterministic). It is **misrouted, not dropped** — a
+  memory-unsafe outcome, not a benign no-op.
+
+This backend split makes the non-guarantee sharper than "messages are best-effort
+dropped": in compiled code a wrong-actor send is undefined behavior. It is
+documented, not corpus-encoded — it typechecks (exit 0), so it cannot be a
+`reject/` witness; the accept path (`send(counter, Inc(3))`) is
+`accept/t40_actor_send_typed_payload`, and the non-guarantee itself is filed as
+an open gap (finding 19, `specs/todos.md`).
+
+**The message-name flat global namespace — a design point, not a bug.** Message
+and handler constructor names (`Inc`, `Log`, …) live in the **single flat global
+constructor namespace**, like every other constructor — there is no per-actor
+message namespace, exactly analogous to the no-per-module-type-namespace design
+point (§2.5). Two actors may not both declare a handler of the same name in a way
+that resolves ambiguously; a collision requires the ordinary qualified-name form
+(`Actor_Msg.Report`-style qualification) to disambiguate, just as a colliding
+type name across modules requires a qualified path (§2.5). This is deliberate and
+uniform with the rest of the constructor namespace — it is not filed as a gap.
+(It also underlies the compiled misroute above: because message constructors
+share one namespace and the compiled dispatch is by per-actor-variant
+discriminant *position*, a message from actor A's variant and a message from
+actor B's variant can occupy the same discriminant slot and be
+indistinguishable to B's dispatch `ECase`.)
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the
@@ -2340,6 +2554,98 @@ typechecker that this document exists to pin down, not defects:
     would assert behavior this finding identifies as WRONG (the program
     currently, incorrectly, `--check`s clean) — once fixed, a
     `reject/derive_unknown_type`-style program should be added here.
+
+18. **[OPEN — filed, not fixed] `spawn(Actor)` does NOT yield `Pid[state]`; the
+    `Pid` parameter is an unconstrained fresh variable, and the state type never
+    reaches an observable `Pid`.** Found while building §2.6 (actors widening,
+    Task 1). The `ESpawn` arm returns `TCon ("Pid", [fresh_var env.level])`
+    (`typecheck.ml:4203`), a fresh var computed with no reference to the actor's
+    state type. The `bind_var name.txt (Mono (TCon ("Pid", [state_ty])))` at
+    `:6821` *does* record the state type against the actor name, but that binding
+    is unreachable from a bare occurrence: the nullary-constructor registration
+    at `:6769` (actor name ⇒ type `<Name>`) shadows it, so a bare `Counter` is
+    typed `Counter`, not `Pid[state]`. Live probes (re-verified for this task):
+    `let p = if true do spawn(Counter) else spawn(Named) end` typechecks clean
+    with `Counter`/`Named` carrying *different* state records (proving each
+    `spawn` yields an independent free var, not `Pid[state]`); `is_alive(Counter)`
+    is rejected `` expected `Pid(r3)` but got `Counter` `` (the name is the
+    nullary ctor, not the `Pid[state]` value). Compounding it, no surface
+    annotation can pin the parameter either: the built-in arity-1 `Pid`
+    (`typecheck.ml:1849`) is shadowed in the single global type namespace (§2.5)
+    by stdlib `GlobalPid`'s 0-arity `type Pid` record (`stdlib/global_pid.march:
+    11`), so `Pid(T)` annotations reject `` `Pid` expects 0 type argument(s) but
+    got 1. ``. So the state type is *checked* inside the actor decl (init +
+    handler conformance, §2.6.1) but is not carried by the `Pid` at any `spawn`
+    site. This is a faithfulness note, not a corpus reject (there is no
+    *incorrect* program to pin — `accept/t39_actor_spawn_pid` witnesses the
+    actual, fresh-var accept behavior); tightening `spawn`'s result to
+    `Pid[state]` (or making the actor name resolve to its `:6821` `Pid[state]`
+    binding) would be a compiler change, out of scope for this docs slice. See
+    §2.6.3 for the full account.
+
+19. **[OPEN — filed, not fixed] `send` does NOT check the message against the
+    target actor's accepted-message set — a wrong-actor send typechecks (exit 0)
+    and, at RUNTIME, is silently DROPPED interpreted but MISROUTED (memory-unsafe)
+    compiled.** Found while building §2.6.4 (message-payload typing, Task 3).
+    Distinct from finding 18 (which is about the `Pid` being unparameterized after
+    `spawn`); this finding is about the `send` *typing arm itself* ignoring the
+    target. The `ESend` arm (`typecheck.ml:4177`) infers the target Pid's type
+    and immediately discards it (`ignore (infer_expr env cap)`, `:4178`), so
+    `send` never consults which actor `cap` is; the only send-side check is
+    `check_sendable` (`:3335`), a hardcoded `RingBuf` denylist (`non_sendable_types
+    = ["RingBuf"]`, `:3331`) — NOT a message-acceptance check. The message payload
+    *shape* IS checked (ordinary `ECon` typing on `infer_expr env msg`, `:4179` —
+    that is finding-19's *complement*, witnessed by `reject/t29`), but *which
+    handler the target actually has* is not. Note this would remain true even if
+    the Pid carried its state type (cf. finding 18): `send` doesn't read the
+    target's type at all. Minimal repro (`Counter` handles only `Inc`, `Logger`
+    handles `Log`; send `Log` to the `Counter` Pid), re-verified live BOTH
+    backends for this task:
+    ```
+    mod Main do
+      actor Counter do
+        state { count : Int }
+        init  { count: 0 }
+        on Inc(x : Int) do
+          println("Counter.Inc -> " ++ int_to_string(state.count + x))
+          { count: state.count + x }
+        end
+      end
+      actor Logger do
+        state { seen : Int }
+        init  { seen: 0 }
+        on Log(m : String) do
+          println("Logger.Log -> " ++ m)
+          { seen: state.seen + 1 }
+        end
+      end
+      fn main() do
+        let counter = spawn(Counter)
+        send(counter, Inc(3))
+        send(counter, Log("stray"))   -- Log is a Logger message, not Counter's
+        run_until_idle()
+        println("done")
+      end
+    end
+    ```
+    `--check` exits **0**. Interpreted run prints only `Counter.Inc -> 3` then
+    `done` — the stray `Log` matched no `Counter` handler name and was silently
+    dropped (`eval.ml:7545` string-equality tag match; `None -> ()`,
+    `eval.ml:7547-7549`). Compiled run (`--compile --opt 2`) prints `Counter.Inc
+    -> 3`, then `Counter.Inc -> <garbage int, e.g. 2796564219>`, then `done`: the
+    stray message was MISROUTED into `Counter`'s first handler slot (the compiled
+    dispatch is an `ECase` on a per-actor `<Actor>_Msg` variant discriminant, in
+    handler-declaration order, with **no default arm** — `ECase(msg, branches,
+    None)`, `lower_actor.ml:256`, variant order `lower_actor.ml:17`), and the
+    `String` payload pointer was reinterpreted as the `Int` param of `Inc` —
+    non-deterministic, memory-unsafe. Filed in `specs/todos.md` under "Compiler:
+    Type System" (2026-07-06) with this repro; fixing it (typing Pids by their
+    accepted-message set so `send` can gate the message against the target actor)
+    is a significant type-system design decision — deferred, out of scope for this
+    docs-only slice. Not a corpus `reject/` (it typechecks; a `reject/` witness
+    would codify behavior this finding calls WRONG); the correctly-typed accept
+    path is `accept/t40_actor_send_typed_payload`. Cross-ref §2.6.4 and finding
+    18.
 
 ## 5. What this validated, and what's next
 

@@ -1,0 +1,38 @@
+mod Main do
+  -- Operational actor witness (core-march.md §4.10): receive()-mediated
+  -- follow-up. The Inbox actor's `on Start()` handler calls receive() ONCE to
+  -- pop the next already-queued message (a Follow(n)) from its own mailbox and
+  -- prints its payload. Because a strictly-ordered send sequence puts Follow(99)
+  -- in the mailbox BEFORE Start() is dispatched, receive() finds it non-empty
+  -- and pops it (eval.ml:3076 — pop-or-BlockedOnReceive). Only the FIRST
+  -- receive() in a handler body is safe to block on (documented limitation,
+  -- eval.ml run_scheduler ~:7576); this handler calls it exactly once.
+  -- Determinism: single actor, ordered sends, one run_until_idle() drain —
+  -- byte-identical interpreted vs compiled.
+  actor Inbox do
+    state { seen : Int }
+    init  { seen: 0 }
+
+    on Start() do
+      let m = receive()
+      match m do
+        Follow(n) ->
+          println("got=" ++ int_to_string(n))
+          { seen: n }
+        _ -> { seen: state.seen }
+      end
+    end
+
+    on Follow(n : Int) do
+      { seen: n }
+    end
+  end
+
+  fn main() do
+    let box = spawn(Inbox)
+    send(box, Start())
+    send(box, Follow(99))
+    run_until_idle()
+    println("done")
+  end
+end

@@ -2409,6 +2409,93 @@ NEXT spec step (roadmap): DSL-forms full resolution (§9 deepening) and any
 follow-up from the `f(1)(2)` documentation-precision finding, both tracked in
 `specs/todos.md`.
 
+## Core March widening slice 3 — actors, messaging, and supervision (2026-07-06, CLOSEOUT)
+
+`specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened
+past widening slice 2 (modules/visibility) to cover **actors: declaration and
+`spawn`/`Pid` typing, message send/receive, lifecycle (`kill`/`is_alive`), the
+epoch-stamped capability plane, and `one_for_one` supervision** — a six-task
+docs-only slice (no compiler changes). The two conformance corpora grew and a
+prominent, mechanically-checked determinism property was pinned.
+
+- **The determinism property (the headline).** The **live-message plane** —
+  `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` /
+  `is_alive` / `kill` — produces output that is DETERMINISTIC and **byte-identical
+  interpreted vs compiled** for any program whose observable output does not
+  depend on scheduler interleaving. This is pinned by three new golden witnesses,
+  each verified `MATCH` under `verify.sh`: `g35_actor_spawn_send` (spawn + three
+  ordered async `send`s + `run_until_idle` drain → `count=8`/`done`),
+  `g36_actor_receive` (a handler `receive()`ing an already-queued follow-up on
+  the non-blocking pop path → `got=99`/`done`), and `g37_actor_lifecycle`
+  (`spawn → is_alive true → kill → is_alive false`). Documented in
+  `core-march.md` §4.10.1–§4.10.5.
+- **Operational reference (`core-march.md` §4.10):** §4.10.1–.5 pin the message
+  plane (spawn/send/receive/`run_until_idle`, the determinism property + golden
+  witnesses); §4.10.6 pins the lifecycle plane (`kill`/`is_alive`) and the
+  epoch-stamped `Cap` mechanism; §4.10.7 pins `one_for_one` supervision (child
+  restart + epoch invalidation). Each subsection states operationally against
+  `eval.ml`.
+- **Typing reference (`core-march-types.md` §2.6):** §2.6.1 (what the `DActor`
+  arm checks — state record, duplicate-handler rejection, message-constructor
+  registration, `init`/handler conformance), §2.6.2 (`spawn` resolved by literal
+  actor name at compile time), §2.6.3 (the truthful `Pid`-parameter account —
+  `spawn` yields `Pid[fresh var]`, not `Pid[state]`), §2.6.4 (message-payload
+  typing + the actor-affinity non-guarantee + the flat message-name namespace
+  design point). Corpus: `accept/t39`–`t40`, `reject/t28`–`t29`.
+- **Corpora:** golden 34 → **37** (all three count sites — the `INDEX.md` header
+  `g01–g37`, the `37/37 MATCH` line, and `core-march.md` §5's "Thirty-seven
+  programs" — consistent); types 65 → **69** (accept 38 → 40, reject 27 → 29;
+  all three count sites — `INDEX.md` header, the `69/69 — 40 accept, 29 reject`
+  line, and the `69 / 69` result line — consistent). `verify.sh` 37/37,
+  `check_types.sh` 69/69, both exit 0.
+- **Which planes are byte-identical, and which DIVERGE compiled (findings).** The
+  live-message plane agrees; three *other* planes diverge compiled and are
+  therefore prose-only (interpreter-first), NOT golden — each a filed open
+  finding:
+  1. **Finding 18** — `spawn(Actor)` yields `Pid[<fresh var>]`, not `Pid[state]`;
+     the state type never reaches an observable `Pid`, and a surface `Pid(T)`
+     annotation is impossible (`GlobalPid` namespace collision). (§2.6.3, §4.1)
+  2. **Finding 19** — `send` does not check the message against the target
+     actor's accepted-message set; a wrong-actor send typechecks, then is silently
+     DROPPED interpreted but MISROUTED (memory-unsafe) compiled. (§2.6.4, §4.1)
+  3. **Capability / dead-`send` plane** — compiled `send_checked` performs no
+     epoch validation (returns an uninterned garbage atom for every cap); plain
+     `send` to a dead pid returns `Some` compiled (`None` interpreted); `get_cap`
+     does not gate on liveness. The epoch-`Cap` mechanism is non-functional
+     compiled. (§4.10.6)
+  4. **`revoke_cap`/`is_cap_valid`** — `eval.ml` builtins NOT registered in the
+     typechecker, so the explicit-revoke path is not surface-expressible. (§4.10.6)
+  5. **`Actor.call` timeout** — the `timeout_ms` argument is accepted for API
+     compatibility but UNENFORCED in the compiled runtime
+     (`runtime/march_runtime.c:1809–1810`). (§4.10.7)
+  6. **`get_actor_field`/`pid_of_int`** — SIGSEGV compiled
+     (`runtime/march_runtime.c:3329`/`:3324`); `examples/supervision_strategies.march`
+     exits 139, and the compiled supervisor never runs its declared children's
+     `init` at `spawn(Sup)`. This blocks any compiled observation of a supervised
+     child — hence no supervision golden. (§4.10.7)
+  All six are filed OPEN in `specs/todos.md` (four "actors:" section headers);
+  none is a compiler change in this docs-only slice. A seventh item — the
+  message/handler constructor names living in one flat global namespace — is a
+  documented DESIGN POINT (§2.6.4, analogous to §2.5's no-per-module-type-namespace
+  point), NOT a filed gap.
+- **`specs/lang/actors.md` (the tutorial) reconciled.** Every code example was
+  re-verified live (`--check` + run to the stated printed value). **Three broken
+  examples fixed:** the "Complete Actor Example" did not compile (`Ping` collides
+  with a stdlib `WsFrame.Ping` constructor in the flat global namespace — renamed
+  to `Poke`); the "Receiving Messages" example used `Followup` without declaring
+  an `on Followup(…)` handler (`Followup` was not a registered constructor —
+  added the handler); the "`Actor.call`" example used `on Call(ref, Get())` with a
+  nested-constructor handler pattern that does not parse and an undeclared `Get()`
+  message (rewritten to the canonical form — first handler `on Call(ref, msg)`
+  receives the call, prints `count = 2`). The over-broad top-of-file claim that
+  "`spawn`/`send`/`kill`/`is_alive`/`Actor.call` all work identically … whether
+  interpreted or compiled" was corrected to name exactly which plane is
+  byte-identical and which three diverge; the capability, `Actor.call`-timeout,
+  and `pid_of_int`/`get_actor_field` surfaces are marked interp-only with the
+  filed-finding cross-references; the Builtins table gained a per-builtin
+  backend column. Cross-references to the new operational (§4.10.1–.7) and typing
+  (§2.6.1–.4) reference sections were added throughout.
+
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 
 `specs/lang/core-march.md` and `specs/lang/core-march-types.md` are widened
