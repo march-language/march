@@ -327,6 +327,24 @@ forge licenses --strict      # non-zero if any dependency has no license
 forge build --frozen         # CI: fail if forge.lock is out of date (don't re-resolve)
 ```
 
+## AI assistant support
+
+March ships a portable Claude Code skill, `spec-search`, that full-text
+searches the language reference and design docs (`specs/lang/`,
+`specs/impl/`, `specs/features/`) via a bundled SQLite FTS5 index — no
+network access, no dependency on the compiler repo being checked out in
+whatever project you're working in:
+
+```bash
+git clone https://github.com/march-language/march.git
+mkdir -p ~/.claude/skills
+cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
+```
+
+Once installed at `~/.claude/skills/spec-search/`, it's available to Claude
+in any project on the machine. See [docs/tooling.md](docs/tooling.md#ai-assistant-search--spec-search-claude-skill)
+for query syntax and how to refresh the index after a compiler update.
+
 ## Language tour
 
 ### Values and bindings

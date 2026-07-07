@@ -417,6 +417,72 @@ The search index is cached at `.march/search-index.json` and rebuilt when source
 
 ---
 
+## AI assistant search — spec-search Claude Skill
+
+`forge search` (above) finds *code* — functions, types, signatures. `spec-search`
+is its counterpart for *documentation*: a Claude Code skill that full-text
+searches March's language reference (`specs/lang/`), internals reference
+(`specs/impl/`), and feature design docs (`specs/features/`) — roughly 44
+files, 20-25k lines — via a bundled SQLite [FTS5](https://sqlite.org/fts5.html)
+index.
+
+It's fully self-contained: the markdown docs and the prebuilt index ship
+*inside* the skill directory, so it works in any March project, not just a
+checkout of the compiler repo.
+
+### Installing
+
+Install once, at the user level, and it's available to Claude in every
+project on the machine:
+
+```bash
+git clone https://github.com/march-language/march.git
+mkdir -p ~/.claude/skills
+cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
+```
+
+(Vendoring a copy into a specific project's own `.claude/skills/` instead
+also works, if you want that project pinned to a particular spec snapshot —
+the directory is self-contained either way.)
+
+### Using it
+
+Claude invokes the skill automatically for March language/design questions
+that go beyond syntax basics — actor supervision semantics, refinement
+types, session types, capabilities, module resolution, etc. You can also
+run the query script directly:
+
+```bash
+~/.claude/skills/spec-search/spec-search.sh "actor supervision restart"
+~/.claude/skills/spec-search/spec-search.sh --json -n 5 "refinement predicate"
+```
+
+Output is ranked by relevance (SQLite's `bm25()`), one hit per matched
+markdown section — file, heading path, line range, and a highlighted
+snippet — so answers are grounded in a precise slice of the docs rather
+than a whole 1000-line chapter.
+
+### Rebuilding the index
+
+Run this from a clone of the [march-language/march](https://github.com/march-language/march)
+repo after `specs/lang/`, `specs/impl/`, or `specs/features/` change:
+
+```bash
+./scripts/build-spec-index.sh
+```
+
+This vendors the current docs and rebuilds `.claude/skills/spec-search/spec-search.db`
+in place. Review the diff, commit it, then re-copy the directory to
+`~/.claude/skills/spec-search/` to pick up the change. The index carries a
+`meta` table stamping the source commit and build date — check it if search
+results ever look out of date:
+
+```bash
+sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
+```
+
+---
+
 ## forge cap — Capability and typestate inspection
 
 `forge cap query` prints a capability and typestate summary across all `.march` files in your project. It parses (but does not typecheck) each file and reports every `needs`, `always_linear type`, `transitions`, and `proof cap` declaration.
