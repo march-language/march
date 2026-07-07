@@ -2621,6 +2621,306 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
   | _ -> ()                  (* swallow other connection errors *)
 
 (* ------------------------------------------------------------------ *)
+(* Non-blocking, single-threaded, multiplexed HTTP connection handling *)
+(* ------------------------------------------------------------------ *)
+(* [handle_http_connection] above is fully blocking: it assumes every recv/
+   send completes immediately. That's fine for the fork-per-accept-loop
+   variant (http_server_spawn_n) where each forked child only ever serves
+   one client at a time by design, but it is fatal for [http_server_listen]'s
+   main accept loop — a single slow/idle client (e.g. a WebSocket client that
+   opens the TCP connection and then pauses before sending the upgrade
+   request) blocks that one OS thread inside a blocking recv(), and since
+   there is only one thread, NO other client can be accepted or served until
+   that recv() returns.
+
+   The fix follows the same cooperative, single-threaded pattern the
+   interpreter already uses for actor mailboxes (see [BlockedOnReceive] /
+   [run_scheduler] above): instead of blocking, each connection is a small
+   state machine that is driven forward only when [Unix.select] reports its
+   socket ready. No connection can ever stall another. *)
+
+(** What a connection is currently waiting to do. *)
+type http_conn_phase =
+  | HCReadingRequest    (* accumulating bytes until headers (+ body) complete *)
+  | HCWriting           (* response bytes queued; draining via non-blocking send *)
+
+type http_conn_state = {
+  hc_sock            : Unix.file_descr;
+  mutable hc_phase    : http_conn_phase;
+  hc_in_buf           : Buffer.t;   (* raw bytes read so far (request line+headers+body) *)
+  mutable hc_out_buf  : string;     (* full response bytes still to be written *)
+  mutable hc_out_off  : int;        (* bytes of hc_out_buf already written *)
+}
+
+let http_conn_new sock =
+  { hc_sock = sock;
+    hc_phase = HCReadingRequest;
+    hc_in_buf = Buffer.create 512;
+    hc_out_buf = "";
+    hc_out_off = 0;
+  }
+
+(** Look for "\r\n\r\n" (or bare "\n\n") marking the end of the header block
+    in the bytes accumulated so far. Returns the byte offset just past the
+    blank line, or None if not yet seen. *)
+let http_find_header_end (raw : string) : int option =
+  let n = String.length raw in
+  let rec go i =
+    if i + 3 >= n then None
+    else if raw.[i] = '\r' && raw.[i+1] = '\n' && raw.[i+2] = '\r' && raw.[i+3] = '\n'
+    then Some (i + 4)
+    else go (i + 1)
+  in
+  (* Also allow a bare "\n\n" for leniency, matching how http_recv_line
+     tolerates missing CR. *)
+  let rec go_lf i =
+    if i + 1 >= n then None
+    else if raw.[i] = '\n' && raw.[i+1] = '\n' then Some (i + 2)
+    else go_lf (i + 1)
+  in
+  match go 0 with
+  | Some _ as r -> r
+  | None -> go_lf 0
+
+(** Parse the accumulated header block (everything up to but not including
+    the blank-line terminator) into (method, full_path, headers_raw). *)
+let http_parse_request_head (head_block : string) : string * string * (string * string) list =
+  let lines = String.split_on_char '\n' head_block in
+  let lines = List.map (fun l ->
+      if String.length l > 0 && l.[String.length l - 1] = '\r'
+      then String.sub l 0 (String.length l - 1) else l)
+      lines
+  in
+  match lines with
+  | [] -> ("GET", "/", [])
+  | req_line :: header_lines ->
+    let (meth, full_path) =
+      match String.split_on_char ' ' req_line with
+      | m :: fp :: _ -> (m, fp)
+      | _ -> ("GET", "/")
+    in
+    let headers_raw = List.filter_map parse_header_line header_lines in
+    (meth, full_path, headers_raw)
+
+(** Given the bytes read so far, determine whether a complete HTTP request
+    (headers + body, per Content-Length) is present. Returns
+    Some (meth, full_path, headers_raw, body) once complete. *)
+let http_try_parse_request (raw : string) :
+  (string * string * (string * string) list * string) option =
+  match http_find_header_end raw with
+  | None -> None
+  | Some header_end ->
+    let head_block = String.sub raw 0 header_end in
+    let (meth, full_path, headers_raw) = http_parse_request_head head_block in
+    let content_length =
+      match List.find_opt
+              (fun (n, _) -> String.lowercase_ascii n = "content-length")
+              headers_raw
+      with
+      | Some (_, s) -> (match int_of_string_opt (String.trim s) with
+          | Some n when n >= 0 -> n
+          | _ -> 0)
+      | None -> 0
+    in
+    let available_body = String.length raw - header_end in
+    if available_body < content_length then None  (* body not fully arrived yet *)
+    else Some (meth, full_path, headers_raw, String.sub raw header_end content_length)
+
+(** Run the pipeline for a fully-received request and produce the response
+    bytes to write (or detect a WebSocket upgrade, returning [None] since
+    there is no ordinary HTTP response to queue in that case). This part is
+    pure in-memory computation (no blocking I/O) except for the WS handshake
+    write and handoff, which — like the prior blocking implementation —
+    intentionally takes over the socket for the lifetime of the WS
+    connection (matching the documented, unchanged semantics of
+    WebSocketUpgrade / handler_fn: once upgraded, this one connection is
+    WS-owned and blocking, exactly as before this fix). *)
+let http_run_pipeline_and_respond
+    (sock : Unix.file_descr) (pipeline_fn : value)
+    (meth : string) (full_path : string)
+    (headers_raw : (string * string) list) (body : string) : string option =
+  let conn_val = build_conn_value
+      ~fd:(Obj.magic sock : int)
+      ~method_str:meth ~full_path ~headers_raw ~body () in
+  let result_conn = !apply_hook pipeline_fn [conn_val] in
+  match result_conn with
+  | VCon ("Conn", [_fd; _meth; _path; _pi; _qs;
+                   _rh; _rb; _status; _rhs; _rbody;
+                   _halted; _assigns;
+                   VCon ("WebSocketUpgrade", [handler_fn])]) ->
+    let ws_key_opt =
+      List.find_opt
+        (fun (n, _) -> String.lowercase_ascii n = "sec-websocket-key")
+        headers_raw
+    in
+    (match ws_key_opt with
+     | None ->
+       Some "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+     | Some (_, key) ->
+       let accept = ws_accept_key (String.trim key) in
+       let handshake =
+         "HTTP/1.1 101 Switching Protocols\r\n" ^
+         "Upgrade: websocket\r\n" ^
+         "Connection: Upgrade\r\n" ^
+         "Sec-WebSocket-Accept: " ^ accept ^ "\r\n\r\n"
+       in
+       (* The handshake + subsequent WS frames are written/read with the
+          same blocking helpers the old implementation used: this one
+          connection becomes WS-owned for its lifetime, same as before. *)
+       tcp_send_all sock handshake;
+       let fd_int = (Obj.magic sock : int) in
+       let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
+       (try ignore (!apply_hook handler_fn [ws_sock]) with _ -> ());
+       None)
+  | _ ->
+    let (status, resp_headers, resp_body) = extract_conn_response result_conn in
+    let effective_status = if status = 0 then 200 else status in
+    let reason     = http_reason_phrase effective_status in
+    let header_str = march_headers_to_string resp_headers in
+    let response   =
+      Printf.sprintf "HTTP/1.1 %d %s\r\n%sContent-Length: %d\r\n\r\n%s"
+        effective_status reason
+        header_str
+        (String.length resp_body)
+        resp_body
+    in
+    Some response
+
+(** Non-blocking multiplexed HTTP accept/serve loop.
+    Tracks every open connection (not just the listening socket) and
+    [Unix.select]s across all of them each iteration, so a connection that
+    is idle/slow/partially-written never blocks progress on any other
+    connection. Each connection is driven forward only when [select]
+    reports it ready for the operation it is currently waiting on. *)
+let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : unit =
+  let open Unix in
+  set_nonblock server_sock;
+  (* fd -> connection state, for all currently-open client connections. *)
+  let conns : (Unix.file_descr, http_conn_state) Hashtbl.t = Hashtbl.create 64 in
+  let close_conn (c : http_conn_state) =
+    Hashtbl.remove conns c.hc_sock;
+    (try close c.hc_sock with _ -> ())
+  in
+  (* Try to make forward progress reading a request on [c]. Called only
+     after select reports the socket readable. *)
+  let advance_read (c : http_conn_state) =
+    let chunk = Bytes.create 65536 in
+    match (try `Read (Unix.read c.hc_sock chunk 0 (Bytes.length chunk))
+           with
+           | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+           | Unix_error (EINTR, _, _) -> `WouldBlock
+           | Unix_error _ -> `Closed
+           | _ -> `Closed)
+    with
+    | `WouldBlock -> ()
+    | `Closed -> close_conn c
+    | `Read 0 -> close_conn c   (* peer closed before completing a request *)
+    | `Read n ->
+      Buffer.add_subbytes c.hc_in_buf chunk 0 n;
+      (match http_try_parse_request (Buffer.contents c.hc_in_buf) with
+       | None -> ()  (* need more bytes; keep waiting on this socket *)
+       | Some (meth, full_path, headers_raw, body) ->
+         (* Run the (in-memory, non-blocking) pipeline now. This may take
+            over the socket for a WebSocket upgrade — matching the prior
+            blocking implementation's semantics exactly — in which case
+            there is no HTTP response to queue and the connection is
+            simply closed out from the event loop's perspective. *)
+         (match
+            (try http_run_pipeline_and_respond c.hc_sock pipeline_fn
+                   meth full_path headers_raw body
+             with
+             | Eval_error msg ->
+               Printf.eprintf "[http handler error] %s\n%!" msg;
+               Some "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+             | Unix.Unix_error _ -> None
+             | _ -> None)
+          with
+          | None -> close_conn c
+          | Some response ->
+            c.hc_out_buf <- response;
+            c.hc_out_off <- 0;
+            c.hc_phase <- HCWriting))
+  in
+  (* Try to make forward progress writing the queued response on [c].
+     Called only after select reports the socket writable. *)
+  let advance_write (c : http_conn_state) =
+    let remaining = String.length c.hc_out_buf - c.hc_out_off in
+    if remaining <= 0 then close_conn c
+    else
+      match
+        (try `Wrote (Unix.write_substring c.hc_sock c.hc_out_buf c.hc_out_off remaining)
+         with
+         | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+         | Unix_error (EINTR, _, _) -> `WouldBlock
+         | Unix_error _ -> `Closed
+         | _ -> `Closed)
+      with
+      | `WouldBlock -> ()
+      | `Closed -> close_conn c
+      | `Wrote n ->
+        c.hc_out_off <- c.hc_out_off + n;
+        if c.hc_out_off >= String.length c.hc_out_buf then close_conn c
+  in
+  (try
+     while not !shutdown_requested do
+       let read_fds =
+         server_sock ::
+         Hashtbl.fold (fun _ c acc ->
+             if c.hc_phase = HCReadingRequest then c.hc_sock :: acc else acc)
+           conns []
+       in
+       let write_fds =
+         Hashtbl.fold (fun _ c acc ->
+             if c.hc_phase = HCWriting then c.hc_sock :: acc else acc)
+           conns []
+       in
+       let (readable, writable, _) =
+         try select read_fds write_fds [] 1.0
+         with Unix_error (EINTR, _, _) -> ([], [], [])
+            | _ -> ([], [], [])
+       in
+       if not !shutdown_requested then begin
+         (* New connections first. *)
+         if List.mem server_sock readable then begin
+           (* Drain every pending connection in the backlog, not just one —
+              under load, select only guarantees at least one is ready. *)
+           let continue_accepting = ref true in
+           while !continue_accepting do
+             match
+               (try `Accepted (accept server_sock)
+                with
+                | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+                | Unix_error (EINTR, _, _) -> `WouldBlock
+                | Unix_error _ -> `WouldBlock
+                | _ -> `WouldBlock)
+             with
+             | `WouldBlock -> continue_accepting := false
+             | `Accepted (client_sock, _addr) ->
+               (try set_nonblock client_sock with _ -> ());
+               Hashtbl.replace conns client_sock (http_conn_new client_sock)
+           done
+         end;
+         (* Drive every connection ready for its current phase. Snapshot
+            first since advance_read/advance_write may remove entries. *)
+         List.iter (fun fd ->
+             match Hashtbl.find_opt conns fd with
+             | Some c when c.hc_phase = HCReadingRequest -> advance_read c
+             | _ -> ())
+           readable;
+         List.iter (fun fd ->
+             match Hashtbl.find_opt conns fd with
+             | Some c when c.hc_phase = HCWriting -> advance_write c
+             | _ -> ())
+           writable
+       end
+     done;
+     Printf.eprintf "march: Shutting down...\n%!"
+   with exn ->
+     Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns;
+     raise exn);
+  Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns
+
+(* ------------------------------------------------------------------ *)
 (* Session-typed channel runtime                                       *)
 (* ------------------------------------------------------------------ *)
 
@@ -5097,11 +5397,16 @@ let base_env : env =
         | _ -> eval_error "http_fetch_available()"))
 
   (* ── HTTP server (interpreter mode: pure-OCaml implementation) ──── *)
-  (* Uses select with a 1-second timeout so the loop can check
-     [shutdown_requested] between iterations.  This lets Ctrl+C (SIGINT)
-     — which sets [shutdown_requested] via the handler installed in
-     [run_module] — exit the server cleanly instead of blocking forever
-     on [accept].  Mirrors the C runtime's g_http_shutdown pattern. *)
+  (* Single-threaded, non-blocking, multiplexed event loop — see
+     [run_http_event_loop] above.  select()s across the listen socket AND
+     every open client connection each iteration (1s timeout so the loop
+     can check [shutdown_requested] between iterations, letting Ctrl+C /
+     SIGTERM exit cleanly).  No connection's recv/send can ever block
+     progress on any other connection: a slow/idle client (e.g. a
+     WebSocket client that connects but delays sending its upgrade
+     request) simply sits in HCReadingRequest without being served, while
+     every other connection continues to make progress.  Mirrors the C
+     runtime's g_http_shutdown pattern for shutdown handling. *)
   ; ("http_server_listen", VBuiltin ("http_server_listen", function
       | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
         let open Unix in
@@ -5110,28 +5415,7 @@ let base_env : env =
         bind server_sock (ADDR_INET (inet_addr_any, port));
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
-        (try
-           while not !shutdown_requested do
-             (* select with 1s timeout — returns early on EINTR (signal) *)
-             let readable =
-               try
-                 let (r, _, _) = select [server_sock] [] [] 1.0 in r
-               with Unix_error (EINTR, _, _) -> []
-                  | _ -> []
-             in
-             if readable <> [] && not !shutdown_requested then
-               (match
-                 (try Some (accept server_sock)
-                  with Unix_error (EINTR, _, _) -> None
-                     | _ -> None)
-               with
-               | None -> ()
-               | Some (client_sock, _addr) ->
-                 (try handle_http_connection client_sock pipeline_fn
-                  with _ -> ());
-                 (try close client_sock with _ -> ()))
-           done;
-           Printf.eprintf "march: Shutting down...\n%!"
+        (try run_http_event_loop server_sock pipeline_fn
          with
          (* EINTR from accept/select that slipped past inner handlers —
             treat as a clean shutdown rather than re-raising as a fatal error *)
