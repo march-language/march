@@ -325,6 +325,33 @@ runtime OOM. Full suite green: **421 compiler / 231 eval / 391 codegen / 804
 stdlib** (alcotest counts unchanged — the two additions are `test/dune` native
 golden-diff rules, not alcotest cases).
 
+## Current State (as of 2026-07-06, compiled Task.await heap-payload crash fixed)
+
+Compiled `Task.await` on a task whose result is a heap value (String, List,
+tuple, record, ADT) no longer crashes at runtime (`march: out of memory` /
+SIGSEGV) — it now returns the correct `Ok(payload)`, matching the interpreter.
+Root cause: the thunk trampoline stores `task[3] = (apply_ret << 1) | 1` (the
+apply-wrapper's uniform-slot return, tagged once), and `march_task_await` wraps
+that straight into `Ok(...)`; but a boxed-ADT field must hold the uniform value
+`apply_ret` verbatim. An `Ok(x)` destructure loads a **ptr** field raw (a normal
+`Ok(heap_ptr)` stores an even raw pointer, so no untag is applied), so the Ok
+payload carried the wild `(addr<<1)|1 ≈ 2*addr` value; `IS_HEAP_PTR` rejects it
+(odd) so `incrc`/`decrc` silently no-op'd, and the first deref of the payload
+(`march_string_concat`, `List.length`) read garbage. This is the ptr sibling of
+the i64 double-tag fix `f89b8711` (on main, not this branch), whose commit note
+wrongly assumed the ptr path was already correct. Fix (`lib/tir/llvm_emit.ml`
+`task_await` case): extend `f89b8711`'s guard from `inner_ty = "i64"` to
+`"i64" || "ptr"` and `ashr` the freshly-allocated Ok payload field (offset 16)
+once — `task[3]` is always odd, so one arithmetic shift is the exact inverse for
+both reps (`4*n+3 → 2*n+1` for i64, `(addr<<1)|1 → addr` for ptr); `"double"`
+(Float, separately ABI-broken through the `void*` trampoline) is left
+byte-identical. Covers all combinators that funnel through `task_await`
+(`await_many`, `async_stream`/`_n`, `all_settled`, `race`). Verified compiled ==
+interpreter across String/List/tuple/ADT/list-of-string payloads and `await_many`
+over Strings, clean under ASAN. Regression: `test/native/task_await_ptr.{march,expected}`
++ a `test/dune` native compiled-run golden. Codegen-only change (interpreter,
+type-checker, and stdlib suites unaffected): **391 codegen / 231 eval pass**.
+
 ## Current State (as of 2026-07-06, same-file private nested-module member diagnostic fixed)
 
 A same-file qualified reference to a PRIVATE nested-module member now reports

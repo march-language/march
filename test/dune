@@ -1271,6 +1271,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff apps/actor_stress.expected native_actor_stress.out)))
 
+; ── Regression: compiled Task.await on a heap (ptr) result must untag the Ok
+; ── payload.  The thunk trampoline stores task[3] = (apply_ret << 1)|1;
+; ── march_task_await wraps it into Ok, but the Ok(x) destructure loads a ptr
+; ── field raw, so pre-fix the String/List payload was a wild ~2*addr pointer
+; ── -> `march: out of memory` / SIGSEGV.  The i64 case (6*7 -> 42) guards the
+; ── shared single-ashr untag path (double-tag 4*n+3).  Run single-threaded so
+; ── the sequential await prints serialise deterministically; diff stdout.
+(rule
+ (targets native_task_await_ptr native_task_await_ptr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_ptr.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_ptr
+        native/task_await_ptr.march)
+   (with-stdout-to native_task_await_ptr.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_ptr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_ptr.expected native_task_await_ptr.out)))
+
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule
  (targets native_ffi_leak native_ffi_leak.out)

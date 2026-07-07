@@ -1223,14 +1223,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime.
-     march_task_await returns Ok(task[3]) where task[3] = (apply_ret << 1)|1.
-     For a ptr result apply_ret is a heap address, so the Ok field holds the
-     correctly-tagged uniform pointer and the normal destructure recovers it.
-     For an i64 result apply_ret is already a tagged scalar (2*n+1), so task[3]
-     is double-tagged (4*n+3): the Ok(n) destructure untags only once and
-     leaves 2*n+1.  Mirror the task_await_unwrap fix (commit 291f6b5f) by
-     stripping the extra tag from the Ok payload here, keyed on the statically
-     known Task inner type so the ptr path is left byte-identical. *)
+     march_task_await returns Ok(task[3]).  The thunk trampoline stored
+     task[3] = (apply_ret << 1) | 1 — i.e. the apply-wrapper's uniform-slot
+     return value tagged exactly once.  A boxed-ADT (Ok) field must hold that
+     uniform value *verbatim*, and the two representations pull in opposite
+     directions relative to the raw task[3]:
+       • i64 payload — apply_ret is already a tagged scalar (2*n+1), so
+         task[3] = 4*n+3 (double-tagged); the Ok(n) destructure untags once
+         and would leave 2*n+1 (await(async(6*7)) → Ok(85), not 42).
+       • ptr payload — apply_ret is a raw heap address; the Ok(x) destructure
+         loads a ptr field *raw* (no untag), but task[3] holds (addr<<1)|1, so
+         the field would carry a wild ~2*addr pointer → incrc/decrc misfire and
+         the payload deref SIGSEGVs / OOMs.
+     In BOTH cases the correct field value is apply_ret == task[3] >> 1, and
+     task[3] is always odd (trampoline sets the low bit), so a single
+     unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
+     16) is the exact inverse.  Keyed on the statically-known Task inner type:
+     "double" (Float — ABI-broken through the void*-returning trampoline,
+     separate follow-up) and any other repr are left byte-identical.  The i64
+     half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
+     (f89b8711); the ptr half fixes the heap-payload crash f89b8711's comment
+     wrongly assumed was already correct. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
@@ -1242,10 +1255,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | _ -> "ptr")
       | _ -> "ptr"
     in
-    if inner_ty = "i64" then begin
-      (* Ok payload lives at field 0 (offset 16).  task[3] = 4*n+3 is always
-         odd, so an unconditional ashr-1 is the exact inverse of the trampoline
-         double-tag: 4*n+3 → 2*n+1 (the proper single-tagged uniform scalar). *)
+    if inner_ty = "i64" || inner_ty = "ptr" then begin
       let fp = fresh ctx "tawf" in
       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
       let v  = fresh ctx "tawv" in
