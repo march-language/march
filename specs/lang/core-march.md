@@ -2031,7 +2031,7 @@ mechanically verified** —
 this is the roadmap's §7 faithfulness risk made concrete, and it remains true
 now that the core is complete: the rules are only as faithful as the review of
 each citation. What *is* mechanically checked is weaker but real: the golden
-corpus (§5) confirms that, on these 37 programs, the interpreter these rules
+corpus (§5) confirms that, on these 39 programs, the interpreter these rules
 describe and the independently-written compiled backend produce identical
 output. A divergence there would mean either the interpreter or the compiler is
 wrong; agreement plus arm-for-arm review is the reference's correctness
@@ -2432,9 +2432,200 @@ added** — the same class of "the observation surface diverges/crashes compiled
 so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
 out-of-scope scheduler races.
 
+### 4.11 Session-typed channels: the runtime model (operational)
+
+The typing reference (`core-march-types.md` §2.7) pins **what a `protocol`
+declaration checks** and **how `Chan.send`/`recv`/`choose`/`offer`/`close`
+advance a channel's static session state** (§2.7.3–§2.7.9). This subsection
+pins the **runtime** side: what a channel actually IS at runtime, how the four
+core operations reduce in `eval.ml`, and — the point of adding channel
+programs to the golden corpus at all — that a program using only the binary
+channel plane is **byte-identical interpreted vs compiled**, now that the
+concurrent codegen fix (F1/F2, `specs/todos.md`) tags payloads symmetrically
+at the send site.
+
+**The runtime model in one line:** a channel is a pair of synchronous,
+single-threaded FIFO queues; `recv` does **not** suspend — an empty queue is a
+fatal error on both backends; there is **no scheduler**, so the programmer
+must order every `send` textually before its matching `recv` in program
+order.
+
+#### 4.11.1 Values and the crossed-queue representation
+
+A binary channel endpoint is `VChan of chan_endpoint` (`eval.ml:50`); the
+multi-party (MPST) analogue is `VMChan of mpst_endpoint` (`:51`). The binary
+`chan_endpoint` record (`:63–73`):
+
+```ocaml
+and chan_endpoint = {
+  ce_id      : int;           (* Globally unique channel id *)
+  ce_role    : string;        (* Which side of the protocol this is *)
+  ce_proto   : string;        (* Protocol name, for runtime error messages *)
+  mutable ce_closed   : bool;
+  ce_out_q   : value Queue.t; (* Values this endpoint puts out (other side reads) *)
+  ce_in_q    : value Queue.t; (* Values this endpoint receives (other side wrote) *)
+}
+```
+
+Two endpoints of the same channel share **crossed** queues: endpoint `a`'s
+`ce_out_q` IS endpoint `b`'s `ce_in_q`, and vice versa — a `send` on one side
+becomes a pending value for a `recv` on the other, mediated purely by two
+plain OCaml `Queue.t` values with no locking, no thread, no scheduler
+involved. (The MPST `mpst_endpoint`, `:75–88`, generalizes this to N×(N−1)
+directed queues, one per ordered role pair, keyed by peer role in a
+hashtable — same crossed-queue idea, more of them; see §4.11.5 for why MPST
+is documented but not golden-witnessed.)
+
+#### 4.11.2 `Chan.new` — role-sorted endpoint construction
+
+`chan_new proto_name role_a role_b` (`eval.ml:2632`) allocates a fresh
+globally-unique channel id, creates the two underlying queues (`q_ab` for
+a→b, `q_ba` for b→a), and builds the two endpoint records with `ce_out_q`/
+`ce_in_q` crossed as above. The builtin dispatch for surface `Chan.new(Proto)`
+(`:5551–5559`) calls `chan_new` with the two roles named `"A"`/`"B"` by
+convention (the typechecker has already verified the protocol's real role
+names — the runtime only needs *a* connected pair, not their exact labels)
+and returns `VTuple [VChan ep_a; VChan ep_b]`. Crucially, the returned pair's
+ORDER is the same role-sorted order the typing side already fixed
+(`core-march-types.md` §2.7.3's `project_protocol`, which sorts roles and
+returns projections in that order) — so `let (cc, sc) = Chan.new(Echo)` binds
+the roles in a fixed, deterministic order, not spawn-order or declaration-
+order.
+
+#### 4.11.3 `Chan.send` / `Chan.recv` / `Chan.close`
+
+- **`chan_send ce v`** (`eval.ml:2645`) — errors if `ce.ce_closed`; otherwise
+  `Queue.push v ce.ce_out_q` and returns `VChan ce` (the *same* endpoint
+  record — the type system's linearity discipline is what prevents reuse in a
+  well-typed program; the runtime itself does not re-check linearity, see
+  §4.11.6). This is a **pure enqueue**: it does not block, does not look at
+  the other side's queue, and returns immediately — `send` is fire-and-forget
+  in the exact same async sense as an actor `send` (§4.10.2), just onto a
+  different queue shape.
+- **`chan_recv ce`** (`eval.ml:2655`) — errors if `ce.ce_closed`; if
+  `ce.ce_in_q` is empty, **hard error** (`:2660`): `"Chan.recv: channel
+  %s#%d has no pending value — did you run the sender first?"`. This is the
+  operative fact for §4.11.6/F6: `recv` never suspends or retries, it either
+  finds a value immediately (pushed by an earlier `send` on the other
+  endpoint, evaluated earlier in program order) or the program crashes.
+  Otherwise pops the value and returns `VTuple [v; VChan ce]` — the popped
+  payload paired with the same endpoint, now advanced.
+- **`chan_close ce`** (`eval.ml:2666`) — errors if already closed; otherwise
+  sets `ce.ce_closed <- true` and returns `VUnit`. Marks the endpoint dead;
+  any further `send`/`recv`/`close` on it is the "already closed" error.
+
+The builtin dispatch table wires these directly: `Chan.send`
+(`eval.ml:5563–5565`) is `chan_send`, `Chan.recv` (`:5569–5571`) is
+`chan_recv`, `Chan.close` (`:5575–5577`) is `chan_close` — no additional
+runtime logic beyond argument-shape matching.
+
+#### 4.11.4 `Chan.choose` / `Chan.offer` — branch selection IS send/recv of an atom
+
+`Chan.choose(ch, :label)` (`eval.ml:5581–5584`) is **literally** `chan_send`
+applied to the label value (an `Atom` or `String`) — the builtin arm is `[VChan
+ce; (VAtom _ as v)] | [VChan ce; (VString _ as v)] -> chan_send ce v`, no
+separate "selection" machinery at all. `Chan.offer(ch)` (`:5588–5589`) is
+**literally** `chan_recv` — `[VChan ce] -> chan_recv ce`. So MPST-style
+choice/offer over a session type reduces, at runtime, to sending and
+receiving an ordinary value over the same crossed FIFO queues §4.11.1
+describes: the "protocol branch" abstraction is entirely a typechecker-side
+fiction (tracking which `SChoose`/`SOffer` continuation is legal next,
+`core-march-types.md` §2.7.8) with **zero** runtime representation of its own.
+This is why a `choose`/`offer` program is exactly as byte-identical-compiled
+as a plain send/recv program carrying the same payload types — there is no
+extra runtime surface for the compiled backend to get wrong beyond the
+ordinary channel payload path (§4.11.5 below).
+
+#### 4.11.5 Interp==compiled property for the binary channel plane (post F1/F2)
+
+**Verified property (this task).** For a program using only the **binary**
+channel plane (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads,
+correctly interleaved (every `send` textually before its matching `recv` —
+§4.11.6/F6), the interpreted and compiled outputs are **byte-identical**.
+This was NOT true before the concurrent codegen fix filed as F1/F2 in
+`specs/todos.md`: `march_chan_send` used to receive its payload as a bare
+untagged `i64` while `march_chan_recv`'s result went through the standard
+conditional erased-i64 untag (`ashr` iff the low bit is set) — an asymmetry
+that corrupted every **odd** `Int` payload (`43` came back `21`) and flipped
+every `Bool` (`true` came back `false`), while even Ints and heap payloads
+(String, records) passed by construction (even-aligned pointers are
+untouched by the conditional untag). That asymmetry is fixed: the send site
+now tags the payload the same way the recv site expects, so the round-trip
+is symmetric for the full payload-type range a channel can carry. Two golden
+programs (§5) witness this directly:
+
+- **`g38_chan_int_echo`** — a plain `Chan.new`/`send`/`recv`/`close`
+  round-trip carrying an **odd** `Int` (`42` sent, `43` returned) — exactly
+  the value class F1 used to corrupt. `MATCH` under `verify.sh`.
+- **`g39_chan_choose_offer`** — `Chan.choose`/`Chan.offer` branch selection
+  over a protocol with **type-distinct** branches (`ok -> Int`, `err ->
+  String` — required so the MPST-merge-rule-into-binary-duality pitfall, F4,
+  does not spuriously reject the protocol), the chooser picking `:ok` and
+  sending an odd Int (`43`) after the label. `MATCH` under `verify.sh`.
+
+**MPST DIVERGES compiled and is explicitly NOT golden (F3).** Every `MPST.*`
+program this task tried — including an all-`String`-payload, correctly
+interleaved, cleanly-typechecking 3-role relay — segfaults compiled (exit
+139) while running correctly interpreted. The compiled MPST C runtime
+(`runtime/march_extras.c:1463+`) is not correctly wired to the lowered
+representation (see the filed finding for the live repro). So: binary
+channels are IN the golden corpus after F1/F2; MPST is interp-only and stays
+OUT of the golden corpus until its own fix lands.
+
+#### 4.11.6 Two scope boundaries, both filed as findings, neither "fixed" here
+
+Two properties of this runtime are documented as **findings**, not defects
+this task resolves — they are real, live-verified, and load-bearing for
+anyone writing a channel program, but fixing either is out of scope for a
+docs-widening slice:
+
+- **F6 — no scheduler, so `recv`-before-`send` deadlocks at runtime, not
+  caught statically.** Because `chan_recv` never suspends (§4.11.3), a
+  protocol whose two roles are driven by separate functions called in the
+  "wrong" order (the receiver's function invoked before the sender's) TYPE-
+  CHECKS fine — session-state advancement is a per-op static check, oblivious
+  to call order — but dies at runtime on BOTH backends: interpreted, the
+  `"has no pending value"` error above; compiled, `march: Chan.recv on empty
+  channel queue (role N)` then abort. This is a fundamental scope boundary:
+  **session types here are a linear protocol-conformance checker over a
+  same-thread mailbox, not a concurrent session system** — every golden
+  witness in this corpus is therefore written with strict send-before-recv
+  program order, by construction, not by accident.
+- **F7 — partial linearity enforcement.** Session-channel "use exactly once"
+  is enforced by the same generic linear-`let` tracker every other linear
+  value uses, not by session-specific accounting. Two shapes slip through:
+  dropping an unclosed `SEnd` channel (never calling `Chan.close` once a
+  channel reaches `End`) typechecks and runs cleanly; and reusing a linear
+  **parameter** endpoint (rather than a `let`-bound continuation) at a
+  protocol shape where the parameter's declared session state coincidentally
+  still matches after one op — e.g. two `Chan.send` calls against the same
+  parameter `ch : Chan(Client, Send(Int, Send(Int, End)))` rather than
+  threading the first call's returned continuation — also typechecks and
+  runs cleanly. The "consume each channel exactly once, at the exact
+  advancing state" guarantee therefore only actually holds for `let`-bound
+  continuations threaded through in the same scope.
+
+Both are filed in `specs/todos.md` with live repros; neither blocks a golden
+witness (every witness here is written to avoid both shapes on purpose:
+every channel is closed, and every continuation is threaded through fresh
+`let` bindings rather than re-read from a stale parameter or `let`).
+
+**A third, purely cosmetic finding (F8) is worth naming so it is not
+mistaken for a golden-corpus hazard.** `protocol` participant names that
+aren't declared as an `actor` or a `type` produce a typecheck-time HINT to
+STDERR (`typecheck.ml:~7057–7066`) — e.g. naming bare `Sender`/`Receiver`
+roles with no corresponding declaration. This is diagnostic noise, not a
+runtime or golden-corpus issue: the HINT is emitted by the compiler's own
+typecheck pass, at compile time, to the *compiler's* stderr — it has no
+program-runtime representation on either backend, so it cannot appear in
+either side of `verify.sh`'s interp-stdout vs compiled-stdout+stderr
+comparison. Declaring protocol roles as their own nullary types (as `g38`/
+`g39` do, `type Client = Client`) silences it, but that is optional hygiene,
+not a golden requirement.
+
 ## 5. Golden conformance corpus
 
-Thirty-seven programs in `specs/lang/golden/`, each exercising a slice of the
+Thirty-nine programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2519,8 +2710,10 @@ golden program):
 | `g35_actor_spawn_send.march` | operational actor slice (§4.10): `spawn` a single `Counter` actor (`ESpawn` → `actor_inst` in `actor_registry`, returns `VPid`), three async `send(c, Inc(n))` (FIFO mailbox enqueue, non-blocking) each returning the new `{count:…}` state, a `Report()` handler that `println`s the accumulated count, drained by one `run_until_idle()` (scheduler-drain to fixed point) — the interleaving-free determinism witness of §4.10.5 | `count=8` / `done` |
 | `g36_actor_receive.march` | operational actor slice (§4.10): an `Inbox` actor whose `on Start()` handler calls `receive()` ONCE to pop the already-queued `Follow(99)` (sent immediately after `Start()`, so present before dispatch — the non-blocking pop-or-`BlockedOnReceive` path, `eval.ml:3076`) and `println`s its payload; honors the once-per-handler `receive()` limitation (§4.10.3) | `got=99` / `done` |
 | `g37_actor_lifecycle.march` | actor lifecycle slice (§4.10.6): `spawn` a `Counter` (`ai_alive = true`) so `is_alive` returns `true`, then `kill` (`crash_actor` sets `ai_alive <- false`, `eval.ml:2961/1766/1772`) so `is_alive` returns `false` — observed via the `Bool` `is_alive` returns (`eval.ml:2964`, a registry lookup SAFE compiled), printed via a `Bool→String` helper. The one lifecycle observation byte-identical compiled; the cap / dead-`send` plane diverges (§4.10.6 finding) and is NOT a golden program | `alive=true` / `alive=false` |
+| `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
+| `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 37 / 37 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 39 / 39 matched, 0 divergences in the committed corpus** (These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not
@@ -2692,7 +2885,16 @@ Phase-1 tasks did):**
 - refinements;
 - capabilities;
 - the Perceus RC discipline (its own Level-3 track);
-- session types;
+- session types — **LANDED (§4.11, 2026-07-06).** §4.11 documents the
+  channel-runtime operational model: the crossed-FIFO-queue representation
+  (`VChan`/`chan_endpoint`), `Chan.new`/`send`/`recv`/`close`,
+  `Chan.choose`/`offer` as literal send/recv of a label atom, the
+  interp==compiled property for the binary channel plane now that the
+  concurrent F1/F2 codegen fix lands (witnessed by `g38`/`g39`), and the MPST
+  compiled-segfault (F3), no-scheduler-deadlock (F6), partial-linearity (F7),
+  and HINT-noise (F8) findings. The typing side (`protocol`/projection/
+  duality/per-op session-state typing) is `core-march-types.md` §2.7;
+  MPST remains interp-only and out of the golden corpus (F3);
 - sigils.
 
 (This is the same deferred set §0 now names. Everything that was on the ORIGINAL

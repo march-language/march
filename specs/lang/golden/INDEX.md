@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g37)
+# Golden corpus index (g01–g39)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (37/37 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (39/39 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -16,7 +16,11 @@ nested-`PatTuple` lowering (`g34`) backend fixes landed; `g35`–`g36` the
 actor-operational addition (§4.10 spawn/send/receive/run_until_idle); `g37` the
 actor-lifecycle addition (§4.10.6 spawn/kill/is_alive — the one lifecycle plane
 byte-identical compiled; the capability/dead-`send` plane diverges and is a
-prose finding, not a golden program).
+prose finding, not a golden program); `g38`–`g39` the session-typed channel
+operational addition (§4.11 channel runtime — binary `Chan.new`/`send`/`recv`/
+`close` and `choose`/`offer`, ENABLED by the concurrent F1/F2 codegen fix that
+made odd-Int/Bool channel payloads byte-identical compiled; MPST is documented
+but diverges compiled — F3 — and is deliberately NOT a golden program).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -57,6 +61,8 @@ prose finding, not a golden program).
 | `g35_actor_spawn_send` | `spawn` a single `Counter` actor + three async `send(Inc(n))` + `Report()` handler `println` + one `run_until_idle()` drain (interleaving-free determinism witness) | E-Spawn/E-Send/run_until_idle (§4.10.1–.5, `eval.ml:7194/7265/3067→7523`) |
 | `g36_actor_receive` | `on Start()` handler calls `receive()` once to pop an already-queued `Follow(99)` and `println`s its payload (non-blocking pop path) | receive pop-or-`BlockedOnReceive` (§4.10.3, `eval.ml:3076`) |
 | `g37_actor_lifecycle` | `spawn` → `is_alive` (`true`) → `kill` → `is_alive` (`false`), each printed via a `Bool→String` helper (registry-bool observation, SAFE compiled) | `kill`/`is_alive` + `crash_actor`/`ai_alive` (§4.10.6, `eval.ml:2961/2964/1766/1772`) |
+| `g38_chan_int_echo` | binary `Chan.new`/`send`/`recv`/`close` round-trip carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the value class the concurrent F1/F2 codegen fix made byte-identical compiled | `chan_new`/`chan_send`/`chan_recv`/`chan_close` (§4.11.2–.3, `eval.ml:2632/2645/2655/2666`) |
+| `g39_chan_choose_offer` | `Chan.choose`/`Chan.offer` branch selection over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule pitfall); chooser picks `:ok`, sends an odd `Int` (`43`) after the label | choose=send-atom / offer=recv-atom (§4.11.4, `eval.ml:5581/5588`) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
@@ -100,4 +106,11 @@ note explaining why:
   a `get_actor_field`-free "supervisor spawns its declared children" witness
   (observed via a printing child `init`) diverges — interp runs each child's
   `init` at `spawn(Sup)`, compiled runs none. A divergent/crashing program cannot
-  be a golden `MATCH`, so no `g38` restart witness was added.
+  be a golden `MATCH`, so no restart witness was added.
+- **Multi-party session types (`MPST.*`)** — the MPST runtime (§4.11.5) is
+  complete and correct interpreted (a 3-role all-`String` relay runs cleanly),
+  but **every** `MPST.*` program segfaults compiled (exit 139, filed as F3 in
+  `specs/todos.md`) — the compiled MPST C runtime is not correctly wired to
+  the lowered representation. A crashing program cannot be a golden `MATCH`,
+  so MPST is documented in §4.11 prose only; only the **binary** channel plane
+  (`g38`/`g39`) is golden-witnessed.
