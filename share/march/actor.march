@@ -3,35 +3,47 @@
 -- cast/2 is fire-and-forget (async): the message is enqueued and the
 -- caller continues immediately without waiting for a response.
 --
--- call/3 is synchronous: it sends a Call(ref, msg) message to the target
--- actor and blocks until the actor calls Actor.reply(ref, result).
--- Returns Ok(result) or Err(reason) if no reply arrives.
+-- call/3 is synchronous: it sends the given message to the target actor
+-- and blocks until the actor calls Actor.reply(reply_to, result).
+-- Returns Ok(result), or Err(reason) if no reply arrives.
 --
 -- call protocol:
---   The target actor's handler receives Call(ref, Msg(args...)).
---   It must call Actor.reply(ref, result) before returning to unblock the
---   caller.  If the handler does not reply, call returns Err("no reply ...").
+--   Pass a zero-arg sentinel constructor as the call message. Its tag
+--   selects which handler receives the call, and the runtime injects the
+--   caller (the "reply channel") as that handler's first argument. The
+--   handler must call Actor.reply(reply_to, result) to unblock the caller;
+--   if it never replies, call returns Err("no reply ...").
+--
+--   So the call handler must be declared FIRST in the actor (tag 0), and
+--   the sentinel must have a name distinct from that handler to avoid a
+--   constructor-name clash.
 --
 -- Example:
 --
+--   type GetReq = GetReq          -- zero-arg sentinel for the sync call
+--
 --   actor Counter do
---     state = 0
+--     state { count : Int }
+--     init  { count: 0 }
 --
---     on Call(ref, Get()) ->
---       Actor.reply(ref, state)
+--     -- First handler (tag 0) = the call handler; reply_to is the caller.
+--     on GetCount(reply_to) do
+--       Actor.reply(reply_to, state.count)
 --       state
+--     end
 --
---     on Inc() ->
---       state + 1
+--     on Inc(n : Int) do
+--       { state with count: state.count + n }
+--     end
 --   end
 --
 --   fn main() do
 --     let pid = spawn(Counter)
---     pid <- Inc()
---     let count = Actor.call(pid, Get(), 5000)
---     match count do
---     | Ok(n) -> println("count = ${n}")
---     | Err(e) -> println("error: ${e}")
+--     Actor.cast(pid, Inc(1))
+--     run_until_idle()
+--     match Actor.call(pid, GetReq, 5000) do
+--       Ok(n)  -> println("count = " ++ int_to_string(n))
+--       Err(e) -> println("error: " ++ e)
 --     end
 --   end
 
@@ -43,9 +55,10 @@ fn cast(pid, msg) do
 end
 
 doc """
-Synchronous call: send Call(ref, msg) to the actor and wait for a reply.
-The actor handler must call Actor.reply(ref, result) to unblock the caller.
-Returns Ok(result) or Err(reason).
+Synchronous call: send msg (a zero-arg sentinel) to the actor and wait
+for a reply. The runtime injects the caller as the target handler's first
+argument; that handler must call Actor.reply(reply_to, result) to unblock
+the caller. Returns Ok(result) or Err(reason).
 timeout_ms is accepted for API compatibility but not enforced in the interpreter.
 """
 fn call(pid, msg, timeout_ms) do
@@ -54,8 +67,8 @@ end
 
 doc """
 Reply to a synchronous call from within an actor handler.
-ref_id is the first element of the Call(ref_id, ...) message.
-result is the value to return to the caller.
+ref_id is the reply channel — the handler's first argument, injected by
+Actor.call. result is the value to return to the caller.
 """
 fn reply(ref_id, result) do
   actor_reply(ref_id, result)
