@@ -283,6 +283,58 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-07, `dependency_order_dmod_run` hard/soft-edge cycle corruption fixed)
+
+Checking a real downstream project (`conduit`) whole-program surfaced a fourth
+`run_check_cmd`-family bug, this time inside the typechecker's own module
+ordering pass rather than `run_check_cmd` itself: `dependency_order_dmod_run`
+(`lib/typecheck/typecheck.ml`) topologically sorts sibling DMods over the
+UNION of two different kinds of dependency edges — qualified references
+(`Mod.fn`/`Mod.Ctor`, from `module_refs_in_decls`) and bare/unqualified
+ctor-or-type references (from `unqualified_module_deps`). The two kinds are
+not equally load-bearing: qualified references are pre-bound as pass-1 Mono
+placeholders regardless of check order (see `prebind_mod_members`), so
+ordering by them is purely a precision nicety (avoids a caller pinning an
+under-generalized placeholder — the rationale `0799c745` added this class of
+edge for). Bare references have no such placeholder — the referenced name
+only becomes visible once the defining sibling's DMod has actually been
+processed by `check_decl` — so ordering by them is a hard correctness
+requirement. Real sibling modules commonly form actual reference cycles
+through qualified calls alone (a facade module delegating into an internal
+one, which calls back into a module the facade itself depends on) — legal
+and previously harmless, since qualified refs tolerate any order. But mixing
+both edge kinds into one DFS meant a soft-edge cycle could non-deterministically
+reorder a hard edge the wrong way: whichever edge type the traversal reached
+an already-in-progress ancestor through "won", independent of which one was
+actually load-bearing. Live repro: `conduit`'s base module (`Conduit`)
+qualified-delegates to `Conduit.API`, which qualified-calls into
+`Conduit.Worker`, which bare-pattern-matches `WorkerError` — a constructor
+declared on `Conduit`. The DFS visited `Conduit` first, recursed into the
+soft-edge cycle before `Conduit` could push itself, and `Conduit.Worker` (its
+hard dependent) ended up ordered first — "I don't know a constructor called
+`WorkerError`" despite the constructor being correctly declared.
+
+Fixed by computing the existing combined-edge DFS order as before (unchanged
+for the common case — no behavior change when there's no hard/soft
+conflict), then validating it against the hard edges alone. If satisfied
+(the overwhelming majority of real programs, including every existing
+regression fixture), return it unchanged. Only when a hard edge is actually
+violated does it fall back to Kahn's algorithm restricted to hard edges,
+using the original combined-edge order purely as a tie-break, so soft-edge
+precision is preserved everywhere it doesn't conflict with a hard
+requirement. New regression test
+`test_check_qualified_cycle_does_not_break_bare_ctor_ordering` in
+`forge/test/test_build_check.ml`, minimized to the same three-module
+facade/worker/core shape (file naming there is itself load-bearing —
+`Cmd_build.find_march_files` walks sorted-ascending but prepends, so the
+file list handed to `march check` is sorted DESCENDING; the module carrying
+the hard dependency's definition has to be discovered first for the bug to
+reproduce through the real `forge check` path, hence `zcore.march`).
+
+**Test counts:** `forge/test/test_build_check.exe` gains 1 more case (12
+total, up from 11). Standard runners unaffected: 424 compiler / 231 eval /
+391 codegen, all exit 0 (stdlib runner not re-verified this pass).
+
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
 Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong

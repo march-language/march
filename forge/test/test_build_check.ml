@@ -185,6 +185,62 @@ let test_check_stdlib_shadow_does_not_corrupt_unrelated_module () =
       | Error m -> Alcotest.fail ("expected Ok despite the stdlib-shadowing file, got Error: " ^ m)
       | Ok _    -> ())
 
+(** Regression test for a module-ordering bug in [dependency_order_dmod_run]
+    (lib/typecheck/typecheck.ml): sibling modules that mutually reference each
+    other through QUALIFIED calls (a "soft" dependency — tolerated regardless
+    of check order via pass-1 placeholders, see [prebind_mod_members]) can
+    form a real cycle, e.g. a facade module delegating to an internal worker
+    module which delegates back to the facade's own module.  One of those
+    modules can ALSO bare-pattern-match a constructor owned by another sibling
+    (a "hard" dependency — the defining module's DMod must actually be
+    processed by [check_decl] first, since bare ctor names have no pass-1
+    placeholder). The ordering DFS previously mixed both kinds of edges into
+    one graph and picked whichever edge it reached an ancestor through first —
+    so a soft-edge cycle could silently push the hard dependency's definer
+    AFTER its bare-pattern-matching dependent, producing a spurious "I cannot
+    find `Ctor`" error despite the constructor being correctly declared.
+    Confirmed live against a real project (`conduit`): a base module
+    delegating to `Conduit.API`, which calls into `Conduit.Worker`, which
+    bare-matches a constructor (`WorkerError`) declared in the base module.
+    Minimized here to the same three-module shape.
+
+    The bug is order-sensitive: it only reproduces when the DMod carrying the
+    hard dependency's DEFINITION is the first one the ordering DFS visits (it
+    then sits "in progress" while recursing through the soft-edge cycle, so
+    the hard dependent gets pushed to the output before it — see the fix's
+    comment in [dependency_order_dmod_run] for the full mechanics).
+    [Cmd_build.find_march_files] walks directory entries in ascending sorted
+    order but PREPENDS each match, so the file list handed to `march check`
+    ends up in *descending* alphabetical order — hence naming this file
+    `zcore.march`: it sorts last ascending, so it is discovered FIRST. *)
+let test_check_qualified_cycle_does_not_break_bare_ctor_ordering () =
+  with_project ~project_type:Project.Lib (fun _name root ->
+      let core   = Filename.concat root (Filename.concat "lib" "zcore.march") in
+      let facade = Filename.concat root (Filename.concat "lib" "facade.march") in
+      let worker = Filename.concat root (Filename.concat "lib" "worker.march") in
+      (* Core delegates to Facade via a QUALIFIED call (soft edge, tolerates
+         any order) and declares a type whose constructor is only ever
+         referenced BARE by a different sibling below (hard edge). *)
+      write_file core
+        "mod Core do\n\n  type CoreError = Bad(String)\n\n  \
+         fn delegate(x) do\n    Facade.run(x)\n  end\n\nend\n";
+      (* Facade delegates to Worker via a QUALIFIED call (soft edge). *)
+      write_file facade
+        "mod Facade do\n\n  fn run(x) do\n    Worker.process(x)\n  end\n\nend\n";
+      (* Worker closes the qualified cycle back to Core, AND bare-matches
+         Core's constructor — the hard edge that must win the ordering. *)
+      write_file worker
+        "mod Worker do\n\n  fn process(x) do\n    \
+         match x do\n    \
+         Bad(msg) -> msg\n    \
+         _ -> \"\"\n    end\n  end\n\nend\n";
+      match Cmd_check.check () with
+      | Error m ->
+        Alcotest.fail
+          ("expected Ok despite the qualified-call cycle between Core/Facade/Worker, \
+            got Error: " ^ m)
+      | Ok _ -> ())
+
 (** Rather than breaking PATH/MARCH_HOME to prove `march` isn't re-invoked
     (tried first — but that also perturbs `lib_path_env`, since
     `Toolchain.path_prefix ()` bakes the resolved toolchain's bin/ directly
@@ -278,6 +334,8 @@ let () =
         test_check_does_not_duplicate_shared_module_diagnostics;
       Alcotest.test_case "check: stdlib shadow does not corrupt an unrelated module" `Quick
         test_check_stdlib_shadow_does_not_corrupt_unrelated_module;
+      Alcotest.test_case "check: qualified-call cycle does not break bare ctor ordering" `Quick
+        test_check_qualified_cycle_does_not_break_bare_ctor_ordering;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
