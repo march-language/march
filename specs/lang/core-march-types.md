@@ -2769,13 +2769,15 @@ named by `X`, but the proof is **runtime-erased** — `Cap(X)` values compile to
 any effect on runtime semantics or output; a cap-threading program produces
 byte-identical results interpreted and compiled). All enforcement lives
 entirely in `--check` (the typechecker plus two post-typecheck refinecheck
-passes, out of scope for this subsection). This subsection covers the first,
+passes, out of scope for this subsection). This subsection covers the
 foundational layer: the **IO permission hierarchy**, the `needs` module
-manifest, and **Check 1** — every `Cap(X)` in a function/actor/extern
-**signature** must be covered by a declared `needs`. Later widening tasks
-extend §2.8 with transitive `use`/extern-implied caps, `cap_narrow`/
-`root_cap` threading, effect inference, and proof-cap minting — this
-subsection is deliberately narrow.
+manifest, **Check 1** — every `Cap(X)` in a function/actor/extern
+**signature** must be covered by a declared `needs` — and (§2.8.6) the
+transitive/extern-implied checks (4, 1c, 5) plus the honest three-tier
+enforcement reality (signature/transitive/extern-cap = ERROR; direct-body-
+call/extern-implied = WARNING). Later widening tasks extend §2.8 further with
+`cap_narrow`/`root_cap` threading, effect inference, and proof-cap minting —
+those remain out of scope here.
 
 #### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
 
@@ -3048,7 +3050,212 @@ three new `reject/` programs (`t36`-`t38`), each verified live against
   Pinned: `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is
   not declared in `needs` ``.
 
-`check_types.sh`: **86/86 (48 accept, 38 reject)**, exit 0.
+`check_types.sh` (Task 1 running total, superseded below): 86/86 (48 accept,
+38 reject), exit 0.
+
+#### 2.8.6 Transitive `use` and extern-implied caps (Checks 4, 1c, 5) — and the honest three-tier enforcement reality
+
+Check 1 (§2.8.3) is only the *first* of three genuinely error-level cap
+checks. `check_module_needs` also enforces two more shapes at ERROR severity,
+plus two shapes at WARNING-only severity that are frequently mistaken for
+errors because the tutorial-level docs describe them loosely. This
+subsection pins all four, and states the three-tier reality plainly because
+it is the single most consequential fact for anyone relying on `needs` as a
+soundness guarantee.
+
+**Check 4 — transitive `use` coverage (ERROR).** A module that `use`s another
+module inherits an obligation to cover whatever capabilities the *used*
+module itself declared via its own `needs`. Live cite, `typecheck.ml:5661-5681`
+(comment "Check 4:" at `:5661`):
+
+```ocaml
+List.iter (function
+  | Ast.DUse (ud, sp) ->
+    let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+    (match List.assoc_opt imported env.module_caps with
+     | None | Some [] -> ()
+     | Some req_caps ->
+       List.iter (fun req_cap ->
+         let covered =
+           List.exists (fun need -> cap_subsumes need req_cap) declared_needs
+         in
+         if not covered then
+           Err.error env.errors ~span:sp (* "module `Main` imports `Vault` which
+             requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`." *)
+       ) req_caps)
+  | _ -> ()
+) decls;
+```
+
+`env.module_caps : (string * string list) list` is an association list of
+`(module_name, that_module's_declared_needs)`, appended to every time a
+nested `DMod` finishes checking (`(name.txt, inner_needs) :: env'.module_caps`,
+`typecheck.ml:7012`). Check 4 looks up the imported module's name in this
+list and, for every capability the *used* module required, checks the
+*using* module's own `declared_needs` covers it via the same `cap_subsumes`
+subsumption Check 1 uses — so all of §2.8.2's directionality rules (broad
+covers narrow, siblings don't cover each other) apply identically here, one
+hop through a `use` edge. This is a real, **error-level** propagation: an
+importer cannot silently absorb an imported module's IO obligations by
+omission. Live witness — `stdlib/vault.march:26` declares `needs IO.Mut`; a
+module that `use`s `Vault` without declaring `needs IO.Mut` itself is
+rejected:
+
+```
+module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
+help: add `needs IO.Mut` to the module body.
+```
+
+Declaring `needs IO.Mut` (or any ancestor, e.g. the root `needs IO`) in the
+importer satisfies Check 4 (`accept/t49`, §2.8.7); omitting it rejects
+(`reject/t39`, §2.8.7).
+
+**Check 5 — extern `Cap(X)` must be in `needs` (ERROR).** An `extern "lib" :
+Cap(X) do ... end` block (`ext_cap_ty`, `ast.ml:339`) names a capability the
+FFI surface itself requires. Check 5 (`typecheck.ml:5684-5701`, comment
+"Check 5:" at `:5684`) is structurally the same shape as Check 1, applied to
+`DExtern` instead of `DFn`/`DActor`:
+
+```ocaml
+List.iter (function
+  | Ast.DExtern (edef, sp) ->
+    let cap_paths = cap_paths_in_surface_ty edef.ext_cap_ty in
+    List.iter (fun cap_path ->
+      let covered =
+        List.exists (fun need -> cap_subsumes need cap_path) declared_needs
+      in
+      if not covered then
+        Err.error env.errors ~span:sp (* "extern block `\"libc\"` uses
+          `Cap(IO.FileSystem)`, but `IO.FileSystem` is not declared in
+          `needs`." *)
+    ) cap_paths
+  | _ -> ()
+) decls;
+```
+
+This is an ERROR, not a warning — the extern block's own declared `Cap(X)`
+must be covered by `needs` exactly as a function signature's `Cap(X)` must
+be (§2.8.3). `accept/t50` (§2.8.7) declares `needs IO.FileSystem` covering an
+`extern "libc" : Cap(IO.FileSystem)` block and accepts.
+
+**Check 1c — extern blocks imply `IO.Foreign` (WARNING only).** Distinct
+from Check 5's ERROR on the extern's *own declared* `Cap(X)`, Check 1c
+(`typecheck.ml:5607-5620`, comment "Check 1c:" at `:5607`) additionally holds
+that *every* extern block, regardless of what `Cap(X)` it declares, implies
+`IO.Foreign` (an FFI call is inherently foreign-code execution) — and, per
+the extern-implied-caps computation feeding this check
+(`typecheck.ml:5539-5550`), `IO.Foreign.Blocking` too if any of the block's
+functions are marked blocking. Unlike Check 5, an uncovered `IO.Foreign`
+implication is only a **WARNING**:
+
+```ocaml
+List.iter (fun (cap_path, sp) ->
+  let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+  if not covered then
+    Err.warning_with_fix env.errors ~span:sp
+      ~fix:(Err.FInsert { after_line = ...; text = "  needs " ^ cap_path })
+      (* "extern block in `Bindings` requires `Cap(IO.Foreign)` but `Bindings`
+         does not declare `needs IO.Foreign`." *)
+) extern_cap_uses;
+```
+
+So a single `extern` block carries **two independent capability obligations
+of two different severities**: its own declared `Cap(X)` is ERROR-enforced
+(Check 5), while the blanket `IO.Foreign` implication is WARNING-only (Check
+1c). `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
+so neither fires; dropping only the `IO.Foreign` line would still `--check`
+exit 0 (a warning, not a rejection) — dropping the `IO.FileSystem` line
+would exit 1 (Check 5, an error). This asymmetry is easy to miss because
+both obligations originate from the same `extern` block and both suggest the
+identical `needs <X>` fix.
+
+**Check 1b — body-scanned builtin calls (WARNING only) — the F1 crux.** A
+function *body* that calls a `builtin_cap_table` builtin (`file_read`,
+`tls_connect`, `vault_set`, …, `typecheck.ml:999-1097`) without a covering
+`needs` is Check 1b (`typecheck.ml:5588-5605`, comment "Check 1b:" at
+`:5588`), and it is **WARNING-only**, exactly parallel in shape to Check 1c:
+
+```ocaml
+List.iter (fun (cap_path, sp) ->
+  let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+  let self_declared = (* proof-cap self-declaration exemption, out of scope here *) in
+  if not covered && not self_declared then
+    Err.warning_with_fix env.errors ~span:sp
+      ~fix:(Err.FInsert { after_line = ...; text = "  needs " ^ cap_path })
+      (* "function body calls a builtin that requires `Cap(IO.FileRead)` but
+         `Reader` does not declare `needs IO.FileRead`." *)
+) body_cap_uses;
+```
+
+**This is the load-bearing distinction the reference must state plainly, in
+contrast to `specs/lang/capabilities.md`'s tutorial framing** (`:69` "The
+compiler enforces this transitively... the build fails"; `:142`/`:312`
+describe the body-call case as a "hint"/"warning" correctly labeled in the
+example text, but the surrounding prose — "There are no false positives"
+(`:142` area) and "the type checker already enforces `needs` as an error"
+(`:312`) — overstates what actually happens). The truth, reproduced live
+side by side:
+
+```
+=== signature Cap(IO.FileRead), no needs (Check 1, ERROR) ===
+`Cap(IO.FileRead)` used in module `Reader` but `IO.FileRead` is not declared in `needs`.
+help: add `needs IO.FileRead` to the module body.
+EXIT=1
+
+=== body call to file_read, no needs (Check 1b, WARNING) ===
+-- HINT --
+call to `file_read` requires `needs IO.FileRead` — add `needs IO.FileRead` to module `Reader`
+-- WARNING --
+function body calls a builtin that requires `Cap(IO.FileRead)` but `Reader` does not declare `needs IO.FileRead`.
+hint: add `needs IO.FileRead` to the module body.
+EXIT=0
+```
+
+So the three-tier reality is:
+
+| Position | Check | Severity | `--check` exit on violation |
+|---|---|---|---|
+| `Cap(X)` in a fn/actor/extern **signature** | Check 1 | **ERROR** | 1 |
+| `use`d module's declared caps uncovered | Check 4 | **ERROR** | 1 |
+| extern's own declared `Cap(X)` uncovered | Check 5 | **ERROR** | 1 |
+| body call to a cap-table builtin, uncovered | Check 1b | WARNING | 0 |
+| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | WARNING | 0 |
+
+"Absence of `needs` is a machine-verified guarantee of purity" (the
+tutorial's framing) holds **only** for the signature/transitive/extern-cap
+surface (Checks 1/4/5) — a module that calls IO builtins directly in a
+function body, with no `Cap(X)` anywhere in any signature, is *warned*, not
+*rejected*; `--check` still exits 0. Authors who want the ERROR-level
+guarantee must thread `Cap(X)` through every effectful function's signature,
+not merely call the builtin and rely on the warning. This gap is filed as
+**F1** in `specs/todos.md` (open, deferred) — it is a design/enforcement
+choice, not a bug in the mechanics of Checks 1/4/5 themselves, which are
+sound and precise over the `builtin_cap_table` domain (§2.8.3's F6 scoping
+note is a separate, narrower gap about which hierarchy entries can even be
+*written* as `Cap(X)`).
+
+#### 2.8.7 Corpus witnesses (Task 2 — transitive `use` + extern-implied caps)
+
+Two new `accept/` programs (`t49`-`t50`) and one new `reject/` program
+(`t39`), each verified live against `--check`:
+
+- **`t49_transitive_use_covered`** — `Main` declares `needs IO.Mut` and `use`s
+  the real stdlib module `Vault` (`stdlib/vault.march:26`, `needs IO.Mut`).
+  Check 4 walks `Main`'s single `DUse`, finds `Vault`'s declared cap
+  (`IO.Mut`) in `env.module_caps`, and confirms it is covered by `Main`'s own
+  `needs IO.Mut` (reflexive subsumption). `--check` exit 0.
+- **`t50_extern_cap_and_foreign_covered`** — `Bindings` declares both `needs
+  IO.Foreign` and `needs IO.FileSystem`, then an `extern "libc" :
+  Cap(IO.FileSystem) do ... end` block. Check 5 confirms the extern's own
+  declared `Cap(IO.FileSystem)` is covered; Check 1c confirms the blanket
+  `IO.Foreign` implication is covered. Neither fires. `--check` exit 0.
+- **`t39_transitive_use_missing_cap`** — companion to `t49` with the `needs
+  IO.Mut` line removed: `Main` `use`s `Vault` but declares no `needs` at all,
+  so `declared_needs = []` covers nothing and Check 4 raises. Pinned: ``
+  module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
+  not declared in `needs` ``.
+
+`check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0.
 
 ## 3. Conformance corpus
 
@@ -3847,7 +4054,32 @@ independence — two siblings each need their own `needs`, and a second
 mid-tier subsumption shape) and three new `reject/` programs (`t36`–`t38`:
 uncovered `Cap(X)`, narrow `needs` does not cover a broader `Cap` — directional
 asymmetry, and sibling does not cover sibling). `check_types.sh`: **86/86
-(48 accept, 38 reject)**, exit 0 — the corpus's current total (§3).
+(48 accept, 38 reject)**, exit 0 — the corpus's total after Task 1 (see below
+for the Task 2 total that supersedes it).
+
+**Capabilities widening, Task 2 (2026-07-07) added:** §2.8.6-§2.8.7 —
+transitive `use` coverage (**Check 4**, `typecheck.ml:5661-5681`: every
+module a given module `use`s must have its own declared `needs` covered,
+transitively, via the same `cap_subsumes` subsumption, ERROR on violation),
+extern `Cap(X)` coverage (**Check 5**, `typecheck.ml:5684-5701`, ERROR), and
+the extern-implies-`IO.Foreign` obligation (**Check 1c**,
+`typecheck.ml:5607-5620`, WARNING-only) — plus the honestly-stated three-tier
+enforcement reality that reconciles `specs/lang/capabilities.md`'s tutorial
+overclaim (F1, filed): Checks 1/4/5 (signature/transitive/extern-cap) are
+true ERRORs, exit 1; Checks 1b (body-scanned builtin call, `typecheck.ml:5588
+-5605`) and 1c (extern-implied `IO.Foreign`) are WARNING-only, exit 0 —
+reproduced live side by side (a `Cap(IO.FileRead)` signature with no `needs`
+rejects; a body call to `file_read` with no `needs` only warns and
+`--check`s clean). Two new `accept/` programs (`t49`: an importer declaring
+the imported stdlib module `Vault`'s (`needs IO.Mut`) transitive obligation;
+`t50`: a well-formed `extern` block covered on both its Check 5 and Check 1c
+obligations) and one new `reject/` program (`t39`: companion to `t49` with
+the covering `needs IO.Mut` removed, pinning Check 4's ERROR). Also files
+**F6** (found while widening Task 1, filed now): only 10 of the 18 hierarchy
+entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`,
+`typecheck.ml:1858-1861`) — see §2.8.3's scoping note, unchanged by this
+task. `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0 — the
+corpus's current total (§3).
 
 ## 6. Deferred — the roadmap's Phase-2b/3 queue
 

@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t48 accept, t01–t38 reject)
+# Typing corpus index (t01–t50 accept, t01–t39 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -64,6 +64,20 @@ cannot be written as a `Cap(X)` annotation today (`Unknown module \`IO\``),
 so this task's corpus draws only from the registered 10. See
 core-march-types.md §2.8.3.
 
+**Note (`accept/t49`–`t50`, `reject/t39`):** Capabilities widening, Task 2
+(2026-07-07) — extends `core-march-types.md` §2.8 (§2.8.6-§2.8.7) with
+transitive `use` coverage (**Check 4**, `typecheck.ml:5661`, ERROR — a
+module's declared `needs` must cover every capability the modules it `use`s
+themselves declare), extern `Cap(X)` coverage (**Check 5**,
+`typecheck.ml:5684`, ERROR), and the extern-implies-`IO.Foreign` obligation
+(**Check 1c**, `typecheck.ml:5607`, WARNING-only) — plus the honestly-stated
+three-tier enforcement reality (Checks 1/4/5 = ERROR; Checks 1b/1c =
+WARNING-only, `--check` exit 0) that reconciles `specs/lang/capabilities.md`'s
+tutorial overclaim, filed as **F1** (open, `specs/todos.md`). Also files
+**F6** (found during Task 1, filed now): only 10 of the 18 hierarchy entries
+are registered as valid `Cap(X)` type arguments (`builtin_types`,
+`typecheck.ml:1858-1861`).
+
 ## The `--check` accept/reject harness model
 
 Unlike the operational golden corpus (`specs/lang/golden/`, which runs each
@@ -88,7 +102,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 86/86 — 48 accept, 38
+Exit 0 iff every program behaves as declared (currently 89/89 — 50 accept, 39
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -133,6 +147,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `reject/t30`–`t35`, `accept/t43` | Session-types widening, Task 3 (2026-07-06) | per-operation channel typing + advancement (`core-march-types.md` §2.7.8): the six `reject/` programs pin the live message for each session-state violation — send-at-wrong-state (`t30`), close-before-`End` (`t31`), invalid `choose` label (`t32`), wrong payload type (`t33`, the ordinary `check_expr` path, not a session-specific message), recv-at-wrong-state (`t34`), and a linear channel continuation used twice (`t35`, the generic linear-`let` tracker, not session-specific accounting). `accept/t43` is a full `choose`/`send`/`close` + `offer`/`recv`/`close` round-trip on a two-branch (`Int`/`String`) `Decision` protocol, run-witnessed printing `:ok` then `42`. Also files **F5** (§2.7.9, §4.1 finding 21): `Chan.offer` (`typecheck.ml:3614`) always returns the FIRST branch's continuation type regardless of which branch the peer actually chose at runtime — a documented conservative approximation that is a real (if narrow) soundness gap for protocols whose `offer` branches have DIFFERENT continuations |
 | `accept/t44` | Session-types fix-campaign (2026-07-07) | F4 FIX witness (§2.7.5, FIXED): a binary `Decision` protocol whose two `choose` branches carry the SAME payload type (`Int`/`Int`) now typechecks — the merge rule in `project_steps`'s `ProtoChoice` arm is gated on `multiparty`, so a 2-role protocol's non-chooser always projects to `SOffer{...}` instead of collapsing to a shared `Recv`, restoring binary duality |
 | `accept/t45`–`t48`, `reject/t36`–`t38` | Capabilities widening, Task 1 (2026-07-07) | IO capability subsumption + `Cap(X)` signature enforcement (§2.8): the 18-entry hierarchy (`lib/caps/cap_lattice.ml:15-34`), `cap_subsumes`/`normalize` (`:50`/`:56`), the `needs` manifest (`DNeeds`, `ast.ml:159`), and **Check 1** (`typecheck.ml:5561`) — every `Cap(X)` in a function/actor/extern signature must be covered by a declared `needs` via subsumption, else ERROR. Accept: bare-covered (`t45`), root-covers-child subsumption (`t46`), sibling independence — each of two siblings needs its own `needs` (`t47`), a second mid-tier subsumption shape (`t48`). Reject: uncovered `Cap(X)` (`t36`), narrow `needs` does not cover a broader `Cap` (`t37`), sibling does not cover sibling (`t38`). Also files a live scoping finding: only 10 of the 18 hierarchy entries are registered as valid `Cap(X)` type ARGUMENTS (`builtin_types`, `typecheck.ml:1858-1861`) — the other 8 (`IO.Random`, `IO.Database`, `IO.Spawn`, `IO.Mut`, `IO.Telemetry`, `IO.Foreign`(`.Blocking`), `IO.NetConnect.TLS`) are valid `needs` targets but cannot be written as a `Cap(X)` annotation (`Unknown module \`IO\``) |
+| `accept/t49`–`t50`, `reject/t39` | Capabilities widening, Task 2 (2026-07-07) | transitive `use` + extern-implied caps (§2.8.6): **Check 4** (`typecheck.ml:5661`) — every module a given module `use`s must have ITS OWN declared `needs` covered transitively, via `env.module_caps` and the same `cap_subsumes` subsumption, ERROR on violation; **Check 5** (`typecheck.ml:5684`) — an extern block's own declared `Cap(X)` must be covered by `needs`, ERROR; **Check 1c** (`typecheck.ml:5607`) — every extern block additionally implies `IO.Foreign` (+`.Blocking`), WARNING-only. Accept: an importer declaring the real stdlib module `Vault`'s (`needs IO.Mut`) transitive obligation (`t49`); a well-formed extern covered on both Check 5 and Check 1c (`t50`). Reject: companion to `t49` with the covering `needs` removed, pinning Check 4's ERROR (`t39`). Also states the honest three-tier enforcement reality (Checks 1/4/5 = ERROR; Checks 1b/1c = WARNING-only, `--check` exit 0), reconciling `specs/lang/capabilities.md`'s tutorial overclaim — filed as **F1** (open); also files **F6** (found during Task 1, filed now) — the 10-of-18 `Cap(X)`-argument registration gap |
 
 ## `accept/` — must typecheck
 
@@ -186,6 +201,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t46_cap_broad_needs_covers_narrow` | **Check 1 subsumption (§2.8) — root covers a child** — `Cap(IO.Network)` param covered by the ROOT `needs IO`; `cap_subsumes "IO" "IO.Network"` holds because `"IO.Network"`'s ancestor chain includes `"IO"` | `--check` exit 0 |
 | `t47_cap_sibling_independence` | **Check 1 (§2.8) — siblings checked independently** — `Cap(IO.FileRead)` and `Cap(IO.FileWrite)` (siblings under `IO.FileSystem`, neither subsumes the other) each covered by its OWN `needs` line; proves Check 1 walks each used `Cap(X)` separately, no cross-sibling subsumption | `--check` exit 0 |
 | `t48_cap_midtier_subsumption` | **Check 1 subsumption (§2.8) — a second, mid-tier shape** — `Cap(IO.NetConnect)` param covered by `needs IO.Network` (`IO.NetConnect`'s direct parent), one tier down from t46's root-covers-all shape; also documents the corpus-scoping finding that only 10/18 hierarchy entries are valid `Cap(X)` type arguments today (`builtin_types`, `typecheck.ml:1858-1861`) | `--check` exit 0 |
+| `t49_transitive_use_covered` | **Check 4 (§2.8.6, capabilities widening Task 2) — transitive `use` coverage** — `Main` declares `needs IO.Mut` and `use`s the real stdlib module `Vault` (`stdlib/vault.march:26`, `needs IO.Mut`); Check 4 (`typecheck.ml:5661`) looks up `Vault`'s declared caps in `env.module_caps` and confirms `Main`'s own `needs IO.Mut` covers it (reflexive subsumption) | `--check` exit 0 |
+| `t50_extern_cap_and_foreign_covered` | **Check 5 + Check 1c (§2.8.6, capabilities widening Task 2) — extern block, both obligations covered** — `Bindings` declares `needs IO.Foreign` and `needs IO.FileSystem`, then an `extern "libc" : Cap(IO.FileSystem) do ... end` block; Check 5 (`typecheck.ml:5684`, ERROR) confirms the extern's own declared `Cap(IO.FileSystem)` is covered, Check 1c (`typecheck.ml:5607`, WARNING) confirms the blanket `IO.Foreign` implication is covered — neither fires | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -229,8 +246,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t36_cap_sig_uncovered` | **Check 1 (§2.8, capabilities widening Task 1) — the base rejection** — `Cap(IO.Network)` param, no `needs` declared at all, so `declared_needs = []` covers nothing | `` is not declared in `needs` `` |
 | `t37_cap_narrow_does_not_cover_broad` | **Check 1 (§2.8) — subsumption is directional, not symmetric** — module declares the NARROW `needs IO.Network`, signature uses the ROOT `Cap(IO)`; `cap_subsumes "IO.Network" "IO"` is false (a child never covers its own parent). Also emits a Check 3 narrowing HINT ahead of the ERROR | `` `Cap(IO)` used in module `Server` but `IO` is not declared in `needs` `` |
 | `t38_cap_sibling_does_not_cover_sibling` | **Check 1 (§2.8) — one more violation: siblings don't cover each other** — module declares only `needs IO.FileRead`; `save`'s signature uses `Cap(IO.FileWrite)` (a sibling under `IO.FileSystem`), uncovered. Companion to `accept/t47`, which declares both siblings and accepts | `` `Cap(IO.FileWrite)` used in module `Store` but `IO.FileWrite` is not declared in `needs` `` |
+| `t39_transitive_use_missing_cap` | **Check 4 (§2.8.6, capabilities widening Task 2) — transitive `use` coverage, REJECT side** — companion to `accept/t49` with the covering `needs IO.Mut` line removed: `Main` `use`s `Vault` (`needs IO.Mut`) but declares no `needs` of its own, so `declared_needs = []` covers nothing; Check 4 raises an ERROR (not a warning) | `` module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs` `` |
 
-**Result: 86 / 86 (48 accept, 38 reject).**
+**Result: 89 / 89 (50 accept, 39 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
