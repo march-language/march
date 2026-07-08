@@ -169,11 +169,13 @@ let dep_to_lib_paths ~root (dep_name, dep) =
     if Sys.file_exists d then collect_lib_dirs d
     else if Sys.file_exists abs_path then collect_lib_dirs abs_path
     else []
-  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _
+  | Project.RegistryDep _ ->
+    (* Git and registry deps both install under ~/.march/cas/deps/<name>; use
+       that dep's lib/ (or its root as a fallback). *)
     (match Project.git_dep_lib_path dep_name with
      | Some p -> collect_lib_dirs p
      | None  -> [])
-  | _ -> []
 
 (** Walk a project's dependency graph transitively: for every direct dep,
     also pull in ITS OWN prod [deps] (recursively), so e.g. a project

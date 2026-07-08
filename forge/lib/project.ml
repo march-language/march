@@ -137,6 +137,11 @@ let parse_dep_table tbl =
   | Some _, _, _ ->
     let ver = Option.value ~default:"*" version in
     Some (RegistryDep { version = ver })
+  | None, None, None when version <> None ->
+    (* Table with a `version` key but no `git`/`path`/`registry` qualifier:
+       treat as a registry dep (the registry is implicit — one registry per
+       forge install, configured via FORGE_REGISTRY / default forgepm.org). *)
+    Some (RegistryDep { version = Option.get version })
   | None, Some url, _ ->
     (match tag, branch, rev with
      | Some t, _, _ -> Some (GitTagDep    { url; tag = t })
@@ -158,7 +163,11 @@ let parse_deps_section dep_pairs =
         (match parse_dep_table tbl with
          | Some dep -> Some (dep_name, dep)
          | None     -> None)
-      | Toml.Str _ | Toml.Array _ -> None
+      | Toml.Str version ->
+        (* Bare-string shorthand `name = "0.2.1"` is a registry dep with that
+           version constraint — the most common declaration form. *)
+        Some (dep_name, RegistryDep { version })
+      | Toml.Array _ -> None
     ) dep_pairs
 
 (** Parse deps from dot-sections like [deps.depot] and [dev-deps.name]. *)
@@ -355,20 +364,19 @@ let git_dep_lib_path dep_name =
     dep, or a git dep's clone under the CAS), so its own forge.toml can be
     read to walk transitive dependencies.  [project_root] is the root of the
     project that DECLARED [dep] (needed to resolve a relative PathDep).
-    Returns [None] for registry deps (not yet resolvable this way). *)
+    Registry and git deps both live under [~/.march/cas/deps/<name>]. *)
 let dep_root_dir ~project_root (dep_name, dep) =
   match dep with
   | PathDep rel_path ->
     Some (if Filename.is_relative rel_path
           then Filename.concat project_root rel_path
           else rel_path)
-  | GitTagDep _ | GitBranchDep _ | GitRevDep _ ->
+  | GitTagDep _ | GitBranchDep _ | GitRevDep _ | RegistryDep _ ->
     (match Sys.getenv_opt "HOME" with
      | None -> None
      | Some home ->
        Some (Filename.concat home
                (Filename.concat ".march" (Filename.concat "cas" (Filename.concat "deps" dep_name)))))
-  | RegistryDep _ -> None
 
 (** Create a directory and all its parents. *)
 let mkdir_p dir =
