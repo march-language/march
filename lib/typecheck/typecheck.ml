@@ -481,6 +481,10 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  cur_fn_public : bool;
+  (** True while checking the body of a PUBLIC (fn, not pfn) function — read by
+      the proof-cap mint gate. Lambdas inherit it; nested named fns/modules reset
+      it via their own check_fn. *)
   cap_qual_prefix : string;
   (** Accumulated dotted-path prefix of enclosing [DMod]s, for keying
       [cap_closures] so it matches TIR's fully-qualified function-name
@@ -563,6 +567,7 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  cur_fn_public = false;
   cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
@@ -4902,6 +4907,13 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               (t :: tys, env')
           ) clause.fc_params ([], env_rec)
       in
+
+      (* Proof-cap mint gate context: the body is inside a PUBLIC fn iff fn_vis
+         is Public. Set on body_env so the `mint_cap` EApp special-case can
+         require declaring-module + public provenance. Lambdas inherit this
+         (they don't call check_fn); nested named fns/modules reset it via their
+         own check_fn. *)
+      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
 
       (* Record each named parameter's type in the type map *)
       List.iter2 (fun fp pty ->
