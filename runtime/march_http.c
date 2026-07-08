@@ -273,10 +273,10 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
 
     while (!found_end && (int64_t)hdr_len < max_bytes) {
         ssize_t n = recv(sock, readbuf, sizeof(readbuf), 0);
-        if (n <= 0) return NULL;
+        if (n <= 0) return make_err("tcp_recv_http: connection closed before response headers");
 
         char *buf = recv_buf_grow(hdr_len + (size_t)n);
-        if (!buf) return NULL;
+        if (!buf) return make_err("tcp_recv_http: out of memory growing header buffer");
         memcpy(buf + hdr_len, readbuf, (size_t)n);
         hdr_len += (size_t)n;
 
@@ -292,13 +292,13 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             }
         }
     }
-    if (!found_end) return NULL;
+    if (!found_end) return make_err("tcp_recv_http: response headers exceeded max_bytes without a CRLFCRLF terminator");
 
     /* Phase 2: find Content-Length.  Temporarily null-terminate at hdrs_end. */
     int64_t content_length = -1;
     {
         char *buf = recv_buf_grow(hdrs_end + 1);
-        if (!buf) return NULL;
+        if (!buf) return make_err("tcp_recv_http: out of memory");
         char saved = buf[hdrs_end];
         buf[hdrs_end] = '\0';
         const char *p = buf;
@@ -328,7 +328,7 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             to_read = max_bytes - (int64_t)hdrs_end;
         if (to_read > 0) {
             body_buf = malloc((size_t)to_read);
-            if (!body_buf) return NULL;
+            if (!body_buf) return make_err("tcp_recv_http: out of memory allocating body buffer");
             size_t already = hdr_len - hdrs_end;
             if (already > (size_t)to_read) already = (size_t)to_read;
             if (already > 0)
@@ -348,7 +348,7 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
      * tl_recv_buf.buf is NOT freed — it is reused by the next request. */
     size_t total = hdrs_end + body_len;
     march_string *result = malloc(sizeof(march_string) + total + 1);
-    if (!result) { free(body_buf); return NULL; }
+    if (!result) { free(body_buf); return make_err("tcp_recv_http: out of memory allocating result"); }
     atomic_store_explicit((_Atomic int64_t *)&result->rc, 1, memory_order_relaxed);
     result->tag = MARCH_STRING_TAG;
     result->pad = 0;
@@ -359,7 +359,12 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
         free(body_buf);
     }
     result->data[total] = '\0';
-    return result;
+    /* Wrap in Ok(...) — the declared type is Result(String, String).  Returning
+       a bare march_string (or NULL below) makes the compiled `match … Ok/Err`
+       hit neither arm of the boxed Result and panic "non-exhaustive pattern
+       match" (only the plain-TCP client path uses this; the TLS path reads
+       differently, which is why it went unnoticed). */
+    return make_ok(result);
 }
 
 /* Send all bytes of a march_string to fd.
