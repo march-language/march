@@ -2596,7 +2596,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       ) args;
       ("ptr", ptr)
     end
-    else if Tir_names.is_actor_struct_name reuse_type_name then begin
+    else if Repr.is_actor_struct_type ctx.type_defs reuse_type_name then begin
       (* Actor-state update (finding 20): an actor's message handler writes its
          new state back into the actor struct via EReuse (see
          lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
@@ -2612,7 +2612,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          crash, just a wrong-but-valid count).  actor_green_thread's
          `a[0]=1` force to defeat the check is itself racy against that concurrent
          incrc and cannot be made safe.  The fix: for an actor struct, ALWAYS
-         mutate in place — no RC load, no branch, no decrc, no fresh alloc. *)
+         mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+
+         Gate MUST be structural, not name-based: an adversarial review found
+         that a name-suffix check (the type con name ending in "_Actor") false-
+         positive-matched a user type coincidentally named e.g. `Tree_Actor`,
+         silently corrupting it under a shared (RC>1) FBIP reuse by skipping the
+         refcount check that shared-value safety depends on. [Repr.is_actor_struct_type]
+         instead confirms the type's field 0 is literally named "$d_dispatch" —
+         a name only [lower_actor.ml] can ever construct (user identifiers can
+         never start with `$`), so this cannot false-positive on user code. *)
       let (_, rv) = emit_atom ctx reuse_atom in
       let entry = ctor_entry ctx ctor (List.length args) in
       emit_store_tag ctx rv entry.ce_tag;

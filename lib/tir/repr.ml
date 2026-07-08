@@ -21,6 +21,25 @@ let find_variant (type_defs : Tir.type_def list) (name : string)
     | Tir.TDVariant (n, variants) when n = name -> Some variants
     | _ -> None) type_defs
 
+(** True if [name] is a genuine actor struct — STRUCTURAL check, not a name
+    heuristic.  [lower_actor.ml] always constructs an actor's state record as
+    [TDRecord (name, ("$d_dispatch", TPtr TUnit) :: ("$e_alive", TBool) :: ...)],
+    field 0 literally named ["$d_dispatch"].  Surface identifiers can never
+    start with [$] (the lexer's [ident] rule is [alpha (alpha|digit|'\'')*]),
+    so no user-declared record can ever have a field with this name — this
+    predicate cannot false-positive on a user type, unlike a name-suffix check
+    (e.g. [Tir_names.is_actor_struct_name] on a literal ["_Actor"] suffix, which
+    a user-named type like [Tree_Actor] can coincidentally match).
+
+    Used by [llvm_emit.ml]'s [EReuse] case (finding 20) to gate the actor-struct
+    always-in-place mutation: that branch is UNSOUND for a non-actor value (it
+    skips the refcount check FBIP relies on for shared-value safety), so the
+    gate must never admit a false positive. *)
+let is_actor_struct_type (type_defs : Tir.type_def list) (name : string) : bool =
+  List.exists (function
+    | Tir.TDRecord (n, (fname, _) :: _) -> n = name && fname = "$d_dispatch"
+    | _ -> false) type_defs
+
 (** True if [name] has the Option-shaped pattern: exactly one nullary ctor and
     exactly one single-field ctor (in either order).  Does NOT check whether the
     payload is niche-safe; use [niche_payload_ok] for that.

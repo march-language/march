@@ -297,17 +297,30 @@ atomically incremented/decremented by the caller thread as it passes the
 `Pid` through successive `send`s — a handler observing a transient `rc > 1`
 took the "fresh" branch and silently discarded its state write (memory-safe:
 a wrong-but-valid count, never a crash). Fix (`lib/tir/llvm_emit.ml`
-`emit_expr`'s `EReuse` case): a new branch gated on
-`Tir_names.is_actor_struct_name` makes an actor-struct `EReuse` ALWAYS mutate
-in place — no RC load, no branch, no decrc, no fresh alloc. Verified
-deterministic over 200 compiled runs of the repro (0 failures, was ~5–17%);
-golden `g40_actor_foreign_msg_drop.march` restored to the fuller
+`emit_expr`'s `EReuse` case): a new branch makes an actor-struct `EReuse`
+ALWAYS mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+Verified deterministic over 200 compiled runs of the repro (0 failures, was
+~5–17%); golden `g40_actor_foreign_msg_drop.march` restored to the fuller
 `Inc(3)/Zlog/Inc(4)/Report → count=7` shape now that it's deterministic
-(`verify.sh` MATCH). Six-runner suite green (compiler 482 / eval 231 /
-codegen 392, IR-gate clean / stdlib 804); the pre-existing
+(`verify.sh` MATCH). Six-runner suite green; the pre-existing
 `examples/actors.march` dead-actor-drop ordering divergence is unrelated
 (confirmed identical pre-fix/post-fix via file-copy A/B, not caused by this
-change). See `specs/todos.md`'s finding 20 entry.
+change).
+
+**Same-day follow-up (adversarial review):** the fix's first cut gated the
+always-in-place branch on `Tir_names.is_actor_struct_name` — a NAME-suffix
+check (`"_Actor"`) — which was a Critical false-positive vector: an ordinary
+user type coincidentally named `Foo_Actor` would also take the unconditional
+path and silently corrupt a SHARED (`RC > 1`) value under FBIP (verified live
+with a `Tree_Actor` ADT). Fixed by making the gate STRUCTURAL:
+`Repr.is_actor_struct_type` (`lib/tir/repr.ml`) checks the type's field 0 for
+the literal, compiler-only `"$d_dispatch"` marker (`lower_actor.ml`'s
+`TDRecord` construction) instead of pattern-matching the type name — March
+identifiers can never start with `$`, so no user type can forge this. Two new
+regression tests in `test/test_codegen.ml` (RED on the name-based gate / GREEN
+after, confirmed via file-copy A/B). Six-runner green again (compiler 482 /
+eval 231 / codegen 394, IR-gate clean / stdlib 804); `verify.sh` 40/40;
+`check-docs.sh` clean. See `specs/todos.md`'s finding 20 entry (both cuts).
 
 ## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
 

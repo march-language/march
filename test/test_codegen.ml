@@ -507,6 +507,74 @@ let test_actor_foreign_msg_drop_boxed_dispatch () =
   Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
     true (ir_contains ir "store i32 16777217")
 
+(** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
+    actor's handler writes its new state back via an EReuse on the actor
+    struct. That EReuse must be UNCONDITIONAL — no refcount load/branch — or
+    the handler can race the caller's concurrent incrc/decrc on the actor
+    handle and silently lose the write (see specs/todos.md finding 20).
+    Assert the absence of the generic RC-conditional FBIP shape (an atomic RC
+    load + `icmp eq i64 _, 1` + the `fbip_fresh`/`fbip_reuse` block pair) in
+    the emitted module. *)
+let test_actor_struct_ereuse_unconditional () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      run_until_idle()
+    end
+  end|} in
+  Alcotest.(check bool) "no RC-conditional fbip_fresh block for the actor-struct reuse"
+    false (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "no atomic RC load guarding the actor-struct reuse"
+    false (ir_contains ir "load atomic i64")
+
+(** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
+    always-in-place gate must be STRUCTURAL (does this type's field 0 carry
+    the compiler-only "$d_dispatch" marker lower_actor.ml alone can construct
+    — see Repr.is_actor_struct_type), not a name-suffix heuristic. A prior
+    version gated on the type constructor name ending in "_Actor", which
+    false-positive-matched an ORDINARY user type coincidentally named
+    `Tree_Actor` — such a type's EReuse would then skip the refcount check,
+    silently corrupting a SHARED (RC>1) value in place. Assert a non-actor
+    `..._Actor`-named type's EReuse still takes the RC-conditional path. *)
+let test_actor_suffix_named_user_type_not_treated_as_actor () =
+  let ir = emit_actor_ir {|mod Test do
+    type Tree_Actor = TLeaf(Int) | TNode(Tree_Actor, Tree_Actor)
+    fn bump(t : Tree_Actor) : Tree_Actor do
+      match t do
+        TLeaf(n) -> TLeaf(n + 1)
+        TNode(l, r) -> TNode(bump(l), r)
+      end
+    end
+    fn main() : Unit do
+      let original = TNode(TLeaf(10), TLeaf(20))
+      let shared = original
+      let bumped = bump(original)
+      println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+    end
+    fn bumped_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> bumped_val(l)
+      end
+    end
+    fn shared_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> shared_val(l)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the RC-conditional fbip_fresh block"
+    true (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the atomic RC load"
+    true (ir_contains ir "load atomic i64")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -7493,6 +7561,10 @@ let codegen_suites =
       ( "actor_dispatch_codegen", [
           Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
             `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
+            `Quick test_actor_struct_ereuse_unconditional;
+          Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
+            `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
