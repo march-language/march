@@ -283,6 +283,26 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
+
+`runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
+(`CONN_BUF_SIZE`); a request that filled it without a complete parse got an
+immediate 413, capping the whole request (headers + body) at 64KB. That made the
+forgepm package registry reject any tarball upload > 64KB (a 486KB `bastion`
+publish → 413 → the `forge publish` client saw it as a 502 through Cloudflare).
+
+- **Fix:** grow the buffer by doubling on demand up to `MAX_REQ_SIZE = 32MB`
+  (one `realloc` in the recv step); only a request past the cap gets a 413.
+  Sub-64KB requests never leave the initial buffer, so the hot path is unchanged.
+- **Verified:** live on the deploy droplet — a 600KB POST reaches the handler
+  (401 for a bad token) instead of 413; `bastion` 0.2.1 (485KB, carrying the
+  server-owned-island dispatch fix in `priv/js/march-islands.js`) published to
+  the registry (now 0.1.0–0.2.1). forgepm's `forge.toml` repointed at
+  `bastion = "0.2.1"`.
+- **Open follow-up:** the `forge publish` client (`registry.march`) panics
+  `non-exhaustive pattern match` parsing the publish *success* response — the
+  publish completes server-side but the CLI reports failure. Client-side only.
+
 ## Current State (as of 2026-07-08, entry-module self-qualified `--check` type-erasure closed)
 
 An unannotated (or distinct-tvar-annotated) fn at the **entry module's** top level,
