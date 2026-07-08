@@ -514,6 +514,17 @@ type env = {
       is gated inside [check_no_panic_module], which only runs for
       `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
       Warning and is never promoted to an error. *)
+  cap_narrow_sites : (Ast.span * ty) list ref;
+  (** Every [cap_narrow(_)] application site, recorded as (span, result_type) by
+      the cap_narrow EApp special-case in [infer_expr].  The result type is the
+      SAME mutable [ty] node the arm returned (a fresh [Cap(a)] var); its [a] is
+      pinned to the concrete cap by LATER unification (the caller's param type or
+      a [let]/return annotation), which the arm cannot see at record time.  A
+      post-checking sweep ([check_cap_narrow_proof_cap_sites]) [repr]s each
+      recorded type once the whole compilation is checked and errors if the
+      result is a nominal proof cap — the proof-cap forge is closed everywhere
+      regardless of expression position.  A shared mutable ref (like
+      [nonexhaustive_match_spans]) so every env copy appends to one list. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -572,6 +583,7 @@ let make_env errors type_map = {
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
+  cap_narrow_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
@@ -3870,6 +3882,29 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (pp_ty ch_ty));
          TError)
 
+    (* Restrict cap_narrow (Part 1): its result must never be a nominal proof
+       cap. cap_narrow is the ONLY polymorphic cap producer, so this closes the
+       proof-cap forge in every expression position (inline arg, let-binding,
+       return). IO-lattice narrowing (Cap(IO) -> Cap(IO.Network)) is unaffected
+       because IO caps are not in env.proof_caps; proof-cap minting goes through
+       `mint_cap` (gated).
+
+       POSITION-PINNING (verified live, R1/R7): at this point the result var `a`
+       in `Cap(a)` is NOT yet pinned — `infer_app` only pins the ARGUMENT against
+       `Cap(IO)`; `a` is pinned to the concrete cap by the SURROUNDING
+       check_expr/unify (the caller's param type in R1, the let/return annotation
+       in R7), which runs AFTER this arm returns.  So `repr rty` here is still an
+       unbound var (observed `Cap(r3)` for R1, R3, R4 alike).  We therefore RECORD
+       the (span, result-type) into a shared side-table and let the post-checking
+       sweep [check_cap_narrow_proof_cap_sites] inspect the now-pinned type — the
+       proven "record-a-span-side-table-then-read-after-checking" pattern used for
+       [nonexhaustive_match_spans].  This is position-independent. *)
+    | Ast.EApp (Ast.EVar { txt = "cap_narrow"; _ } as fv, [arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [arg] 0 in
+      env.cap_narrow_sites := (sp, rty) :: !(env.cap_narrow_sites);
+      rty
+
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
       (* Reject wrong-arity calls of known (module-defined) functions.  March
@@ -5900,6 +5935,35 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       ) edef.ext_fns
     | _ -> ()
   ) decls
+
+(** Post-checking sweep (Part 1b): for every recorded [cap_narrow(_)] call site,
+    [repr] its result type — now fully pinned by the surrounding unification that
+    ran after the site was recorded — and reject if it is a nominal proof cap.
+    [cap_narrow] attenuates IO capabilities only; a proof cap is minted via the
+    gated [mint_cap] primitive.  Runs once after the whole compilation is checked
+    (env.proof_caps fully populated); the position-pinning caveat that defeats an
+    inline check inside the EApp arm is exactly why this side-table sweep exists
+    — see the [cap_narrow] arm in [infer_expr]. *)
+let check_cap_narrow_proof_cap_sites (env : env) : unit =
+  List.iter (fun (sp, rty) ->
+      (* [repr] both the outer Cap and its inner cap argument: after unification
+         the inner cap is typically a [TVar] Link chain, not yet a bare [TCon]. *)
+      match repr rty with
+      | TCon ("Cap", [inner]) ->
+        (match repr inner with
+         | TCon (p, []) when List.mem_assoc p env.proof_caps ->
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
+               MPText " — "; MPCode ("Cap(" ^ p ^ ")");
+               MPText " is a proof capability, not an IO capability.";
+               MPBreak;
+               MPText "hint: a proof capability may only be minted by a public function of its declaring module via ";
+               MPCode "mint_cap";
+               MPText "; cap_narrow only attenuates IO capabilities." ])
+         | _ -> ())
+      | _ -> ()
+    ) !(env.cap_narrow_sites)
 
 (** [fn_capability_closures env] returns the per-function inferred IO-capability
     closure recorded by [check_module_needs] for every function checked so far
@@ -8364,6 +8428,11 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Pass 2: full checking *)
   let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  (* Part 1b: sweep recorded cap_narrow sites now that every function body (and
+     thus every result-type unification) has been checked — reject any whose
+     pinned result is a nominal proof cap.  The side-table is a shared ref, so a
+     single sweep at the entry module covers every nested module's sites. *)
+  check_cap_narrow_proof_cap_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
      TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]

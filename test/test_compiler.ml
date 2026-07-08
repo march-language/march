@@ -4300,6 +4300,63 @@ let test_cap_deterministic_arithmetic_ok () =
   end|} in
   Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
 
+(* ── Proof-cap mint soundness (Part 1: cap_narrow restriction) ────────────
+   cap_narrow's polymorphic result Cap(a) let ANY holder of a plain Cap(IO)
+   forge a nominal proof capability at a proof-cap-typed call site (inline arg,
+   let-binding, or return position) — a soundness hole Check 6 (declared-return
+   only) structurally cannot see. Part 1 rejects any cap_narrow whose pinned
+   result is a proof cap. RED pre-fix (forge accepted, exit 0), GREEN after. *)
+let test_cap_narrow_cannot_mint_proof_cap () =
+  (* R1: consume(cap_narrow(cap)) at a Cap(Db.Migrated) call site, holding only
+     Cap(IO). Pre-fix this typechecks; the fix rejects it. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        consume(cap_narrow(cap))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forging a proof cap (inline arg): error"
+    true (has_errors ctx)
+
+let test_cap_narrow_forge_let () =
+  (* R7: let forged : Cap(Db.Migrated) = cap_narrow(cap) — let-binding position. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        let forged : Cap(Db.Migrated) = cap_narrow(cap)
+        consume(forged)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forging a proof cap (let binding): error"
+    true (has_errors ctx)
+
+let test_cap_narrow_io_narrow_still_ok () =
+  (* R4 regression guard: narrowing Cap(IO) -> Cap(IO.Network) is an IO-lattice
+     attenuation, NOT a proof-cap mint — Part 1 must leave it accepted. *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(cap_narrow(cap))
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow IO-lattice narrow: no error"
+    false (has_errors ctx)
+
 (* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
    typecheck registration + finding 17 (derive unknown type) ──────────────── *)
 
@@ -6730,6 +6787,11 @@ let compiler_suites =
           Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
           Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+        ] );
+      ( "proof_cap_mint", [
+          Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
+          Alcotest.test_case "cap_narrow cannot mint proof cap (let binding): error" `Quick test_cap_narrow_forge_let;
+          Alcotest.test_case "cap_narrow IO-lattice narrow: no error"       `Quick test_cap_narrow_io_narrow_still_ok;
         ] );
       ( "fix_batch_regressions", [
           Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;
