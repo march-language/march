@@ -569,6 +569,34 @@ let record_jit_skip reason =
 let clang_available () =
   Sys.command "command -v clang >/dev/null 2>&1" = 0
 
+(** True iff a `zig` binary is reachable on PATH.  The Linux cross-compile path
+    drives `zig cc`; without zig, cross tests are a legitimate tool-absence skip
+    (same policy as [clang_available]). *)
+let zig_available () =
+  Sys.command "command -v zig >/dev/null 2>&1" = 0
+
+(** Directory of the cross-compile target sysroot for [arch] ("amd64"|"arm64"),
+    populated by scripts/fetch-cross-sysroot.sh, or None if absent.  Mirrors the
+    compiler's own resolution (env override → ~/.cache/march cache).  A cross
+    link test without a sysroot is a legitimate skip, not a failure. *)
+let cross_sysroot_dir arch =
+  let well_formed d =
+    Sys.file_exists (Filename.concat d "lib/libssl.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libcrypto.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libz.so.1")
+  in
+  let candidates =
+    let upper = String.uppercase_ascii arch in
+    (match Sys.getenv_opt ("MARCH_CROSS_SYSROOT_" ^ upper) with
+     | Some d -> [d] | None -> [])
+    @ (match Sys.getenv_opt "MARCH_CROSS_SYSROOT" with
+       | Some d -> [d] | None -> [])
+    @ (let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+       [Filename.concat home
+          (Printf.sprintf ".cache/march/cross-sysroot/linux-%s" arch)])
+  in
+  List.find_opt well_formed candidates
+
 (** Read the whole contents of a file (best-effort; "" if unreadable). *)
 let read_file_contents path =
   try

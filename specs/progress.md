@@ -283,6 +283,73 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-07, Linux cross-compile P3 — OpenSSL/TLS + zlib/gzip for the main binary)
+
+`march --compile --target linux/amd64|linux/arm64` (and `forge build --target …`)
+now cross-link **TLS (OpenSSL 3)** and **gzip (zlib)** into the main binary. P1
+deliberately dropped both (pure-compute only), so a real server app — forgepm,
+which uses native HTTPS and gzip tarball extraction — failed to link for Linux
+with `undefined symbol: march_tls_write / march_tls_close / march_gzip_decode`.
+P3 resolves them against a **target sysroot** extracted from Debian *bookworm*
+(matching the `debian:bookworm-slim` deploy image: `libssl.so.3` /
+`libcrypto.so.3` / `libz.so.1`, glibc 2.36).
+
+- **Sysroot fetch/cache.** `scripts/fetch-cross-sysroot.sh <amd64|arm64>`
+  populates `~/.cache/march/cross-sysroot/linux-<arch>/{lib,include}` from the
+  bookworm `libssl3`/`libssl-dev`/`zlib1g`/`zlib1g-dev` `.deb`s, extracted with
+  `ar` + `tar` (the mac has no `dpkg-deb`). It resolves the exact `.deb`
+  filenames from the suite `Packages.gz` index — the flat pool dir mixes in
+  trixie/sid, so a pool-listing grep would grab the wrong versions — with pinned
+  known-good fallbacks if the index is unreachable, and copies the **multiarch**
+  `openssl/opensslconf.h` (Debian ships it under `usr/include/<multiarch>/openssl`,
+  not `usr/include/openssl` — miss it and the compile fails "opensslconf.h file
+  not found") into `include/openssl/`.
+- **Compiler.** `bin/main.ml` gains `cross_sysroot_dir` (env override
+  `MARCH_CROSS_SYSROOT_<ARCH>` / `MARCH_CROSS_SYSROOT` → `~/.cache` cache) with a
+  clear, actionable error on a cache miss (names the fetch script — no silent
+  auto-download). The `is_cross` link block now **keeps** `march_tls.c` +
+  `march_compress.c` (they cross-compile fine against the target headers) and
+  links OpenSSL/zlib by **direct positional `.so` paths** — `<sysroot>/lib/
+  libssl.so.3` etc., NOT `-l:libssl.so.3`/`-L` (lld can't find them via `-l:`;
+  the direct path records the correct `DT_NEEDED` soname) — with
+  `-I<sysroot>/include` and no `-L/opt/homebrew` host paths. It still drops
+  `march_blake3.c` (needs a target `libblake3` we don't vendor — the prompt's
+  "pure C" assumption was wrong; it `#include <blake3.h>`) and `march_reload.c`
+  (HCR-over-cross is out of scope). zstd/brotli stay off (`-DMARCH_HAVE_*`
+  undefined); zlib is the only mandatory codec and gzip/deflate is pure zlib.
+- **glibc floor 2.31 → 2.36.** Bumped in `parse_target`. Mandatory for TLS: the
+  target `libcrypto.so.3` references `GLIBC_2.34` symbols
+  (`pthread_getspecific`, `dlsym`/`dlclose` — where libdl merged into libc) and
+  `stat@2.33`, which a lower floor's libc doesn't provide, so `ld.lld
+  --no-allow-shlib-undefined` rejects the link. 2.36 exactly matches bookworm;
+  `zig_target` already appends the floor (`x86_64-linux-gnu.2.36`).
+  **Portability cost:** cross binaries now require glibc ≥ 2.36 (bookworm+) —
+  acceptable since the hot-deploy target is bookworm.
+- **CAS.** The target OpenSSL/zlib `.so` live outside the repo, so
+  `runtime_identity` (which digests only `runtime/*.c/*.h`) doesn't cover them; a
+  12-hex digest of the three sysroot `.so` files is folded into `cas_flags` (both
+  the source-level early cache and the inner link cache) so a sysroot re-fetch
+  that changes the linked libs invalidates cached cross binaries. Verified: a
+  content change to `libz.so.1` flips a cached build back to recompiling.
+- **Verification** is link-structure only on the Mac (the Linux ELF can't run
+  there): the TLS+gzip probe cross-links to a valid `ELF 64-bit … x86-64 …
+  GNU/Linux` (and `ARM aarch64` for arm64) whose `DT_NEEDED` lists all three
+  sonames; forgepm's `.ll` references the full `march_tls_*`/`march_gzip_*` API
+  (all previously undefined-symbol errors), and its linux/amd64 build now reaches
+  link-parity with its native build — both fail only on a pre-existing,
+  unrelated `PubSub` module-qualification issue in the cleaned dep copies.
+  **Runtime** (HTTPS/gzip round-trip) validation happens on the droplet at deploy
+  time. New regression test `test/test_codegen.ml` (`cross_compile` suite)
+  asserts the ELF type + all three `DT_NEEDED` sonames and SKIPS cleanly (via the
+  tool-absence ledger) when zig or the sysroot cache is absent.
+
+The change is scoped strictly to `is_cross && target_is_linux`; the Native and
+JS compile paths are byte-identical (a native TLS+gzip build still uses host
+homebrew OpenSSL/zlib and runs). Full suite green after a complete `dune build`:
+**445 compiler / 231 eval / 393 codegen (+1) / 804 stdlib / 29 snapshots** (the
+~15 "cannot find runtime/march_runtime.c" stdlib fixtures are the documented
+partial-build artifact — they vanish on a full build).
+
 ## Current State (as of 2026-07-07, module alias in a non-entry module body now resolves at codegen)
 
 `forge build` of a multi-repo project (forgepm → bastion) failed to LINK with
