@@ -2595,7 +2595,41 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
       ) args;
       ("ptr", ptr)
-    end else begin
+    end
+    else if Tir_names.is_actor_struct_name reuse_type_name then begin
+      (* Actor-state update (finding 20): an actor's message handler writes its
+         new state back into the actor struct via EReuse (see
+         lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
+         singleton mutated SOLELY by its own daemon green thread — the RC of the
+         actor *handle* (how many `Pid` references exist) has nothing to do with
+         whether an in-place state write is safe.  The generic RC-conditional
+         FBIP path below is actively WRONG here: the main thread legitimately
+         does atomic incrc/decrc on the actor handle as it passes the Pid to
+         successive `send`s, so the handler's `rc == 1` check races that and can
+         observe rc > 1, taking the "fresh" branch — which allocates a COPY,
+         writes the new state into the copy, and DISCARDS it (the handler's
+         result is unit), silently LOSING the state update (memory-safe: no
+         crash, just a wrong-but-valid count).  actor_green_thread's
+         `a[0]=1` force to defeat the check is itself racy against that concurrent
+         incrc and cannot be made safe.  The fix: for an actor struct, ALWAYS
+         mutate in place — no RC load, no branch, no decrc, no fresh alloc. *)
+      let (_, rv) = emit_atom ctx reuse_atom in
+      let entry = ctor_entry ctx ctor (List.length args) in
+      emit_store_tag ctx rv entry.ce_tag;
+      List.iteri (fun i atom ->
+        let field_ty = match List.nth_opt entry.ce_fields i with
+          | Some t -> llvm_ty t
+          | None -> failwith (Printf.sprintf
+              "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
+               %d was requested (arity mismatch)"
+              ctor (List.length entry.ce_fields) i)
+        in
+        let (v_ty, v_val) = emit_atom ctx atom in
+        emit_store_field ctx rv i field_ty (coerce ctx v_ty v_val field_ty)
+      ) args;
+      ("ptr", rv)
+    end
+    else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)

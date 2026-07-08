@@ -283,6 +283,32 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, finding 20 — compiled actor-struct FBIP/RC race fixed)
+
+**Finding 20** (compiled actor scheduler intermittently losing a legitimate
+message, filed during the finding-19 fix review) is FIXED. Root cause was
+**not** the mailbox drain the original hypothesis pointed at — it was FBIP
+in-place reuse racing an actor handle's refcount: an actor handler writes its
+new state back via a Perceus `EReuse`, and the generic emit path is
+RC-conditional (mutate in place iff `rc == 1`, else allocate a fresh copy and
+discard the old). The actor object is a stable daemon-owned singleton mutated
+solely by its own thread, but its *handle* refcount is concurrently,
+atomically incremented/decremented by the caller thread as it passes the
+`Pid` through successive `send`s — a handler observing a transient `rc > 1`
+took the "fresh" branch and silently discarded its state write (memory-safe:
+a wrong-but-valid count, never a crash). Fix (`lib/tir/llvm_emit.ml`
+`emit_expr`'s `EReuse` case): a new branch gated on
+`Tir_names.is_actor_struct_name` makes an actor-struct `EReuse` ALWAYS mutate
+in place — no RC load, no branch, no decrc, no fresh alloc. Verified
+deterministic over 200 compiled runs of the repro (0 failures, was ~5–17%);
+golden `g40_actor_foreign_msg_drop.march` restored to the fuller
+`Inc(3)/Zlog/Inc(4)/Report → count=7` shape now that it's deterministic
+(`verify.sh` MATCH). Six-runner suite green (compiler 482 / eval 231 /
+codegen 392, IR-gate clean / stdlib 804); the pre-existing
+`examples/actors.march` dead-actor-drop ordering divergence is unrelated
+(confirmed identical pre-fix/post-fix via file-copy A/B, not caused by this
+change). See `specs/todos.md`'s finding 20 entry.
+
 ## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
 
 Slice 6 lands **two soundness properties** in `lib/typecheck/typecheck.ml` (both

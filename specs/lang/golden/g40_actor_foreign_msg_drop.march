@@ -12,14 +12,19 @@ mod Main do
   -- gives the dispatch ECase a dropping default arm, so a foreign message's tag
   -- matches no branch and is dropped — byte-identical to the interpreter's drop.
   --
-  -- Determinism: exactly ONE count-changing message (`Inc(3)`), then the foreign
-  -- `Zlog`, then `Report`. `count=3` witnesses the drop (a misroute would print a
-  -- huge garbage int). We deliberately AVOID a foreign message sandwiched BETWEEN
-  -- two count-changing messages: that shape exposes an unrelated, pre-existing
-  -- compiled-scheduler race that intermittently loses a legit message (filed as a
-  -- separate finding in specs/todos.md), which would make this witness flaky. The
-  -- property under test — drop vs. misroute — is fully exercised by the single-Inc
-  -- shape (verified: 100/100 compiled + 30/30 interp all print `count=3`).
+  -- Shape: a foreign `Zlog` drop sandwiched BETWEEN two count-changing messages
+  -- (`Inc(3)`, drop `Zlog`, `Inc(4)`), then `Report` → `count=7`. This shape used
+  -- to be flaky: it exposed finding 20, a compiled-only race where the first
+  -- count-changing message's state write was LOST (~5-17%, printing `count=4`).
+  -- Root cause was NOT the drop or the mailbox drain but FBIP in-place reuse: an
+  -- actor handler wrote its new state back into the actor struct via an
+  -- RC-conditional EReuse (in place iff the actor's RC == 1), and the main thread's
+  -- concurrent atomic incrc/decrc of the actor `Pid` handle (Perceus RC of `c`
+  -- across the sends) raced that check — a handler observing RC > 1 took the
+  -- "fresh" branch, writing the update into a discarded copy. Fixed (2026-07-08)
+  -- by making an actor-struct EReuse ALWAYS mutate in place (the actor is a
+  -- daemon-owned singleton; its handle RC is irrelevant to state-write safety) —
+  -- lib/tir/llvm_emit.ml. Now deterministic `count=7` in both backends.
   actor Counter do
     state { count : Int }
     init  { count: 0 }
@@ -48,7 +53,8 @@ mod Main do
     let c = spawn(Counter)
     send(c, Inc(3))
     send(c, Zlog("stray"))   -- Zlog is a Logger message, not Counter's — dropped
-    send(c, Report())        -- prints count=3 (the dropped Zlog contributed nothing)
+    send(c, Inc(4))          -- the drop sits between two count-changing messages
+    send(c, Report())        -- prints count=7 (3 + 4; the dropped Zlog adds nothing)
     run_until_idle()
   end
 end
