@@ -4500,6 +4500,201 @@ let test_mint_cap_io_target_rejected () =
   end|} in
   Alcotest.(check bool) "mint_cap at IO-cap target: error" true (has_errors ctx)
 
+(* ── Nested-module qualified-prebind type-erasure hole ────────────────────
+   ROOT CAUSE (confirmed): an UNANNOTATED public fn defined inside a NESTED
+   `mod` gets its QUALIFIED name (`Mod.fn`) prebound to a fresh `Mono (fresh_var)`
+   by prebind_mod_members (typecheck.ml, prebind_fn_scheme returns None for an
+   unannotated fn).  desugar's qualify_module_refs rewrites every intra-nested-
+   module reference to that qualified form, and check_decl's DFn branch used to
+   rebind ONLY the bare name — never the qualified one.  So every call to the
+   helper resolved a stale `Mono '_v` placeholder that behaves as `∀. a -> b`,
+   ERASING the type of anything laundered through it: base types, ADTs, and Cap
+   alike.  The proof-cap forge was one exploitation of a GENERAL memory-safety
+   hole.  Fixed by reconciling the qualified prebind with the real inferred
+   scheme in check_decl's DFn branch.
+
+   All F* cases below are RED pre-fix (forge accepted, exit 0) and GREEN after.
+   The P* / *_ok cases are GREEN-STAYS-GREEN guards. *)
+
+(* F4 — the clearest witness that this is NOT proof-cap-specific: a plain Int is
+   laundered into a String parameter through a nested unannotated `id`, a genuine
+   type-soundness / memory-safety break. *)
+let test_nested_launder_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn id(x) do x end
+      fn takes_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do
+        let n = 12345
+        takes_str(id(n))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* F3 — nested Box(String) laundered where Box(Int) is required. *)
+let test_nested_launder_box_arg () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn id(x) do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* F1 — nested proof-cap forge: Cap(IO) laundered into a Cap(Db.P) callee. *)
+let test_nested_launder_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn id(x) do x end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* F2 — same launder, Cap(IO) -> Cap(IO.Network) (an IO-cap coercion, proving the
+   erasure is any-Cap, not proof-cap-only). *)
+let test_nested_launder_io_subcap () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      needs IO
+      fn id(x) do x end
+      fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do use_net(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id coerces Cap(IO) into Cap(IO.Network): error"
+    true (has_errors ctx)
+
+(* F5 — three levels of nesting: the qualified prefix accumulates (Mid.App.id);
+   the fix must reconcile at every depth. *)
+let test_nested_launder_three_deep () =
+  let ctx = typecheck {|mod Outer do
+    mod Mid do
+      mod App do
+        type Box(a) = Box(a)
+        fn id(x) do x end
+        fn need_int(_b : Box(Int)) : Int do 1 end
+        fn attack() : Int do
+          let bx = Box("hi")
+          need_int(id(bx))
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "3-deep nested unannotated id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* Container/HOF variant — the launderer is an unannotated factory
+   `fn wrap(x) do (x, 0) end` returning a tuple; destructuring it and feeding the
+   payload to a Box(Int) callee still forges pre-fix. *)
+let test_nested_launder_container_factory () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn wrap(x) do (x, 0) end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        match wrap(bx) do
+          (b, _) -> need_int(b)
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated tuple factory launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: nested unannotated id passing Cap(IO) through UNCHANGED
+   (identity, no coercion) must stay accepted — the fix reconciles the real
+   `∀a. a -> a` scheme, it does not reject legitimate passthrough. *)
+let test_nested_cap_passthrough_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      needs IO
+      fn id(x) do x end
+      fn use_io(_c : Cap(IO)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do use_io(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested id passes Cap(IO) through unchanged: no error"
+    false (has_errors ctx)
+
+(* RED→GREEN (a second, independent witness of the SAME bug in the opposite
+   direction): pre-fix, an unannotated nested `id` is NOT actually polymorphic —
+   the stale qualified placeholder pins to the FIRST use, so using it at Int AND
+   String is a spurious ERROR pre-fix.  The fix reconciles `id` to its real
+   `∀a. a -> a` scheme, RESTORING legitimate polymorphism → no error.  This also
+   proves the fix does not over-monomorphise. *)
+let test_nested_id_polymorphic_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn id(x) do x end
+      fn use_int() : Int do id(1) end
+      fn use_str() : String do id("hi") end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN guard: an ANNOTATED nested id already rejects the forge
+   (prebind_fn_scheme builds a real Poly scheme, so no stale placeholder).  The
+   fix must not change this — it stays an error. *)
+let test_nested_launder_annotated_id_still_rejected () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn id(x : a) : a do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested ANNOTATED id still rejects Box(String)->Box(Int): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN guard: a PRIVATE (pfn) nested id already rejects the forge
+   (prebind_mod_members only prebinds public fns, so no qualified placeholder;
+   the reference falls through to the local Poly scheme).  Unchanged by the fix. *)
+let test_nested_launder_private_id_still_rejected () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      pfn id(x) do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested PRIVATE (pfn) id still rejects Box(String)->Box(Int): error"
+    true (has_errors ctx)
+
 (* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
    typecheck registration + finding 17 (derive unknown type) ──────────────── *)
 
@@ -6944,6 +7139,20 @@ let compiler_suites =
           Alcotest.test_case "mint_cap in applied lambda in declaring fn: no error" `Quick test_mint_cap_lambda_declaring_ok;
           Alcotest.test_case "mint_cap in applied lambda in external module: error" `Quick test_mint_cap_lambda_external_rejected;
           Alcotest.test_case "mint_cap at IO-cap target: error"             `Quick test_mint_cap_io_target_rejected;
+        ] );
+      ( "nested_mod_prebind_erasure", [
+          (* RED pre-fix (forge accepted), GREEN after the qualified-prebind reconciliation. *)
+          Alcotest.test_case "nested id launders Int into String param: error"        `Quick test_nested_launder_int_as_string;
+          Alcotest.test_case "nested id launders Box(String)->Box(Int): error"        `Quick test_nested_launder_box_arg;
+          Alcotest.test_case "nested id launders Cap(IO)->Cap(Db.P): error"           `Quick test_nested_launder_proof_cap;
+          Alcotest.test_case "nested id coerces Cap(IO)->Cap(IO.Network): error"      `Quick test_nested_launder_io_subcap;
+          Alcotest.test_case "3-deep nested id launders Box(String)->Box(Int): error" `Quick test_nested_launder_three_deep;
+          Alcotest.test_case "nested tuple factory launders Box(String)->Box(Int): error" `Quick test_nested_launder_container_factory;
+          (* GREEN-STAYS-GREEN guards. *)
+          Alcotest.test_case "nested id passes Cap(IO) through unchanged: no error"   `Quick test_nested_cap_passthrough_ok;
+          Alcotest.test_case "nested id used at Int AND String: no error"            `Quick test_nested_id_polymorphic_ok;
+          Alcotest.test_case "nested ANNOTATED id still rejects forge: error"        `Quick test_nested_launder_annotated_id_still_rejected;
+          Alcotest.test_case "nested PRIVATE (pfn) id still rejects forge: error"    `Quick test_nested_launder_private_id_still_rejected;
         ] );
       ( "fix_batch_regressions", [
           Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;

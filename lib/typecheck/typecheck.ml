@@ -7095,7 +7095,29 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
     discharge_constraints env sp;
-    bind_var def.fn_name.txt sch env
+    let env = bind_var def.fn_name.txt sch env in
+    (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the real inferred scheme.
+       desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites every
+       intra-nested-module reference to the qualified form (e.g. `App.id`), and
+       [prebind_mod_members] bound that name to a fresh `Mono (fresh_var 1)` for
+       an UNANNOTATED public fn ([prebind_fn_scheme] returned None).  Without
+       this rebind, a sibling fn in the same nested module resolves the stale
+       placeholder — a decoupled `?a -> ?b` — which ERASES the type of anything
+       laundered through the fn (a general type-soundness hole; the proof-cap
+       forge was one exploitation).  Only overwrite when the qualified binding is
+       STILL the bare placeholder; an already-concrete scheme (from
+       [prebind_fn_scheme], or a default-arg sibling) must be left intact —
+       mirrors [check_fn]'s pass-1 placeholder-reconciliation guard.  The prefix
+       matches [prebind_mod_members]'s key exactly: [cap_qual_prefix] accumulates
+       "" at the entry module then the nested names (entry mod stripped), same as
+       [prebind_mod_members]'s [prefix]. *)
+    if env.cap_qual_prefix <> "" then
+      let qname = env.cap_qual_prefix ^ "." ^ def.fn_name.txt in
+      (match StrMap.find_opt qname env.vars with
+       | Some (Mono (TVar r)) when (match !r with Unbound _ -> true | _ -> false) ->
+         bind_var qname sch env
+       | _ -> env)
+    else env
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
