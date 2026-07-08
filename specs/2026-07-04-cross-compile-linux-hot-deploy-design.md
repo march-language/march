@@ -1,6 +1,6 @@
 # Cross-Compilation to Linux (Go-style) for Hot Deploy
 
-## Status: Design — not yet implemented
+## Status: P1 shipped (cross-build main binary, compute/HTTP, no TLS); P3 shipped (OpenSSL/TLS + zlib/gzip for the main binary). P2 (`forge deploy hot --target`) still pending.
 
 ## Summary
 
@@ -326,9 +326,48 @@ proven before OpenSSL:
    (`cmd_deploy_hot.ml:803`, which today drops `--target`) and proves a live
    Mac→(QEMU/Docker droplet) hot swap: validates the ABI invariant and the
    target-aware `so_flag` fix against a running server.
-3. **P3 — OpenSSL/TLS.** Cross-linked target OpenSSL for the main binary; full
-   HTTPS server on the target; optional zstd/brotli codecs; soname-manifest and
-   glibc-floor runtime checks (§5, Risks) for clear deploy-time errors.
+3. **P3 — OpenSSL/TLS + zlib/gzip. ✅ DONE (2026-07-07).** Cross-linked target
+   OpenSSL 3 + zlib for the main binary. Optional zstd/brotli codecs,
+   soname-manifest and glibc-floor runtime checks remain deferred. What shipped:
+   - **Sysroot cache + fetch helper.** `scripts/fetch-cross-sysroot.sh
+     <amd64|arm64>` populates `~/.cache/march/cross-sysroot/linux-<arch>/{lib,include}`
+     by extracting Debian **bookworm** `libssl3`/`libssl-dev`/`zlib1g`/`zlib1g-dev`
+     `.deb`s (via `ar` + `tar` — `dpkg-deb` not required) so the soname/ABI
+     matches `debian:bookworm-slim` (OpenSSL `libssl.so.3`/`libcrypto.so.3`, zlib
+     `libz.so.1`). It resolves exact filenames from the suite `Packages.gz` index
+     (pinned to bookworm — the flat pool dir mixes in trixie/sid), with pinned
+     known-good fallbacks, and copies the multiarch `openssl/opensslconf.h`
+     (Debian ships it under `usr/include/<multiarch>/openssl`, not
+     `usr/include/openssl`) into `include/openssl/`.
+   - **Compiler resolver + error** (`bin/main.ml` `cross_sysroot_dir`): env
+     override `MARCH_CROSS_SYSROOT_<ARCH>` / `MARCH_CROSS_SYSROOT` → `~/.cache`
+     cache; a cache miss emits a clear, actionable error naming the fetch script
+     (no silent auto-download).
+   - **Link path** (`bin/main.ml`, `is_cross` block): keeps `march_tls.c` +
+     `march_compress.c` (they cross-compile against the target headers), still
+     drops `march_blake3.c` (needs a target `libblake3` we don't vendor) and
+     `march_reload.c` (HCR-over-cross is out of scope). OpenSSL/zlib are linked by
+     **direct positional `.so` paths** (`<sr>/lib/libssl.so.3` etc., NOT `-l:` /
+     `-L` — lld can't find them via `-l:`), with `-I<sr>/include`, and **no**
+     `-L/opt/homebrew/lib` host paths. zstd/brotli stay off for cross (zlib is the
+     only mandatory codec; gzip/deflate is pure zlib).
+   - **glibc floor 2.36.** Bumped the `LinuxGnu` default from `2.31`→`2.36`
+     (`parse_target`). This is mandatory for TLS: the target `libcrypto.so.3`
+     references `GLIBC_2.34` symbols (`pthread_getspecific`, `dlsym`/`dlclose` —
+     where libdl merged into libc) plus `stat@2.33`; a lower floor's libc doesn't
+     provide them, so `ld.lld --no-allow-shlib-undefined` rejects the link. 2.36
+     exactly matches bookworm. **Portability implication:** cross binaries now
+     require glibc ≥ 2.36 (bookworm+); pre-bookworm distros are no longer a
+     target. `zig_target` already appends the floor (`x86_64-linux-gnu.2.36`).
+   - **CAS key.** A 12-hex digest of the three sysroot `.so` files is folded into
+     `cas_flags` (both the source-level early cache and the inner link cache), so
+     a sysroot re-fetch that changes the linked OpenSSL/zlib invalidates cached
+     cross binaries (the glibc floor is already in `target_label`).
+   - **Validation is link-structure only on the Mac** (`file` + `DT_NEEDED` lists
+     `libssl.so.3`/`libcrypto.so.3`/`libz.so.1` for both amd64 and arm64;
+     regression test `test_codegen.ml` "cross_compile"). **Runtime** (not just
+     link) validation of the HTTPS/gzip round-trip happens on the actual droplet
+     at deploy time — the cross host can't execute the Linux ELF.
 
 ## Testing
 

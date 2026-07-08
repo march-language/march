@@ -418,6 +418,59 @@ let blake3_link_flags () =
   | [] -> ""
   | _ -> " " ^ String.concat " " flags
 
+(* ── Cross-compile target sysroot (OpenSSL/TLS + zlib/gzip) ─────────────────
+   A cross Linux main binary CANNOT defer undefined symbols the way a .so can,
+   so the cross-linker needs TARGET copies of libssl/libcrypto/libz (+ headers)
+   at link time — not just at runtime.  These live in a per-arch cache populated
+   by scripts/fetch-cross-sysroot.sh, extracted from Debian bookworm packages so
+   the soname/ABI matches the deploy image (debian:bookworm-slim).  See
+   specs/2026-07-04-cross-compile-linux-hot-deploy-design.md §5. *)
+
+(** The cache/override directory that holds a target sysroot for [arch]
+    ("amd64" | "arm64").  Resolution order:
+      1. MARCH_CROSS_SYSROOT_<ARCH>  (arch-specific override)
+      2. MARCH_CROSS_SYSROOT         (single dir — used as-is for the built arch)
+      3. ~/.cache/march/cross-sysroot/linux-<arch>  (fetch-script cache)
+    Returns the first directory that both exists and contains lib/libssl.so.3
+    (a well-formed sysroot), else None. *)
+let cross_sysroot_dir (arch : string) : string option =
+  let well_formed d =
+    Sys.file_exists (Filename.concat d "lib/libssl.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libcrypto.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libz.so.1")
+    && Sys.file_exists (Filename.concat d "include/openssl/ssl.h")
+  in
+  let candidates =
+    let upper = String.uppercase_ascii arch in
+    (match Sys.getenv_opt ("MARCH_CROSS_SYSROOT_" ^ upper) with
+     | Some d -> [d] | None -> [])
+    @ (match Sys.getenv_opt "MARCH_CROSS_SYSROOT" with
+       | Some d -> [d] | None -> [])
+    @ (let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+       [Filename.concat home
+          (Printf.sprintf ".cache/march/cross-sysroot/linux-%s" arch)])
+  in
+  List.find_opt well_formed candidates
+
+(** Short digest of a sysroot's three .so files (by content), folded into the CAS
+    key so re-fetching a different OpenSSL/zlib version invalidates cached cross
+    binaries.  Empty string if the sysroot is missing (the build errors out
+    before caching anyway). *)
+let cross_sysroot_digest (dir : string) : string =
+  let buf = Buffer.create 64 in
+  List.iter (fun so ->
+      let p = Filename.concat dir ("lib/" ^ so) in
+      (try Buffer.add_string buf (Digest.to_hex (Digest.file p))
+       with _ -> ()))
+    ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"];
+  String.sub (Digest.to_hex (Digest.string (Buffer.contents buf))) 0 12
+
+(** arch string ("amd64"/"arm64") for a LinuxGnu target, for sysroot lookup. *)
+let linux_arch_str = function
+  | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) -> Some "amd64"
+  | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ })  -> Some "arm64"
+  | _ -> None
+
 (** Pre-compile the C runtime to a shared library.
     Cached at ~/.cache/march/libmarch_runtime_<hash>.so, where <hash> covers
     every C source/header that goes into the build plus the clang flags.
@@ -687,10 +740,19 @@ let parse_target s =
   | "wasm32-wasi" | "wasm32" -> March_tir.Llvm_emit.Wasm32Wasi
   | "wasm32-unknown-unknown" | "wasm-browser" | "browser" -> March_tir.Llvm_emit.Wasm32Unknown
   | "js" | "javascript" -> March_tir.Llvm_emit.Js
+  (* glibc floor 2.36 matches the deploy image (debian:bookworm-slim ships glibc
+     2.36) and, crucially, is the minimum that TLS builds need: the target
+     libcrypto.so.3 references GLIBC_2.34 symbols (pthread_getspecific@2.34,
+     dlsym/dlclose@2.34 — that's where libdl merged into libc) plus stat@2.33,
+     which a lower floor's libc doesn't provide, so `ld.lld
+     --no-allow-shlib-undefined` rejects the link.  Bumping from 2.31→2.36 trades
+     pre-bookworm portability (which the hot-deploy target does not need) for a
+     TLS-capable cross link.  See specs/…cross-compile-linux-hot-deploy-design.md
+     §5 (P3). *)
   | "linux/amd64" | "linux/x86_64" | "linux-x86_64" ->
-    March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; glibc_min = "2.31" })
+    March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; glibc_min = "2.36" })
   | "linux/arm64" | "linux/aarch64" | "linux-arm64" ->
-    March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; glibc_min = "2.31" })
+    March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; glibc_min = "2.36" })
   | other ->
     Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, linux/amd64, linux/arm64, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
     exit 1
@@ -1301,11 +1363,24 @@ let compile filename =
           | March_tir.Llvm_emit.Js              -> "js"
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        (* Cross target OpenSSL/zlib .so live outside the repo, so fold a digest of
+           them into the key (mirrors the inner CAS check below) — otherwise this
+           source-level early cache would serve a stale cross binary after a
+           sysroot re-fetch changed the linked libs. *)
+        let cross_sysroot_tag =
+          match linux_arch_str target_parsed with
+          | None -> []
+          | Some arch ->
+            (match cross_sysroot_dir arch with
+             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
+             | None -> [])
+        in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
@@ -1977,13 +2052,31 @@ let compile filename =
           ) pre_fns
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
+           repo (~/.cache/march/cross-sysroot), so runtime_identity (which digests
+           only runtime/*.c/*.h) does NOT cover them.  Fold a digest of the three
+           sysroot .so files into cas_flags so re-fetching a different
+           OpenSSL/zlib version invalidates cached cross binaries.  The glibc
+           floor is already in target_label. *)
+        let cross_sysroot_tag =
+          match linux_arch_str target with
+          | None -> []
+          | Some arch ->
+            (match cross_sysroot_dir arch with
+             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
+             | None -> [])
+        in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
           :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
+        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+           Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
+             target_label (String.concat "," cas_flags) ch);
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
@@ -2245,21 +2338,62 @@ let compile filename =
               | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
               | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
             in
-            (* P1 cross targets are pure-compute: drop every module that pulls in
-               an external C library (OpenSSL/zlib/zstd/brotli/libblake3) and the
-               HCR runtime (march_reload.c needs libblake3), and zero out their
-               host-discovered link flags — otherwise host lib paths
-               (-L/opt/homebrew/lib) leak into the cross link.  TLS/compression/
-               hot-reload for cross land in P2/P3. *)
+            (* Cross Linux link (P3): link TLS (OpenSSL 3) + gzip (zlib) against a
+               TARGET sysroot instead of the host's homebrew libs.  march_tls.c
+               and march_compress.c cross-compile cleanly given the target
+               headers, so KEEP them; but drop march_blake3.c (needs a target
+               libblake3 we don't vendor) and march_reload.c (the HCR reload
+               server — hot-reload-over-cross is out of scope; its symbols are the
+               only thing that pulled in blake3).  Host-discovered link flags are
+               replaced wholesale so no -L/opt/homebrew/lib leaks into the cross
+               link.  See specs/2026-07-04-cross-compile-linux-hot-deploy-design.md
+               §5 (P3). *)
             let is_cross = March_tir.Llvm_emit.target_is_linux xtarget in
-            let openssl_flags2  = if is_cross then "" else openssl_flags2 in
-            let compress_flags2 = if is_cross then "" else compress_flags2 in
-            let blake3_flags2   = if is_cross then "" else blake3_flags2 in
+            let cross_sysroot =
+              if not is_cross then None
+              else match linux_arch_str xtarget with
+                | None -> None
+                | Some arch ->
+                  (match cross_sysroot_dir arch with
+                   | Some d -> Some d
+                   | None ->
+                     Printf.eprintf
+                       "march: cross-compile target sysroot for linux/%s not found.\n\
+                       \  TLS (OpenSSL) + gzip (zlib) cross-linking needs target \
+                        libssl/libcrypto/libz + headers.\n\
+                       \  Populate the cache with:\n\
+                       \      scripts/fetch-cross-sysroot.sh %s\n\
+                       \  or point MARCH_CROSS_SYSROOT_%s (or MARCH_CROSS_SYSROOT) \
+                        at a prepared sysroot\n\
+                       \  (a dir with lib/{libssl.so.3,libcrypto.so.3,libz.so.1} + \
+                        include/openssl + include/zlib.h).\n"
+                       arch arch (String.uppercase_ascii arch);
+                     exit 1)
+            in
+            (* Direct positional .so paths (NOT -l:/-L): lld can't find the target
+               .sos via -l:libssl.so.3, but a direct path links and records the
+               correct DT_NEEDED soname.  zstd/brotli stay off for cross (zlib is
+               the only mandatory codec; gzip/deflate is pure zlib). *)
+            let openssl_flags2 = match cross_sysroot with
+              | None -> openssl_flags2
+              | Some sr ->
+                Printf.sprintf " -I%s/include %s/lib/libssl.so.3 %s/lib/libcrypto.so.3"
+                  sr sr sr
+            in
+            let compress_flags2 = match cross_sysroot with
+              | None -> compress_flags2
+              | Some sr ->
+                Printf.sprintf " -I%s/include %s/lib/libz.so.1" sr sr
+            in
+            (* blake3 stays host-discovered for native; zeroed for cross (its .c
+               is dropped below — no target libblake3). *)
+            let blake3_flags2 = if is_cross then "" else blake3_flags2 in
             let extra_c_files =
               if not is_cross then extra_c_files
               else
-                let dropped = ["march_tls.c"; "march_compress.c";
-                               "march_blake3.c"; "march_reload.c"] in
+                (* Keep march_tls.c + march_compress.c (they link against the
+                   target sysroot); drop the blake3/reload HCR pair. *)
+                let dropped = ["march_blake3.c"; "march_reload.c"] in
                 extra_c_files
                 |> String.split_on_char ' '
                 |> List.filter (fun p ->

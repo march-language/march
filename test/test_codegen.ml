@@ -7407,8 +7407,108 @@ let test_unreadable_sibling_dir_does_not_crash_check () =
         true
         (ir_contains out "EXIT:0"))
 
+(* ── Cross-compile: TLS (OpenSSL) + gzip (zlib) for linux/amd64 (P3) ────────
+   Cross-compile a program that references BOTH the TLS runtime
+   (march_tls_write / march_tls_close) AND the gzip runtime (march_gzip_encode /
+   march_gzip_decode), then assert the output is a valid Linux x86-64 ELF whose
+   DT_NEEDED lists libssl.so.3, libcrypto.so.3 and libz.so.1 — i.e. the cross
+   link resolved the external symbols against the target sysroot instead of
+   failing with "undefined symbol: march_tls_write" (the P1 pure-compute
+   behaviour this fix replaces).
+
+   This is a LINK-STRUCTURE test: the binary is x86-64 Linux and cannot RUN on
+   the (arm64/macOS) test host, so we inspect the ELF, we do not execute it.  It
+   REQUIRES `zig` (the cross driver) and the target sysroot cache
+   (scripts/fetch-cross-sysroot.sh amd64); when either is absent it SKIPS
+   cleanly via the tool-absence ledger rather than failing — mirroring the
+   clang-absence policy for the JIT tests. *)
+let test_cross_tls_gzip_linux_amd64_elf () =
+  if not (zig_available ()) then
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no zig on PATH (cross driver absent)"
+  else match cross_sysroot_dir "amd64" with
+  | None ->
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no target sysroot \
+       (run scripts/fetch-cross-sysroot.sh amd64)"
+  | Some _sysroot ->
+    let main_exe = find_main_exe () in
+    let project_root = march_project_root () in
+    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+       libssl/libcrypto would be dropped and the assertion below would be a
+       false negative.  The gzip calls are unconditional. *)
+    let src_text =
+      "mod XTls do\n\
+      \  needs IO.NetConnect.TLS\n\
+      \  fn main() do\n\
+      \    let payload = Bytes.from_string(\"march cross tls+gzip probe\")\n\
+      \    let gz = match stdlib_gzip_encode(payload, -1) do\n\
+      \      Ok(c)  -> c\n\
+      \      Err(_) -> payload\n\
+      \    end\n\
+      \    let restored = match stdlib_gzip_decode(gz) do\n\
+      \      Ok(o)  -> o\n\
+      \      Err(_) -> gz\n\
+      \    end\n\
+      \    if Bytes.length(restored) > 1000000000 do\n\
+      \      let _ = tls_write(0, \"ping\")\n\
+      \      tls_close(0)\n\
+      \    else\n\
+      \      ()\n\
+      \    end\n\
+      \    println(\"probe ok\")\n\
+      \  end\n\
+       end\n"
+    in
+    let tmp = Filename.temp_file "march_xtls" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "xtls.march" in
+    let oc = open_out src in
+    output_string oc src_text;
+    close_out oc;
+    let bin = Filename.concat tmp "xtls_linux" in
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      String.trim (Buffer.contents buf)
+    in
+    let compile_out = read_cmd (Printf.sprintf
+      "cd %s && %s --compile --target linux/amd64 -o %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "cross-compile succeeds (no undefined march_tls_*/march_gzip_* \
+                       symbols); output:\n%s" compile_out)
+      true (ir_contains compile_out "EXIT:0" && Sys.file_exists bin);
+    (* Assert Linux x86-64 ELF via `file`. *)
+    let file_out = read_cmd (Printf.sprintf "file %s" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "output is a Linux x86-64 ELF; `file` said:\n%s" file_out)
+      true
+      (ir_contains file_out "ELF 64-bit"
+       && ir_contains file_out "x86-64"
+       && ir_contains file_out "GNU/Linux");
+    (* Assert DT_NEEDED lists all three target sonames.  `objdump -p` parses the
+       Linux ELF fine on the host; llvm-readelf would work too. *)
+    let needed = read_cmd (Printf.sprintf
+      "objdump -p %s 2>/dev/null | grep NEEDED || true" (Filename.quote bin)) in
+    List.iter (fun so ->
+        Alcotest.(check bool)
+          (Printf.sprintf "DT_NEEDED contains %s; NEEDED lines:\n%s" so needed)
+          true (ir_contains needed so))
+      ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"]
+
 let codegen_suites =
   [
+      ( "cross_compile", [
+          Alcotest.test_case
+            "linux/amd64 TLS+gzip links to valid ELF w/ libssl/libcrypto/libz NEEDED (P3)"
+            `Quick test_cross_tls_gzip_linux_amd64_elf;
+        ] );
       ( "tir_names", [
           Alcotest.test_case "tuple_tag round-trip"       `Quick test_tir_names_tuple_tag;
           Alcotest.test_case "fv_field round-trip"        `Quick test_tir_names_fv_field_round_trip;
