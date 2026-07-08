@@ -152,9 +152,14 @@ subsequently FIXED (fix-campaign batch 3, 2026-07-07): `check_exhaustiveness`
 now computes coverage over the GUARDLESS branches of a guarded match and
 records the span when they are non-exhaustive, so a guarded non-exhaustive
 match in a `cap no_panic` module is now an ERROR (§2.8.11, §2.1a; witnesses
-`reject/t50`, `accept/t59`). Still deferred: proof-cap mint/forge (Check 6)
-itself remains unfixed (the proof-cap mint mismatch finding documents the gap,
-not a fix).
+`reject/t50`, `accept/t59`). **Proof-cap mint/forge is now FIXED too** (widening
+slice 6, 2026-07-08): a dedicated §2.8.13 gives proof capabilities their first
+rule-numbered treatment — Check 1 self-declaration, Check 6 pass-through, the
+gated `mint_cap` mint surface, and the `cap_narrow` proof-cap restriction — and
+§2.5.1's `(T-QualRef)` establishes the general soundness property (an
+intra-module reference is checked against the function's real body-checked
+scheme regardless of nesting) that the proof-cap forge's deepest exploitation
+depended on. Witnesses `reject/t51`–`t57`, `accept/t60`–`t63`.
 
 ## 1. The typing judgment
 
@@ -2015,6 +2020,83 @@ a hard reject), confirmed live and pinned as
 enforcement mechanism — it is the same `pub_set` absence surfacing through a
 second syntactic front door.
 
+#### 2.5.1 Intra-module reference soundness: `(T-QualRef)` — nesting does not weaken type checking
+
+This is the headline correctness property module nesting must satisfy, and it
+is worth stating as its own rule because it was for a time **not** true (a P0
+soundness fix, 2026-07-08, restored it):
+
+> **`(T-QualRef)`.** An intra-module reference to a function is checked against
+> that function's **real, body-checked scheme** — the possibly-polymorphic type
+> `check_fn` infers and generalizes for the function's actual body —
+> **regardless of module nesting depth, and regardless of whether the reference
+> is written bare (`id`) or module-qualified (`App.id`, `Main.id`).** Nesting a
+> function inside a `mod` never gives a caller a weaker (more permissive) view
+> of its type than a top-level definition would.
+
+**Why this needs saying — the mechanism.** March resolves names in two passes.
+A forward-reference *pre-pass* (`prebind_mod_members`, `lib/typecheck/typecheck.ml`)
+seeds every module member's **qualified** key (`App.id`, and for the entry
+module its own `Main.id`) into the environment so siblings can typecheck against
+each other before their own declarations are reached; for an *unannotated* fn,
+`prebind_fn_scheme` returns `None`, so the qualified key is seeded as a fresh
+`Mono (fresh_var)` **placeholder**. Meanwhile desugar's `qualify_module_refs`
+(`lib/desugar/desugar.ml`) rewrites every intra-nested-module reference to that
+qualified form. The main check pass then runs `check_fn` on each declaration and
+**reconciles** the placeholder to the real body-checked scheme. `(T-QualRef)`
+is the guarantee that this reconciliation reaches **every** qualified key the
+pre-pass can seed — at every nesting level, including the entry module's
+self-qualified key.
+
+**The hole `(T-QualRef)` closes (the P0 fix).** Before the fix, `check_decl`'s
+`DFn` branch reconciled only the **bare** name. A sibling resolving the
+desugar-qualified `App.id` reference therefore kept the stale
+`Mono '_v` placeholder, which `infer_app`'s `TVar` branch turns into a decoupled
+`?a -> ?b` — **erasing the type of anything laundered through the nested
+function.** This was not `Cap`-specific and not a `unify` bug (`unify`'s `TCon`
+arm is strict and never reached): a plain `Int` laundered through a nested
+unannotated `fn id(x) do x end` into a `String` parameter typechecked at
+`--check` exit 0 — a genuine memory-safety break. The same erasure hit ADT
+arguments (`Box(String)` → `Box(Int)`), IO-cap coercions, and proof caps
+(the proof-cap forge was one exploitation of this general hole). The fix
+(`check_decl` `DFn` branch, `reconcile_qkey`) binds every qualified fn key —
+both the enclosing-nested key (`cap_qual_prefix ^ "." ^ fn`) and the entry
+module's own self-qualified key (`current_module ^ "." ^ fn`, reached at the
+entry level where `cap_qual_prefix` is `""`) — to `check_fn`'s real scheme, and
+`dependency_order_dfn_run` orders forward references so the reconcile runs
+before a caller is checked. `unify` is untouched, so cap subsumption, the
+`needs` gate, and actor `Cap` dispatch are structurally unaffected.
+
+**Witnesses.** The reject corpus pins the erasure in every shape that was
+type-correct (hence ACCEPTED, exit 0) pre-fix and is now caught — IMPOSSIBLE to
+reject pre-fix, which is the whole point of these witnesses:
+
+- **`reject/t51_nested_id_launder_int_to_string`** — the clearest general
+  memory-safety witness: a nested unannotated `id` launders `Int` → `String`
+  (`takes_str(id(42))`, `takes_str` calling `string_length`). Pinned:
+  `` expected `String` but got `Int` ``.
+- **`reject/t52_nested_id_launder_box`** — the ADT-argument shape,
+  `Box(String)` → `Box(Int)`. Pinned: `` expected `Int` but got `String` ``.
+- **`reject/t53_nested_distinct_tvar_launder`** — a nested `fn launder(x:a):b`
+  whose two DISTINCT signature tvars give it an un-body-validated `a -> b`
+  prebind never unified against the body constraint `a ~ b`. Pinned:
+  `` expected `String` but got `Int` ``.
+- **`reject/t54_entry_self_qualified_launder`** — the entry-module variant:
+  `Main.id(42)` laundered through the entry module's own self-qualified key.
+  Pinned: `` expected `String` but got `Int` ``.
+
+And the positive counterpart proves the fix RESTORES (rather than over-
+restricts) legitimate polymorphism — nested `id` was accidentally *monomorphic*
+pre-fix (the placeholder pinned to its first use), so this ALSO errored before
+the fix:
+
+- **`accept/t60_nested_id_polymorphic`** — a nested unannotated `id` used at
+  both `Int` and `String` in the same nested module. `--check` exit 0.
+
+(Full root-cause narrative and the 25-case `nested_mod_prebind_erasure` unit
+group: `.superpowers/sdd/prebind-fix-report.md`; the `specs/todos.md`
+"Nested-module qualified-prebind type-erasure" Done entry.)
+
 ### 2.6 Actors: declaration, spawn, and `Pid` typing
 
 March's actor construct — `actor Name do state { … } init { … } on Msg(…) do
@@ -2809,7 +2891,9 @@ call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
 keyword and the `Ast.DOpts` AST node: the five **behavioral module caps**
 (`no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) — per-module
 syntactic bans, not IO-permission accounting. Proof-cap minting/forging
-(Check 6) remains out of scope here.
+(Check 6, `mint_cap`, and the `cap_narrow` proof-cap restriction) is a THIRD,
+distinct use of the `Cap(...)` machinery — nominal per-module unforgeable
+tokens — and is treated in full in §2.8.13.
 
 #### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
 
@@ -3309,7 +3393,7 @@ forms:
   value out of nothing; every other `Cap(X)` in a program must ultimately
   originate from `root_cap` (directly or through a chain of `cap_narrow`
   calls and ordinary parameter-passing) or from a proof-cap mint (a separate
-  mechanism, Check 6, out of this subsection's scope).
+  mechanism — `mint_cap` gated to the declaring module's public fns, §2.8.13).
 - **`cap_narrow : Cap(IO) -> Cap(a)`** takes the root capability and returns a
   value at a **polymorphic** result type `Cap(a)` — the type-application site
   (a `let`/parameter annotation, or the callee's declared parameter type)
@@ -3318,12 +3402,14 @@ forms:
   case documented here — `cap_narrow(root)` called where a `Cap(IO.Network)`
   is expected instantiates `a := IO.Network`; called where a
   `Cap(IO.Console)` is expected, the very same call instantiates
-  `a := IO.Console` — but it is also the mechanism a proof-cap mint
-  (`cap_narrow(some_cap) : Cap(Db.Migrated)`) uses to satisfy Check 6's
-  return-type rule, which is the substance of the **F4** finding (§4.1) that
-  a future proof-cap-focused task is expected to address. This subsection
-  notes the polymorphic-return reality factually, as context for that
-  deferred finding — **no fix to F4 is attempted here.**
+  `a := IO.Console` — the very same call instantiates `a := IO.Console`. This
+  polymorphic result is confined to IO-lattice narrowing: as of the proof-cap
+  slice (2026-07-08), **`cap_narrow`'s result can never be a nominal proof cap
+  in any position** (`(Cap-NoNarrowForge)`, §2.8.13). Proof caps are minted only
+  by the dedicated, gated `mint_cap` primitive; the earlier reality that
+  `cap_narrow(some_cap) : Cap(Db.Migrated)` could mint a proof cap to satisfy
+  Check 6 — the "proof-cap mint mismatch" finding — is now **closed** (see
+  §2.8.13 for the full mint/forge/unforgeability treatment).
 
 Both builtins are **compile-time-only and runtime-erased**, exactly like
 every other `Cap(X)` value (§2.8's opening determination, §1 above in the
@@ -3930,6 +4016,146 @@ accept post-fix, confirming neither fix over-rejects.
 
 `check_types.sh`: **104/104 (56 accept, 48 reject)**, exit 0 — the corpus's
 current, final total for this widening slice (§3).
+
+#### 2.8.13 Proof capabilities — minting, forging, and unforgeability
+
+The subsections above cover **IO-permission** caps (`Cap(IO.Network)` and the
+18-entry lattice) and the five **behavioral** module caps. Proof capabilities
+are a THIRD, distinct use of the `Cap(...)` machinery: **nominal, per-module,
+unforgeable tokens** that encode a *fact about the system* — "migrations have
+run," "the request is authenticated" — rather than an IO permission. A proof
+cap is declared `proof cap Name` inside a `mod` (`DProofCap`,
+`lib/ast/ast.ml`), registered in `env.proof_caps : (string * string) list`
+(full cap path → declaring module, populated by the `DProofCap` arm of
+`check_decl`), consumed as a type argument `Cap(Mod.Name)`, and demanded via
+`needs Mod.Name`. Like every `Cap(X)`, a proof cap is **runtime-erased** (`null`
+in LLVM, `VUnit` in the interpreter) — it exists purely so the type system can
+gate who may produce and consume it. §2.8's opening previously deferred these
+rules ("(Check 6) remains out of scope here"); this subsection is where they
+are treated, and the deferral is now discharged.
+
+Four rules together make `Cap(P)` unforgeable. They are all enforced by
+`check_module_needs` and two post-checking sweeps in `lib/typecheck/typecheck.ml`.
+
+**`(Cap-SelfDeclare)` — Check 1's self-declaration exemption.** Check 1
+(§2.8.3, `(* Check 1:` in `check_module_needs`) requires every `Cap(X)` in a
+signature to be covered by a declared `needs` via subsumption. A proof cap is
+NOT in the IO lattice, so no `needs` line *subsumes* it — instead, a proof
+cap's own **declaring module implicitly satisfies its own `needs`**
+(`self_declared = List.assoc_opt cap_path env.proof_caps = Some mod_name`, the
+`(* Check 1:` arm; the same exemption repeats in the Check 1b body-scan). So
+`mod Db` may write functions taking or returning `Cap(Db.P)` without a
+`needs Db.P` line of its own; any OTHER module using `Cap(Db.P)` in a signature
+must declare `needs Db.P`. Cited by `accept/t62` (the declaring module needs no
+self-`needs`) and `accept/t63` (the external `relay` declares `needs
+Db.Migrated`).
+
+**`(Cap-Check6)` — the declared-return-type pass-through discipline.** Check 6
+(`(* Check 6:` in `check_module_needs`) governs what a function may declare as
+its **return type**: a `DFn` may not return a proof cap unless it either
+*received that exact cap as a parameter* OR is a **public (`fn`) function of the
+declaring module**. Consequences:
+
+- A **public fn of the declaring module** is the *minting surface* — it may
+  construct and return its own proof cap.
+- A **`pfn` (private) function of the declaring module** faces the same
+  restriction as external code: pass-through only. Diagnostic: `` private
+  function `F` in `M` cannot mint `Cap(X)`. Only public functions of `M` can
+  construct `Cap(X)`. `` — `reject/t57`.
+- An **external module's function** may only pass a received cap through.
+  Diagnostic: `` function `F` returns `Cap(X)` but `Cap(X)` is a proof
+  capability declared in `M`. Only public functions of `M` can construct
+  `Cap(X)`. `` — `reject/t56`.
+
+Check 6 inspects only *declared function return types*, so it structurally
+cannot see a proof cap produced in an *expression position* (an inline call
+argument, a `let` binding). That gap is closed by `(Cap-NoNarrowForge)` below.
+
+**`(Cap-Mint)` — the `mint_cap` rule.** `mint_cap(x) : Cap(P)` is the ONLY
+sanctioned way to *construct* a proof cap. Its builtin scheme matches
+`cap_narrow`'s (`Cap(IO) -> Cap(a)`), but a post-checking gate
+(`check_mint_cap_sites`, run once after the whole compilation is checked so the
+result type is fully pinned) accepts it **iff** the pinned result is `Cap(P)`
+with `P` a proof cap whose **declaring module == the enclosing module AND the
+enclosing function is public** (`cur_fn_public`). The enclosing-fn/module
+context is captured at the site (recorded in `mint_cap_sites`) because it is
+unavailable at sweep time. Rules that fall out:
+
+- A lambda body **inherits** the enclosing function's public-ness (a `mint_cap`
+  in a lambda inside a public declaring fn accepts, when the cap type is pinned
+  at the lambda's call site); a nested named `fn`/`mod` gets its own
+  `check_fn`/`current_module` and so resets the flag naturally.
+- A value that *cannot be pinned to a specific proof cap* — e.g. a
+  let-generalized `fn _ -> mint_cap(cap)` that generalizes to `∀a. _ -> Cap(a)`
+  — is **rejected**, because a polymorphic mint could produce ANY cap (the exact
+  forge vector); this is strictly sounder than accepting it.
+- `mint_cap` at a NON-proof (IO) cap target is rejected — attenuating IO caps
+  is `cap_narrow`'s job.
+- `mint_cap` is **runtime-erased**: it has no eval/codegen semantics of its own
+  and aliases `cap_narrow` for all downstream passes (interpreter `VUnit`,
+  `defun.ml` `builtin_names`, `llvm_builtins.ml` reusing `march_cap_narrow`), so
+  the security gate lives entirely in typecheck.
+
+Cited by `accept/t62` (public declaring fn mints — exit 0), `reject/t56`
+(external module), `reject/t57` (`pfn` in the declaring module).
+
+**`(Cap-NoNarrowForge)` — `cap_narrow` can never produce a proof cap.**
+`cap_narrow`'s type is polymorphic (`Cap(IO) -> Cap(a)`), which is exactly right
+for IO-lattice narrowing (§2.8.8) but was, before this slice, also a **forge**:
+at a `Cap(Db.P)`-typed call site it instantiated `a := Db.P` and minted a
+nominal proof cap from an ordinary `Cap(IO)`, in the very expression positions
+Check 6 cannot see. The fix restricts `cap_narrow` so its result is **never a
+nominal proof cap in ANY position**. Because `cap_narrow` is the only
+polymorphic cap producer, this closes the forge everywhere; the enforcement is a
+value restriction on the result var (`demote_to_monomorphic`, so a
+`let`-generalized launder cannot slip through) plus a use-site `unify` hook
+(`cap_producer_ivars`) that rejects the instant a `cap_narrow`-tagged var is
+unified with a nominal proof cap `TCon(p,[])`, with the taint propagated through
+calls/instantiation/factory functions (`cap_narrow_factory_fns`). The hook fires
+ONLY for proof caps (IO caps are never in `env.proof_caps`), so IO narrowing —
+in every position, including laundered through a polymorphic fn — is untouched.
+Diagnostic: `` cap_narrow cannot produce `Cap(X)` — `Cap(X)` is a proof
+capability, not an IO capability. `` — `reject/t55`. The regression guard
+`accept/t61` confirms IO narrowing (`cap_narrow(cap) : Cap(IO.Network)`) still
+accepts.
+
+**The unforgeability property.** Combining the four rules: the only ways to
+obtain a value of type `Cap(P)` for a proof cap `P` are
+
+1. **receive it as a parameter and pass it through** (`(Cap-Check6)`;
+   `accept/t63`), or
+2. **`mint_cap` it inside a public function of `P`'s declaring module**
+   (`(Cap-Mint)`; `accept/t62`).
+
+`root_cap` and `cap_narrow` cannot conjure a `Cap(P)` (`(Cap-NoNarrowForge)`),
+and — crucially, since the P0 nested-module fix (`(T-QualRef)`, §2.5.1) —
+**no polymorphic launder through a nested unannotated helper can erase the cap
+type either** (`consume(id(cap))` with a decoupled `?a -> ?b` `id` was the
+deeper exploitation; it is now caught). So a foreign module holding only an
+ordinary `Cap(IO)` genuinely cannot forge `Cap(P)` by name, matching the
+"unforgeable" guarantee `capabilities.md` documents.
+
+**Honest residuals (documented, not hidden).**
+
+- **Proof caps are runtime-erased.** Unforgeability is a *compile-time* property
+  of well-typed programs; there is no runtime capability object, so a party that
+  bypasses the typechecker (hand-written IR, FFI) is outside this guarantee — as
+  for every `Cap(X)`.
+- **The `cap_narrow` container-launder taint gap is still OPEN.**
+  `tag_cap_producer_result` (the `(Cap-NoNarrowForge)` taint tagger) is shallow
+  / non-recursive, so a `cap_narrow` result wrapped in a tuple/`Option` through a
+  polymorphic factory can still forge in some shapes the simple single-module
+  case happens to reject. This is distinct from the nested-module hole
+  `(T-QualRef)` closes (that is about reference *resolution*; this is about taint
+  *propagation* not recursing into `TTuple`/`TCon` payloads). Filed OPEN in
+  `specs/todos.md` (Capabilities/effects section) as a dedicated Batch-A-taint
+  follow-up; a fix would recurse the tagger into container payload positions.
+
+(Fix reports: `.superpowers/sdd/batch-a-report.md` for `mint_cap` +
+`cap_narrow`, `.superpowers/sdd/prebind-fix-report.md` for `(T-QualRef)`.
+Reconciles the §2.8.8 note that `cap_narrow` is "also the mechanism a proof-cap
+mint uses" — that is now `mint_cap`; `cap_narrow` is explicitly forbidden from
+producing proof caps.)
 
 ## 3. Conformance corpus
 
@@ -4919,13 +5145,15 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   survey found — F2 (`cap pure`/`cap deterministic`'s banned-builtin sets
   now derived from `builtin_cap_table`, Task 5) and F3 (`cap no_panic` now
   rejects non-exhaustive matches via a recorded-span side-table, Task 6),
-  both gated on the full test suite. **Still deferred:** proof-cap
-  mint/forge (Check 6) itself — "the proof-cap mint mismatch" (filed in
-  `specs/todos.md`, deliberately unlabeled since every letter `F1`–`F8` is
-  already in use elsewhere in this document) documents a real mismatch
-  between `capabilities.md`'s documented mint idiom and the actual
-  (unrestricted) mechanism, filed but not fixed, expected to be the subject
-  of a dedicated later slice. Linear/uniqueness typing beyond the
+  both gated on the full test suite. **Proof-cap mint/forge — now LANDED
+  (widening slice 6, §2.5.1 + §2.8.13, 2026-07-08).** "The proof-cap mint
+  mismatch" is closed by two real compiler fixes: the gated `mint_cap` primitive
+  + the `cap_narrow` proof-cap restriction (Batch A), and the general
+  nested-module qualified-prebind soundness fix (`(T-QualRef)`) that closed the
+  deeper polymorphic-launder exploitation. `Cap(P)` is now genuinely
+  unforgeable. One documented residual stays OPEN — the `cap_narrow`
+  container-launder taint gap (`tag_cap_producer_result` is shallow), filed in
+  `specs/todos.md`. Linear/uniqueness typing beyond the
   session-channel linearity
   already covered in §2.7.6/§2.7.8 is not separately named in the roadmap
   and is narrower still; grouped with capabilities as a Phase-3-or-later
