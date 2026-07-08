@@ -1466,6 +1466,11 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
 /* Per-connection read buffer size.  Large enough to hold many pipelined
  * GET requests in one recv() (wrk sends 16 at a time ≈ 1.5–2 KB). */
 #define CONN_BUF_SIZE (64 * 1024)
+/* Upper bound a single request (headers + body) may grow to before a 413.
+ * The per-connection buffer starts at CONN_BUF_SIZE and doubles on demand up to
+ * this cap, so large request bodies — e.g. registry package tarball uploads —
+ * are accepted instead of being rejected at the initial 64KB. */
+#define MAX_REQ_SIZE (32 * 1024 * 1024)
 
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
@@ -1508,8 +1513,10 @@ static void *connection_thread(void *arg) {
     char        *clo = (char *)pipeline;
     closure_fn_t fn  = *(closure_fn_t *)(clo + 16);
 
-    /* Persistent per-connection read buffer. */
-    char  *buf     = malloc(CONN_BUF_SIZE);
+    /* Persistent per-connection read buffer.  Starts at CONN_BUF_SIZE and grows
+       on demand (see the recv step below) up to MAX_REQ_SIZE. */
+    size_t buf_cap = CONN_BUF_SIZE;
+    char  *buf     = malloc(buf_cap);
     size_t buf_len = 0;   /* valid bytes in buf */
 
     if (!buf) { close(fd); return NULL; }
@@ -1657,12 +1664,28 @@ static void *connection_thread(void *arg) {
         if (!running) break;
 
         /* 4. Read more data from the socket. */
-        size_t space = CONN_BUF_SIZE - buf_len;
+        size_t space = buf_cap - buf_len;
         if (space == 0) {
-            /* Buffer full with no complete request — request too large. */
-            march_http_send_response(fd, 413, make_nil(),
-                                     march_string_lit("Request Too Large", 17));
-            break;
+            /* Buffer full with no complete request yet — grow it (doubling) up
+               to MAX_REQ_SIZE before giving up, so large request bodies (e.g.
+               registry tarball uploads) are accepted rather than 413'd at the
+               initial 64KB.  Only a request that exceeds the cap gets a 413. */
+            if (buf_cap >= MAX_REQ_SIZE) {
+                march_http_send_response(fd, 413, make_nil(),
+                                         march_string_lit("Request Too Large", 17));
+                break;
+            }
+            size_t new_cap = buf_cap * 2;
+            if (new_cap > MAX_REQ_SIZE) new_cap = MAX_REQ_SIZE;
+            char *nbuf = realloc(buf, new_cap);
+            if (!nbuf) {
+                march_http_send_response(fd, 413, make_nil(),
+                                         march_string_lit("Request Too Large", 17));
+                break;
+            }
+            buf     = nbuf;
+            buf_cap = new_cap;
+            space   = buf_cap - buf_len;
         }
         ssize_t n = recv(fd, buf + buf_len, space, 0);
         if (n <= 0) break;  /* EOF, reset, or timeout */
