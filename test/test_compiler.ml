@@ -4829,6 +4829,107 @@ let test_nested_annotated_same_tvar_ok () =
     "forward-ref nested annotated id (a->a) used at Int AND String: no error"
     false (has_errors ctx)
 
+(* ── Round 3: entry-module self-qualified prebind erasure ─────────────────
+   [prebind_mod_members m.mod_name.txt] (check_module_core) seeds the ENTRY
+   module's own top-level unannotated fns under a qualified key `EntryMod.id`,
+   but [cap_qual_prefix] is "" for entry-level fns, so the round-2 rebind (gated
+   `cap_qual_prefix <> ""`) never reconciled it — the explicit `EntryMod.id`
+   reference form (or a nested sibling's reference to the entry module by name)
+   kept a decoupled `?a -> ?b` and erased.  Closed by ALSO reconciling the
+   `current_module`-based key.  All RED on d19dc519 (exit 0). *)
+
+(* E1 — Main.id self-qualified launder, Int -> String (general memory-safety). *)
+let test_entry_self_qualified_int_as_string () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* E1 — Main.id self-qualified launder, Box(String) -> Box(Int). *)
+let test_entry_self_qualified_box () =
+  let ctx = typecheck {|mod Main do
+    type Box(a) = Box(a)
+    fn id(x) do x end
+    fn need_int(_b : Box(Int)) : Int do 1 end
+    fn attack() : Int do
+      let bx = Box("hi")
+      need_int(Main.id(bx))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* E1 — Main.id self-qualified launder, Cap(IO) -> Cap(Db.P) proof-cap forge. *)
+let test_entry_self_qualified_proof_cap () =
+  let ctx = typecheck {|mod Main do
+    mod Db do proof cap P end
+    needs IO
+    needs Db.P
+    fn id(x) do x end
+    fn consume(_c : Cap(Db.P)) : Int do 1 end
+    fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* E2 — a nested sibling references the ENTRY module by name (`T.id`). *)
+let test_entry_qualified_from_nested_sibling () =
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(T.id(42)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested sibling launders via entry-qualified T.id (Int into String): error"
+    true (has_errors ctx)
+
+(* E3 — entry self-qualified with a FORWARD reference (id defined after caller). *)
+let test_entry_self_qualified_forward_ref () =
+  let ctx = typecheck {|mod Main do
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+    fn id(x) do x end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module forward-ref Main.id launders Int into String: error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN / RED->GREEN: an entry-qualified reference to a genuinely
+   polymorphic entry `id`, used at TWO types, must ACCEPT.  (This spuriously
+   ERRORED on d19dc519 — the erasure made entry `id` non-polymorphic — so it is a
+   second, independent witness that the fix restores true polymorphism.) *)
+let test_entry_self_qualified_polymorphic_ok () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn ui() : Int do Main.id(1) end
+    fn us() : String do Main.id("hi") end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: a nested sibling using the entry `T.id` at a CONSISTENT
+   type must still accept — the fix does not over-reject legit entry-qualified use. *)
+let test_entry_qualified_nested_consistent_ok () =
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_int(n : Int) : Int do n end
+      fn attack() : Int do need_int(T.id(5)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested sibling uses entry T.id at consistent type: no error"
+    false (has_errors ctx)
+
 (* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
    typecheck registration + finding 17 (derive unknown type) ──────────────── *)
 
@@ -7297,6 +7398,15 @@ let compiler_suites =
           (* Round 2 green-stays-green guards. *)
           Alcotest.test_case "forward-ref id used at Int AND String: no error"       `Quick test_nested_fwdref_legit_ok;
           Alcotest.test_case "forward-ref annotated id (a->a) at Int AND String: no error" `Quick test_nested_annotated_same_tvar_ok;
+          (* Round 3 — entry-module self-qualified erasure (RED on d19dc519, GREEN after). *)
+          Alcotest.test_case "entry Main.id launders Int->String: error"           `Quick test_entry_self_qualified_int_as_string;
+          Alcotest.test_case "entry Main.id launders Box(String)->Box(Int): error" `Quick test_entry_self_qualified_box;
+          Alcotest.test_case "entry Main.id launders Cap(IO)->Cap(Db.P): error"     `Quick test_entry_self_qualified_proof_cap;
+          Alcotest.test_case "nested sibling launders via entry T.id: error"        `Quick test_entry_qualified_from_nested_sibling;
+          Alcotest.test_case "entry forward-ref Main.id launders Int->String: error" `Quick test_entry_self_qualified_forward_ref;
+          (* Round 3 green-stays-green / red->green guards. *)
+          Alcotest.test_case "entry Main.id used at Int AND String: no error"       `Quick test_entry_self_qualified_polymorphic_ok;
+          Alcotest.test_case "nested sibling uses entry T.id consistent: no error"  `Quick test_entry_qualified_nested_consistent_ok;
         ] );
       ( "fix_batch_regressions", [
           Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;

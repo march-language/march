@@ -7141,15 +7141,37 @@ let rec check_decl env (d : Ast.decl) : env =
        placeholder to its own decoupled use — are handled UPSTREAM by
        [dependency_order_dfn_run]: its [deps_of]/[local_of] now sees the qualified
        reference (`App.id`) as a dependency on the local `id`, so `id` is checked
-       (and this rebind runs) BEFORE any caller.  The prefix
-       matches [prebind_mod_members]'s key exactly: [cap_qual_prefix] accumulates
-       "" at the entry module then the nested names (entry mod stripped). *)
-    if env.cap_qual_prefix <> "" then
-      let qname = env.cap_qual_prefix ^ "." ^ def.fn_name.txt in
-      (match StrMap.find_opt qname env.vars with
-       | Some _ -> bind_var qname sch env
-       | None   -> env)
-    else env
+       (and this rebind runs) BEFORE any caller.
+
+       [prebind_mod_members] seeds a fn's qualified key under TWO prefixes,
+       reconcile BOTH so no qualified key retains a decoupled scheme:
+       - [cap_qual_prefix] — the accumulated dotted path of ENCLOSING nested
+         modules ("" at the entry module, then the nested names, entry mod
+         stripped): matches [prebind_mod_members]'s [prefix] recursion (:8626).
+       - [current_module] — the CURRENT module's own name.  At the ENTRY module,
+         [check_module_core] seeds the entry's own top-level fns under
+         `EntryMod.fn` (`prebind_mod_members m.mod_name.txt`, :8732) while
+         [cap_qual_prefix] is still "", so the entry-self-qualified key
+         (`Main.id`, or a nested sibling's `T.id` reference to the entry `T`)
+         would otherwise never be reconciled — a memory-unsafe erasure when the
+         explicit `EntryMod.id` form is written.  (For a nested module both
+         prefixes may coincide or nest; deduping by the [<>""] guards + a set
+         avoids a redundant rebind, and rebinding the same real [sch] twice is
+         harmless anyway.) *)
+    let reconcile_qkey env prefix =
+      if prefix = "" then env
+      else
+        let qname = prefix ^ "." ^ def.fn_name.txt in
+        (match StrMap.find_opt qname env.vars with
+         | Some _ -> bind_var qname sch env
+         | None   -> env)
+    in
+    let env = reconcile_qkey env env.cap_qual_prefix in
+    let env =
+      if env.current_module <> env.cap_qual_prefix
+      then reconcile_qkey env env.current_module else env
+    in
+    env
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
