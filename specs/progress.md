@@ -283,6 +283,68 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
+
+A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`) defined in a
+**non-entry module** (a nested `mod`, or any MARCH_LIB_PATH library — all of stdlib)
+was *constructed boxed* but *tuple-nested-destructured as a newtype*, so compiled
+`Bytes.concat` returned an empty `Bytes` — the actual forgepm native-deploy blocker
+(empty Postgres wire packets → hung handshake).
+
+- **Root cause:** `Lower.lower_mod_decls` registers a non-entry module's typedef under
+  its module-qualified name (`Bytes.Bytes`), but the module's own value types reference it
+  BARE (`Bytes`) — the typechecker drops the prefix on same-module references (entry-module
+  types are registered bare, so this was non-entry-only). Construction (EAlloc) and
+  top-level patterns resolve by the bare name → `repr_of_ty` misses → `Boxed` (which is
+  ALSO the C-runtime layout: `make_bytes_from_raw`/`bytes_to_raw` build/read `Bytes` as a
+  box with `List(Int)` at offset 16). But `emit_case`'s newtype-recovery path — fired by a
+  TVar-erased tuple-element sub-scrutinee, keyed on the CTOR name → the qualified typedef —
+  saw `Newtype`. The nested `(Bytes(xs), Bytes(ys))` destructure took the Newtype identity
+  path against a boxed value: `xs` = the box pointer, and the header (tag 0) read as an
+  empty `Nil`.
+- **Fix:** make `emit_case`'s newtype-recovery classify the owning type by its BARE
+  (last dot-segment) name, exactly as construction and the runtime do — so a non-entry
+  single-field type stays consistently `Boxed` (a genuine entry-module newtype is
+  registered bare, so stripping is a no-op and it still classifies `Newtype`). Keeping
+  `Bytes` boxed is required — the runtime constructs/consumes it boxed across crypto,
+  compression, HTTP, and `tcp_recv_exact`; flipping compiled `Bytes` to a raw list made
+  every runtime-built `Bytes` decode as an empty `Nil` (`Bytes.get: index out of bounds`
+  on the PG handshake buffer).
+- **Regression:** `test/test_codegen.ml` `nonentry_newtype_repr_codegen` — a nested `mod`
+  single-field ADT, tuple-destructured, must print `5` compiled (RED `0` pre-fix).
+- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1) / 805
+  stdlib / 29 snapshots, 0 failures; differential property oracle no new divergences;
+  RC benchmarks unchanged. Compiled `Bytes.concat` byte-correct AND native forgepm clears
+  the live Postgres handshake on the deploy droplet → unblocks the native deploy.
+
+## Current State (as of 2026-07-08, monomorphization nested-fn/top-level name-collision fixed)
+
+Monomorphization (`lib/tir/mono.ml` `rewrite_calls`) resolved a call's callee by
+**bare name** against the module-level `fn_table` while recursing into
+`ELetRec`/`ELet`/`ECase` bodies without tracking lexically-bound nested-function
+names. Because March's stdlib conventionally names inner accumulator helpers
+`fn go(...)` (in `List.length`/`reverse`/`map`/`sum_int`/… and `Bytes.concat`'s
+`list_append_go`), ANY user top-level `go` made `fn_table["go"]` hit, silently
+rebinding every stdlib helper's nested `go(...)` call to the user's top-level
+`go`. Compiled tail-recursive list accumulators then returned garbage (a heap
+pointer reinterpreted as an `Int`), while the interpreter — which has no
+mangling/link step — stayed correct. This was the root cause of the native
+forgepm deploy hang (empty Postgres startup packets from `Bytes.concat`).
+
+- **Fix:** thread a `shadowed` name-set through `rewrite_calls`; a callee whose
+  name is bound by a lexically-enclosing nested `fn` (accumulated from `ELetRec`
+  fn names, the `ELet` binder that a block-`fn` lowers its continuation under,
+  and `ECase` `br_vars`) is left un-resolved for `Defun` to lift as a distinct
+  `…$apply$N` closure — exactly the path taken when no name collision exists.
+  Function params are intentionally NOT seeded (preserves the `ECallPtr`
+  erased-type interface-dispatch fallback).
+- **Regression:** `test/test_codegen.ml` `nested_fn_name_collision_codegen` —
+  a top-level `go` reversing `[1..5]`, then `List.length`/`List.sum_int` on the
+  result, must print `5|15` compiled (was `5|<garbage>`), matching the interpreter.
+- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1)
+  / 805 stdlib / 29 snapshots, 0 failures. RC benchmarks unchanged
+  (tree_transform=104857600, list_ops=333333666666, binary_trees depth-16=131071).
+
 ## Current State (as of 2026-07-07, Linux cross-compile P3 — OpenSSL/TLS + zlib/gzip for the main binary)
 
 `march --compile --target linux/amd64|linux/arm64` (and `forge build --target …`)

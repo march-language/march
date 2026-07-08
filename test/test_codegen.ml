@@ -6212,6 +6212,119 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
        interior nested tuple) matches the interpreter"
       "15" run_out
 
+(* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
+   A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
+   with the MANY stdlib helpers that use a conventionally-named nested
+   `fn go` (List.length, List.reverse, List.map, …).  Monomorphization's
+   [rewrite_calls] resolved every call named `go` against the module-level
+   fn_table (keyed by bare name), so the stdlib helpers' nested `go` calls were
+   silently rebound to the USER's top-level `go`.  `List.length(r)` then ran the
+   user's reverse-accumulator against an Int accumulator (0), returning a garbage
+   pointer reinterpreted as an Int (observed: len=4745871568 instead of 5).
+   The interpreter has no mangling/linking step, so it was always correct — an
+   interpreter-correct / compiled-wrong divergence.  Compile-and-run because the
+   symptom is a wrong runtime value, not an IR shape.  Fix: nested-fn names
+   shadow same-named top-level fns in mono (lib/tir/mono.ml `rewrite_calls`). *)
+let test_nested_fn_name_shadows_toplevel_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_go_collision"
+    "mod GoCollision do\n\
+    \  pfn go(xs, acc) do\n\
+    \    match xs do\n\
+    \    Nil -> acc\n\
+    \    Cons(h, t) -> go(t, Cons(h, acc))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let r = go([1, 2, 3, 4, 5], [])\n\
+    \    println(int_to_string(List.length(r)) ++ \"|\" ++ int_to_string(List.sum_int(r)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no mangling, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: user `go` reverses to a 5-element list; stdlib `go` helpers \
+     (length/sum_int) still resolve to their own bodies"
+    "5|15" interp_out;
+  (* --- compiled: must match; before the fix this printed a garbage length --- *)
+  let bin = Filename.concat tmp "gocollisionbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: stdlib nested `go` helpers are NOT captured by the user's \
+       top-level `go` — List.length/List.sum_int return the SAME values as the \
+       interpreter (not a garbage pointer reinterpreted as an Int)"
+      "5|15" run_out
+
+(* ── Non-entry-module single-field ADT: construct-vs-destructure repr ──────
+   A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`)
+   defined in a NON-ENTRY module (a nested `mod`, or any MARCH_LIB_PATH library
+   like stdlib) is registered under its MODULE-QUALIFIED name ("Inner.Wrap") by
+   [Lower.lower_mod_decls], but the module's own value types reference it BARE
+   ("Wrap") — the typechecker drops the prefix on same-module references.  So
+   [Repr.find_variant]/[repr_of_ty] missed on the bare-name query and defaulted
+   to [Boxed] at construction (EAlloc) and top-level pattern sites, while the
+   codegen newtype-recovery path (`emit_case`, which looks up by CTOR name → the
+   qualified typedef) saw [Newtype].  A tuple-nested destructure
+   `match (w1,w2) do (Wrap(xs),Wrap(ys)) -> …` reaches [emit_case] with a
+   TVar-erased sub-scrutinee → took the Newtype (identity) path, so `xs` was the
+   BOX pointer, not the payload; `List.length(xs)` then read the box header
+   (tag 0) as an empty `Nil` → 0.  Entry-module ADTs are registered bare so both
+   sides agreed (Newtype) and worked — this was non-entry-only, and it made
+   compiled `Bytes.concat` (bytes.march is a non-entry module) return an empty
+   `Bytes`, hanging forgepm's Postgres handshake.  Fixed in [Repr.find_variant]:
+   reconcile a bare query against a unique module-qualified registration.
+   Compile-and-run because the symptom is a wrong runtime value across the
+   construct/destructure boundary, not an IR shape. *)
+let test_nonentry_newtype_tuple_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nonentry_newtype"
+    "mod Main do\n\
+    \  needs IO.Console\n\
+    \  mod Inner do\n\
+    \    type Wrap = Wrap(List(Int))\n\
+    \    fn mk(xs) do Wrap(xs) end\n\
+    \    fn sum_pair(w1, w2) do\n\
+    \      match (w1, w2) do\n\
+    \      (Wrap(xs), Wrap(ys)) -> List.length(xs) + List.length(ys)\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let a = Inner.mk([1, 2, 3])\n\
+    \    let b = Inner.mk([4, 5])\n\
+    \    println(int_to_string(Inner.sum_pair(a, b)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no repr/mangling step, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: tuple-destructure of a non-entry single-field ADT unwraps \
+     both payloads (3 + 2)"
+    "5" interp_out;
+  (* --- compiled: must match; before the fix the nested Wrap destructure took
+         the Newtype (identity) path against a boxed value and printed 0 --- *)
+  let bin = Filename.concat tmp "nonentrynewtypebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: a non-entry single-field ADT is classified identically at \
+       construction and (tuple-nested) destructure — the payload is unwrapped, \
+       not read as an empty niche/newtype (which returned 0)"
+      "5" run_out
+
 (* ── EUpdate on type-erased records (B5) ─────────────────────────────────
    `{ base with f: v }` where the base's static shape is unknown
    (get_record_fields = [], e.g. a record_from_list/record_put result) used
@@ -7989,6 +8102,14 @@ let codegen_suites =
             test_nested_tuple_let_destructure_compiled;
           Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
             test_nested_tuple_let_deep_wildcard_compiled;
+        ] );
+      ( "nested_fn_name_collision_codegen", [
+          Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
+            test_nested_fn_name_shadows_toplevel_compiled;
+        ] );
+      ( "nonentry_newtype_repr_codegen", [
+          Alcotest.test_case "non-entry single-field ADT: construct/destructure repr agree (tuple-nested)" `Quick
+            test_nonentry_newtype_tuple_destructure_compiled;
         ] );
       ( "erased_record_update_codegen", [
           Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick
