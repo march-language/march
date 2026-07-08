@@ -661,6 +661,7 @@ let setup_interpreter_ffi () =
       Buffer.add_string key_buf f;
       (try Buffer.add_string key_buf (Digest.to_hex (Digest.file f)) with _ -> ()))
       (List.rev !ffi_c_files);
+    List.iter (Buffer.add_string key_buf) (List.rev !ffi_link_flags);
     let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
     let so_path = Filename.concat cache_dir ("march_ffi_shim_" ^ key ^ ".so") in
     if not (Sys.file_exists so_path) then begin
@@ -681,6 +682,12 @@ let setup_interpreter_ffi () =
       in
       let src_files = String.concat " "
         (List.rev_map Filename.quote !ffi_c_files) in
+      (* Link flags from forge.toml [ffi] link (e.g. -lsqlite3) — the shim's
+         own C code needs these resolved same as a native `forge build`;
+         without them, symbols the shim calls into a system library for
+         (not march runtime symbols, which resolve at dlopen time via
+         RTLD_GLOBAL) are undefined and the whole shim fails to dlopen. *)
+      let link_flags = String.concat " " (List.rev !ffi_link_flags) in
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
       (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
          that are not available at .so link time — they'll be resolved at dlopen
@@ -695,8 +702,8 @@ let setup_interpreter_ffi () =
           else ""
       in
       let cmd = Printf.sprintf
-        "cc -shared -O2 -fPIC%s%s %s -o %s 2>&1"
-        platform_flags inc_flag src_files tmp in
+        "cc -shared -O2 -fPIC%s%s %s -o %s %s 2>&1"
+        platform_flags inc_flag src_files tmp link_flags in
       let rc = Sys.command cmd in
       if rc <> 0 then
         Printf.eprintf "march: warning: failed to compile FFI shim sources \
