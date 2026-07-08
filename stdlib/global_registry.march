@@ -92,13 +92,18 @@ mod GlobalRegistry do
     end
   end
 
+  -- The name component of a `(name, Entry)` pair, as produced by `Map.entries`.
+  pfn entry_name(kv : (String, Entry)) : String do
+    match kv do (n, _e) -> n end
+  end
+
   -- The names with a present (non-tombstoned) binding.
   fn names(reg : Names) : List(String) do
     match reg do
       Names(m) ->
         let kept = List.filter(Map.entries(m), fn (kv) ->
           match kv do (_n, e) -> e.present end)
-        List.map(kept, fn (kv) -> match kv do (n, _e) -> n end)
+        List.map(kept, entry_name)
     end
   end
 
