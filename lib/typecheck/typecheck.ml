@@ -6922,7 +6922,37 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
     discharge_constraints env sp;
-    bind_var def.fn_name.txt sch env
+    let env = bind_var def.fn_name.txt sch env in
+    (* Reconcile the entry-module-qualified prebind (`EntryMod.fn`) with the fn's
+       REAL body-checked scheme.  The entry module is UNWRAPPED at the combined
+       module's top level, so — unlike a wrapped sibling module, whose public
+       members are re-exported under `Sib.fn` with their real schemes when the
+       sibling's DMod is checked — its own top-level members are only ever seeded
+       by [check_module_core]'s Pass 1b (`prebind_mod_members m.mod_name.txt`).
+       For an UNANNOTATED fn that seed is a bare `Mono (fresh_var 1)` placeholder
+       ([prebind_fn_scheme] returned None); for a distinct-tvar annotation
+       (`fn f(x:a):b`) it is an un-body-validated `a -> b` built from annotation
+       syntax.  Either way a same-module reference written `EntryMod.fn`
+       (produced by desugar's [qualify_module_refs] to disambiguate a shadowing
+       nested local, or written by hand) resolves that decoupled `?a -> ?b` and
+       ERASES the type of anything laundered through the fn — a general
+       type-soundness hole (`need_str(Main.id(42))` typechecks; the proof-cap
+       forge is one exploitation).  Rebind the qualified name to [sch], the
+       scheme [check_fn] validated against the body, so it is exactly as
+       polymorphic as the bare name (this also restores polymorphism the pinned
+       placeholder had destroyed).  Fires only at the ENTRY level
+       ([cap_qual_prefix] = "": nested and loaded modules re-export real schemes
+       already and must be left unchanged) and only when the qualified key
+       already exists ([Some _]: a private `pfn` gets no qualified prebind and is
+       untouched; the incremental [check_module_with_env] path never seeds the
+       entry's own top-level fns, so this is inert there).  Codegen-safe: mono/TIR
+       key on the per-span [type_map], not this env scheme. *)
+    if env.cap_qual_prefix = "" && env.current_module <> "" then
+      let qname = env.current_module ^ "." ^ def.fn_name.txt in
+      (match StrMap.find_opt qname env.vars with
+       | Some _ -> bind_var qname sch env
+       | None   -> env)
+    else env
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in

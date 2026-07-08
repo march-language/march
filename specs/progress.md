@@ -283,6 +283,45 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, entry-module self-qualified `--check` type-erasure closed)
+
+An unannotated (or distinct-tvar-annotated) fn at the **entry module's** top level,
+referenced through the entry-module-qualified name (`EntryMod.fn`), erased the type of
+anything laundered through it, so `march --check` exited 0 on a memory-unsafe mismatch
+(`need_str(Main.id(42))` — an `Int` into a `String` parameter — typechecked clean, while
+the bare `need_str(id(42))` correctly rejected).
+
+- **Root cause:** the entry module is UNWRAPPED at the combined module's top level, so —
+  unlike a wrapped sibling module, whose public members are re-exported under `Sib.fn` with
+  their real body-checked schemes when its `DMod` is checked — the entry's own top-level
+  fns are only ever seeded by `check_module_core`'s Pass 1b (`prebind_mod_members
+  m.mod_name.txt`) as a bare `Mono (fresh_var 1)` placeholder (`prebind_fn_scheme` returns
+  None for an unannotated fn; a distinct-tvar annotation `fn f(x:a):b` seeds an
+  un-body-validated `a -> b`). That decoupled `?a -> ?b` was never reconciled with the fn's
+  real scheme, so an `EntryMod.fn` reference (produced by desugar's `qualify_module_refs`,
+  or hand-written to disambiguate a shadowing nested local) instantiated it and erased the
+  laundered type; the pinned placeholder also spuriously over-rejected legitimate
+  polymorphism.
+- **Fix:** the DFn branch of `check_decl` (`lib/typecheck/typecheck.ml`) now rebinds the
+  entry-qualified name to `sch` — the scheme `check_fn` validated against the body — so it
+  is exactly as polymorphic as the bare name. Guarded to the ENTRY level (`cap_qual_prefix
+  = "" && current_module <> ""`) and to an already-seeded key (`Some _`), so nested/loaded
+  modules, private `pfn`s, and the incremental `check_module_with_env` path are untouched.
+  Codegen-safe: mono/TIR key on the per-span `type_map`, not this env scheme.
+- **Scope:** this closes the `--check` type-erasure aspect only; the sibling link-time
+  finding (an entry file self-qualifying its own top-level mod name → undefined symbols at
+  link time) shares the `entry_prefix = "" / cap_qual_prefix = ""` root but is a
+  codegen/lowering gap and remains open (see `specs/todos.md`).
+- **Regression:** `test/test_compiler.ml` group `entry_mod_qual_erasure` (8 non-vacuous
+  cases): the `Int`→`String`, `Box(String)`→`Box(Int)`, and `Cap(IO)`→`Cap(Db.P)` launder
+  shapes, the C2 distinct-tvar variant, and a nested-sibling `T.id` shape (all flip
+  clean→rejected), plus three green guards (single-type use stays clean, polymorphic use
+  restored to clean, annotated `a->a` stays clean).
+- **Verification:** full suite green — 451 compiler (+8) / 231 eval / 394 codegen
+  (`llvm_ir_validity_gate` 0 failures) / 805 stdlib / 29 snapshots, 0 failures
+  (`test_stdlib_march`'s lone `global_registry` `unbound variable` failure is pre-existing —
+  identical at HEAD without this change).
+
 ## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
 
 A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`) defined in a

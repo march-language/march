@@ -6373,6 +6373,128 @@ let test_broken_ctor_field_type_reported_once () =
   Alcotest.(check int) "`Bogus` unresolved-type error reported exactly once" 1
     (count_errors_matching ctx "I cannot find `Bogus`.")
 
+(* ── Entry-module self-qualified type erasure ─────────────────────────────
+   An UNANNOTATED fn at the ENTRY module's top level, referenced by the
+   entry-module-qualified name (`EntryMod.fn` — produced by desugar's
+   [qualify_module_refs] to disambiguate a shadowing nested local, or written
+   by hand), must be exactly as type-safe as the bare reference.  The entry
+   module is UNWRAPPED at the combined module's top level, so — unlike a wrapped
+   sibling module, whose public members are re-exported under `Sib.fn` with
+   their real schemes when the sibling's DMod is checked — its own top-level fns
+   are only ever seeded by [check_module_core]'s Pass 1b
+   (`prebind_mod_members m.mod_name.txt`) as a bare `Mono (fresh_var 1)`
+   placeholder ([prebind_fn_scheme] returns None for an unannotated fn).  Before
+   the fix that decoupled `?a -> ?b` placeholder was never reconciled with the
+   fn's real body-checked scheme, so `EntryMod.id` ERASED the type of anything
+   laundered through it — a general memory-safety hole (an Int laundered into a
+   String parameter typechecked).  The DFn branch of [check_decl] now rebinds
+   the entry-qualified name to the validated scheme.  These launder cases are
+   RED before the fix (each typechecks clean) and GREEN after. *)
+
+let test_entry_qual_launders_int_as_string () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_launders_box () =
+  let ctx = typecheck {|mod Main do
+    type Box(a) = Box(a)
+    fn id(x) do x end
+    fn need_int(_b : Box(Int)) : Int do 0 end
+    fn attack() : Int do need_int(Main.id(Box("hi"))) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Box(String) into Box(Int): rejected" true
+    (has_errors ctx)
+
+let test_entry_qual_forges_proof_cap () =
+  (* The proof-cap forge: `Main.id` must not launder a `Cap(IO)` into a
+     `Cap(Db.P)` parameter.  The module also lacks `needs` declarations (which
+     raise their own, unrelated errors), so assert on the FORGE-SPECIFIC
+     mismatch rather than the error count: it is absent (count 0) when the type
+     erases and present (>= 1) when the forge is caught. *)
+  let ctx = typecheck {|mod Main do
+    mod Db do
+      proof cap P
+    end
+    fn id(x) do x end
+    fn consume(_c : Cap(Db.P)) : Int do 0 end
+    fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
+  end|} in
+  Alcotest.(check bool) "Main.id forging Cap(IO) -> Cap(Db.P): mismatch caught" true
+    (count_errors_matching ctx "expected `Db.P` but got `IO`." >= 1)
+
+let test_entry_qual_distinct_tvar_launders () =
+  (* C2 variant: an ANNOTATED but distinct-tvar helper `fn f(x:a):b do x` gets a
+     prebind built purely from annotation SYNTAX (`a -> b`, never unified against
+     the body constraint a~b), so `Main.f` erased just like the unannotated case.
+     The unconditional rebind to the body-checked scheme closes this too. *)
+  let ctx = typecheck {|mod Main do
+    fn launder(x : a) : b do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.launder(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.launder (a->b) laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_from_nested_sibling () =
+  (* The entry-qualified reference can also come from a NESTED module: `T.id`
+     used inside `mod App` (nested in the entry `T`) resolves the same
+     entry-level `T.id` prebind and must be reconciled just as a top-level
+     `T.id` reference is. *)
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(T.id(42)) end
+    end
+  end|} in
+  Alcotest.(check bool) "T.id from nested App laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+(* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
+
+let test_entry_qual_same_type_ok () =
+  (* `Main.id` used at a single, consistent type stays clean (green before and
+     after the fix). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int only: no error" false (has_errors ctx)
+
+let test_entry_qual_polymorphic_ok () =
+  (* Reconciling `Main.id` to the fn's REAL scheme (rather than a pinned
+     placeholder) also RESTORES polymorphism: the bare `id` is `∀a. a -> a`, so
+     `Main.id` used at BOTH Int and String must typecheck exactly as the bare
+     name does.  RED before the fix — the placeholder `?a` was pinned to Int by
+     the first use, so the String use spuriously failed (an over-rejection). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+    fn use_str() : String do Main.id("hi") end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int AND String: no error" false (has_errors ctx)
+
+let test_entry_qual_annotated_same_tvar_ok () =
+  (* An annotated `a -> a` entry fn used consistently stays clean — its prebind
+     is already a real, body-consistent scheme, and the rebind to [sch] keeps it
+     that way. *)
+  let ctx = typecheck {|mod Main do
+    fn identity(x : a) : a do x end
+    fn ok() : Int do Main.identity(42) end
+  end|} in
+  Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
@@ -6946,6 +7068,16 @@ let compiler_suites =
           Alcotest.test_case "B14: interleaved same-name fn groups error"          `Quick test_interleaved_fn_clauses_error;
           Alcotest.test_case "B14: adjacent multi-head clauses still parse"        `Quick test_adjacent_fn_clauses_still_parse;
           Alcotest.test_case "B14: same fn name in nested mod is fine"             `Quick test_same_fn_name_in_nested_mod_ok;
+        ] );
+      ( "entry_mod_qual_erasure", [
+          Alcotest.test_case "Main.id launders Int -> String: error"              `Quick test_entry_qual_launders_int_as_string;
+          Alcotest.test_case "Main.id launders Box(String) -> Box(Int): error"    `Quick test_entry_qual_launders_box;
+          Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
+          Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
+          Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
+          Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
+          Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
         ] );
   ]
 
