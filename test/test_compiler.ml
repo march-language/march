@@ -4357,6 +4357,93 @@ let test_cap_narrow_io_narrow_still_ok () =
   Alcotest.(check bool) "cap_narrow IO-lattice narrow: no error"
     false (has_errors ctx)
 
+(* ── Proof-cap mint (Part 2: gated mint_cap primitive) ────────────────────
+   mint_cap is the ONLY way to construct a proof cap; it typechecks iff used in
+   a PUBLIC fn of the cap's DECLARING module. cap_narrow can no longer produce a
+   proof cap (Part 1), so mint_cap is the sanctioned mint surface. *)
+let test_mint_cap_public_declaring_ok () =
+  (* R3-migrated: Db's public fn mints its own proof cap via mint_cap. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      mint_cap(cap)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in public declaring-module fn: no error"
+    false (has_errors ctx)
+
+let test_mint_cap_pfn_rejected () =
+  (* mint_cap in a PRIVATE fn of the declaring module is rejected — only public
+     fns are the minting surface. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      mint_cap(cap)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in pfn: error" true (has_errors ctx)
+
+let test_mint_cap_external_rejected () =
+  (* mint_cap in a fn of a NON-declaring module is rejected (unforgeability). *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
+        mint_cap(cap)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in external module: error" true (has_errors ctx)
+
+let test_mint_cap_lambda_declaring_ok () =
+  (* Lambda-inherit rule: a mint inside a lambda inside a public declaring-module
+     fn accepts when the cap type is pinned at the call site (immediately-applied
+     lambda). Confirms the enclosing fn's public-ness is inherited by the lambda. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      (fn _ -> mint_cap(cap))(0)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in applied lambda in public declaring fn: no error"
+    false (has_errors ctx)
+
+let test_mint_cap_lambda_external_rejected () =
+  (* The forge via a lambda in a non-declaring module must still be rejected. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
+        (fn _ -> mint_cap(cap))(0)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in applied lambda in external module: error"
+    true (has_errors ctx)
+
+let test_mint_cap_io_target_rejected () =
+  (* mint_cap is proof-cap-only: aiming it at an IO cap is rejected (that's
+     cap_narrow's job). *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(mint_cap(cap))
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap at IO-cap target: error" true (has_errors ctx)
+
 (* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
    typecheck registration + finding 17 (derive unknown type) ──────────────── *)
 
@@ -6792,6 +6879,12 @@ let compiler_suites =
           Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
           Alcotest.test_case "cap_narrow cannot mint proof cap (let binding): error" `Quick test_cap_narrow_forge_let;
           Alcotest.test_case "cap_narrow IO-lattice narrow: no error"       `Quick test_cap_narrow_io_narrow_still_ok;
+          Alcotest.test_case "mint_cap in public declaring-module fn: no error" `Quick test_mint_cap_public_declaring_ok;
+          Alcotest.test_case "mint_cap in pfn: error"                       `Quick test_mint_cap_pfn_rejected;
+          Alcotest.test_case "mint_cap in external module: error"           `Quick test_mint_cap_external_rejected;
+          Alcotest.test_case "mint_cap in applied lambda in declaring fn: no error" `Quick test_mint_cap_lambda_declaring_ok;
+          Alcotest.test_case "mint_cap in applied lambda in external module: error" `Quick test_mint_cap_lambda_external_rejected;
+          Alcotest.test_case "mint_cap at IO-cap target: error"             `Quick test_mint_cap_io_target_rejected;
         ] );
       ( "fix_batch_regressions", [
           Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;

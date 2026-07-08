@@ -525,6 +525,17 @@ type env = {
       result is a nominal proof cap — the proof-cap forge is closed everywhere
       regardless of expression position.  A shared mutable ref (like
       [nonexhaustive_match_spans]) so every env copy appends to one list. *)
+  mint_cap_sites : (Ast.span * ty * bool * string) list ref;
+  (** Every [mint_cap(_)] application site, recorded as
+      (span, result_type, cur_fn_public, current_module).  The mint GATE is
+      checked by the same post-checking sweep as [cap_narrow_sites]: the result
+      type is pinned by later unification (so it can only be inspected after the
+      whole compilation is checked), while the enclosing-fn/module CONTEXT
+      ([cur_fn_public], [current_module]) must be captured HERE because it is
+      per-site and unavailable at sweep time.  A [mint_cap] typechecks iff its
+      pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
+      [current_module] AND [cur_fn_public]; a proof cap from another module, a
+      private fn, or a non-proof (IO) target is rejected. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -584,6 +595,7 @@ let make_env errors type_map = {
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
   cap_narrow_sites = ref [];
+  mint_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
@@ -1486,6 +1498,12 @@ let builtin_bindings : (string * scheme) list =
     (* Capability builtins *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
     ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
+       (Cap(IO) -> Cap(a)); the GATE (declaring-module + public fn, proof-cap
+       target only) is enforced in the EApp special-case, not the scheme.
+       Runtime-erased: aliases cap_narrow in eval/defun/llvm (caps compile to
+       null/VUnit). *)
+    ("mint_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
     (* Phase 1: Monitor/link builtins *)
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
@@ -3905,6 +3923,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
       env.cap_narrow_sites := (sp, rty) :: !(env.cap_narrow_sites);
       rty
 
+    (* mint_cap (Part 2): the GATED proof-cap mint.  Same Cap(IO) -> Cap(a)
+       inference as cap_narrow; the gate — target must be a proof cap whose
+       declaring module is the enclosing module, and the enclosing fn must be
+       public — is enforced by the post-checking sweep because (like cap_narrow)
+       the result var is not pinned until the surrounding unification runs.  We
+       capture the enclosing fn/module CONTEXT here (env.cur_fn_public,
+       env.current_module — lambdas inherit the enclosing fn's public-ness) since
+       that context is unavailable at sweep time. *)
+    | Ast.EApp (Ast.EVar { txt = "mint_cap"; _ } as fv, [arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [arg] 0 in
+      env.mint_cap_sites :=
+        (sp, rty, env.cur_fn_public, env.current_module) :: !(env.mint_cap_sites);
+      rty
+
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
       (* Reject wrong-arity calls of known (module-defined) functions.  March
@@ -5964,6 +5997,59 @@ let check_cap_narrow_proof_cap_sites (env : env) : unit =
          | _ -> ())
       | _ -> ()
     ) !(env.cap_narrow_sites)
+
+(** Post-checking sweep (Part 2): enforce the [mint_cap] gate for every recorded
+    site, now that its result type is pinned by later unification.  [mint_cap(x)]
+    typechecks iff its pinned result is [Cap(P)] with [P] a proof cap whose
+    declaring module equals the site's enclosing module AND the site's enclosing
+    fn is public.  A proof cap from another module or a mint in a private/non-
+    declaring fn is rejected (unforgeability); a non-proof (IO) target is
+    rejected too — attenuating IO caps is [cap_narrow]'s job.  The enclosing
+    fn/module context was captured at record time (unavailable now). *)
+let check_mint_cap_sites (env : env) : unit =
+  List.iter (fun (sp, rty, cur_fn_public, current_module) ->
+      match repr rty with
+      | TCon ("Cap", [inner]) ->
+        (match repr inner with
+         | TCon (p, []) ->
+           (match List.assoc_opt p env.proof_caps with
+            | Some declaring_mod ->
+              if not (declaring_mod = current_module && cur_fn_public) then
+                Err.error env.errors ~span:sp
+                  (render_parts [
+                    MPText "mint_cap "; MPCode ("Cap(" ^ p ^ ")");
+                    MPText " is only allowed inside a public function of its declaring module ";
+                    MPCode declaring_mod; MPText ".";
+                    MPBreak;
+                    MPText "hint: to obtain "; MPCode ("Cap(" ^ p ^ ")");
+                    MPText " elsewhere, receive it as a parameter and pass it through, or call a public factory in ";
+                    MPCode declaring_mod; MPText "." ])
+            | None ->
+              (* mint_cap used to produce a non-proof (IO) cap — disallow; that's
+                 cap_narrow's job. *)
+              Err.error env.errors ~span:sp
+                (render_parts [
+                  MPText "mint_cap is only for proof capabilities; use ";
+                  MPCode "cap_narrow"; MPText " to attenuate IO capabilities." ]))
+         | _ ->
+           (* Result is not a concrete cap constructor — an unbound (generalized)
+              cap var that never got pinned to a specific proof cap.  This
+              happens when the mint is inside a [let]-bound lambda that gets
+              generalized to [forall a. _ -> Cap(a)]: such a value is a
+              polymorphic cap producer that could mint ANY cap (a forge vector),
+              so it is rejected regardless of the enclosing fn.  A mint whose
+              target proof cap is fixed at the call site (direct mint, or an
+              immediately-applied / type-annotated lambda) pins the result and
+              is checked against the declaring-module + public gate above. *)
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPText "mint_cap here does not have a determinable proof-capability result type.";
+               MPBreak;
+               MPText "hint: mint_cap must produce a specific ";
+               MPCode "Cap(Mod.Name)";
+               MPText " fixed at the call site. A mint captured in a generalized (let-bound) lambda is polymorphic in the capability and is rejected — mint directly, or fix the capability type (e.g. annotate the return or apply the lambda in place)." ]))
+      | _ -> ()
+    ) !(env.mint_cap_sites)
 
 (** [fn_capability_closures env] returns the per-function inferred IO-capability
     closure recorded by [check_module_needs] for every function checked so far
@@ -8433,6 +8519,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      pinned result is a nominal proof cap.  The side-table is a shared ref, so a
      single sweep at the entry module covers every nested module's sites. *)
   check_cap_narrow_proof_cap_sites final_env;
+  (* Part 2: enforce the mint_cap gate on every recorded site (result now pinned;
+     enclosing fn/module context captured at record time). Shared ref → one sweep
+     at the entry module covers every nested module's sites. *)
+  check_mint_cap_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:
      TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]

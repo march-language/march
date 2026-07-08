@@ -7733,6 +7733,11 @@ let task_builtins : env =
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
+  (* mint_cap — the gated proof-cap mint. Gating is a compile-time check; at
+     runtime it is a no-op alias of cap_narrow (caps are opaque unit sentinels). *)
+  ; ("mint_cap", VBuiltin ("mint_cap", function
+    | [_cap] -> VUnit
+    | _ -> eval_error "mint_cap: expected 1 argument"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
