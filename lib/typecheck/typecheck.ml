@@ -514,21 +514,32 @@ type env = {
       is gated inside [check_no_panic_module], which only runs for
       `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
       Warning and is never promoted to an error. *)
-  cap_narrow_sites : (Ast.span * ty) list ref;
-  (** Every [cap_narrow(_)] application site, recorded as (span, result_type) by
-      the cap_narrow EApp special-case in [infer_expr].  The result type is the
-      SAME mutable [ty] node the arm returned (a fresh [Cap(a)] var); its [a] is
-      pinned to the concrete cap by LATER unification (the caller's param type or
-      a [let]/return annotation), which the arm cannot see at record time.  A
-      post-checking sweep ([check_cap_narrow_proof_cap_sites]) [repr]s each
-      recorded type once the whole compilation is checked and errors if the
-      result is a nominal proof cap — the proof-cap forge is closed everywhere
-      regardless of expression position.  A shared mutable ref (like
-      [nonexhaustive_match_spans]) so every env copy appends to one list. *)
+  cap_producer_ivars : (int, Ast.span) Hashtbl.t;
+  (** Inner cap-argument [TVar] id → the [cap_narrow] application span that
+      produced it.  A [cap_narrow(cap)] result is [Cap(a)]; we tag [a]'s id here.
+      [unify] consults this table: the instant [a] (or any var linked to it) is
+      bound to a nominal proof cap [TCon(p,[])] with [p] in [proof_caps], it is a
+      forge (a proof cap can ONLY come from [mint_cap] in a public declaring-
+      module fn or from a parameter pass-through — never from [cap_narrow]) and
+      the binding is rejected.  IO caps are not in [proof_caps], so legitimate
+      IO-lattice narrowing ([Cap(IO) -> Cap(IO.Network)]) is unaffected in every
+      position, including laundering through a polymorphic function.  A shared
+      hashtable (like [cap_closures]) so every env copy sees the same tags. *)
+  cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
+  (** Names of user functions whose body IS (or launders) a [cap_narrow] result —
+      a "cap-narrow factory" (e.g. `fn mk(cap) do cap_narrow(cap) end`).  A
+      cross-module reference to such a fn resolves to its PREBOUND scheme (whose
+      vars are distinct from the pass-2 [check_fn] vars we tag), so the unify hook
+      cannot see the taint through the call.  We instead record the factory name
+      here and, at the call site, taint the call's result.  (NOTE: this path does
+      not yet close the nested-module cross-resolution route — see the batch-a
+      report's Critical-fix section; it is retained as it closes same-module
+      factory calls and is harmless.)  Shared hashtable so every env copy sees the
+      same factory set. *)
   mint_cap_sites : (Ast.span * ty * bool * string) list ref;
   (** Every [mint_cap(_)] application site, recorded as
       (span, result_type, cur_fn_public, current_module).  The mint GATE is
-      checked by the same post-checking sweep as [cap_narrow_sites]: the result
+      checked by a post-checking sweep ([check_mint_cap_sites]): the result
       type is pinned by later unification (so it can only be inspected after the
       whole compilation is checked), while the enclosing-fn/module CONTEXT
       ([cur_fn_public], [current_module]) must be captured HERE because it is
@@ -594,7 +605,8 @@ let make_env errors type_map = {
   no_panic_mod = false;
   no_panic_modules = [];
   nonexhaustive_match_spans = ref [];
-  cap_narrow_sites = ref [];
+  cap_producer_ivars = Hashtbl.create 16;
+  cap_narrow_factory_fns = Hashtbl.create 16;
   mint_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
@@ -606,6 +618,79 @@ let make_env errors type_map = {
 
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
+
+(** Value restriction for capability-producer applications.  Lower every
+    [Unbound] TVar reachable in [ty] to level 0 IN PLACE, so [generalize]
+    (which quantifies vars at [l > level] for any [level >= 0]) can NEVER
+    quantify them.  The result type of a [cap_narrow]/[mint_cap] application is
+    expansive (a function call) and must not be let-generalized: if
+    [let x = cap_narrow(cap)] generalized [x] to [∀a. Cap(a)], each use would
+    instantiate a FRESH [a] pinned to that use's type while the compiler's
+    single recorded result node stayed an unbound quantified var — defeating the
+    post-checking proof-cap sweep and REOPENING the forge in every let-/generic-
+    flow position (a value narrowed once and reused as different caps).  Pinning
+    the result to a single monomorphic var makes the use-site's type flow back to
+    the recorded node, so the sweep sees the concrete cap.  Consequence: a single
+    [cap_narrow]/[mint_cap] value used at two DIFFERENT cap types no longer
+    typechecks (the one var can't unify with both) — that pattern is not
+    least-privilege threading and does not occur in real code. *)
+let rec demote_to_monomorphic (t : ty) : unit =
+  match t with
+  | TVar r ->
+    (match !r with
+     | Unbound (id, l) -> if l > 0 then r := Unbound (id, 0)
+     | Link t'         -> demote_to_monomorphic t')
+  | TCon   (_, args)    -> List.iter demote_to_monomorphic args
+  | TArrow (a, b)       -> demote_to_monomorphic a; demote_to_monomorphic b
+  | TTuple ts           -> List.iter demote_to_monomorphic ts
+  | TRecord flds        -> List.iter (fun (_, t) -> demote_to_monomorphic t) flds
+  | TLin   (_, t)       -> demote_to_monomorphic t
+  | TNatOp (_, a, b)    -> demote_to_monomorphic a; demote_to_monomorphic b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> demote_to_monomorphic base
+  | TNat _ | TError     -> ()
+
+(** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
+    can reject the instant [a] is bound to a nominal proof cap — closing the
+    forge even when the value is laundered through a polymorphic function.  Two
+    shapes are tagged: [Cap(a)] (tag the inner var [a]) and a bare var [r] (the
+    whole value type is a still-unknown var — as happens when a laundering fn's
+    return decouples from its param; tag [r] itself).  If the type is already a
+    concrete cap, tagging is a no-op. *)
+let tag_cap_producer_result (env : env) (rty : ty) (sp : Ast.span) : unit =
+  match repr rty with
+  | TCon ("Cap", [inner]) ->
+    (match repr inner with
+     | TVar r ->
+       (match !r with
+        | Unbound (id, _) -> Hashtbl.replace env.cap_producer_ivars id sp
+        | Link _ -> ())
+     | _ -> ())
+  | TVar r ->
+    (match !r with
+     | Unbound (id, _) -> Hashtbl.replace env.cap_producer_ivars id sp
+     | Link _ -> ())
+  | _ -> ()
+
+(** True if [ty] carries a [cap_narrow]-tagged cap-producer var anywhere — the
+    inner var of a [Cap(a)] whose [a] is tagged, or a bare tagged var.  Used to
+    propagate the forge taint through a call: an argument whose type is tainted
+    laundered a cap_narrow result, so the call's result must be tainted too. *)
+let ty_has_tagged_cap_producer (env : env) (ty : ty) : bool =
+  let tagged r = match !r with
+    | Unbound (id, _) -> Hashtbl.mem env.cap_producer_ivars id
+    | Link _ -> false in
+  let rec go t = match repr t with
+    | TVar r             -> tagged r
+    | TCon   (_, args)   -> List.exists go args
+    | TArrow (a, b)      -> go a || go b
+    | TTuple ts          -> List.exists go ts
+    | TRecord flds       -> List.exists (fun (_, t) -> go t) flds
+    | TLin   (_, t)      -> go t
+    | TNatOp (_, a, b)   -> go a || go b
+    | TRefine (base, _, _) -> go base
+    | TChan _ | TNat _ | TError -> false
+  in go ty
 
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
@@ -974,6 +1059,17 @@ let instantiate level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
+    (* Proof-cap forge taint survives generalization: if a quantified var was a
+       [cap_narrow]-tagged cap-producer var (e.g. an un-annotated helper
+       `fn mk(cap) do cap_narrow(cap) end` whose return got generalized), tag its
+       fresh instantiation too, so the unify hook still fires when the laundered
+       result is bound to a proof cap at THIS call site. *)
+    List.iter (fun (id, fresh) ->
+        if Hashtbl.mem env.cap_producer_ivars id then
+          let cn_sp = Hashtbl.find env.cap_producer_ivars id in
+          (match fresh with
+           | TVar r -> (match !r with Unbound (nid, _) -> Hashtbl.replace env.cap_producer_ivars nid cn_sp | Link _ -> ())
+           | _ -> ())) subst;
     let rec inst t =
       (* Preserve a refinement wrapper through instantiation so call sites see
          the predicate on the parameter type; only the base is instantiated. *)
@@ -2196,8 +2292,50 @@ let rec unify env ~span ?(reason = None) t1 t2 =
        if occurs id level t then begin
          report_mismatch env ~span ~reason t1 t2;
          r := Link TError
-       end else
+       end else begin
+         (* Proof-cap forge hook: if [r] is a tagged [cap_narrow]-result inner
+            var (see [cap_producer_ivars]), reject the instant it is bound to a
+            nominal proof cap — a cap_narrow value can NEVER become a proof cap,
+            in any position or flow (direct, let-generalized, or laundered
+            through a polymorphic function). If it binds to ANOTHER var, propagate
+            the tag so the check fires when that var is eventually pinned. IO caps
+            are not in [proof_caps], so IO-lattice narrowing is never affected. *)
+         (match Hashtbl.find_opt env.cap_producer_ivars id with
+          | Some cn_sp ->
+            let forge_error p =
+              Err.error env.errors ~span:cn_sp
+                (render_parts [
+                  MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
+                  MPText " — "; MPCode ("Cap(" ^ p ^ ")");
+                  MPText " is a proof capability, not an IO capability.";
+                  MPBreak;
+                  MPText "hint: a proof capability may only be minted by a public function of its declaring module via ";
+                  MPCode "mint_cap";
+                  MPText "; cap_narrow only attenuates IO capabilities." ])
+            in
+            (match repr t with
+             (* Tag is on the inner cap var: [a] binds directly to a proof cap. *)
+             | TCon (p, []) when List.mem_assoc p env.proof_caps -> forge_error p
+             (* Tag is on a whole-value var (laundered result): binds to Cap(P). *)
+             | TCon ("Cap", [inner]) ->
+               (match repr inner with
+                | TCon (p, []) when List.mem_assoc p env.proof_caps -> forge_error p
+                | TVar r2 ->
+                  (* Cap of an unbound var: propagate the tag to the inner var. *)
+                  (match !r2 with
+                   | Unbound (id2, _) -> Hashtbl.replace env.cap_producer_ivars id2 cn_sp
+                   | Link _ -> ())
+                | _ -> ())
+             (* Binds to another bare var: propagate the tag so the check fires
+                when that var is eventually pinned. *)
+             | TVar r2 ->
+               (match !r2 with
+                | Unbound (id2, _) -> Hashtbl.replace env.cap_producer_ivars id2 cn_sp
+                | Link _ -> ())
+             | _ -> ())
+          | None -> ());
          r := Link t
+       end
      | Link _ -> assert false)  (* repr should have resolved links *)
 
   | TCon (n1, a1), TCon (n2, a2) ->
@@ -3901,26 +4039,36 @@ let rec infer_expr env (e : Ast.expr) : ty =
          TError)
 
     (* Restrict cap_narrow (Part 1): its result must never be a nominal proof
-       cap. cap_narrow is the ONLY polymorphic cap producer, so this closes the
-       proof-cap forge in every expression position (inline arg, let-binding,
-       return). IO-lattice narrowing (Cap(IO) -> Cap(IO.Network)) is unaffected
-       because IO caps are not in env.proof_caps; proof-cap minting goes through
-       `mint_cap` (gated).
+       cap. cap_narrow is the ONLY polymorphic cap producer, so closing this
+       closes the proof-cap forge in every expression position (inline arg,
+       let-binding, return, and laundered through a polymorphic function).
+       IO-lattice narrowing (Cap(IO) -> Cap(IO.Network)) is unaffected because IO
+       caps are not in env.proof_caps; proof-cap minting goes through `mint_cap`
+       (gated).
 
-       POSITION-PINNING (verified live, R1/R7): at this point the result var `a`
-       in `Cap(a)` is NOT yet pinned — `infer_app` only pins the ARGUMENT against
-       `Cap(IO)`; `a` is pinned to the concrete cap by the SURROUNDING
-       check_expr/unify (the caller's param type in R1, the let/return annotation
-       in R7), which runs AFTER this arm returns.  So `repr rty` here is still an
-       unbound var (observed `Cap(r3)` for R1, R3, R4 alike).  We therefore RECORD
-       the (span, result-type) into a shared side-table and let the post-checking
-       sweep [check_cap_narrow_proof_cap_sites] inspect the now-pinned type — the
-       proven "record-a-span-side-table-then-read-after-checking" pattern used for
-       [nonexhaustive_match_spans].  This is position-independent. *)
+       WHY A CALL-SITE / POST-CHECKING SWEEP IS INSUFFICIENT: at this point the
+       result var `a` in `Cap(a)` is NOT yet pinned — `infer_app` only pins the
+       ARGUMENT against `Cap(IO)`; `a` is pinned by LATER unification.  A recorded
+       side-table read after checking catches the directly-pinned positions
+       (R1/R7), but when the value is laundered through a polymorphic user
+       function (`consume(id(cap_narrow(cap)))`) the recorded node stays unbound
+       forever — indistinguishable from legitimate laundered IO narrowing.
+
+       THE FIX (two complementary, both here):
+       - VALUE RESTRICTION [demote_to_monomorphic]: a cap_narrow application is
+         expansive, so its result must never let-generalize.  Demoting the result
+         var to level 0 keeps `let x = cap_narrow(cap)` monomorphic so its single
+         use pins the one var.
+       - USE-SITE HOOK [tag_cap_producer_result] + the [unify] proof-cap-forge
+         arm: tag the inner cap var `a`; the instant `a` (or any var it later
+         links to) is unified with a nominal proof cap, [unify] rejects it —
+         position- and flow-independent, and it fires ONLY for proof caps so
+         IO narrowing (including through a polymorphic fn) is never touched. *)
     | Ast.EApp (Ast.EVar { txt = "cap_narrow"; _ } as fv, [arg], sp) ->
       let f_ty = infer_expr env fv in
       let rty = infer_app env sp f_ty [arg] 0 in
-      env.cap_narrow_sites := (sp, rty) :: !(env.cap_narrow_sites);
+      demote_to_monomorphic rty;
+      tag_cap_producer_result env rty sp;
       rty
 
     (* mint_cap (Part 2): the GATED proof-cap mint.  Same Cap(IO) -> Cap(a)
@@ -3934,6 +4082,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EApp (Ast.EVar { txt = "mint_cap"; _ } as fv, [arg], sp) ->
       let f_ty = infer_expr env fv in
       let rty = infer_app env sp f_ty [arg] 0 in
+      (* Same value restriction as cap_narrow: a mint_cap application is
+         expansive and must not let-generalize, so the gate sweep sees the
+         concrete pinned cap rather than an unbound quantified var. *)
+      demote_to_monomorphic rty;
       env.mint_cap_sites :=
         (sp, rty, env.cur_fn_public, env.current_module) :: !(env.mint_cap_sites);
       rty
@@ -3980,7 +4132,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
        | None ->
-         infer_app env sp f_ty args 0)
+         let res = infer_app env sp f_ty args 0 in
+         (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
+            result — recorded in check_fn), taint the call's result so the unify
+            hook fires when it is later bound to a proof cap.  This closes the
+            cross-module factory route (`consume(mk(cap))`) whose prebound scheme
+            hides the per-var taint from the hook. *)
+         (match f with
+          | Ast.EVar name when Hashtbl.mem env.cap_narrow_factory_fns name.txt ->
+            tag_cap_producer_result env res sp
+          | _ -> ());
+         res)
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
@@ -4500,6 +4662,16 @@ and infer_app env span f_ty args idx =
   | arg :: rest, TArrow (param_ty, ret_ty) ->
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));
+    (* Proof-cap forge taint: if this argument laundered a [cap_narrow] result
+       (its type — now unified with [param_ty] — carries a tagged cap-producer
+       var), taint [ret_ty].  This closes the launder-through-a-polymorphic-fn
+       routes (e.g. [consume(id(cap_narrow(cap)))]) where the fn's return
+       decouples from its param and would otherwise slip past the direct unify
+       hook: the tainted result is then rejected when it is bound to a proof cap.
+       Only proof caps are ever rejected downstream, so IO narrowing through the
+       same fn is unaffected. *)
+    if ty_has_tagged_cap_producer env param_ty then
+      tag_cap_producer_result env ret_ty span;
     infer_app env span ret_ty rest (idx + 1)
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -4508,6 +4680,10 @@ and infer_app env span f_ty args idx =
     unify env ~span
       ~reason:(Some (RBuiltin "A value being applied like a function must have a function type."))
       f_ty (TArrow (arg_ty, ret_ty));
+    (* Proof-cap forge taint (same as the TArrow branch): a laundered cap_narrow
+       argument taints the call's result so the unify hook still fires downstream. *)
+    if ty_has_tagged_cap_producer env arg_ty then
+      tag_cap_producer_result env ret_ty span;
     infer_app env span ret_ty rest (idx + 1)
   | _, TError ->
     List.iter (fun a -> ignore (infer_expr env a)) args;
@@ -5059,6 +5235,25 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
 
       (* Warn about unrestricted params not referenced in the body *)
       warn_unused_params env clause.fc_params clause.fc_body fn_span;
+
+      (* Proof-cap forge value restriction across fn boundaries: if this fn's
+         body is (or launders) a [cap_narrow] result (e.g.
+         `fn mk(cap) do cap_narrow(cap) end`), its cap-producer return var must
+         NOT generalize — otherwise each cross-module call instantiates a fresh,
+         untagged copy that escapes the unify hook and can be forged into a proof
+         cap.  Demote the return type's vars to level 0 so [generalize] below
+         keeps them monomorphic, and re-tag so the shared var is caught when a
+         call binds it to a proof cap. *)
+      (* Record a cap-narrow-factory fn: its body launders a [cap_narrow] result,
+         so a cross-module call to it (which resolves to the prebound scheme,
+         invisible to the unify hook's per-var tag) must taint its result at the
+         call site — see the [EApp] handling of a factory name. *)
+      if ty_has_tagged_cap_producer env body_ty then begin
+        Hashtbl.replace env.cap_narrow_factory_fns def.fn_name.txt fn_span;
+        if env.current_module <> "" then
+          Hashtbl.replace env.cap_narrow_factory_fns
+            (env.current_module ^ "." ^ def.fn_name.txt) fn_span
+      end;
 
       let fn_ty =
         List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
@@ -5968,35 +6163,6 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       ) edef.ext_fns
     | _ -> ()
   ) decls
-
-(** Post-checking sweep (Part 1b): for every recorded [cap_narrow(_)] call site,
-    [repr] its result type — now fully pinned by the surrounding unification that
-    ran after the site was recorded — and reject if it is a nominal proof cap.
-    [cap_narrow] attenuates IO capabilities only; a proof cap is minted via the
-    gated [mint_cap] primitive.  Runs once after the whole compilation is checked
-    (env.proof_caps fully populated); the position-pinning caveat that defeats an
-    inline check inside the EApp arm is exactly why this side-table sweep exists
-    — see the [cap_narrow] arm in [infer_expr]. *)
-let check_cap_narrow_proof_cap_sites (env : env) : unit =
-  List.iter (fun (sp, rty) ->
-      (* [repr] both the outer Cap and its inner cap argument: after unification
-         the inner cap is typically a [TVar] Link chain, not yet a bare [TCon]. *)
-      match repr rty with
-      | TCon ("Cap", [inner]) ->
-        (match repr inner with
-         | TCon (p, []) when List.mem_assoc p env.proof_caps ->
-           Err.error env.errors ~span:sp
-             (render_parts [
-               MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
-               MPText " — "; MPCode ("Cap(" ^ p ^ ")");
-               MPText " is a proof capability, not an IO capability.";
-               MPBreak;
-               MPText "hint: a proof capability may only be minted by a public function of its declaring module via ";
-               MPCode "mint_cap";
-               MPText "; cap_narrow only attenuates IO capabilities." ])
-         | _ -> ())
-      | _ -> ()
-    ) !(env.cap_narrow_sites)
 
 (** Post-checking sweep (Part 2): enforce the [mint_cap] gate for every recorded
     site, now that its result type is pinned by later unification.  [mint_cap(x)]
@@ -8514,12 +8680,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   (* Pass 2: full checking *)
   let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
-  (* Part 1b: sweep recorded cap_narrow sites now that every function body (and
-     thus every result-type unification) has been checked — reject any whose
-     pinned result is a nominal proof cap.  The side-table is a shared ref, so a
-     single sweep at the entry module covers every nested module's sites. *)
-  check_cap_narrow_proof_cap_sites final_env;
-  (* Part 2: enforce the mint_cap gate on every recorded site (result now pinned;
+  (* Part 1: the cap_narrow proof-cap forge is closed by the [unify] hook
+     ([cap_producer_ivars]), which fires at the exact moment a cap_narrow-derived
+     inner var is bound to a nominal proof cap — position- and flow-independent
+     (direct, let-generalized, or laundered through a polymorphic function).  A
+     post-checking recorded-node sweep is NOT used for cap_narrow: a laundered
+     value leaves the recorded node unbound, which the sweep cannot distinguish
+     from legitimate laundered IO narrowing.
+     Part 2: enforce the mint_cap gate on every recorded site (result now pinned;
      enclosing fn/module context captured at record time). Shared ref → one sweep
      at the entry module covers every nested module's sites. *)
   check_mint_cap_sites final_env;

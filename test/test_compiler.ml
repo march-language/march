@@ -4357,6 +4357,62 @@ let test_cap_narrow_io_narrow_still_ok () =
   Alcotest.(check bool) "cap_narrow IO-lattice narrow: no error"
     false (has_errors ctx)
 
+let test_cap_narrow_forge_generalized_let () =
+  (* Residual-forge witness (let-generalized launder): a cap_narrow result bound
+     with `let`, then passed to a proof-cap-typed callee.  The RHS is expansive,
+     so `stolen` must stay MONOMORPHIC (value restriction) — without it, `stolen`
+     generalized to ∀a.Cap(a) and each use forged a fresh proof cap while the
+     compiler's recorded node stayed unbound.  RED pre-fix (exit 0), GREEN after. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn use_proof(_m : Cap(Db.P)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        let stolen = cap_narrow(cap)
+        use_proof(stolen)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow let-generalized launder to proof cap: error"
+    true (has_errors ctx)
+
+let test_cap_narrow_forge_through_generic_fn () =
+  (* Residual-forge witness (laundered through a polymorphic user fn): a generic
+     `fn id(x) do x end` carries a cap_narrow result to a proof-cap-typed callee.
+     Closed by taint propagation through the call + the unify use-site hook.
+     RED pre-fix (exit 0), GREEN after. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn id(x) do x end
+      fn consume(_m : Cap(Db.P)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        consume(id(cap_narrow(cap)))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow laundered through generic fn to proof cap: error"
+    true (has_errors ctx)
+
+let test_cap_narrow_launder_io_still_ok () =
+  (* Regression guard for the taint machinery: laundering a cap_narrow result
+     through a generic fn to an IO-cap callee must STAY accepted — only proof
+     caps are rejected. *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn id(x) do x end
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(id(cap_narrow(cap)))
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow laundered through generic fn to IO cap: no error"
+    false (has_errors ctx)
+
 (* ── Proof-cap mint (Part 2: gated mint_cap primitive) ────────────────────
    mint_cap is the ONLY way to construct a proof cap; it typechecks iff used in
    a PUBLIC fn of the cap's DECLARING module. cap_narrow can no longer produce a
@@ -6879,6 +6935,9 @@ let compiler_suites =
           Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
           Alcotest.test_case "cap_narrow cannot mint proof cap (let binding): error" `Quick test_cap_narrow_forge_let;
           Alcotest.test_case "cap_narrow IO-lattice narrow: no error"       `Quick test_cap_narrow_io_narrow_still_ok;
+          Alcotest.test_case "cap_narrow let-generalized launder: error"    `Quick test_cap_narrow_forge_generalized_let;
+          Alcotest.test_case "cap_narrow laundered through generic fn: error" `Quick test_cap_narrow_forge_through_generic_fn;
+          Alcotest.test_case "cap_narrow laundered to IO cap: no error"      `Quick test_cap_narrow_launder_io_still_ok;
           Alcotest.test_case "mint_cap in public declaring-module fn: no error" `Quick test_mint_cap_public_declaring_ok;
           Alcotest.test_case "mint_cap in pfn: error"                       `Quick test_mint_cap_pfn_rejected;
           Alcotest.test_case "mint_cap in external module: error"           `Quick test_mint_cap_external_rejected;
