@@ -4695,6 +4695,140 @@ let test_nested_launder_private_id_still_rejected () =
     "nested PRIVATE (pfn) id still rejects Box(String)->Box(Int): error"
     true (has_errors ctx)
 
+(* ── Round 2: residual erasures the first fix missed ──────────────────────
+   CRITICAL #1 — FORWARD REFERENCE: the unannotated helper is defined AFTER its
+   caller.  The caller pins the qualified prebind (`App.id`) to its own decoupled
+   use before `id`'s DFn runs, so a post-hoc rebind is too late.  Closed by
+   teaching [dependency_order_dfn_run]'s [deps_of] to see the qualified reference
+   (`App.id`) as a dependency on the local `id`, ordering the helper FIRST.
+   CRITICAL #2 — DISTINCT-TVAR ANNOTATION: `fn launder(x:a):b do x` gets a prebind
+   built from annotation SYNTAX (`a -> b`, never unified against the body
+   constraint `a ~ b`).  Closed by rebinding the qualified name to the fn's REAL
+   body-checked scheme UNCONDITIONALLY (not only bare-placeholder prebinds).
+   All RED on commit 10249488; GREEN after round 2. *)
+
+(* C1 forward-ref, Int -> String (general memory-safety). *)
+let test_nested_fwdref_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(id(42)) end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* C1 forward-ref, Box(String) -> Box(Int). *)
+let test_nested_fwdref_box () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* C1 forward-ref, Cap(IO) -> Cap(Db.P) proof-cap forge. *)
+let test_nested_fwdref_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(id(cap)) end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Int -> String. *)
+let test_nested_distinct_tvar_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn launder(x : a) : b do x end
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack(n : Int) : Int do need_str(launder(n)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Int into String param: error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Box(String) -> Box(Int). *)
+let test_nested_distinct_tvar_box () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn launder(x : a) : b do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(launder(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Cap(IO) -> Cap(Db.P). *)
+let test_nested_distinct_tvar_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn launder(x : a) : b do x end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(launder(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: forward-ref helper used legitimately (identity passthrough
+   of the SAME type) must still accept — the dependency ordering + real-scheme
+   rebind restore true polymorphism, they do not over-reject. *)
+let test_nested_fwdref_legit_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn dbl(n : Int) : Int do n + n end
+      fn a() : Int do dbl(id(5)) end
+      fn b() : String do id("hi") end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: a genuinely-polymorphic annotated helper `fn id(x:a):a`
+   (SAME tvar in and out) forward-referenced must still accept at two types. *)
+let test_nested_annotated_same_tvar_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn u1() : Int do id(1) end
+      fn u2() : String do id("hi") end
+      fn id(x : a) : a do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested annotated id (a->a) used at Int AND String: no error"
+    false (has_errors ctx)
+
 (* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
    typecheck registration + finding 17 (derive unknown type) ──────────────── *)
 
@@ -7153,6 +7287,16 @@ let compiler_suites =
           Alcotest.test_case "nested id used at Int AND String: no error"            `Quick test_nested_id_polymorphic_ok;
           Alcotest.test_case "nested ANNOTATED id still rejects forge: error"        `Quick test_nested_launder_annotated_id_still_rejected;
           Alcotest.test_case "nested PRIVATE (pfn) id still rejects forge: error"    `Quick test_nested_launder_private_id_still_rejected;
+          (* Round 2 — residual erasures (RED on 10249488, GREEN after). *)
+          Alcotest.test_case "C1 forward-ref id launders Int->String: error"        `Quick test_nested_fwdref_int_as_string;
+          Alcotest.test_case "C1 forward-ref id launders Box(String)->Box(Int): error" `Quick test_nested_fwdref_box;
+          Alcotest.test_case "C1 forward-ref id launders Cap(IO)->Cap(Db.P): error" `Quick test_nested_fwdref_proof_cap;
+          Alcotest.test_case "C2 distinct-tvar launder erases Int->String: error"    `Quick test_nested_distinct_tvar_int_as_string;
+          Alcotest.test_case "C2 distinct-tvar launder erases Box(String)->Box(Int): error" `Quick test_nested_distinct_tvar_box;
+          Alcotest.test_case "C2 distinct-tvar launder erases Cap(IO)->Cap(Db.P): error" `Quick test_nested_distinct_tvar_proof_cap;
+          (* Round 2 green-stays-green guards. *)
+          Alcotest.test_case "forward-ref id used at Int AND String: no error"       `Quick test_nested_fwdref_legit_ok;
+          Alcotest.test_case "forward-ref annotated id (a->a) at Int AND String: no error" `Quick test_nested_annotated_same_tvar_ok;
         ] );
       ( "fix_batch_regressions", [
           Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;

@@ -4922,7 +4922,14 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
 let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   match e with
   | Ast.EVar n ->
-    if List.mem n.txt bound || String.contains n.txt '.' then [] else [n.txt]
+    (* Keep DOTTED names too (e.g. `App.id`, produced by desugar's
+       [qualify_module_refs] for an intra-nested-module reference).  The only two
+       callers are [dependency_order_dfn_run]'s [deps_of] — which maps a dotted
+       name's suffix to a local fn so a nested-module forward reference is ordered
+       helper-first (closing the qualified-prebind type-erasure forward-ref hole)
+       — and [warn_unused_params], which only compares against bare param names, so
+       a dotted entry is inert there.  A bound name is still dropped. *)
+    if List.mem n.txt bound then [] else [n.txt]
   | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
   | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
   | Ast.EApp (f, args, _) ->
@@ -6473,10 +6480,28 @@ let dependency_order_dfn_run (run : Ast.decl list) : Ast.decl list =
     let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
     let by_name : (string, Ast.fn_def * Ast.span) Hashtbl.t = Hashtbl.create 16 in
     List.iter (fun (n, ds) -> Hashtbl.replace by_name n ds) info;
+    (* Map a body reference to a local fn name.  A BARE name matches directly; a
+       DOTTED name (`App.id`, produced by desugar's [qualify_module_refs] for an
+       intra-nested-module reference) is mapped by its suffix after the last `.` —
+       so a nested-module call to a sibling `id` is recognised as a dependency on
+       the local `id`, and [dependency_order_dfn_run] orders the helper BEFORE its
+       caller.  Without this, a forward reference (`fn attack() do need_str(id(x))`
+       defined ABOVE `fn id`) left `App.id`'s prebind pinned to the caller's
+       decoupled use, and the qualified-prebind reconciliation (see the DFn branch
+       of [check_decl]) ran too late to un-erase the already-checked caller. *)
+    let local_of n =
+      if StringSet.mem n name_set then Some n
+      else match String.rindex_opt n '.' with
+        | Some i ->
+          let suffix = String.sub n (i + 1) (String.length n - i - 1) in
+          if StringSet.mem suffix name_set then Some suffix else None
+        | None -> None
+    in
     let deps_of (d : Ast.fn_def) =
       List.concat_map (fun (c : Ast.fn_clause) -> free_vars_expr [] c.Ast.fc_body)
         d.Ast.fn_clauses
-      |> List.filter (fun n -> n <> d.Ast.fn_name.txt && StringSet.mem n name_set)
+      |> List.filter_map local_of
+      |> List.filter (fun n -> n <> d.Ast.fn_name.txt)
     in
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
@@ -7096,27 +7121,34 @@ let rec check_decl env (d : Ast.decl) : env =
     let sch = check_fn env def sp in
     discharge_constraints env sp;
     let env = bind_var def.fn_name.txt sch env in
-    (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the real inferred scheme.
-       desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites every
-       intra-nested-module reference to the qualified form (e.g. `App.id`), and
-       [prebind_mod_members] bound that name to a fresh `Mono (fresh_var 1)` for
-       an UNANNOTATED public fn ([prebind_fn_scheme] returned None).  Without
-       this rebind, a sibling fn in the same nested module resolves the stale
-       placeholder — a decoupled `?a -> ?b` — which ERASES the type of anything
-       laundered through the fn (a general type-soundness hole; the proof-cap
-       forge was one exploitation).  Only overwrite when the qualified binding is
-       STILL the bare placeholder; an already-concrete scheme (from
-       [prebind_fn_scheme], or a default-arg sibling) must be left intact —
-       mirrors [check_fn]'s pass-1 placeholder-reconciliation guard.  The prefix
+    (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the fn's REAL body-checked
+       scheme.  desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites
+       every intra-nested-module reference to the qualified form (e.g. `App.id`),
+       and [prebind_mod_members] seeds that name with either a fresh
+       `Mono (fresh_var 1)` placeholder (UNANNOTATED fn — [prebind_fn_scheme]
+       returned None) or a scheme built purely from annotation SYNTAX
+       (ANNOTATED fn — never unified against the body, so `fn launder(x:a):b do x`
+       keeps a decoupled `a -> b` that erases through every call).  Either way the
+       prebind is NOT the validated scheme; a sibling fn resolving the qualified
+       name gets a decoupled `?a -> ?b` that ERASES the type of anything laundered
+       through it (a general type-soundness hole; the proof-cap forge was one
+       exploitation).  Bind the qualified name to [sch] — the scheme [check_fn]
+       actually validated against the body — UNCONDITIONALLY (both the placeholder
+       and the un-body-validated-annotation cases).  This is codegen-safe: mono/TIR
+       key on the per-span [type_map] types, not this env scheme, and the full
+       [llvm_ir_validity_gate] (CRDT/distributed fixtures) is clean under it.
+       Forward references — where a caller earlier in the module already pinned the
+       placeholder to its own decoupled use — are handled UPSTREAM by
+       [dependency_order_dfn_run]: its [deps_of]/[local_of] now sees the qualified
+       reference (`App.id`) as a dependency on the local `id`, so `id` is checked
+       (and this rebind runs) BEFORE any caller.  The prefix
        matches [prebind_mod_members]'s key exactly: [cap_qual_prefix] accumulates
-       "" at the entry module then the nested names (entry mod stripped), same as
-       [prebind_mod_members]'s [prefix]. *)
+       "" at the entry module then the nested names (entry mod stripped). *)
     if env.cap_qual_prefix <> "" then
       let qname = env.cap_qual_prefix ^ "." ^ def.fn_name.txt in
       (match StrMap.find_opt qname env.vars with
-       | Some (Mono (TVar r)) when (match !r with Unbound _ -> true | _ -> false) ->
-         bind_var qname sch env
-       | _ -> env)
+       | Some _ -> bind_var qname sch env
+       | None   -> env)
     else env
 
   | Ast.DLet (_vis, b, sp) ->
