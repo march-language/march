@@ -283,6 +283,73 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
+
+Slice 6 lands **two soundness properties** in `lib/typecheck/typecheck.ml` (both
+real compiler fixes, gated on the full six-runner suite), then documents and
+witnesses them across `specs/lang/core-march-types.md` §2.8.13,
+`specs/lang/capabilities.md`, the `specs/lang/types/` corpus, and `INDEX.md`.
+
+- **The P0 nested-module type-erasure fix (GENERAL soundness).** Nesting no
+  longer weakens type checking: an intra-module reference to a function is now
+  checked against that function's real, body-checked (possibly polymorphic)
+  scheme at every nesting level, INCLUDING the entry module. Root cause (see
+  `.superpowers/sdd/prebind-fix-report.md`): an unannotated public fn in a
+  nested `mod` was prebound under its QUALIFIED name (`App.id`) to a fresh
+  placeholder that `check_decl`'s DFn branch reconciled only under the BARE
+  name, so a sibling resolving the desugar-qualified reference got a decoupled
+  `?a -> ?b` that **erased the type of anything laundered through it** — base
+  types (`Int`→`String`, a genuine memory-safety break), ADT args
+  (`Box(String)`→`Box(Int)`), and `Cap` alike. The proof-cap forge was one
+  exploitation of this general hole. The fix reconciles every qualified fn key
+  (both the `cap_qual_prefix` nested key and the `current_module` entry-self
+  key) to `check_fn`'s real scheme, and orders forward references so the rebind
+  runs in time; `unify` is untouched. 25 NON-VACUOUS unit tests
+  (`nested_mod_prebind_erasure` group, RED pre-fix / GREEN after), fixed across
+  three adversarial-review rounds (`10249488`, `d19dc519`, `cbbf99a8`).
+- **The proof-cap minting discipline.** Proof capabilities (`proof cap Name` in
+  a `mod`, consumed as `Cap(Mod.Name)`) are now genuinely unforgeable. The
+  gated `mint_cap` primitive is the ONLY way to construct a proof cap and
+  typechecks iff used in a PUBLIC (`fn`, not `pfn`) function of the cap's
+  declaring module; `cap_narrow` — the ordinary IO-lattice narrower — can no
+  longer produce a proof cap in ANY expression position (Batch-A: value
+  restriction + a use-site `unify` proof-cap hook + call/instantiate/factory
+  taint propagation). Both are runtime-erased (`mint_cap` aliases `cap_narrow`
+  downstream). The only two ways to obtain `Cap(P)` are now receive-and-pass-
+  through or `mint_cap` in P's declaring module's public fns. See
+  `.superpowers/sdd/batch-a-report.md`; 12 `proof_cap_mint` unit tests.
+
+- **Reference:** `core-march-types.md` gains a general typing-soundness rule
+  ((T-QualRef): intra-module references reconcile to the real body-checked
+  scheme regardless of nesting) and a dedicated proof-capabilities subsection
+  §2.8.13 (Check 1 self-declaration, Check 6 pass-through, the `mint_cap` rule,
+  the `cap_narrow` restriction, and the unforgeability property), reconciling
+  §2.8's opening "(Check 6) out of scope here" and §2.8.8's stale `cap_narrow`-
+  mints-a-proof-cap note. The still-OPEN `cap_narrow` container-launder taint
+  follow-up is noted as a documented residual.
+- **Tutorial:** `capabilities.md`'s proof-caps section replaces the
+  non-typechecking `; ()` mint idiom with `mint_cap`, updates the "unforgeable"
+  claims to the now-enforced mechanism, and replaces the "Known mismatch, being
+  reconciled in a later slice" callout with the resolved mechanism.
+- **Corpus:** `specs/lang/types/` grew from 109 to **120 programs** (63 accept /
+  57 reject). New reject witnesses (`t51`–`t57`) each type-correct so they were
+  ACCEPTED pre-fix (IMPOSSIBLE to reject pre-fix): nested `id`-launder
+  `Int`→`String`/`Box`, distinct-tvar launder, entry-module self-qualified
+  launder, `cap_narrow` proof-cap forge, `mint_cap` external, `mint_cap` in a
+  `pfn`. New accept witnesses (`t60`–`t63`): legit nested polymorphism, legit IO
+  narrow, legit `mint_cap` in the declaring module's public fn, proof-cap
+  pass-through. `check_types.sh`: **120 passed, 0 failed**, exit 0;
+  `check-docs.sh` exit 0.
+- **Findings:** `specs/todos.md`'s "proof-cap mint mismatch" reflects the
+  resolved state (mint_cap + cap_narrow restriction landed; general erasure
+  closed by the prebind fix); the container-launder taint gap and the
+  `global_registry` parser finding remain filed OPEN.
+- **Compiler unchanged in this closeout** — the fixes already landed on `main`
+  (HEAD `cbbf99a8`); this slice is the docs + `.march` corpus + specs finish
+  work. run_compiler is now **482** (with the 25+12 new unit tests).
+- **Next queued widening slice:** linear/affine types (per the survey's
+  scoping recommendation and the roadmap's Phase-2b/3 phasing).
+
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
 Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong
