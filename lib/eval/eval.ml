@@ -59,6 +59,11 @@ type value =
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
   | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
+  | VResource of int64
+      (** Opaque FFI `resource` handle (e.g. a native DB/Stmt handle from an
+          extern call). Holds the raw marshaled march_value bits; never
+          introspected by the interpreter, only round-tripped through
+          ffi_marshal_iv/ffi_unmarshal_iv back into subsequent extern calls. *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -304,6 +309,22 @@ let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
     Populated when [eval_decl] processes [DType] nodes.
     Used by ffi_marshal_field/unmarshal to look up record fields and ctor args. *)
 let ffi_type_decl_tbl : (string, March_ast.Ast.type_def) Hashtbl.t = Hashtbl.create 16
+
+(** Names of `resource`-declared FFI types (e.g. `resource Db`), populated
+    alongside [ffi_type_decl_tbl] when [eval_decl] processes [DType] nodes.
+
+    The parser desugars `resource Foo` to [DType (Public, "Foo", [], TDVariant [], _)]
+    (see lib/parser/parser.mly, resource_decl) — an empty-constructor variant.
+    Every *other* grammar production for a type declaration requires
+    [separated_nonempty_list(PIPE, variant)], i.e. at least one constructor,
+    so [TDVariant []] is a structurally reliable signal that a [DType] came
+    from a `resource` declaration and not a genuine user type. We use that
+    signal here (rather than adding a new AST decl constructor, which would
+    force exhaustiveness updates across ~90 unrelated match sites in
+    typecheck/lower/borrow/format for no behavioral gain) to mark the name as
+    opaque: the FFI marshal layer must treat it as a raw handle ([VResource])
+    instead of trying to interpret it as a zero-case variant discriminant. *)
+let ffi_resource_tbl : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 (** Protocol → sorted role list mapping.
     Populated when [eval_decl] processes [DProtocol] nodes.
@@ -1021,6 +1042,7 @@ let rec value_to_string v =
      | None   -> Printf.sprintf "Vault(#%d)" id)
   | VRingBuf r ->
     Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
+  | VResource _ -> "#<resource>"
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -1287,6 +1309,22 @@ let list_index pred lst =
    int_enc=`Tagged: Int/Bool as tagged word via make_int (Option/Result payloads). *)
 let rec ffi_marshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (v : value) : int64 =
   match ty, v with
+  (* Opaque FFI `resource` handle: pass the raw marshaled bits straight
+     through, regardless of the expected type — a VResource is only ever
+     produced by ffi_unmarshal_iv's own resource case below, so it's always
+     already the correct representation for re-entering an extern call.
+     Bump the refcount first: the OCaml [value] keeps its own live reference
+     to [mv] independent of this call, but dynamic_ffi_call's post-call
+     cleanup unconditionally drops every heap-classified argument it
+     marshaled (mirroring the fact that e.g. VString's str_new allocates a
+     fresh, call-scoped march_value). A resource is the one case where the
+     marshaled march_value is NOT a fresh call-scoped allocation but the same
+     long-lived handle the March-level variable still holds, so without this
+     dup the cleanup drop would prematurely free it (and run its native
+     destructor) after its first use as an argument — e.g. passing the same
+     `Db` handle into two successive `sqlite_prepare` calls would close the
+     connection after the first. *)
+  | _, VResource mv -> Ffi_marshal.dup mv; mv
   | TyCon ({txt = "Int"|"Char"; _}, []), VInt n ->
     let n64 = Int64.of_int n in
     if int_enc = `Tagged then Ffi_marshal.make_int n64 else n64
@@ -1371,6 +1409,11 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
     if Ffi_marshal.variant_tag mv = 0
     then VCon ("Ok",  [ffi_unmarshal_payload a_ty (Ffi_marshal.variant_field mv 0)])
     else VCon ("Err", [ffi_unmarshal_payload e_ty (Ffi_marshal.variant_field mv 0)])
+  | TyCon ({txt = tname; _}, _) when Hashtbl.mem ffi_resource_tbl tname ->
+    (* `resource Foo` — an opaque FFI handle (see ffi_resource_tbl comment).
+       Never consult ffi_type_decl_tbl's variant path for these: the raw bits
+       are not a variant discriminant, just wrap them as-is. *)
+    VResource mv
   | TyCon ({txt = tname; _}, _) ->
     (match Hashtbl.find_opt ffi_type_decl_tbl tname with
      | Some (TDRecord fdecls) ->
@@ -1383,7 +1426,7 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
      | Some (TDVariant vars) ->
        let tag = Ffi_marshal.variant_tag mv in
        let var = (try List.nth vars tag
-                  with Failure _ ->
+                  with Failure _ | Invalid_argument _ ->
                     eval_error "FFI unmarshal: variant tag %d out of range for %s" tag tname) in
        let args = List.mapi (fun i arg_ty ->
          ffi_unmarshal_field arg_ty (Ffi_marshal.variant_field mv i))
@@ -7510,7 +7553,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear vault_registry;
   Hashtbl.clear vault_name_registry;
   vault_next_id := 0;
-  Hashtbl.clear ffi_type_decl_tbl
+  Hashtbl.clear ffi_type_decl_tbl;
+  Hashtbl.clear ffi_resource_tbl
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -8151,8 +8195,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
     (* Also register in ffi_type_decl_tbl so the FFI marshal layer can look up
-       field/ctor types for record and variant arguments. *)
+       field/ctor types for record and variant arguments. A `resource Foo`
+       declaration desugars to TDVariant [] (see resource_decl in parser.mly);
+       mark such names in ffi_resource_tbl so the marshal layer treats them as
+       opaque handles instead of zero-case variants. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8373,7 +8421,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        let key = String.concat "," (List.sort String.compare field_names) in
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
+    (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl.
+       always_linear types can't currently arise from `resource` declarations
+       (resource_decl only produces DType), but handle it the same way as the
+       other two registration sites for defense in depth. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8675,7 +8728,9 @@ let eval_module_env (m : module_) : env =
          let key = String.concat "," (List.sort String.compare field_names) in
          Hashtbl.replace record_type_tbl key name.txt
        | _ -> ());
+      (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl. *)
       (match td with
+       | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
        | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
        | _ -> ());
       make_recursive_env rest env
