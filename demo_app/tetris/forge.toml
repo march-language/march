@@ -3,3 +3,6 @@ name = "tetris"
 version = "0.1.0"
 type = "app"
 description = "March Tetris — compiled to JS, playable in the browser"
+
+[deps]
+tetris_logic = { path = "../tetris_logic" }

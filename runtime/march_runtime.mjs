@@ -27,6 +27,51 @@ export function march_float_to_string(f) {
   return /^-?\d+$/.test(s) ? s + '.' : s;   // bare integer 1 -> "1."
 }
 
+/** Truncating integer division, matching runtime/march_runtime.c's
+ *  march_checked_idiv (panics on a zero divisor instead of producing
+ *  Infinity/NaN). Used for the `int_div` builtin (e.g. stdlib/array.march's
+ *  PVec leaf-count math), distinct from the bare `/` operator's looser
+ *  unchecked lowering. */
+export function march_int_div(a, b) {
+  if (b === 0) throw new Error("int_div: division by zero");
+  return Math.trunc(a / b);
+}
+
+/** Truncating integer remainder (sign follows the dividend, matching JS's
+ *  native `%` and C's `%`), matching march_runtime.c's march_checked_imod. */
+export function march_int_mod(a, b) {
+  if (b === 0) throw new Error("int_mod: division by zero");
+  return a % b;
+}
+
+/** Euclidean remainder (always non-negative), matching march_runtime.c's
+ *  march_checked_umod for the magnitudes representable as JS numbers. */
+export function march_int_mod_euclid(a, b) {
+  if (b === 0) throw new Error("int_mod_euclid: division by zero");
+  return ((a % b) + Math.abs(b)) % Math.abs(b);
+}
+
+/** Integer exponentiation by squaring, matching march_runtime.c's
+ *  march_int_pow (negative exponents return 0, mirroring the native
+ *  backend rather than JS's fractional Math.pow). */
+export function march_int_pow(base, exp) {
+  if (exp < 0) return 0;
+  let result = 1;
+  while (exp > 0) {
+    if (exp & 1) result *= base;
+    base *= base;
+    exp >>= 1;
+  }
+  return result;
+}
+
+/** Seconds since epoch as a fractional float, matching march_runtime.c's
+ *  march_unix_time (CLOCK_REALTIME tv_sec + tv_nsec/1e9). Used by
+ *  stdlib/random.march's default seed and a few timestamp helpers. */
+export function march_unix_time() {
+  return Date.now() / 1000;
+}
+
 /** String byte length (UTF-8 bytes, matching the native backend) */
 export function march_string_byte_length(s) {
   return new TextEncoder().encode(s).length;

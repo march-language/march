@@ -33,6 +33,7 @@ test/native/rust_ffi/Cargo.lock
 .worktrees/
 *.ll
 .march/
+.forge/
 .claude/worktrees/
 march-phases/
 docs/superpowers/

@@ -45,14 +45,19 @@ mod Random do
     let s1 = mix(n + 1)
     let s2 = mix(n + 2)
     let s3 = mix(n + 3)
-    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
-    let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
-    { s0: s0, s1: s1, s2: s2, s3: s3 }
+    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word.
+    -- (Named s0_nz rather than shadowing s0: the --target js backend doesn't
+    -- alpha-rename same-block shadowed lets, so a same-named `let s0 = ...
+    -- else s0` self-references the new binding instead of the old one.)
+    let s0_nz = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
+    { s0: s0_nz, s1: s1, s2: s2, s3: s3 }
   end
 
   -- ---- Core xoshiro256** step (63-bit variant) ----
 
   -- Returns the next raw output and advances the state.
+  -- (s2b/s3b rather than shadowing s2/s3: see the s0_nz note in `seed` above
+  -- — the --target js backend doesn't alpha-rename same-block shadowed lets.)
   pfn next_raw(rng : Rng) : (Int, Rng) do
     let result = rotl(rng.s1 * 5, 7) * 9
     let t = int_shl(rng.s1, 17)
@@ -60,9 +65,9 @@ mod Random do
     let s3 = int_xor(rng.s3, rng.s1)
     let s1 = int_xor(rng.s1, s2)
     let s0 = int_xor(rng.s0, s3)
-    let s2 = int_xor(s2, t)
-    let s3 = rotl(s3, 45)
-    (result, { s0: s0, s1: s1, s2: s2, s3: s3 })
+    let s2b = int_xor(s2, t)
+    let s3b = rotl(s3, 45)
+    (result, { s0: s0, s1: s1, s2: s2b, s3: s3b })
   end
 
   -- ---- Public generators ----

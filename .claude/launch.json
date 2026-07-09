@@ -12,6 +12,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "4851", "--directory", "/Users/80197052/code/march/demo_app/dom_demo"],
       "port": 4851
+    },
+    {
+      "name": "tetris",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4852", "--directory", "/Users/80197052/code/march/.claude/worktrees/quizzical-hamilton-a4633d/demo_app/tetris"],
+      "port": 4852
     }
   ]
 }

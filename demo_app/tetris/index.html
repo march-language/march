@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>March Tetris</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      padding: 2rem;
+    }
+    h1 { font-size: 1.5rem; color: #a0aec0; }
+    #board {
+      display: flex;
+      flex-direction: column;
+      border: 2px solid rgba(255,255,255,0.2);
+      background: #000;
+    }
+    .tetris-row { display: flex; }
+    .tetris-cell { width: 20px; height: 20px; border: 1px solid #222; background: #111; }
+    #hud { display: flex; gap: 1.5rem; font-size: 0.95rem; color: #cbd5e0; }
+    #game-over { color: #f87171; font-weight: 600; min-height: 1.4em; }
+    .hint { font-size: 0.8rem; color: #718096; text-align: center; max-width: 30em; }
+  </style>
+</head>
+<body>
+  <h1>March Tetris</h1>
+  <div id="board"></div>
+  <div id="hud">
+    <span id="score">Score: 0</span>
+    <span id="level">Level: 0</span>
+    <span id="next">Next: O</span>
+  </div>
+  <div id="game-over"></div>
+  <div id="game-state" data-board="" data-piece="I" data-rot="0" data-x="3" data-y="0"
+       data-next="O" data-score="0" data-lines="0" data-over="false" style="display:none"></div>
+  <p class="hint">Arrow keys to move/rotate &middot; Space to hard-drop &middot; R to restart</p>
+
+  <script type="module" src="tetris.mjs"></script>
+</body>
+</html>
