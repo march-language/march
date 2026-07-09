@@ -150,6 +150,27 @@
     };
   }
 
+  var BOARD_COLS = 10, BOARD_ROWS = 20;
+
+  // The board rendered at a fixed 16px/cell regardless of how much space the
+  // panel actually had — tiny and lost in the middle of a tall panel. Instead
+  // size cells from the ACTUAL space #tp-iframe-host has right now (measured
+  // before the old iframe is torn down, since the host's own size comes from
+  // outer flex layout and doesn't depend on its children), reserving room for
+  // the HUD/game-over lines and some breathing room, so the board fills most
+  // of the panel on a big screen and still fits on a small one.
+  function computeCellSize() {
+    var host = document.getElementById("tp-iframe-host");
+    var rect = host.getBoundingClientRect();
+    var reservedV = 110; // HUD + game-over lines + gaps + body padding
+    var reservedH = 32;  // board border + side margin
+    var byHeight = Math.floor((rect.height - reservedV) / BOARD_ROWS);
+    var byWidth = Math.floor((rect.width - reservedH) / BOARD_COLS);
+    var size = Math.min(byHeight, byWidth);
+    if (!isFinite(size) || size <= 0) size = 20;
+    return Math.max(12, Math.min(size, 44));
+  }
+
   function buildSrcdoc(js) {
     // tetris.mjs's own emitted code imports "./march_runtime.mjs" and
     // "./march_dom.mjs" by RELATIVE path. A srcdoc iframe's base URL is the
@@ -158,6 +179,8 @@
     // an explicit <base href> pointing at the assets directory.
     var assetsBase = window.location.origin + base + "/assets/tetris/";
     var t = themeColors();
+    var cell = computeCellSize();
+    var hudFont = Math.max(12, Math.round(cell * 0.5));
     return (
       "<!DOCTYPE html><html><head><meta charset='utf-8'>" +
       "<base href='" + assetsBase + "'>" +
@@ -166,9 +189,9 @@
       "body{background:" + t.bg + ";color:" + t.text + ";font-family:system-ui,sans-serif;" +
       "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;height:100vh}" +
       "#board{display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
-      ".tetris-row{display:flex}.tetris-cell{width:16px;height:16px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
-      "#hud{display:flex;gap:1rem;font-size:.85rem;color:" + t.textMuted + "}" +
-      "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:.85rem}" +
+      ".tetris-row{display:flex}.tetris-cell{width:" + cell + "px;height:" + cell + "px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
+      "#hud{display:flex;gap:1rem;font-size:" + hudFont + "px;color:" + t.textMuted + "}" +
+      "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
       "</style></head><body>" +
       "<div id='board'></div>" +
       "<div id='hud'><span id='score'>Score: 0</span><span id='level'>Level: 0</span><span id='next'>Next: O</span></div>" +
