@@ -113,8 +113,8 @@ mod Range do
   end
 
   doc "Folds over the range: f(acc, element) -> acc."
-  fn reduce(r : {start: Int, stop: Int, step: Int}, acc : b, f : (b, Int) -> b) : b do
-    List.fold_left(acc, to_list(r), fn a -> fn x -> f(a, x))
+  fn reduce(r : {start: Int, stop: Int, step: Int}, acc : b, f : b -> Int -> b) : b do
+    List.fold_left(to_list(r), acc, fn a -> fn x -> f(a, x))
   end
 
   doc "Returns a new range iterating in the opposite direction."

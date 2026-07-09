@@ -29,27 +29,6 @@ let browser_stdlib_files = [
   "dom.march";
 ]
 
-(** Names that exist in BOTH prelude.march (unwrapped to bare top-level, see
-    below) and one of the other bundled modules' own bodies (e.g. fold_left
-    is defined in both prelude.march and list.march/array.march, with
-    different signatures). check_module_full's pass-1 registers bare names
-    in a single flat table when every stdlib file is merged as a top-level
-    sibling this way (unlike the CLI's real per-file lazy stdlib loading),
-    so the later-registered module's fold_left can end up shadowing
-    prelude's own during prelude's OWN body typecheck, producing a bogus
-    "expected (a, b) but got a" error inside prelude.march itself. None of
-    this bundle's own code calls these prelude names bare (always via
-    List.fold_left / Array.fold_left etc.), so dropping prelude's bare copy
-    here is safe — this is a playground-bundle-only workaround, not a
-    stdlib change. *)
-let prelude_bare_name_collisions = ["fold_left"]
-
-let is_colliding_prelude_decl = function
-  | March_ast.Ast.DFn (def, _) ->
-    List.mem def.March_ast.Ast.fn_name.March_ast.Ast.txt
-      prelude_bare_name_collisions
-  | _ -> false
-
 (** Parse and desugar a stdlib source string, returning its decl list.
     Same logic as js/march_browser.ml's parse_stdlib_src. *)
 let parse_stdlib_src filename src =
@@ -62,9 +41,8 @@ let parse_stdlib_src filename src =
     let m = March_desugar.Desugar.desugar_module m in
     if filename = "prelude.march" then
       match m.March_ast.Ast.mod_decls with
-      | [March_ast.Ast.DMod (_, _, inner, _)] ->
-        List.filter (fun d -> not (is_colliding_prelude_decl d)) inner
-      | ds -> List.filter (fun d -> not (is_colliding_prelude_decl d)) ds
+      | [March_ast.Ast.DMod (_, _, inner, _)] -> inner
+      | ds -> ds
     else
       [March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
                            March_ast.Ast.Public,

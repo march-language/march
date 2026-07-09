@@ -7252,6 +7252,57 @@ let test_entry_qual_from_nested_sibling () =
   Alcotest.(check bool) "diagnostic names String vs Int" true
     (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
 
+(* ── Stdlib HOF-callback annotations must be curried, not tuple-arrow ──────
+   March's uncurried-collection convention calls callbacks with N-ary call
+   syntax (`f(acc, x)`), which [infer_app] treats as peeling one `TArrow`
+   layer per argument (purely curried — there is no auto-tupling special
+   case).  Annotating such a callback param as a TUPLE-arrow (`f : (b, a) ->
+   b`, parsed as `TArrow(TTuple[b;a], b)`) instead of a curried chain
+   (`f : b -> a -> b`) therefore makes the recursive self-call inside the
+   function's OWN body check its first arg against the tuple `(b,a)` and
+   fail — a real, self-contained type error entirely internal to the stdlib
+   file, independent of any other module.  (An earlier hypothesis blamed
+   this on cross-module bare-name collisions when many stdlib modules are
+   merged as typecheck siblings — e.g. `fold_left` existing in both
+   `prelude.march` and `list.march`; that was investigated and falsified:
+   the error reproduces identically with the offending file typechecked
+   completely alone.)  Such an error is invisible via the normal CLI
+   because `bin/main.ml`'s `is_user_file` filter drops any diagnostic
+   whose span points into a stdlib file — so this class of bug can persist
+   silently until something (e.g. a pipeline that does NOT filter by file,
+   like a browser/playground compile target) surfaces it.  `fold_left`
+   (prelude.march, iterable.march), `cmp`/`fold` (ordered_map.march,
+   sorted_set.march), and `reduce` (range.march) all had this typo; fixed
+   to curried-arrow form.  Guard each by typechecking the file completely
+   standalone (no other stdlib siblings) via [check_module_core], mirroring
+   how `bin/main.ml`'s `get_stdlib_tc_env` typechecks stdlib. *)
+
+let assert_stdlib_file_typechecks_cleanly name =
+  let dmod = load_stdlib_file_for_test name in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
+    mod_decls = [dmod];
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
+    false (has_errors errors)
+
+let test_stdlib_prelude_fold_left_curried () =
+  assert_stdlib_file_typechecks_cleanly "prelude.march"
+
+let test_stdlib_iterable_fold_curried () =
+  assert_stdlib_file_typechecks_cleanly "iterable.march"
+
+let test_stdlib_ordered_map_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "ordered_map.march"
+
+let test_stdlib_sorted_set_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "sorted_set.march"
+
+let test_stdlib_range_reduce_curried () =
+  assert_stdlib_file_typechecks_cleanly "range.march"
+
 (* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
 
 let test_entry_qual_same_type_ok () =
@@ -7920,6 +7971,11 @@ let compiler_suites =
           Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
+          Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
+          Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;
+          Alcotest.test_case "sorted_set.march cmp/fold: curried, no internal error"  `Quick test_stdlib_sorted_set_cmp_curried;
+          Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;

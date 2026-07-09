@@ -283,6 +283,44 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, stdlib curried-vs-tuple-arrow HOF callback annotation bug fixed)
+
+Six stdlib functions annotated a callback/comparator parameter as a TUPLE-arrow
+type (`f : (b, a) -> b`, i.e. `TArrow(TTuple[b;a], b)`) while calling it with
+N-ary uncurried call syntax (`f(acc, h)`). `infer_app` (`lib/typecheck/typecheck.ml`)
+is purely curried with no auto-tupling special case, so the first call argument
+got checked against the whole tuple type and failed — a real, self-contained
+internal type error, reproducible with the offending file typechecked completely
+alone (no sibling modules involved).
+
+- **Not a module-scoping bug.** Originally reported as a suspected
+  `lib/typecheck/typecheck.ml` pass-1/1b bare-name cross-module leak (`fold_left`
+  exists in both `prelude.march` and `list.march`); that hypothesis was
+  investigated and falsified by direct reproduction — `stdlib/prelude.march`
+  alone, with zero siblings in the merge, reproduces the identical error. No
+  compiler code changed.
+- **Why it was invisible:** `bin/main.ml`'s `is_user_file` diagnostic filter
+  (both the single-file `--check`/`--compile` path and `run_check_cmd`'s
+  multi-file path) drops every diagnostic whose span points into a stdlib
+  file, by design — so this silently passed on every `march --compile` for the
+  bug's entire lifetime. A downstream pipeline that skips that filter (a
+  browser live-compile target) is what originally surfaced it.
+- **Fixed the annotation** (tuple-arrow → curried arrow chain) in `fold_left`
+  (`stdlib/prelude.march`, `stdlib/iterable.march`), `cmp`/`fold` callbacks
+  (`stdlib/ordered_map.march`, `stdlib/sorted_set.march`), and `reduce`
+  (`stdlib/range.march`). Also fixed one unrelated pre-existing bug uncovered
+  while verifying end-to-end: `range.march`'s `reduce` called
+  `List.fold_left` with the collection/accumulator arguments swapped.
+- **Verified via the real `bin/main.exe --check` CLI**, not just an isolated
+  test harness: previously `fold_left(xs, 0, fn (acc, x) -> acc + x)` in a
+  user's own program produced a user-visible cascading `` `(<error>, Int)`
+  does not implement Num `` error — this bug DID leak past the stdlib-file
+  filter into real user-facing diagnostics, not just hidden internal noise.
+  Now typechecks/compiles clean.
+- Regression coverage: 5 new `test/test_compiler.ml` tests, each typechecking
+  one fixed stdlib file completely standalone via `check_module_core` and
+  asserting zero errors.
+
 ## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
 
 Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
